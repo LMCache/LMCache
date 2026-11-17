@@ -48,6 +48,15 @@ def _declare_signatures() -> None:
     ]
     libcufile.cuFileWriteAsync.restype = CUfileError
 
+    libcufile.cuFileRead.argtypes = [
+        ctypes.c_void_p,  # CUfileHandle_t fh
+        ctypes.c_void_p,  # void *bufPtr_base
+        ctypes.c_size_t,  # size_t size
+        ctypes.c_int64,  # off_t file_offset
+        ctypes.c_int64,  # off_t bufPtr_offset
+    ]
+    libcufile.cuFileRead.restype = ctypes.c_ssize_t
+
     libcufile.cuFileStreamRegister.argtypes = [ctypes.c_void_p, ctypes.c_uint]
     libcufile.cuFileStreamRegister.restype = CUfileError
 
@@ -168,6 +177,21 @@ class AsyncHandle(FDGDSHandle):
     """An owning cufile slab handle with stream-ordered IO."""
 
     _backend: Backend
+    supports_blocking_read = True
+
+    def read_blocking(
+        self, buf_base: int, size: int, file_offset: int, buf_offset: int
+    ) -> int:
+        # Third Party
+        from cufile.bindings import libcufile
+
+        done = libcufile.cuFileRead(
+            self._handle, ctypes.c_void_p(buf_base), size, file_offset, buf_offset
+        )
+        if done < 0:
+            # -1 is a system error; other negatives are cuFile error codes.
+            raise OSError(f"cuFileRead failed with {done}")
+        return done
 
     def read_async(
         self,

@@ -26,8 +26,9 @@ def test_lane_hands_out_its_banks_in_turn():
 
 @pytest.fixture
 def events(monkeypatch):
-    """Fake stream events; returns the log of ``("record", n, stream)`` and
-    ``("wait", n, stream)`` entries, where ``n`` numbers the events."""
+    """Fake stream events; returns the log of ``("record", n, stream)``,
+    ``("wait", n, stream)`` and ``("poll", n)`` entries, where ``n`` numbers
+    the events. An event is complete from its third poll on."""
     log: list[tuple] = []
 
     class _Event:
@@ -36,6 +37,11 @@ def events(monkeypatch):
 
         def wait_on(self, stream: object) -> None:
             log.append(("wait", self._number, stream))
+
+        def is_complete(self) -> bool:
+            polls = sum(1 for entry in log if entry == ("poll", self._number))
+            log.append(("poll", self._number))
+            return polls == 2
 
     def record_completion_event(device: object, stream: object) -> _Event:
         number = sum(1 for entry in log if entry[0] == "record")
@@ -74,6 +80,15 @@ def test_event_signals_each_side_waits_for_the_other_sides_last_event(events):
     ]
 
 
+def test_event_signals_host_wait_polls_the_last_free_event_until_complete(events):
+    signals = EventBankSignals(device="gpu")
+    signals.wait_free_on_host(0)
+    assert events == []
+    signals.signal_free(0, SCATTER)
+    signals.wait_free_on_host(0)
+    assert events == [("record", 0, SCATTER)] + [("poll", 0)] * 3
+
+
 def test_event_signals_keep_the_banks_apart(events):
     signals = EventBankSignals(device="gpu")
     signals.signal_free(0, SCATTER)
@@ -87,6 +102,7 @@ class _FakeDoorbell:
     def __init__(self, first_word: int = 0) -> None:
         self.log: list[tuple] = []
         self.fail_writes = False
+        self.words: list[int] = []
         self._first_word = first_word
 
     def take_words(self, count: int) -> int:
@@ -99,6 +115,10 @@ class _FakeDoorbell:
 
     def wait_equal(self, stream_handle: int, word: int, value: int) -> None:
         self.log.append(("wait", stream_handle, word, value))
+
+    def read(self, word: int) -> int:
+        self.log.append(("read", word))
+        return self.words.pop(0)
 
 
 @pytest.fixture
@@ -176,6 +196,41 @@ def test_doorbell_round_number_wraps_at_32_bits(handles, monkeypatch):
         ("write", 1, 0, 0),
         ("wait", 2, 0, 0),
         ("write", 2, 1, 0),
+    ]
+
+
+def test_doorbell_host_wait_polls_the_free_word_until_it_holds_the_last_round(
+    handles,
+):
+    """After round 1 of bank 0 the free word (1) must read 1."""
+    doorbell = _FakeDoorbell()
+    signals = DoorbellBankSignals(doorbell, device="gpu")
+    _round(signals, 0)
+    doorbell.log.clear()
+    doorbell.words = [0, 0, 1]
+
+    signals.wait_free_on_host(0)
+    assert doorbell.log == [("read", 1), ("read", 1), ("read", 1)]
+
+
+def test_doorbell_host_loaded_round_is_signalled_on_the_scatter_stream(handles):
+    """Round 1 of bank 0 loaded by the host: every word is written by a
+    stream, and the next stream-ordered load waits for round 1."""
+    doorbell = _FakeDoorbell()
+    signals = DoorbellBankSignals(doorbell, device="gpu")
+    doorbell.words = [0]
+
+    signals.wait_free_on_host(0)
+    signals.signal_staged(0, SCATTER)
+    signals.wait_staged(0, SCATTER)
+    signals.signal_free(0, SCATTER)
+    signals.wait_free(0, LOAD)
+    assert doorbell.log == [
+        ("read", 1),
+        ("write", 2, 0, 1),
+        ("wait", 2, 0, 1),
+        ("write", 2, 1, 1),
+        ("wait", 1, 1, 1),
     ]
 
 

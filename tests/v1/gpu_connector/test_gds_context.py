@@ -322,6 +322,50 @@ class TestResolveBuffer:
         assert resolved == [(buf.data_ptr(), 4096)]
 
 
+class TestReadBlocking:
+    """The blocking read: one backend read per registered region the chunk
+    spans, on the calling thread."""
+
+    def _context(self, monkeypatch, backend, buf: torch.Tensor, handle: Mock):
+        backend.name = "fake"
+        backend.open_slab.return_value = handle
+        handle.path = "slab"
+        ctx = GDSContext(backend)
+        ctx.initialize(GdsL1Config(file_location="slab", size_in_bytes=1 << 26))
+        monkeypatch.setattr(backend, "register_buffer", lambda b: None)
+        monkeypatch.setattr(backend, "register_stream", lambda raw: None)
+        _use_fake_stream(monkeypatch, 0)
+        ctx.register_gpu_buffer(buf)
+        return ctx
+
+    def test_reads_each_region_the_chunk_spans(self, monkeypatch, backend):
+        region = 16 << 20
+        buf = torch.empty(region + 8192, dtype=torch.uint8)
+        handle = Mock(supports_blocking_read=True)
+        handle.read_blocking.side_effect = lambda base, size, file_off, off: size
+        ctx = self._context(monkeypatch, backend, buf, handle)
+        assert ctx.supports_blocking_read is True
+        mem_obj = SimpleNamespace(get_size=lambda: 12288, slab_offset=1 << 20)
+        # The chunk starts 4 KiB before the first region's end.
+        ctx.read_blocking(mem_obj, buf[region - 4096 :])
+        assert [call.args for call in handle.read_blocking.call_args_list] == [
+            (buf.data_ptr(), 4096, 1 << 20, region - 4096),
+            (buf.data_ptr() + region, 8192, (1 << 20) + 4096, 0),
+        ]
+
+    def test_short_read_raises(self, monkeypatch, backend):
+        buf = torch.empty(8192, dtype=torch.uint8)
+        handle = Mock(supports_blocking_read=True)
+        handle.read_blocking.return_value = 100
+        ctx = self._context(monkeypatch, backend, buf, handle)
+        mem_obj = SimpleNamespace(get_size=lambda: 4096, slab_offset=0)
+        with pytest.raises(OSError):
+            ctx.read_blocking(mem_obj, buf)
+
+    def test_context_without_an_open_slab_has_no_blocking_read(self, backend):
+        assert GDSContext(backend).supports_blocking_read is False
+
+
 class TestPerStreamRegistration:
     """Each distinct stream is cuFile-registered once and deregistered once its
     last region is gone -- observed at the backend interface (no private state)."""

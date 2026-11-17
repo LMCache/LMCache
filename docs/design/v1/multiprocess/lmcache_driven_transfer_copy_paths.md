@@ -174,12 +174,61 @@ waits for the previous request's last scatter of it.
   `DoorbellBankSignals` uses two 32-bit words per bank in host memory mapped
   for the device: a stream writes the bank's round number
   (`cuStreamWriteValue32`) and the other stream waits until the word equals
-  it (`cuStreamWaitValue32`). A host thread can write the same word, which
-  is what a load that is not stream-ordered (a thread pool of file reads, a
-  network read) needs; no such load exists yet, and for the stream-ordered
+  it (`cuStreamWaitValue32`). Every word is written by a stream, never by
+  the host (see "Host-thread loads" below for why). For the stream-ordered
   loads the doorbell measures the same as events. If the driver cannot map
   the page or the device rejects the stream write, the lane logs a warning
   and uses events.
+
+#### Host-thread loads (NVMe DMA)
+
+A stream-ordered GDS read runs one after another on its stream, so one
+request reads one object at a time however many drives hold the slab. The
+NVMe engine therefore loads on host threads by default:
+
+```
+handler        | wait free(b0) | load b0 ........ | queue scatter b0 | wait free(b1) | load b1 ...
+reader threads |               | read c0 | read c2 |                  |               | read c4 | ...
+               |               | read c1 | read c3 |                  |               | read c5 | ...
+scatter stream |                                   | scatter b0 ..........            |
+```
+
+- For a batch whose engine loads on host threads, the pipelined loop waits
+  on the host until the bank is free (`BankSignals.wait_free_on_host`),
+  calls `NvmeDmaEngine.load_from_host`, which fans the batch's objects out
+  to the reader threads (`GDSContext.read_blocking`, a blocking slab read
+  into the registered bank) and returns when all of them have ended, and
+  only then queues the "staged" signal, the block kernels and the "free"
+  signal on the scatter stream. Nothing is queued on the lane's stream. The
+  next batch reads into the other bank while this one scatters.
+- **The handler waits for the reads.** Handler time for a GDS run is about
+  its wall time, as with the stream-ordered read under cuFile compat mode.
+- **Why the kernels are not queued ahead.** An earlier version queued the
+  kernels first, behind a doorbell word that a host thread wrote when the
+  reads had returned, so the handler returned at once. It deadlocked:
+  `cuFileRead` in compat mode copies the bytes to the device on an internal
+  stream and synchronizes it, and the driver, which cannot see the order a
+  doorbell wait imposes, sometimes ran that copy behind a pending wait. The
+  wait needed the read to return and the read needed the wait released
+  (found on an H200 with two reader threads, alternating host/GDS runs;
+  writing the doorbell words by hand released the stuck read). So no stream
+  ever waits for a host thread: device work for a batch is queued after its
+  reads have returned.
+- **Default.** Two reader threads; `LMCACHE_GDS_READ_THREADS` changes the
+  number and `0` returns to the stream-ordered read, as does a GDS backend
+  without a blocking read (only cuFile implements it). At most one batch
+  (four objects) is read at a time, so more than four threads gain nothing.
+- **Failure.** A failed or short read raises `OSError` from the retrieve
+  call after the other reads of the batch have ended; no kernel is queued
+  for that batch. A read that never returns holds the handler, as a
+  stream-ordered read in compat mode does.
+- **Measured** (H200 shared with another job, cuFile compat mode, 64
+  chunks, 11-27 MiB objects, pages identical). One NVMe drive, limit 5.9
+  GiB/s: GDS 4.3-5.0 GiB/s with one thread, 5.2-6.0 with two (4.1-4.4
+  stream-ordered); alternating host/GDS runs 9.9-11.6 with two. Four
+  drives, one slab on each (a benchmark-only setup: LMCache opens one slab
+  per process): GDS 7.3-9.1 with two threads and 12.0-16.4 with four;
+  alternating runs 13.4-15.9 and 20.5-26.2.
 
 The caller's stream is where the request is ordered (the engine's event is
 waited on it; the completion event and the lock release are queued on it),
@@ -392,8 +441,13 @@ moves strided 2-D rows more slowly than 1-D entries of the same size
   loop queues on the load and the scatter stream, bank rotation, the bank
   freed after a failed launch, the gate and the join, and when the
   dispatcher uses lanes (CPU only, fakes).
-- `tests/v1/platform/test_staging_lane.py`: event and doorbell bank signals
-  (CPU only, fakes).
+- `tests/v1/platform/test_staging_lane.py`: event and doorbell bank signals,
+  including the host-side wait and a host-loaded round (CPU only, fakes).
+- `tests/v1/multiprocess/test_nvme_host_load.py`: the NVMe engine's
+  host-thread load: when it applies, and that it returns or raises only
+  once every read of the batch has ended (CPU only, fakes).
+- `tests/v1/gpu_connector/test_gds_context.py` (`TestReadBlocking`): the
+  blocking read's split at region boundaries and the short-read error.
 - `tests/v1/multiprocess/test_direct_copy_planner_gpu.py`: a group split
   across engines gives the same bytes as one engine moving it whole, with
   the skipped prefix in a direct or a staged run, host runs on the direct

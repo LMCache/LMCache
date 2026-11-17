@@ -3,11 +3,14 @@
 a stream can write (``cuStreamWriteValue32``) and wait on
 (``cuStreamWaitValue32``).
 
-Unlike a stream event, a doorbell word can also be written by the host, so
-a load that is not stream-ordered (a thread pool reading files, a network
-read) can release the stream that waits for it. The stream-ordered loads
-in the tree gain nothing from it over events, so it is opt-in: set
-``LMCACHE_STAGING_DOORBELL=1`` to use it for the staging banks.
+Staging lanes use stream events by default; the doorbell is opt-in: set
+``LMCACHE_STAGING_DOORBELL=1``.
+
+Every word is written by a stream, never by the host. The driver cannot
+see the order a doorbell wait imposes, and may run unrelated work (for
+example the device copy inside a ``cuFileRead``) behind a pending wait. A
+wait that only a host thread releases, after such work returns, therefore
+deadlocks.
 """
 
 # Future
@@ -17,11 +20,16 @@ from __future__ import annotations
 import ctypes
 import mmap
 import os
+import time
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.platform import stream as platform_stream
-from lmcache.v1.platform.base.staging_lane import BANKS_PER_LANE, BankSignals
+from lmcache.v1.platform.base.staging_lane import (
+    BANKS_PER_LANE,
+    HOST_POLL_SECONDS,
+    BankSignals,
+)
 
 logger = init_logger(__name__)
 
@@ -226,6 +234,10 @@ class DoorbellBankSignals(BankSignals):
         self._doorbell.wait_equal(
             self._handle(stream), self._free_word(bank), self._rounds[bank]
         )
+
+    def wait_free_on_host(self, bank: int) -> None:
+        while self._doorbell.read(self._free_word(bank)) != self._rounds[bank]:
+            time.sleep(HOST_POLL_SECONDS)
 
     def signal_staged(self, bank: int, stream: object) -> None:
         next_round = (self._rounds[bank] + 1) & _WORD_MASK

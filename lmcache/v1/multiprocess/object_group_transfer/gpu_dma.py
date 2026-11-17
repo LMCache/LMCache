@@ -43,3 +43,20 @@ class GpuDmaEngine:
                 lmcache_memcpy_async_h2d(memory_obj, buffer)
             else:
                 lmcache_memcpy_async_d2h(buffer, memory_obj)
+
+    def loads_from_host(self, memory_objs: Sequence[MemoryObj]) -> bool:
+        """Return False: host/GPU copies are stream-ordered."""
+        return False
+
+    def load_from_host(
+        self,
+        memory_objs: Sequence[MemoryObj],
+        buffers: Sequence[torch.Tensor],
+        device: torch.device,
+    ) -> None:
+        """Not supported; :meth:`loads_from_host` is always False.
+
+        Raises:
+            NotImplementedError: Always.
+        """
+        raise NotImplementedError("The GPU DMA engine has no host-thread load")

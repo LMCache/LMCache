@@ -36,6 +36,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (  # noqa: E402
     direct_transfer_supported,
     downsample_and_stage_block_ids,
     engines,
+    nvme_dma,
     transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.object_group_transfer.gpu_dma import (  # noqa: E402
@@ -414,6 +415,58 @@ def test_repeated_retrieves_reuse_the_staging_banks(
                 allocator.free(obj)
         lane = ctx.get_staging_lane("gpu_dma", file_io=False)
         assert isinstance(lane.signals, _BANK_SIGNALS[doorbell])
+    finally:
+        ctx.close()
+
+
+def _read_on_host_thread(memory_obj: MemoryObj, buffer: torch.Tensor) -> None:
+    """Stand-in for the blocking slab read: fill the staging region from the
+    host object and return when the bytes are there."""
+    raw = memory_obj.raw_tensor
+    assert raw is not None
+    buffer.view(torch.uint8).copy_(raw.view(torch.uint8)[: memory_obj.get_size()])
+
+
+@pytest.mark.parametrize("doorbell", [False, True])
+@pytest.mark.parametrize("storage_first", [False, True])
+@pytest.mark.parametrize("name", sorted(_CASES))
+def test_host_thread_loads_match_single_engine(
+    name: str,
+    storage_first: bool,
+    doorbell: bool,
+    allocator: LazyMemoryAllocator,
+    monkeypatch,
+):
+    """Storage runs loaded by the reader threads, with the kernels queued
+    once each batch has landed: three retrieves in a row on one context each
+    write the pages the direct copy writes."""
+    monkeypatch.setenv(ENV_STAGING_DOORBELL, "1" if doorbell else "0")
+    monkeypatch.setattr(NvmeDmaEngine, "loads_from_host", lambda self, objs: True)
+    monkeypatch.setattr(nvme_dma, "read_slab_object", _read_on_host_thread)
+    ctx, tensors = _make_context(name)
+    _, _, chunk, num_chunks = _CASES[name]
+    blocks_per_chunk = ctx.calculate_num_blocks(chunk, 0)
+    skip_first_n_tokens = chunk + chunk // blocks_per_chunk
+    try:
+        for _ in range(3):
+            block_ids = [
+                random.sample(range(ctx.num_blocks), num_chunks * blocks_per_chunk)
+            ]
+            objs = _allocate_objects(allocator, ctx, num_chunks, fill=True)
+            before = [t.clone() for t in tensors]
+            _run(ctx, block_ids, objs, H2D, "direct", 1, skip_first_n_tokens)
+            single = [t.clone() for t in tensors]
+            for t, snap in zip(tensors, before, strict=True):
+                t.copy_(snap)
+            torch_dev.synchronize()
+
+            with monkeypatch.context() as patch:
+                _mix_engines(patch, objs, storage_first)
+                _run(ctx, block_ids, objs, H2D, "direct", 1, skip_first_n_tokens)
+            for expected, got in zip(single, tensors, strict=True):
+                assert _bitwise_equal(expected, got)
+            for obj in objs:
+                allocator.free(obj)
     finally:
         ctx.close()
 

@@ -24,6 +24,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Protocol, Sequence
+import time
 
 # Third Party
 import torch
@@ -32,6 +33,9 @@ import torch
 from lmcache.v1.platform import stream as platform_stream
 
 BANKS_PER_LANE = 2
+# A host thread polls for "free"; the wait is short, since the scatter it
+# waits for was queued a whole load earlier.
+HOST_POLL_SECONDS = 20e-6
 
 
 class StagingBank(Protocol):
@@ -55,9 +59,13 @@ class BankSignals(ABC):
 
     Per bank the four calls repeat in this order, one round per batch:
     :meth:`wait_free`, :meth:`signal_staged`, :meth:`wait_staged`,
-    :meth:`signal_free`. Every call only queues work on ``stream``; none
+    :meth:`signal_free`. These calls only queue work on ``stream``; none
     blocks the caller. A round that queued :meth:`signal_staged` must also
     queue :meth:`signal_free`, or the bank's next load never starts.
+
+    A load done by host threads cannot queue its wait on a stream; it calls
+    :meth:`wait_free_on_host` in place of :meth:`wait_free`, and gives
+    :meth:`signal_staged` on the reading stream once the bank is written.
     """
 
     @abstractmethod
@@ -67,6 +75,15 @@ class BankSignals(ABC):
         Args:
             bank: Bank index in the lane.
             stream: The stream about to load into the bank.
+        """
+
+    @abstractmethod
+    def wait_free_on_host(self, bank: int) -> None:
+        """Block the calling thread until the previous scatter of ``bank``
+        ran. Call before host threads write the bank.
+
+        Args:
+            bank: Bank index in the lane.
         """
 
     @abstractmethod
@@ -118,6 +135,13 @@ class EventBankSignals(BankSignals):
         # A bank no scatter has read yet is free.
         if event is not None:
             event.wait_on(stream)
+
+    def wait_free_on_host(self, bank: int) -> None:
+        event = self._free[bank]
+        if event is None:
+            return
+        while not event.is_complete():
+            time.sleep(HOST_POLL_SECONDS)
 
     def signal_staged(self, bank: int, stream: object) -> None:
         self._staged[bank] = platform_stream.record_completion_event(

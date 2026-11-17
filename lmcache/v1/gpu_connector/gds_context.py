@@ -352,6 +352,53 @@ class GDSContext:
             )
             pos += seg_len
 
+    @property
+    def supports_blocking_read(self) -> bool:
+        """Whether :meth:`read_blocking` can be used on this context's slab."""
+        return self._slab_handle is not None and (
+            self._slab_handle.supports_blocking_read
+        )
+
+    def read_blocking(
+        self, memory_obj: GDSMemoryObject, gpu_buffer: torch.Tensor
+    ) -> None:
+        """Read a chunk from its slab region into ``gpu_buffer`` on the
+        calling thread; the bytes are in the buffer on return.
+
+        Not ordered on any stream, so the caller must keep GPU work that
+        reads or overwrites ``gpu_buffer`` away until the call returns.
+        Split at registered-region boundaries like :meth:`transfer_async`.
+        Safe to call from several threads at once.
+
+        Args:
+            memory_obj: The chunk; ``slab_offset`` / ``get_size()`` give the
+                file offset and length.
+            gpu_buffer: A slice of a registered staging buffer; its first
+                ``get_size()`` bytes are filled.
+
+        Raises:
+            RuntimeError: If the slab is not open.
+            NotImplementedError: If the backend has no blocking read.
+            OSError: If a read fails or returns fewer bytes than asked.
+        """
+        if self._slab_handle is None:
+            raise RuntimeError("GDSContext.read_blocking: slab handle not open")
+        nbytes = memory_obj.get_size()
+        buf = gpu_buffer.view(torch.uint8)
+        pos = 0
+        while pos < nbytes:
+            base_ptr, dev_offset, region_nbytes = self._resolve_buffer(buf[pos:])
+            seg_len = min(nbytes - pos, region_nbytes - dev_offset)
+            done = self._slab_handle.read_blocking(
+                base_ptr, seg_len, memory_obj.slab_offset + pos, dev_offset
+            )
+            if done != seg_len:
+                raise OSError(
+                    f"short slab read: {done} of {seg_len} bytes at slab offset "
+                    f"{memory_obj.slab_offset + pos}"
+                )
+            pos += seg_len
+
     def close(self) -> None:
         """Sync the stream, deregister GDS state, and close the slab handle."""
         devices = {str(buffer.device): buffer.device for buffer in self._buffers}

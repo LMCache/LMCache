@@ -23,6 +23,8 @@ from lmcache.v1.mp_observability.event_bus import (
 )
 from lmcache.v1.multiprocess.object_group_transfer.engines import (
     TransferEngine,
+    load_from_host,
+    loads_from_host,
     stage,
 )
 from lmcache.v1.multiprocess.object_group_transfer.planning import (
@@ -31,7 +33,10 @@ from lmcache.v1.multiprocess.object_group_transfer.planning import (
     resolve_chunk_range,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
-from lmcache.v1.platform.base.staging_lane import StagingBank, StagingLane
+from lmcache.v1.platform.base.staging_lane import (
+    StagingBank,
+    StagingLane,
+)
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -483,8 +488,10 @@ def run_pipelined_retrieve(
     running the block kernels on the scatter stream.
 
     Batches alternate between the lane's banks, so a batch loads while the
-    one before it scatters. The call only queues work. The caller makes the
-    scatter stream wait for whatever the kernels depend on (staged block
+    one before it scatters. A stream-ordered load is only queued. An engine
+    that loads on host threads is waited for: the call blocks until the
+    batch is in its bank and queues the kernels after that. The caller makes
+    the scatter stream wait for whatever the kernels depend on (staged block
     IDs, the engine's own event) before the call, and waits for both streams
     after it.
 
@@ -503,6 +510,8 @@ def run_pipelined_retrieve(
     Raises:
         ValueError: If a None entry is found.
         NotImplementedError: If an object is owned by a peer.
+        OSError: If a host-thread load failed; no kernel is queued for its
+            batch.
     """
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
     direction = lmcache_native.TransferDirection.H2D
@@ -530,16 +539,26 @@ def run_pipelined_retrieve(
             for chunk_idx in range(first, batch_len)
         ]
 
-        with torch_dev.stream(lane.stream):
-            lane.signals.wait_free(bank_idx, lane.stream)
-            stage(engine, memory_object_batch[first:], staged_buffers, direction)
-            lane.signals.signal_staged(bank_idx, lane.stream)
+        staged_objs = memory_object_batch[first:]
+        signals = lane.signals
+        if loads_from_host(engine, staged_objs):
+            # Nothing is queued for the batch until its bytes are in the
+            # bank: a stream must never wait for a host thread (see
+            # ``nvme_dma``).
+            signals.wait_free_on_host(bank_idx)
+            load_from_host(engine, staged_objs, staged_buffers, cache_context.device)
+            signals.signal_staged(bank_idx, scatter_stream)
+        else:
+            with torch_dev.stream(lane.stream):
+                signals.wait_free(bank_idx, lane.stream)
+                stage(engine, staged_objs, staged_buffers, direction)
+                signals.signal_staged(bank_idx, lane.stream)
 
         with torch_dev.stream(scatter_stream):
-            # Once "staged" is queued "free" must follow, or the bank's next
+            # Once "staged" is due "free" must follow, or the bank's next
             # load waits forever.
             try:
-                lane.signals.wait_staged(bank_idx, scatter_stream)
+                signals.wait_staged(bank_idx, scatter_stream)
                 _launch_batch_kernels(
                     cache_context,
                     bank,
@@ -551,4 +570,4 @@ def run_pipelined_retrieve(
                     direction,
                 )
             finally:
-                lane.signals.signal_free(bank_idx, scatter_stream)
+                signals.signal_free(bank_idx, scatter_stream)

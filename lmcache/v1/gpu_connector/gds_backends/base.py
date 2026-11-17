@@ -136,6 +136,32 @@ class GDSHandle(ABC):
     ) -> Submission:
         """Enqueue a GPU-to-slab write and return its in-flight Submission."""
 
+    #: Whether :meth:`read_blocking` is implemented.
+    supports_blocking_read: bool = False
+
+    def read_blocking(
+        self, buf_base: int, size: int, file_offset: int, buf_offset: int
+    ) -> int:
+        """Read slab bytes into a registered GPU buffer on the calling thread.
+
+        Not ordered on any stream: the bytes are in the buffer on return.
+        Several threads may read at once.
+
+        Args:
+            buf_base: Base address of the registered buffer.
+            size: Bytes to read.
+            file_offset: Offset in the slab.
+            buf_offset: Offset from ``buf_base``.
+
+        Returns:
+            The bytes read.
+
+        Raises:
+            NotImplementedError: If :attr:`supports_blocking_read` is False.
+            OSError: If the library reports a read error.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no blocking slab read")
+
     @abstractmethod
     def close(self) -> None:
         """Release this slab's resources; repeated calls do nothing.

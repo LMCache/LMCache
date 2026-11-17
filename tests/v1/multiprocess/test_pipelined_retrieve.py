@@ -65,6 +65,9 @@ class _LoggedSignals(BankSignals):
     def wait_free(self, bank: int, stream: object) -> None:
         self._log.append(("wait_free", bank, stream))
 
+    def wait_free_on_host(self, bank: int) -> None:
+        self._log.append(("wait_free_on_host", bank))
+
     def signal_staged(self, bank: int, stream: object) -> None:
         self._log.append(("signal_staged", bank, stream))
 
@@ -118,6 +121,7 @@ def harness(monkeypatch):
     ops.multi_layer_block_kv_transfer.side_effect = fake_kernel
     monkeypatch.setattr(staged, "device_ops", ops)
     monkeypatch.setattr(staged, "stage", fake_stage)
+    monkeypatch.setattr(staged, "loads_from_host", lambda engine, objs: False)
     monkeypatch.setattr(staged, "torch_dev", SimpleNamespace(stream=use_stream))
     lane = StagingLane("load", [_Bank("a"), _Bank("b")], _LoggedSignals(log))
     return SimpleNamespace(cc=cc, lane=lane, log=log, ops=ops)
@@ -197,6 +201,74 @@ def test_failed_load_signals_nothing_and_launches_no_kernel(harness, monkeypatch
     with pytest.raises(ValueError):
         _run(harness, _objects(1))
     assert harness.log == [("wait_free", 0, "load")]
+
+
+@pytest.fixture
+def host_harness(harness, monkeypatch):
+    """The harness with an engine that loads on host threads; a load is
+    logged as ``("load_from_host", chunk names, slots)``."""
+    harness.host_capable = True
+    harness.load_error = None
+
+    def fake_load_from_host(engine, memory_objs, buffers, device):
+        if harness.load_error is not None:
+            raise harness.load_error
+        harness.log.append(
+            (
+                "load_from_host",
+                [obj.name for obj in memory_objs],
+                [buffer.address for buffer in buffers],
+            )
+        )
+
+    monkeypatch.setattr(staged, "loads_from_host", lambda e, o: harness.host_capable)
+    monkeypatch.setattr(staged, "load_from_host", fake_load_from_host)
+    return harness
+
+
+def test_host_loaded_batch_is_in_its_bank_before_anything_is_queued_for_it(
+    host_harness,
+):
+    """No stream may wait for a host thread, so the host waits for the bank,
+    loads it, and only then queues the batch on the scatter stream. Nothing
+    goes on the lane's stream."""
+    _run(host_harness, _objects(3))
+    assert host_harness.log == [
+        ("wait_free_on_host", 0),
+        ("load_from_host", ["c0", "c1"], [("a", 0), ("a", 1)]),
+        ("signal_staged", 0, SCATTER),
+        ("wait_staged", 0, SCATTER),
+        ("kernel", SCATTER, [("a", 0), ("a", 1)], list(range(0, 8))),
+        ("signal_free", 0, SCATTER),
+        ("wait_free_on_host", 1),
+        ("load_from_host", ["c2"], [("b", 0)]),
+        ("signal_staged", 1, SCATTER),
+        ("wait_staged", 1, SCATTER),
+        ("kernel", SCATTER, [("b", 0)], list(range(8, 12))),
+        ("signal_free", 1, SCATTER),
+    ]
+
+
+def test_failed_host_load_is_raised_and_queues_nothing_for_its_batch(host_harness):
+    host_harness.load_error = OSError("short slab read")
+    with pytest.raises(OSError, match="short slab read"):
+        _run(host_harness, _objects(1))
+    assert host_harness.log == [("wait_free_on_host", 0)]
+
+
+def test_engine_that_does_not_load_on_host_threads_stages_on_the_lane_stream(
+    host_harness,
+):
+    host_harness.host_capable = False
+    _run(host_harness, _objects(1))
+    assert [entry[0] for entry in host_harness.log] == [
+        "wait_free",
+        "stage",
+        "signal_staged",
+        "wait_staged",
+        "kernel",
+        "signal_free",
+    ]
 
 
 @pytest.fixture
