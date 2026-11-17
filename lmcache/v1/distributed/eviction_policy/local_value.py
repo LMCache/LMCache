@@ -366,12 +366,13 @@ class LocalValuePolicy(ProfiledEvictionPolicy, StorePolicy, L2AdapterListener):
             return math.inf
         decay_age = math.log(2) * (elapsed / self._costs.half_life_s)
         scaled_exposure = -math.expm1(-decay_age)
+        # The small-age series avoids relative error in subnormal decay ratios.
         log_exposure = (
-            math.log(scaled_exposure)
+            math.log(elapsed) + math.log1p(-decay_age / 2 + decay_age * decay_age / 6)
+            if decay_age < 1e-5
+            else math.log(scaled_exposure)
             + math.log(self._costs.half_life_s)
             - math.log(math.log(2))
-            if scaled_exposure > 0
-            else math.log(elapsed)
         )
         # Keep both exposure and lambda*H scaled across the finite input domain.
         log_intensity = (

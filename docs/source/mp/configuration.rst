@@ -666,7 +666,8 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--eviction-policy``
      - *required*
      - Eviction policy.
-       Choices: ``LRU``, ``ARC``, ``IsolatedLRU``, ``noop``.
+       Choices: ``LRU``, ``ARC``, ``IsolatedLRU``, ``noop``,
+       ``Profiled``, ``ProfiledValue``.
        ``ARC`` adaptively balances recently created keys and frequently
        accessed keys. It keeps key-only ghost history for completed policy
        evictions; no KV data is retained in the ghost lists.
@@ -685,6 +686,32 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--eviction-ratio``
      - ``0.2``
      - Fraction of allocated memory to evict when triggered (0.0--1.0).
+   * - ``--profiling-config``
+     - Not set
+     - JSON cost snapshot required by the experimental profiling policies.
+
+``ProfiledValue`` shares demand history between L1 victim ordering and L2 write
+admission. It requires an enabled event bus, one L1, one fixed L2 and the default
+store policy. Its schema2 snapshot binds a local ``model_name`` directory,
+``model_revision`` inventory SHA256, ``chunk_size``, ``dtypes`` and ``shapes`` to
+equal-length cumulative millisecond arrays: ``prefix_recompute_ms``,
+``prefix_fetch_l1_ms``, ``prefix_fetch_l2_ms`` and ``prefix_write_l2_ms``.
+
+Optional snapshot fields ``value_model`` and ``recompute_fraction`` default to
+``"expected_reuses"`` and ``0`` respectively. Set ``value_model`` to
+``"reuse_probability"`` to estimate the probability of at least one future reuse
+in ``horizon_s`` (default60 seconds), using a decayed Poisson rate with a
+distinct-key-distance penalty. This estimate is not empirically calibrated.
+``recompute_fraction`` must be finite and in [0,1]; it discounts recompute savings
+in the cost model, without enabling partial recomputation in the engine.
+The count-domain ``no-cost`` control is not accepted with probability mode.
+
+The policy operates after GPU-to-host copying. It does not enforce a dynamic
+L2 resident-value admission watermark; disk write time is not storage capacity
+opportunity cost. Unknown identities, incompatible layouts and stale knowledge
+use native fallback behavior. Runtime L2 mutations require restarting with a new
+snapshot. Configured costs alone do not establish measured calibration or TTFT
+improvement.
 
 L2 Policies
 -----------

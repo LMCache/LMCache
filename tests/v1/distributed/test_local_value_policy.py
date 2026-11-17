@@ -244,20 +244,26 @@ def test_probability_rejects_count_domain_no_cost_control():
         make_config(value_model="reuse_probability", mode="no-cost")
 
 
-@pytest.mark.parametrize("half_life", [1.0, 1e-310])
-def test_probability_scales_extreme_rate_before_it_can_overflow(runtime, half_life):
+@pytest.mark.parametrize(
+    "half_life,horizon,write",
+    [(1.0, 1e-310, 4.8), (1e-310, 1e-310, 4.8), (1e308, 1e-15, 4.2)],
+)
+def test_probability_scales_extreme_rate_before_it_can_overflow(
+    runtime, half_life, horizon, write
+):
     bus, now, build = runtime
     now[0] = 0
     policy = build(
         value_model="reuse_probability",
-        horizon_s=1e-310,
+        horizon_s=horizon,
         half_life_s=half_life,
-        prefix_write_l2_ms=(4.8, 9.6),
+        prefix_write_l2_ms=(write, 2 * write),
     )
     demand(bus, policy, [b"hot"])
-    now[0] = 1e-310
+    now[0] = horizon
     demand(bus, policy, [b"hot"])
-    # lambda*H tends to 1, so P is about .632, not 1 after overflow.
+    # Probability is about .632 (or .75 when age is one half-life),
+    # not inflated by overflow or quantized subnormal exposure.
     assert policy.select_store_targets([key(b"hot")], adapters()) == {}
 
 
