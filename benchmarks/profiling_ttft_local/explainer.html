@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Experimental local KV policy / 本地 KV 策略</title>
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:980px;margin:32px auto;padding:0 20px;color:#222;background:white}pre{overflow:auto;background:#f2f4f5;padding:16px}table{border-collapse:collapse}td,th{border:1px solid #aaa;padding:8px}button{padding:8px 16px;cursor:pointer}[hidden]{display:none}h1{font-size:28px}h2{font-size:22px}</style>
+<button type="button" onclick="switchLanguage()">English / 中文</button>
+<main id="en">
+<h1>Experimental Local Profiling-Driven KV Policy</h1>
+<p>Validation draft, not merge-ready. This PR adds opt-in policy decisions, not a new cache or transfer engine. It ports the previously measured prototype onto dev while keeping the upstream L1 factory and write-placement APIs.</p>
+<h2>1. Ownership And Call Chain</h2>
+<pre>MP lookup, including misses
+       | model / layout / namespace checks
+       v
+bounded demand history: decayed frequency + distinct-key reuse distance
+       |                        |
+       v                        v
+StorePolicy target selection    eligible L1 victim ordering
+       |                        |
+native StoreController          native L1EvictionController
+       |                        |
+native L2 completion callback    native deletion acknowledgement</pre>
+<p><code>StorageManager</code> constructs one shared policy, injects it into the L1 controller and store controller, and registers its event subscription only when construction commits. Allocation, locks, transfers, deletion and error handling remain native. L2 completion callbacks maintain advisory backing knowledge, not a second residency authority.</p>
+<h2>2. Decision Economics</h2>
+<pre>No disk copy:       gain = N * (recompute - disk fetch) - disk write
+DRAM + disk copy:   value = N * (disk fetch - host fetch)
+DRAM only:         value = N * (recompute - host fetch)</pre>
+<p><code>LocalValueConfig</code> prices non-overlapping prefix increments from cumulative arrays. <code>LocalValuePolicy.select_store_targets</code> rejects known nonpositive writes and requires the full ancestor chain. <code>get_eviction_actions</code> retains native eligibility checks and returns actions rather than deleting buffers. Prediction uses past demand only, not workload family labels or future requests.</p>
+<h2>3. Why This Synthetic Workload Benefits</h2>
+<pre>Two reused long prefixes + one-pass scan documents
+            |
+   +--------+------------------+
+   |                           |
+LRU keeps recent scans     Local policy protects observed reuse
+   |                           |
+hot prefix partly evicted  more hot-prefix DRAM hits
+   |                           |
+disk fetch / recompute     less fetch / recompute work before token 1</pre>
+<table><tr><th>Restart pair</th><th>LRU mean ms</th><th>Local mean ms</th><th>Reduction</th></tr><tr><td>0</td><td>60.1554</td><td>51.8740</td><td>13.77%</td></tr><tr><td>1</td><td>65.3301</td><td>51.8821</td><td>20.58%</td></tr><tr><td>2</td><td>64.2716</td><td>52.3367</td><td>18.57%</td></tr><tr><td>Combined</td><td>63.2524</td><td>52.0310</td><td>17.74%</td></tr></table>
+<p>Historical pinned-base observation: policy a101de47, base d0a86807, producer a20056de. All 360 requests completed; 288 evaluation observations; 180 matching paired outputs. This is not current-dev GPU performance. Costs are illustrative, not measured calibration. See <a href="RESULTS.md">complete scope and limitations</a> and <a href="results.json">sanitized per-request data</a>.</p>
+<h2>4. Failure Boundaries And Tests</h2>
+<p>Tests cover negative gain, copy double-counting, ancestor reachability, decay and distance, stale/missing costs, model-byte binding, namespace/layout fallback, constructor subscription lifetime, eligibility, and HTTP409 for runtime topology changes. Unsupported resident identities fall back to native ordering. The current-dev port also adapts immutable ObjectKey identities without discarding tags. Native CUDA execution and measured GPU speedups belong to separately versioned evidence.</p>
+<p>Not implemented: capacity-aware L2 opportunity pricing, pre-D2H admission, selective load-versus-recompute routing, fleet coordination or per-signal causal attribution. Formal eight-pair qualification, representative controls and complete IPC cleanup remain unqualified. The disposable experimental runner is not shipped as a reusable benchmark tool.</p>
+</main>
+<main id="zh" hidden>
+<h1>实验性本地 KV 缓存策略</h1>
+<p>这是验证草稿，不是可直接合并的生产方案。改动负责决定哪些 KV 值得写磁盘、哪些应优先保留在内存；缓存本体、数据拷贝和锁仍由 LMCache 原有组件负责。此次提交适配最新 dev，但不会把旧版本的实测结果冒充为新版本结果。</p>
+<h2>1. 调用链和所有权</h2>
+<pre>请求查询，包括未命中
+       | 检查模型、布局和命名空间
+       v
+有界历史：衰减访问频率 + 间隔内不同缓存块数量
+       |                          |
+       v                          v
+选择是否写入 L2                调整可淘汰对象的顺序
+       |                          |
+原生 StoreController          原生 L1EvictionController
+       |                          |
+原生存储完成回调               原生删除确认</pre>
+<p>StorageManager 只构造一个共享策略，注入存储和淘汰控制器；构造成功后才订阅事件，失败不留下观察者。策略记录的磁盘备份信息只来自实际完成回调，不自行分配、删除缓存或释放锁。</p>
+<h2>2. 如何判断值不值得保留</h2>
+<pre>首次写磁盘：预计复用次数 ×（重算耗时 - 磁盘读取耗时）- 写入代价
+已有磁盘副本时保留内存：预计复用次数 ×（磁盘读取耗时 - 内存读取耗时）
+没有磁盘副本时保留内存：预计复用次数 ×（重算耗时 - 内存读取耗时）</pre>
+<p>不能把一整段前缀的重算收益重复算给每一块，也不能给内存和磁盘两份副本同时算一遍避免重算的收益。代码用累计成本的差分表达不同前缀区间；后面的缓存块依赖前面的块，准入时检查完整祖先链。预测只看过去的访问，不读取负载中的 hot/scan 标签。</p>
+<h2>3. 为什么本次负载收益明显</h2>
+<pre>两个重复访问的长前缀 + 一次性扫描文档
+          |
+    +-----+-------------------+
+    |                         |
+LRU 容易留下最近的扫描数据    新策略优先留下已观察到的热点
+    |                         |
+热点部分被挤走               更多热点在 DRAM 命中
+    |                         |
+再次读磁盘或重算             首 token 前少做这些工作</pre>
+<p>三对独立重启的平均 TTFT 分别降低 13.77%、20.58%、18.57%；合并后由 63.25ms 降到 52.03ms，下降 17.74%。360 个请求完成，180 组对应输出一致。数据对应旧的固定实测版本，使用固定示例成本，不代表已完成成本校准，也不代表每个信号的独立贡献。完整边界见 <a href="RESULTS.md">结果说明</a>，逐请求数据见 <a href="results.json">JSON</a>。</p>
+<h2>4. 失败路径和测试目的</h2>
+<p>测试覆盖负收益拒绝、重复计价、前缀依赖、频率衰减和复用间隔、过期成本、模型文件变化、布局和命名空间不匹配、构造失败后的订阅清理、不能淘汰的对象，以及运行中更换 L2 返回明确的 HTTP409。未知对象走原生回退；新 dev 的 ObjectKey 身份和标签也要保留。</p>
+<p>尚未实现：按 L2 容量计算机会成本、GPU 到主机拷贝前的准入、按成本选择加载或重算、集群全局调度。八对正式实验、代表性对照、完整 IPC 清理和各信号贡献仍未验证。本次没有把存在超时清理缺口的一次性实验脚本包装成可复用工具。</p>
+</main>
+<script>function switchLanguage(){const zh=document.getElementById('zh'),en=document.getElementById('en');zh.hidden=!zh.hidden;en.hidden=!en.hidden;document.documentElement.lang=zh.hidden?'en':'zh'}</script>
+</html>

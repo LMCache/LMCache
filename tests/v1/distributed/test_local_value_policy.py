@@ -98,6 +98,16 @@ def adapters():
     return [L2AdapterDescriptor(index=0, config=MockL2AdapterConfig(0.01, 10.0))]
 
 
+def test_identity_tags_are_unsupported_and_use_default_store(runtime):
+    bus, _, build = runtime
+    policy = build()
+    demand(bus, policy, [b"cold"])
+    plain = key(b"cold")
+    tagged = replace(plain, identity=replace(plain.identity, tags={"tenant": "other"}))
+    assert policy.select_store_targets([plain], adapters()) == {}
+    assert policy.select_store_targets([tagged], adapters()) == {0: [tagged]}
+
+
 def test_cost_model_distinguishes_first_copy_and_existing_disk_copy():
     config = make_config()
     assert config.first_copy_gain_ms(0, 2.0) == pytest.approx(10.0)

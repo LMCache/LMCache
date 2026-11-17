@@ -303,6 +303,7 @@ class LocalValuePolicy(ProfiledEvictionPolicy, StorePolicy, L2AdapterListener):
             self._layout_compatible
             and key.model_name == self._config.model_name
             and not key.cache_salt
+            and not key.identity.tags
             and key.kv_rank == ObjectKey.ComputeKVRank(1, 0, 1, 0)
             and key.object_group_id == 0
             and key.chunk_hash in self._history
@@ -337,7 +338,11 @@ class LocalValuePolicy(ProfiledEvictionPolicy, StorePolicy, L2AdapterListener):
         return self._config.mode not in {"observe", "two-hit"} and self._costs_fresh()
 
     def _rank_snapshot(self, keys: list[ObjectKey], profiled: set[ObjectKey]) -> bool:
-        return len(keys) == len(profiled) and self._ranking_enabled()
+        return (
+            len(keys) == len(profiled)
+            and all(self._known(key) for key in keys)
+            and self._ranking_enabled()
+        )
 
     def _costs_fresh(self) -> bool:
         return (
@@ -372,7 +377,8 @@ class LocalValuePolicy(ProfiledEvictionPolicy, StorePolicy, L2AdapterListener):
         while parent is not None and remaining > 0:
             if (
                 parent not in selected
-                and replace(key, chunk_hash=parent) not in self._backed
+                and replace(key, identity=replace(key.identity, chunk_hash=parent))
+                not in self._backed
             ):
                 return False
             ancestor = self._history.get(parent)
