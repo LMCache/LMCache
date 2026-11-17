@@ -39,6 +39,27 @@ _EMPTY_BY_CACHE_SALT: Mapping[str, int] = MappingProxyType({})
 
 
 @dataclass(frozen=True)
+class CapacitySnapshot:
+    """Detached capacity evidence for an exclusively owned storage domain.
+
+    ``resident_sizes`` maps resident keys to bytes; ``unavailable`` contains
+    locked or in-flight keys that cannot be deleted. ``pending_bytes`` charges
+    unique pending non-resident stores, not resident re-stores.
+    ``capacity_bytes`` is the finite positive owner budget, not free disk space.
+    """
+
+    resident_sizes: Mapping[ObjectKey, int]
+    unavailable: frozenset[ObjectKey]
+    pending_bytes: int
+    capacity_bytes: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "resident_sizes", MappingProxyType(dict(self.resident_sizes))
+        )
+
+
+@dataclass(frozen=True)
 class AdapterUsage:
     """Unified usage report for an L2 adapter.
 
@@ -151,6 +172,34 @@ class L2AdapterInterface(ABC):
     #####################
     # Event Fd Interface
     #####################
+
+    @property
+    def supports_value_capacity(self) -> bool:
+        """Whether this adapter owns a bounded, fully tracked capacity domain."""
+        return False
+
+    def get_capacity_snapshot(self) -> CapacitySnapshot:
+        """Return atomic residency and reservation evidence.
+
+        Raises:
+            NotImplementedError: Unless the adapter supports value capacity.
+        """
+        raise NotImplementedError("adapter does not own value capacity")
+
+    def delete_unlocked(self, keys: list[ObjectKey]) -> None:
+        """Submit deletion only for keys not locked or pending I/O.
+
+        Args:
+            keys: Candidate keys; busy keys are skipped atomically at submission.
+
+        Notes:
+            Completion is not proof every candidate was deleted. Callers must
+            reread ``get_capacity_snapshot()`` before spending reclaimed bytes.
+
+        Raises:
+            NotImplementedError: Unless the adapter supports value capacity.
+        """
+        raise NotImplementedError("adapter does not own value capacity")
 
     # IMPORTANT: Each of the three event fd methods below MUST return a
     # distinct file descriptor.  The store controller and prefetch controller

@@ -25,16 +25,24 @@ from collections import defaultdict
 from functools import cache
 from typing import Any
 import ctypes
+import math
 import select
 import threading
 
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryLayoutDesc, MemoryTags, ObjectKey
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.key_codec import encode_storage_key
 from lmcache.v1.distributed.l2_adapters.base import (
+    CapacitySnapshot,
     L2AdapterInterface,
     L2TaskId,
 )
@@ -131,6 +139,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     _OP_LOOKUP = "lookup"
     _OP_LOAD = "load"
     _OP_DELETE = "delete"
+    _OP_RECONCILE_STORE = "reconcile_store"
 
     def __init__(
         self,
@@ -140,6 +149,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         type_name: str = "",
         extra_status: dict[str, Any] | None = None,
         pad_buffers_to_alignment: bool = False,
+        *,
+        value_capacity: bool = False,
     ) -> None:
         """Initialize the adapter over a native connector client.
 
@@ -160,8 +171,29 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 native connectors whose I/O path requires aligned buffer
                 lengths (e.g. O_DIRECT file storage). See
                 ``_obj_to_memoryview``.
+            value_capacity: Owner assertion, supplied only by the qualified FS
+                factory: cold empty local directory, exclusive writes through
+                this adapter, finite budget, and no alignment padding. This
+                does not discover pre-existing files or police external writers.
+
+        Raises:
+            ValueError: If the owner assertion lacks a finite positive local
+                unpadded capacity or the native delete operation.
         """
+        if value_capacity and (
+            not math.isfinite(max_capacity_gb)
+            or not math.isfinite(max_capacity_gb * (1024**3))
+            or int(max_capacity_gb * (1024**3)) <= 0
+            or memory_tags.residency != MemoryResidency.LOCAL
+            or memory_tags.segment != MemorySegment.STORAGE
+            or pad_buffers_to_alignment
+            or not callable(getattr(native_client, "submit_batch_delete", None))
+        ):
+            raise ValueError(
+                "value capacity requires bounded local unpadded FS ownership"
+            )
         super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
+        self._value_capacity = value_capacity
         self._client = native_client
         self._client_fd: int = int(native_client.event_fd())
         self._type_name: str = type_name or type(native_client).__name__
@@ -245,6 +277,18 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
+        """Submit native stores and reserve their bytes until completion.
+
+        Args:
+            keys: Keys corresponding to ``objects``.
+            objects: Caller-owned buffers kept alive until store completion.
+
+        Returns:
+            The adapter-local task ID.
+
+        Raises:
+            RuntimeError: An owner-qualified key is still pending deletion.
+        """
         key_strings = [_object_key_to_string(k) for k in keys]
         memviews = [
             _obj_to_memoryview(obj, self._pad_buffers_to_alignment) for obj in objects
@@ -258,6 +302,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         # with demux thread. The native submit is
         # non-blocking so holding the lock is brief.
         with self._lock:
+            if self._value_capacity and set(keys) & self._pending_delete_keys():
+                raise RuntimeError("cannot store keys pending deletion")
             task_id = self._get_next_task_id()
             future_id = int(self._client.submit_batch_set(key_strings, memviews))
             self._pending_ops[future_id] = (
@@ -287,10 +333,25 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         group_layout_descs: dict[int, MemoryLayoutDesc],
     ) -> L2TaskId:
+        """Submit native lookup and acquire locks on confirmed hits.
+
+        Args:
+            keys: Candidate keys.
+            group_layout_descs: Advisory layouts; unused by this connector.
+
+        Returns:
+            The task ID. For owners, a batch intersecting pending deletion
+            completes as all misses without native I/O, preventing a late
+            lookup from acquiring locks on keys already selected for deletion.
+        """
         key_strings = [_object_key_to_string(k) for k in keys]
 
         with self._lock:
             task_id = self._get_next_task_id()
+            if self._value_capacity and set(keys) & self._pending_delete_keys():
+                self._completed_lookups[task_id] = Bitmap(len(keys))
+                self._lookup_efd.notify()
+                return task_id
             future_id = int(self._client.submit_batch_exists(key_strings))
             self._pending_ops[future_id] = (
                 self._OP_LOOKUP,
@@ -349,6 +410,60 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # Eviction Interface
     # ---------------------------------------------------------------
 
+    @property
+    def supports_value_capacity(self) -> bool:
+        """Whether construction asserted cold, exclusive local FS ownership."""
+        return self._value_capacity
+
+    def get_capacity_snapshot(self) -> CapacitySnapshot:
+        """Return detached residency and unique pending bytes under one lock.
+
+        Failed stores remain reserved until native existence evidence reconciles
+        possible partial writes. Missing reconciliation evidence never frees bytes.
+
+        Raises:
+            NotImplementedError: If this adapter is not owner-qualified.
+        """
+        if not self.supports_value_capacity:
+            return super().get_capacity_snapshot()
+        with self._lock:
+            pending: dict[ObjectKey, int] = {}
+            for keys, sizes in self._pending_store_sizes.values():
+                for key, size in zip(keys, sizes, strict=True):
+                    if key not in self._key_sizes:
+                        pending[key] = max(pending.get(key, 0), size)
+            return CapacitySnapshot(
+                self._key_sizes,
+                frozenset(self._unavailable_keys()),
+                sum(pending.values()),
+                self._max_capacity_bytes,
+            )
+
+    def delete_unlocked(self, keys: list[ObjectKey]) -> None:
+        """Skip busy keys atomically, then wait for the original native event.
+
+        Args:
+            keys: Candidate keys. Locks and pending operations prevent deletion.
+
+        Raises:
+            NotImplementedError: If not owner-qualified.
+            TimeoutError: No completion in 30s; pending keys remain unavailable.
+
+        Notes:
+            Failed/partial deletes only reclaim bytes confirmed by per-key native
+            results. Reread the snapshot; returning is not a success assertion.
+        """
+        if not self.supports_value_capacity:
+            return super().delete_unlocked(keys)
+        with self._lock:
+            busy = self._unavailable_keys()
+            selected = list(dict.fromkeys(key for key in keys if key not in busy))
+            if not selected:
+                return
+            _, done_event = self._submit_delete_locked(selected)
+        if not done_event.wait(timeout=30.0):
+            raise TimeoutError("delete_unlocked timed out; keys remain pending")
+
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delete a batch of keys from the remote backend.
 
@@ -359,23 +474,17 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
         No-op if the connector does not expose ``submit_batch_delete``
         or if the key list is empty.
+
+        Owner-qualified adapters use ``delete_unlocked`` instead, including
+        its busy-key checks and TimeoutError on missing completion.
         """
+        if self.supports_value_capacity:
+            return self.delete_unlocked(keys)
         if not keys or not self._has_delete:
             return
 
-        key_strings = [_object_key_to_string(k) for k in keys]
-        done_event = threading.Event()
-
         with self._lock:
-            task_id = self._get_next_task_id()
-            future_id = int(self._client.submit_batch_delete(key_strings))
-            self._pending_ops[future_id] = (
-                self._OP_DELETE,
-                task_id,
-                len(keys),
-                list(keys),
-            )
-            self._pending_delete_events[task_id] = done_event
+            task_id, done_event = self._submit_delete_locked(keys)
 
         # Block until demux thread signals completion
         if not done_event.wait(timeout=30.0):
@@ -514,12 +623,60 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                         lookup_keys,
                     ) = entry
 
-                    if op_type == self._OP_STORE:
+                    if op_type in (self._OP_STORE, self._OP_RECONCILE_STORE):
+                        if (
+                            self._value_capacity
+                            and op_type == self._OP_STORE
+                            and not ok
+                        ):
+                            store_keys, _ = self._pending_store_sizes[fid]
+                            try:
+                                reconcile_id = int(
+                                    self._client.submit_batch_exists(
+                                        [_object_key_to_string(k) for k in store_keys]
+                                    )
+                                )
+                            except RuntimeError:
+                                # Unknown partial writes must remain charged even
+                                # when the connector cannot submit reconciliation.
+                                logger.exception("failed store reconciliation submit")
+                                self._pending_ops[fid] = entry
+                                self._completed_stores[task_id] = L2StoreResult(
+                                    False, 0
+                                )
+                                self._store_efd.notify()
+                                continue
+                            self._pending_store_sizes[reconcile_id] = (
+                                self._pending_store_sizes.pop(fid)
+                            )
+                            self._pending_ops[reconcile_id] = (
+                                self._OP_RECONCILE_STORE,
+                                task_id,
+                                num_keys,
+                                list(store_keys),
+                            )
+                            continue
+                        reconciled = op_type == self._OP_RECONCILE_STORE
+                        if reconciled and (
+                            not ok
+                            or result_bools is None
+                            or len(result_bools) != num_keys
+                        ):
+                            # Retain the unresolved reservation, never interpret
+                            # absent/partial evidence as an empty storage domain.
+                            self._pending_ops[fid] = entry
+                            self._completed_stores[task_id] = L2StoreResult(False, 0)
+                            self._store_efd.notify()
+                            continue
                         store_info = self._pending_store_sizes.pop(fid, None)
                         task_bytes = 0
                         if ok and store_info is not None:
                             store_keys, sizes = store_info
-                            for key, size in zip(store_keys, sizes, strict=True):
+                            for i, (key, size) in enumerate(
+                                zip(store_keys, sizes, strict=True)
+                            ):
+                                if reconciled and not result_bools[i]:
+                                    continue
                                 # First-store wins for byte accounting:
                                 # a re-store of an existing key adds 0
                                 # bytes (the backend already holds it).
@@ -535,7 +692,9 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                 else:
                                     keys_stored.append(key)
                                     sizes_stored.append(0)
-                        self._completed_stores[task_id] = L2StoreResult(ok, task_bytes)
+                        self._completed_stores[task_id] = L2StoreResult(
+                            ok and not reconciled, task_bytes if not reconciled else 0
+                        )
                         self._store_efd.notify()
 
                     elif op_type == self._OP_LOOKUP:
@@ -600,3 +759,35 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             # returning and the notify running.
             for evt in delete_done_events:
                 evt.set()
+
+    def _pending_delete_keys(self) -> set[ObjectKey]:
+        """Return pending deletion keys; caller holds _lock."""
+        return {
+            key
+            for op, _, _, keys in self._pending_ops.values()
+            if op == self._OP_DELETE and keys is not None
+            for key in keys
+        }
+
+    def _unavailable_keys(self) -> set[ObjectKey]:
+        """Derive busy keys from existing state; caller holds _lock."""
+        busy = set(self._locked_keys)
+        for _, _, _, keys in self._pending_ops.values():
+            if keys is not None:
+                busy.update(keys)
+        for keys, _ in self._pending_store_sizes.values():
+            busy.update(keys)
+        return busy
+
+    def _submit_delete_locked(
+        self, keys: list[ObjectKey]
+    ) -> tuple[L2TaskId, threading.Event]:
+        """Register native delete and its original event; caller holds _lock."""
+        done_event = threading.Event()
+        task_id = self._get_next_task_id()
+        future_id = int(
+            self._client.submit_batch_delete([_object_key_to_string(k) for k in keys])
+        )
+        self._pending_ops[future_id] = (self._OP_DELETE, task_id, len(keys), list(keys))
+        self._pending_delete_events[task_id] = done_event
+        return task_id, done_event
