@@ -39,6 +39,7 @@ from lmcache.v1.multiprocess.engine_context import (
 )
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import all_null_chunk_masks
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
+from lmcache.v1.multiprocess.recurrent_plan import earlier_checkpoint_keys
 from lmcache.v1.multiprocess.session import SessionManager
 
 CHUNK = 16
@@ -288,6 +289,22 @@ def test_endpoint_limit_bounds_sparse_checkpoint_lookup() -> None:
     assert hit == 2
     module.free_lookup_locks(key, tp_size=1)
     assert not +storage.locked
+
+
+def test_history_plan_uses_all_ranks_and_preserves_primary_endpoint() -> None:
+    key = replace(_key(world_size=2), end=3 * CHUNK)
+    context = MagicMock(spec=MPCacheServerContext, chunk_size=CHUNK)
+    context.layout_desc_registry.find_attn_desc.return_value = _groups().get_attn_desc()
+    rows = [
+        [ObjectKey(bytes([index]), "native-state", rank, 1) for index in range(3)]
+        for rank in range(2)
+    ]
+    context.resolve_obj_keys.side_effect = [[rows[0]], [rows[1]]]
+
+    groups, candidates = earlier_checkpoint_keys(context, key, {CHUNK})
+
+    assert groups == [1]
+    assert candidates == {2 * CHUNK: (rows[0][1], rows[1][1])}
 
 
 def test_leaving_last_prompt_token_uncached_uses_previous_checkpoint() -> None:

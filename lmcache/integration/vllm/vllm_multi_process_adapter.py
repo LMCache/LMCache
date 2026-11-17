@@ -13,6 +13,7 @@ import uuid
 
 # Third Party
 from prometheus_client import Counter, Gauge
+import msgspec
 import torch
 import zmq
 
@@ -61,6 +62,12 @@ from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.fd_channel import fd_channel_path_for_url
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
 from lmcache.v1.transport.futures import MessagingFuture
+from lmcache.v1.transport.recurrent_history import (
+    HISTORY_METHOD,
+    HistoryRequest,
+    HistoryResponse,
+)
+from lmcache.v1.transport.server_module import ServerModuleCallRequest
 
 if TYPE_CHECKING:
     # First Party
@@ -1060,6 +1067,31 @@ class LMCacheMPSchedulerAdapter:
             self.req_clients[url].report_block_allocation(
                 os.getpid(), self.model_name, records
             )
+
+    def recurrent_history(self, request: HistoryRequest) -> HistoryResponse:
+        """Call the single-server recurrent history extension.
+
+        Args:
+            request: History planning or lifecycle operation.
+
+        Returns:
+            The server's checkpoint plan or completion result.
+
+        Raises:
+            ValueError: The connector is routed to multiple servers.
+            RuntimeError: The server rejects the history operation.
+        """
+        if len(self.req_clients) != 1:
+            raise ValueError("Recurrent history requires one LMCache server")
+        client = next(iter(self.req_clients.values()))
+        response = client.server_module_call(
+            ServerModuleCallRequest(
+                method=HISTORY_METHOD, payload=msgspec.msgpack.encode(request)
+            )
+        ).result(timeout=self._mq_timeout)
+        if not response.success:
+            raise RuntimeError(response.error)
+        return msgspec.msgpack.decode(response.payload, type=HistoryResponse)
 
     # Helper functions
     def _buffer_kv_events(self, events: Sequence[CacheEvent]) -> None:

@@ -293,7 +293,10 @@ def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
 
     _handle, ok = module.retrieve(
         key=SimpleNamespace(
-            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+            request_id="req",
+            request_configs=None,
+            cache_salt="salt",
+            has_unfull_chunk=_no_unfull,
         ),
         instance_id=1,
         gpu_block_ids=gpu_block_ids,
@@ -322,7 +325,10 @@ def test_retrieve_full_attention_only_reads_everything(monkeypatch):
     )
     _handle, ok = module.retrieve(
         key=SimpleNamespace(
-            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+            request_id="req",
+            request_configs=None,
+            cache_salt="salt",
+            has_unfull_chunk=_no_unfull,
         ),
         instance_id=1,
         gpu_block_ids=[[1, 2, 3]],
@@ -352,7 +358,10 @@ def test_retrieve_never_reads_aux_groups(monkeypatch):
 
     _handle, ok = module.retrieve(
         key=SimpleNamespace(
-            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+            request_id="req",
+            request_configs=None,
+            cache_salt="salt",
+            has_unfull_chunk=_no_unfull,
         ),
         instance_id=1,
         gpu_block_ids=gpu_block_ids,
@@ -381,7 +390,10 @@ def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):
     )
     _, ok = module.retrieve(
         SimpleNamespace(
-            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+            request_id="req",
+            request_configs=None,
+            cache_salt="salt",
+            has_unfull_chunk=_no_unfull,
         ),
         1,
         [[1, 2], [0, 3]],
@@ -459,6 +471,7 @@ def test_downsample_full_attention_keeps_every_block():
 
 
 def _unfull_key(**kwargs):
+    kwargs.setdefault("request_configs", None)
     return SimpleNamespace(
         request_id="req",
         worker_id=1,
