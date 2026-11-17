@@ -6,10 +6,12 @@ from dataclasses import replace
 from types import SimpleNamespace
 import importlib
 import json
+import threading
 import time
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
@@ -85,6 +87,7 @@ def demand(bus, policy, chunks):
                 "shapes": [[2, 256, 8]],
                 "cache_salt": "",
                 "world_size": 1,
+                "tags": {},
             },
         )
     )
@@ -106,6 +109,114 @@ def test_identity_tags_are_unsupported_and_use_default_store(runtime):
     tagged = replace(plain, identity=replace(plain.identity, tags={"tenant": "other"}))
     assert policy.select_store_targets([plain], adapters()) == {}
     assert policy.select_store_targets([tagged], adapters()) == {0: [tagged]}
+
+
+@pytest.mark.parametrize("request_configs", [{"lmcache.tag.tenant": "other"}, None])
+def test_actual_lookup_emitter_preserves_tag_scope(runtime, request_configs):
+    # First Party
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    bus, _, build = runtime
+    policy = build()
+    drained = threading.Event()
+    seen = []
+
+    def observe(event):
+        seen.append(event)
+        if len(seen) == 5:
+            drained.set()
+
+    bus.subscribe(EventType.MP_LOOKUP, observe)
+
+    def stop_after_emission(*args):
+        raise RuntimeError("stop-after-emission")
+
+    subject = object.__new__(LookupModule)
+    subject._ctx = SimpleNamespace(
+        event_bus=bus,
+        chunk_size=256,
+        layout_desc_registry=SimpleNamespace(
+            find=lambda *args: SimpleNamespace(
+                dtypes=[torch.bfloat16], shapes=[[2, 256, 8]]
+            ),
+            find_attn_desc=stop_after_emission,
+        ),
+        token_hasher=SimpleNamespace(
+            compute_packed_chunk_hashes=lambda *args, **kwargs: [b"cold"]
+        ),
+    )
+    request = SimpleNamespace(
+        model_name="model",
+        world_size=1,
+        request_id="scope",
+        cache_salt="",
+        token_bytes=b"\x01\x00\x00\x00",
+        end=1,
+        num_tokens=1,
+        request_configs=request_configs,
+    )
+    for _ in range(5):
+        with pytest.raises(RuntimeError, match="stop-after-emission"):
+            subject.lookup(request, 1)
+    assert drained.wait(3)
+    expected_tags = {"tenant": "other"} if request_configs else {}
+    assert seen[0].metadata["tags"] == expected_tags
+    if request_configs:
+        assert policy.statistics()["requests"] == 0
+        assert policy.profile(b"cold") is None
+    else:
+        assert policy.statistics()["requests"] == 5
+        assert policy.profile(b"cold")["frequency"] > 4
+
+
+def test_failed_profiled_manager_construction_does_not_subscribe(runtime, monkeypatch):
+    # First Party
+    from lmcache.v1.distributed.eviction_policy.profiled import ProfileConfig
+    from lmcache.v1.distributed.storage_manager import StorageManager
+
+    bus, _, _ = runtime
+    config = parse_args(
+        [
+            "--l1-size-gb",
+            "0.01",
+            "--eviction-policy",
+            "Profiled",
+            "--profiling-config",
+            "unused.json",
+        ]
+    )
+    closed = []
+    manager = SimpleNamespace(
+        config=config.l1_manager_configs[0],
+        l1_manager_id=0,
+        close=lambda: closed.append(True),
+    )
+    monkeypatch.setattr(
+        "lmcache.v1.distributed.storage_manager.create_l1_managers",
+        lambda _: [manager],
+    )
+    for name in [
+        "lmcache.v1.distributed.storage_manager.get_event_bus",
+        "lmcache.v1.mp_observability.event_bus.get_event_bus",
+    ]:
+        monkeypatch.setattr(name, lambda: bus)
+    monkeypatch.setattr(
+        "lmcache.v1.mp_observability.event_bus.is_observability_enabled", lambda: True
+    )
+    monkeypatch.setattr(
+        ProfileConfig, "load", lambda _: ProfileConfig("model", 256, (10.0,))
+    )
+
+    def fail_controller(*args, **kwargs):
+        raise RuntimeError("injected-controller-failure")
+
+    monkeypatch.setattr(
+        "lmcache.v1.distributed.storage_manager.L1EvictionController", fail_controller
+    )
+    with pytest.raises(RuntimeError, match="injected-controller-failure"):
+        StorageManager(config)
+    assert closed == [True]
+    assert not bus.has_subscribers(EventType.MP_LOOKUP)
 
 
 def test_cost_model_distinguishes_first_copy_and_existing_disk_copy():
@@ -353,7 +464,9 @@ def test_unknown_resident_preserves_stock_lru_fallback(runtime):
     assert policy.get_eviction_actions(0.5)[0].keys == [known]
 
 
-@pytest.mark.parametrize("scope", [{"cache_salt": "other"}, {"world_size": 2}])
+@pytest.mark.parametrize(
+    "scope", [{"cache_salt": "other"}, {"world_size": 2}, {"tags": {"tenant": "other"}}]
+)
 def test_foreign_scope_cannot_pollute_empty_tp1_demand(runtime, scope):
     bus, _, build = runtime
     policy = build()
@@ -373,6 +486,7 @@ def test_foreign_scope_cannot_pollute_empty_tp1_demand(runtime, scope):
                 "shapes": [[2, 256, 8]],
                 "cache_salt": "",
                 "world_size": 1,
+                "tags": {},
                 **scope,
             },
         )
@@ -543,6 +657,7 @@ def test_native_storage_manager_executes_admission_and_releases_locks(
                         "shapes": [[2, 256, 8]],
                         "cache_salt": "",
                         "world_size": 1,
+                        "tags": {},
                     },
                 )
             )

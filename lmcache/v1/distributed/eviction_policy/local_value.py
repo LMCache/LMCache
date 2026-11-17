@@ -353,11 +353,18 @@ class LocalValuePolicy(ProfiledEvictionPolicy, StorePolicy, L2AdapterListener):
     def _observe(self, event: Event) -> None:
         if event.metadata.get("model_name") != self._config.model_name:
             return
-        if "cache_salt" not in event.metadata or "world_size" not in event.metadata:
+        if any(
+            field not in event.metadata
+            for field in ("cache_salt", "world_size", "tags")
+        ):
             with self._lock:
                 self._layout_compatible = False
             return
-        if event.metadata["cache_salt"] != "" or event.metadata["world_size"] != 1:
+        if (
+            event.metadata["cache_salt"] != ""
+            or event.metadata["world_size"] != 1
+            or event.metadata["tags"] != {}
+        ):
             return
         if event.metadata.get("dtypes") != list(
             self._costs.dtypes

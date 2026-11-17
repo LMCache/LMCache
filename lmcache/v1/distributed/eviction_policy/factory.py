@@ -19,8 +19,8 @@ def CreateEvictionPolicy(
 
     Args:
         eviction_config (EvictionConfig): The configuration for the eviction policy.
-        defer_subscription: Delay LocalValue observation until its owning
-            StorageManager commits construction. Legacy policies are unchanged.
+        defer_subscription: Delay profiling observation until its owning
+            StorageManager commits construction.
 
     Returns:
         An instance of the specified eviction policy.
@@ -61,7 +61,9 @@ def CreateEvictionPolicy(
                 register=not defer_subscription,
             )
         return ProfiledEvictionPolicy(
-            ProfileConfig.load(eviction_config.profiling_config), get_event_bus()
+            ProfileConfig.load(eviction_config.profiling_config),
+            get_event_bus(),
+            register=not defer_subscription,
         )
     else:
         raise ValueError(

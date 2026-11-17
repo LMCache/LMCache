@@ -189,9 +189,7 @@ class StorageManager:
                 L1EvictionController(
                     m, m.config.eviction or config.eviction_config, policy=policy
                 )
-                for m, policy in zip(
-                    self._l1_managers, eviction_policies, strict=True
-                )
+                for m, policy in zip(self._l1_managers, eviction_policies, strict=True)
             ]
             for eviction_controller in self._eviction_controllers:
                 eviction_controller.start()
@@ -318,10 +316,9 @@ class StorageManager:
                 ),
                 self.get_l2_usages,
             )
-            for shared_policy in shared_store_policies:
-                self._event_bus.register_subscriber(
-                    cast(EventSubscriber, shared_policy)
-                )
+            for policy in eviction_policies:
+                if isinstance(policy, EventSubscriber):
+                    self._event_bus.register_subscriber(policy)
             cleanup.pop_all()
 
     # External APIs for serving engine integration code to call

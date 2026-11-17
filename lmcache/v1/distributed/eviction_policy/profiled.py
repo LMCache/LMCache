@@ -305,6 +305,7 @@ class ProfiledEvictionPolicy(EvictionPolicy, EventSubscriber):
                     and not key.cache_salt
                     and key.kv_rank == ObjectKey.ComputeKVRank(1, 0, 1, 0)
                     and key.object_group_id == 0
+                    and not key.identity.tags
                     and item is not None
                 ):
                     age = len(self._stack) - self._stack.bisect_right(item.ordinal)
@@ -383,6 +384,9 @@ class ProfiledEvictionPolicy(EvictionPolicy, EventSubscriber):
             or len(hashes) > len(self._config.prefix_recompute_ms)
             or any(not isinstance(chunk, bytes) for chunk in hashes)
             or len(set(hashes)) != len(hashes)
+            or metadata.get("tags", {}) != {}
+            or metadata.get("cache_salt", "") != ""
+            or metadata.get("world_size", 1) != 1
         ):
             return
         cost = self._config.prefix_recompute_ms[len(hashes) - 1] / len(hashes)
