@@ -5,9 +5,6 @@
 from typing import cast
 import threading
 
-# Third Party
-import torch
-
 # First Party
 from lmcache import torch_dev
 from lmcache.lmcache_native import TTLLock
@@ -31,11 +28,8 @@ from lmcache.v1.distributed.l1_manager.base import (
     L1ObjectState,
     l1_mgr_synchronized,
 )
-from lmcache.v1.distributed.memory_manager import (
-    BorrowedMemoryObj,
-    ShadowL1MemoryManager,
-)
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.distributed.memory_manager import ShadowL1MemoryManager
+from lmcache.v1.memory_management import BorrowedMemoryObj, MemoryObj
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 
 # The L1 medium a borrowed segment is reported as; other segments cannot be
@@ -205,19 +199,13 @@ class ShadowL1Manager(BaseL1Manager):
 
     def close(self) -> None:
         """Release every view, read-locked or not; idempotent. Outstanding
-        GPU work is synchronized first so no copy reads a released view: on
-        the devices the views live on, or on every device for host views."""
+        GPU work is synchronized first so no read lands from a released
+        view; a borrowed object is read into whichever device its reader
+        chose, so every device is fenced."""
         with self._lock:
-            devices = {
-                cast(BorrowedMemoryObj, entry.memory_obj).local_device()
-                for entry in self._objects.values()
-            }
-        if torch_dev.is_available():
-            if any(device is None or device.type == "cpu" for device in devices):
-                indices = list(range(torch_dev.device_count()))
-            else:
-                indices = [cast(torch.device, device).index for device in devices]
-            for index in indices:
+            has_views = bool(self._objects)
+        if has_views and torch_dev.is_available():
+            for index in range(torch_dev.device_count()):
                 torch_dev.synchronize(index)
         super().close()
 

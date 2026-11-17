@@ -1,9 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """ROCm platform primitives built on PyTorch's CUDA-compatible surface."""
 
+# Future
+from __future__ import annotations
+
+# Standard
+from typing import TYPE_CHECKING
+
 # First Party
 from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
+from lmcache.v1.platform.ipc_policy import get_ipc_policy
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 
 class RocmDeviceSpec(CudaDeviceSpec):
@@ -13,6 +24,18 @@ class RocmDeviceSpec(CudaDeviceSpec):
     def backend_name(self) -> str:
         """Return the LMCache-specific ROCm backend selector."""
         return "rocm"
+
+    @property
+    def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper] | None:
+        """Return the KV-cache IPC wrapper class; the VMM one is ROCm-specific."""
+        if get_ipc_policy().use_vmm_api:
+            # First Party
+            from lmcache.v1.platform.devices.rocm.ipc_wrapper import (
+                VmmRocmIPCWrapper,
+            )
+
+            return VmmRocmIPCWrapper
+        return super().ipc_wrapper_cls
 
     @property
     def pin_memory_backend(self) -> type[PinMemoryBackend] | None:

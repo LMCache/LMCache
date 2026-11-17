@@ -23,7 +23,12 @@ Expected log output:
 
 .. code-block:: text
 
-    LMCache INFO: MP coordinator listening on http://0.0.0.0:9300
+    LMCache INFO: MP coordinator listening on http://127.0.0.1:9300
+
+By default, the coordinator is reachable only from the local machine. For MP
+servers on other hosts, bind it to a reachable interface explicitly, for
+example ``lmcache coordinator --host <COORDINATOR_IP>``, and configure
+API-key authentication before exposing it to an untrusted network.
 
 See :doc:`/cli/coordinator` for the full flag list. Equivalently, the
 coordinator can be launched as a module with
@@ -43,7 +48,7 @@ keeps the default below.
      - Default
      - Description
    * - ``--host``
-     - ``0.0.0.0``
+     - ``127.0.0.1``
      - Host the HTTP server binds to.
    * - ``--port``
      - ``9300``
@@ -387,8 +392,10 @@ startup.
      - Description
    * - ``ip``
      - string
-     - IP/host of the server's HTTP API; the coordinator dials this address, so
-       it must be non-empty.
+     - Bare IPv4 address, IPv6 address, or resolver host name of the server's
+       HTTP API. Do not include a scheme, port, path, query, fragment, or
+       userinfo; ``http_port`` supplies the port separately. Resolver-specific
+       names such as Docker service names containing underscores are accepted.
    * - ``http_port``
      - int
      - Port of the server's HTTP API.
@@ -422,8 +429,8 @@ it); ``re_registered`` is ``true`` when this replaced an existing registration.
 **HTTP status codes:**
 
 - ``200``: registered.
-- ``422``: request body fails field-level validation (e.g. blank ``ip`` or
-  out-of-range ``http_port``).
+- ``422``: request body fails field-level validation (e.g. blank or URL-shaped
+  ``ip``, or out-of-range ``http_port``).
 
 **Example:**
 
@@ -1014,8 +1021,8 @@ forms -- supply exactly one:
 * **keys form** -- ``{"keys": [...]}``: resolve keys you already have (e.g.
   from ``GET /directory/keys``).
 * **tokens form** -- ``{"token_ids": [...], "model_name": ..., "world_size":
-  ..., "cache_salt": ...}``: resolve a request's tokens to the keys of its
-  complete chunks (the same fan-out the pin APIs use).
+  ..., "cache_salt": ..., "tags": ...}``: resolve a request's tokens to the
+  keys of its complete chunks (the same fan-out the pin APIs use).
 
 .. important::
 
@@ -1033,7 +1040,8 @@ forms -- supply exactly one:
       "token_ids": [15496, 11, 995, 314],
       "model_name": "meta-llama/Llama-3.1-8B-Instruct",
       "world_size": 1,
-      "cache_salt": ""
+      "cache_salt": "",
+      "tags": {"adapter_revision": "abc123"}
     }
 
 **Request body** (keys form):
@@ -1047,7 +1055,8 @@ forms -- supply exactly one:
           "model_name": "meta-llama/Llama-3.1-8B-Instruct",
           "kv_rank": 0,
           "object_group_id": 0,
-          "cache_salt": ""
+          "cache_salt": "",
+          "tags": {"adapter_revision": "abc123"}
         }
       ]
     }
@@ -1061,7 +1070,8 @@ forms -- supply exactly one:
       "results": [
         {
           "key": {"chunk_hash_hex": "aa12...", "model_name": "...", "kv_rank": 0,
-                  "object_group_id": 0, "cache_salt": ""},
+                  "object_group_id": 0, "cache_salt": "",
+                  "tags": {"adapter_revision": "abc123"}},
           "placements": [
             {"instance_id": "server-1", "incarnation": 1770000000, "tier": "l1",
              "backend": "dram", "size_bytes": 8388608, "shared": false}
@@ -1079,6 +1089,11 @@ is empty for keys the directory does not know; ``token_ids`` is empty when the
 directory has no tokens for the key's chunk (never stored with token reporting
 on, or not yet re-reported after an event gap). ``access_count`` is the number
 of ``access`` events applied to the key, ``0`` for unknown keys.
+
+``tags`` is optional (default ``{}``) in both forms. For token-addressed
+content, pass the exact ``lmcache.tag.*`` values used at store time with the
+prefix removed. Empty tags select only untagged content, not every tag
+namespace. Tag names must be nonempty strings and values must be strings.
 
 **HTTP status codes:**
 
@@ -1156,6 +1171,10 @@ Submit a warm prefetch of a token sequence on one named server.
      - string
      - Optional (default ``""``). Per-tenant isolation salt applied to the
        produced keys.
+   * - ``tags``
+     - map[string, string]
+     - Optional (default ``{}``). Matching tags used when the content was
+       stored, without the ``lmcache.tag.`` prefix.
 
 **Response** (``200 OK``):
 
@@ -1196,7 +1215,8 @@ submitted to warm.
             "model_name": "Qwen/Qwen3-8B",
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
         }'
     # -> {"instance_id": "server-1", "request_id": "abc123", "chunks": 12, "status": "submitted"}
 
@@ -1260,8 +1280,8 @@ pinned keys from quota-based eviction. L2 pins are fleet-wide (per
 Local resolution requires the coordinator's ``chunk_size`` and
 ``hash_algorithm`` (see `Configuration`_) to match the MP servers' ``--chunk-size``
 / ``--hash-algorithm``; otherwise the resolved keys will not match what was
-stored and the pin protects nothing. Under ``--separate-object-groups`` a chunk
-is stored once per object group; a pin covers the chunk in every group,
+stored and the pin protects nothing. With object-group separation (the default),
+a chunk is stored once per object group; a pin covers the chunk in every group,
 including groups it is not stored in yet, so ``GET /cache/pins`` lists one entry
 per chunk and rank rather than per group.
 
@@ -1292,6 +1312,10 @@ Pin a token sequence's keys in the L2 eviction plan.
    * - ``cache_salt``
      - string
      - Optional (default ``""``). Per-tenant isolation salt.
+   * - ``tags``
+     - map[string, string]
+     - Optional (default ``{}``). Matching tags used when the content was
+       stored, without the ``lmcache.tag.`` prefix.
 
 **Response** (``200 OK``):
 
@@ -1321,7 +1345,8 @@ of L2 keys pinned (chunks times the per-rank fan-out).
             "model_name": "Qwen/Qwen3-8B",
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
         }'
     # -> {"requested": 12, "affected": 12, "status": "pinned"}
 
@@ -1351,7 +1376,8 @@ chunk pinned *N* times needs *N* unpins before it can be evicted.
             "model_name": "Qwen/Qwen3-8B",
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
         }'
     # -> {"requested": 12, "affected": 12, "status": "unpinned"}
 
@@ -1396,7 +1422,8 @@ List the keys currently pinned in the L2 eviction plan.
             "model_name": "Qwen/Qwen3-8B",
             "kv_rank": 0,
             "object_group_id": 0,
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
           },
           "pin_count": 2
         }
@@ -1422,11 +1449,11 @@ requested page in first-pinned order, each with its current ``pin_count``.
 
 Delete a token sequence on one named server.
 
-**Request body:** (``model_name``,
-``world_size``, ``token_ids``, ``cache_salt``) plus ``tier`` (``l1`` / ``l2`` /
-``all``) and ``force`` (bool, default ``false``). When ``force`` is ``true``,
-locked keys are deleted anyway (L1 read/write locks on the node and the
-coordinator's L2 pin set).
+**Request body:** (``model_name``, ``world_size``, ``token_ids``,
+``cache_salt``, and optional matching ``tags`` as documented for
+``POST /cache/pins``) plus ``tier`` (``l1`` / ``l2`` / ``all``) and ``force``
+(bool, default ``false``). When ``force`` is ``true``, locked keys are deleted
+anyway (L1 read/write locks on the node and the coordinator's L2 pin set).
 
 **Response** (``200 OK``):
 
@@ -1462,6 +1489,7 @@ sequence returns ``status`` ``"noop"``.
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
             "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"},
             "tier": "all",
             "force": false
         }'
@@ -1539,7 +1567,8 @@ The whole fleet: every server's compartments, plus the shared pools.
 ``shared_modules`` holds storage several servers mount -- one S3 bucket, one
 CXL region. These are counted **once for the fleet** and appear in no
 instance's ``modules``. Summing them per mounting server would multiply both
-the bytes and the capacity by the number of mounts.
+the bytes and the capacity by the number of mounts. A declared pool is listed
+even while it holds no bytes, with ``used_bytes: 0``.
 
 A server appears when it is registered, when it still holds bytes, or when it
 declared capacity. ``registered: false`` therefore means a departed server
@@ -1665,3 +1694,16 @@ match rather than one that misses at prefetch.
   ``uint32`` tokens, or it is supplied without ``model_name``.
 
 Index counts are reported under the ``blend`` key of ``GET /directory/stats``.
+
+``POST /directory/blend-lookup`` accepts an optional ``tags`` map. Supply the
+exact ``lmcache.tag.*`` values used when storing the content, without that
+prefix:
+
+.. code-block:: json
+
+   {"model_name": "model", "world_size": 1, "token_ids": [1, 2, 3, 4],
+    "cache_salt": "", "tags": {"adapter_revision": "abc123"}}
+
+The map defaults to ``{}``, selecting untagged content. Names must be nonempty
+strings and values must be strings. Matches are limited to the caller's complete
+``model_name`` / ``cache_salt`` / ``world_size`` / ``tags`` namespace.

@@ -3,7 +3,7 @@
 Integration tests for the nixl-backed transfer channel implementation.
 
 Tests are written against the public contracts documented in
-``transfer_channel/abstract.py`` and ``transfer_channel/api.py`` (the
+``transfer_channel/abstract.py`` and ``common/transfer_channel/api.py`` (the
 ``TransferChannelContext`` / ``TransferChannelServer`` / ``TransferChannelClient``
 interfaces). They use only public methods and do not access private fields.
 
@@ -31,6 +31,7 @@ import torch
 nixl = pytest.importorskip("nixl")
 
 # First Party
+from lmcache import torch_dev, torch_device_type  # noqa: E402
 from lmcache.v1.distributed.internal_api import L1MemoryDesc  # noqa: E402
 from lmcache.v1.distributed.transfer_channel.impl.nixl_impl import (  # noqa: E402
     NixlTransferChannelContext,
@@ -88,12 +89,12 @@ def fresh_contexts():
 
 
 def _wait_finished(client, task_id, timeout_s=5.0):
-    """Poll query_read_status until the task reports finished (or timeout)."""
+    """Poll query_status until the task reports finished (or timeout)."""
     deadline = time.monotonic() + timeout_s
-    result = client.query_read_status(task_id)
+    result = client.query_status(task_id)
     while not result.is_finished() and time.monotonic() < deadline:
         time.sleep(0.01)
-        result = client.query_read_status(task_id)
+        result = client.query_status(task_id)
     return result
 
 
@@ -117,7 +118,7 @@ def test_get_address_out_of_region_raises_value_error(shared_contexts):
 
 
 # =========================================================
-# End-to-end read (submit_read / query_read_status)
+# End-to-end read (submit_read / query_status)
 # =========================================================
 def test_read_copies_remote_data_into_local_buffer(shared_contexts):
     ctx_a, buf_a, ctx_b, buf_b = shared_contexts
@@ -160,7 +161,99 @@ def test_query_unknown_task_id_raises_key_error(shared_contexts):
     ctx_a, _, ctx_b, _ = shared_contexts
     client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
     with pytest.raises(KeyError):
-        client.query_read_status(99999)
+        client.query_status(99999)
+
+
+# =========================================================
+# End-to-end write (submit_write / query_status)
+# =========================================================
+def test_write_copies_local_data_into_remote_buffer(fresh_contexts):
+    ctx_a, buf_a, ctx_b, buf_b = fresh_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    buf_a[:512] = 0xAB
+
+    # Write local [0, 512) into remote [0, 512).
+    local = ctx_a.get_transfer_channel_address([(0, 512)])
+    remote = ctx_b.get_transfer_channel_address([(0, 512)])
+    task_id = client.submit_write(local, remote)
+
+    result = _wait_finished(client, task_id)
+    assert result.is_finished() is True
+    assert result.succeeded_mask == [True] * len(remote)
+    assert torch.all(buf_b[:512] == 0xAB)
+    # Bytes outside the written region keep the peer's pattern.
+    assert torch.equal(buf_b[512:768], torch.arange(0, 256, dtype=torch.uint8))
+
+
+def test_write_into_offset_region(fresh_contexts):
+    ctx_a, buf_a, ctx_b, buf_b = fresh_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    buf_a[0:256] = 0x5C
+
+    # Write local [0, 256) into remote [1024, 1280).
+    local = ctx_a.get_transfer_channel_address([(0, 256)])
+    remote = ctx_b.get_transfer_channel_address([(1024, 256)])
+    task_id = client.submit_write(local, remote)
+
+    result = _wait_finished(client, task_id)
+    assert result.is_finished() is True
+    assert torch.all(buf_b[1024:1280] == 0x5C)
+    assert torch.equal(buf_b[1280:1536], torch.arange(0, 256, dtype=torch.uint8))
+
+
+def test_write_then_read_back_round_trips(fresh_contexts):
+    """Bytes written into the peer can be read back through the same client."""
+    ctx_a, buf_a, ctx_b, _ = fresh_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    buf_a[0:256] = torch.arange(255, -1, -1, dtype=torch.uint8)
+
+    local_src = ctx_a.get_transfer_channel_address([(0, 256)])
+    remote = ctx_b.get_transfer_channel_address([(2048, 256)])
+    write_id = client.submit_write(local_src, remote)
+    assert _wait_finished(client, write_id).succeeded_mask == [True]
+
+    local_dst = ctx_a.get_transfer_channel_address([(2048, 256)])
+    read_id = client.submit_read(local_dst, remote)
+    assert _wait_finished(client, read_id).succeeded_mask == [True]
+    # Read and write task ids come from one counter.
+    assert read_id != write_id
+    assert torch.equal(buf_a[2048:2304], buf_a[0:256])
+
+
+def test_write_multiple_objects_reports_one_flag_each(fresh_contexts):
+    ctx_a, buf_a, ctx_b, buf_b = fresh_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    buf_a[0:256] = 1
+    buf_a[256:512] = 2
+
+    local = ctx_a.get_transfer_channel_address([(0, 256), (256, 256)])
+    remote = ctx_b.get_transfer_channel_address([(512, 256), (0, 256)])
+    task_id = client.submit_write(local, remote)
+
+    result = _wait_finished(client, task_id)
+    assert result.succeeded_mask == [True, True]
+    assert torch.all(buf_b[512:768] == 1)
+    assert torch.all(buf_b[0:256] == 2)
+
+
+def test_submit_write_mismatched_lengths_raises_value_error(shared_contexts):
+    ctx_a, _, ctx_b, _ = shared_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    local = ctx_a.get_transfer_channel_address([(0, 256)])
+    remote = ctx_b.get_transfer_channel_address([(0, 256), (256, 256)])
+    with pytest.raises(ValueError):
+        client.submit_write(local, remote)
+
+
+def test_finished_write_cannot_be_queried_again(fresh_contexts):
+    ctx_a, _, ctx_b, _ = fresh_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    local = ctx_a.get_transfer_channel_address([(0, 256)])
+    remote = ctx_b.get_transfer_channel_address([(0, 256)])
+    task_id = client.submit_write(local, remote)
+    assert _wait_finished(client, task_id).is_finished() is True
+    with pytest.raises(KeyError):
+        client.query_status(task_id)
 
 
 # =========================================================
@@ -234,3 +327,83 @@ def test_connecting_registers_clients_on_both_sides(fresh_contexts):
 def test_server_is_available_from_context(shared_contexts):
     ctx_a, _, _, _ = shared_contexts
     assert ctx_a.get_transfer_channel_server() is not None
+
+
+# =========================================================
+# Extra memory regions
+# =========================================================
+_REGION_KINDS = [
+    pytest.param(None, "cpu", id="host"),
+    pytest.param(
+        0,
+        "cuda",
+        id="device",
+        marks=pytest.mark.skipif(
+            torch_device_type != "cuda", reason="needs a CUDA device"
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize("device_id, device", _REGION_KINDS)
+def test_read_into_registered_region(fresh_contexts, device_id, device):
+    ctx_a, buf_a, ctx_b, buf_b = fresh_contexts
+    target = torch.zeros(_BUF_SIZE, dtype=torch.uint8, device=device)
+    region = ctx_a.register_memory_region(target.data_ptr(), target.numel(), device_id)
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+
+    local = ctx_a.get_transfer_channel_address([(512, 1024)], region=region)
+    remote = ctx_b.get_transfer_channel_address([(256, 1024)])
+    task_id = client.submit_read(local, remote, local_region=region)
+
+    assert _wait_finished(client, task_id).succeeded_mask == [True]
+    result = target.cpu()
+    assert torch.equal(result[512:1536], buf_b[256:1280])
+    assert not result[:512].any() and not result[1536:].any()
+    assert not buf_a.any()
+
+    ctx_a.deregister_memory_region(region)
+    with pytest.raises(KeyError):
+        ctx_a.get_transfer_channel_address([(0, 256)], region=region)
+
+
+@pytest.mark.skipif(
+    torch_device_type != "cuda" or torch_dev.device_count() < 2,
+    reason="needs two CUDA devices",
+)
+def test_concurrent_reads_into_one_region_per_device(fresh_contexts):
+    ctx_a, _, ctx_b, buf_b = fresh_contexts
+    targets = [
+        torch.zeros(_BUF_SIZE, dtype=torch.uint8, device=f"cuda:{device_id}")
+        for device_id in range(torch_dev.device_count())
+    ]
+    regions = [
+        ctx_a.register_memory_region(t.data_ptr(), t.numel(), device_id)
+        for device_id, t in enumerate(targets)
+    ]
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+
+    # Each device reads a different slice, so a read landing in the wrong
+    # region shows up as wrong bytes.
+    offsets = [_ALIGN * i for i in range(len(regions))]
+    task_ids = [
+        client.submit_read(
+            ctx_a.get_transfer_channel_address([(offset, 512)], region=region),
+            ctx_b.get_transfer_channel_address([(offset, 512)]),
+            local_region=region,
+        )
+        for offset, region in zip(offsets, regions, strict=True)
+    ]
+
+    for task_id in task_ids:
+        assert _wait_finished(client, task_id).succeeded_mask == [True]
+    for offset, target in zip(offsets, targets, strict=True):
+        result = target.cpu()
+        assert torch.equal(result[offset : offset + 512], buf_b[offset : offset + 512])
+        assert not result[:offset].any() and not result[offset + 512 :].any()
+
+
+def test_region_size_must_be_multiple_of_alignment(shared_contexts):
+    ctx_a, buf_a, _, _ = shared_contexts
+    with pytest.raises(ValueError):
+        ctx_a.register_memory_region(buf_a.data_ptr(), _ALIGN + 1)

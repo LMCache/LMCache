@@ -9,9 +9,10 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
-    AttnWindowDesc,
     GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
@@ -21,7 +22,6 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 LAYOUT = MemoryLayoutDesc(shapes=[torch.Size([2, 3])], dtypes=[torch.float16])
 
@@ -104,7 +104,7 @@ class TestPrefetchTaskSpecValidation:
         with pytest.raises(ValueError):
             PrefetchTaskSpec(key_groups=[_row(1)], fetching_policy="sparse")  # type: ignore[arg-type]
 
-    @pytest.mark.parametrize("policy", ["prefix", "full"])
+    @pytest.mark.parametrize("policy", ["prefix", "full", "whole_chunk"])
     def test_requires_equal_group_sizes(self, policy):
         rows = [_row(2, gid=0), _row(3, gid=1)]
         with pytest.raises(ValueError):
@@ -123,7 +123,7 @@ class TestPrefetchTaskSpecShape:
 
     def test_groups_may_appear_in_any_order(self):
         rows = [_row(3, gid=1), _row(3, gid=0), _row(3, gid=1, kv_rank=1)]
-        for policy in ("prefix", "full"):
+        for policy in ("prefix", "full", "whole_chunk"):
             assert (
                 PrefetchTaskSpec(key_groups=rows, fetching_policy=policy).group_size
                 == 3

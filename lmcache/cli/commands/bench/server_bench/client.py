@@ -49,7 +49,7 @@ from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
     create_transfer_context,
 )
-from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import (
     DTYPE_MAP,
     format_kvcache_shape_spec,

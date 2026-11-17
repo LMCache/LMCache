@@ -71,7 +71,7 @@ $PY setup.py bdist_wheel --dist-dir=dist_rocm
 
 # Repair: bundle generic userspace libs, but exclude torch and every
 # ROCm/driver-coupled runtime lib so they bind to the host vLLM image at
-# runtime (same policy as the cu129 wheel excluding libcudart). Globs match
+# runtime (same policy as the CUDA wheel excluding libcudart). Globs match
 # versioned SONAMEs (e.g. libamdhip64.so.7) -- an unversioned "libamdhip64.so"
 # exclude silently misses them and the HIP runtime gets vendored into the
 # wheel, which then couples to the build host's KFD driver.

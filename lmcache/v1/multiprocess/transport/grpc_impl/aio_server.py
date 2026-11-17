@@ -14,12 +14,10 @@ import grpc
 # First Party
 from lmcache.logging import init_logger
 from lmcache.security.api_key import APIKeyVerifier
-from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.auth import (
     GrpcAioAuthenticationInterceptor,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import ServiceBinding
 from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
     GrpcMultiprocessServerBase,
 )
@@ -28,6 +26,8 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     GrpcRequestHandler,
     client_affinity_key,
 )
+from lmcache.v1.transport.futures import MessagingStream
+from lmcache.v1.transport.grpc.descriptors import ServiceBinding
 
 logger = init_logger(__name__)
 

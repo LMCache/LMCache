@@ -14,9 +14,9 @@ import pytest
 
 # First Party
 from lmcache.integration.vllm.mp_lookup_state import LookupState
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.transport.futures import MessagingFuture
 
 TOKENS_PER_CHUNK = 64
 
