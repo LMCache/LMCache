@@ -103,20 +103,34 @@ def _supports_async_primitives() -> bool:
 
 
 def _build_engine_driven_context(
+    device_type: str,
     instance_id: int,
     req_client: RequestClient,
 ) -> "TransferContext":
     """Build the engine-driven context, async when device-capable else sync.
 
     Routes the ``ENGINE_DRIVEN`` and AUTO branches through a single capability
-    check. ``AsyncEngineDrivenTransferContext`` is imported lazily to avoid an
-    import cycle and to keep the synchronous path free of stream/event
-    dependencies.
+    check: the spec for ``device_type`` (the KV cache tensors' device) must
+    allow the async store (:meth:`DeviceSpec.supports_async_engine_driven_store`)
+    and the runtime must expose the async primitives.
+    ``AsyncEngineDrivenTransferContext`` is imported lazily to avoid an import
+    cycle and to keep the synchronous path free of stream/event dependencies.
 
     Returns:
-        ``AsyncEngineDrivenTransferContext`` when async primitives are
-        available, otherwise ``EngineDrivenTransferContext``.
+        ``AsyncEngineDrivenTransferContext`` when the device allows the async
+        store and its primitives are available, otherwise
+        ``EngineDrivenTransferContext``.
     """
+    device_spec = get_device_spec(device_type)
+    if device_spec is not None and not (
+        device_spec.supports_async_engine_driven_store()
+    ):
+        logger.info(
+            "Using EngineDrivenTransferContext (sync) for store path: "
+            "device type %r does not support the async store",
+            device_type,
+        )
+        return EngineDrivenTransferContext(instance_id, req_client)
     if _supports_async_primitives():
         # First Party
         from lmcache.v1.client.async_engine_driven import (
@@ -1729,4 +1743,4 @@ def create_transfer_context(
         return _build_lmcache_driven_context(
             device_type, instance_id, req_client, fd_channel_path
         )
-    return _build_engine_driven_context(instance_id, req_client)
+    return _build_engine_driven_context(device_type, instance_id, req_client)

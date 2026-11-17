@@ -58,7 +58,8 @@ State machine overview (worker-side):
            lmcache-driven;               engine-driven;
            CUDA, NPU)                    sync fallback)
                  |                       AsyncEngineDrivenTransferContext
-                 |                       (engine-driven, async primitives available)
+                 |                       (engine-driven, device allows async,
+                 |                        async primitives available)
                  |                               |
                  v                               v
               register()                      register()
@@ -150,10 +151,14 @@ derives it from `is_lmcache_driven_available()`, so CUDA and NPU get
 lmcache-driven while opt-in-only stacks and every other device stay
 engine-driven):
 - Resolved lmcache-driven → `_build_lmcache_driven_context()`
-- Resolved engine-driven → `_build_engine_driven_context()`, which probes async primitives:
-  - async primitives available (stream, event with record/synchronize/wait, pin_memory) →
-    `AsyncEngineDrivenTransferContext`
-  - otherwise → `EngineDrivenTransferContext` (synchronous fallback)
+- Resolved engine-driven → `_build_engine_driven_context()`:
+  - the device spec allows the async store
+    (`DeviceSpec.supports_async_engine_driven_store()`, `True` by default) and
+    async primitives are available (stream, event with record/synchronize/wait,
+    pin_memory) → `AsyncEngineDrivenTransferContext`
+  - otherwise → `EngineDrivenTransferContext` (synchronous fallback). A device
+    whose primitives exist but whose transfer ordering relies on device-wide
+    synchronization (RBLN) opts out through the spec hook.
 
 It also validates that all KV cache tensors share one device type and rejects
 mixed-device configurations by raising an error.

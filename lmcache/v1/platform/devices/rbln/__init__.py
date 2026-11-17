@@ -7,14 +7,18 @@ to the CPU stub.  ``torch.rbln`` is contributed by the ``torch_rbln``
 package through a torch backend entry point, so it is visible on a bare
 ``import torch`` -- no explicit ``import torch_rbln`` is required here.
 
-Scope: **engine-driven** multiprocess (MP) transfer only.  ``torch.rbln``
-exposes device discovery and ``synchronize()`` but no ``Stream`` / ``Event``
-types, so the LMCache-driven path (which needs cross-process event IPC and
-an IPC handle wrapper) cannot be supported.  The spec therefore reports
-:meth:`RblnDeviceSpec.is_lmcache_driven_available` as ``False`` and leaves
-``ipc_wrapper_cls`` / ``event_ipc_backend`` at their ``None`` defaults, so
-requesting ``mp_transfer_mode=lmcache_driven`` fails fast with a clear
-error rather than crashing deeper in the transfer path.
+Scope: **engine-driven** multiprocess (MP) transfer only, with the
+synchronous store.  ``torch.rbln`` events cannot be shared across processes
+(torch-rbln's ``Event.ipc_handle`` raises; older releases expose no
+``Event`` type at all), so the LMCache-driven path (which needs
+cross-process event IPC and an IPC handle wrapper) cannot be supported.
+The spec therefore reports :meth:`RblnDeviceSpec.is_lmcache_driven_available`
+as ``False`` and leaves ``ipc_wrapper_cls`` / ``event_ipc_backend`` at their
+``None`` defaults, so requesting ``mp_transfer_mode=lmcache_driven`` fails
+fast with a clear error rather than crashing deeper in the transfer path.
+It also reports :meth:`RblnDeviceSpec.supports_async_engine_driven_store`
+as ``False``: RBLN block transfer is ordered by device-wide
+``synchronize()``, not by the stream/event ordering the async store relies on.
 
 See ``docs/design/v1/platform/devices/rbln/README.md`` for the full contract.
 """
@@ -81,11 +85,27 @@ class RblnDeviceSpec(DeviceSpec):
     def is_lmcache_driven_available(self) -> bool:
         """Report that RBLN cannot ship KV tensors as IPC handles.
 
-        ``torch.rbln`` exposes no ``Event`` type, so the ordered
-        cross-process publication the LMCache-driven path depends on cannot
-        be expressed.  Returning ``False`` keeps
+        ``torch.rbln`` events cannot be shared across processes, so the
+        ordered cross-process publication the LMCache-driven path depends on
+        cannot be expressed.  Returning ``False`` keeps
         ``mp_transfer_mode=lmcache_driven`` failing at its documented
         validation point instead of at an attribute lookup later on.
+
+        Returns:
+            bool: Always ``False``.
+        """
+        return False
+
+    def supports_async_engine_driven_store(self) -> bool:
+        """Keep RBLN on the synchronous engine-driven store.
+
+        torch-rbln exposes ``Stream`` / ``Event``, so the runtime probe alone
+        would select the async store, which orders its gather by making a
+        side copy stream wait on the forward event.  RBLN block transfer
+        (:class:`~lmcache.v1.platform.devices.rbln.device_ops.RblnDeviceOps`)
+        is instead ordered by the device-wide ``synchronize()`` the
+        synchronous store issues around each gather, and has not been
+        validated against stream/event ordering.
 
         Returns:
             bool: Always ``False``.

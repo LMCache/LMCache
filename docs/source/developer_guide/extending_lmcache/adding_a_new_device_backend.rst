@@ -209,6 +209,16 @@ a class instance or factory. For every ownership model, the class must have a
 no-argument constructor; LMCache instantiates it once per process and caches
 it.
 
+.. note::
+
+   In engine-driven mode the store runs asynchronously -- the gather runs on
+   a side copy stream ordered by events -- whenever ``torch.foo`` exposes a
+   ``Stream``, an ``Event`` with ``record`` / ``synchronize`` / ``wait``, and
+   pinned host memory. If your device exposes these but orders its transfers
+   only through ``torch.foo.synchronize()``, override
+   :meth:`~lmcache.v1.platform.base.device_spec.DeviceSpec.supports_async_engine_driven_store`
+   to return ``False`` to keep the synchronous store.
+
 Step 3: Implement ``FooDeviceOps``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

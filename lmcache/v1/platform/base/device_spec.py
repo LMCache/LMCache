@@ -175,6 +175,25 @@ class DeviceSpec:
             return MPTransferMode.LMCACHE_DRIVEN
         return MPTransferMode.ENGINE_DRIVEN
 
+    def supports_async_engine_driven_store(self) -> bool:
+        """Return ``True`` when the engine-driven store may run asynchronously.
+
+        The async engine-driven store gathers KV on a side copy stream that
+        waits on the forward pass's event, then waits on a recorded event
+        before committing. The synchronous store instead synchronizes the
+        whole device around its gather. The worker factory picks the async
+        store only when this returns ``True`` *and* the runtime exposes a
+        stream, an event with ``record`` / ``synchronize`` / ``wait``, and
+        pinned host memory. A device whose primitives exist but whose
+        transfer ordering is built on device-wide synchronization overrides
+        this to ``False`` to keep the synchronous store.
+
+        Returns:
+            bool: ``True`` by default, leaving the choice to the runtime
+            probe.
+        """
+        return True
+
     def current_stream(self, device: object) -> object:
         """Return the current stream for ``device`` on the active platform."""
         return self._get_torch_module().current_stream(device)

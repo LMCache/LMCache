@@ -8,7 +8,7 @@ These tests cover the device-backend contract documented in
 - Availability probing, including the case where ``torch.rbln.is_available()``
   raises because every NPU is already claimed.
 - The engine-driven-only capability surface (no IPC handle transfer, no event
-  IPC backend, no cache context).
+  IPC backend, no cache context, synchronous store).
 
 ``torch`` is replaced with a stub in ``sys.modules`` rather than importing
 ``torch_rbln``, so the suite runs on any platform.
@@ -16,13 +16,15 @@ These tests cover the device-backend contract documented in
 
 # Standard
 from types import SimpleNamespace
-from typing import Any
-from unittest.mock import patch
+from typing import Any, cast
+from unittest.mock import MagicMock, patch
 
 # Third Party
 import pytest
+import torch
 
 # First Party
+from lmcache.v1.client import worker_transfer
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform._device_detect import _detect_device, get_device_spec
 from lmcache.v1.platform.base.device_spec import DeviceSpec
@@ -136,8 +138,9 @@ def test_detect_device_selects_rbln_when_forced(
 def test_handle_transfer_is_unavailable() -> None:
     """RBLN cannot serve the LMCache-driven path.
 
-    ``torch.rbln`` exposes no ``Event`` type, so ``mp_transfer_mode=
-    lmcache_driven`` must fail at its documented validation point.
+    ``torch.rbln`` events cannot be shared across processes, so
+    ``mp_transfer_mode=lmcache_driven`` must fail at its documented
+    validation point.
     """
     assert DeviceSpec().is_lmcache_driven_available() is False
     assert RblnDeviceSpec().is_lmcache_driven_available() is False
@@ -148,6 +151,29 @@ def test_no_ipc_wrapper_and_no_event_backend() -> None:
     spec = RblnDeviceSpec()
     assert spec.ipc_wrapper_cls is None
     assert spec.event_ipc_backend is None
+
+
+def test_engine_driven_store_stays_synchronous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RBLN KV gets the synchronous store even when async primitives exist.
+
+    torch-rbln exposes ``Stream`` / ``Event``, so the runtime probe passes on
+    an RBLN host. The probe is forced to pass here so the spec's opt-out is
+    what keeps the store synchronous on any test host.
+    """
+    monkeypatch.delenv(worker_transfer.ENV_MP_TRANSFER_MODE, raising=False)
+    monkeypatch.setattr(worker_transfer, "_supports_async_primitives", lambda: True)
+    rbln_kv = SimpleNamespace(device=SimpleNamespace(type="rbln"))
+    kv_caches = cast(dict[str, torch.Tensor], {"layer_0": rbln_kv})
+
+    context = worker_transfer.create_transfer_context(
+        kv_caches, instance_id=1, req_client=MagicMock()
+    )
+    try:
+        assert type(context) is worker_transfer.EngineDrivenTransferContext
+    finally:
+        context.close()
 
 
 def test_create_cache_context_is_not_implemented() -> None:

@@ -351,12 +351,12 @@ def test_build_engine_driven_context_dispatches_on_capability(
     monkeypatch.setattr(
         async_engine_driven, "torch_dev", _FakeTorchDev(threading.Event())
     )
-    capable = worker_transfer._build_engine_driven_context(1, MagicMock())
+    capable = worker_transfer._build_engine_driven_context("cuda", 1, MagicMock())
     assert isinstance(capable, AsyncEngineDrivenTransferContext)
     capable.close()
 
     monkeypatch.setattr(worker_transfer, "_supports_async_primitives", lambda: False)
-    fallback = worker_transfer._build_engine_driven_context(1, MagicMock())
+    fallback = worker_transfer._build_engine_driven_context("cuda", 1, MagicMock())
     assert isinstance(fallback, EngineDrivenTransferContext)
     assert not isinstance(fallback, AsyncEngineDrivenTransferContext)
     fallback.close()

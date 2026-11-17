@@ -8,7 +8,7 @@ Rebellions NPUs. The engine is
 
 | path | supported | how it gets there |
 |---|---|---|
-| multiprocess, engine-driven | yes | `gather_paged_kv_to_cpu` / `scatter_cpu_to_paged_kv`, dispatching to `RblnDeviceOps.multi_layer_block_kv_transfer` |
+| multiprocess, engine-driven | yes, synchronous store | `gather_paged_kv_to_cpu` / `scatter_cpu_to_paged_kv`, dispatching to `RblnDeviceOps.multi_layer_block_kv_transfer` |
 | multiprocess, LMCache-driven | **no** | refused up front |
 | in-process | not yet | `CreateGPUConnector` still raises for `rbln`; a follow-up adds the connector |
 
@@ -19,10 +19,12 @@ path builds no GPU connector at all, resolving layouts through
 `torch.rbln` comes from
 [torch-rbln](https://github.com/RBLN-SW/torch-rbln) through a torch backend
 entry point, so it is visible on a bare `import torch` -- LMCache never imports
-it explicitly. It provides device discovery, `set_device()` and `synchronize()`,
-but no `Stream` / `Event` types. The LMCache-driven path publishes KV buffers
-across processes by exporting a device IPC handle and ordering the handoff with
-a cross-process event, which cannot be expressed without an event type.
+it explicitly. It provides device discovery, `set_device()`, `synchronize()`
+and, in current releases, `Stream` / `Event` types, but its events cannot be
+shared across processes (`Event.ipc_handle` raises; older releases expose no
+`Event` type at all). The LMCache-driven path publishes KV buffers across
+processes by exporting a device IPC handle and ordering the handoff with a
+cross-process event, which cannot be expressed without a shareable event.
 `RblnDeviceSpec` therefore reports `is_lmcache_driven_available()` as `False`
 and leaves `ipc_wrapper_cls` / `event_ipc_backend` at their `None` defaults, so
 `mp_transfer_mode=lmcache_driven` fails at its documented validation point
@@ -30,6 +32,16 @@ instead of crashing later on an attribute lookup. `mp_transfer_mode=auto`
 resolves to the device spec's declared default, which `RblnDeviceSpec`
 derives from that `False` capability as engine-driven, so the default
 needs no special casing.
+
+The engine-driven store stays synchronous. Once `torch.rbln` exposes a stream
+and an event, the runtime probe alone would select
+`AsyncEngineDrivenTransferContext`, which orders its gather by making a side
+copy stream wait on the forward event. RBLN block transfer is instead ordered
+by the device-wide `synchronize()` that the synchronous
+`EngineDrivenTransferContext` issues before and after each gather, and has not
+been validated against stream/event ordering. `RblnDeviceSpec` therefore
+returns `False` from `supports_async_engine_driven_store()`, and the worker
+factory builds the synchronous context regardless of the probe.
 
 ## The 6-D KV cache
 
