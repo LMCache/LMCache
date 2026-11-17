@@ -195,6 +195,7 @@ def _key(request_id: str = "request") -> Any:
         request_id=request_id,
         cache_salt="",
         worker_id=0,
+        request_configs=None,
         has_unfull_chunk=lambda chunk_size: False,
     )
 
