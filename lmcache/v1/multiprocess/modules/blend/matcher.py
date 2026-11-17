@@ -242,7 +242,7 @@ class BlendTokenRangeMatcher:
                         cid,
                     )
                     continue
-                # A newer chunk sharing the slot may hold it now; leave it.
+                # Another chunk sharing the slot may hold it now; leave it.
                 if int(self._table_id[slot]) == cid:
                     self._table_id[slot] = -1
                 self._compact_id_to_slot[cid] = -1
