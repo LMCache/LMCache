@@ -123,6 +123,7 @@ jobs:
       (github.event.pull_request.draft ||
         (needs.pre-commit.result == 'success' && needs.scope.result == 'success'))
     permissions:
+      actions: write
       contents: read
       pull-requests: read
     uses: ./.github/workflows/test.yml
@@ -141,6 +142,7 @@ jobs:
       needs.pre-commit.result == 'success' &&
       needs.scope.result == 'success'
     permissions:
+      actions: write
       contents: read
       pull-requests: read
     uses: ./.github/workflows/cpu_device.yml
