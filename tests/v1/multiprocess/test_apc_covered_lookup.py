@@ -167,6 +167,7 @@ def test_covered_boundary_frozen_only_when_a_lookup_is_sent():
     adapter.check_lookup_result.return_value = None
 
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._kv_format = ""
     connector.request_trackers = {}
     connector.scheduler_adapter = adapter
     connector._reserve_last_token_for_lookup = False
@@ -205,6 +206,7 @@ def _shrink_connector(covered_chunks: int = 4):
     adapter.maybe_submit_lookup_request.return_value = False
     adapter.check_lookup_result.return_value = 6 * CHUNK_SIZE
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._kv_format = ""
     connector.request_trackers = {}
     connector.scheduler_adapter = adapter
     connector._reserve_last_token_for_lookup = False

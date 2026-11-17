@@ -19,6 +19,7 @@ message RegisterQCacheRequest {
   bytes encoded_layout_hints = 6;
   repeated EngineGroupInfo engine_group_infos = 7;
   optional int64 chunk_size = 8;
+  string cache_format = 9;
 }
 
 message RegisterQCacheResponse {}

@@ -229,7 +229,7 @@ def test_gpu_reap_two_tier_windows() -> None:
     assert module.tracked_instance_count() == 2
     cast(
         MagicMock, module._ctx.layout_desc_registry.unregister
-    ).assert_called_once_with("m", 1)
+    ).assert_called_once_with("m", 1, "")
 
 
 def test_gpu_unregister_cleans_up() -> None:
@@ -241,7 +241,7 @@ def test_gpu_unregister_cleans_up() -> None:
     assert module.tracked_instance_count() == 0
     cast(
         MagicMock, module._ctx.layout_desc_registry.unregister
-    ).assert_called_once_with("m", 1)
+    ).assert_called_once_with("m", 1, "")
 
     module.unregister_kv_cache(1)  # already gone -> no exception
 
@@ -832,10 +832,10 @@ def test_cpu_events_withdraw_all_chunks_during_registration_change(
     read_geometry = registry.find_group_shard_geometry
 
     def change_registration_after_read(
-        model_name: str, world_size: int
+        model_name: str, world_size: int, cache_format: str = ""
     ) -> tuple[tuple[int, ...], ShardReplicationDesc] | None:
-        geometry = read_geometry(model_name, world_size)
-        registry.unregister(model_name, world_size)
+        geometry = read_geometry(model_name, world_size, cache_format)
+        registry.unregister(model_name, world_size, cache_format)
         if reregister:
             registry.register(
                 model_name,
@@ -844,6 +844,7 @@ def test_cpu_events_withdraw_all_chunks_during_registration_change(
                 chunk_size=256,
                 hash_algorithm="blake3",
                 shard_replication_desc=ShardReplicationDesc((1,), (1,)),
+                cache_format=cache_format,
             )
         return geometry
 

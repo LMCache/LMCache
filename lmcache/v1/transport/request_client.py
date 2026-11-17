@@ -45,6 +45,7 @@ class RequestClient(Protocol):
         engine_group_infos: list[EngineGroupInfo],
         event_profile: KVEventProfile | None,
         chunk_size: int | None = None,
+        cache_format: str = "",
     ) -> MessagingFuture[KVEventProfile | None]:
         """Register caches and return their recorded native identity profile.
 
@@ -75,6 +76,7 @@ class RequestClient(Protocol):
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
         chunk_size: int | None = None,
+        cache_format: str = "",
     ) -> MessagingFuture[None]: ...
 
     @rpc_method

@@ -25,6 +25,7 @@ from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_codec import TOKEN_STRIDE, unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.multiprocess.engine_context import get_request_cache_format
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _classify_cb_read_groups,
     _per_rank_read_groups,
@@ -108,7 +109,7 @@ class StoreMixin:
                         attn_desc.num_object_groups, attn_desc.group_kinds
                     ).blend_gids,
                     self._ctx.layout_desc_registry.find_shard_replication_desc(
-                        key.model_name, key.world_size
+                        key.model_name, key.world_size, get_request_cache_format(key)
                     ),
                 )
         except Exception:

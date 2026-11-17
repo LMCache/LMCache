@@ -34,6 +34,7 @@ message RegisterKvCacheEngineDrivenContextRequest {
   int64 chunk_size = 11;
   int64 num_physical_slots = 9;
   repeated GroupLayout group_layouts = 10;
+  string cache_format = 12;
 }
 
 message RegisterKvCacheEngineDrivenContextResponse {

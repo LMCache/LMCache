@@ -31,6 +31,7 @@ Different L1 managers may supply different required objects. Distinct models,
 world sizes, salts, identity tags, and object groups cannot satisfy each other's
 requirements. Completeness probes preserve the incoming key's identity, so a
 pinned revision or other `lmcache.tag.*` value does not hide a committed chunk.
+The `kv_format` identity tag selects the registered geometry for that precision.
 Owner entries disappear when their last copy is evicted. Announcement state
 disappears when a chunk loses readiness. The existing token cache and event log
 remain bounded by their existing limits.

@@ -27,6 +27,7 @@ from lmcache.v1.multiprocess.engine_context import (
     MPCacheServerContext,
     check_chunk_hash_key,
     finish_lookup_read,
+    get_request_cache_format,
 )
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
@@ -89,11 +90,14 @@ def resolve_prefetched_obj_keys(
 
     ``key.worker_id=None`` resolves every KV rank for scheduler-owned cleanup.
     The per-group windows and shard replication come from the registration for
-    ``(key.model_name, key.world_size)``.
+    the key's model, world size and precision.
     """
+    cache_format = get_request_cache_format(key)
     registry = ctx.layout_desc_registry
-    chunk_size = registry.get_chunk_size(key.model_name, key.world_size)
-    token_hasher = registry.get_token_hasher(key.model_name, key.world_size)
+    chunk_size = registry.get_chunk_size(key.model_name, key.world_size, cache_format)
+    token_hasher = registry.get_token_hasher(
+        key.model_name, key.world_size, cache_format
+    )
     chunk_hashes = _key_chunk_hashes(token_hasher, key, start=key.start, end=key.end)
     if not chunk_hashes:
         return []
@@ -101,10 +105,10 @@ def resolve_prefetched_obj_keys(
     start_chunk = key.start // chunk_size
     end_chunk = start_chunk + len(chunk_hashes)
     group_windows = registry.find_attn_desc(
-        key.model_name, key.world_size
+        key.model_name, key.world_size, cache_format
     ).num_chunks_in_sw
     shard_replication_desc = registry.find_shard_replication_desc(
-        key.model_name, key.world_size
+        key.model_name, key.world_size, cache_format
     )
 
     obj_keys: list[ObjectKey] = []
@@ -259,6 +263,7 @@ class LookupModule(DiscoverableModule):
         """
         check_chunk_hash_key(self._ctx, key)
         model_name, world_size = key.model_name, key.world_size
+        cache_format = get_request_cache_format(key)
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_REQUEST_START,
@@ -272,7 +277,9 @@ class LookupModule(DiscoverableModule):
             )
         )
 
-        layout_desc = self._ctx.layout_desc_registry.find(model_name, world_size)
+        layout_desc = self._ctx.layout_desc_registry.find(
+            model_name, world_size, cache_format
+        )
         if layout_desc is None:
             logger.error(
                 "No GPU context found for model %s with world size %d during lookup!",
@@ -283,10 +290,10 @@ class LookupModule(DiscoverableModule):
             return
 
         chunk_size = self._ctx.layout_desc_registry.get_chunk_size(
-            model_name, world_size
+            model_name, world_size, cache_format
         )
         token_hasher = self._ctx.layout_desc_registry.get_token_hasher(
-            model_name, world_size
+            model_name, world_size, cache_format
         )
         chunk_hashes = _key_chunk_hashes(token_hasher, key, end=key.end)
         # A prompt shorter than one chunk has no full-chunk hash. A connector
@@ -336,11 +343,11 @@ class LookupModule(DiscoverableModule):
         # Submit one key row per (object group, kv rank), each with its own
         # attention window.
         attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
-            model_name, world_size
+            model_name, world_size, cache_format
         )
         shard_replication_desc = (
             self._ctx.layout_desc_registry.find_shard_replication_desc(
-                model_name, world_size
+                model_name, world_size, cache_format
             )
         )
         session = self._ctx.session_manager.get_or_create(key.request_id, token_hasher)
@@ -355,7 +362,7 @@ class LookupModule(DiscoverableModule):
         session.begin_lookup(key)
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
-            model_name, world_size
+            model_name, world_size, cache_format
         )
         if not group_layout_descs:
             logger.error(
@@ -610,11 +617,12 @@ class LookupModule(DiscoverableModule):
             return
 
         check_chunk_hash_key(self._ctx, key)
+        cache_format = get_request_cache_format(key)
         token_hasher = self._ctx.layout_desc_registry.get_token_hasher(
-            key.model_name, key.world_size
+            key.model_name, key.world_size, cache_format
         )
         chunk_size = self._ctx.layout_desc_registry.get_chunk_size(
-            key.model_name, key.world_size
+            key.model_name, key.world_size, cache_format
         )
         session = self._ctx.session_manager.get_or_create(key.request_id, token_hasher)
         if session.prefetch_hit_chunks < 0:
@@ -758,10 +766,13 @@ class LookupModule(DiscoverableModule):
         Returns:
             The object keys of all groups and kv ranks for ``chunk_hashes``.
         """
+        cache_format = get_request_cache_format(key)
         registry = self._ctx.layout_desc_registry
-        attn_desc = registry.find_attn_desc(key.model_name, key.world_size)
+        attn_desc = registry.find_attn_desc(
+            key.model_name, key.world_size, cache_format
+        )
         shard_replication_desc = registry.find_shard_replication_desc(
-            key.model_name, key.world_size
+            key.model_name, key.world_size, cache_format
         )
         per_group = ipc_key_to_object_keys(
             key,
@@ -981,8 +992,9 @@ class LookupModule(DiscoverableModule):
             read-once (temporary) tail below the hit survives; a candidate
             some object group misses is released by the prefetch itself.
         """
+        cache_format = get_request_cache_format(key)
         chunk_size = self._ctx.layout_desc_registry.get_chunk_size(
-            key.model_name, key.world_size
+            key.model_name, key.world_size, cache_format
         )
         hit_tokens = hit_chunks * chunk_size
         last_boundary = min(key.end, hit_tokens + chunk_size - 1)
@@ -1005,7 +1017,7 @@ class LookupModule(DiscoverableModule):
             return 0, 0, {}
         group_layout_descs = (
             self._ctx.layout_desc_registry.find_group_unfull_chunk_layout_descs(
-                key.model_name, key.world_size
+                key.model_name, key.world_size, cache_format
             )
         )
         # The model may have unregistered since the lookup was submitted.
@@ -1014,7 +1026,7 @@ class LookupModule(DiscoverableModule):
         object_group_ids = list(range(attn_desc.num_object_groups))
         shard_replication_desc = (
             self._ctx.layout_desc_registry.find_shard_replication_desc(
-                key.model_name, key.world_size
+                key.model_name, key.world_size, cache_format
             )
         )
         for num_checked, boundary in enumerate(candidate_boundaries, start=1):

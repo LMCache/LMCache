@@ -31,7 +31,10 @@ from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.multiprocess.engine_context import finish_lookup_read
+from lmcache.v1.multiprocess.engine_context import (
+    finish_lookup_read,
+    get_request_cache_format,
+)
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _BlendReadGroups,
     _cb_chunk_major_object_keys,
@@ -795,7 +798,7 @@ class RetrieveMixin:
             [r.hash for r in cb_match_result],
             read_groups.blend_gids,
             self._ctx.layout_desc_registry.find_shard_replication_desc(
-                key.model_name, key.world_size
+                key.model_name, key.world_size, get_request_cache_format(key)
             ),
         )
 

@@ -1059,10 +1059,48 @@ lookup) is sent literally; pinning a commit hash keeps the identity stable
 across restarts. Engines that do not pass ``--revision`` add no tag and keep
 their existing cache namespace.
 
-The KV layout registry is keyed by model name and world size, so engines at two
-revisions of one model ID share the registered layout. That is correct as long
-as the revisions keep the same cache layout, which is the case for weights-only
-revisions.
+The KV layout registry is keyed by model name, world size, and the precision
+format described below. Revision tags do not select a different layout, so
+revisions sharing a precision format must keep the same cache layout.
+
+KV precision isolation
+~~~~~~~~~~~~~~~~~~~~~~
+
+When BF16 and FP8 vLLM instances share an LMCache server or an L2 store such as
+Mooncake, enable precision isolation on every participating instance:
+
+.. code-block:: json
+
+    {
+      "kv_connector": "LMCacheMPConnector",
+      "kv_role": "kv_both",
+      "kv_connector_extra_config": {
+        "lmcache.mp.enable_kv_dtype_isolation": true
+      }
+    }
+
+This option defaults to ``false``. When enabled, the connector fingerprints the
+model dtype, attention cache dtype, skipped layers, Mamba cache dtype, and
+Mamba SSM cache dtype. It adds the resulting ``lmcache.tag.kv_format`` identity
+tag to every request and registers the worker layout under the same token.
+Lookup, transfer, cleanup, CacheBlend, and management prefetch use that format's
+layout. The model name and cache salt keep their existing meanings.
+
+Enable the option consistently on clients using the shared cache, and upgrade
+clients and servers together. Enabling it selects a separate namespace:
+existing untagged entries miss and are recomputed. Disabling it keeps the
+existing namespace and does not prevent mixed-precision collisions. Tagged
+requests never fall back to untagged objects, whose precision is unknown.
+
+``lmcache.tag.kv_format`` is reserved for the engine's precision identity. With
+isolation enabled, the connector overrides conflicting request-supplied values.
+For cache-management operations on tagged objects, pass the token as the
+``kv_format`` entry in ``tags``, alongside any revision, tenant, or LoRA tags.
+
+This fingerprints configured settings. ``auto`` and explicit ``bfloat16`` can
+produce separate namespaces even when they describe the same bytes. It does
+not establish compatibility across platforms with different resolutions of
+``fp8``, quantization scales, weight changes, or arbitrary physical KV layouts.
 
 Connector ``extra_config`` Keys
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

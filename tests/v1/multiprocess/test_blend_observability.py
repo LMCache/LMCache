@@ -176,6 +176,7 @@ class TestPrefixLegNoGpuContext:
     def _key(self):
         return SimpleNamespace(
             request_id="req-ctx",
+            request_configs=None,
             model_name="m",
             world_size=2,
             token_bytes=pack_token_ids([1, 2, 3]),

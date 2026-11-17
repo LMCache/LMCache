@@ -74,6 +74,7 @@ from lmcache.integration.vllm.kv_cache_groups import (
     tokens_per_group_block,
     vllm_mamba_cache_mode,
 )
+from lmcache.integration.vllm.kv_cache_identity import get_kv_cache_format
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPConnectorMetadata,
@@ -151,6 +152,7 @@ _DCP_LAYOUT_NAMESPACE = "##lmcache-dcp-layout-v1-"
 # Request-config key whose value becomes ``ObjectKeyIdentity.tags["revision"]``.
 # See ``get_request_tags`` in ``lmcache.v1.distributed.api``.
 _REVISION_TAG_KEY = "lmcache.tag.revision"
+_KV_FORMAT_TAG_KEY = "lmcache.tag.kv_format"
 _MAX_LCM_EXPANSION_FACTOR = 4
 _USE_VMM_API_KEY = "lmcache.mp.use_vmm_api"
 
@@ -682,6 +684,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self._revision_tag = _revision_cache_token(vllm_config) or ""
 
         assert vllm_config.kv_transfer_config is not None
+        enable_kv_dtype_isolation = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.enable_kv_dtype_isolation", False
+            )
+        )
+        if not isinstance(enable_kv_dtype_isolation, bool):
+            raise ValueError("lmcache.mp.enable_kv_dtype_isolation must be a boolean")
+        # The scheduler sends this identity with requests; workers use the
+        # same token when registering their layout, including after recovery.
+        self._kv_format = (
+            get_kv_cache_format(vllm_config) if enable_kv_dtype_isolation else ""
+        )
         self._can_store = vllm_config.kv_transfer_config.is_kv_producer
         self._save_decode_cache = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.save_decode_cache", False
@@ -884,6 +898,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 parallel_strategy=parallel_strategy,
                 extra_config=_worker_extra_config(vllm_config),
                 required_chunk_alignment=scheduler_block_size,
+                cache_format=self._kv_format,
             )
             # Requests whose blocks vLLM keeps until they are in finished_sending.
             self._delay_free_req_ids = set()
@@ -2202,6 +2217,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     self.scheduler_adapter.end_session(session_id)
             new_tracker = LMCacheMPRequestTracker(request)
             self._apply_revision_tag(new_tracker)
+            self._apply_kv_format_tag(new_tracker)
             self.request_trackers[request_id] = new_tracker
         return self.request_trackers[request_id]
 
@@ -2230,6 +2246,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 revision_tag,
             )
         configs[_REVISION_TAG_KEY] = revision_tag
+        tracker.request_configs = configs
+
+    def _apply_kv_format_tag(self, tracker: LMCacheMPRequestTracker) -> None:
+        """Bind each request to the engine's registered KV precision format."""
+        if not self._kv_format:
+            return
+        configs = dict(tracker.request_configs or {})
+        configured = configs.get(_KV_FORMAT_TAG_KEY)
+        if configured is not None and configured != self._kv_format:
+            logger.warning(
+                "Request %s sets %s=%r, overriding it with the engine KV format %r",
+                tracker.request_id,
+                _KV_FORMAT_TAG_KEY,
+                configured,
+                self._kv_format,
+            )
+        configs[_KV_FORMAT_TAG_KEY] = self._kv_format
         tracker.request_configs = configs
 
     def _cleanup_request_tracker(self, request_id: str) -> None:
