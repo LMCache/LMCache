@@ -685,12 +685,20 @@ class StoreController(StorageControllerInterface):
                         successful_keys, block_bytes, adapter.get_capacity_snapshot()
                     )
                     if proposal.victim_keys:
-                        adapter.delete_unlocked(list(proposal.victim_keys))
-                        proposal = self._policy.plan_capacity_admission(
-                            successful_keys,
-                            block_bytes,
-                            adapter.get_capacity_snapshot(),
-                        )
+                        # Confirm each leaf before deleting any of its ancestors.
+                        # A native batch may refuse only the child after a race.
+                        for victim in proposal.victim_keys:
+                            adapter.delete_unlocked([victim])
+                            snapshot = adapter.get_capacity_snapshot()
+                            if (
+                                victim in snapshot.resident_sizes
+                                or victim in snapshot.unavailable
+                            ):
+                                break
+                        else:
+                            proposal = self._policy.plan_capacity_admission(
+                                successful_keys, block_bytes, snapshot
+                            )
                     # Refused/failed/partial deletion is not free capacity.
                     admitted = (
                         set(proposal.admitted_keys)

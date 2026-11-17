@@ -25,22 +25,27 @@ from lmcache.v1.platform import create_event_notifier
 
 
 @pytest.mark.parametrize(
-    "failure",
+    "failure,resident_chunks",
     [
-        "none",
-        "delete_refused",
-        "delete_raises",
-        "snapshot_raises",
-        "submit_raises",
-        "store_fails",
+        ("none", (b"resident",)),
+        ("delete_refused", (b"resident",)),
+        ("delete_raises", (b"resident",)),
+        ("snapshot_raises", (b"resident",)),
+        ("submit_raises", (b"resident",)),
+        ("store_fails", (b"resident",)),
+        ("none", (b"suffix", b"root")),
+        ("delete_refused", (b"suffix", b"root")),
     ],
 )
 def test_store_loop_rechecks_deleted_capacity_and_releases_every_read(
-    monkeypatch, failure
+    monkeypatch, failure, resident_chunks
 ):
     incoming = ObjectKey(chunk_hash=b"incoming", model_name="m", kv_rank=0)
     rejected = ObjectKey(chunk_hash=b"rejected", model_name="m", kv_rank=0)
-    resident = ObjectKey(chunk_hash=b"resident", model_name="m", kv_rank=0)
+    residents = [
+        ObjectKey(chunk_hash=chunk, model_name="m", kv_rank=0)
+        for chunk in resident_chunks
+    ]
     released = []
     done = threading.Event()
     calls = []
@@ -67,15 +72,13 @@ def test_store_loop_rechecks_deleted_capacity_and_releases_every_read(
             return True
 
         def plan_capacity_admission(self, keys, block_bytes, snapshot):
-            return CapacityAdmission(
-                (incoming,), (resident,) if snapshot.resident_sizes else ()
-            )
+            return CapacityAdmission((incoming,), tuple(snapshot.resident_sizes))
 
     class Adapter:
         supports_value_capacity = True
 
         def __init__(self):
-            self.residents = {resident: 1}
+            self.residents = {resident: 1 for resident in residents}
             self.notifier = create_event_notifier()
 
         def get_store_event_fd(self):
@@ -85,10 +88,11 @@ def test_store_loop_rechecks_deleted_capacity_and_releases_every_read(
             calls.append("snapshot")
             if failure == "snapshot_raises":
                 raise RuntimeError("snapshot failed")
-            return SimpleNamespace(resident_sizes=dict(self.residents))
+            return SimpleNamespace(resident_sizes=dict(self.residents), unavailable=())
 
         def delete_unlocked(self, keys):
             calls.append("delete")
+            assert len(keys) == 1, "dependent victims cannot share a delete batch"
             if failure == "delete_raises":
                 raise RuntimeError("delete failed")
             if failure != "delete_refused":
@@ -132,9 +136,14 @@ def test_store_loop_rechecks_deleted_capacity_and_releases_every_read(
     if failure in {"delete_refused", "delete_raises", "snapshot_raises"}:
         assert submits == [], "failed deletion/snapshot must not count as free space"
         assert completions == [], "rejection must not publish a successful store"
+        if failure == "delete_refused":
+            assert calls == ["snapshot", "delete", "snapshot"]
+            assert set(adapter.residents) == set(residents)
     else:
         assert submits == [("submit", (incoming,))]
-        assert calls[:4] == ["snapshot", "delete", "snapshot", ("submit", (incoming,))]
+        assert calls == ["snapshot"] + [
+            operation for _ in residents for operation in ["delete", "snapshot"]
+        ] + [("submit", (incoming,))]
         if failure == "submit_raises":
             assert completions == []
         else:
