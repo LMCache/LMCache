@@ -17,14 +17,13 @@ otherwise.
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import cast
 import itertools
 import time
 
 # Third Party
 import pytest
 import torch
-import zmq
 
 # First Party
 from lmcache import torch_dev, torch_device_type
@@ -38,7 +37,6 @@ if not torch_dev.is_available():
 nixl = pytest.importorskip("nixl")
 
 # First Party
-from lmcache.v1.client.transport.factory import RequestClientFactory  # noqa: E402
 from lmcache.v1.distributed.api import (  # noqa: E402
     MemoryLayoutDesc,
     MemoryResidency,
@@ -62,6 +60,7 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (  # noqa: E402
     P2PL2Adapter,
     P2PL2AdapterConfig,
 )
+from lmcache.v1.distributed.p2p import P2PClient  # noqa: E402
 from lmcache.v1.distributed.storage_manager import (  # noqa: E402
     StorageManager,
     l1_owners_of,
@@ -85,16 +84,17 @@ from lmcache.v1.multiprocess.config import (  # noqa: E402
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext  # noqa: E402
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController  # noqa: E402
-from lmcache.v1.multiprocess.transport.base import RequestServer  # noqa: E402
-from lmcache.v1.multiprocess.transport.server_factory import (  # noqa: E402
-    create_request_server,
+from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (  # noqa: E402
+    GrpcMultiprocessServerBase,
+)
+from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (  # noqa: E402
+    build_grpc_request_server,
 )
 from tests.v1.distributed.utils import single_row_spec  # noqa: E402
 
 _PAGE = 4096
 _NUM_KEYS = 3
 _port_counter = itertools.count(18300)
-RequestTransport = Literal["zmq", "grpc"]
 
 
 def _next_url() -> str:
@@ -102,31 +102,16 @@ def _next_url() -> str:
 
 
 def _start_p2p_request_server(
-    transport: RequestTransport,
     controller: P2PController,
-) -> tuple[str, RequestServer]:
-    """Start a P2P request server for the selected transport.
-
-    Args:
-        transport: Request transport to exercise.
-        controller: P2P controller that handles peer requests.
-
-    Returns:
-        The client URL and the started request server.
-    """
-    target = _next_url()
-    host, port_str = target.rsplit(":", maxsplit=1)
-    mp_config = MPServerConfig(
-        transport=transport,
-        host=host,
-        port=int(port_str),
-        max_cpu_workers=4,
-        max_gpu_workers=4,
+) -> tuple[str, GrpcMultiprocessServerBase]:
+    """Start the independent peer control listener."""
+    url = f"grpc://{_next_url()}"
+    host, port = url.removeprefix("grpc://").rsplit(":", 1)
+    server = build_grpc_request_server(
+        [controller], MPServerConfig(host=host, port=int(port)), rpc_client=P2PClient
     )
-    request_server = create_request_server([controller], mp_config)
-    request_server.start()
-    scheme = "tcp" if transport == "zmq" else "grpc"
-    return f"{scheme}://{target}", request_server
+    server.start()
+    return url, server
 
 
 def _local_memory_obj(buffer: torch.Tensor, offset: int) -> MemoryObj:
@@ -227,22 +212,20 @@ class _Peer:
 
 @contextmanager
 def _peer_side(
-    request_transport: RequestTransport,
     *,
     l1_pages: int = 16384,
     write_ttl_seconds: int = 600,
 ) -> Iterator[_Peer]:
-    """Stand up a peer: storage manager, NIXL context over its L1, and a
-    request server hosting its P2P controller.
+    """Stand up a peer: storage manager, NIXL context over its L1, and the
+    control listener hosting its P2P controller.
 
     Args:
-        request_transport: Request transport the peer serves.
         l1_pages: Size of the peer's L1 in pages.
         write_ttl_seconds: Write TTL of the peer's L1.
     """
     peer_sm = _make_storage_manager(l1_pages * _PAGE, write_ttl_seconds)
     peer_tc_ctx = None
-    request_server: RequestServer | None = None
+    request_server: GrpcMultiprocessServerBase | None = None
     try:
         peer_l1 = peer_sm.get_l1_manager_by_tags(
             MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)
@@ -259,10 +242,7 @@ def _peer_side(
             CoordinatorConfig(),
             instance_id="peer",
         )
-        peer_mq_url, request_server = _start_p2p_request_server(
-            request_transport,
-            controller,
-        )
+        peer_mq_url, request_server = _start_p2p_request_server(controller)
         yield _Peer(peer_sm, peer_l1, peer_mq_url, peer_tc_url)
     finally:
         if request_server is not None:
@@ -300,7 +280,6 @@ class _Pair:
 
 @contextmanager
 def _p2p_pair(
-    request_transport: RequestTransport,
     *,
     write_enabled: bool = False,
     peer_l1_pages: int = 16384,
@@ -310,7 +289,6 @@ def _p2p_pair(
     """Stand up a peer and a local adapter over loopback NIXL.
 
     Args:
-        request_transport: Request transport between the adapter and the peer.
         write_enabled: Whether the adapter stores into the peer.
         peer_l1_pages: Size of the peer's L1 in pages.
         peer_write_ttl_seconds: Write TTL of the peer's L1.
@@ -318,7 +296,6 @@ def _p2p_pair(
     """
     local_buf = torch.zeros(local_pages * _PAGE, dtype=torch.uint8)
     with _peer_side(
-        request_transport,
         l1_pages=peer_l1_pages,
         write_ttl_seconds=peer_write_ttl_seconds,
     ) as peer:
@@ -349,11 +326,10 @@ def _p2p_pair(
             delete_transfer_channel_context()
 
 
-@pytest.mark.parametrize("request_transport", ["zmq", "grpc"])
-def test_p2p_adapter_end_to_end(request_transport: RequestTransport) -> None:
+def test_p2p_adapter_end_to_end() -> None:
     keys = [_key(i) for i in range(_NUM_KEYS)]
 
-    with _p2p_pair(request_transport) as pair:
+    with _p2p_pair() as pair:
         peer_sm, adapter, local_buf = pair.peer_sm, pair.adapter, pair.local_buf
 
         # --- Peer side: store known objects in L1 ---
@@ -399,11 +375,10 @@ def test_p2p_adapter_end_to_end(request_transport: RequestTransport) -> None:
             assert key not in adapter._remote_addresses
 
 
-@pytest.mark.parametrize("request_transport", ["zmq", "grpc"])
-def test_p2p_store_end_to_end(request_transport: RequestTransport) -> None:
+def test_p2p_store_end_to_end() -> None:
     keys = [_key(i) for i in range(_NUM_KEYS)]
 
-    with _p2p_pair(request_transport, write_enabled=True) as pair:
+    with _p2p_pair(write_enabled=True) as pair:
         adapter, local_buf = pair.adapter, pair.local_buf
 
         # Store: local pages 0..N-1, each filled with its own value.
@@ -440,7 +415,6 @@ def test_p2p_store_end_to_end(request_transport: RequestTransport) -> None:
 def test_p2p_store_into_a_full_peer_fails_and_leaves_it_unchanged() -> None:
     peer_pages = 8
     with _p2p_pair(
-        "zmq",
         write_enabled=True,
         peer_l1_pages=peer_pages,
         local_pages=2 * peer_pages + 1,
@@ -462,11 +436,9 @@ def test_p2p_store_into_a_full_peer_fails_and_leaves_it_unchanged() -> None:
 
 def test_p2p_store_takes_over_an_abandoned_reservation_after_the_write_ttl() -> None:
     key = _key(0)
-    with _p2p_pair("zmq", write_enabled=True, peer_write_ttl_seconds=1) as pair:
+    with _p2p_pair(write_enabled=True, peer_write_ttl_seconds=1) as pair:
         # Another writer reserves the key on the peer and never finishes.
-        other_writer = RequestClientFactory.create(
-            pair.peer_mq_url, context=zmq.Context.instance()
-        )
+        other_writer = P2PClient(pair.peer_mq_url)
         try:
             (address,) = other_writer.p2p_reserve_write([key], _LAYOUT).result(5)
         finally:
@@ -503,7 +475,7 @@ def test_p2p_store_policy_keeps_objects_local_until_the_usage_threshold() -> Non
     spilled = [_key(100 + i) for i in range(8)]
     spilled_values = list(range(11, 19))
 
-    with _peer_side("zmq") as peer:
+    with _peer_side() as peer:
         main_sm = _make_storage_manager(main_pages * _PAGE, store_policy="p2p")
         adapter_id = None
         try:

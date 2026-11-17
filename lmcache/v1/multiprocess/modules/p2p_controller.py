@@ -5,7 +5,6 @@
 from dataclasses import dataclass
 from enum import Enum
 from functools import partial
-from typing import Literal
 import threading
 import time
 
@@ -28,7 +27,6 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
-from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.transfer_channel import (
     delete_transfer_channel_context,
     initialize_transfer_channel_context,
@@ -181,11 +179,10 @@ class P2PController(DiscoverableModule):
         coordinator_config: Coordinator connection used for peer discovery.
         instance_id: Stable id of this instance, used to exclude itself from the
             discovered peer set.
-        request_transport: Request transport exposed by this server and its
-            discovered peers.
     """
 
     module_name = "p2p_controller"
+    rpc_service = "p2p"
 
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
@@ -195,7 +192,6 @@ class P2PController(DiscoverableModule):
             build_ctx.mp_config.p2p_config,
             build_ctx.coordinator_config,
             build_ctx.mp_config.instance_id,
-            build_ctx.mp_config.transport,
         )
 
     def __init__(
@@ -204,12 +200,10 @@ class P2PController(DiscoverableModule):
         p2p_config: P2PConfig,
         coordinator_config: CoordinatorConfig,
         instance_id: str,
-        request_transport: Literal["zmq", "grpc"] = "zmq",
     ) -> None:
         self._ctx = ctx
         self._p2p_config = p2p_config
         self._instance_id = instance_id
-        self._request_scheme = "grpc" if request_transport == "grpc" else "tcp"
         self._next_task_id = 0
         self._jobs: dict[int, _P2PLookupJob] = {}
         self._job_lock = threading.Lock()
@@ -778,8 +772,11 @@ class P2PController(DiscoverableModule):
         Returns:
             ``True`` if the adapter was created and tracked.
         """
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
+
         config = P2PL2AdapterConfig(
-            peer_mq_server_url=(f"{self._request_scheme}://{inst.ip}:{inst.mq_port}"),
+            peer_mq_server_url=f"grpc://{inst.ip}:{inst.mq_port}",
             peer_transfer_channel_server_url=inst.p2p_advertised_url,
             lookup_timeout_s=self._p2p_config.lookup_timeout,
             load_timeout_s=self._p2p_config.load_timeout,
