@@ -144,4 +144,3 @@ noop_skip_pruned:
   - "sglang / deadlock / zmq"
   - "sglang / long_doc_qa_l2 / zmq"
   - "sglang / lm_eval_preemption"
-  - "sglang / restart_recovery"
