@@ -244,13 +244,14 @@ def test_probability_rejects_count_domain_no_cost_control():
         make_config(value_model="reuse_probability", mode="no-cost")
 
 
-def test_probability_scales_extreme_rate_before_it_can_overflow(runtime):
+@pytest.mark.parametrize("half_life", [1.0, 1e-310])
+def test_probability_scales_extreme_rate_before_it_can_overflow(runtime, half_life):
     bus, now, build = runtime
     now[0] = 0
     policy = build(
         value_model="reuse_probability",
         horizon_s=1e-310,
-        half_life_s=1.0,
+        half_life_s=half_life,
         prefix_write_l2_ms=(4.8, 9.6),
     )
     demand(bus, policy, [b"hot"])

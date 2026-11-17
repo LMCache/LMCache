@@ -364,15 +364,18 @@ class LocalValuePolicy(ProfiledEvictionPolicy, StorePolicy, L2AdapterListener):
             return 0.0
         if elapsed == 0:
             return math.inf
-        decay = math.log(2) / self._costs.half_life_s
-        exposure = (
-            elapsed if decay * elapsed == 0 else -math.expm1(-decay * elapsed) / decay
+        decay_age = math.log(2) * (elapsed / self._costs.half_life_s)
+        scaled_exposure = -math.expm1(-decay_age)
+        log_exposure = (
+            math.log(scaled_exposure)
+            + math.log(self._costs.half_life_s)
+            - math.log(math.log(2))
+            if scaled_exposure > 0
+            else math.log(elapsed)
         )
-        if exposure == 0:
-            return math.inf
-        # Scale in log space: a tiny horizon can cancel an otherwise huge rate.
+        # Keep both exposure and lambda*H scaled across the finite input domain.
         log_intensity = (
-            math.log(repeats) + math.log(self._costs.horizon_s) - math.log(exposure)
+            math.log(repeats) + math.log(self._costs.horizon_s) - log_exposure
         )
         return (
             math.inf
