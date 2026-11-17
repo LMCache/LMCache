@@ -78,8 +78,8 @@ If you need the XPU pipeline to run for a docs/asset-only PR, add the
 
 Before creating the pipeline, prepare the machine that will run the `intel-xpu` queue:
 
-1. Run [setup-cluster.sh](../../k3_harness/setup-cluster.sh) to install K3s, the GPU Operator, and the shared host volumes.
-2. Run [install-agent-stack.sh](../../k3_harness/install-agent-stack.sh) with a Buildkite agent token and a GitHub token.
+1. Run [setup-cluster.sh](../../../k3_harness/setup-cluster.sh) to install K3s, the GPU Operator, and the shared host volumes.
+2. Run [install-agent-stack.sh](../../../k3_harness/install-agent-stack.sh) with a Buildkite agent token and a GitHub token.
 
 
 ## Buildkite UI snippet

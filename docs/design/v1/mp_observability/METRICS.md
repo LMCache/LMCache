@@ -295,8 +295,7 @@ sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)
 > context matches, empty `chunk_hashes`) contribute `0` tokens to all four
 > token counters, `0` keys to both key counters, and `+1` to `lookups` and `lookup_early_exit{reason}`, and
 > abandoned lookups (client never polls `query_prefetch_status`)
-> contribute to neither.  See
-> [L1_L2_HIT_RATE_PLAN.md](L1_L2_HIT_RATE_PLAN.md) for the full rationale.
+> contribute to neither.
 
 ---
 

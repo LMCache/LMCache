@@ -317,8 +317,7 @@ denormalized token-level counts so subscribers need not know `chunk_size`:
   rule if storage cost matters.
 
 Together they drive the `lmcache_mp.lookup_*_tokens` counters used to
-compute the L1+L2 token-level hit rate.  See
-[L1_L2_HIT_RATE_PLAN.md](L1_L2_HIT_RATE_PLAN.md) for the design.
+compute the L1+L2 token-level hit rate.
 
 ---
 
