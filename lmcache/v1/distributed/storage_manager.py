@@ -237,6 +237,21 @@ class StorageManager:
             # Controllers receive the initial set as ordered lists; they key
             # their own copies by ``descriptor.index`` (== adapter_id) and learn
             # of later changes via add_adapter/request_remove_adapter.
+            # Build PrefetchController first so StoreControllers can query its
+            # load state, but register its stop callback last so ExitStack
+            # unwind stops prefetch before closing the store wakeup fds.
+            self._prefetch_controller = PrefetchController(
+                l1_managers=list(self._l1_managers),
+                l1_manager_descriptors=[
+                    L1ManagerDescriptor(index=m.l1_manager_id, config=m.config)
+                    for m in self._l1_managers
+                ],
+                l2_adapters=list(self._l2_adapters.values()),
+                adapter_descriptors=list(self._adapter_descriptors.values()),
+                policy=create_prefetch_policy(config.prefetch_policy),
+                inflight_watermark=config.prefetch_inflight_watermark,
+            )
+
             self._store_controllers: dict[int, StoreController] = {}
             for manager in self._l1_managers:
                 descriptors = [
@@ -251,22 +266,13 @@ class StorageManager:
                     descriptors,
                     create_store_policy(config.store_policy, self._l1_managers),
                     eviction_config=manager.config.eviction or config.eviction_config,
+                    has_inflight_loads=self._prefetch_controller.has_inflight_loads,
                 )
+                self._prefetch_controller.register_load_idle_callback(controller.wake)
                 self._store_controllers[manager.l1_manager_id] = controller
                 controller.start()
                 cleanup.callback(controller.stop)
 
-            self._prefetch_controller = PrefetchController(
-                l1_managers=list(self._l1_managers),
-                l1_manager_descriptors=[
-                    L1ManagerDescriptor(index=m.l1_manager_id, config=m.config)
-                    for m in self._l1_managers
-                ],
-                l2_adapters=list(self._l2_adapters.values()),
-                adapter_descriptors=list(self._adapter_descriptors.values()),
-                policy=create_prefetch_policy(config.prefetch_policy),
-                inflight_watermark=config.prefetch_inflight_watermark,
-            )
             self._prefetch_controller.start()
             cleanup.callback(self._prefetch_controller.stop)
 

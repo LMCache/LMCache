@@ -11,6 +11,7 @@ The controller runs a background thread with an event-driven loop that:
 
 # Standard
 from collections import Counter, OrderedDict, defaultdict, deque
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 import enum
 import select
@@ -47,22 +48,44 @@ logger = init_logger(__name__)
 # Poll timeout in milliseconds for the store loop
 STORE_LOOP_POLL_TIMEOUT_MS = 500
 
+# Store size while stores yield to prefetch loads, so a load that arrives
+# waits behind at most this many keys.
+STORE_SLICE_MAX_KEYS = 4
+
+# Queued keys hold no L1 lock and can be evicted before they reach L2, so
+# stores stop yielding past this many.
+STORE_YIELD_MAX_QUEUED_KEYS = 512
+
+# Keys per store once stores stop yielding.
+STORE_CATCH_UP_MAX_KEYS = 32
+
+# Past the yield limit, each this many more queued keys allow one more store
+# in flight per adapter, for L2s that keep up only with several stores.
+STORE_CATCH_UP_STEP_KEYS = 128
+
+
+def _store_shape(key: ObjectKey) -> tuple[str, int]:
+    """Return the fields of ``key`` that determine its KV cache shape.
+
+    Today the shape is pinned by ``(model_name, kv_rank)`` — ``kv_rank``
+    packs ``world_size`` and parallelism config, so different TP/PP setups
+    get different shapes. Extend the tuple when a new shape-affecting field
+    is added to ``ObjectKey``.
+    """
+    return (key.model_name, key.kv_rank)
+
 
 def _group_keys_by_shape(
     keys: list[ObjectKey],
 ) -> dict[tuple, list[ObjectKey]]:
-    """Group ``keys`` by the fields that determine their KV cache shape.
+    """Group ``keys`` by :func:`_store_shape`.
 
     Each bucket shares a single ``(shape, dtype)``, so each bucket can be
-    submitted as one ``submit_store_task`` call. Today the shape is pinned
-    by ``(model_name, kv_rank)`` — ``kv_rank`` packs ``world_size`` and
-    parallelism config, so different TP/PP setups land in different
-    buckets. Extend the grouping tuple when a new shape-affecting field is
-    added to ``ObjectKey``.
+    submitted as one ``submit_store_task`` call.
     """
     groups: dict[tuple, list[ObjectKey]] = defaultdict(list)
     for key in keys:
-        groups[(key.model_name, key.kv_rank)].append(key)
+        groups[_store_shape(key)].append(key)
     return groups
 
 
@@ -218,7 +241,8 @@ class StoreController(StorageControllerInterface):
        store eventfds.
     3. On new keys: consults StorePolicy to decide targets,
        calls reserve_read to get MemoryObjs, and submits store
-       tasks to L2 adapters. Keys past the budget wait unlocked.
+       tasks to L2 adapters. Keys that cannot go out yet (past the
+       budget, or held back for prefetch loads) wait unlocked.
     4. On L2 task completion: releases read locks, optionally
        deletes keys from L1 per policy.
 
@@ -227,11 +251,15 @@ class StoreController(StorageControllerInterface):
         l2_adapters: List of L2 adapter instances.
         adapter_descriptors: Descriptors for each L2 adapter (same order).
         policy: The store policy for deciding targets and deletions.
-        eviction_config: The L1's eviction settings. Before a group goes
-            out, in-flight stores must lock less than
-            ``trigger_watermark * (1 - eviction_ratio)`` of L1; groups go out
-            whole, so they can end up one group over. Other groups wait
-            unlocked. ``None`` or the ``noop`` policy means no limit.
+        eviction_config: The L1's eviction settings. A store goes out only
+            while in-flight stores lock less than
+            ``trigger_watermark * (1 - eviction_ratio)`` of L1, so they can
+            end up over by one store. ``None`` or the ``noop`` policy means
+            no limit.
+        has_inflight_loads: Returns whether prefetch loads are running on
+            any of the given adapter indices. When set, stores are cut from
+            the queue, wait for an adapter with none in flight, and yield to
+            loads (see ``_submit_queued``); ``None`` sends whole groups.
     """
 
     # Singleton dispatch for ``lmcache_mp.num_inflight_l2_stores``: tests may
@@ -251,9 +279,11 @@ class StoreController(StorageControllerInterface):
         adapter_descriptors: list[L2AdapterDescriptor],
         policy: StorePolicy,
         eviction_config: EvictionConfig | None = None,
+        has_inflight_loads: Callable[[Iterable[int]], bool] | None = None,
     ) -> None:
         self._l1_manager = l1_manager
         self._eviction_config = eviction_config
+        self._has_inflight_loads = has_inflight_loads
         self._l2_adapters: dict[int, L2AdapterInterface] = {
             desc.index: adapter
             for desc, adapter in zip(adapter_descriptors, l2_adapters, strict=True)
@@ -362,6 +392,12 @@ class StoreController(StorageControllerInterface):
         self._adapter_ctrl_efd.close()
         if StoreController._gauge_targets.get(self._l1_manager.config.tag) is self:
             del StoreController._gauge_targets[self._l1_manager.config.tag]
+
+    def wake(self) -> None:
+        """Wake the store loop so held-back slices go out without waiting
+        for the poll timeout. Safe from any thread; a no-op after stop()."""
+        if not self._stop_flag.is_set():
+            self._listener.notify()
 
     def report_status(self) -> dict:
         """Return a status dict for the store controller."""
@@ -658,12 +694,56 @@ class StoreController(StorageControllerInterface):
 
     def _submit_queued(self) -> None:
         """Submit queued groups, oldest first, while under the budget. Keys
-        deleted since the last round are skipped by ``reserve_read``."""
+        deleted since the last round are skipped by ``reserve_read``.
+
+        With ``has_inflight_loads`` set, a store goes out only once some
+        active adapter has fewer stores in flight than allowed, so a slower
+        adapter falls behind, up to the budget, without holding back the
+        others; as with the budget, a store stops counting once its read
+        locks lapse. While at most ``STORE_YIELD_MAX_QUEUED_KEYS`` keys wait,
+        one store per adapter is allowed, and it takes
+        ``STORE_SLICE_MAX_KEYS`` keys and waits for prefetch loads to finish.
+        Past that, stores take up to ``STORE_CATCH_UP_MAX_KEYS`` same-shape
+        keys and go out anyway, and every ``STORE_CATCH_UP_STEP_KEYS`` more
+        queued keys allow one more in flight."""
         self._release_lapsed_budget()
+        has_inflight_loads = self._has_inflight_loads
         while self._queued and not self._over_budget():
-            group = self._queued.popleft()
-            self._queued_keys.difference_update(group)
-            self._submit_store_for_single_shape(group)
+            if has_inflight_loads is None:
+                keys = self._queued.popleft()
+            else:
+                queued = len(self._queued_keys)
+                excess = max(0, queued - STORE_YIELD_MAX_QUEUED_KEYS)
+                allowed = 1 + excess // STORE_CATCH_UP_STEP_KEYS
+                active = {idx for idx in self._l2_adapters if idx not in self._draining}
+                in_flight = Counter(idx for idx, _ in self._budget_deadlines)
+                if active and all(in_flight[idx] >= allowed for idx in active):
+                    return
+                if queued > STORE_YIELD_MAX_QUEUED_KEYS:
+                    keys = self._pop_queued(STORE_CATCH_UP_MAX_KEYS)
+                elif has_inflight_loads(active):
+                    return
+                else:
+                    keys = self._pop_queued(STORE_SLICE_MAX_KEYS)
+            self._queued_keys.difference_update(keys)
+            self._submit_store_for_single_shape(keys)
+
+    def _pop_queued(self, limit: int) -> list[ObjectKey]:
+        """Pop up to ``limit`` keys from the front of the queue, merging
+        following groups of the same shape."""
+        shape = _store_shape(self._queued[0][0])
+        keys: list[ObjectKey] = []
+        while self._queued and len(keys) < limit:
+            group = self._queued[0]
+            if _store_shape(group[0]) != shape:
+                break
+            take = limit - len(keys)
+            keys.extend(group[:take])
+            if len(group) > take:
+                self._queued[0] = group[take:]
+            else:
+                self._queued.popleft()
+        return keys
 
     def _release_lapsed_budget(self) -> None:
         """Stop counting stores whose read locks have lapsed."""

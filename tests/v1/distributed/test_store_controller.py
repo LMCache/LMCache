@@ -21,22 +21,33 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    FULL_ATTENTION_WINDOW_CHUNKS,
+    GroupedObjectKeys,
+    MemoryLayoutDesc,
+    ObjectKey,
+    PrefetchLockMode,
+    PrefetchTaskSpec,
+)
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
     L1MemoryManagerConfig,
+    StorageManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.eviction_policy.noop import (
     NoOpEvictionPolicy,
 )
 from lmcache.v1.distributed.l1_manager import DramL1Manager
+from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
 )
+from lmcache.v1.distributed.storage_controllers import store_controller
 from lmcache.v1.distributed.storage_controllers.store_controller import (
+    STORE_SLICE_MAX_KEYS,
     StoreController,
     StoreListener,
 )
@@ -46,6 +57,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     StorePolicy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
@@ -809,11 +821,17 @@ class TestStoreBudget:
         assert l1_manager.report_status()["read_locked_count"] == 0
         adapter.close()
 
+    @pytest.mark.parametrize(
+        "has_inflight_loads",
+        [None, lambda _adapter_ids: False],
+        ids=["whole_groups", "load_tracking"],
+    )
     def test_store_stops_holding_budget_when_its_locks_lapse(
-        self, short_ttl_l1_manager
+        self, short_ttl_l1_manager, has_inflight_loads
     ):
-        """A store slower than the read lock TTL frees its budget once the
-        locks lapse, so the next group goes out while it still runs."""
+        """A store slower than the read lock TTL stops holding back the queue
+        once its locks lapse, so the next store goes out while it still
+        runs."""
         group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
         adapter = MockL2Adapter(
             MockL2AdapterConfig(
@@ -828,6 +846,7 @@ class TestStoreBudget:
             eviction_config=EvictionConfig(
                 "LRU", trigger_watermark=0.5, eviction_ratio=1.0
             ),
+            has_inflight_loads=has_inflight_loads,
         )
         ctrl.start()
 
@@ -1274,3 +1293,307 @@ class TestBufferOnlyMode:
 
         ctrl.stop()
         adapter.close()
+
+
+class TestStoreSlicingAndPrefetchYield:
+    """Tests for store slicing and yielding to prefetch loads."""
+
+    def test_large_batch_dispatches_one_slice_at_a_time(
+        self, l1_manager, monkeypatch
+    ) -> None:
+        """With load tracking wired, a group larger than STORE_SLICE_MAX_KEYS
+        goes out one slice at a time while the rest wait unlocked."""
+        object_bytes = make_layout().shapes[0].numel() * 2
+        slice_bytes = STORE_SLICE_MAX_KEYS * object_bytes
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01,
+                mock_bandwidth_gb=slice_bytes / 1.5 / (1 << 30),
+            )
+        )
+        submitted_sizes: list[int] = []
+        orig_submit = adapter.submit_store_task
+
+        def record_submit(keys: list[ObjectKey], objs: list[MemoryObj]):
+            submitted_sizes.append(len(keys))
+            return orig_submit(keys, objs)
+
+        monkeypatch.setattr(adapter, "submit_store_task", record_submit)
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([l1_manager]),
+            has_inflight_loads=lambda _adapter_ids: False,
+        )
+        ctrl.start()
+        try:
+            total = 2 * STORE_SLICE_MAX_KEYS + 2
+            keys = [make_object_key(i) for i in range(total)]
+            write_keys_to_l1(l1_manager, keys, make_layout())
+
+            assert wait_for_condition(
+                lambda: (
+                    ctrl.report_status()["in_flight_task_count"] == 1
+                    and ctrl.report_status()["queued_keys_count"]
+                    == total - STORE_SLICE_MAX_KEYS
+                )
+            )
+            assert l1_manager.is_key_evictable(keys[-1])
+            assert wait_for_condition(
+                lambda: all(adapter.debug_has_key(k) for k in keys),
+                timeout=10.0,
+            )
+            assert submitted_sizes == [STORE_SLICE_MAX_KEYS, STORE_SLICE_MAX_KEYS, 2]
+        finally:
+            ctrl.stop()
+            adapter.close()
+
+    def test_yields_to_inflight_loads_and_resumes_on_wake(
+        self, l1_manager, monkeypatch
+    ) -> None:
+        """Queued slices wait while loads run on the adapter, and wake() alone
+        sends them out."""
+        monkeypatch.setattr(store_controller, "STORE_LOOP_POLL_TIMEOUT_MS", 60_000)
+        adapter = make_adapter()
+        loads_active = threading.Event()
+        loads_active.set()
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([l1_manager]),
+            has_inflight_loads=lambda adapter_ids: (
+                0 in set(adapter_ids) and loads_active.is_set()
+            ),
+        )
+        ctrl.start()
+        try:
+            keys = [make_object_key(i) for i in range(STORE_SLICE_MAX_KEYS)]
+            write_keys_to_l1(l1_manager, keys, make_layout())
+
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["queued_keys_count"] == len(keys)
+            )
+            time.sleep(0.2)
+            assert adapter.debug_get_stored_object_count() == 0
+
+            loads_active.clear()
+            ctrl.wake()
+            assert wait_for_condition(
+                lambda: adapter.debug_get_stored_object_count() == len(keys)
+            )
+        finally:
+            ctrl.stop()
+            adapter.close()
+
+    @pytest.fixture
+    def small_limits(self, monkeypatch) -> None:
+        """Yield limit 16 keys, catch-up stores of 8 keys, and no extra
+        stores in flight unless a test lowers the step."""
+        monkeypatch.setattr(store_controller, "STORE_YIELD_MAX_QUEUED_KEYS", 16)
+        monkeypatch.setattr(store_controller, "STORE_CATCH_UP_MAX_KEYS", 8)
+        monkeypatch.setattr(store_controller, "STORE_CATCH_UP_STEP_KEYS", 1000)
+
+    def test_backlog_past_yield_limit_goes_out_in_catch_up_stores(
+        self, l1_manager, monkeypatch, small_limits
+    ) -> None:
+        """Past the yield limit, stores go out while loads run, one at a time,
+        each at most STORE_CATCH_UP_MAX_KEYS keys of one shape, until the
+        queue is back at the limit."""
+        adapter = make_adapter()
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([l1_manager]),
+            has_inflight_loads=lambda _adapter_ids: True,
+        )
+        submits: list[tuple[int, int]] = []
+        orig_submit = adapter.submit_store_task
+
+        def record_submit(keys: list[ObjectKey], objs: list[MemoryObj]):
+            submits.append((len(keys), ctrl.report_status()["in_flight_task_count"]))
+            return orig_submit(keys, objs)
+
+        monkeypatch.setattr(adapter, "submit_store_task", record_submit)
+        ctrl.start()
+        try:
+            first = [make_object_key(i) for i in range(6)]
+            write_keys_to_l1(l1_manager, first, make_layout())
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["queued_keys_count"] == len(first)
+            )
+            same_shape = [make_object_key(6 + i) for i in range(6)]
+            other_shape = [make_object_key(12 + i, kv_rank=1) for i in range(20)]
+            write_keys_to_l1(l1_manager, same_shape + other_shape, make_layout())
+
+            assert wait_for_condition(
+                lambda: adapter.debug_get_stored_object_count() == 20
+            )
+            assert ctrl.report_status()["queued_keys_count"] == 12
+            # 6 + 2 merged, the other 4 of that shape, then 8 of the next.
+            assert submits == [(8, 0), (4, 0), (8, 0)]
+        finally:
+            ctrl.stop()
+            adapter.close()
+
+    def test_growing_backlog_allows_more_stores_in_flight(
+        self, l1_manager, monkeypatch, small_limits
+    ) -> None:
+        """Every STORE_CATCH_UP_STEP_KEYS queued keys past the yield limit
+        allow one more store in flight, and no more than that."""
+        monkeypatch.setattr(store_controller, "STORE_CATCH_UP_STEP_KEYS", 4)
+        monkeypatch.setattr(store_controller, "STORE_CATCH_UP_MAX_KEYS", 4)
+        slice_bytes = 4 * make_layout().shapes[0].numel() * 2
+        # About 20 s per store, so stores stay in flight.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=slice_bytes / 20 / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([l1_manager]),
+            has_inflight_loads=lambda _adapter_ids: True,
+        )
+        ctrl.start()
+        try:
+            keys = [make_object_key(i) for i in range(28)]
+            write_keys_to_l1(l1_manager, keys, make_layout())
+
+            # 28 queued allow 4; after two stores, 20 queued allow 2.
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["in_flight_task_count"] == 2
+                and ctrl.report_status()["queued_keys_count"] == 20
+            )
+            time.sleep(0.3)
+            assert ctrl.report_status()["in_flight_task_count"] == 2
+        finally:
+            ctrl.stop()
+            adapter.close()
+
+    def test_slow_adapter_does_not_hold_back_the_fast_one(self, l1_manager) -> None:
+        """With two adapters, stores keep going to the fast one while the slow
+        one is still writing its first slice."""
+        slice_bytes = STORE_SLICE_MAX_KEYS * make_layout().shapes[0].numel() * 2
+        fast = make_adapter()
+        # About 20 s per slice.
+        slow = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=slice_bytes / 20 / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[fast, slow],
+            adapter_descriptors=[make_descriptor(0), make_descriptor(1)],
+            policy=DefaultStorePolicy([l1_manager]),
+            has_inflight_loads=lambda _adapter_ids: False,
+        )
+        ctrl.start()
+        try:
+            keys = [make_object_key(i) for i in range(3 * STORE_SLICE_MAX_KEYS)]
+            write_keys_to_l1(l1_manager, keys, make_layout())
+
+            # The fast adapter finished all three slices; all three are still
+            # in flight on the slow one.
+            assert wait_for_condition(
+                lambda: all(fast.debug_has_key(k) for k in keys)
+                and ctrl.report_status()["in_flight_task_count"] == 3
+            )
+        finally:
+            ctrl.stop()
+            fast.close()
+            slow.close()
+
+    def test_storage_manager_pauses_store_until_prefetch_load_finishes(
+        self, monkeypatch
+    ) -> None:
+        """Through StorageManager, new L1 writes wait while an L2 prefetch load
+        runs, and the load finishing sends them out."""
+        monkeypatch.setattr(store_controller, "STORE_LOOP_POLL_TIMEOUT_MS", 60_000)
+        layout = MemoryLayoutDesc(
+            shapes=[torch.Size([256, 2, 128])],
+            dtypes=[torch.float32],
+        )
+        obj_bytes = layout.shapes[0].numel() * 4
+        sm = StorageManager(
+            StorageManagerConfig(
+                l1_manager_config=L1ManagerConfig(
+                    memory_config=L1MemoryManagerConfig(
+                        size_in_bytes=64 * 1024 * 1024,
+                        use_lazy=should_use_lazy_alloc(),
+                        init_size_in_bytes=64 * 1024 * 1024,
+                        align_bytes=0x1000,
+                    )
+                ),
+                eviction_config=EvictionConfig("LRU"),
+                l2_adapter_config=L2AdaptersConfig(
+                    [
+                        MockL2AdapterConfig(
+                            max_size_gb=0.01,
+                            mock_bandwidth_gb=4 * obj_bytes / 1.1 / (1 << 30),
+                        )
+                    ]
+                ),
+            )
+        )
+        try:
+            seed = [make_object_key(i) for i in range(4)]
+            reserved = sm.reserve_write(seed, layout)
+            sm.finish_write(list(reserved), l1_owners_of(reserved))
+            assert wait_for_condition(
+                lambda: (
+                    sm.report_status()["l2_adapters"][0]["stored_object_count"] == 4
+                    and sm.report_status()["store_controller"]["in_flight_task_count"]
+                    == 0
+                )
+            )
+            sm.clear(force=True)
+
+            handle = sm.submit_prefetch_task(
+                PrefetchTaskSpec(
+                    key_groups=[
+                        GroupedObjectKeys(
+                            keys=seed,
+                            object_group_id=0,
+                            layout_desc=layout,
+                            sliding_window_size=FULL_ATTENTION_WINDOW_CHUNKS,
+                            num_kv_readers=1,
+                        )
+                    ],
+                    fetching_policy="prefix",
+                    lock_mode=PrefetchLockMode.NO_LOCK,
+                )
+            )
+            assert wait_for_condition(
+                lambda: (
+                    sm.report_status()["prefetch_controller"]["load_phase_count"] == 1
+                    and sm.report_status()["l1_manager"]["staging_object_count"] == 4
+                ),
+                poll_interval=0.005,
+            )
+
+            fresh = [make_object_key(100 + i) for i in range(2)]
+            fresh_res = sm.reserve_write(fresh, layout)
+            sm.finish_write(list(fresh_res), l1_owners_of(fresh_res))
+            assert wait_for_condition(
+                lambda: sm.report_status()["store_controller"]["queued_keys_count"]
+                == 2,
+                poll_interval=0.005,
+            )
+            assert sm.report_status()["store_controller"]["in_flight_task_count"] == 0
+
+            assert sm.wait_prefetch_status(handle, timeout=5.0)
+            assert sm.query_prefetch_status(handle) is not None
+            assert wait_for_condition(
+                lambda: sm.report_status()["store_controller"]["queued_keys_count"] == 0
+            )
+            assert wait_for_condition(
+                lambda: sm.report_status()["l2_adapters"][0]["stored_object_count"] == 6
+            )
+        finally:
+            sm.close()
