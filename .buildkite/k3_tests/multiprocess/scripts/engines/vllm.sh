@@ -182,6 +182,8 @@ extra_config = {
     "lmcache.mp.port": int(os.environ["LMCACHE_PORT"]),
     "lmcache.mp.mq_timeout": int(os.environ["LMCACHE_MP_MQ_TIMEOUT"]),
 }
+if os.environ.get("VLLM_TARGET_DEVICE") == "xpu":
+    extra_config["lmcache.mp.use_vmm_api"] = False
 if os.environ["LMCACHE_MP_LAZY_OFFLOAD"].lower() in {"1", "true"}:
     extra_config.update(
         {
