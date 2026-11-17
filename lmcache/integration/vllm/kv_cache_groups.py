@@ -154,7 +154,7 @@ def _kernel_pages_per_block(
         num_blocks: Block IDs vLLM allocated (``KVCacheConfig.num_blocks``).
         page_tokens: Token slots in one tensor page.
         block_tokens: Tokens one vLLM block ID covers on this rank
-            (``kv_cache_spec.block_size``).
+            (:func:`group_block_size`).
 
     Returns:
         ``k`` when ``k`` pages per block ID tile each block's tokens exactly,
@@ -319,6 +319,13 @@ def is_align_mode_mamba_group(group: Any) -> bool:
         _is_mamba_spec(spec) and group_mamba_cache_mode(group, spec) == "align"
         for spec in group_specs(group)
     )
+
+
+def group_block_size(group: Any) -> int:
+    """Return the tokens one block id of the group covers on this rank."""
+    if _manager_config(group) is None:
+        return group.kv_cache_spec.block_size
+    return group.block_size
 
 
 def tokens_per_group_block(group: Any, dcp_size: int) -> int:
@@ -699,7 +706,7 @@ def create_engine_group_infos_from_vllm(
                 ),
                 kv_cache_config.num_blocks,
                 identity.block_size,
-                vllm_groups[identity.engine_group_idx].kv_cache_spec.block_size,
+                group_block_size(vllm_groups[identity.engine_group_idx]),
             )
         pages_per_block.append(pages)
         # A kernel-paged group is described per tensor page, the unit the

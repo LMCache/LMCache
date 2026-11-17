@@ -583,8 +583,8 @@ def test_conversion_reads_kv_cache_group_manager_config() -> None:
     ]
     names = ["layer.0", "layer.1", "layer.2", "layer.3"]
 
-    spec = create_engine_group_infos_from_vllm(
-        SimpleNamespace(kv_cache_groups=groups),
+    spec, _ = create_engine_group_infos_from_vllm(
+        SimpleNamespace(kv_cache_groups=groups, num_blocks=32),
         _same_shape_caches(names),
         dcp_size=2,
     )
@@ -844,6 +844,23 @@ def test_conversion_reports_kernel_paged_group_per_page():
     assert [info.tokens_per_block for info in infos] == [16, 8]
     assert [info.sw_size_tokens for info in infos] == [-1, 64]
     assert pages_per_block == [1, 2]
+
+
+def test_conversion_reports_kernel_paged_manager_config_group_per_page():
+    """A KVCacheGroup with a manager config carries its block size on the
+    group instead of a spec; kernel pages are still detected against it."""
+    config = SimpleNamespace(
+        kv_cache_groups=[
+            KVCacheGroup({"layer.0": AttentionSpec(16)}, FullAttentionManager, 16)
+        ],
+        num_blocks=32,
+    )
+    caches = {"layer.0": _paged_cache(num_pages=64, page_tokens=8)}
+
+    infos, pages_per_block = create_engine_group_infos_from_vllm(config, caches)
+
+    assert [info.tokens_per_block for info in infos] == [8]
+    assert pages_per_block == [2]
 
 
 @pytest.mark.parametrize(
