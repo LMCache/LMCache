@@ -27,6 +27,12 @@ from lmcache.v1.client.transfer_context.base import (
 )
 from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
+from lmcache.v1.common.custom_types import (
+    GroupLayout,
+    RegisterEngineDrivenContextPayload,
+    RegisterEngineDrivenContextResponse,
+)
+from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.utils import (
     LayoutHints,
     get_device,
@@ -34,12 +40,6 @@ from lmcache.v1.common.utils import (
 )
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.custom_types import (
-    GroupLayout,
-    RegisterEngineDrivenContextPayload,
-    RegisterEngineDrivenContextResponse,
-)
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import (
     get_device_spec,

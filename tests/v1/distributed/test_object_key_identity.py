@@ -15,6 +15,8 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey, ObjectKeyIdentity
+from lmcache.v1.transport.grpc._proto_gen import p2p_service_pb2
+from lmcache.v1.transport.grpc.proto_codec import compile_request_codec_for_types
 from tests.import_utils import lmcache_subprocess_env
 
 
@@ -119,6 +121,21 @@ def test_decoded_key_lists_find_the_original_keys(codec: ModuleType) -> None:
     keys = [ObjectKey(bytes([i]), "model", 7, tags={"tenant": "a"}) for i in range(4)]
     slots = {key: index for index, key in enumerate(keys)}
     decoded = codec.decode(codec.encode(keys), type=list[ObjectKey])
+    assert [slots[key] for key in decoded] == list(range(4))
+
+
+def test_grpc_decoded_keys_find_hashed_originals() -> None:
+    encode, decode = compile_request_codec_for_types(
+        p2p_service_pb2.P2pUnlockObjectsRequest, (list[ObjectKey],)
+    )
+    keys = [ObjectKey(bytes([i]), "model", 0, tags={"tenant": "a"}) for i in range(4)]
+    slots = {key: index for index, key in enumerate(keys)}
+    fresh = [ObjectKey(bytes([i]), "model", 0, tags={"tenant": "a"}) for i in range(4)]
+
+    message = encode((keys,), {})
+    (decoded,) = decode(message)
+
+    assert message.SerializeToString() == encode((fresh,), {}).SerializeToString()
     assert [slots[key] for key in decoded] == list(range(4))
 
 

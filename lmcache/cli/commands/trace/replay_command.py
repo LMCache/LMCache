@@ -13,8 +13,8 @@ import sys
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.cli.metrics import Metrics, StreamHandler, get_formatter
 from lmcache.logging import init_logger
+from lmcache.v1.common.metrics import Metrics, StreamHandler, get_formatter
 
 logger = init_logger(__name__)
 
@@ -110,7 +110,7 @@ def run_trace_replay(args: argparse.Namespace) -> None:
     * Aggregated per-qualname summary: CSV (unless ``--no-csv``)
       and JSON (with ``--json``) written under ``--output-dir``.
     * Terminal metrics table (unless ``--quiet``) using the shared
-      :class:`~lmcache.cli.metrics.Metrics` renderer.
+      :class:`~lmcache.v1.common.metrics.Metrics` renderer.
 
     Args:
         args: Parsed CLI arguments.

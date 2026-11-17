@@ -45,8 +45,8 @@ struct BatchStep {
 // host object and the paged buffer: one 2-D copy over all layers when the
 // group's layers sit at a constant pitch, else one entry per layer. Only
 // token-major formats whose block is one contiguous [bs, nh, hs] run are
-// eligible (see direct_copy_format_supported); HND and blocked-scale layouts
-// stay on the kernel path.
+// eligible, plus single-head HND (see direct_copy_format_supported);
+// multi-head HND and blocked-scale layouts stay on the kernel path.
 // ---------------------------------------------------------------------------
 
 // Per-kernel-group invariants for the direct copy path, resolved once per
