@@ -201,9 +201,17 @@ class BlendTokenRangeMatcher:
             )
             return results
 
-    def remove_chunks(self, token_hashes: list[bytes]) -> None:
+    def remove_chunks(self, token_hashes: list[bytes]) -> int:
         """Evict the given chunks so later probes cannot match them.
-        Thread-safe."""
+        Thread-safe.
+
+        Args:
+            token_hashes: Per-chunk content hashes; unknown ones are skipped.
+
+        Returns:
+            Number of chunks removed from the index.
+        """
+        num_removed = 0
         with self._lock:
             for th in token_hashes:
                 cid = self._token_hash_to_compact_id.get(th)
@@ -223,6 +231,8 @@ class BlendTokenRangeMatcher:
                 self._chunk_poly_hash[cid] = 0
                 self._token_hash_to_start.pop(th, None)
                 del self._token_hash_to_compact_id[th]
+                num_removed += 1
+        return num_removed
 
 
 def merge_intervals(results: list[CBMatchResult]) -> list[tuple[int, int]]:
