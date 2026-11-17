@@ -1,8 +1,16 @@
 name: Code Quality
 
+# PR CI runs in two layers:
+#   Draft    test.yml on Python 3.12 only.
+#   Ready    pre-commit first, then test.yml on the Python versions and
+#            cpu_device.yml on the OSes the author ticked in the PR
+#            template's "CI scope" checklist (none ticked = all).
+# converted_to_draft starts a run that does nothing, so the concurrency group
+# below cancels the in-flight ready-for-review run.
 on:
   workflow_call:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
 
 # Cancel older in-flight runs on the same PR / branch.
 concurrency:
@@ -15,6 +23,7 @@ permissions:
 jobs:
   pre-commit:
     name: Check code quality
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -68,3 +77,65 @@ jobs:
         with:
           extra_args: --all-files
 
+  scope:
+    name: Resolve CI scope
+    if: >-
+      github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft &&
+      (github.base_ref == 'dev' || startsWith(github.base_ref, 'release-'))
+    runs-on: ubuntu-24.04
+    outputs:
+      python_versions: ${{ steps.scope.outputs.python_versions }}
+      cpu_os: ${{ steps.scope.outputs.cpu_os }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: true
+          egress-policy: audit
+
+      - name: Checkout scope script
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          sparse-checkout: .github/scripts/pr-ci-scope.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Read the CI scope checklist
+        id: scope
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: bash .github/scripts/pr-ci-scope.sh
+
+  # Reusable workflows called from here, since GitHub has no needs: across
+  # workflows. Drafts skip pre-commit and scope, so the draft leg needs
+  # !cancelled() to run past those skipped jobs; it passes an empty
+  # python_versions and test.yml falls back to 3.12.
+  test:
+    name: Test
+    needs: [pre-commit, scope]
+    if: >-
+      !cancelled() &&
+      github.event_name == 'pull_request' &&
+      github.event.action != 'converted_to_draft' &&
+      (github.base_ref == 'dev' || startsWith(github.base_ref, 'release-')) &&
+      (github.event.pull_request.draft ||
+        (needs.pre-commit.result == 'success' && needs.scope.result == 'success'))
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/test.yml
+    with:
+      python_versions: ${{ needs.scope.outputs.python_versions }}
+
+  cpu-device:
+    name: CPU device
+    needs: [pre-commit, scope]
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/cpu_device.yml
+    with:
+      os: ${{ needs.scope.outputs.cpu_os }}
+    secrets:
+      hf_token: ${{ secrets.HF_TOKEN }}

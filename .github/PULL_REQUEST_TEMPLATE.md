@@ -19,6 +19,24 @@ zip one file. -->
 - [ ] this PR contains user facing changes - docs added
 - [ ] this PR contains unit tests
 
+**CI scope after "Ready for review"**:
+<!-- While the PR is a draft, CI runs only the CPU unit tests on Python 3.12.
+Clicking "Ready for review" runs Code Quality first, then the CPU unit tests and
+CPU device tests on the entries ticked below. A group with nothing ticked runs
+every entry. Converting the PR back to draft cancels the in-flight runs. -->
+
+CPU unit tests (**Test**), Python versions:
+
+- [ ] `py3.11`
+- [ ] `py3.12`
+- [ ] `py3.13`
+- [ ] `py3.14`
+
+CPU device tests (**CPU device**), runner OS:
+
+- [ ] `ubuntu-22.04` — also runs the gRPC request-transport legs
+- [ ] `macos-latest`
+
 <details>
 <summary>Before marking ready for review</summary>
 
