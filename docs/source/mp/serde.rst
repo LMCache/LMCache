@@ -117,6 +117,28 @@ Supported presets:
      - 3-bit value quantization
 
 
+Packed K/V tensors
+~~~~~~~~~~~~~~~~~~
+
+For a fused per-head K/V cache, set ``"kv_layout": "packed"``. This accepts
+``[1, layers, tokens, heads * 2 * head_dim]`` tensors with K then V inside
+each head, as used by current vLLM fused-content cache layouts::
+
+    --l2-adapter '{
+        "type": "fs",
+        "base_path": "/data/kv_cache",
+        "serde": {
+            "type": "turboquant",
+            "kv_layout": "packed",
+            "head_dim": 128
+        }
+    }'
+
+The default ``"split"`` layout expects separate K/V planes with shape
+``[2, layers, tokens, heads * head_dim]``. Select the mode matching the
+engine's staging layout; packed mode must not be used for MLA key-only
+caches. The compressed format and precision are the same in both modes.
+
 Encryption serde
 ----------------
 
