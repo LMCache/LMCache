@@ -43,17 +43,26 @@ def _supports_declared_slot_compression() -> bool:
     return "tokens_per_state" in inspect.signature(MLAAttentionSpec).parameters
 
 
-def _mla_spec() -> MLAAttentionSpec:
+def _padded_kwargs(page_size_padded: int | None) -> dict[str, int]:
+    if page_size_padded is None:
+        return {}
+    if "page_size_padded" not in inspect.signature(MLAAttentionSpec).parameters:
+        pytest.skip("MLAAttentionSpec does not expose page_size_padded")
+    return {"page_size_padded": page_size_padded}
+
+
+def _mla_spec(page_size_padded: int | None = None) -> MLAAttentionSpec:
     return MLAAttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=1,
         head_size=MLA_WIDTH,
         head_size_v=0,
         dtype=torch.bfloat16,
+        **_padded_kwargs(page_size_padded),
     )
 
 
-def _indexer_spec() -> MLAAttentionSpec:
+def _indexer_spec(page_size_padded: int | None = None) -> MLAAttentionSpec:
     if not _supports_declared_slot_compression():
         pytest.skip("MLAAttentionSpec does not expose tokens_per_state")
     return MLAAttentionSpec(
@@ -63,6 +72,7 @@ def _indexer_spec() -> MLAAttentionSpec:
         head_size_v=0,
         dtype=torch.uint8,
         tokens_per_state=INDEXER_TOKENS_PER_STATE,
+        **_padded_kwargs(page_size_padded),
     )
 
 
@@ -120,11 +130,12 @@ def test_mla_kernel_pages_re_viewed_as_logical_block():
         assert torch.equal(edited[block, 0], pages.reshape(BLOCK_SIZE, MLA_WIDTH))
 
 
-def test_indexer_keeps_declared_compression():
+@pytest.mark.parametrize("page_size_padded", [None, 524_288])
+def test_indexer_keeps_declared_compression(page_size_padded: int | None):
     num_states = BLOCK_SIZE // INDEXER_TOKENS_PER_STATE
     raw = _kernel_paged(num_states, INDEXER_KERNEL_ROWS, INDEXER_WIDTH, torch.uint8)
 
-    edited = _edit(_indexer_spec(), raw)
+    edited = _edit(_indexer_spec(page_size_padded=page_size_padded), raw)
 
     assert edited.shape == (NUM_BLOCKS, 1, num_states, INDEXER_WIDTH)
     assert edited.data_ptr() == raw.data_ptr()
@@ -150,8 +161,9 @@ def test_logical_block_cache_passes_through():
     assert _edit(_mla_spec(), raw) is raw
 
 
-def test_mismatched_page_bytes_rejected():
+@pytest.mark.parametrize("page_size_padded", [None, 2_097_152])
+def test_mismatched_page_bytes_rejected(page_size_padded: int | None):
     raw = _kernel_paged(BLOCK_SIZE, MLA_KERNEL_ROWS, MLA_WIDTH // 2, torch.bfloat16)
 
     with pytest.raises(ValueError, match="do not tile"):
-        _edit(_mla_spec(), raw)
+        _edit(_mla_spec(page_size_padded=page_size_padded), raw)
