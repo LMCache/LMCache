@@ -46,6 +46,20 @@ if [[ -n "${expensive_pipeline_name}" ]] && \
     exit 0
 fi
 
+if [[ "${PIPELINE_FILE}" == *k3_tests/multiprocess/smoke-pipeline.yml ]] && \
+    [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",mp-full,"* ]] && \
+    [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," != *",force-ci,"* ]]; then
+    echo "+++ :fast_forward: Bypassing PR-smoke (PR has 'mp-full' label; heavy tier runs directly)"
+    if command -v buildkite-agent >/dev/null 2>&1; then
+        buildkite-agent annotate \
+            --style success \
+            --context "mp-smoke-bypass" \
+            "Bypassed PR-smoke: PR has the \`mp-full\` label so the full heavy multiprocess pipeline runs directly." \
+            || true
+    fi
+    exit 0
+fi
+
 merge_pr_base_branch
 
 if [[ "${XPU_CANDIDATE_VALIDATION:-0}" != "1" ]] && should_skip_ci "${PIPELINE_FILE}"; then

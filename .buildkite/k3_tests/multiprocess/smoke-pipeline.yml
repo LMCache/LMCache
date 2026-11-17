@@ -130,3 +130,19 @@ steps:
                 volumes:
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
+
+  - wait: ~
+    if: build.pull_request.labels includes 'force-ci'
+
+  - trigger: "k3-multiprocess-test"
+    label: ":rocket: Trigger heavy multiprocess tier (force-ci)"
+    if: build.pull_request.labels includes 'force-ci'
+    async: false
+    build:
+      commit: "${BUILDKITE_COMMIT}"
+      branch: "${BUILDKITE_BRANCH}"
+      message: "${BUILDKITE_MESSAGE}"
+      env:
+        BUILDKITE_PULL_REQUEST: "${BUILDKITE_PULL_REQUEST:-false}"
+        BUILDKITE_PULL_REQUEST_BASE_BRANCH: "${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-dev}"
+        BUILDKITE_PULL_REQUEST_LABELS: "${BUILDKITE_PULL_REQUEST_LABELS:-}"

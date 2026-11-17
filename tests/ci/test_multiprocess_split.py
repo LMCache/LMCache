@@ -76,14 +76,20 @@ def test_smoke_pipeline_only_contains_0_or_1_gpu_pr_smoke() -> None:
     """smoke-pipeline.yml must stay fast (0/1-GPU) and cover only pr-smoke."""
     smoke = yaml.safe_load(SMOKE_PIPELINE_PATH.read_text(encoding="utf-8"))
     steps = _collect_steps(smoke)
-    assert len(steps) == 6
+    command_steps = [s for s in steps if "command" in s]
+    assert len(command_steps) == 6
+
+    trigger_steps = [s for s in steps if "trigger" in s]
+    assert len(trigger_steps) == 1
+    assert trigger_steps[0]["trigger"] == "k3-multiprocess-test"
+    assert "force-ci" in str(trigger_steps[0].get("if", ""))
 
     text = SMOKE_PIPELINE_PATH.read_text(encoding="utf-8")
     assert '"nvidia.com/gpu": "2"' not in text
     assert '"nvidia.com/gpu": "4"' not in text
     assert "sglang" not in text
 
-    commands = " ".join(str(s.get("command", "")) for s in steps)
+    commands = " ".join(str(s.get("command", "")) for s in command_steps)
     for expected in (
         "run.sh lm_eval",
         "run.sh restart_recovery",
@@ -222,3 +228,74 @@ should_skip_multiprocess_heavy ".buildkite/k3_tests/multiprocess/pipeline.yml"
     env.update(env_overrides)
     proc = subprocess.run([bash, "-c", script], env=env, check=False)
     assert (proc.returncode == 0) is expected_skip
+
+
+@pytest.mark.parametrize(
+    ("labels", "pipeline_rel", "expected_uploaded"),
+    [
+        # mp-full bypasses smoke-pipeline.yml (exits 0) and runs heavy pipeline.yml
+        ("full,mp-full", ".buildkite/k3_tests/multiprocess/smoke-pipeline.yml", False),
+        ("full,mp-full", ".buildkite/k3_tests/multiprocess/pipeline.yml", True),
+        # skip expensive ci skips both smoke and heavy
+        (
+            "full,skip expensive ci",
+            ".buildkite/k3_tests/multiprocess/smoke-pipeline.yml",
+            False,
+        ),
+        (
+            "full,skip expensive ci",
+            ".buildkite/k3_tests/multiprocess/pipeline.yml",
+            False,
+        ),
+    ],
+)
+def test_upload_pipeline_mp_full_and_skip_expensive_ci(
+    tmp_path: Path,
+    labels: str,
+    pipeline_rel: str,
+    expected_uploaded: bool,
+) -> None:
+    """Verify mp-full bypasses smoke-only and skip expensive ci skips both."""
+    bash = _find_bash()
+    if bash is None:
+        pytest.skip("Git Bash / bash not available")
+    assert bash is not None
+
+    scripts_dir = tmp_path / "common_scripts"
+    scripts_dir.mkdir(parents=True)
+    for src in (
+        UPLOAD_SCRIPT,
+        PATH_FILTER_SCRIPT,
+        UPLOAD_SCRIPT.parent / "helpers.sh",
+    ):
+        (scripts_dir / src.name).write_text(
+            src.read_text(encoding="utf-8").replace("\r\n", "\n"),
+            encoding="utf-8",
+        )
+
+    marker = tmp_path / "uploaded.txt"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_agent = fake_bin / "buildkite-agent"
+    fake_agent.write_text(
+        f"#!/usr/bin/env bash\nif [[ \"${{1:-}}\" == \"pipeline\" ]]; then touch \"{marker.as_posix()}\"; fi\nexit 0\n",
+        encoding="utf-8",
+    )
+
+    script = f"""
+export PATH="{fake_bin.as_posix()}:$PATH"
+merge_pr_base_branch() {{ :; }}
+_path_filter_get_changed_files() {{ printf 'lmcache/v1/cache_engine.py\\n'; }}
+bash "{(scripts_dir / 'upload-pipeline.sh').as_posix()}" "{pipeline_rel}"
+"""
+    env = os.environ.copy()
+    env.update(
+        {
+            "BUILDKITE_PULL_REQUEST": "42",
+            "BUILDKITE_PULL_REQUEST_LABELS": labels,
+            "BUILDKITE_PULL_REQUEST_BASE_BRANCH": "dev",
+        }
+    )
+    proc = subprocess.run([bash, "-c", script], env=env, check=False)
+    assert proc.returncode == 0
+    assert marker.exists() is expected_uploaded
