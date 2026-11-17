@@ -832,6 +832,42 @@ def test_unregistered_operation_returns_remote_error() -> None:
         server.close()
 
 
+def test_serialized_handler_error_returns_remote_error() -> None:
+    """A failing serialized handler must fail promptly without poisoning later
+    requests."""
+
+    def failing_noop() -> str:
+        raise RuntimeError("noop exploded")
+
+    def get_chunk_size() -> int:
+        return 256
+
+    server_url = f"tcp://127.0.0.1:{_unused_tcp_port()}"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    server.add_handler("noop", HandlerType.SERIALIZED, failing_noop)
+    server.add_handler("get_chunk_size", HandlerType.SERIALIZED, get_chunk_size)
+    server.start()
+
+    client = MessageQueueClient(server_url, context)
+    try:
+        failed: MessagingFuture[str] | MessagingStream[str] = client.submit_request(
+            "noop", []
+        )
+        assert isinstance(failed, MessagingFuture)
+        with pytest.raises(MPRequestError, match="handler_error.*noop exploded"):
+            failed.result(timeout=1)
+
+        healthy: MessagingFuture[int] | MessagingStream[int] = client.submit_request(
+            "get_chunk_size", []
+        )
+        assert isinstance(healthy, MessagingFuture)
+        assert healthy.result(timeout=1) == 256
+    finally:
+        client.close()
+        server.close()
+
+
 def test_blocking_handler_value_error_returns_remote_error() -> None:
     """A rejected request must fail promptly without poisoning later requests."""
 
