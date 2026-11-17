@@ -114,7 +114,10 @@ def test_heavy_pipeline_prunes_noop_skip_sglang_variants() -> None:
 
     restart_steps = [s for lbl, s in by_label.items() if "/ restart_recovery /" in lbl]
     assert len(restart_steps) == 1
-    assert restart_steps[0]["matrix"]["setup"]["inference_engine"] == ["vllm"]
+    assert restart_steps[0]["matrix"]["setup"]["inference_engine"] == [
+        "vllm",
+        "sglang",
+    ]
 
     preempt_steps = [
         s for lbl, s in by_label.items() if "/ lm_eval_preemption /" in lbl
