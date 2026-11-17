@@ -51,7 +51,7 @@ concrete wrappers, and `to_tensor()` does the right thing.
 ## Sender-side validation
 
 `RawCudaIPCWrapper.__init__` calls `assert_contiguous` (from
-`gpu_connector/utils.py`) instead of permuting. TRT-LLM allocates the
+`common/utils.py`) instead of permuting. TRT-LLM allocates the
 pool contiguously, so the only valid recovery from a non-contiguous
 input is "the sender did something wrong" — surface it loudly rather
 than silently `.contiguous()`-ing and copying GBs of KV cache.

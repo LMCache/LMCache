@@ -4,7 +4,6 @@ name: Aerospike integration
 on:
   push:
     branches:
-      - "dev"
       - "release-**"
     paths:
       - "csrc/storage_backends/aerospike/**"

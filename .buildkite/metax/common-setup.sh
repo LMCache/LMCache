@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Shared environment setup for both the PR smoke-test and the post-merge full
-# unit-test run on the "metax-maca" bare-metal queue. Sourced, not executed
-# directly -- both run-smoke-tests.sh and run-unit-tests.sh `source` this
-# before their respective pytest invocations, so a change to how the venv,
-# MACA SDK env, or install steps work only needs to happen in one place.
+# Shared environment setup for both the PR smoke test and the manually
+# triggered full unit-test run on the "metax-maca" bare-metal queue. Sourced,
+# not executed directly -- both run-smoke-tests.sh and run-unit-tests.sh
+# `source` this before their respective pytest invocations, so a change to how
+# the venv, MACA SDK env, or install steps work only needs to happen in one place.
 set -euo pipefail
 
 echo "$PWD" # for debugging

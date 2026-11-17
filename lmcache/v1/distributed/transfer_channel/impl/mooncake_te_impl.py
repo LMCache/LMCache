@@ -109,16 +109,20 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
         self,
         local_addresses: list[TransferChannelAddress],
         remote_addresses: list[TransferChannelAddress],
+        local_region: int | None = None,
     ) -> int:
         """Submit a read transfer from the remote addresses to the local addresses.
 
         Args:
             local_addresses: The local addresses to read into.
             remote_addresses: The remote addresses to read from.
+            local_region: Must be None (L1).
 
         Returns:
             A unique task ID for this transfer.
         """
+        if local_region is not None:
+            raise ValueError("mooncake_te only reads into the L1 buffer")
         return self._submit_transfer("READ", local_addresses, remote_addresses)
 
     def submit_write(
@@ -451,6 +455,7 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
     def get_transfer_channel_address(
         self,
         lmcache_addresses: list[tuple[int, int]],
+        region: int | None = None,
     ) -> list[TransferChannelAddress]:
         """
         Validate the given LMCache addresses (offset, size) against the
@@ -459,11 +464,14 @@ class MooncakeTeTransferChannelContext(TransferChannelContext):
         Args:
             lmcache_addresses: List of (offset, size) tuples representing the LMCache
                 addresses.
+            region: Must be None (L1).
 
         Returns:
             A list of TransferChannelAddress corresponding to the given LMCache
             addresses.
         """
+        if region is not None:
+            raise ValueError("mooncake_te only reads into the L1 buffer")
         size = self._l1_memory_desc.size
         out = []
         for offset, obj_size in lmcache_addresses:

@@ -19,8 +19,8 @@ from lmcache.v1.client.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
 )
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import current_device_spec
 

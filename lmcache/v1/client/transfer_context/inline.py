@@ -18,7 +18,7 @@ from lmcache.v1.client.transfer_context.tensor_wire import (
     encode_grouped_tensors,
     encode_tensors,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.transport.base import RequestClient
 
 

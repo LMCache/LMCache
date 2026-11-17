@@ -80,6 +80,11 @@ P2P is enabled per server by the ``--p2p-advertise-url`` flag. The relevant
      - Address the transfer-channel server binds to. Defaults to
        ``--p2p-advertise-url``; set it to bind ``0.0.0.0`` while advertising a
        routable IP.
+   * - ``--p2p-rpc-port PORT``
+     - Independent P2P gRPC control port, bound on ``--host`` (default ``0``:
+       OS-assigned). Pin and allow this port when a firewall, Docker port
+       mapping, or NetworkPolicy restricts reachable ports; allowing only
+       the worker ``--port`` is insufficient.
    * - ``--p2p-lookup-timeout SECONDS``
      - Deadline for a peer lookup before it counts as a miss (default ``30``).
    * - ``--p2p-load-timeout SECONDS``
@@ -146,12 +151,13 @@ Running a multi-node deployment
 The example below brings up a two-node fleet. Adding more nodes is just more
 copies of the per-node step, all pointing at the same coordinator.
 
-**Step 1 — start the coordinator** (on a host all nodes can reach, here
+**Step 1 — start the coordinator** on a host all nodes can reach. Replace
+``<COORDINATOR_IP>`` with a routable address on that host (for example,
 ``10.0.0.1``):
 
 .. code-block:: bash
 
-   lmcache coordinator --host 0.0.0.0 --port 9300
+   lmcache coordinator --host <COORDINATOR_IP> --port 9300
 
 **Step 2 — on each node, start the LMCache server with P2P enabled.** Replace
 ``<NODE_IP>`` with that node's routable address (e.g. ``10.0.0.2``,
@@ -166,6 +172,7 @@ copies of the per-node step, all pointing at the same coordinator.
        --l1-align-bytes 65536 \
        --coordinator-url http://10.0.0.1:9300 \
        --coordinator-advertise-ip <NODE_IP> \
+       --p2p-rpc-port 9555 \
        --p2p-advertise-url <NODE_IP>:8500
 
 ``--coordinator-advertise-ip`` is the address peers use to reach this node's
@@ -207,7 +214,7 @@ coordinator. This is the recommended way to develop and debug P2P.
 .. code-block:: bash
 
    # Terminal 1 — coordinator
-   lmcache coordinator --host 0.0.0.0 --port 9300
+   lmcache coordinator --host 127.0.0.1 --port 9300
 
    # Terminal 2 — node "A": LMCache server
    lmcache server \

@@ -557,7 +557,7 @@ Eviction
    * - ``eviction.policy``
      - ``LRU``
      - ``LRU`` or ``noop``.  Use ``noop`` with ``l2Backend.storePolicy: skip_l1``
-       for buffer-only mode.
+       and ``l2Backend.prefetchPolicy: skip_l1`` for buffer-only mode.
    * - ``eviction.triggerWatermark``
      - ``0.8``
      - Usage ratio (0.0--1.0] to trigger eviction.
