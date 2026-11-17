@@ -180,7 +180,7 @@ _path_filter_should_skip_for_pipeline() {
 _path_filter_pipeline_kind() {
     case "$1" in
         *k3_tests/unit/pipeline.yml) echo unit ;;
-        *k3_tests/multiprocess/pipeline.yml|*k3_tests/multiprocess/smoke-pipeline.yml) echo multiprocess ;;
+        *k3_tests/multiprocess/pipeline.yml) echo multiprocess ;;
         *k3_tests/blend/pipeline.yml) echo blend ;;
         *k3_tests/xpu/*/pipeline.yml) echo xpu ;;
         *k3_tests/musa/pipeline.yml) echo musa ;;

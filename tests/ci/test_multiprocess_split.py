@@ -196,6 +196,7 @@ def _find_bash() -> str | None:
     ],
 )
 def test_should_skip_multiprocess_heavy_rules(
+    tmp_path: Path,
     env_overrides: dict[str, str],
     changed_files: str,
     expected_skip: bool,
@@ -205,9 +206,13 @@ def test_should_skip_multiprocess_heavy_rules(
     if bash is None:
         pytest.skip("Git Bash / bash not available")
 
-    pf = PATH_FILTER_SCRIPT.as_posix()
+    clean_pf = tmp_path / "path-filter.sh"
+    clean_pf.write_text(
+        PATH_FILTER_SCRIPT.read_text(encoding="utf-8").replace("\r\n", "\n"),
+        encoding="utf-8",
+    )
     script = f"""
-source <(tr -d '\\r' < "{pf}")
+source "{clean_pf.as_posix()}"
 _path_filter_get_changed_files() {{ printf '%s\\n' "{changed_files}"; }}
 should_skip_multiprocess_heavy ".buildkite/k3_tests/multiprocess/pipeline.yml"
 """
