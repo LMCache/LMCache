@@ -41,7 +41,7 @@ from lmcache.v1.transport.futures import MessagingStream
 
 _KIND_LOST = "lost"
 _TOKEN_BINDING_CACHE_SIZE = 65536
-_ChunkKey = tuple[str, int, str, bytes]
+_ChunkKey = tuple[str, int, str, bytes, tuple[tuple[str, str], ...]]
 
 
 def _chunk_key(key: ObjectKey) -> _ChunkKey:
@@ -51,6 +51,7 @@ def _chunk_key(key: ObjectKey) -> _ChunkKey:
         ObjectKey.WorldSizeFromKVRank(key.kv_rank),
         key.cache_salt,
         key.chunk_hash,
+        tuple(sorted(key.identity.tags.items())),
     )
 
 
@@ -102,16 +103,16 @@ class CommittedKVResidency:
             Different L1 tags may supply different required objects.
         """
         world_size = ObjectKey.WorldSizeFromKVRank(key.kv_rank)
-        groups = self._layouts.find_group_layout_descs(key.model_name, world_size)
+        groups = self._layouts.find_group_layout_descs(
+            key.model_name, world_size, key.identity.tags.get("kv_format", "")
+        )
         if not world_size or not groups:
             return False
         return all(
             ObjectKey(
-                key.chunk_hash,
-                key.model_name,
-                ObjectKey.ComputeKVRank(world_size, rank, world_size, rank),
-                group,
-                key.cache_salt,
+                identity=key.identity,
+                kv_rank=ObjectKey.ComputeKVRank(world_size, rank, world_size, rank),
+                object_group_id=group,
             )
             in self._owners
             for rank in range(world_size)

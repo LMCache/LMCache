@@ -214,7 +214,7 @@ def test_gpu_reap_two_tier_windows() -> None:
     assert module.tracked_instance_count() == 2
     cast(
         MagicMock, module._ctx.layout_desc_registry.unregister
-    ).assert_called_once_with("m", 1)
+    ).assert_called_once_with("m", 1, "")
 
 
 def test_gpu_unregister_cleans_up() -> None:
@@ -226,7 +226,7 @@ def test_gpu_unregister_cleans_up() -> None:
     assert module.tracked_instance_count() == 0
     cast(
         MagicMock, module._ctx.layout_desc_registry.unregister
-    ).assert_called_once_with("m", 1)
+    ).assert_called_once_with("m", 1, "")
 
     module.unregister_kv_cache(1)  # already gone -> no exception
 

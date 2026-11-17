@@ -209,6 +209,7 @@ class ContextEntry:
             PING. Selects the reap window (timeout vs registration grace).
             Latched only by PING, never by traffic.
         event_backend: Cached event backend selected for this context's device.
+        cache_format: Opaque precision token selecting this registration's layout.
     """
 
     cache_context: BaseCacheContext
@@ -217,6 +218,7 @@ class ContextEntry:
     last_seen: float = 0.0
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
+    cache_format: str = ""
 
 
 class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
@@ -459,7 +461,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         for entry in entries:
             entry.cache_context.close()
             self._ctx.layout_desc_registry.unregister(
-                entry.model_name, entry.world_size
+                entry.model_name, entry.world_size, entry.cache_format
             )
         del entry
         entries.clear()
@@ -524,6 +526,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
+        cache_format: str = "",
     ) -> None:
         """Register the KV cache tensors for a given GPU instance ID.
 
@@ -539,6 +542,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 GPUCacheContext for GPU KV format detection.
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
+            cache_format: Configured KV precision identity; empty selects
+                legacy layouts, matching requests without a precision tag.
         """
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering
@@ -595,6 +600,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             shard_replication_desc=_fold_shard_replication_desc(
                 kv_groups_manager.object_groups, engine_group_infos
             ),
+            cache_format=cache_format,
         )
 
         with self._lock:
@@ -605,6 +611,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
+                cache_format=cache_format,
             )
 
         logger.info(

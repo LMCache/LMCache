@@ -363,7 +363,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         for entry in entries:
             entry.cache_context.close()
             self._ctx.layout_desc_registry.unregister(
-                entry.model_name, entry.world_size
+                entry.model_name, entry.world_size, entry.cache_format
             )
         del entry
         entries.clear()
@@ -409,27 +409,30 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         registry), for the engine's KV models and the Q rings alike.
 
         Returns:
-            One entry per registered ``(model_name, world_size)``: its object
-            groups' kind, window in chunks, and one chunk's tensor shapes and
-            dtypes.
+            One entry per model/world-size/precision namespace: the format
+            token (empty for legacy layouts), object groups' kind, window in
+            chunks, and one chunk's tensor shapes and dtypes.
         """
         entries = list(self.context_entries_snapshot().values())
         if self._kv_module is not None:
             entries += self._kv_module.context_entries_snapshot().values()
         registry = self._ctx.layout_desc_registry
         layouts = []
-        for model_name, world_size in sorted(
-            {(e.model_name, e.world_size) for e in entries}
+        for model_name, world_size, cache_format in sorted(
+            {(e.model_name, e.world_size, e.cache_format) for e in entries}
         ):
-            group_layouts = registry.find_group_layout_descs(model_name, world_size)
+            group_layouts = registry.find_group_layout_descs(
+                model_name, world_size, cache_format
+            )
             if group_layouts is None:
                 continue
-            attn_desc = registry.find_attn_desc(model_name, world_size)
+            attn_desc = registry.find_attn_desc(model_name, world_size, cache_format)
             kinds = attn_desc.group_kinds or ("attention",) * len(group_layouts)
             layouts.append(
                 {
                     "model_name": model_name,
                     "world_size": world_size,
+                    "cache_format": cache_format,
                     "object_groups": [
                         {
                             "object_group_idx": group_id,
@@ -466,6 +469,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
+        cache_format: str = "",
     ) -> None:
         """Register the paged Q ring tensors for a given worker instance ID.
 
@@ -480,6 +484,8 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                 GPUCacheContext for GPU KV format detection.
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
+            cache_format: Configured precision identity shared with the
+                worker's KV registration; empty selects legacy layouts.
         """
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering
@@ -515,7 +521,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         kv_groups_manager = cache_context.kv_layer_groups_manager
         attn_desc = kv_groups_manager.get_attn_desc()
         self._ctx.layout_desc_registry.register(
-            model_name, world_size, layout_desc, attn_desc
+            model_name, world_size, layout_desc, attn_desc, cache_format=cache_format
         )
 
         with self._lock:
@@ -526,6 +532,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
+                cache_format=cache_format,
             )
             self._q_rings[instance_id] = _QRingState(
                 q_caches=list(q_caches),

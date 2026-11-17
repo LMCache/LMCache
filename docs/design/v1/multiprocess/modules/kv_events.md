@@ -12,7 +12,7 @@ owners. `L1_KEYS_EVICTED` removes only the named L1 owner. Reservations, token
 bindings, and GPU STORE submission do not establish residency. Missing or empty
 registered geometry cannot establish readiness.
 
-For each `(model_name, world_size, cache_salt, chunk_hash)`:
+For each `(model_name, world_size, cache_salt, chunk_hash, matching_tags)`:
 
 | Change | Published event |
 | --- | --- |
@@ -23,7 +23,9 @@ For each `(model_name, world_size, cache_salt, chunk_hash)`:
 | The missing object is committed again | Stored |
 
 Different L1 managers may supply different required objects. Distinct models,
-world sizes, salts, and object groups cannot satisfy each other's requirements.
+world sizes, salts, matching tags, and object groups cannot satisfy each other's
+requirements. Precision-tagged keys select their registered layout using
+`kv_format`; required rank/group keys preserve the complete matching identity.
 Owner entries disappear when their last copy is evicted. Announcement state
 disappears when a chunk loses readiness. The existing token cache and event log
 remain bounded by their existing limits.
@@ -46,7 +48,8 @@ This implements the residency step of [issue #5932](https://github.com/LMCache/L
 The wire format, chunk hashes, token bindings, elected worker subscription, and
 engine publication hooks remain the existing contract. Native block identities,
 scheduler-side subscription, and idle engine publication belong to later steps.
-The legacy wire does not distinguish salts or parallel setups for a shared model;
+The legacy wire does not distinguish salts, matching tags, or parallel setups
+for a shared model;
 separate ownership scopes prevent mixed-shard completeness but do not solve
 router identity collisions. The supported routing profile uses one unsalted
 parallel setup per model and full-attention object groups.

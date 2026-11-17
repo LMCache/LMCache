@@ -54,6 +54,7 @@ class RequestClient(Protocol):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
+        cache_format: str = "",
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
@@ -69,6 +70,7 @@ class RequestClient(Protocol):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
+        cache_format: str = "",
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
