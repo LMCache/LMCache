@@ -270,12 +270,16 @@ Importing `nixl` loads the `libnixl` matching torch's CUDA, and the dynamic
 loader resolves the wheel's SONAME dependency to that loaded copy. When both
 fail, the error names `pip install "lmcache[nixl]==<version>"` (release
 versions only) and the source build settings, and includes both import
-errors. A connector loaded from the `lmcache-nixl` wheel must have
-`lmcache`'s version when both are releases: its pybind API (constructor
-arguments, the `drain_completions` tuple) follows `lmcache`, and the extra's
-pin applies only when `[nixl]` is requested, so `pip install -U lmcache` can
-leave an older connector behind. A wheel built from a checkout keeps the
-placeholder version `0.0.0.dev0` and is not checked.
+errors. A connector loaded from the `lmcache-nixl` wheel must export the
+`API_VERSION` the adapter expects (`NIXL_CONNECTOR_API_VERSION`). Its pybind
+API (constructor arguments, the `drain_completions` tuple) has to match the
+adapter, and the extra's pin applies only when `[nixl]` is requested, so
+`pip install -U lmcache` can leave an older connector behind. Comparing an API
+number rather than package versions also covers development builds and allows
+any two versions with the same API. The cost is a rule: bump `API_VERSION` in
+`csrc/storage_backends/nixl/pybind.cpp` and `NIXL_CONNECTOR_API_VERSION`
+together whenever the constructor or `LMCACHE_BIND_CONNECTOR_METHODS`
+(`connector_pybind_utils.h`) changes.
 
 Runtime status exposes only the backend name, inferred storage type, workers,
 FILE path, direct-I/O choice, and inferred strategy capabilities. The opaque

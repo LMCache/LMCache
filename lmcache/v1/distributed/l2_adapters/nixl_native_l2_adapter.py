@@ -6,7 +6,6 @@ from __future__ import annotations
 
 # Standard
 from typing import TYPE_CHECKING, Any
-import importlib.metadata
 import re
 
 if TYPE_CHECKING:
@@ -26,6 +25,10 @@ from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_facto
 logger = init_logger(__name__)
 
 _BACKEND_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
+# The lmcache_nixl Python API this adapter is written against. It must equal the
+# module's API_VERSION (csrc/storage_backends/nixl/pybind.cpp); bump both
+# together.
+NIXL_CONNECTOR_API_VERSION = 1
 # The versions lmcache-nixl is published at. The pattern is also in setup.py
 # and .github/scripts/stamp_nixl_version.sh.
 _RELEASE_VERSION = re.compile(r"\d+\.\d+\.\d+((a|b|rc)\d+)?(\.post\d+)?")
@@ -59,8 +62,9 @@ def load_nixl_client_class() -> type:
 
     Raises:
         RuntimeError: If neither module loads, or if the ``lmcache-nixl``
-            wheel and ``lmcache`` are different release versions; the message
-            says how to install the matching connector.
+            wheel's ``API_VERSION`` differs from
+            ``NIXL_CONNECTOR_API_VERSION``; the message says how to install the
+            matching connector.
     """
     # First Party
     from lmcache import __version__
@@ -85,7 +89,7 @@ def load_nixl_client_class() -> type:
 
         # isort: split
         # Third Party
-        from lmcache_nixl import LMCacheNixlClient
+        import lmcache_nixl
     except ImportError as exc:
         # Only release versions have a matching lmcache-nixl on PyPI.
         how = f"Install it with {install}, or build" if is_release else "Build"
@@ -96,21 +100,21 @@ def load_nixl_client_class() -> type:
             f"with: {source_error}; importing nixl and lmcache_nixl failed "
             f"with: {exc}"
         ) from exc
-    # The connector's Python API follows lmcache's, and the extra's pin
-    # applies only when [nixl] is requested, so an upgrade can leave an older
-    # connector behind. A connector built from a checkout keeps the
-    # placeholder version and is not checked.
-    connector_version = importlib.metadata.version("lmcache-nixl")
-    if (
-        is_release
-        and _RELEASE_VERSION.fullmatch(connector_version)
-        and connector_version != __version__
-    ):
-        raise RuntimeError(
-            f"lmcache-nixl {connector_version} does not match lmcache "
-            f"{__version__}. Install the matching connector with {install}."
+    # lmcache-nixl is a separate package, and the extra's pin applies only when
+    # [nixl] is requested, so it can be older or newer than this lmcache.
+    api_version = getattr(lmcache_nixl, "API_VERSION", None)
+    if api_version != NIXL_CONNECTOR_API_VERSION:
+        fix = (
+            f"Install the matching connector with {install}"
+            if is_release
+            else "Rebuild lmcache-nixl from this LMCache checkout "
+            "(csrc/storage_backends/nixl)"
         )
-    return LMCacheNixlClient
+        raise RuntimeError(
+            f"lmcache_nixl provides connector API {api_version}, but lmcache "
+            f"{__version__} needs {NIXL_CONNECTOR_API_VERSION}. {fix}."
+        )
+    return lmcache_nixl.LMCacheNixlClient
 
 
 class NixlNativeL2AdapterConfig(L2AdapterConfigBase):

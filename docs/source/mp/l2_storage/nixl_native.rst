@@ -32,9 +32,9 @@ Elsewhere, install LMCache with the ``nixl`` extra (Python 3.10 to 3.14):
 For a release, the extra installs the connector, published as the
 ``lmcache-nixl`` package at the same version as ``lmcache``, and the ``nixl``
 runtime. To add it to an existing installation, pin the installed version:
-``pip install "lmcache[nixl]==<installed version>"``. The adapter refuses a
-released ``lmcache-nixl`` whose version differs from ``lmcache``'s, for example
-after upgrading ``lmcache`` without the extra, and prints that command.
+``pip install "lmcache[nixl]==<installed version>"``. The adapter refuses an
+``lmcache-nixl`` built for a different connector API, for example after
+upgrading ``lmcache`` without the extra, and prints that command.
 
 ``lmcache-nixl`` is compiled against NIXL 1.3.1, tested with that and the newest
 NIXL release, and depends on ``nixl>=1.3.0,<2``. The ``nixl`` package bundles

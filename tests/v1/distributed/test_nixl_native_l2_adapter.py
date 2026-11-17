@@ -6,7 +6,6 @@ from collections.abc import Sequence
 from types import ModuleType
 import importlib.abc
 import importlib.machinery
-import importlib.metadata
 import importlib.util
 import os
 import sys
@@ -25,6 +24,7 @@ from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
 )
 from lmcache.v1.distributed.l2_adapters.nixl_native_l2_adapter import (
+    NIXL_CONNECTOR_API_VERSION,
     NixlNativeL2AdapterConfig,
 )
 import lmcache
@@ -159,9 +159,9 @@ class _ImportScenario(importlib.abc.MetaPathFinder, importlib.abc.Loader):
     ``lmcache.lmcache_nixl`` (source build) loads only when ``source_build``;
     ``lmcache_nixl`` (lmcache-nixl wheel) loads only once ``nixl`` has been
     imported, as its libnixl comes from there; importing ``nixl`` raises
-    ``nixl_error`` when set. The wheel reports ``connector_version`` as the
-    installed lmcache-nixl version (by default the placeholder of a build from
-    a checkout). Records every import attempt in ``attempts``.
+    ``nixl_error`` when set. The connector modules export ``api_version`` as
+    ``API_VERSION``, or nothing when it is ``None``. Records every import
+    attempt in ``attempts``.
     """
 
     _NAMES = ("lmcache.lmcache_nixl", "lmcache_nixl", "nixl")
@@ -170,11 +170,11 @@ class _ImportScenario(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         self,
         source_build: bool,
         nixl_error: str = "",
-        connector_version: str = "0.0.0.dev0",
+        api_version: int | None = NIXL_CONNECTOR_API_VERSION,
     ) -> None:
         self.source_build = source_build
         self.nixl_error = nixl_error
-        self.connector_version = connector_version
+        self.api_version = api_version
         self.attempts: list[str] = []
 
     def find_spec(
@@ -203,6 +203,8 @@ class _ImportScenario(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         """Populate the fake connector modules with the client class."""
         if module.__name__ != "nixl":
             module.LMCacheNixlClient = _FakeNixlClient  # type: ignore[attr-defined]
+            if self.api_version is not None:
+                module.API_VERSION = self.api_version  # type: ignore[attr-defined]
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Route the connector and nixl imports through this scenario."""
@@ -212,14 +214,6 @@ class _ImportScenario(importlib.abc.MetaPathFinder, importlib.abc.Loader):
             monkeypatch.setitem(sys.modules, name, None)
             monkeypatch.delitem(sys.modules, name)
         monkeypatch.setattr(sys, "meta_path", [self, *sys.meta_path])
-        installed_version = importlib.metadata.version
-        monkeypatch.setattr(
-            importlib.metadata,
-            "version",
-            lambda name: self.connector_version
-            if name == "lmcache-nixl"
-            else installed_version(name),
-        )
 
 
 def _obj_config() -> NixlNativeL2AdapterConfig:
@@ -254,32 +248,37 @@ def test_factory_wheel_imports_nixl_first(
 
 
 @pytest.mark.parametrize(
-    ("lmcache_version", "connector_version", "error"),
+    ("lmcache_version", "api_version", "error"),
     [
-        ("0.5.8", "0.5.8", None),
-        ("0.5.8", "0.0.0.dev0", None),
-        ("0.5.8.post1", "0.5.8.post1", None),
+        ("0.5.8", NIXL_CONNECTOR_API_VERSION, None),
         (
             "0.5.8",
-            "0.5.7",
-            r'lmcache-nixl 0\.5\.7 .*pip install "lmcache\[nixl\]==0\.5\.8"',
+            NIXL_CONNECTOR_API_VERSION + 1,
+            r"connector API \d+, but lmcache 0\.5\.8 needs "
+            r'.*pip install "lmcache\[nixl\]==0\.5\.8"',
         ),
         (
             "0.5.8.post1",
-            "0.5.8",
-            r'lmcache-nixl 0\.5\.8 .*pip install "lmcache\[nixl\]==0\.5\.8\.post1"',
+            None,
+            r'connector API None, .*pip install "lmcache\[nixl\]==0\.5\.8\.post1"',
+        ),
+        (
+            "0.5.9.dev3",
+            NIXL_CONNECTOR_API_VERSION + 1,
+            r"Rebuild lmcache-nixl from this LMCache checkout",
         ),
     ],
 )
-def test_factory_checks_wheel_version(
+def test_factory_checks_wheel_api_version(
     monkeypatch: pytest.MonkeyPatch,
     lmcache_version: str,
-    connector_version: str,
+    api_version: int | None,
     error: str | None,
 ) -> None:
-    """A released lmcache-nixl must match the lmcache release, since its API
-    follows lmcache's; a connector built from a checkout is not checked."""
-    scenario = _ImportScenario(source_build=False, connector_version=connector_version)
+    """The lmcache-nixl wheel is a separate package, so the adapter accepts it
+    only when its API_VERSION is the one it expects; a mismatch names the fix:
+    the pinned install on a release, a rebuild otherwise."""
+    scenario = _ImportScenario(source_build=False, api_version=api_version)
     scenario.install(monkeypatch)
     monkeypatch.setattr(lmcache, "__version__", lmcache_version)
 
