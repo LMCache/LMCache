@@ -371,7 +371,9 @@ class LocalValuePolicy(ProfiledEvictionPolicy, StorePolicy, L2AdapterListener):
                     victim: ObjectKey | None = None
                     if used + block_bytes > snapshot.capacity_bytes:
                         # Unknown ancestry cannot justify deleting a known parent.
-                        if len(scored) != len(residents):
+                        if len(scored) != len(residents) or any(
+                            not self._known(busy) for busy in snapshot.unavailable
+                        ):
                             continue
                         eligible = [
                             resident

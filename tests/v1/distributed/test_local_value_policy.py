@@ -222,6 +222,22 @@ def test_capacity_charges_pending_bytes_and_never_evicts_busy_keys(runtime):
     assert plan.admitted_keys == plan.victim_keys == ()
 
 
+def test_capacity_forgotten_pending_child_still_protects_resident_parent(runtime):
+    bus, _, build = runtime
+    policy = build(l2_capacity_policy="value", history_keys=2)
+    demand(bus, policy, [b"root", b"pending-child"])
+    demand(bus, policy, [b"root"])
+    for _ in range(5):
+        demand(bus, policy, [b"incoming"])
+    assert policy.profile(b"pending-child") is None
+    plan = policy.plan_capacity_admission(
+        [key(b"incoming")],
+        1,
+        capacity([b"root"], pending=1, unavailable=[b"pending-child"]),
+    )
+    assert plan.admitted_keys == plan.victim_keys == ()
+
+
 def test_capacity_replacement_preserves_resident_prefix_and_deduplicates(runtime):
     bus, _, build = runtime
     policy = build(l2_capacity_policy="value")
