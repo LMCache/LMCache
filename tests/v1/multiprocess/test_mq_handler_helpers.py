@@ -41,6 +41,7 @@ def register_kv_cache_handler(
     engine_type: EngineType,
     layout_hints: LayoutHints,
     engine_group_infos: list[EngineGroupInfo],
+    cache_format: str = "",
 ) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
@@ -54,6 +55,7 @@ def register_kv_cache_handler(
         layout_hints: Engine-provided hints dict.
         engine_group_infos: Engine-neutral KV cache group metadata,
             msgspec-decoded from the request payload.
+        cache_format: Precision identity; empty selects the legacy namespace.
 
     Returns:
         None
