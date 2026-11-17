@@ -60,9 +60,7 @@ def test_split_manifest_schema_and_tiers() -> None:
         assert REQUIRED_MANIFEST_FIELDS.issubset(entry.keys())
         assert entry["tier"] in {"pr-smoke", "heavy"}
 
-    pr_smoke_names = {
-        w["workload"] for w in workloads if w["tier"] == "pr-smoke"
-    }
+    pr_smoke_names = {w["workload"] for w in workloads if w["tier"] == "pr-smoke"}
     assert pr_smoke_names == {
         "cpu_e2e_validation",
         "cache_stats",
@@ -107,9 +105,7 @@ def test_heavy_pipeline_prunes_noop_skip_sglang_variants() -> None:
         assert len(matching) == 1
         assert matching[0]["matrix"]["setup"]["inference_engine"] == ["vllm"]
 
-    restart_steps = [
-        s for lbl, s in by_label.items() if "/ restart_recovery /" in lbl
-    ]
+    restart_steps = [s for lbl, s in by_label.items() if "/ restart_recovery /" in lbl]
     assert len(restart_steps) == 1
     assert restart_steps[0]["matrix"]["setup"]["inference_engine"] == ["vllm"]
 
