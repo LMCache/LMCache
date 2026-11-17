@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for request-transport authentication configuration."""
 
-# Standard
-import subprocess
-import sys
-import textwrap
-
 # Third Party
 import pytest
 
@@ -94,18 +89,3 @@ def test_request_client_rejects_multiple_environment_sources(
 
     with pytest.raises(ValueError, match="exactly one"):
         load_request_client_api_key()
-
-
-def test_request_client_auth_does_not_import_starlette() -> None:
-    """Request clients load transport authentication without the HTTP server stack."""
-    script = textwrap.dedent(
-        """
-        import sys
-
-        import lmcache.v1.client.transport.grpc_impl.auth
-        import lmcache.v1.transport.auth
-
-        assert "starlette" not in sys.modules
-        """
-    )
-    subprocess.run([sys.executable, "-c", script], check=True)

@@ -442,6 +442,7 @@ banned = (
     "lmcache.v1.multiprocess.transport.grpc_impl.server_base",
     "lmcache.v1.multiprocess.transport.grpc_impl.server_builder",
     "lmcache.v1.multiprocess.transport.grpc_impl.server_handlers",
+    "starlette",
 )
 
 
