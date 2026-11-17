@@ -47,19 +47,26 @@ over the same storage, where `head_size` is derived so the bytes fill the page
 exactly. `matches` requires the conv state's per-block stride to equal
 `page_size_bytes` (one scheduler block == one full padded page in memory).
 
+A Mamba V2 packed page is also handled by this rule: its conv stride 
+equals `page_size_bytes`.
+
 On some backends (e.g. vLLM-Ascend ≤ v0.29) conv and SSM are still one
 logical page per block, but they register as **two separate tensors** carved
 from a shared pool. Each tensor's per-block stride is only **that slice's**
 byte length (conv-only or ssm-only), not `page_size_bytes`, so the packed
 page reinterpretation above does not apply.
 
-A second rule then registers **one uint8 plane per slice** (conv and ssm
-stay two LMCache tensors). For each slice it keeps the same storage and only
-changes metadata: dtype `uint8` and shape
-``[num_blocks, block_size, 1, width]``, where ``block_size`` is the
-scheduler's ``kv_cache_spec.block_size`` and ``width`` is how many bytes sit
-in each "row" of that synthetic layout (`bytes_per_block / block_size`).
-That shape is what LMCache's format detector recognizes as format 17
+A second rule (mamba-slice-planes) then registers **one uint8 plane per slice** 
+(conv and ssm stay two LMCache tensors). For each slice it keeps the same 
+storage and only changes metadata: dtype `uint8` and shape
+``[num_blocks, num_slots, 1, width]``. When every payload is a multiple of
+the scheduler block, `num_slots` is `kv_cache_spec.block_size` and `width` is
+`payload_bytes / block_size`. When it is not (e.g, Qwen4 PLE `[NB, 9, 10240]`
+bf16 -> 184320 bytes under block sizes 896 or 1664) `num_slots` is
+`gcd(block_size, *payloads)` and `width` is `payload_bytes / num_slots`
+when `gcd > 1`. A gcd of 1 does not match.
+This edit is correct as long as the entire block is copied.
+The output shape is what LMCache's format detector recognizes as format 17
 (opaque sub-planes). The edit does not copy or pad bytes; the transfer kernel
 checks alignment, row size, and plane count when store/load runs.
 
@@ -172,7 +179,12 @@ view and the compression path still derives it from
 `tokens_per_block / slots_per_block`. Each layer is matched against its own
 leaf spec: GLM-5.3-Flash's MLA and indexer layers share one
 `UniformTypeKVCacheSpecs` group with different `num_states` (sparse MLA at 64
-rows and the kpool indexer at 32 under a 1152-token block).
+rows and the kpool indexer at 32 under a 1152-token block). The tile check
+compares `kernel_page_bytes * ratio` with the unpadded logical page
+(`real_page_size_bytes`, else `page_size_bytes`). On NVIDIA, AMD, and XPU a
+kernel-split contiguous MLA page has `page_size_padded` unset, so the two
+sizes are equal. vLLM-Ascend QSA compressed pages set `page_size_padded` to
+the Mamba page while the tensor stays dense at `real_page_size_bytes`.
 
 ## Startup validation
 
@@ -243,19 +255,27 @@ bijective block-id → bytes mapping. Consequences:
 ## Invariants
 
 - Edits are pure tensor views over the registered storage — never copies.
-- A sub-paged view is only produced when `kernel_page_bytes * k ==
-  spec.page_size_bytes`; any mismatch raises `ValueError` (fail loudly rather
-  than silently transfer a compressed layout).
+- A fused sub-paged attention view is only produced when
+  `kernel_page_bytes * k == spec.page_size_bytes`; any mismatch raises
+  `ValueError` (fail loudly rather than silently transfer a compressed
+  layout). Sub-paged MLA uses the same check against the unpadded logical
+  page (`real_page_size_bytes` when the spec declares it).
 - On vLLM-Ascend, a sub-paged view is also produced when `k` kernel pages tile
   the logical page: one fused or interleaved span of `spec.page_size_bytes`,
-  or the two contiguous halves added together equaling `real_page_size_bytes`
-  (falling back to `page_size_bytes` when the spec has no unpadded size). A
-  matched layout whose bytes do not tile raises `ValueError` rather than
-  transferring a compressed layout. A pair that is not one of the recognized
-  layouts is left unchanged.
+  a contiguous MLA span of `real_page_size_bytes`, or the two contiguous
+  halves added together equaling `real_page_size_bytes` (falling back to
+  `page_size_bytes` when the spec has no unpadded size). A matched layout
+  whose bytes do not tile raises `ValueError` rather than transferring a
+  compressed layout. A pair that is not one of the recognized layouts is left
+  unchanged.
 - After edits, every registered tensor's block dim equals its group's
   `kv_cache_spec.block_size`, so the server derives `compress_ratio == 1` for
   these groups.
+- Exception: a contiguous Mamba slice, such as PLE, whose state size is fixed
+  by the model and does not divide `kv_cache_spec.block_size`. A view cannot
+  give one integer-width slot per token without reading past the allocation
+  or copying, so `num_slots = gcd(block_size, *payloads)`, which still divides
+  the block, and the server stores that `slots_per_block`.
 
 ## Code map
 
