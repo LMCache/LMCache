@@ -158,8 +158,8 @@ misses, so it has to leave the matcher. Two paths remove it:
 Removing a fingerprint empties its table slot only when that chunk still
 holds the slot. The matcher's table keeps one chunk per slot, the newest
 registered to it, and several live chunks can share a slot: the same text
-stored behind different prefixes (without `--enable-dedup-content`), or a
-bucket collision. Storage evicts the older copy first, so emptying the slot
+stored behind different prefixes (without
+`--enable-dedup-content-fingerprint`), or a bucket collision. Storage evicts the older copy first, so emptying the slot
 unconditionally would hide the newer copy while it is still stored. A chunk
 that was shadowed is not restored when the holder is removed; its text
 matches again once it is stored anew.
