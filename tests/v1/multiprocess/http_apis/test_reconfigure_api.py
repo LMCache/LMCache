@@ -89,6 +89,29 @@ def _client(sm: _FakeStorageManager) -> TestClient:
     return TestClient(app)
 
 
+def test_profiled_fixed_topology_returns_structured_http_conflict():
+    from lmcache.v1.distributed.storage_manager import StorageManager
+
+    subject = object.__new__(StorageManager)
+    object.__setattr__(subject, "_fixed_l2_topology", True)
+
+    class FixedBoundary(_FakeStorageManager):
+        def reconfigure_l2_adapter(self, adapter_index, operation, payload):
+            return subject.reconfigure_l2_adapter(adapter_index, operation, payload)
+
+    with _client(FixedBoundary()) as client:
+        response = client.post(
+            "/reconfigure/dax/l2/resize",
+            json={
+                "adapter_index": 0,
+                "device_path": "/dev/daxX.X",
+                "size": "1GiB",
+            },
+        )
+    assert response.status_code == 409
+    assert "fixed calibrated" in response.json()["error"]
+
+
 def test_calls_storage_manager_without_timeout_and_without_accepted_response():
     sm = _FakeStorageManager()
     client = _client(sm)

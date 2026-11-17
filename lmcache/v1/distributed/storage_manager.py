@@ -36,6 +36,7 @@ from lmcache.v1.distributed.config import (
     unwrap_l2_adapter_config,
 )
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError, strerror
+from lmcache.v1.distributed.eviction_policy import CreateEvictionPolicy
 from lmcache.v1.distributed.internal_api import (
     L1ManagerInterface,
     L1OperationResult,
@@ -67,6 +68,7 @@ from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     create_prefetch_policy,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
+    StorePolicy,
     create_store_policy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import (
@@ -85,7 +87,7 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.event_bus import EventSubscriber, get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.mp_observability.trace.decorator import (
     enable_tracing,
@@ -144,6 +146,21 @@ class StorageManager:
         with ExitStack() as cleanup:
             self._event_bus = get_event_bus()
 
+            self._fixed_l2_topology = any(
+                (c.eviction or config.eviction_config).eviction_policy
+                == "ProfiledValue"
+                for c in config.l1_manager_configs
+            )
+            if self._fixed_l2_topology and (
+                len(config.l1_manager_configs) != 1
+                or len(config.l2_adapter_config.adapters) != 1
+                or config.store_policy != "default"
+            ):
+                raise ValueError(
+                    "ProfiledValue requires one L1, one fixed L2 "
+                    "and default store policy"
+                )
+
             # L1 Managers:
             self._l1_managers: list[L1ManagerInterface] = create_l1_managers(
                 config.l1_manager_configs
@@ -156,10 +173,25 @@ class StorageManager:
 
             self._write_policy = create_write_policy(config.write_policy)
 
-            # L1 Eviction:
-            self._eviction_controllers = [
-                L1EvictionController(m, m.config.eviction or config.eviction_config)
+            eviction_policies = [
+                CreateEvictionPolicy(
+                    m.config.eviction or config.eviction_config,
+                    defer_subscription=True,
+                )
                 for m in self._l1_managers
+            ]
+            shared_store_policies = [
+                policy
+                for policy in eviction_policies
+                if isinstance(policy, StorePolicy)
+            ]
+            self._eviction_controllers = [
+                L1EvictionController(
+                    m, m.config.eviction or config.eviction_config, policy=policy
+                )
+                for m, policy in zip(
+                    self._l1_managers, eviction_policies, strict=True
+                )
             ]
             for eviction_controller in self._eviction_controllers:
                 eviction_controller.start()
@@ -191,6 +223,10 @@ class StorageManager:
                 cleanup.callback(adapter.close)
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
+            for shared_policy in shared_store_policies:
+                if isinstance(shared_policy, L2AdapterListener):
+                    for adapter in self._l2_adapters.values():
+                        adapter.register_listener(shared_policy)
 
             PeriodicEventNotifier.create(
                 interval_ms=config.periodic_notifier_interval_ms,
@@ -249,7 +285,9 @@ class StorageManager:
                     manager,
                     [self._l2_adapters[d.index] for d in descriptors],
                     descriptors,
-                    create_store_policy(config.store_policy),
+                    shared_store_policies[0]
+                    if shared_store_policies
+                    else create_store_policy(config.store_policy),
                 )
                 self._store_controllers[manager.l1_manager_id] = controller
                 controller.start()
@@ -280,6 +318,10 @@ class StorageManager:
                 ),
                 self.get_l2_usages,
             )
+            for shared_policy in shared_store_policies:
+                self._event_bus.register_subscriber(
+                    cast(EventSubscriber, shared_policy)
+                )
             cleanup.pop_all()
 
     # External APIs for serving engine integration code to call
@@ -961,6 +1003,12 @@ class StorageManager:
         self._publish_capacity_changed()
         return status
 
+    def _require_mutable_l2(self) -> None:
+        if self._fixed_l2_topology:
+            raise L2ReconfigureError(
+                409, "ProfiledValue has a fixed calibrated L2 topology"
+            )
+
     def _single_region_adapter_names(self) -> list[str]:
         """Return type names of registered L2 adapters needing one L1 region.
 
@@ -1088,6 +1136,7 @@ class StorageManager:
         Returns:
             JSON-serializable operation result.
         """
+        self._require_mutable_l2()
         with self._lifecycle_lock if operation in ("add", "resize") else nullcontext():
             adapter = self._get_reconfigurable_l2_adapter(adapter_index)
             result = adapter.reconfigure(
@@ -1116,6 +1165,7 @@ class StorageManager:
                 more than one Device-DAX arena, or a DAX device is already
                 mapped by L1 or another L2 adapter.
         """
+        self._require_mutable_l2()
         with self._lifecycle_lock:
             # Mirror of the check in add_l1_devdax_device: a single-region
             # adapter may only be added while L1 is exactly one memory region.
@@ -1179,6 +1229,7 @@ class StorageManager:
                 status, touches and capacity exclude it); it stays only in
                 the registry, so a retry skips the drain and closes it again.
         """
+        self._require_mutable_l2()
         with self._lifecycle_lock:
             if adapter_id not in self._l2_adapters:
                 raise ValueError(f"No L2 adapter with id {adapter_id}")

@@ -129,7 +129,7 @@ def _parse_l1_common(
             "eviction must contain policy, watermark and ratio settings only"
         )
     policy = raw.get("eviction_policy", defaults.eviction_policy if defaults else None)
-    if policy not in ("LRU", "ARC", "IsolatedLRU", "noop"):
+    if policy not in ("LRU", "ARC", "IsolatedLRU", "noop", "Profiled", "ProfiledValue"):
         raise ValueError("An eviction policy is required for each L1")
     eviction = replace(defaults or EvictionConfig(policy), **raw)
     for name in ("trigger_watermark", "eviction_ratio"):
@@ -438,7 +438,9 @@ class EvictionConfig:
     The configuration for eviction policies (L1 and optionally L2).
     """
 
-    eviction_policy: Literal["LRU", "ARC", "IsolatedLRU", "noop"]
+    eviction_policy: Literal[
+        "LRU", "ARC", "IsolatedLRU", "noop", "Profiled", "ProfiledValue"
+    ]
     """ The eviction policy to use. """
 
     trigger_watermark: float = field(default=0.8)
@@ -452,6 +454,9 @@ class EvictionConfig:
 
     extra_logging_interval: float = field(default=10.0)
     """ Seconds between L1 memory usage log lines when extra logging is enabled. """
+
+    profiling_config: str = ""
+    """Calibration JSON path for experimental Profiled retention; unused otherwise."""
 
 
 @dataclass
@@ -981,12 +986,18 @@ def add_storage_manager_args(
     eviction_group.add_argument(
         "--eviction-policy",
         type=str,
-        choices=["LRU", "ARC", "IsolatedLRU", "noop"],
+        choices=["LRU", "ARC", "IsolatedLRU", "noop", "Profiled", "ProfiledValue"],
         default=None,
-        help="The eviction policy to use ('LRU', 'ARC', 'IsolatedLRU', or 'noop'). "
+        help="The eviction policy to use (LRU, ARC, IsolatedLRU, noop, Profiled). "
         "'ARC' balances recent and frequently reused keys adaptively. "
         "'IsolatedLRU' maintains one LRU list per cache_salt and requires "
         "quotas keyed by cache_salt to be configured via the HTTP API.",
+    )
+    eviction_group.add_argument(
+        "--profiling-config",
+        default="",
+        help="Measured calibration JSON for experimental Profiled eviction "
+        "(requires observability).",
     )
     eviction_group.add_argument(
         "--eviction-trigger-watermark",
@@ -1111,6 +1122,7 @@ def parse_args_to_config(
             args.eviction_ratio,
             getattr(args, "enable_extra_logging", False),
             getattr(args, "extra_logging_interval", 10.0),
+            getattr(args, "profiling_config", ""),
         )
         if args.eviction_policy is not None
         else None
@@ -1237,6 +1249,7 @@ def parse_args_to_config(
         eviction_ratio=args.eviction_ratio,
         extra_logging_enabled=getattr(args, "enable_extra_logging", False),
         extra_logging_interval=getattr(args, "extra_logging_interval", 10.0),
+        profiling_config=getattr(args, "profiling_config", ""),
     )
 
     l2_adapter_config = parse_args_to_l2_adapters_config(args)

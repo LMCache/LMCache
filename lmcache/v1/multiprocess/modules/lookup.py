@@ -268,6 +268,8 @@ class LookupModule(DiscoverableModule):
                         "chunk_hashes": chunk_hashes,
                         "model_name": model_name,
                         "chunk_size": self._ctx.chunk_size,
+                        "cache_salt": key.cache_salt,
+                        "world_size": world_size,
                         "seq_len": key.num_tokens,
                         "dtypes": [str(d) for d in layout_desc.dtypes],
                         "shapes": [list(s) for s in layout_desc.shapes],

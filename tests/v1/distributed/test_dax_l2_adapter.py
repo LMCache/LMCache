@@ -630,6 +630,7 @@ def _wire_capacity_publishing(sm: StorageManager) -> None:
     Args:
         sm: The partially-constructed storage manager to wire up.
     """
+    sm._fixed_l2_topology = False
     sm._lifecycle_lock = threading.Lock()
     sm._capacity_publish_lock = threading.Lock()
     sm._event_bus = cast(EventBus, _RecordingBus())
