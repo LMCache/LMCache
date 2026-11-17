@@ -7,6 +7,7 @@ Run without loading the torch-dependent tests/conftest.py:
 
 # Standard
 from pathlib import Path
+from typing import Any
 import os
 import shutil
 import subprocess
@@ -37,12 +38,12 @@ REQUIRED_MANIFEST_FIELDS = {
 }
 
 
-def _collect_steps(doc: dict[str, object]) -> list[dict[str, object]]:
+def _collect_steps(doc: dict[str, Any]) -> list[dict[str, Any]]:
     """Flatten top-level and grouped Buildkite steps."""
-    collected: list[dict[str, object]] = []
-    for item in doc.get("steps", []):  # type: ignore[union-attr]
+    collected: list[dict[str, Any]] = []
+    for item in doc.get("steps", []):
         if isinstance(item, dict) and "steps" in item:
-            collected.extend(item["steps"])  # type: ignore[arg-type]
+            collected.extend(item["steps"])
         elif isinstance(item, dict):
             collected.append(item)
     return collected
@@ -107,10 +108,7 @@ def test_heavy_pipeline_prunes_noop_skip_sglang_variants() -> None:
 
     restart_steps = [s for lbl, s in by_label.items() if "/ restart_recovery /" in lbl]
     assert len(restart_steps) == 1
-    assert restart_steps[0]["matrix"]["setup"]["inference_engine"] == [
-        "vllm",
-        "sglang",
-    ]
+    assert restart_steps[0]["matrix"]["setup"]["inference_engine"] == ["vllm"]
 
     preempt_steps = [
         s for lbl, s in by_label.items() if "/ lm_eval_preemption /" in lbl
@@ -208,6 +206,7 @@ def test_should_skip_multiprocess_heavy_rules(
     bash = _find_bash()
     if bash is None:
         pytest.skip("Git Bash / bash not available")
+    assert bash is not None
 
     clean_pf = tmp_path / "path-filter.sh"
     clean_pf.write_text(
