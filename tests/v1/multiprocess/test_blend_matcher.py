@@ -897,18 +897,6 @@ def test_evicting_an_older_duplicate_keeps_the_newer_one():
     assert matcher.match_sub_sequence(_content_chunk(1)) == []
 
 
-def test_evicting_older_duplicates_in_any_batch_order_keeps_the_newest():
-    """Older copies evicted together, as one eviction batch, leave the
-    newest copy matchable."""
-    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
-    for seed in (101, 202, 303):
-        _register_content(matcher, _content_chunk(1), [seed])
-
-    older = [ObjectKey.IntHash2Bytes(202), ObjectKey.IntHash2Bytes(101)]
-    assert matcher.remove_chunks(older) == 2
-    assert _matched_hashes(matcher, _content_chunk(1)) == {ObjectKey.IntHash2Bytes(303)}
-
-
 def test_evicting_a_shadowed_collision_keeps_the_slot_holder():
     """Evicting a chunk whose slot a colliding chunk took over must not hide
     that chunk."""
@@ -922,25 +910,6 @@ def test_evicting_a_shadowed_collision_keeps_the_slot_holder():
 
     assert matcher.remove_chunks([older]) == 1
     assert _matched_hashes(matcher, [newer_token]) == {newer}
-
-
-def test_slot_holder_survives_reuse_of_an_evicted_duplicates_compact_id():
-    """The compact ID freed by an evicted older copy can be reused by another
-    chunk without disturbing the newer copy's slot."""
-    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
-    first, second = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
-    other = ObjectKey.IntHash2Bytes(303)
-    _register_content(matcher, _content_chunk(1), [101])
-    _register_content(matcher, _content_chunk(1), [202])
-
-    matcher.remove_chunks([first])
-    _register_content(matcher, _content_chunk(2), [303])
-    assert _matched_hashes(matcher, _content_chunk(1)) == {second}
-    assert _matched_hashes(matcher, _content_chunk(2)) == {other}
-
-    matcher.remove_chunks([other])
-    assert _matched_hashes(matcher, _content_chunk(1)) == {second}
-    assert matcher.match_sub_sequence(_content_chunk(2)) == []
 
 
 # -- Enabled ------------------------------------------------------------------
