@@ -1,5 +1,41 @@
 # Memory orchestrator
 
+## Private resource pooling
+
+`pooling.py` provides a separate control workflow for existing private L1/L2
+DAX backends. It does not use the shared-region object state machine below.
+`MemoryPoolProvider.acquire/release` manages exclusive physical ranges;
+`MemoryPoolController.grow/shrink` uses the worker's existing HTTP hotplug APIs.
+The deployment supplies a Pangaea or other provider adapter and invokes the
+controller from its policy loop. Each worker retains its own allocator/index.
+
+```text
+grow:   provider.acquire -> worker hotplug add
+shrink: worker drain/remove -> confirmed unmapped -> provider.release
+```
+
+The controller records grants before attaching. An ambiguous HTTP result
+retains the grant and blocks further automated actions for that request;
+there is no speculative rollback release. A confirmed detached grant survives
+a provider-release failure so a retry does not touch the backend again.
+Provider request IDs include the worker incarnation; the provider must retain
+grants until explicit release and reject reuse of completed request IDs.
+
+The reconfiguration middleware checks an optional expected worker incarnation
+before dispatch and tags replies. This makes a restarted worker's empty status
+insufficient to release an older worker's memory. After an acknowledged L1
+drain, a repeated remove retries cleanup; a same-instance 404 proves that the
+previous drain already unmapped that range.
+L2 removal uses non-forced eviction and requires successful strict DAX close;
+an unmap error cannot certify removal. Backend code already publishes capacity
+changes. Controllers serialize their own operations; deployments must not
+concurrently mutate their ranges through another controller or manual hotplug.
+
+The controller and its HTTP client have deployment-owned lifetimes. No worker
+agent, scheduler, new RPC protocol, persistent journal or automatic restart
+recovery is added. On controller loss, fence the worker and reconcile retained
+provider grants offline. See the MP private-memory-pooling guide for usage.
+
 ## Scope
 
 `lmcache memory` is one process per shared memory region. It owns the
