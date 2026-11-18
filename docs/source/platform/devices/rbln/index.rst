@@ -88,6 +88,30 @@ Pinning is recommended. Without it, a process that cannot open an NPU (for
 example, because another process holds the device) falls back to the CPU stub
 without an error. With it, startup fails instead.
 
+Shared memory registration
+--------------------------
+
+For engine-driven MP transfers, the worker registers its mapping of the
+server's SHM pool with the local NPU. RBLN reports allocator-side pinning
+as unsupported, so the server uses eager SHM L1. The RBLN device ops
+allocate the server mapping without registration, preserving device
+registration capacity for the worker that performs the copies.
+
+Registration requires the public ``host_register`` and ``host_unregister``
+APIs in torch-rbln main and v0.12.1a0 and later. Older builds can use SHM
+without registration. The whole mapping must fit in the device's
+registration budget, which is shared with other live registrations on that
+device. If it does not fit, the worker warns and continues unpinned. The
+worker log reports the result as ``SHM pinned=True`` or
+``SHM pinned=False``.
+
+Registering commits the pool's pages at worker startup. Bind the worker's
+CPUs to the NPU's NUMA node to reduce startup and transfer costs. Read the
+node from ``/sys/class/rebellions/rblnN/device/numa_node``, replacing
+``N`` with the physical NPU index. Closing the transfer context drains its
+copies and requests unregister. Any registration left after a shutdown
+failure is left to process teardown.
+
 Supported KV cache layouts
 --------------------------
 

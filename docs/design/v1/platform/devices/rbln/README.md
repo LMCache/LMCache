@@ -31,6 +31,44 @@ resolves to the device spec's declared default, which `RblnDeviceSpec`
 derives from that `False` capability as engine-driven, so the default
 needs no special casing.
 
+## Shared memory registration
+
+The LMCache server creates the SHM pool and advertises it to engine-driven
+workers. The RBLN worker registers its own mapping on its current device
+when opening the transfer context. Only the worker copies KV between the
+pool and the NPU. Registering host pools in the server would open a device
+context and spend the same registration budget without serving any copies.
+RblnDeviceSpec reports allocator-side pinning as unsupported. This keeps
+the server on eager SHM L1 and leaves Device-DAX arenas unregistered.
+RblnDeviceOps invokes the base SHM allocator with registration disabled
+on the allocating thread. The base free path closes and unlinks the pool.
+The worker registers its own mapping directly through the pin backend.
+
+The backend uses the public `torch.rbln.host_register` and `host_unregister`
+APIs available on torch-rbln main and in v0.12.1a0 and later. Older builds
+keep using unregistered SHM. Registration is subject to a per-device budget
+shared by every live registration on that device; torch-rbln documents its
+limits under "Host memory registration" in `docs/CONFIGURATION.md`. The
+request must fit as a whole. When it cannot, the worker logs a warning and
+continues unpinned. Check `SHM pinned=True` or `SHM pinned=False` in the
+worker log. A direct transfer also needs a page-aligned host address and a
+range contained in a single native registration.
+
+Registration commits the pool's pages up front, so worker startup takes
+longer as the pool grows. Size the pool within the device's available
+registration budget: the runtime attempts the whole registration first and
+rolls it back when the pool does not fit, so an oversized pool also delays
+startup before the worker falls back to unpinned SHM. Bind the worker's
+CPUs to the NPU's NUMA node, as reported by
+`/sys/class/rebellions/rblnN/device/numa_node`; registration and copies are
+both slower when the worker runs on the other node.
+
+On orderly shutdown, closing the worker context drains its copies and
+requests unregister before unmapping. If unregister fails, the RBLN
+backend logs the failure and keeps its ownership record. The worker still
+closes its mapping, leaving any outstanding registration to process
+teardown.
+
 ## The 6-D KV cache
 
 This is what makes RBLN unusual. Since
