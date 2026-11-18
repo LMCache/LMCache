@@ -450,7 +450,7 @@ banned = (
     "cachetools",
     "lmcache.utils",
     "lmcache.v1.transport.futures",
-    "lmcache.v1.multiprocess.transport.base",
+    "lmcache.v1.transport.request_client",
 )
 
 
