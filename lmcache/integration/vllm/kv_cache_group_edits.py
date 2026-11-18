@@ -37,11 +37,11 @@ store. Check it again when working on any of the following:
 from __future__ import annotations
 
 # Standard
-import math
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any, TypeAlias
+import math
 
 # Third Party
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, KVCacheSpecKind
