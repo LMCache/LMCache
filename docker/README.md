@@ -18,18 +18,29 @@ This directory contains Dockerfiles for building different LMCache images. Each 
 - ✅ Optimized multi-stage build
 
 **Build Targets**:
-- `image-build`: Builds with vLLM nightly and LMCache from source
+- `image-build`: Builds LMCache from source with the vLLM chosen by
+  `VLLM_VERSION` (default: the newest vLLM release with a CUDA 13.0 build;
+  `nightly` installs vLLM main, which vLLM publishes only for CUDA 13.2)
 - `image-release`: Uses stable vLLM release and LMCache from PyPI
 
 **Usage**:
 
 ```bash
-# Build with nightly vLLM
+# Build LMCache from source with the default vLLM release
 docker build \
   --build-arg CUDA_VERSION=13.0 \
   --build-arg UBUNTU_VERSION=24.04 \
   --target image-build \
   --tag lmcache/vllm-openai:latest \
+  --file docker/Dockerfile .
+
+# Build LMCache from source with vLLM main (needs a CUDA 13.2 driver to run)
+docker build \
+  --build-arg CUDA_VERSION=13.2 \
+  --build-arg BASE_IMAGE=<a CUDA 13.2 devel image> \
+  --build-arg VLLM_VERSION=nightly \
+  --target image-build \
+  --tag lmcache/vllm-openai:vllm-main \
   --file docker/Dockerfile .
 
 # Build with stable releases

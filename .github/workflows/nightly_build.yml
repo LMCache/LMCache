@@ -440,6 +440,42 @@ jobs:
             ```
           asset_glob: dist/rbln/*.whl
 
+  # docker/Dockerfile pins vLLM to the newest release with a cu130 build
+  # (vLLM main publishes only cu132 nightlies). Warn when that pin falls behind
+  # so the nightly image does not silently keep an old vLLM.
+  check-vllm-pin:
+    name: Check vLLM pin for the cu13.0 image
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Compare the pin with the latest vLLM release
+        run: |
+          set -euo pipefail
+          pin="$(sed -nE 's/^ARG VLLM_VERSION=//p' docker/Dockerfile)"
+          standalone_pin="$(sed -nE 's/^ARG VLLM_VERSION=//p' docker/Dockerfile.standalone)"
+          if [ "${pin}" != "${standalone_pin}" ]; then
+            echo "::error::VLLM_VERSION differs: docker/Dockerfile=${pin}, docker/Dockerfile.standalone=${standalone_pin}"
+            exit 1
+          fi
+          latest="$(curl -fsSL --retry 3 https://pypi.org/pypi/vllm/json \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')"
+          echo "vLLM pin: ${pin}; latest vLLM release: ${latest}"
+          if [ "${latest}" = "${pin}" ]; then
+            exit 0
+          fi
+          if curl -fsI --retry 3 "https://wheels.vllm.ai/${latest}/cu130/vllm/" > /dev/null; then
+            echo "::warning::vLLM ${latest} has a cu130 build; bump VLLM_VERSION=${pin} in docker/Dockerfile and docker/Dockerfile.standalone."
+          else
+            echo "::warning::vLLM ${latest} has no cu130 build, so the nightly image stays on vLLM ${pin}; moving it to a newer vLLM needs CUDA 13.2 and a newer driver."
+          fi
+
   nightly-build:
     name: Build image (${{ matrix.arch }})
     strategy:

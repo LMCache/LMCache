@@ -51,7 +51,7 @@ ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 #################### vLLM IMAGE & LMCache (Build) ##########################
-# Integrate vLLM nightly build and LMCache build, and expose vLLM OpenAI API
+# Integrate vLLM and an LMCache build from source, and expose vLLM OpenAI API
 
 FROM base AS image-build
 
@@ -67,7 +67,16 @@ ARG nvcc_threads=auto
 ENV NVCC_THREADS=$nvcc_threads
 
 ARG CUDA_VERSION
-ARG VLLM_VERSION=nightly
+# vLLM to pair with LMCache. The default is the newest vLLM release with a
+# CUDA 13.0 (cu130) build, so the image runs on R580 drivers. vLLM main
+# publishes nightly wheels only for cu132 since 2026-11-10; those need a
+# CUDA 13.2 driver. Bump this when a newer release ships a cu130 build
+# (the nightly workflow warns when it does).
+# VLLM_VERSION=nightly installs vLLM main from wheels.vllm.ai/nightly/<cuda>.
+ARG VLLM_VERSION=0.34.0
+# With VLLM_VERSION=nightly, fail when the nightly index for CUDA_VERSION is
+# older than this many days, i.e. vLLM stopped building it (0 disables).
+ARG VLLM_NIGHTLY_MAX_AGE_DAYS=7
 
 RUN --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
@@ -79,22 +88,30 @@ COPY . /workspace/LMCache
 WORKDIR /workspace/LMCache
 
  
+# vLLM comes from its per-CUDA index (wheels.vllm.ai/<version or nightly>/
+# <cuda_tag>) and torch from the matching PyTorch index, so both are built for
+# CUDA_VERSION even when PyPI's default vLLM wheel targets another CUDA.
 RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
     export LMCACHE_CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
     if [ "$VLLM_VERSION" = "nightly" ]; then \
-        VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
-            'vllm[runai,tensorizer,flashinfer]' \
-            --extra-index-url https://wheels.vllm.ai/nightly/${CUDA_TAG} \
-            --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
-            --index-strategy unsafe-first-match ; \
+        VLLM_INDEX=https://wheels.vllm.ai/nightly/${CUDA_TAG} && \
+        VLLM_SPEC='vllm[runai,tensorizer,flashinfer]' && \
+        python3 .github/scripts/check_vllm_nightly_age.py \
+            "${VLLM_INDEX}" "${VLLM_NIGHTLY_MAX_AGE_DAYS}" ; \
     else \
-        VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
-            "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" ; \
+        VLLM_INDEX=https://wheels.vllm.ai/${VLLM_VERSION}/${CUDA_TAG} && \
+        VLLM_SPEC="vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" ; \
     fi && \
+    VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
+        "${VLLM_SPEC}" \
+        --extra-index-url "${VLLM_INDEX}" \
+        --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
+        --index-strategy unsafe-first-match && \
     uv pip install "nixl<2" && \
+    python3 -c 'import importlib.metadata as m; print("VLLM=", m.version("vllm"))' && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 -c 'import importlib.metadata as m; print("NIXL=", m.version("nixl"))' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
