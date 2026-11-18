@@ -157,15 +157,23 @@ def _kernel_pages_per_block(
             (:func:`group_block_size`).
 
     Returns:
-        ``k`` when ``k`` pages per block ID tile each block's tokens exactly,
-        else ``1``.
+        ``1`` when the tensor holds one page per block ID, else ``k`` when
+        ``k`` pages per block ID tile each block's tokens exactly.
+
+    Raises:
+        ValueError: If the tensor holds neither layout. Sending block IDs
+            as page IDs would then store and restore the wrong KV.
     """
-    if num_pages % num_blocks != 0:
+    if num_pages == num_blocks:
         return 1
-    pages = num_pages // num_blocks
-    if pages > 1 and page_tokens * pages == block_tokens:
+    pages, remainder = divmod(num_pages, num_blocks)
+    if remainder == 0 and page_tokens * pages == block_tokens:
         return pages
-    return 1
+    raise ValueError(
+        f"cannot map {num_blocks} vLLM block IDs of {block_tokens} tokens onto "
+        f"{num_pages} tensor pages of {page_tokens} tokens: expected one page "
+        "per block ID or whole pages tiling each block"
+    )
 
 
 def expand_block_ids_to_kernel_pages(
@@ -576,6 +584,11 @@ def create_engine_group_infos_from_vllm(
         ``(infos, pages_per_block)``: the ``EngineGroupInfo`` list in protocol
         order, i.e. the LMCache group order used by store/retrieve block IDs,
         and one ``k`` per info (``1`` except for kernel-paged groups).
+
+    Raises:
+        ValueError: If a vLLM group's tensor holds neither one page per
+            block ID nor ``k`` pages tiling each block (see
+            :func:`_kernel_pages_per_block`).
     """
     # First Party
     from lmcache.utils import EngineType

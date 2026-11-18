@@ -863,20 +863,36 @@ def test_conversion_reports_kernel_paged_manager_config_group_per_page():
     assert pages_per_block == [2]
 
 
+def test_conversion_keeps_slot_compressed_group_per_block():
+    """One page per block ID with fewer slots than tokens is slot compression,
+    not kernel paging, so tokens_per_block stays at the block size."""
+    config = MockKVCacheConfig(
+        kv_cache_groups=[
+            MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+        ],
+        num_blocks=32,
+    )
+    caches = {"layer.0": _paged_cache(num_pages=32, page_tokens=8)}
+
+    infos, pages_per_block = create_engine_group_infos_from_vllm(config, caches)
+
+    assert [info.tokens_per_block for info in infos] == [16]
+    assert pages_per_block == [1]
+
+
 @pytest.mark.parametrize(
     ("num_pages", "page_tokens"),
     [
-        # One page per block ID with fewer slots: slot compression.
-        (32, 8),
         # Two pages per block ID that do not tile its 16 tokens.
         (64, 4),
         # A page count that is not a multiple of the block-ID count.
         (48, 8),
     ],
 )
-def test_conversion_keeps_non_kernel_paged_group_per_block(num_pages, page_tokens):
-    """Only an exact tiling of each block ID by whole pages counts as kernel
-    paging; every other layout keeps tokens_per_block at the block size."""
+def test_conversion_rejects_unmappable_page_count(num_pages, page_tokens):
+    """A tensor that holds neither one page per block ID nor whole pages tiling
+    each block cannot be addressed by the IDs vLLM sends; registration fails
+    rather than storing or restoring the wrong KV."""
     config = MockKVCacheConfig(
         kv_cache_groups=[
             MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
@@ -885,10 +901,8 @@ def test_conversion_keeps_non_kernel_paged_group_per_block(num_pages, page_token
     )
     caches = {"layer.0": _paged_cache(num_pages, page_tokens)}
 
-    infos, pages_per_block = create_engine_group_infos_from_vllm(config, caches)
-
-    assert [info.tokens_per_block for info in infos] == [16]
-    assert pages_per_block == [1]
+    with pytest.raises(ValueError, match="tensor pages"):
+        create_engine_group_infos_from_vllm(config, caches)
 
 
 def test_conversion_kernel_paged_group_under_dcp():
