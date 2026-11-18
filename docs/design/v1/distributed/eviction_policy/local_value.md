@@ -78,6 +78,15 @@ StorageManager construction commits.
 
 ## Evidence
 
+The latest bounded model experiment remains **FAIL**: six of 756 responses
+disagree with the no-external-cache oracle, including warmup, and two jobs log
+an output-handler EngineDeadError during shutdown. Native partial-prefix APC
+also reproduces both alternate output sequences without LMCache; that does not
+prove LMCache payload integrity or identify a common cause. The new probability
+and capacity models have no qualified TTFT improvement claim. See the
+[enhanced validation record](../../../../../benchmarks/profiling_ttft_local/ENHANCED_RESULTS.md)
+for source versions, scope and remaining checks.
+
 See [the bounded exploratory result](../../../../../benchmarks/profiling_ttft_local/RESULTS.md).
 Its illustrative costs are **not** an accepted measured calibration. There are
 no per-signal attribution, production-workload or current-dev GPU performance
@@ -87,3 +96,20 @@ the old private constructor injection is not restored.
 See [the formula follow-up contract](value_formula_followup.md) for the ARC-first
 execution order, capacity-owner contract and acceptance tests. A fixed write
 charge is not a capacity-value watermark.
+
+## Relationship To External Policies
+
+[PR #5786](https://github.com/LMCache/LMCache/pull/5786) provides explicit
+`module:Class` loading for external StorePolicy and PrefetchPolicy classes.
+This bundled experimental policy uses the existing interfaces directly and has
+no runtime or Git ancestry dependency on that unmerged PR. Do not merge a second
+external loader here. A future external-package version should reuse #5786;
+its loader alone does not bind demand/L1 observation, share an instance across
+admission and L1 eviction, or execute owner-safe capacity replacement.
+
+The current implementation remains a local algorithm, not a general plugin
+framework. Its formula, calibration and history can move to an external package.
+Any required lifecycle/L1 extension should be proposed separately and kept
+algorithm-neutral. Hard L2 capacity can alternatively belong to an external
+adapter that owns inventory, reservations and completion. Neither externalization
+nor general multi-tier/shared-storage support is delivered by this PR.
