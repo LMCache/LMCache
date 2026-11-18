@@ -48,7 +48,7 @@ peer owns select `NicDmaEngine`, whose `stage` raises
 
 | L1 object | Engine | `stage` | Full-chunk copy path |
 |---|---|---|---|
-| Host memory (DRAM, DevDAX) | GPU DMA | host/GPU copy on the stream | `direct` when usable, else `kernel`: on the engine's lane on retrieve; native plan (or per batch without it) on store |
+| Host memory (DRAM, DevDAX) | GPU DMA | host/GPU copy on the stream | `direct` when usable, else `kernel` (native plan, or per batch without it) |
 | Storage-backed (`GDSMemoryObject`) | NVMe DMA | file read or write on the stream | `kernel`, per batch: on the engine's lane on retrieve, on the caller's stream on store |
 | Owned by a peer (`BorrowedMemoryObj`) | NIC DMA | not implemented; raises `NotImplementedError` | none |
 
@@ -72,8 +72,8 @@ every single-L1 deployment sees: the result is the same as before the split.
 `transfer_kv_per_object_group` is called once per object group. It splits
 the chunks into runs and picks each run's copy path. The direct copy and the
 native plan bypass `stage`, so only host-memory runs may take them. On
-retrieve, a staged run goes to its engine's lane when the context has a
-scatter stream (see [Load lanes and the scatter stream](#load-lanes-and-the-scatter-stream)).
+retrieve, a staged run of another engine goes to that engine's lane when the
+context has a scatter stream (see [Load lanes and the scatter stream](#load-lanes-and-the-scatter-stream)).
 
 ```mermaid
 flowchart TD
@@ -98,12 +98,13 @@ flowchart TD
     H --> D --> S --> R
     R --> G1
     G1 -->|yes| GD
-    G1 -->|no| G0
-    G0 -->|yes| P
-    G0 -->|no| G2
-    P --> ST
+    G1 -->|no| G2
     G2 -->|yes| GP
-    G2 -->|no| L
+    G2 -->|"no, host memory"| L
+    G2 -->|"no, other engine"| G0
+    G0 -->|yes| P
+    G0 -->|no| L
+    P --> ST
     L --> ST
     ST --> K
     GD --> E
@@ -143,7 +144,7 @@ the paged KV blocks). On one stream they alternate, and a slow engine holds
 up the chunks of a fast one.
 
 A context that returns a stream from `get_scatter_stream()` (CUDA does)
-gives each engine a **staging lane** (`StagingLane`): its own load stream
+gives each engine other than GPU DMA a **staging lane** (`StagingLane`): its own load stream
 and two staging banks, each the size of the context's staging buffer.
 Batches alternate between the banks, and all block kernels run on the one
 scatter stream. `dispatch.py` ties both to the caller's stream, where the
@@ -167,13 +168,15 @@ scatter stream |      (gate) | scatter b0 | scatter b1 | scatter b2  |
   stream waits for every lane the call used and for the scatter stream, also
   when the call raises: a queued load must finish before the handler
   releases the objects it reads.
-- **Unchanged.** Direct copy runs, store and the unfull tail chunk stay on
-  the caller's stream. Direct copy runs overlap with the staged runs of the
-  other engines, because the join comes at the end of the call.
+- **Host memory stays on the caller's stream** (direct copy or native
+  plan), as do store and the unfull tail chunk. Its staged copy already
+  runs near the link's rate (45-48 GiB/s of 51 on an H200), and on a lane
+  it measured no lower TTFT; a lane would cost a stream and two banks.
+  Host-memory runs still overlap with the staged runs of the other
+  engines, because the join comes at the end of the call.
 - **Cost.** A lane is created on its first staged retrieve: one stream and
   two banks of GPU memory. The NVMe lane's banks are registered with the
-  GDS library. A staged host-memory retrieve on a lane reports no
-  `MP_TRANSFER_PHASE_SAMPLES` (the native plan produces them).
+  GDS library.
 
 #### Host-thread loads (NVMe DMA)
 
@@ -375,6 +378,6 @@ moves strided 2-D rows more slowly than 1-D entries of the same size
   blocking read's split at region boundaries and the short-read error.
 - `tests/v1/multiprocess/test_direct_copy_planner_gpu.py`: a group split
   across engines gives the same bytes as one engine moving it whole, with
-  the skipped prefix in a direct or a staged run, host runs on the direct
-  copy or staged; repeated staged retrieves on one context reuse the
-  banks; storage runs loaded by the reader threads.
+  the skipped prefix in a direct or a staged run and host runs on the
+  direct copy or the native plan; repeated storage retrieves on one
+  context reuse the banks; storage runs loaded by the reader threads.

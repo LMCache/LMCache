@@ -326,9 +326,8 @@ def _mix_engines(monkeypatch, objs: list[MemoryObj], storage_first: bool) -> Non
 
 
 # ``storage_first`` puts the skipped token prefix in a staged run. ``kernel``
-# withholds the host block ids, so host-memory runs are staged with a chunk
-# range and do not take the direct copy: on the engine's lane on retrieve,
-# by the native plan on store.
+# withholds the host block ids, so host-memory runs take the native plan
+# with a chunk range and not the direct copy.
 _MIXES = [(False, "direct"), (True, "direct"), (False, "kernel"), (True, "kernel")]
 
 
@@ -372,11 +371,12 @@ def test_retrieve_mixed_engines_matches_single_engine(
 
 
 def test_repeated_retrieves_reuse_the_staging_banks(
-    allocator: LazyMemoryAllocator,
+    allocator: LazyMemoryAllocator, monkeypatch
 ):
-    """Several staged retrieves on one context, each with new objects and an
-    odd number of batches, so every bank is reused across calls: each one
-    writes the pages the direct copy writes."""
+    """Several storage retrieves on one context (the staging step replaced
+    by the host copy), each with new objects and an odd number of batches,
+    so every bank is reused across calls: each one writes the pages the
+    direct copy writes."""
     name = sorted(_CASES)[0]
     ctx, tensors = _make_context(name)
     _, _, chunk, num_chunks = _CASES[name]
@@ -394,7 +394,14 @@ def test_repeated_retrieves_reuse_the_staging_banks(
                 t.copy_(snap)
             torch_dev.synchronize()
 
-            _run(ctx, block_ids, objs, H2D, "kernel", 1, 0)
+            with monkeypatch.context() as patch:
+                patch.setattr(NvmeDmaEngine, "stage", GpuDmaEngine.stage)
+                patch.setattr(
+                    engines,
+                    "select_engine",
+                    lambda obj: engines.TransferEngine.NVME_DMA,
+                )
+                _run(ctx, block_ids, objs, H2D, "kernel", 1, 0)
             for expected, got in zip(single, tensors, strict=True):
                 assert _bitwise_equal(expected, got)
             for obj in objs:

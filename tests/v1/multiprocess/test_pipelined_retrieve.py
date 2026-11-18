@@ -316,25 +316,21 @@ def _dispatch(monkeypatch, direction, objs, direct_copy=False, staged_error=None
     return calls, cc
 
 
-def test_retrieve_stages_every_run_on_its_engines_lane(monkeypatch, stream_events):
-    """The scatter stream is gated once, and the caller's stream joins every
-    stream the call used. Only the file engine asks for file IO banks."""
-    calls, cc = _dispatch(monkeypatch, H2D, [HOST, SLAB, HOST])
+def test_retrieve_stages_storage_runs_on_a_lane(monkeypatch, stream_events):
+    """Host-memory runs keep the native plan. The scatter stream is gated
+    once, and the caller's stream joins every stream the call used."""
+    calls, cc = _dispatch(monkeypatch, H2D, [SLAB, HOST, SLAB])
     assert calls == [
-        ("staged", "gpu_dma", "gpu_dma", SCATTER),
         ("staged", "nvme_dma", "nvme_dma", SCATTER),
-        ("staged", "gpu_dma", "gpu_dma", SCATTER),
+        ("plan",),
+        ("staged", "nvme_dma", "nvme_dma", SCATTER),
     ]
     assert stream_events == [
         (CALLER, SCATTER),
-        ("gpu_dma", CALLER),
         ("nvme_dma", CALLER),
         (SCATTER, CALLER),
     ]
-    assert [call.kwargs["file_io"] for call in cc.get_staging_lane.call_args_list] == [
-        False,
-        True,
-    ]
+    cc.get_staging_lane.assert_called_once_with("nvme_dma", file_io=True)
 
 
 def test_streams_are_joined_when_the_transfer_raises(monkeypatch, stream_events):
@@ -343,15 +339,13 @@ def test_streams_are_joined_when_the_transfer_raises(monkeypatch, stream_events)
     assert stream_events[1:] == [("nvme_dma", CALLER), (SCATTER, CALLER)]
 
 
-def test_retrieve_keeps_the_direct_copy_for_host_memory(monkeypatch, stream_events):
-    calls, _ = _dispatch(monkeypatch, H2D, [HOST, SLAB], direct_copy=True)
-    assert calls == [("direct",), ("staged", "nvme_dma", "nvme_dma", SCATTER)]
-
-
-def test_call_that_stages_nothing_touches_no_stream(monkeypatch, stream_events):
-    calls, _ = _dispatch(monkeypatch, H2D, [HOST], direct_copy=True)
-    assert calls == [("direct",)]
-    assert stream_events == []
+def test_host_memory_retrieve_touches_no_stream(monkeypatch, stream_events):
+    """Neither the direct copy nor the native plan opens a scatter stream."""
+    for direct_copy in (True, False):
+        calls, cc = _dispatch(monkeypatch, H2D, [HOST], direct_copy=direct_copy)
+        assert calls == [("direct",) if direct_copy else ("plan",)]
+        assert stream_events == []
+        cc.get_scatter_stream.assert_not_called()
 
 
 def test_store_stays_on_the_callers_stream(monkeypatch, stream_events):

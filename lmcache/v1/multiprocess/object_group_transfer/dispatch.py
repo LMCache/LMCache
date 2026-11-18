@@ -75,10 +75,10 @@ def transfer_kv_per_object_group(
     selects. Runs are issued in chunk order; work the caller queues next on
     its stream runs after all of them.
 
-    Host-memory runs take the direct copy if usable. A retrieve on a context
-    with a scatter stream stages every other run on its engine's lane.
-    Otherwise host-memory runs take the native plan if the extension has it,
-    and the rest is staged one batch at a time on the caller's stream.
+    Host-memory runs take the direct copy if usable, else the native plan if
+    the extension has it. A retrieve on a context with a scatter stream
+    stages every run of another engine on that engine's lane; the rest is
+    staged one batch at a time on the caller's stream.
 
     Args:
         cache_context: Cache context of the KV cache.
@@ -100,15 +100,9 @@ def transfer_kv_per_object_group(
         ValueError: If a None entry is found on retrieve.
         NotImplementedError: If an object is owned by a peer.
     """
-    scatter_stream = (
-        cache_context.get_scatter_stream()
-        if direction == lmcache_native.TransferDirection.H2D
-        else None
-    )
     lanes: dict[TransferEngine, StagingLane] = {}
     try:
         _transfer_runs(
-            scatter_stream,
             lanes,
             cache_context,
             block_ids_gpu,
@@ -126,14 +120,16 @@ def transfer_kv_per_object_group(
         if lanes:
             device = cache_context.device
             caller_stream = platform_stream.current_stream(device)
-            for stream in (*(lane.stream for lane in lanes.values()), scatter_stream):
+            for stream in (
+                *(lane.stream for lane in lanes.values()),
+                cache_context.get_scatter_stream(),
+            ):
                 platform_stream.record_completion_event(device, stream).wait_on(
                     caller_stream
                 )
 
 
 def _transfer_runs(
-    scatter_stream: Any,
     lanes: dict[TransferEngine, StagingLane],
     cache_context: BaseCacheContext,
     block_ids_gpu: list[torch.Tensor],
@@ -145,8 +141,7 @@ def _transfer_runs(
     transfer_key: str,
     block_ids_host: Sequence[Sequence[int]],
 ) -> None:
-    """Issue every run; ``scatter_stream`` is None on the single-stream path
-    and ``lanes`` collects the lanes the call used."""
+    """Issue every run; ``lanes`` collects the lanes the call used."""
     for engine, start, end in split_into_runs(memory_objs):
         chunk_range = (start, end)
         is_host_memory = engine is TransferEngine.GPU_DMA
@@ -166,7 +161,7 @@ def _transfer_runs(
                 direction,
                 chunk_range=chunk_range,
             )
-        elif scatter_stream is None and is_host_memory and native_plan_available():
+        elif is_host_memory and native_plan_available():
             run_object_group_transfer_plan(
                 cache_context,
                 block_ids_gpu,
@@ -179,6 +174,14 @@ def _transfer_runs(
                 chunk_range=chunk_range,
             )
         else:
+            # Lanes are for retrieves from the tiers slower than host memory,
+            # whose staged copy already runs near the link's rate.
+            scatter_stream = (
+                cache_context.get_scatter_stream()
+                if direction == lmcache_native.TransferDirection.H2D
+                and not is_host_memory
+                else None
+            )
             run_staged_loop(
                 cache_context,
                 block_ids_gpu,
