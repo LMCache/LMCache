@@ -16,6 +16,9 @@ target.
    * - :doc:`NIXL <nixl>`
      - ``nixl_store`` / ``nixl_store_dynamic``
      - High-performance I/O
+   * - :doc:`Native NIXL <nixl_native>`
+     - ``nixl_native``
+     - High-performance FILE / OBJECT I/O
    * - :doc:`FileSystem <fs>`
      - ``fs``
      - File & Block
@@ -40,6 +43,9 @@ target.
    * - :doc:`Mooncake Store <mooncake_store>`
      - ``mooncake_store``
      - Remote & Distributed
+   * - :doc:`HF3FS <hf3fs>`
+     - ``hf3fs``
+     - Remote & Distributed
    * - :doc:`RESP (Redis/Valkey) <resp>`
      - ``resp``
      - Remote & Distributed
@@ -49,6 +55,9 @@ target.
    * - :doc:`Aerospike <aerospike>`
      - ``aerospike``
      - Remote & Distributed
+   * - :doc:`WQS <wqs>`
+     - ``wqs_store``
+     - Remote & Distributed (vendor-provided)
    * - :doc:`DAX <dax>`
      - ``dax``
      - Byte-addressable memory
@@ -66,6 +75,7 @@ target.
    :maxdepth: 1
 
    nixl
+   nixl_native
    file_and_block
    remote_and_distributed
    dax

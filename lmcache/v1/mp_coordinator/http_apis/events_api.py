@@ -1,18 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Cache-event ingest endpoint on the coordinator (fleet-level).
+"""HTTP cache-event source endpoint on the coordinator (fleet-level).
 
-The ``/events`` surface, thin over the :class:`EventGate`. Top-level
-rather than under ``/directory`` because the stream feeds every consumer
-of it, not one of them. See
+The ``/events`` surface is thin over :class:`HttpCacheEventSource`, which
+passes request-ordered batches through the common ingestor to
+:class:`EventGate`. It is top-level rather than under ``/directory``
+because the stream feeds every consumer of it, not one of them. A
+coordinator consuming cache events from Kafka instead runs no HTTP source,
+and this endpoint answers 404. See
 ``docs/design/v1/mp_coordinator/ingest.md``.
 """
 
 # Third Party
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 # First Party
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
-from lmcache.v1.mp_coordinator.ingest.event_gate import IngestResult
+from lmcache.v1.mp_coordinator.ingest.http_event_source import HttpCacheEventSource
 from lmcache.v1.mp_coordinator.schemas import CacheEventsRequest, CacheEventsResponse
 
 router = APIRouter()
@@ -33,18 +36,25 @@ async def report_cache_events(
 
     Args:
         body: The event batches to ingest.
+        request: The FastAPI request carrying the coordinator context.
 
     Returns:
         Counts of applied and dropped batches.
+
+    Raises:
+        HTTPException: 404 when this coordinator consumes cache events from
+            Kafka (``--event-transport kafka``), so the push door is closed.
     """
-    event_gate = get_context(request).event_gate
-    response = CacheEventsResponse()
-    for batch in body.batches:
-        result = event_gate.ingest(batch)
-        if result == IngestResult.ADMITTED:
-            response.applied += 1
-        elif result == IngestResult.DUPLICATE:
-            response.duplicates += 1
-        else:
-            response.stale += 1
-    return response
+    source = get_context(request).event_source
+    if not isinstance(source, HttpCacheEventSource):
+        raise HTTPException(
+            status_code=404,
+            detail="POST /events is disabled: this coordinator consumes cache "
+            "events from Kafka (--event-transport kafka)",
+        )
+    summary = source.ingest(body.batches)
+    return CacheEventsResponse(
+        applied=summary.applied,
+        duplicates=summary.duplicates,
+        stale=summary.stale,
+    )

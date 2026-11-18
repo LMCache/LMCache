@@ -15,6 +15,9 @@ import argparse
 import os
 import sys
 
+# First Party
+from lmcache.cli.commands.base import nonnegative_int, positive_int
+
 if TYPE_CHECKING:
     # First Party
     from lmcache.cli.commands.base import BaseCommand
@@ -28,6 +31,8 @@ if TYPE_CHECKING:
 
 def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
     """Add ``lmcache bench l2`` arguments to *parser*.
+
+    Require positive measurement rounds and non-negative warmup rounds.
 
     Args:
         parser: The ``ArgumentParser`` for the L2 bench subcommand.
@@ -79,16 +84,28 @@ def add_l2_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--l1-use-hugepages",
+        dest="l1_use_hugepages",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Allocate the benchmark L1 buffer from the pre-allocated 2 MiB "
+            "hugepage pool instead of regular pinned memory. Requires "
+            "pre-allocated hugepages (sysctl vm.nr_hugepages). Default is "
+            "False."
+        ),
+    )
+    parser.add_argument(
         "--rounds",
-        type=int,
+        type=positive_int,
         default=1,
-        help="Measurement rounds per operation (default: 1).",
+        help="Positive number of measurement rounds per operation (default: 1).",
     )
     parser.add_argument(
         "--warmup-rounds",
-        type=int,
+        type=nonnegative_int,
         default=1,
-        help="Warmup rounds before measurement (default: 1).",
+        help="Non-negative warmup rounds before measurement (default: 1).",
     )
     parser.add_argument(
         "--lookup-max-hit-rate",
@@ -177,6 +194,11 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             to obtain a configured :class:`Metrics` object via
             ``command.create_metrics``.
         args: Parsed CLI arguments from the ``bench l2`` subparser.
+
+    Raises:
+        SystemExit: With code 1 if adapter creation or verification fails, or
+            an operation times out in every measured round; code 2 for invalid
+            arguments or unavailable requested profiling tools.
     """
     # Lazy imports: keep CLI loadable without torch / native deps.
     # First Party
@@ -269,7 +291,13 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
     # Backing L1 memory buffer for adapters that need an L1 desc.
     # Sized for one in-flight wave of store + load buffers.
-    l1_buffer = make_aligned_tensor(2 * keys_per_round * data_size, l1_align_bytes)
+    use_hugepages = bool(getattr(args, "l1_use_hugepages", False))
+    l1_buffer_size = 2 * keys_per_round * data_size
+    l1_buffer = make_aligned_tensor(
+        l1_buffer_size,
+        l1_align_bytes,
+        use_hugepages=use_hugepages,
+    )
     l1_memory_desc = create_l1_memory_desc(l1_buffer, align_bytes=l1_align_bytes)
 
     # Resolve and validate the flame-graph toolchain up front, before any
@@ -554,6 +582,13 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             data_per_round_mb=(keys_per_round * data_size) / mb,
             results=results,
         )
+        for result in results:
+            if result.timed_out_rounds > 0 and not result.round_durations:
+                print(
+                    f"Error: all measured {result.operation.lower()} rounds timed out.",
+                    file=sys.stderr,
+                )
+                failed = True
     finally:
         # Idempotent: a no-op if profiling already stopped on the normal
         # path; tears the recorder down if a phase raised.
@@ -564,6 +599,15 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             adapter.close()
         except Exception as e:
             print(f"[Cleanup] adapter.close() failed: {e}", file=sys.stderr)
+        # Release the hugepage-backed L1 buffer explicitly. ``make_aligned_tensor``
+        # builds it from a raw pointer via ``torch.frombuffer`` (which does not
+        # own the memory), so dropping the tensor alone would not return the
+        # 2 MiB hugepages to the pool until the process exits.
+        if use_hugepages:
+            # First Party
+            from lmcache.v1.memory_management import _free_cpu_memory
+
+            _free_cpu_memory(l1_buffer, l1_buffer_size, use_hugepages=True)
         log("[Cleanup] Done.")
 
     if failed:
@@ -580,20 +624,21 @@ def _strip_warmup(result: "BenchResult", warmup: int) -> "BenchResult":
     # First Party
     from lmcache.cli.commands.bench.l2_adapter_bench.result import BenchResult
 
-    # Adjust the expected hit count proportionally for the kept rounds.
-    kept_rounds = max(0, len(result.round_durations) - warmup)
-    total_rounds = max(1, len(result.round_durations))
-    scaled_expected_hit = int(result.expected_hit_count * kept_rounds / total_rounds)
+    # Timed-out rounds have no duration entry, so skip only completed warmup rounds.
+    warmup_timeouts = sum(result.round_timed_out[:warmup])
+    warmup_completed = warmup - warmup_timeouts
 
     return BenchResult(
         operation=result.operation,
         in_flight=result.in_flight,
         num_keys=result.num_keys,
         data_size_bytes=result.data_size_bytes,
-        round_durations=result.round_durations[warmup:],
+        round_durations=result.round_durations[warmup_completed:],
         success_counts=result.success_counts[warmup:],
+        timed_out_rounds=result.timed_out_rounds - warmup_timeouts,
+        round_timed_out=result.round_timed_out[warmup:],
         expected_max_hit_rate=result.expected_max_hit_rate,
-        expected_hit_count=scaled_expected_hit,
+        expected_hit_count=result.expected_hit_count,
     )
 
 

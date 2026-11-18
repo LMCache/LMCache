@@ -36,6 +36,12 @@ if find_spec("lmcache.lmcache_native") is None:
             """Return set bit indices in ascending order."""
             return sorted(self._bits)
 
+        def copy(self) -> "Bitmap":
+            """Return an independent copy with the same size and bits."""
+            result = Bitmap(self._size)
+            result._bits = set(self._bits)
+            return result
+
         def popcount(self) -> int:
             """Return the number of set bits."""
             return len(self._bits)

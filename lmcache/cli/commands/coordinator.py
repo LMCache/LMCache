@@ -13,6 +13,7 @@ import json
 # First Party
 from lmcache.cli.commands.base import BaseCommand
 from lmcache.logging import init_logger
+from lmcache.security.api_key import add_api_key_args
 
 logger = init_logger(__name__)
 
@@ -50,7 +51,7 @@ class CoordinatorCommand(BaseCommand):
             "--host",
             type=str,
             default=None,
-            help="Host the coordinator's HTTP server binds to (default: 0.0.0.0).",
+            help="Host the coordinator's HTTP server binds to (default: 127.0.0.1).",
         )
         parser.add_argument(
             "--port",
@@ -204,6 +205,50 @@ class CoordinatorCommand(BaseCommand):
                 "Prometheus scrapes /metrics on the coordinator HTTP port."
             ),
         )
+        parser.add_argument(
+            "--event-transport",
+            choices=("http", "kafka"),
+            default=None,
+            help=(
+                "Transport the fleet's cache events arrive on, exactly one: "
+                "http (default) serves POST /events; kafka consumes "
+                "--kafka-topic instead and POST /events answers 404 (needs "
+                "the lmcache[kafka] extra)."
+            ),
+        )
+        parser.add_argument(
+            "--kafka-bootstrap-servers",
+            type=str,
+            default=None,
+            help=(
+                "Comma-separated Kafka bootstrap servers. Required with "
+                "--event-transport kafka."
+            ),
+        )
+        parser.add_argument(
+            "--kafka-topic",
+            type=str,
+            default=None,
+            help=(
+                "Kafka topic to consume cache events from; must match the MP "
+                "servers' --coordinator-kafka-topic (default: "
+                "lmcache-cache-events). Ignored unless --event-transport kafka."
+            ),
+        )
+        parser.add_argument(
+            "--kafka-group-id",
+            type=str,
+            default=None,
+            help=(
+                "Consumer group whose committed offsets a restart resumes "
+                "from (default: lmcache-coordinator). Ignored unless "
+                "--event-transport kafka."
+            ),
+        )
+        # Shared authentication option (--api-key-file / LMCACHE_API_KEY*). An
+        # unset flag leaves the coordinator open; supplying a key closes every
+        # route except /healthz.
+        add_api_key_args(parser)
 
     def execute(self, args: argparse.Namespace) -> None:
         """Build the coordinator config and serve the app with uvicorn.
@@ -216,6 +261,8 @@ class CoordinatorCommand(BaseCommand):
 
         Raises:
             SystemExit: When coordinator dependencies are not installed.
+            ValueError: When ``--event-transport kafka`` is selected without
+                ``--kafka-bootstrap-servers``.
         """
         # Standard
         import sys
@@ -226,7 +273,13 @@ class CoordinatorCommand(BaseCommand):
 
             # First Party
             from lmcache.v1.mp_coordinator.app import create_app
-            from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+            from lmcache.v1.mp_coordinator.config import (
+                KafkaCacheEventSourceConfig,
+                MPCoordinatorConfig,
+            )
+            from lmcache.v1.mp_coordinator.http_auth import (
+                CoordinatorAuthenticationConfig,
+            )
             from lmcache.v1.mp_coordinator.observability import (
                 init_coordinator_metrics,
             )
@@ -260,6 +313,17 @@ class CoordinatorCommand(BaseCommand):
             )
             if value is not None
         }
+        if args.event_transport == "kafka":
+            kafka_fields = {
+                field: value
+                for field, value in (
+                    ("bootstrap_servers", args.kafka_bootstrap_servers),
+                    ("topic", args.kafka_topic),
+                    ("group_id", args.kafka_group_id),
+                )
+                if value is not None
+            }
+            fields["event_source_config"] = KafkaCacheEventSourceConfig(**kafka_fields)
         if args.disable_metrics is not None:
             fields["metrics_enabled"] = not args.disable_metrics
         extra_config = _parse_extra_config(args.extra_config)
@@ -268,7 +332,11 @@ class CoordinatorCommand(BaseCommand):
         config = MPCoordinatorConfig(**fields)
 
         init_coordinator_metrics(config)
-        app = create_app(config)
+        # ``api_key_file`` is registered by add_api_key_args; getattr keeps
+        # hand-built Namespaces (e.g. unit tests) working when they omit it.
+        key_files = getattr(args, "api_key_file", None) or []
+        http_authentication = CoordinatorAuthenticationConfig.from_sources(key_files)
+        app = create_app(config, http_authentication=http_authentication)
         uvicorn.run(
             app,
             host=config.host,

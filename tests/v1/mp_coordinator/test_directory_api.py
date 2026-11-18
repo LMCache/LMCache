@@ -6,6 +6,7 @@ ingestion, placement lookup, and stats)."""
 from fastapi.testclient import TestClient
 
 # First Party
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.schemas import encode_tokens
@@ -27,12 +28,31 @@ def _blend_client() -> TestClient:
     return TestClient(create_app(config))
 
 
-def _key(h: str = "aa", model: str = "m", rank: int = 0, salt: str = "") -> dict:
+MODEL = "m"
+WORLD_SIZE = 1
+
+
+def _key(
+    h: str = "aa",
+    model: str = MODEL,
+    rank: int = 0,
+    salt: str = "",
+    world_size: int = WORLD_SIZE,
+    tags: dict[str, str] | None = None,
+) -> dict:
+    """A key shaped the way a server emits one: ``kv_rank`` packs the
+    parallel setup the blend namespace is derived from."""
     return {
         "chunk_hash_hex": h,
         "model_name": model,
-        "kv_rank": rank,
+        "kv_rank": ObjectKey.ComputeKVRank(
+            world_size=world_size,
+            global_rank=rank,
+            local_world_size=world_size,
+            local_rank=rank,
+        ),
         "cache_salt": salt,
+        "tags": tags or {},
     }
 
 
@@ -107,6 +127,22 @@ def test_delete_event_removes_placement():
         assert result[0]["placements"] == []
 
 
+def test_a_batch_without_dropped_events_reads_as_zero():
+    """Emitters that predate the field omit it."""
+    batch = _batch()
+    assert "dropped_events" not in batch
+    with _client() as client:
+        assert _post_events(client, [batch])["applied"] == 1
+
+
+def test_a_negative_dropped_events_is_rejected():
+    with _client() as client:
+        resp = client.post(
+            "/events", json={"batches": [{**_batch(), "dropped_events": -1}]}
+        )
+    assert resp.status_code == 422
+
+
 def test_duplicate_and_stale_batches_are_counted():
     with _client() as client:
         _post_events(client, [_batch(incarnation=2, seq=1)])
@@ -124,12 +160,15 @@ def test_duplicate_and_stale_batches_are_counted():
 # -- Token -> placement lookup -------------------------------------------------
 
 
-def _lookup_tokens_body(n_tokens: int, model: str = "m") -> dict:
+def _lookup_tokens_body(
+    n_tokens: int, model: str = "m", tags: dict[str, str] | None = None
+) -> dict:
     return {
         "model_name": model,
         "world_size": 1,
         "token_ids": list(range(n_tokens)),
         "cache_salt": "",
+        "tags": tags or {},
     }
 
 
@@ -156,6 +195,27 @@ def test_lookup_tokens_roundtrip():
         [placement] = second["results"][0]["placements"]
         assert placement["instance_id"] == "node-a"
         assert placement["size_bytes"] == 64
+
+
+def test_lookup_tokens_selects_only_the_requested_tags():
+    tags = {"adapter": "A"}
+    with _client() as client:
+        tagged = client.post(
+            "/directory/lookup", json=_lookup_tokens_body(256, tags=tags)
+        ).json()
+        key = tagged["results"][0]["key"]
+        _post_events(client, [_batch(entries=[{"key": key, "size_bytes": 64}])])
+
+        [tagged_result] = client.post(
+            "/directory/lookup", json=_lookup_tokens_body(256, tags=tags)
+        ).json()["results"]
+        assert tagged_result["key"]["tags"] == tags
+        assert len(tagged_result["placements"]) == 1
+
+        [untagged_result] = client.post(
+            "/directory/lookup", json=_lookup_tokens_body(256)
+        ).json()["results"]
+        assert untagged_result["placements"] == []
 
 
 def test_lookup_tokens_invalid_model_name_is_400():
@@ -228,9 +288,21 @@ def _chunk_tokens(first: int, count: int) -> list[int]:
     return list(range(first, first + count))
 
 
-def _blend_lookup(client: TestClient, tokens: list[int]) -> dict:
+def _blend_lookup(
+    client: TestClient,
+    tokens: list[int],
+    model: str = MODEL,
+    salt: str = "",
+    world_size: int = WORLD_SIZE,
+) -> dict:
     resp = client.post(
-        "/directory/blend-lookup", json={"tokens_b64": encode_tokens(tokens)}
+        "/directory/blend-lookup",
+        json={
+            "tokens_b64": encode_tokens(tokens),
+            "model_name": model,
+            "cache_salt": salt,
+            "world_size": world_size,
+        },
     )
     assert resp.status_code == 200
     return resp.json()
@@ -264,8 +336,39 @@ def test_blend_lookup_without_a_match_is_empty():
 
 def test_blend_lookup_rejects_a_malformed_token_buffer():
     with _blend_client() as client:
-        resp = client.post("/directory/blend-lookup", json={"tokens_b64": "not!b64"})
+        resp = client.post(
+            "/directory/blend-lookup",
+            json={"tokens_b64": "not!b64", "model_name": MODEL},
+        )
         assert resp.status_code == 422
+
+
+def test_blend_lookup_rejects_a_query_missing_its_namespace():
+    """Without a model there is no namespace to scope matches to."""
+    with _blend_client() as client:
+        resp = client.post(
+            "/directory/blend-lookup",
+            json={"tokens_b64": encode_tokens([1, 2, 3])},
+        )
+        assert resp.status_code == 422
+
+
+def test_blend_lookup_does_not_match_across_namespaces():
+    """The chunk was stored by another model, so its hash expands into keys
+    this caller has nothing under."""
+    chunk_size = MPCoordinatorConfig().chunk_size
+    content = _chunk_tokens(1000, chunk_size)
+    with _blend_client() as client:
+        entry = {
+            "key": _key(model="other"),
+            "size_bytes": 1024,
+            "token_ids": content,
+            "token_offset": 0,
+        }
+        _post_events(client, [_batch(entries=[entry])])
+
+        assert _blend_lookup(client, content)["matches"] == []
+        assert _blend_lookup(client, content, model="other")["matches"]
 
 
 def test_blend_lookup_stops_matching_a_deleted_chunk():
@@ -425,6 +528,8 @@ def test_stats_reports_blend_index_counts():
         assert client.get("/directory/stats").json()["blend"] == {
             "num_contents": 0,
             "num_chunks": 0,
+            "num_claims": 0,
+            "num_namespaces": 0,
             "table_size": 1024,
         }
 
@@ -439,3 +544,100 @@ def test_stats_reports_blend_index_counts():
         data = client.get("/directory/stats").json()["blend"]
         assert data["num_contents"] == 1
         assert data["num_chunks"] == 1
+        assert data["num_claims"] == 1
+        assert data["num_namespaces"] == 1
+
+
+# -- Separate object groups --------------------------------------------------
+
+
+def test_a_token_lookup_reports_every_object_group_it_is_stored_in():
+    """Under --separate-object-groups a chunk is stored once per group. A
+    lookup that resolved group 0 alone answered "cached" while reporting a
+    fraction of what was held; it now reports every group, each with its
+    own placement."""
+    config = MPCoordinatorConfig(
+        health_check_interval=0.0, eviction_check_interval=0.0, chunk_size=4
+    )
+    body = {"model_name": MODEL, "world_size": 1, "token_ids": [1, 2, 3, 4]}
+    with TestClient(create_app(config)) as client:
+        [group_zero] = client.post("/directory/lookup", json=body).json()["results"]
+        stored = [{**group_zero["key"], "object_group_id": g} for g in (0, 1, 2)]
+        _post_events(
+            client,
+            [_batch(entries=[{"key": key, "size_bytes": 64} for key in stored])],
+        )
+
+        results = client.post("/directory/lookup", json=body).json()
+
+    assert results["chunks"] == 1
+    assert sorted(r["key"]["object_group_id"] for r in results["results"]) == [0, 1, 2]
+    assert all(r["placements"] for r in results["results"])
+
+
+# -- Lookup counts -------------------------------------------------------------
+
+
+def test_prefix_lookups_are_counted_in_directory_stats():
+    with _client() as client:
+        _post_events(client, [_batch()])
+        _lookup(client, [_key("aa"), _key("bb")])
+
+        stats = client.get("/directory/stats").json()
+
+    prefix = stats["lookups"]["prefix"]
+    assert (prefix["lookups"], prefix["chunks_requested"], prefix["chunks_found"]) == (
+        1,
+        2,
+        1,
+    )
+    assert prefix["chunks_found_per_request"]["count"] == 1
+    assert stats["lookups"]["non_prefix"]["lookups"] == 0
+    assert stats["blend_lookup_enabled"] is False
+
+
+def test_blend_lookups_are_counted_as_non_prefix():
+    chunk_size = MPCoordinatorConfig().chunk_size
+    content = _chunk_tokens(1000, chunk_size)
+    with _blend_client() as client:
+        entry = {
+            "key": _key(),
+            "size_bytes": 1024,
+            "token_ids": content,
+            "token_offset": 512,
+        }
+        _post_events(client, [_batch(entries=[entry])])
+        _blend_lookup(client, [7, 8, 9] + content + [11, 12])
+
+        stats = client.get("/directory/stats").json()
+
+    non_prefix = stats["lookups"]["non_prefix"]
+    assert (non_prefix["lookups"], non_prefix["chunks_requested"]) == (1, 1)
+    assert non_prefix["chunks_found"] == 1
+    assert stats["blend_lookup_enabled"] is True
+
+
+def test_overlapping_blend_matches_count_no_more_chunks_than_requested():
+    """Two stored chunks sharing tokens both match a query 1.5 chunks long:
+    two matches, but they cover one chunk's worth of the query."""
+    chunk_size = MPCoordinatorConfig().chunk_size
+    half = chunk_size // 2
+    first = _chunk_tokens(1000, chunk_size)
+    second = first[half:] + _chunk_tokens(5000, half)
+    with _blend_client() as client:
+        entries = [
+            {"key": _key("aa"), "size_bytes": 1, "token_ids": first, "token_offset": 0},
+            {
+                "key": _key("bb"),
+                "size_bytes": 1,
+                "token_ids": second,
+                "token_offset": 0,
+            },
+        ]
+        _post_events(client, [_batch(entries=entries)])
+        data = _blend_lookup(client, first + second[half:])
+        stats = client.get("/directory/stats").json()
+
+    assert len(data["matches"]) == 2
+    non_prefix = stats["lookups"]["non_prefix"]
+    assert (non_prefix["chunks_requested"], non_prefix["chunks_found"]) == (1, 1)

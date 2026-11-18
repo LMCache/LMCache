@@ -8,10 +8,12 @@ belong to the ``cache_control`` services. ``Tier`` is imported from the domain
 """
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey, Tier
+from lmcache.v1.distributed.api import EncodedObjectKey, Tier, validate_identity_tags
+from lmcache.v1.utils.frozen_dict import freeze_dict
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,11 @@ class PrefetchRequest:
     cache_salt: str = ""
     source_tier: Tier = Tier.L2
     target_tier: Tier = Tier.L1
+    tags: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        validate_identity_tags(self.tags)
+        object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
 
 @dataclass(frozen=True)
@@ -58,7 +65,7 @@ class ClearRequest:
     """
 
     tier: Tier = Tier.L1
-    force: bool = True
+    force: bool = False
 
 
 @dataclass(frozen=True)

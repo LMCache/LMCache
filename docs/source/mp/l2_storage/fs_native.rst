@@ -13,9 +13,9 @@ I/O queue depth on a single Python thread.
 **Optional fields:**
 
 - ``num_workers`` (int, default ``4``, > 0): Number of C++ worker threads
-  inside the connector.  This is the real I/O queue depth -- raise to
-  push throughput on filesystems whose aggregate BW exceeds per-stream
-  BW.
+  inside the connector.  With ``num_read_workers`` at ``0`` this is also the
+  read queue depth against the device, since each worker reads one object
+  at a time.
 - ``relative_tmp_dir`` (str, default ``""``): Relative sub-directory for
   temporary files during writes (atomic rename on completion).
 - ``use_odirect`` (bool, default ``false``): Bypass the page cache via
@@ -26,22 +26,33 @@ I/O queue depth on a single Python thread.
   for reads that use ``O_DIRECT`` because direct I/O bypasses the page cache.
 - ``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB
   for client-side usage tracking.  Default ``0`` disables tracking.
+- ``num_read_workers`` (int, default ``256``): Threads dedicated to reads,
+  and so the maximum reads in flight.  ``0`` keeps the legacy path, where
+  the depth equals ``num_workers``, usually far below what an array of
+  several devices needs.  Each reader thread holds one file open at a time.
+- ``read_max_bytes_in_flight`` (int, default ``0``): With ``num_read_workers``
+  positive, the bytes kept outstanding against the device.  ``0``
+  selects 1536 MiB, chosen for its worst
+  case across local and network-latency storage; a single slow device
+  does better with a smaller value.  Bytes in flight also never exceed
+  ``num_read_workers`` x object size, so ``num_read_workers`` must be
+  large enough for the budget to bind.  Sizing notes:
+  ``docs/design/v1/distributed/l2_adapters/fs_native_read_depth.md``.
 
 .. important::
 
    ``O_DIRECT`` has two independent alignment requirements:
 
    1. **Length alignment.**  The transfer length must be a multiple of
-      the filesystem's block size.  The connector queries the disk block
-      size at construction time and, on each operation, checks
-      ``len % disk_block_size``.  If the length is **not** a multiple,
-      the connector silently falls back to a buffered open (no
-      ``O_DIRECT``) for that operation -- correctness is preserved but
-      you do not get true direct I/O.  To ensure ``O_DIRECT`` is
-      actually used, choose ``--chunk-size`` so that the resulting
-      per-chunk byte size is a multiple of the FS block size.  GPFS and
-      similar parallel filesystems often use large blocks (e.g. several
-      MiB).
+      the filesystem's block size.  With ``use_odirect: true`` the adapter
+      automatically transfers each object's full alignment-padded L1 slot
+      (logical bytes plus padding up to ``--l1-align-bytes``), so this
+      requirement holds even when KV chunk byte sizes are not multiples of
+      the block size; on-disk files are correspondingly padded, and loads
+      must run with the same ``use_odirect`` and ``--l1-align-bytes``
+      settings as the stores.  Raise ``--l1-align-bytes`` to match the
+      block size on filesystems with large blocks (GPFS and similar
+      parallel filesystems often use several MiB).
 
    2. **Memory-buffer alignment.**  The I/O buffer pointer itself must
       also be aligned (typically to 4096 bytes on local disks, or to the

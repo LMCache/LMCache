@@ -2,6 +2,7 @@
 """``lmcache quota set`` — create or update a quota for a cache_salt."""
 
 # Standard
+from urllib.parse import quote
 import argparse
 
 # First Party
@@ -52,7 +53,7 @@ class SetCommand(BaseCommand):
 
         result = http_request(
             "PUT",
-            f"{base_url}/quota/{salt}",
+            f"{base_url}/quota/{quote(salt, safe='')}",
             data={"limit_gb": limit_gb},
         )
 

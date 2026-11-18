@@ -61,6 +61,10 @@ func BuildContainerArgs(spec *lmcachev1alpha1.LMCacheEngineSpec) []string {
 		"--hash-algorithm", getHashAlgorithm(spec),
 	}
 
+	if spec.IsolatedIPCEnabled() {
+		args = append(args, "--isolated-ipc")
+	}
+
 	// Eviction args
 	evPolicy := "LRU"
 	evTrigger := 0.8

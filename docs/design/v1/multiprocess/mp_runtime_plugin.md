@@ -2,11 +2,10 @@
 
 ## Overview
 
-The **MP Runtime Plugin** framework allows users to run custom
-scripts (Python or Bash) alongside the LMCache multiprocess (MP /
-ZMQ) server. Plugins receive the full server configuration via an
-environment variable and run as child processes whose stdout is
-captured into the LMCache logger.
+The **MP Runtime Plugin** framework allows users to run custom scripts
+(Python or Bash) alongside the LMCache multiprocess (MP) request server.
+Plugins receive the full server configuration via an environment variable and
+run as child processes whose stdout is captured into the LMCache logger.
 
 Unlike the non-MP (vLLM integration) mode where plugins receive a
 single `LMCacheEngineConfig`, the MP mode has multiple independent
@@ -190,7 +189,7 @@ CLI arguments
 
 MPRuntimePluginLauncher.__init__(
     runtime_plugin_config,   # locations + extra_config
-    mp_config,               # ZMQ server config
+    mp_config,               # request server config (ZMQ or gRPC)
     storage_manager_config,  # storage config
     obs_config,              # observability config
     http_config,             # HTTP config (optional)

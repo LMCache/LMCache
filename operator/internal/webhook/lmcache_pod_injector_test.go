@@ -204,8 +204,10 @@ var _ = Describe("LMCachePodInjector", func() {
 
 		It("mirrors the engine's hostIPC opt-in instead of mounting /dev/shm", func() {
 			hostIPC := true
+			isolatedIPC := false
 			engine := lmcacheEngineWithInjection("")
 			engine.Spec.HostIPC = &hostIPC
+			engine.Spec.IsolatedIPC = &isolatedIPC
 			injector := newLMCacheInjectorForEngine(engine)
 			pod := lmcachePod(nil)
 
@@ -213,6 +215,87 @@ var _ = Describe("LMCachePodInjector", func() {
 			out := applyResponse(pod, resp)
 
 			Expect(out.Spec.HostIPC).To(BeTrue())
+			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
+		})
+
+		It("gives the pod a private memory-backed /dev/shm under isolated IPC (engine default)", func() {
+			// The engine CR leaves isolatedIPC unset: auto-resolves to true for
+			// the default gpuVendor (nvidia).
+			engine := lmcacheEngineWithInjection("")
+			injector := newLMCacheInjectorForEngine(engine)
+			pod := lmcachePod(nil)
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+			c := findContainer(out, testContainerVLLM)
+
+			By("no hostIPC and no host /dev/shm hostPath")
+			Expect(out.Spec.HostIPC).To(BeFalse())
+			shm := findVolume(out, testDevShmVolumeName)
+			Expect(shm).NotTo(BeNil())
+			Expect(shm.HostPath).To(BeNil())
+
+			By("a pod-private memory-backed emptyDir mounted at /dev/shm instead")
+			Expect(shm.EmptyDir).NotTo(BeNil())
+			Expect(shm.EmptyDir.Medium).To(Equal(corev1.StorageMediumMemory))
+			shmMount := findVolumeMount(c, testDevShmVolumeName)
+			Expect(shmMount).NotTo(BeNil())
+			Expect(shmMount.MountPath).To(Equal("/dev/shm"))
+		})
+
+		It("isolated IPC overrides the engine's hostIPC opt-in", func() {
+			hostIPC := true
+			isolatedIPC := true
+			engine := lmcacheEngineWithInjection("")
+			engine.Spec.HostIPC = &hostIPC
+			engine.Spec.IsolatedIPC = &isolatedIPC
+			injector := newLMCacheInjectorForEngine(engine)
+			pod := lmcachePod(nil)
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
+			Expect(out.Spec.HostIPC).To(BeFalse())
+			shm := findVolume(out, testDevShmVolumeName)
+			Expect(shm).NotTo(BeNil())
+			Expect(shm.EmptyDir).NotTo(BeNil())
+		})
+
+		It("keeps the host /dev/shm hostPath when isolatedIPC is explicitly disabled", func() {
+			isolatedIPC := false
+			engine := lmcacheEngineWithInjection("")
+			engine.Spec.IsolatedIPC = &isolatedIPC
+			injector := newLMCacheInjectorForEngine(engine)
+			pod := lmcachePod(nil)
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
+			Expect(out.Spec.HostIPC).To(BeFalse())
+			shm := findVolume(out, testDevShmVolumeName)
+			Expect(shm).NotTo(BeNil())
+			Expect(shm.HostPath).NotTo(BeNil())
+		})
+
+		It("leaves user-supplied /dev/shm wiring untouched under isolated IPC", func() {
+			engine := lmcacheEngineWithInjection("")
+			injector := newLMCacheInjectorForEngine(engine)
+			pod := lmcachePod(func(p *corev1.Pod) {
+				p.Spec.Volumes = append(p.Spec.Volumes, corev1.Volume{
+					Name: "my-shm",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				})
+				p.Spec.Containers[0].VolumeMounts = append(
+					p.Spec.Containers[0].VolumeMounts,
+					corev1.VolumeMount{Name: "my-shm", MountPath: "/dev/shm"},
+				)
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
 			Expect(findVolume(out, testDevShmVolumeName)).To(BeNil())
 		})
 

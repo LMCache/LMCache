@@ -1,0 +1,203 @@
+name: Build SGLang Image
+
+# Reusable workflow that builds lmcache/sglang (docker/Dockerfile.sglang): the
+# newest official SGLang release image plus LMCache built from source in that
+# image's torch environment. Kept out of
+# publish-image so a failure here never blocks the vLLM / standalone images.
+# With push: false it only builds (the Dockerfile runs the smoke checks), which
+# is how changes to the Dockerfile can be validated before a release.
+
+on:
+    workflow_call:
+        inputs:
+            lmcache_version:
+                description: LMCache source release to build (e.g. v0.5.8 or v0.5.8rc1).
+                type: string
+                required: true
+            push:
+                description: >-
+                    Push lmcache/sglang:<lmcache_version>-<arch> and the
+                    multi-arch manifest; stable releases also move latest.
+                type: boolean
+                default: false
+                required: false
+        secrets:
+            dockerhub_token:
+                description: DockerHub token used to push the image.
+                required: false
+    workflow_dispatch:
+        inputs:
+            lmcache_version:
+                description: LMCache source release to build (e.g. v0.5.8rc1).
+                type: string
+                required: true
+
+defaults:
+    run:
+        shell: bash
+
+permissions:
+    contents: read
+
+jobs:
+    # Resolved once so both architectures build on the same SGLang release and
+    # the image label names it. Starts from the release tag lmsysorg/sglang:latest
+    # points to (SGLang's GitHub release is tagged before its image is pushed) and
+    # selects that exact release. LMCache is compiled from source against the
+    # torch already installed in this image.
+    resolve-sglang-version:
+        name: Resolve the newest SGLang release image
+        runs-on: ubuntu-24.04
+        outputs:
+            version: ${{ steps.resolve.outputs.version }}
+            torch: ${{ steps.resolve.outputs.torch }}
+
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+            - name: Resolve the newest SGLang release
+              id: resolve
+              run: |
+                HUB=https://hub.docker.com/v2/repositories/lmsysorg/sglang/tags
+                LATEST=$(curl -fsSL "${HUB}/latest" | jq -r .digest)
+                VERSION=""
+                TORCH=""
+                for TAG in $(git ls-remote --tags --refs https://github.com/sgl-project/sglang.git \
+                    | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$' | sort -rV); do
+                  # A 404 means the release's image is not pushed yet.
+                  DIGEST=$(curl -fsSL "${HUB}/${TAG}" | jq -r .digest) || continue
+                  [[ "${DIGEST}" == "${LATEST}" ]] || continue
+                  VERSION=${TAG}
+                  TORCH=$(curl -fsSL "https://raw.githubusercontent.com/sgl-project/sglang/${TAG}/python/pyproject.toml" \
+                    | grep -m1 -oP '^\s*"torch==\K[^"]+')
+                  break
+                done
+                if [[ -z "${VERSION}" || -z "${TORCH}" ]]; then
+                  echo "::error::Could not resolve the SGLang release and torch version behind lmsysorg/sglang:latest"
+                  exit 1
+                fi
+                echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+                echo "torch=${TORCH}" >> "$GITHUB_OUTPUT"
+                echo "Building LMCache from source on lmsysorg/sglang:${VERSION} (torch ${TORCH})"
+
+    build-sglang-image:
+        name: Build lmcache/sglang (${{ matrix.arch }})
+        needs: [resolve-sglang-version]
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - arch: amd64
+                      runner: ubuntu-24.04
+                    - arch: arm64
+                      runner: ubuntu-24.04-arm
+        runs-on: ${{ matrix.runner }}
+        env:
+            IMAGE: lmcache/sglang:${{ inputs.lmcache_version }}-${{ matrix.arch }}
+
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+            - name: Free disk space
+              uses: ./.github/actions/free-disk-space
+
+            # The SGLang base image is ~15 GB compressed and ~50 GB once
+            # unpacked by BuildKit, more than the root disk has free even after
+            # the cleanup above. Move Docker's storage to the runner's second
+            # disk when it has more room.
+            - name: Move Docker storage to the larger disk
+              run: |
+                df -h / /mnt || true
+                root_free=$(df --output=avail -B1 / | tail -1)
+                mnt_free=$(df --output=avail -B1 /mnt 2>/dev/null | tail -1 || echo 0)
+                if mountpoint -q /mnt && [ "${mnt_free:-0}" -gt "${root_free}" ]; then
+                  sudo systemctl stop docker docker.socket
+                  sudo mkdir -p /mnt/docker /etc/docker
+                  [ -s /etc/docker/daemon.json ] || echo '{}' | sudo tee /etc/docker/daemon.json >/dev/null
+                  sudo python3 -c 'import json; p="/etc/docker/daemon.json"; d=json.load(open(p)); d["data-root"]="/mnt/docker"; json.dump(d, open(p, "w"))'
+                  sudo systemctl start docker
+                  docker info --format 'Docker root: {{.DockerRootDir}}'
+                fi
+                df -h / /mnt || true
+
+            - name: Login to DockerHub
+              if: inputs.push
+              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+              with:
+                username: ${{ vars.DOCKERHUB_USERNAME }}
+                password: ${{ secrets.dockerhub_token }}
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+            # --push streams layers straight to DockerHub; --load would need a
+            # second full copy of the image on disk. Without push the result
+            # stays in the build cache, which is enough to run the checks.
+            - name: Build lmcache/sglang
+              run: |
+                docker buildx build \
+                  --platform linux/${{ matrix.arch }} \
+                  --build-arg SGLANG_VERSION=${{ needs.resolve-sglang-version.outputs.version }} \
+                  --build-arg LMCACHE_VERSION=${{ inputs.lmcache_version }} \
+                  --build-arg EXPECTED_TORCH=${{ needs.resolve-sglang-version.outputs.torch }} \
+                  --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
+                  --tag "${IMAGE}" \
+                  ${{ inputs.push && '--push' || '' }} \
+                  --file docker/Dockerfile.sglang .
+                df -h / /mnt || true
+
+            - name: Check the pushed image
+              if: inputs.push
+              run: |
+                docker buildx imagetools inspect "${IMAGE}" --format '{{json .Image}}' \
+                  | python3 -c 'import json, sys; arch = json.load(sys.stdin)["architecture"]; print(arch); assert arch == "${{ matrix.arch }}"'
+
+    publish-sglang-manifest:
+        name: Publish lmcache/sglang manifest
+        if: inputs.push
+        needs: [build-sglang-image]
+        runs-on: ubuntu-24.04
+
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Login to DockerHub
+              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+              with:
+                username: ${{ vars.DOCKERHUB_USERNAME }}
+                password: ${{ secrets.dockerhub_token }}
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+            # RC tags are published as-is; only stable releases move latest.
+            - name: Publish lmcache/sglang manifest
+              env:
+                TAG: ${{ inputs.lmcache_version }}
+              run: |
+                LATEST=()
+                [[ "${TAG}" == *rc* ]] || LATEST=(--tag lmcache/sglang:latest)
+                docker buildx imagetools create \
+                  "${LATEST[@]}" \
+                  --tag "lmcache/sglang:${TAG}" \
+                  "lmcache/sglang:${TAG}-amd64" \
+                  "lmcache/sglang:${TAG}-arm64"
+                docker buildx imagetools inspect "lmcache/sglang:${TAG}"
