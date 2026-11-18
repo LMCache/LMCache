@@ -10,12 +10,12 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.errors import LMCacheTimeoutError
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.storage_controllers.streaming_window_pool import (
     StreamingWindow,
     StreamingWindowPool,
 )
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 
 pytestmark = pytest.mark.no_shared_allocator
 

@@ -12,10 +12,10 @@ import torch
 
 # First Party
 from lmcache.utils import get_size_bytes
+from lmcache.v1.common.errors import LMCacheTimeoutError
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 
 
 @dataclass(frozen=True, eq=False)

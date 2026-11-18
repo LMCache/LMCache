@@ -12,8 +12,8 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.common.errors import LMCacheTimeoutError
 from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.streaming import FSStreamingReader, StreamingLoadTimeout
 import lmcache.v1.memory_management as memory_management
 

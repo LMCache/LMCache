@@ -10,6 +10,7 @@ import time
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.utils import get_size_bytes
+from lmcache.v1.common.errors import LMCacheTimeoutError
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.l1_manager.dram import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2Adapter
@@ -17,7 +18,6 @@ from lmcache.v1.distributed.storage_controllers.streaming_window_pool import (
     StreamingWindow,
     StreamingWindowPool,
 )
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 
 logger = init_logger(__name__)
 
