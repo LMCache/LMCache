@@ -1,8 +1,9 @@
 name: Build Client Artifacts
 
 # Build the lmcache-client wheel from pyproject_client.toml (#6315), the way
-# build_cli_artifacts.yml builds lmcache-cli, and create request clients from
-# the installed wheel. pr_full_build.yml calls this on `full` PRs.
+# build_cli_artifacts.yml builds lmcache-cli, audit it and its lmcache imports,
+# and create request clients from the installed wheel. pr_full_build.yml calls
+# this on `full` PRs.
 
 on:
     workflow_call:
@@ -20,6 +21,8 @@ on:
             - 'pyproject.toml'
             - 'requirements/build.txt'
             - '.github/scripts/build_client_wheel.sh'
+            - '.github/scripts/assert_client_wheel.py'
+            - '.github/scripts/check_client_imports.py'
             - '.github/workflows/build_client_artifacts.yml'
 
 env:
@@ -88,6 +91,12 @@ jobs:
                 NO_GPU_EXT=1 .github/scripts/build_client_wheel.sh dist --no-isolation
                 test -z "$(git status --porcelain)"
 
+            - name: Audit the wheel
+              run: python .github/scripts/assert_client_wheel.py dist/lmcache_client-*.whl
+
+            - name: Check the wheel's lmcache imports
+              run: python .github/scripts/check_client_imports.py dist/lmcache_client-*.whl
+
             - name: Install the wheel in a clean venv
               run: |
                 python -m venv "$RUNNER_TEMP/venv-client"
@@ -109,3 +118,14 @@ jobs:
                     RequestClientFactory.create(url).close()
                     print("created and closed", url)
                 '
+
+            - name: The full wheel must fail the audit
+              # Proves the server-file rule bites on a wheel that ships server code.
+              run: |
+                NO_GPU_EXT=1 python -m build --wheel --no-isolation --outdir "$RUNNER_TEMP/full"
+                if python .github/scripts/assert_client_wheel.py "$RUNNER_TEMP"/full/lmcache-*.whl \
+                    > "$RUNNER_TEMP/full-audit.txt"; then
+                  exit 1
+                fi
+                grep "server file not in pyproject_client.toml py-modules: lmcache/v1/multiprocess/server.py" \
+                  "$RUNNER_TEMP/full-audit.txt"
