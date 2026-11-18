@@ -254,6 +254,7 @@ def test_standalone_calibration_failure_closes_l1_without_subscription(
     construction: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     env = construction
+    error: type[Exception]
     if failure == "disabled":
         monkeypatch.setattr(
             "lmcache.v1.mp_observability.event_bus.is_observability_enabled",
@@ -362,9 +363,8 @@ def test_value_capacity_capability_and_no_competing_lru(
     subject = StorageManager(config)
     try:
         assert isinstance(env.states[0].eviction_policy, NoOpEvictionPolicy)
-        assert (
-            config.l2_adapter_config.adapters[0].eviction_config.eviction_policy
-            == "LRU"
-        )
+        eviction_config = config.l2_adapter_config.adapters[0].eviction_config
+        assert eviction_config is not None
+        assert eviction_config.eviction_policy == "LRU"
     finally:
         subject.close()

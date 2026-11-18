@@ -47,6 +47,7 @@ from lmcache.v1.distributed.l2_adapters.base import (
     L2TaskId,
 )
 from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
@@ -447,7 +448,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
         Raises:
             NotImplementedError: If not owner-qualified.
-            TimeoutError: No completion in 30s; pending keys remain unavailable.
+            LMCacheTimeoutError: No completion in 30s; pending keys remain unavailable.
 
         Notes:
             Failed/partial deletes only reclaim bytes confirmed by per-key native
@@ -462,7 +463,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 return
             _, done_event = self._submit_delete_locked(selected)
         if not done_event.wait(timeout=30.0):
-            raise TimeoutError("delete_unlocked timed out; keys remain pending")
+            raise LMCacheTimeoutError("delete_unlocked timed out; keys remain pending")
 
     def delete(self, keys: list[ObjectKey]) -> None:
         """Delete a batch of keys from the remote backend.

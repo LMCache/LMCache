@@ -20,6 +20,7 @@ from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
 )
 from lmcache.v1.memory_management import BytesBufferMemoryObj
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.platform import create_event_notifier
 from tests.v1.distributed.test_native_connector_l2_adapter import (
     create_object_key,
@@ -211,7 +212,7 @@ def test_delete_timeout_retains_pending_and_late_completion(
 
     with monkeypatch.context() as patcher:
         patcher.setattr(threading.Event, "wait", wait)
-        with pytest.raises(TimeoutError):
+        with pytest.raises(LMCacheTimeoutError):
             adapter.delete_unlocked([key])
     assert adapter.get_capacity_snapshot().unavailable == frozenset([key])
     adapter.delete_unlocked([key])
