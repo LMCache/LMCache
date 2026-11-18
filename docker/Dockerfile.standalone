@@ -7,7 +7,7 @@ ARG NGC_VERSION=25.09
 ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:${NGC_VERSION}-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 # vLLM whose torch the image uses; vLLM itself is not installed. Keep in sync
 # with VLLM_VERSION in docker/Dockerfile (see the reason there).
-# VLLM_VERSION=nightly tracks vLLM main from wheels.vllm.ai/nightly/<cuda>.
+# VLLM_VERSION=nightly takes torch from vLLM main (wheels.vllm.ai/nightly/<cuda>).
 ARG VLLM_VERSION=0.34.0
 # With VLLM_VERSION=nightly, fail when the nightly index for CUDA_VERSION is
 # older than this many days, i.e. vLLM stopped building it (0 disables).
@@ -91,17 +91,20 @@ RUN --mount=type=cache,target=/root/.cache/uv,id=uv-resolver \
         uv pip compile /tmp/req.in --quiet --prerelease=allow \
             --extra-index-url https://wheels.vllm.ai/nightly/${CUDA_TAG} \
             --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
-            --index-strategy unsafe-best-match \
+            --index-strategy unsafe-first-match \
             > /tmp/resolved.txt ; \
     else \
         echo "vllm==${VLLM_VERSION}" > /tmp/req.in && \
         uv pip compile /tmp/req.in --quiet --prerelease=allow \
             --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/${CUDA_TAG} \
             --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
-            --index-strategy unsafe-best-match \
+            --index-strategy unsafe-first-match \
             > /tmp/resolved.txt ; \
     fi && \
     grep -E '^torch==' /tmp/resolved.txt > /torch.pin && \
+    # uv skips a vLLM index that returns 404; make sure torch still targets CUDA_TAG.
+    { grep -q "+${CUDA_TAG}$" /torch.pin || \
+        { echo "torch pin $(cat /torch.pin) is not a ${CUDA_TAG} build" >&2; exit 1; }; } && \
     echo "Resolved torch pin (matches vllm ${VLLM_VERSION} on ${CUDA_TAG}):" && \
     cat /torch.pin
 

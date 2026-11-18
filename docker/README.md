@@ -227,6 +227,8 @@ Both containers share the host IPC namespace (`--ipc host`) so the LMCache serve
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `CUDA_VERSION` | `13.0` | CUDA version to use |
+| `VLLM_VERSION` | `0.34.0` | vLLM release to install (`Dockerfile`) or take the torch version from (`Dockerfile.standalone`); the newest release with a CUDA 13.0 build. `nightly` uses vLLM main, which vLLM publishes only for CUDA 13.2 |
+| `VLLM_NIGHTLY_MAX_AGE_DAYS` | `7` | With `VLLM_VERSION=nightly`, fail the build when vLLM's nightly index for `CUDA_VERSION` is missing or older than this many days; `0` disables the check |
 | `UBUNTU_VERSION` | `24.04` | Ubuntu base version |
 | `PYTHON_VERSION` | `3.12` | Python version |
 | `max_jobs` | `2` | Max parallel jobs for build |

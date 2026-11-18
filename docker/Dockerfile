@@ -89,8 +89,9 @@ WORKDIR /workspace/LMCache
 
  
 # vLLM comes from its per-CUDA index (wheels.vllm.ai/<version or nightly>/
-# <cuda_tag>) and torch from the matching PyTorch index, so both are built for
-# CUDA_VERSION even when PyPI's default vLLM wheel targets another CUDA.
+# <cuda_tag>) and torch from the matching PyTorch index. uv skips an index that
+# returns 404 and falls back to PyPI, so the build checks that the installed
+# torch really targets CUDA_VERSION.
 RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
@@ -112,7 +113,10 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
         --index-strategy unsafe-first-match && \
     uv pip install "nixl<2" && \
     python3 -c 'import importlib.metadata as m; print("VLLM=", m.version("vllm"))' && \
-    python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
+    python3 -c 'import sys, torch; print("TORCH=", torch.__version__); \
+        sys.exit(None if torch.version.cuda == sys.argv[1] else \
+        f"torch is built for CUDA {torch.version.cuda}, not CUDA_VERSION {sys.argv[1]}")' \
+        "$(echo ${CUDA_VERSION} | cut -d. -f1,2)" && \
     python3 -c 'import importlib.metadata as m; print("NIXL=", m.version("nixl"))' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
     bash docker/build_raw_block_wheel.sh dist_lmcache && \

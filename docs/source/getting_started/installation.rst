@@ -437,7 +437,8 @@ runtime, see :doc:`compatibility` before installing.
 
                         The nightly image builds LMCache from the ``dev``
                         branch and pairs it with the newest vLLM release that
-                        has a CUDA 13.0 build, so it runs on R580 drivers.
+                        has a CUDA 13.0 build, so it runs on NVIDIA 580-series
+                        drivers (CUDA 13.0).
                         vLLM main publishes nightly wheels only for CUDA 13.2.
 
             .. tab-item:: SGLang
