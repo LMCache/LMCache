@@ -20,11 +20,8 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     staged,
     transfer_kv_per_object_group,
 )
-from lmcache.v1.multiprocess.object_group_transfer.dispatch import (
-    open_retrieve_streams,
-)
 from lmcache.v1.multiprocess.object_group_transfer.engines import TransferEngine
-from lmcache.v1.platform.base.staging_lane import BankSignals, StagingLane
+from lmcache.v1.platform.base.staging_lane import StagingLane
 import lmcache.lmcache_native as lmcache_native
 
 CHUNK = 16
@@ -57,12 +54,13 @@ class _Bank:
         return _Slot(self._name, batch_idx)
 
 
-class _LoggedSignals(BankSignals):
+class _LoggedLane(StagingLane):
     def __init__(self, log: list[tuple]) -> None:
+        super().__init__("gpu", "load", [_Bank("a"), _Bank("b")])
         self._log = log
 
-    def wait_free(self, bank: int, stream: object) -> None:
-        self._log.append(("wait_free", bank, stream))
+    def wait_free(self, bank: int) -> None:
+        self._log.append(("wait_free", bank, self.stream))
 
     def wait_free_on_host(self, bank: int) -> None:
         self._log.append(("wait_free_on_host", bank))
@@ -122,8 +120,7 @@ def harness(monkeypatch):
     monkeypatch.setattr(staged, "stage", fake_stage)
     monkeypatch.setattr(staged, "host_loader", lambda engine, objs: None)
     monkeypatch.setattr(staged, "torch_dev", SimpleNamespace(stream=use_stream))
-    lane = StagingLane("load", [_Bank("a"), _Bank("b")], _LoggedSignals(log))
-    return SimpleNamespace(cc=cc, lane=lane, log=log, ops=ops)
+    return SimpleNamespace(cc=cc, lane=_LoggedLane(log), log=log, ops=ops)
 
 
 def _objects(count: int) -> list[MemoryObj | None]:
@@ -275,62 +272,21 @@ def stream_events(monkeypatch):
     return log
 
 
-def _lane_context() -> MagicMock:
-    """A cache context whose lanes run on a stream named after the lane."""
-    cc = MagicMock()
-    cc.get_scatter_stream.return_value = SCATTER
-    cc.get_staging_lane.side_effect = lambda name, file_io: StagingLane(
-        name, [], MagicMock()
-    )
-    return cc
+HOST = MagicMock(spec=MemoryObj)
+SLAB = MagicMock(spec=GDSMemoryObject)
 
 
-def test_scatter_stream_is_gated_once_and_every_used_stream_is_joined(
-    stream_events,
-):
-    cc = _lane_context()
-    with open_retrieve_streams(cc, H2D) as streams:
-        assert stream_events == []
-        streams.lane(TransferEngine.GPU_DMA)
-        streams.lane(TransferEngine.NVME_DMA)
-        streams.lane(TransferEngine.GPU_DMA)
-        assert stream_events == [(CALLER, SCATTER)]
-    assert stream_events[1:] == [
-        ("gpu_dma", CALLER),
-        ("nvme_dma", CALLER),
-        (SCATTER, CALLER),
-    ]
-
-
-def test_streams_are_joined_when_the_transfer_raises(stream_events):
-    with pytest.raises(ValueError):
-        with open_retrieve_streams(_lane_context(), H2D) as streams:
-            streams.lane(TransferEngine.NVME_DMA)
-            raise ValueError("missing object")
-    assert stream_events[1:] == [("nvme_dma", CALLER), (SCATTER, CALLER)]
-
-
-def test_call_that_stages_nothing_touches_no_stream(stream_events):
-    with open_retrieve_streams(_lane_context(), H2D):
-        pass
-    assert stream_events == []
-
-
-def test_only_the_file_engine_asks_for_file_io_banks(stream_events):
-    cc = _lane_context()
-    with open_retrieve_streams(cc, H2D) as streams:
-        streams.lane(TransferEngine.GPU_DMA)
-        streams.lane(TransferEngine.NVME_DMA)
-    assert [call.kwargs["file_io"] for call in cc.get_staging_lane.call_args_list] == [
-        False,
-        True,
-    ]
-
-
-def _dispatch(monkeypatch, stream_events, direction, direct_copy=False):
-    """Run the dispatcher on a context with a scatter stream, over a
-    host-memory chunk followed by a slab chunk; return each run's path."""
+def _dispatch(monkeypatch, direction, objs, direct_copy=False, staged_error=None):
+    """Run the dispatcher over ``objs`` on a context with a scatter stream
+    whose lanes run on a stream named after the lane; return each run's
+    path and the context."""
     calls: list[tuple] = []
+
+    def run_staged_loop(*args, engine, lane, scatter_stream, **kwargs):
+        if staged_error is not None:
+            raise staged_error
+        calls.append(("staged", engine.value, lane and lane.stream, scatter_stream))
+
     monkeypatch.setattr(dispatch, "batch_memcpy_available", lambda: direct_copy)
     monkeypatch.setattr(dispatch, "direct_transfer_supported", lambda *a: True)
     monkeypatch.setattr(dispatch, "native_plan_available", lambda: True)
@@ -342,50 +298,63 @@ def _dispatch(monkeypatch, stream_events, direction, direct_copy=False):
         "run_object_group_transfer_plan",
         lambda *a, **k: calls.append(("plan",)),
     )
-    monkeypatch.setattr(
-        dispatch,
-        "run_staged_loop",
-        lambda *a, **k: calls.append(
-            (
-                "staged",
-                k["engine"].value,
-                k["lane"] and k["lane"].stream,
-                k["scatter_stream"],
-            )
-        ),
-    )
+    monkeypatch.setattr(dispatch, "run_staged_loop", run_staged_loop)
+    cc = MagicMock()
+    cc.get_scatter_stream.return_value = SCATTER
+    cc.get_staging_lane.side_effect = lambda name, file_io: StagingLane("gpu", name, [])
     transfer_kv_per_object_group(
-        _lane_context(),
+        cc,
         block_ids_gpu=[MagicMock()],
-        memory_objs=[MagicMock(spec=MemoryObj), MagicMock(spec=GDSMemoryObject)],
+        memory_objs=objs,
         object_group_id=0,
         batch_size=4,
         skip_first_n_tokens=0,
         direction=direction,
         transfer_key="test",
-        block_ids_host=[[1, 2]],
+        block_ids_host=[[1, 2]] * len(objs),
     )
-    return calls
+    return calls, cc
 
 
 def test_retrieve_stages_every_run_on_its_engines_lane(monkeypatch, stream_events):
-    assert _dispatch(monkeypatch, stream_events, H2D) == [
+    """The scatter stream is gated once, and the caller's stream joins every
+    stream the call used. Only the file engine asks for file IO banks."""
+    calls, cc = _dispatch(monkeypatch, H2D, [HOST, SLAB, HOST])
+    assert calls == [
         ("staged", "gpu_dma", "gpu_dma", SCATTER),
         ("staged", "nvme_dma", "nvme_dma", SCATTER),
+        ("staged", "gpu_dma", "gpu_dma", SCATTER),
     ]
-    assert stream_events[-1] == (SCATTER, CALLER)
+    assert stream_events == [
+        (CALLER, SCATTER),
+        ("gpu_dma", CALLER),
+        ("nvme_dma", CALLER),
+        (SCATTER, CALLER),
+    ]
+    assert [call.kwargs["file_io"] for call in cc.get_staging_lane.call_args_list] == [
+        False,
+        True,
+    ]
+
+
+def test_streams_are_joined_when_the_transfer_raises(monkeypatch, stream_events):
+    with pytest.raises(ValueError):
+        _dispatch(monkeypatch, H2D, [SLAB], staged_error=ValueError("missing object"))
+    assert stream_events[1:] == [("nvme_dma", CALLER), (SCATTER, CALLER)]
 
 
 def test_retrieve_keeps_the_direct_copy_for_host_memory(monkeypatch, stream_events):
-    assert _dispatch(monkeypatch, stream_events, H2D, direct_copy=True) == [
-        ("direct",),
-        ("staged", "nvme_dma", "nvme_dma", SCATTER),
-    ]
+    calls, _ = _dispatch(monkeypatch, H2D, [HOST, SLAB], direct_copy=True)
+    assert calls == [("direct",), ("staged", "nvme_dma", "nvme_dma", SCATTER)]
+
+
+def test_call_that_stages_nothing_touches_no_stream(monkeypatch, stream_events):
+    calls, _ = _dispatch(monkeypatch, H2D, [HOST], direct_copy=True)
+    assert calls == [("direct",)]
+    assert stream_events == []
 
 
 def test_store_stays_on_the_callers_stream(monkeypatch, stream_events):
-    assert _dispatch(monkeypatch, stream_events, D2H) == [
-        ("plan",),
-        ("staged", "nvme_dma", None, None),
-    ]
+    calls, _ = _dispatch(monkeypatch, D2H, [HOST, SLAB])
+    assert calls == [("plan",), ("staged", "nvme_dma", None, None)]
     assert stream_events == []

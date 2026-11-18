@@ -16,9 +16,8 @@ planning) driven from `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.p
 | `dispatch.py` | `transfer_kv_per_object_group`: picks each run's copy path, and ties a retrieve's load and scatter streams to the caller's stream (gate and join) |
 | `unfull_chunk.py` | the request's trailing unfull chunk |
 
-Platform side: `lmcache/v1/platform/base/staging_lane.py` (`StagingLane`,
-`BankSignals`) and `BaseCacheContext.get_scatter_stream` /
-`get_staging_lane`.
+Platform side: `lmcache/v1/platform/base/staging_lane.py` (`StagingLane`)
+and `BaseCacheContext.get_scatter_stream` / `get_staging_lane`.
 
 Callers import the public names from the package itself.
 
@@ -119,7 +118,7 @@ flowchart TD
 
 - **Order.** Runs are issued in chunk order. On the caller's stream the
   context's one staging buffer is never used by two runs at once; on a lane
-  the bank signals keep a load off a bank that is still being scattered.
+  the bank events keep a load off a bank that is still being scattered.
 - **Host memory** is decided per run, not per group: a run of host-memory
   chunks next to a storage-backed run still takes the direct path.
 - **NVMe DMA** always stages per batch: its staging step is a file
@@ -140,93 +139,15 @@ flowchart TD
 
 A staged retrieve has two stream-ordered steps per batch: the load (L1
 object to staging buffer) and the scatter (block kernel, staging buffer to
-the paged KV blocks). On one stream they alternate, so the copy engine (or
-the drive) idles during every scatter and the kernel idles during every
-load, and a slow engine holds up the chunks of a fast one.
+the paged KV blocks). On one stream they alternate, and a slow engine holds
+up the chunks of a fast one.
 
 A context that returns a stream from `get_scatter_stream()` (CUDA does)
-gives each engine a **staging lane**: its own load stream and two staging
-banks, each the size of the context's staging buffer. Batches alternate
-between the banks, and all block kernels run on the one scatter stream:
-
-```
-GPU DMA lane   | load b0 -> bank 0 | load b1 -> bank 1 | load b2 -> bank 0 |
-NVMe DMA lane  | read c0 -> bank 0 ............ | read c1 -> bank 1 ......
-scatter stream |                   | scatter b0 | scatter b1 | scatter c0 | ...
-```
-
-Two signals per bank order the two streams (`BankSignals`):
-
-| Signal | Queued on | Waited on | Meaning |
-|---|---|---|---|
-| staged | load stream, after the batch's loads | scatter stream, before the batch's kernels | the bank holds the batch |
-| free | scatter stream, after the batch's kernels | load stream, before the bank's next load | the bank may be overwritten |
-
-The signals outlive a request: the next request's first load into a bank
-waits for the previous request's last scatter of it.
-
-Both are stream events: `BankSignals` records an event on one stream and
-makes the other wait for it. A doorbell word (`cuStreamWriteValue32` /
-`cuStreamWaitValue32`) was tried in their place and dropped: it measured
-the same as events for stream-ordered loads (49.2-50.7 against 49.4-50.9
-GiB/s for staged host memory), and a wait that a host thread releases can
-deadlock (see "Host-thread loads" below).
-
-#### Host-thread loads (NVMe DMA)
-
-A stream-ordered GDS read runs one after another on its stream, so one
-request reads one object at a time however many drives hold the slab. The
-NVMe engine therefore loads on host threads by default:
-
-```
-handler        | wait free(b0) | load b0 ........ | queue scatter b0 | wait free(b1) | load b1 ...
-reader threads |               | read c0 | read c2 |                  |               | read c4 | ...
-               |               | read c1 | read c3 |                  |               | read c5 | ...
-scatter stream |                                   | scatter b0 ..........            |
-```
-
-- For a batch whose engine loads on host threads, the staged loop waits
-  on the host until the bank is free (`BankSignals.wait_free_on_host`),
-  calls `NvmeDmaEngine.load_from_host`, which fans the batch's objects out
-  to the reader threads (`GDSContext.read_blocking`, a blocking slab read
-  into the registered bank) and returns when all of them have ended, and
-  only then queues the "staged" signal, the block kernels and the "free"
-  signal on the scatter stream. Nothing is queued on the lane's stream. The
-  next batch reads into the other bank while this one scatters.
-- **The handler waits for the reads.** Handler time for a GDS run is about
-  its wall time, as with the stream-ordered read under cuFile compat mode.
-- **Why the kernels are not queued ahead.** An earlier version queued the
-  kernels first, behind a doorbell word (`cuStreamWaitValue32`) that a host
-  thread wrote when the reads had returned, so the handler returned at
-  once. It deadlocked: `cuFileRead` in compat mode copies the bytes to the
-  device on an internal stream and synchronizes it, and the driver, which
-  cannot see the order such a wait imposes, sometimes ran that copy behind
-  a pending wait. The wait needed the read to return and the read needed
-  the wait released (found on an H200 with two reader threads, alternating
-  host/GDS runs; writing the words by hand released the stuck read). So no
-  stream ever waits for a host thread: device work for a batch is queued
-  after its reads have returned. A peer-to-peer GPU read measured the same
-  way (28.9-30.9 GiB/s with events, 28.9-30.8 with the doorbell), so the
-  early return is the only thing given up.
-- **Default.** Two reader threads; `LMCACHE_GDS_READ_THREADS` changes the
-  number and `0` returns to the stream-ordered read, as does a GDS backend
-  without a blocking read (only cuFile implements it). At most one batch
-  (four objects) is read at a time, so more than four threads gain nothing.
-- **Failure.** A failed or short read raises `OSError` from the retrieve
-  call after the other reads of the batch have ended; no kernel is queued
-  for that batch. A read that never returns holds the handler, as a
-  stream-ordered read in compat mode does.
-- **Measured** (H200 shared with another job, cuFile compat mode, 64
-  chunks, 11-27 MiB objects, pages identical). One NVMe drive, limit 5.9
-  GiB/s: GDS 4.3-5.0 GiB/s with one thread, 5.2-6.0 with two (4.1-4.4
-  stream-ordered); alternating host/GDS runs 9.9-11.6 with two. Four
-  drives, one slab on each (a benchmark-only setup: LMCache opens one slab
-  per process): GDS 7.3-9.1 with two threads and 12.0-16.4 with four;
-  alternating runs 13.4-15.9 and 20.5-26.2.
-
-The caller's stream is where the request is ordered (the engine's event is
-waited on it; the completion event and the lock release are queued on it),
-so `dispatch.py` ties the other streams to it at both ends:
+gives each engine a **staging lane** (`StagingLane`): its own load stream
+and two staging banks, each the size of the context's staging buffer.
+Batches alternate between the banks, and all block kernels run on the one
+scatter stream. `dispatch.py` ties both to the caller's stream, where the
+request is ordered:
 
 ```
 caller stream  | wait engine | gate ............................. | join | done
@@ -234,36 +155,46 @@ load stream    |   load b0   | load b1 | load b2 |                   ^
 scatter stream |      (gate) | scatter b0 | scatter b1 | scatter b2  |
 ```
 
-- **Gate.** The scatter stream waits for an event recorded on the caller's
-  stream, so no kernel runs before the block IDs are staged and the engine
-  has released the blocks. Loads only write staging banks and start at once.
+- **Bank events.** Per bank, "staged" is recorded after the batch's loads
+  and waited on by the scatter stream; "free" is recorded after the batch's
+  kernels and waited on before the bank's next load, also across requests.
+  "free" is queued in a `finally`, so a failed kernel launch cannot block
+  the bank's next load.
+- **Gate.** The scatter stream waits for the caller's stream, so no kernel
+  runs before the block IDs are staged and the engine has released the
+  blocks. Loads only write staging banks and start at once.
 - **Join.** Before `transfer_kv_per_object_group` returns, the caller's
   stream waits for every lane the call used and for the scatter stream, also
   when the call raises: a queued load must finish before the handler
   releases the objects it reads.
-- **Direct copy** runs stay on the caller's stream. They need no staging,
-  and because the join comes at the end of the call they overlap with the
-  staged runs of the other engines.
-- **Store** and the **unfull tail chunk** stay on the caller's stream with
-  the context's own staging buffer.
-- **Failure.** Once a batch's "staged" signal is queued its "free" signal is
-  queued too (`finally`), so a failed kernel launch cannot leave the bank's
-  next load waiting forever.
+- **Unchanged.** Direct copy runs, store and the unfull tail chunk stay on
+  the caller's stream. Direct copy runs overlap with the staged runs of the
+  other engines, because the join comes at the end of the call.
 - **Cost.** A lane is created on its first staged retrieve: one stream and
-  two banks of GPU memory (for a 256-token chunk of an 18 MiB object, 72 MiB
-  per bank). A deployment whose retrieves all take the direct copy creates
-  none. The NVMe lane's banks are registered with the GDS library on the
-  lane's stream.
-- **Phase timing.** `MP_TRANSFER_PHASE_SAMPLES` is produced by the native
-  plan only, so a staged host-memory retrieve on a lane reports no phase
-  samples; store still does.
+  two banks of GPU memory. The NVMe lane's banks are registered with the
+  GDS library. A staged host-memory retrieve on a lane reports no
+  `MP_TRANSFER_PHASE_SAMPLES` (the native plan produces them).
 
-Measured on an H200 (64 chunks, batch 4, staged path, median of 9; GDS in
-cuFile compat mode on one NVMe drive): host memory 45-48 -> 49-51 GiB/s,
-GDS unchanged at 4.2-4.4 GiB/s (the drive is the limit), alternating
-host/GDS runs 7.8-8.0 -> 8.2-8.5 GiB/s. Queueing on two streams from Python
-costs handler time for host memory: 0.8-1.2 ms -> 2.1-3.0 ms per request
-against the native plan.
+#### Host-thread loads (NVMe DMA)
+
+A stream-ordered GDS read moves one object at a time, so the NVMe engine
+loads on host threads by default: `NvmeDmaEngine.load_from_host` fans a
+batch's objects out to reader threads (`GDSContext.read_blocking`) and
+returns when every read has ended.
+
+- **Order.** The staged loop waits on the host until the bank is free
+  (`StagingLane.wait_free_on_host`), loads it, and only then queues the
+  batch on the scatter stream. Nothing is queued on the lane's stream.
+- **No stream waits for a host thread.** Queueing the kernels ahead, behind
+  a signal a host thread writes after the reads, deadlocked with
+  `cuFileRead` in compat mode, which does device work of its own. The cost
+  is that the handler waits for the reads.
+- **Default.** Two reader threads; `LMCACHE_GDS_READ_THREADS` changes the
+  number and `0` returns to the stream-ordered read, as does a GDS backend
+  without a blocking read (only cuFile implements it).
+- **Failure.** A failed or short read raises `OSError` from the retrieve
+  call after the other reads of the batch have ended; no kernel is queued
+  for that batch.
 
 ### NIC DMA
 
@@ -436,7 +367,7 @@ moves strided 2-D rows more slowly than 1-D entries of the same size
   freed after a failed launch, the gate and the join, and when the
   dispatcher uses lanes (CPU only, fakes).
 - `tests/v1/platform/test_staging_lane.py`: bank rotation and the bank
-  signals, including the host-side wait (CPU only, fakes).
+  events, including the host-side wait (CPU only, fakes).
 - `tests/v1/multiprocess/test_nvme_host_load.py`: the NVMe engine's
   host-thread load: when it applies, and that it returns or raises only
   once every read of the batch has ended (CPU only, fakes).

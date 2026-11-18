@@ -336,7 +336,6 @@ def _retrieve_batch_on_lane(
     direction = lmcache_native.TransferDirection.H2D
     bank_idx = lane.take_bank()
     bank = lane.banks[bank_idx]
-    signals = lane.signals
     staged_objs = memory_objs[first:]
     staged_buffers = [
         bank.get_temp_object_group_buffer(chunk_idx, object_group_id)
@@ -346,18 +345,18 @@ def _retrieve_batch_on_lane(
     if loader is not None:
         # A stream must never wait for a host thread, so the kernels are
         # queued only once the bytes are in the bank.
-        signals.wait_free_on_host(bank_idx)
+        lane.wait_free_on_host(bank_idx)
         loader.load_from_host(staged_objs, staged_buffers, cache_context.device)
-        signals.signal_staged(bank_idx, scatter_stream)
+        lane.signal_staged(bank_idx, scatter_stream)
     else:
         with torch_dev.stream(lane.stream):
-            signals.wait_free(bank_idx, lane.stream)
+            lane.wait_free(bank_idx)
             stage(engine, staged_objs, staged_buffers, direction)
-            signals.signal_staged(bank_idx, lane.stream)
+            lane.signal_staged(bank_idx, lane.stream)
     with torch_dev.stream(scatter_stream):
         # "free" must follow "staged", or the bank's next load never starts.
         try:
-            signals.wait_staged(bank_idx, scatter_stream)
+            lane.wait_staged(bank_idx, scatter_stream)
             _launch_batch_kernels(
                 cache_context,
                 bank,
@@ -369,7 +368,7 @@ def _retrieve_batch_on_lane(
                 direction,
             )
         finally:
-            signals.signal_free(bank_idx, scatter_stream)
+            lane.signal_free(bank_idx, scatter_stream)
 
 
 def run_staged_loop(

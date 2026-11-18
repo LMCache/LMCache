@@ -10,7 +10,6 @@ into one bank while the stream that empties them scatters the other::
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass, field
 from typing import Any, Protocol, Sequence
 import time
 
@@ -40,32 +39,41 @@ class StagingBank(Protocol):
         ...
 
 
-class BankSignals:
-    """Per bank, "staged" (the scatter may read it) and "free" (the next
-    load may overwrite it), as stream events.
+class StagingLane:
+    """A load stream and its staging banks. Used by one thread at a time,
+    like the cache context's own staging buffer.
 
-    One round per batch: :meth:`wait_free`, :meth:`signal_staged`,
-    :meth:`wait_staged`, :meth:`signal_free`. A round that signals "staged"
-    must also signal "free", or the bank's next load never starts.
+    Per bank, "staged" (the scatter may read it) and "free" (the next load
+    may overwrite it) are stream events. One round per batch:
+    :meth:`wait_free`, :meth:`signal_staged`, :meth:`wait_staged`,
+    :meth:`signal_free`. A round that signals "staged" must also signal
+    "free", or the bank's next load never starts.
 
     Args:
-        device: The device that owns the lane's streams.
+        device: The device that owns the lane's stream.
+        stream: The stream the lane's loads are queued on.
+        banks: The lane's staging banks.
     """
 
-    def __init__(self, device: object) -> None:
+    def __init__(self, device: object, stream: Any, banks: Sequence[StagingBank]):
         self._device = device
-        self._staged: list[platform_stream.CompletionEvent | None] = [
-            None
-        ] * BANKS_PER_LANE
-        self._free: list[platform_stream.CompletionEvent | None] = [
-            None
-        ] * BANKS_PER_LANE
+        self.stream = stream
+        self.banks = banks
+        self._next_bank = 0
+        self._staged: list[platform_stream.CompletionEvent | None] = [None] * len(banks)
+        self._free: list[platform_stream.CompletionEvent | None] = [None] * len(banks)
 
-    def wait_free(self, bank: int, stream: object) -> None:
-        """Make ``stream`` wait until the last scatter of ``bank`` ran."""
+    def take_bank(self) -> int:
+        """Return the bank index for the next batch; banks alternate."""
+        bank = self._next_bank
+        self._next_bank = (bank + 1) % len(self.banks)
+        return bank
+
+    def wait_free(self, bank: int) -> None:
+        """Make the lane's stream wait until the last scatter of ``bank`` ran."""
         event = self._free[bank]
         if event is not None:
-            event.wait_on(stream)
+            event.wait_on(self.stream)
 
     def wait_free_on_host(self, bank: int) -> None:
         """Block until the last scatter of ``bank`` ran; for loads done by
@@ -89,26 +97,3 @@ class BankSignals:
     def signal_free(self, bank: int, stream: object) -> None:
         """Signal "free" for ``bank`` after the work queued on ``stream``."""
         self._free[bank] = platform_stream.record_completion_event(self._device, stream)
-
-
-@dataclass
-class StagingLane:
-    """A load stream, its staging banks and their signals. Used by one
-    thread at a time, like the cache context's own staging buffer.
-
-    Attributes:
-        stream: The stream the lane's loads are queued on.
-        banks: The lane's staging banks.
-        signals: The banks' "staged" and "free" signals.
-    """
-
-    stream: Any
-    banks: Sequence[StagingBank]
-    signals: BankSignals
-    _next_bank: int = field(default=0, repr=False)
-
-    def take_bank(self) -> int:
-        """Return the bank index for the next batch; banks alternate."""
-        bank = self._next_bank
-        self._next_bank = (bank + 1) % len(self.banks)
-        return bank

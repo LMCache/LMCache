@@ -1,23 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Staging lanes: bank rotation and the bank signals. Streams and events
+"""Staging lanes: bank rotation and the bank events. Streams and events
 are faked, so these run without CUDA."""
 
 # Standard
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 # Third Party
 import pytest
 
 # First Party
 from lmcache.v1.platform.base import staging_lane
-from lmcache.v1.platform.base.staging_lane import BankSignals, StagingLane
+from lmcache.v1.platform.base.staging_lane import StagingLane
 
 LOAD = "load"
 SCATTER = "scatter"
 
 
+def _lane() -> StagingLane:
+    return StagingLane("gpu", LOAD, [MagicMock(), MagicMock()])
+
+
 def test_lane_hands_out_its_banks_in_turn():
-    lane = StagingLane(stream=LOAD, banks=["a", "b"], signals=None)
+    lane = _lane()
     assert [lane.take_bank() for _ in range(5)] == [0, 1, 0, 1, 0]
 
 
@@ -53,19 +58,19 @@ def events(monkeypatch):
     return log
 
 
-def test_signals_free_bank_needs_no_wait_before_its_first_load(events):
-    signals = BankSignals(device="gpu")
-    signals.wait_free(0, LOAD)
+def test_free_bank_needs_no_wait_before_its_first_load(events):
+    lane = _lane()
+    lane.wait_free(0)
     assert events == []
 
 
-def test_signals_each_side_waits_for_the_other_sides_last_event(events):
-    signals = BankSignals(device="gpu")
+def test_each_side_waits_for_the_other_sides_last_event(events):
+    lane = _lane()
     for _ in range(2):
-        signals.wait_free(0, LOAD)
-        signals.signal_staged(0, LOAD)
-        signals.wait_staged(0, SCATTER)
-        signals.signal_free(0, SCATTER)
+        lane.wait_free(0)
+        lane.signal_staged(0, LOAD)
+        lane.wait_staged(0, SCATTER)
+        lane.signal_free(0, SCATTER)
     assert events == [
         ("record", 0, LOAD),
         ("wait", 0, SCATTER),
@@ -77,17 +82,17 @@ def test_signals_each_side_waits_for_the_other_sides_last_event(events):
     ]
 
 
-def test_signals_host_wait_polls_the_last_free_event_until_complete(events):
-    signals = BankSignals(device="gpu")
-    signals.wait_free_on_host(0)
+def test_host_wait_polls_the_last_free_event_until_complete(events):
+    lane = _lane()
+    lane.wait_free_on_host(0)
     assert events == []
-    signals.signal_free(0, SCATTER)
-    signals.wait_free_on_host(0)
+    lane.signal_free(0, SCATTER)
+    lane.wait_free_on_host(0)
     assert events == [("record", 0, SCATTER)] + [("poll", 0)] * 3
 
 
-def test_signals_keep_the_banks_apart(events):
-    signals = BankSignals(device="gpu")
-    signals.signal_free(0, SCATTER)
-    signals.wait_free(1, LOAD)
+def test_bank_events_keep_the_banks_apart(events):
+    lane = _lane()
+    lane.signal_free(0, SCATTER)
+    lane.wait_free(1)
     assert events == [("record", 0, SCATTER)]

@@ -40,11 +40,7 @@ from lmcache.v1.gpu_connector.gds_context import (
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.ipc_wrapper import KVCache
-from lmcache.v1.platform.base.staging_lane import (
-    BANKS_PER_LANE,
-    BankSignals,
-    StagingLane,
-)
+from lmcache.v1.platform.base.staging_lane import BANKS_PER_LANE, StagingLane
 
 logger = init_logger(__name__)
 
@@ -585,7 +581,7 @@ class GPUCacheContext(BaseCacheContext):
                 for bank in banks:
                     register_gds_gpu_buffer(bank.buffer)
                     self._file_io_banks.append((lane_stream, bank))
-        lane = StagingLane(lane_stream, banks, BankSignals(self.device_))
+        lane = StagingLane(self.device_, lane_stream, banks)
         self._lanes[name] = lane
         return lane
 

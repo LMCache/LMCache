@@ -12,8 +12,7 @@ request is ordered on:
 """
 
 # Standard
-from contextlib import contextmanager
-from typing import Any, Iterator, Sequence
+from typing import Any, Sequence
 
 # Third Party
 import torch
@@ -41,75 +40,23 @@ from lmcache.v1.platform.base.staging_lane import StagingLane
 import lmcache.lmcache_native as lmcache_native
 
 
-class RetrieveStreams:
-    """Hands out staging lanes for one retrieve call and tracks which
-    streams the call used.
-
-    Args:
-        cache_context: Cache context of the KV cache.
-        scatter_stream: The context's scatter stream.
-    """
-
-    def __init__(self, cache_context: BaseCacheContext, scatter_stream: Any) -> None:
-        self._cache_context = cache_context
-        self._caller_stream = platform_stream.current_stream(cache_context.device)
-        self.scatter_stream = scatter_stream
-        self._lanes: dict[TransferEngine, StagingLane] = {}
-
-    def lane(self, engine: TransferEngine) -> StagingLane:
-        """Return ``engine``'s staging lane; the call's first lane gates the
-        scatter stream behind the caller's stream."""
-        lane = self._lanes.get(engine)
-        if lane is None:
-            if not self._lanes:
-                platform_stream.record_completion_event(
-                    self._cache_context.device, self._caller_stream
-                ).wait_on(self.scatter_stream)
-            lane = staging_lane(self._cache_context, engine)
-            self._lanes[engine] = lane
-        return lane
-
-    def join(self) -> None:
-        """Make the caller's stream wait for every stream the call used."""
-        if not self._lanes:
-            return
-        streams = [lane.stream for lane in self._lanes.values()]
-        streams.append(self.scatter_stream)
-        for stream in streams:
+def _lane(
+    cache_context: BaseCacheContext,
+    lanes: dict[TransferEngine, StagingLane],
+    engine: TransferEngine,
+    scatter_stream: Any,
+) -> StagingLane:
+    """Return ``engine``'s staging lane; the call's first lane gates the
+    scatter stream behind the caller's stream."""
+    lane = lanes.get(engine)
+    if lane is None:
+        if not lanes:
+            device = cache_context.device
             platform_stream.record_completion_event(
-                self._cache_context.device, stream
-            ).wait_on(self._caller_stream)
-
-
-@contextmanager
-def open_retrieve_streams(
-    cache_context: BaseCacheContext, direction: "lmcache_native.TransferDirection"
-) -> Iterator[RetrieveStreams | None]:
-    """Open the streams of one transfer call and join them on exit, also
-    when the call raises: a queued load must finish before the caller
-    releases the objects it reads.
-
-    Args:
-        cache_context: Cache context of the KV cache.
-        direction: H2D (retrieve) or D2H (store).
-
-    Yields:
-        The call's streams, or None for a store or a context without a
-        scatter stream.
-    """
-    scatter_stream = (
-        cache_context.get_scatter_stream()
-        if direction == lmcache_native.TransferDirection.H2D
-        else None
-    )
-    if scatter_stream is None:
-        yield None
-        return
-    streams = RetrieveStreams(cache_context, scatter_stream)
-    try:
-        yield streams
-    finally:
-        streams.join()
+                device, platform_stream.current_stream(device)
+            ).wait_on(scatter_stream)
+        lane = lanes[engine] = staging_lane(cache_context, engine)
+    return lane
 
 
 def transfer_kv_per_object_group(
@@ -153,9 +100,16 @@ def transfer_kv_per_object_group(
         ValueError: If a None entry is found on retrieve.
         NotImplementedError: If an object is owned by a peer.
     """
-    with open_retrieve_streams(cache_context, direction) as streams:
+    scatter_stream = (
+        cache_context.get_scatter_stream()
+        if direction == lmcache_native.TransferDirection.H2D
+        else None
+    )
+    lanes: dict[TransferEngine, StagingLane] = {}
+    try:
         _transfer_runs(
-            streams,
+            scatter_stream,
+            lanes,
             cache_context,
             block_ids_gpu,
             memory_objs,
@@ -166,10 +120,21 @@ def transfer_kv_per_object_group(
             transfer_key,
             block_ids_host,
         )
+    finally:
+        # Join, also when the call raises: a queued load must finish before
+        # the caller releases the objects it reads.
+        if lanes:
+            device = cache_context.device
+            caller_stream = platform_stream.current_stream(device)
+            for stream in (*(lane.stream for lane in lanes.values()), scatter_stream):
+                platform_stream.record_completion_event(device, stream).wait_on(
+                    caller_stream
+                )
 
 
 def _transfer_runs(
-    streams: RetrieveStreams | None,
+    scatter_stream: Any,
+    lanes: dict[TransferEngine, StagingLane],
     cache_context: BaseCacheContext,
     block_ids_gpu: list[torch.Tensor],
     memory_objs: Sequence[MemoryObj | None],
@@ -180,7 +145,8 @@ def _transfer_runs(
     transfer_key: str,
     block_ids_host: Sequence[Sequence[int]],
 ) -> None:
-    """Issue every run; ``streams`` is None on the single-stream path."""
+    """Issue every run; ``scatter_stream`` is None on the single-stream path
+    and ``lanes`` collects the lanes the call used."""
     for engine, start, end in split_into_runs(memory_objs):
         chunk_range = (start, end)
         is_host_memory = engine is TransferEngine.GPU_DMA
@@ -200,7 +166,7 @@ def _transfer_runs(
                 direction,
                 chunk_range=chunk_range,
             )
-        elif streams is None and is_host_memory and native_plan_available():
+        elif scatter_stream is None and is_host_memory and native_plan_available():
             run_object_group_transfer_plan(
                 cache_context,
                 block_ids_gpu,
@@ -223,6 +189,8 @@ def _transfer_runs(
                 direction,
                 engine=engine,
                 chunk_range=chunk_range,
-                lane=streams.lane(engine) if streams else None,
-                scatter_stream=streams.scatter_stream if streams else None,
+                lane=_lane(cache_context, lanes, engine, scatter_stream)
+                if scatter_stream is not None
+                else None,
+                scatter_stream=scatter_stream,
             )
