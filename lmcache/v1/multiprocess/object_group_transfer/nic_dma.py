@@ -42,20 +42,3 @@ class NicDmaEngine:
             "The NIC DMA engine is not implemented: objects a peer owns cannot "
             "be transferred to or from GPU memory"
         )
-
-    def loads_from_host(self, memory_objs: Sequence[MemoryObj]) -> bool:
-        """Return False: the engine is a placeholder."""
-        return False
-
-    def load_from_host(
-        self,
-        memory_objs: Sequence[MemoryObj],
-        buffers: Sequence[torch.Tensor],
-        device: torch.device,
-    ) -> None:
-        """Not supported; :meth:`loads_from_host` is always False.
-
-        Raises:
-            NotImplementedError: Always.
-        """
-        raise NotImplementedError("The NIC DMA engine is not implemented")

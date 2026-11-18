@@ -18,10 +18,8 @@ planning) driven from `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.p
 | `unfull_chunk.py` | the request's trailing unfull chunk |
 
 Platform side: `lmcache/v1/platform/base/staging_lane.py` (`StagingLane`,
-`BankSignals`, `EventBankSignals`), `BaseCacheContext.get_scatter_stream` /
-`get_staging_lane`, and for CUDA
-`lmcache/v1/platform/devices/cuda/stream_doorbell.py` (`StreamDoorbell`,
-`DoorbellBankSignals`).
+`BankSignals`) and `BaseCacheContext.get_scatter_stream` /
+`get_staging_lane`.
 
 Callers import the public names from the package itself.
 
@@ -168,17 +166,12 @@ Two signals per bank order the two streams (`BankSignals`):
 The signals outlive a request: the next request's first load into a bank
 waits for the previous request's last scatter of it.
 
-- **Events (default).** `EventBankSignals` records a stream event on one
-  stream and waits for it on the other.
-- **Doorbell (opt-in, CUDA).** With `LMCACHE_STAGING_DOORBELL=1`,
-  `DoorbellBankSignals` uses two 32-bit words per bank in host memory mapped
-  for the device: a stream writes the bank's round number
-  (`cuStreamWriteValue32`) and the other stream waits until the word equals
-  it (`cuStreamWaitValue32`). Every word is written by a stream, never by
-  the host (see "Host-thread loads" below for why). For the stream-ordered
-  loads the doorbell measures the same as events. If the driver cannot map
-  the page or the device rejects the stream write, the lane logs a warning
-  and uses events.
+Both are stream events: `BankSignals` records an event on one stream and
+makes the other wait for it. A doorbell word (`cuStreamWriteValue32` /
+`cuStreamWaitValue32`) was tried in their place and dropped: it measured
+the same as events for stream-ordered loads (49.2-50.7 against 49.4-50.9
+GiB/s for staged host memory), and a wait that a host thread releases can
+deadlock (see "Host-thread loads" below).
 
 #### Host-thread loads (NVMe DMA)
 
@@ -204,16 +197,18 @@ scatter stream |                                   | scatter b0 ..........      
 - **The handler waits for the reads.** Handler time for a GDS run is about
   its wall time, as with the stream-ordered read under cuFile compat mode.
 - **Why the kernels are not queued ahead.** An earlier version queued the
-  kernels first, behind a doorbell word that a host thread wrote when the
-  reads had returned, so the handler returned at once. It deadlocked:
-  `cuFileRead` in compat mode copies the bytes to the device on an internal
-  stream and synchronizes it, and the driver, which cannot see the order a
-  doorbell wait imposes, sometimes ran that copy behind a pending wait. The
-  wait needed the read to return and the read needed the wait released
-  (found on an H200 with two reader threads, alternating host/GDS runs;
-  writing the doorbell words by hand released the stuck read). So no stream
-  ever waits for a host thread: device work for a batch is queued after its
-  reads have returned.
+  kernels first, behind a doorbell word (`cuStreamWaitValue32`) that a host
+  thread wrote when the reads had returned, so the handler returned at
+  once. It deadlocked: `cuFileRead` in compat mode copies the bytes to the
+  device on an internal stream and synchronizes it, and the driver, which
+  cannot see the order such a wait imposes, sometimes ran that copy behind
+  a pending wait. The wait needed the read to return and the read needed
+  the wait released (found on an H200 with two reader threads, alternating
+  host/GDS runs; writing the words by hand released the stuck read). So no
+  stream ever waits for a host thread: device work for a batch is queued
+  after its reads have returned. A peer-to-peer GPU read measured the same
+  way (28.9-30.9 GiB/s with events, 28.9-30.8 with the doorbell), so the
+  early return is the only thing given up.
 - **Default.** Two reader threads; `LMCACHE_GDS_READ_THREADS` changes the
   number and `0` returns to the stream-ordered read, as does a GDS backend
   without a blocking read (only cuFile implements it). At most one batch
@@ -441,8 +436,8 @@ moves strided 2-D rows more slowly than 1-D entries of the same size
   loop queues on the load and the scatter stream, bank rotation, the bank
   freed after a failed launch, the gate and the join, and when the
   dispatcher uses lanes (CPU only, fakes).
-- `tests/v1/platform/test_staging_lane.py`: event and doorbell bank signals,
-  including the host-side wait and a host-loaded round (CPU only, fakes).
+- `tests/v1/platform/test_staging_lane.py`: bank rotation and the bank
+  signals, including the host-side wait (CPU only, fakes).
 - `tests/v1/multiprocess/test_nvme_host_load.py`: the NVMe engine's
   host-thread load: when it applies, and that it returns or raises only
   once every read of the batch has ended (CPU only, fakes).
@@ -451,5 +446,5 @@ moves strided 2-D rows more slowly than 1-D entries of the same size
 - `tests/v1/multiprocess/test_direct_copy_planner_gpu.py`: a group split
   across engines gives the same bytes as one engine moving it whole, with
   the skipped prefix in a direct or a staged run, host runs on the direct
-  copy or staged, and event or doorbell bank signals; repeated staged
-  retrieves on one context reuse the banks.
+  copy or staged; repeated staged retrieves on one context reuse the
+  banks; storage runs loaded by the reader threads.

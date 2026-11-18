@@ -43,14 +43,7 @@ from lmcache.v1.platform.base.ipc_wrapper import KVCache
 from lmcache.v1.platform.base.staging_lane import (
     BANKS_PER_LANE,
     BankSignals,
-    EventBankSignals,
     StagingLane,
-)
-from lmcache.v1.platform.devices.cuda.stream_doorbell import (
-    DoorbellBankSignals,
-    StreamDoorbell,
-    open_stream_doorbell,
-    staging_doorbell_requested,
 )
 
 logger = init_logger(__name__)
@@ -458,7 +451,6 @@ class GPUCacheContext(BaseCacheContext):
         self._scatter_stream: Any | None = None
         self._lanes: dict[str, StagingLane] = {}
         self._file_io_banks: list[tuple[Any, _TempGPUBuffer]] = []
-        self._doorbell: StreamDoorbell | None = None
 
         # Temporary GPU buffer for transfers — a single flat uint8 buffer
         self._temp_buffer = self._make_temp_buffer(
@@ -535,30 +527,9 @@ class GPUCacheContext(BaseCacheContext):
         for lane_stream, bank in self._file_io_banks:
             with torch_dev.stream(lane_stream):
                 deregister_gds_gpu_buffer(bank.buffer)
-        if self._doorbell is not None:
-            with torch_dev.device(self.device_):
-                self._doorbell.close()
         with torch_dev.stream(self.cuda_stream_):
             deregister_gds_gpu_buffer(self._temp_buffer.buffer)
         self._close_kv_wrappers()
-
-    def _make_bank_signals(self, lane_stream: Any) -> BankSignals:
-        """Build a new lane's bank signals: doorbell words when requested
-        and supported, stream events otherwise."""
-        if staging_doorbell_requested():
-            try:
-                if self._doorbell is None:
-                    with torch_dev.device(self.device_):
-                        self._doorbell = open_stream_doorbell(self.device_, lane_stream)
-                return DoorbellBankSignals(self._doorbell, self.device_)
-            except RuntimeError:
-                logger.warning(
-                    "Doorbell bank signals are not usable on device %s; "
-                    "using stream events",
-                    self.device_,
-                    exc_info=True,
-                )
-        return EventBankSignals(self.device_)
 
     def _close_kv_wrappers(self) -> None:
         """Close every KV wrapper, continuing past per-wrapper failures."""
@@ -591,9 +562,7 @@ class GPUCacheContext(BaseCacheContext):
         """Return the staging lane called ``name``, created on first use.
 
         A new lane allocates a stream and two staging banks, each the size
-        of the context's own staging buffer. Its bank signals are stream
-        events, or doorbell words when ``LMCACHE_STAGING_DOORBELL`` is set
-        and the device supports them.
+        of the context's own staging buffer.
 
         Args:
             name: Lane name; one lane per name for the context's lifetime.
@@ -622,15 +591,14 @@ class GPUCacheContext(BaseCacheContext):
                 for bank in banks:
                     register_gds_gpu_buffer(bank.buffer)
                     self._file_io_banks.append((lane_stream, bank))
-        lane = StagingLane(lane_stream, banks, self._make_bank_signals(lane_stream))
+        lane = StagingLane(lane_stream, banks, BankSignals(self.device_))
         self._lanes[name] = lane
         logger.info(
-            "Created staging lane %r on device %s (%d banks of %d bytes, %s)",
+            "Created staging lane %r on device %s (%d banks of %d bytes)",
             name,
             self.device_,
             len(banks),
             banks[0].buffer.nbytes,
-            type(lane.signals).__name__,
         )
         return lane
 

@@ -6,7 +6,7 @@ regions hold (a full chunk, an unfull chunk) is the caller's business.
 """
 
 # Standard
-from typing import Protocol, Sequence
+from typing import Protocol, Sequence, cast, runtime_checkable
 import enum
 
 # Third Party
@@ -67,6 +67,26 @@ class DMAEngine(Protocol):
 
     reads_files: bool
 
+    def stage(
+        self,
+        memory_objs: Sequence[MemoryObj],
+        buffers: Sequence[torch.Tensor],
+        direction: "lmcache_native.TransferDirection",
+    ) -> None:
+        """Move objects to or from their staging regions.
+
+        Args:
+            memory_objs: Objects of this engine's type.
+            buffers: One staging region per object.
+            direction: H2D fills the regions, D2H fills the objects.
+        """
+        ...
+
+
+@runtime_checkable
+class HostLoadingEngine(Protocol):
+    """An engine that can also load on host threads instead of a stream."""
+
     def loads_from_host(self, memory_objs: Sequence[MemoryObj]) -> bool:
         """Return whether the engine loads these objects on host threads
         (:meth:`load_from_host`) and not on the stream (:meth:`stage`).
@@ -95,21 +115,6 @@ class DMAEngine(Protocol):
 
         Raises:
             OSError: If a load failed; the regions then hold incomplete data.
-        """
-        ...
-
-    def stage(
-        self,
-        memory_objs: Sequence[MemoryObj],
-        buffers: Sequence[torch.Tensor],
-        direction: "lmcache_native.TransferDirection",
-    ) -> None:
-        """Move objects to or from their staging regions.
-
-        Args:
-            memory_objs: Objects of this engine's type.
-            buffers: One staging region per object.
-            direction: H2D fills the regions, D2H fills the objects.
         """
         ...
 
@@ -176,7 +181,8 @@ def loads_from_host(engine: TransferEngine, memory_objs: Sequence[MemoryObj]) ->
     Returns:
         True if :func:`load_from_host` applies, False if :func:`stage` does.
     """
-    return _ENGINES[engine].loads_from_host(memory_objs)
+    impl = _ENGINES[engine]
+    return isinstance(impl, HostLoadingEngine) and impl.loads_from_host(memory_objs)
 
 
 def load_from_host(
@@ -197,7 +203,9 @@ def load_from_host(
     Raises:
         OSError: If a load failed; the regions then hold incomplete data.
     """
-    _ENGINES[engine].load_from_host(memory_objs, buffers, device)
+    cast(HostLoadingEngine, _ENGINES[engine]).load_from_host(
+        memory_objs, buffers, device
+    )
 
 
 def split_into_runs(

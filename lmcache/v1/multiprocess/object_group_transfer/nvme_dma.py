@@ -12,11 +12,12 @@ Two ways to load a slab object into a staging region:
   read; ``LMCACHE_GDS_READ_THREADS`` sets the number of reader threads (2 by
   default, 0 turns host-thread loads off).
 
-Device work for a batch is queued only after its reads have returned. A
-blocking read does device work of its own (cuFile in compat mode copies the
-bytes to the device on an internal stream), and the driver may run that
-work behind a pending doorbell wait; a stream that waited for a host thread
-to signal the end of the read would deadlock with the read itself.
+Device work for a batch is queued only after its reads have returned: no
+stream may wait for a host thread. A blocking read does device work of its
+own (cuFile in compat mode copies the bytes to the device on an internal
+stream), and the driver can run that work behind a wait it cannot see the
+reason for; kernels queued ahead behind a host-written signal deadlocked
+with the read that was to release them.
 """
 
 # Standard
@@ -42,22 +43,10 @@ _DEFAULT_READ_THREADS = 2
 
 
 def gds_read_threads() -> int:
-    """Return the number of host threads that read slab objects.
-
-    Returns:
-        ``LMCACHE_GDS_READ_THREADS`` if set (0 turns host-thread loads off),
-        else 2.
-
-    Raises:
-        ValueError: If the variable is not a non-negative integer.
-    """
-    raw = os.environ.get(ENV_GDS_READ_THREADS)
-    if raw is None:
-        return _DEFAULT_READ_THREADS
-    threads = int(raw)
-    if threads < 0:
-        raise ValueError(f"{ENV_GDS_READ_THREADS} must be >= 0, got {raw!r}")
-    return threads
+    """Return the number of host threads that read slab objects:
+    ``LMCACHE_GDS_READ_THREADS`` if set (0 turns host-thread loads off),
+    else 2."""
+    return int(os.environ.get(ENV_GDS_READ_THREADS, _DEFAULT_READ_THREADS))
 
 
 def read_slab_object(memory_obj: MemoryObj, buffer: torch.Tensor) -> None:

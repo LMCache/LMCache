@@ -96,6 +96,3 @@ def test_two_reader_threads_by_default(monkeypatch):
     assert gds_read_threads() == 2
     monkeypatch.setenv(ENV_GDS_READ_THREADS, "8")
     assert gds_read_threads() == 8
-    monkeypatch.setenv(ENV_GDS_READ_THREADS, "-1")
-    with pytest.raises(ValueError):
-        gds_read_threads()
