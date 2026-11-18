@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
+from collections.abc import Collection, Sequence
 from importlib import resources
 from urllib.parse import unquote
 import argparse
@@ -155,6 +156,50 @@ _node_registry = _NodeRegistry()
 # update) keep working unchanged; whole-list replacement MUST go
 # through ``_node_registry.replace`` so all aliases stay in sync.
 target_nodes = _node_registry.nodes
+
+
+def _configured_socket_paths(nodes: list[dict]) -> frozenset[str]:
+    """Return UDS paths from operator node config, including nested children."""
+    socket_paths: set[str] = set()
+    pending = list(nodes)
+    while pending:
+        node = pending.pop()
+        port = str(node.get("port", ""))
+        if "/" in port:
+            socket_paths.add(port)
+        children = node.get("nodes", [])
+        if isinstance(children, list):
+            pending.extend(child for child in children if isinstance(child, dict))
+    return frozenset(socket_paths)
+
+
+def _socket_allowlist(
+    declared: Collection[str], extra: Sequence[str] | None
+) -> frozenset[str]:
+    """Return startup sockets plus comma-separated ``--uds-allowlist`` entries."""
+    return frozenset(declared) | {
+        part.strip()
+        for value in extra or ()
+        for part in value.split(",")
+        if part.strip()
+    }
+
+
+def _socket_allowed(socket_path: str, allowed: Collection[str]) -> bool:
+    """Return whether an entry authorizes this path, including below a directory.
+
+    Both sides use ``realpath``, so ``..`` and symlinks cannot escape it.
+    """
+    resolved = os.path.realpath(socket_path)
+    for entry in allowed:
+        base = os.path.realpath(entry)
+        if resolved == base:
+            return True
+        if entry.endswith("/") or os.path.isdir(base):
+            if os.path.commonpath([resolved, base]) == base:
+                return True
+    return False
+
 
 # Initialize heartbeat service with app context
 heartbeat_service: HeartbeatService = HeartbeatService()
@@ -682,10 +727,9 @@ async def proxy_request(
 
     For security, non-socket targets must match a host/port already
     registered in :data:`_node_registry`; this prevents the endpoint
-    from being used as an open relay (SSRF).  Socket paths are
-    accepted as-is because they are local UDS endpoints. When frontend
-    authentication or a backend credential is configured, both supported
-    caller credential headers are removed and an
+    from being used as an open relay (SSRF); socket paths must be explicitly
+    configured at startup. When frontend authentication or a backend credential
+    is configured, both supported caller credential headers are removed and an
     independently configured backend credential is added instead.
     """
     target_port_or_socket = unquote(str(target_port_or_socket))
@@ -695,6 +739,11 @@ async def proxy_request(
     if is_socket_path:
         # For socket paths, use UDS transport
         socket_path = target_port_or_socket
+        if not _socket_allowed(socket_path, request.app.state.allowed_socket_paths):
+            raise HTTPException(
+                status_code=403,
+                detail="Socket path is not configured for proxy access",
+            )
         target_url = f"http://localhost/{path}"
 
         # Create UDS transport
@@ -875,7 +924,7 @@ async def load_nodes_from_supplier(
 async def initialize_nodes(
     node_supplier_url: str | None = None,
     backend_authorization_header: str | None = None,
-) -> None:
+) -> frozenset[str]:
     """Initialize node configuration from CLI args or supplier URL.
 
     Args:
@@ -883,6 +932,9 @@ async def initialize_nodes(
             nodes are loaded via :func:`load_nodes_from_supplier`.
             Otherwise falls back to ``args.nodes`` / ``args.config``.
         backend_authorization_header: Optional Bearer value for discovered nodes.
+
+    Returns:
+        UDS paths trusted through startup ``--nodes`` or ``--config``.
     """
     global args
 
@@ -891,6 +943,7 @@ async def initialize_nodes(
 
     if node_supplier_url:
         await load_nodes_from_supplier(node_supplier_url, backend_authorization_header)
+        return frozenset()
     elif args.nodes:
         try:
             nodes = json.loads(args.nodes)
@@ -906,10 +959,13 @@ async def initialize_nodes(
                     ]
                 )
                 print(f"Loaded {len(nodes)} target nodes from command line arguments")
+                return _configured_socket_paths(nodes)
         except json.JSONDecodeError:
             print("Failed to parse nodes JSON parameter")
     elif args.config:
         load_config(args.config)
+        return _configured_socket_paths(target_nodes)
+    return frozenset()
 
 
 # Minimum seconds between two supplier refreshes triggered by ``/``.
@@ -969,12 +1025,17 @@ async def serve_frontend(request: Request) -> FileResponse:
 
 
 # Helper function to fetch metrics from a single node
-async def _fetch_node_metrics(node: dict, authorization_header: str | None) -> str:
+async def _fetch_node_metrics(
+    node: dict,
+    authorization_header: str | None,
+    allowed_socket_paths: Collection[str],
+) -> str:
     """Fetch Prometheus metrics from one node.
 
     Args:
         node: Node dictionary containing name, host, and port.
         authorization_header: Optional Bearer value for the node request.
+        allowed_socket_paths: Operator-configured UDS paths eligible for access.
 
     Returns:
         Metrics text, or a Prometheus comment describing the failure.
@@ -984,6 +1045,11 @@ async def _fetch_node_metrics(node: dict, authorization_header: str | None) -> s
         is_socket_path = "/" in node["port"]
 
         if is_socket_path:
+            if not _socket_allowed(node["port"], allowed_socket_paths):
+                return (
+                    f"# ERROR: Socket path for {node['name']} is not configured "
+                    "for proxy access\n"
+                )
             # Use UDS transport for socket paths
             transport = httpx.AsyncHTTPTransport(uds=node["port"])
             # Use localhost as host
@@ -1039,7 +1105,11 @@ async def aggregated_metrics(request: Request) -> PlainTextResponse:
 
     metrics_results = await asyncio.gather(
         *[
-            _fetch_node_metrics(node, request.app.state.backend_authorization_header)
+            _fetch_node_metrics(
+                node,
+                request.app.state.backend_authorization_header,
+                request.app.state.allowed_socket_paths,
+            )
             for node in nodes
         ]
     )
@@ -1060,12 +1130,14 @@ async def aggregated_metrics(request: Request) -> PlainTextResponse:
 def create_app(
     http_authentication: APIKeyVerifier | None = None,
     backend_authorization_header: str | None = None,
+    allowed_socket_paths: Collection[str] = (),
 ) -> FastAPI:
     """Create and configure the frontend FastAPI application.
 
     Args:
         http_authentication: API keys accepted from frontend callers.
         backend_authorization_header: Bearer value sent to backend HTTP servers.
+        allowed_socket_paths: Operator-configured UDS paths eligible for access.
 
     Returns:
         Configured frontend application.
@@ -1078,6 +1150,7 @@ def create_app(
     )
     app.state.http_authentication = authentication
     app.state.backend_authorization_header = backend_authorization_header
+    app.state.allowed_socket_paths = frozenset(allowed_socket_paths)
     app.add_middleware(
         HTTPBearerAuthenticationMiddleware,
         public_paths=PUBLIC_FRONTEND_PATHS,
@@ -1154,6 +1227,15 @@ def main() -> None:
         help="URL to fetch node information from, e.g.: http://example.com/lmcache_infos",
     )
     parser.add_argument(
+        "--uds-allowlist",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="Unix socket path or directory the dashboard may reach. Repeatable "
+        "and comma-separated; a directory, or a value ending in '/', covers "
+        "every socket below it. Needed for supplier-discovered sockets.",
+    )
+    parser.add_argument(
         "--log-level",
         type=str,
         default="warning",
@@ -1185,9 +1267,18 @@ def main() -> None:
     )
 
     # Initialize node configuration
-    asyncio.run(initialize_nodes(args.node_supplier_url, backend_authorization_header))
+    declared_socket_paths = asyncio.run(
+        initialize_nodes(args.node_supplier_url, backend_authorization_header)
+    )
+    # Supplier-discovered sockets stay untrusted unless the operator declares
+    # them, so discovery still works for UDS deployments.
+    allowed_socket_paths = _socket_allowlist(declared_socket_paths, args.uds_allowlist)
 
-    app = create_app(http_authentication, backend_authorization_header)
+    app = create_app(
+        http_authentication,
+        backend_authorization_header,
+        allowed_socket_paths,
+    )
     print(f"Monitoring service running at http://{args.host}:{args.port}")
     print(f"Node management: http://{args.host}:{args.port}/static/index.html")
 

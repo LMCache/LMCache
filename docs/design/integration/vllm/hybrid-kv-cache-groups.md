@@ -228,8 +228,8 @@ already in those last positions of the tracker's list, `append_block_ids` sets
 the old position to 0. Without align-mode Mamba and speculative decoding the
 window is 0 and ids are appended as-is.
 The server then sees an all-zero chunk for the Mamba group and skips it, and
-the next hit ends one chunk earlier. Needs `--separate-object-groups` and
-chunk size equal to the Mamba block size.
+the next hit ends one chunk earlier. This needs object-group separation, which
+is enabled by default, and chunk size equal to the Mamba block size.
 
 ## Tensor-parallel replicated groups
 
@@ -310,7 +310,7 @@ per reader and each worker's retrieve releases one.
 
 | Area | File |
 |---|---|
-| Engine group info (IPC type) + helpers | `lmcache/v1/multiprocess/group_view.py` |
+| Engine group info (IPC type) + helpers | `lmcache/v1/common/group_view.py` |
 | Shared grouping primitive | `lmcache/v1/kv_layer_groups.py` |
 | vLLM → `list[EngineGroupInfo]` | `lmcache/integration/vllm/kv_cache_groups.py` |
 | Group metadata edits (Mamba, sub-paged attention) | `lmcache/integration/vllm/kv_cache_group_edits.py` |

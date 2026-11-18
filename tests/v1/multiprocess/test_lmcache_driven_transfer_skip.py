@@ -10,7 +10,7 @@
 
 # Standard
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, call
 
 # Third Party
@@ -251,6 +251,34 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
         [-1, -1, 0, 1],
         [-1, -1, 2, 3],
     ]
+
+
+def test_store_skip_chunks_drops_caller_masked_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller-masked chunk (blend ``--enable-dedup-content-kv``) is never
+    reserved in any object group and reports False in the stored mask."""
+    module, _context, _reads, _transfers = _make_checkpoint_module(monkeypatch)
+    key: Any = SimpleNamespace(
+        request_id="req", worker_id=1, has_unfull_chunk=_no_unfull
+    )
+    _handle, ok, mask = module.store_with_chunk_mask(
+        key,
+        1,
+        [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
+        b"producer",
+        skip_chunks=[False, True],
+    )
+    assert ok
+    reserved = [
+        call.args[0]
+        for call in cast(
+            MagicMock, module.context.storage_manager.reserve_write
+        ).call_args_list
+    ]
+    assert all("g0c1" not in keys and "g1c1" not in keys for keys in reserved)
+    assert ["g0c0"] in reserved
+    assert mask[1] is False
 
 
 def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):

@@ -274,3 +274,6 @@ class DeviceIPCWrapper:
             ),
         )
         return wrapper_cls.from_wire(descriptor)
+
+
+KVCache = list[DeviceIPCWrapper]

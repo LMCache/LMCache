@@ -11,7 +11,7 @@ These docs describe LMCache's multiprocess (MP) architecture, the current recomm
 ## Getting started
 
 - [Getting Started](https://docs.lmcache.ai/getting_started/index.html): Entry point for new users — overview, installation, quickstart, and reference tools.
-- [Installation](https://docs.lmcache.ai/getting_started/installation.html): Install via pip/uv (stable and nightly wheels for CUDA 13.0, CUDA 12.9, ROCm, Intel XPU, and MetaX MACA), from source, via Docker, or CLI-only.
+- [Installation](https://docs.lmcache.ai/getting_started/installation.html): Install via pip/uv (stable and nightly wheels for CUDA 13.0, ROCm, Intel XPU, and MetaX MACA), from source, via Docker, or CLI-only.
 - [Quickstart](https://docs.lmcache.ai/getting_started/quickstart.html): Start LMCache's multiprocess server with vLLM or SGLang and verify cache reuse.
 - [Benchmarking](https://docs.lmcache.ai/getting_started/benchmarking.html): How to measure LMCache's effect on TTFT and throughput, and how to reproduce published numbers.
 - [KV Cache Size Calculator](https://docs.lmcache.ai/getting_started/kv_cache_calculator.html): Estimate KV cache memory footprint for a given model, context length, and batch size.
