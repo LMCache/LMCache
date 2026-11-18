@@ -544,6 +544,47 @@ def validate_dcp_support(
         )
 
 
+def validate_unfull_chunk_spec_decode(
+    save_unfull_chunk: bool,
+    uses_spec_decode: bool,
+    kv_cache_config: "KVCacheConfig | None",
+) -> bool:
+    """Check unfull-chunk storing against speculative decoding.
+
+    Grid tails of align-mode Mamba models read boundary-state snapshots and
+    stay supported; the exact prompt-end tail does not (draft rows share its
+    running state blocks).
+
+    Args:
+        save_unfull_chunk: Whether ``lmcache.mp.save_unfull_chunk`` is set.
+        uses_spec_decode: Whether speculative decoding is enabled.
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+
+    Returns:
+        Whether the exact prompt-end tail may be stored.
+
+    Raises:
+        ValueError: If unfull chunks are enabled under speculative decoding
+            without align-mode Mamba boundary-state hand-offs.
+    """
+    if not uses_spec_decode:
+        return True
+    if save_unfull_chunk and not (
+        kv_cache_config is not None
+        and any(
+            is_align_mode_mamba_group(group)
+            for group in kv_cache_config.kv_cache_groups
+        )
+        and "kv_connector_block_state" in SchedulerOutput.__dataclass_fields__
+    ):
+        raise ValueError(
+            "lmcache.mp.save_unfull_chunk supports speculative decoding only "
+            "for align-mode Mamba models on a vLLM that hands boundary states "
+            "to connectors"
+        )
+    return False
+
+
 def build_parallel_strategy_from_vllm_config(
     vllm_config: "VllmConfig",
     n_servers: int,
@@ -687,16 +728,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if not isinstance(self._save_unfull_chunk, bool):
             raise ValueError("lmcache.mp.save_unfull_chunk must be a boolean")
         spec_config = getattr(vllm_config, "speculative_config", None)
-        if (
-            self._save_unfull_chunk
-            and spec_config is not None
-            and (spec_config.num_speculative_tokens or 0) > 0
-        ):
-            # Draft rows sit past the prompt end in relocated Mamba blocks,
-            # so the state at the prompt end is not isolated.
-            raise ValueError(
-                "lmcache.mp.save_unfull_chunk does not support speculative decoding"
-            )
+        # Scheduler only: workers may lack the resolved groups.
+        self._store_exact_unfull_tail = validate_unfull_chunk_spec_decode(
+            self._save_unfull_chunk and role == KVConnectorRole.SCHEDULER,
+            spec_config is not None and (spec_config.num_speculative_tokens or 0) > 0,
+            kv_cache_config,
+        )
         if (
             self._save_unfull_chunk
             and kv_cache_config is not None
@@ -2276,6 +2313,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._unfull_chunk_grid,
             boundary_state_blocks,
             self._boundary_state_groups,
+            store_exact_tail=getattr(self, "_store_exact_unfull_tail", True),
         ):
             if pool is not None and boundary_state_block_ids:
                 pool.touch(
