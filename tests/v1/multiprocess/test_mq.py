@@ -30,6 +30,7 @@ from lmcache.v1.client.transport.zmq_impl.mq_client import (
 from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
+    KVEventBatch,
 )
 from lmcache.v1.distributed.api import get_request_tags
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -863,6 +864,37 @@ def test_serialized_handler_error_returns_remote_error() -> None:
         )
         assert isinstance(healthy, MessagingFuture)
         assert healthy.result(timeout=1) == 256
+    finally:
+        client.close()
+        server.close()
+
+
+def test_serialized_stream_handler_error_closes_client_stream() -> None:
+    """A failing serialized stream handler must end the client's stream
+    promptly instead of leaving it open."""
+
+    def failing_subscribe(
+        instance_id: int, model_name: str, cursor: int, max_events: int
+    ) -> MessagingStream[KVEventBatch]:
+        raise RuntimeError("subscribe exploded")
+
+    server_url = f"tcp://127.0.0.1:{_unused_tcp_port()}"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    server.add_handler("subscribe_kv_events", HandlerType.SERIALIZED, failing_subscribe)
+    server.start()
+
+    client = MessageQueueClient(server_url, context)
+    try:
+        stream: MessagingFuture[KVEventBatch] | MessagingStream[KVEventBatch] = (
+            client.submit_request("subscribe_kv_events", [1, "model", 0, 16])
+        )
+        assert isinstance(stream, MessagingStream)
+        closed = threading.Event()
+        stream.add_close_callback(closed.set)
+        assert closed.wait(timeout=1)
+        with pytest.raises(StopIteration):
+            next(stream)
     finally:
         client.close()
         server.close()
