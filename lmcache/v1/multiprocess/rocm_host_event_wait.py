@@ -35,7 +35,7 @@ time without the waiting peer), delete this module, the option and the
 """
 
 # Standard
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 import ctypes
@@ -50,6 +50,10 @@ from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.affinity_pool import (
     DeferredResponse,
     current_worker_poster,
+)
+from lmcache.v1.platform.base.event_ipc import (
+    IMPORTED_EVENT_CACHE_SIZE,
+    ipc_event_pool_enabled,
 )
 
 logger = init_logger(__name__)
@@ -187,7 +191,30 @@ def _hip_ok(lib: Any, rc: int) -> bool:
     return rc == _HIP_SUCCESS
 
 
+_hip_imported: OrderedDict[tuple[bytes, str], _HipIpcEvent] = OrderedDict()
+_hip_imported_lock = threading.Lock()
+
+
 def _hip_import_event(handle: bytes, device: object) -> _HipIpcEvent | None:
+    """Return the cached event for ``handle``, or open it without the GIL."""
+    if not ipc_event_pool_enabled():
+        return _hip_open_event(handle, device)
+    key = (bytes(handle), str(device))
+    with _hip_imported_lock:
+        event = _hip_imported.get(key)
+        if event is not None:
+            _hip_imported.move_to_end(key)
+            return event
+    event = _hip_open_event(handle, device)
+    if event is not None:
+        with _hip_imported_lock:
+            _hip_imported[key] = event
+            while len(_hip_imported) > IMPORTED_EVENT_CACHE_SIZE:
+                _hip_imported.popitem(last=False)
+    return event
+
+
+def _hip_open_event(handle: bytes, device: object) -> _HipIpcEvent | None:
     """Open ``handle`` on ``device`` without the GIL; None to fall back to torch."""
     lib = _hip_lib()
     if lib is None or len(handle) != _HIP_IPC_HANDLE_SIZE:

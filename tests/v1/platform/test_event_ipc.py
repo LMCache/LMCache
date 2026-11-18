@@ -11,7 +11,10 @@ import pytest
 from lmcache import torch_device_type
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.event_ipc import (
+    _EVENT_POOL_SIZE,
     _EXPORTED_EVENT_RING_SIZE,
+    IMPORTED_EVENT_CACHE_SIZE,
+    IPC_EVENT_POOL_ENV,
     DefaultEventIPCBackend,
     EventIPCBackend,
     get_event_ipc_backend,
@@ -324,3 +327,70 @@ def test_protocol_signatures_match_default_backend():
     for name in proto_methods:
         assert callable(getattr(DefaultEventIPCBackend, name))
         assert inspect.signature(getattr(DefaultEventIPCBackend, name)) is not None
+
+
+class _PooledEvent(_FakeEvent):
+    """Fake event whose completion the test controls."""
+
+    imports = 0
+
+    def __init__(self, interprocess: bool = False) -> None:
+        super().__init__(interprocess)
+        self.done = True
+
+    def query(self) -> bool:
+        return self.done
+
+    @classmethod
+    def from_ipc_handle(cls, device, handle):
+        cls.imports += 1
+        return super().from_ipc_handle(device, handle)
+
+
+class _PooledModule:
+    Event = _PooledEvent
+
+
+def _pooled_backend(monkeypatch: pytest.MonkeyPatch, on: bool = True):
+    monkeypatch.setenv(IPC_EVENT_POOL_ENV, "1" if on else "0")
+    _PooledEvent.imports = 0
+    return DefaultEventIPCBackend(event_module=_PooledModule(), device_type="fake")
+
+
+def test_event_pool_reuses_finished_events_per_device(monkeypatch):
+    backend = _pooled_backend(monkeypatch)
+    first = [backend.create_event("d0") for _ in range(_EVENT_POOL_SIZE)]
+    assert len({id(e) for e in first}) == _EVENT_POOL_SIZE
+    again = [backend.create_event("d0") for _ in range(_EVENT_POOL_SIZE)]
+    assert [id(e) for e in again] == [id(e) for e in first]
+    assert backend.create_event("d1") not in first
+
+
+def test_event_pool_replaces_an_event_still_in_flight(monkeypatch):
+    backend = _pooled_backend(monkeypatch)
+    first = [backend.create_event("d0") for _ in range(_EVENT_POOL_SIZE)]
+    first[0].done = False
+    replaced = backend.create_event("d0")
+    assert replaced is not first[0]
+    assert backend.create_event("d0") is first[1]
+
+
+def test_import_cache_opens_each_handle_once_and_is_bounded(monkeypatch):
+    backend = _pooled_backend(monkeypatch)
+    a = backend.import_event(b"a", "d0")
+    assert backend.import_event(b"a", "d0") is a
+    assert backend.import_event(b"a", "d1") is not a
+    assert _PooledEvent.imports == 2
+    for i in range(IMPORTED_EVENT_CACHE_SIZE):
+        backend.import_event(b"h%d" % i, "d0")
+    assert len(backend._imported) == IMPORTED_EVENT_CACHE_SIZE
+    assert backend.import_event(b"a", "d0") is not a  # evicted (LRU)
+
+
+def test_event_pool_env_off_restores_per_transfer_events(monkeypatch):
+    backend = _pooled_backend(monkeypatch, on=False)
+    events = [backend.create_event("d0") for _ in range(_EVENT_POOL_SIZE + 1)]
+    assert len({id(e) for e in events}) == _EVENT_POOL_SIZE + 1
+    backend.import_event(b"a", "d0")
+    backend.import_event(b"a", "d0")
+    assert _PooledEvent.imports == 2

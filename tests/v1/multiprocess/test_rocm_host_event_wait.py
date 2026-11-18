@@ -2,6 +2,7 @@
 """Tests for the opt-in ROCm host event wait of LMCache-driven transfers."""
 
 # Standard
+from collections import OrderedDict
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
@@ -29,6 +30,7 @@ from lmcache.v1.multiprocess.rocm_host_event_wait import (
     ROCM_HOST_EVENT_WAIT_ENV,
     HostEventWaiter,
 )
+from lmcache.v1.platform.base.event_ipc import IPC_EVENT_POOL_ENV
 from tests.v1.multiprocess.test_event_ipc_handle_path import (
     _FakeEventBackend,
     _FakeStorageManager,
@@ -786,6 +788,7 @@ def hip(monkeypatch: pytest.MonkeyPatch) -> _FakeHip:
     fake = _FakeHip()
     monkeypatch.setattr(rocm_host_event_wait, "_hip", fake)
     monkeypatch.setattr(rocm_host_event_wait, "_hip_unavailable", False)
+    monkeypatch.setattr(rocm_host_event_wait, "_hip_imported", OrderedDict())
     return fake
 
 
@@ -838,8 +841,9 @@ def test_hip_open_failure_clears_error_and_falls_back_to_torch(
 
 
 def test_hip_event_is_destroyed_and_converted_for_stream_waits(
-    waiters: Any, hip: _FakeHip
+    monkeypatch: pytest.MonkeyPatch, waiters: Any, hip: _FakeHip
 ) -> None:
+    monkeypatch.setenv(IPC_EVENT_POOL_ENV, "0")  # no import cache holding it
     waiter = waiters()
     backend = _Backend()
     wrapped = waiter.wrap(backend)
@@ -850,3 +854,17 @@ def test_hip_event_is_destroyed_and_converted_for_stream_waits(
     del event
     gc.collect()
     assert hip.destroyed == [1]
+
+
+def test_hip_import_is_cached_per_handle(
+    monkeypatch: pytest.MonkeyPatch, waiters: Any, hip: _FakeHip
+) -> None:
+    monkeypatch.delenv(IPC_EVENT_POOL_ENV, raising=False)
+    wrapped = waiters().wrap(_Backend())
+    first = wrapped.import_event(_handle(b"a"), 0)
+    assert wrapped.import_event(_handle(b"a"), 0) is first
+    assert wrapped.import_event(_handle(b"b"), 0) is not first
+    assert len(hip.opened) == 2
+    monkeypatch.setenv(IPC_EVENT_POOL_ENV, "0")
+    assert wrapped.import_event(_handle(b"a"), 0) is not first
+    assert len(hip.opened) == 3
