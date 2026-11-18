@@ -19,8 +19,8 @@ from lmcache.v1.client.kv_event_subscriber import (
     MPKVEventSubscriber,
 )
 from lmcache.v1.common.custom_types import KVEventBatch, KVEventRecord
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.transport.futures import MessagingStream
+from lmcache.v1.transport.request_client import RequestClient
 
 
 def test_import_does_not_load_inference_engines() -> None:
