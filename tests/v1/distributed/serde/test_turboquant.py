@@ -827,3 +827,60 @@ def test_fp8_layers_share_encoding_and_preserve_raw_boundaries(
     assert torch.equal(
         recovered.view(torch.uint8), expected_recovered.view(torch.uint8)
     )
+
+
+@pytest.mark.skipif(not torch_dev.is_available(), reason="Requires accelerator")
+@pytest.mark.parametrize("preset", ["turboquant_k8v4", "turboquant_4bit_nc"])
+@pytest.mark.parametrize("phase", ["encode", "decode"])
+def test_turboquant_key_preparation_work(preset: str, phase: str) -> None:
+    """FP8 omits unused WHT signs; low-bit keys retain seeded rotation.
+
+    Args:
+        preset: FP8 preset or low-bit control preset.
+        phase: Public serde operation to profile after warmup.
+
+    Raises:
+        AssertionError: If FP8 generates random signs or the low-bit control
+            omits them.
+
+    Operation counts avoid machine-dependent latency thresholds. Compilation
+    and warmup run outside the profile to measure only per-object work.
+    """
+    cfg = TurboQuantSerdeConfig(preset=preset, cuda_device="0")
+    serializer = TurboQuantSerializer(cfg)
+    deserializer = TurboQuantDeserializer(cfg)
+    generator = torch.Generator().manual_seed(20261115)
+    source = torch.randn((2, 28, 256, 512), dtype=torch.bfloat16, generator=generator)
+    layout = MemoryLayoutDesc(shapes=[source.shape], dtypes=[source.dtype])
+    encoded = torch.zeros(
+        serializer.estimate_serialized_size(layout), dtype=torch.uint8
+    )
+    restored = torch.empty_like(source)
+    source_obj = cast(MemoryObj, _FakeMemoryObj(source))
+    encoded_obj = cast(MemoryObj, _FakeMemoryObj(encoded))
+    restored_obj = cast(MemoryObj, _FakeMemoryObj(restored))
+    key = _make_turboquant_object_key(0)
+
+    serializer.serialize(source_obj, encoded_obj, key)
+    deserializer.deserialize(encoded_obj, restored_obj, key)
+    torch_dev.synchronize()
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU]
+    ) as profile:
+        if phase == "encode":
+            serializer.serialize(source_obj, encoded_obj, key)
+        else:
+            deserializer.deserialize(encoded_obj, restored_obj, key)
+        torch_dev.synchronize()
+
+    random_sign_calls = sum(
+        event.count for event in profile.key_averages() if event.key == "aten::randint"
+    )
+    if cfg.key_fp8:
+        assert random_sign_calls == 0, (
+            "FP8 key casts must not generate unused WHT random signs"
+        )
+    else:
+        assert random_sign_calls > 0, (
+            "Low-bit key rotation must retain seeded random signs"
+        )
