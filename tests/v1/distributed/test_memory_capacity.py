@@ -482,6 +482,32 @@ class TestCapacityChangePublishing:
         snapshot = stub._event_bus.events[0].metadata["snapshot"]
         assert [(m.tier, m.backend) for m in snapshot.modules] == [(Tier.L1, "dram")]
 
+    def test_l2_cleanup_failure_publishes_reduced_capacity(self) -> None:
+        """Cleanup errors must not leave the coordinator advertising old capacity."""
+        published: list[int] = []
+
+        class Adapter:
+            capacity = 8192
+
+            def reconfigure(self, *args: object, **kwargs: object) -> dict[str, object]:
+                self.capacity = 4096
+                raise BufferError("mapping still exported")
+
+        adapter = Adapter()
+
+        class Manager:
+            def _get_reconfigurable_l2_adapter(self, index: int) -> Adapter:
+                return adapter
+
+            def publish_capacity(self) -> None:
+                published.append(adapter.capacity)
+
+        with pytest.raises(BufferError, match="mapping still exported"):
+            StorageManager.reconfigure_l2_adapter(
+                cast(StorageManager, Manager()), 0, "remove", {}
+            )
+        assert published == [4096]
+
 
 class TestCapacityPublishDoesNotTakeLifecycleLock:
     """Publishing must not queue behind adapter lifecycle work."""

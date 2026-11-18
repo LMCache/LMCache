@@ -53,6 +53,9 @@ An uncertain HTTP operation retains the provider lease and blocks automatic
 reuse of that request. Never release backing as rollback for a failed add,
 timeout, worker restart, or merely ``draining`` response. Provider release may
 be retried after confirmed detach without calling the backend again.
+An L2 unmap failure keeps the device ``removing`` and its range owned, while
+excluding it from usable capacity. Adapter shutdown still cleans up other
+devices and event notifiers; explicit cleanup retries retain the failed mapping.
 Controller state is in memory: after controller loss, stop/fence the original
 worker and reconcile its provider grants offline before releasing anything.
 This small API adds no scheduling policy, background loop, or persistent
