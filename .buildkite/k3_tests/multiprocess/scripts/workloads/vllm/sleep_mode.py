@@ -13,13 +13,18 @@ outside:
    cache the same prompt is served from LMCache with the same output.
 3. Sleep with ``reset_connector=false``: vLLM reports sleeping, the LMCache
    server lists no registered KV cache, and GPU memory in use drops.
-4. Wake-up: the KV cache is registered again and GPU memory in use is back at
-   the level before sleep, not above it.
+4. Wake-up: the KV cache is registered again and GPU memory in use is not
+   above the level before sleep.
 5. The prompt is served from LMCache again with the same output, so the
    server reads and writes the memory vLLM uses now.
 6. Sleep with ``reset_connector=true`` and wake-up: same checks as 3 and 4.
 7. The prompt misses LMCache, because the reset cleared it, and is stored
    again. After another prefix-cache reset it hits with the same output.
+
+LMCache stores and returns whole chunks, so the expected counts come from the
+prompt's token count and the server's chunk size: a store is complete when
+every full chunk of the prompt is written, and a hit covers exactly those
+chunks.
 
 A failed check does not stop the run, so one run shows every broken step. A
 request that vLLM rejects does stop it, because the later steps depend on it.
@@ -129,10 +134,27 @@ class Counters:
 
 
 @dataclass(frozen=True)
+class Completion:
+    """Generated text of one completion and the size of its prompt."""
+
+    text: str
+    prompt_tokens: int
+
+
+@dataclass(frozen=True)
+class CachedPrefix:
+    """The part of a prompt that LMCache stores: its full chunks."""
+
+    chunks: int
+    tokens: int
+
+
+@dataclass(frozen=True)
 class Generation:
     """Output of one completion and the cache activity it caused."""
 
     text: str
+    prefix: CachedPrefix
     activity: Counters
 
 
@@ -204,20 +226,28 @@ class Deployment:
             read_chunks=_read_counter(lmcache, L1_READ_CHUNKS),
         )
 
-    def complete(self, prompt: str) -> str:
-        """Run one greedy completion and return the generated text."""
-        response = _http(
-            "POST",
-            f"{self._engine_url}/v1/completions",
-            {
-                "model": self._model,
-                "prompt": prompt,
-                "max_tokens": MAX_TOKENS,
-                "temperature": 0,
-                "seed": 0,
-            },
+    def chunk_size(self) -> int:
+        """Return the number of tokens in one LMCache chunk."""
+        return json.loads(_http("GET", f"{self._lmcache_url}/status"))["chunk_size"]
+
+    def complete(self, prompt: str) -> Completion:
+        """Run one greedy completion."""
+        response = json.loads(
+            _http(
+                "POST",
+                f"{self._engine_url}/v1/completions",
+                {
+                    "model": self._model,
+                    "prompt": prompt,
+                    "max_tokens": MAX_TOKENS,
+                    "temperature": 0,
+                    "seed": 0,
+                },
+            )
         )
-        return json.loads(response)["choices"][0]["text"]
+        return Completion(
+            response["choices"][0]["text"], response["usage"]["prompt_tokens"]
+        )
 
     def reset_prefix_cache(self) -> None:
         """Clear vLLM's own prefix cache and leave LMCache as it is."""
@@ -264,36 +294,54 @@ class Deployment:
         return int(output.strip())
 
 
+def stored(activity: Counters, prefix: CachedPrefix) -> bool:
+    """Tell whether every full chunk of the prompt has been written."""
+    return activity.stored_chunks >= prefix.chunks
+
+
+def hit(activity: Counters, prefix: CachedPrefix) -> bool:
+    """Tell whether vLLM took every full chunk of the prompt from LMCache."""
+    return activity.external_hit_tokens >= prefix.tokens
+
+
+def hit_from_l1(activity: Counters, prefix: CachedPrefix) -> bool:
+    """Tell whether the hit is complete and the server reports its L1 reads."""
+    return hit(activity, prefix) and activity.read_chunks > 0
+
+
 def run_prompt(
-    deployment: Deployment, expected: Callable[[Counters], bool]
+    deployment: Deployment,
+    chunk_size: int,
+    complete: Callable[[Counters, CachedPrefix], bool],
 ) -> Generation:
     """Send the prompt and wait for the cache activity it should cause.
 
-    A store finishes after the response, so the counters are polled until the
-    expected activity shows and two consecutive readings agree.
+    A store finishes after the response and the counters are exported with a
+    delay, so they are polled until the awaited activity is complete.
 
     Args:
         deployment: The servers under test.
-        expected: Tells whether the awaited activity has appeared.
+        chunk_size: Tokens per LMCache chunk.
+        complete: Given the counter changes and the prompt's cached prefix,
+            tells whether the awaited activity is complete.
 
     Returns:
-        The output and the counter changes, which may lack the expected
-        activity if it did not appear in time.
+        The output, the cached prefix and the counter changes, which fall
+        short of the awaited activity if it did not complete in time.
     """
     before = deployment.counters()
-    text = deployment.complete(PROMPT)
-    readings: list[Counters] = []
+    completion = deployment.complete(PROMPT)
+    full_chunks = completion.prompt_tokens // chunk_size
+    prefix = CachedPrefix(full_chunks, full_chunks * chunk_size)
+    activity = before.since(before)
 
-    def settled() -> bool:
-        readings.append(deployment.counters().since(before))
-        return (
-            expected(readings[-1])
-            and len(readings) > 1
-            and readings[-1] == readings[-2]
-        )
+    def reached() -> bool:
+        nonlocal activity
+        activity = deployment.counters().since(before)
+        return complete(activity, prefix)
 
-    _wait_for(settled, STATE_TIMEOUT_SECONDS)
-    return Generation(text, readings[-1])
+    _wait_for(reached, STATE_TIMEOUT_SECONDS)
+    return Generation(completion.text, prefix, activity)
 
 
 def check_output(report: Report, step: str, cold_text: str, text: str) -> None:
@@ -381,7 +429,7 @@ def check_wake_up(
     used_mib = deployment.gpu_used_mib()
     limit_mib = int(awake_mib * WAKE_MAX_FRACTION)
     report.check(
-        f"{step}: GPU memory is back at the level before sleep",
+        f"{step}: GPU memory is not above the level before sleep",
         used_mib <= limit_mib,
         f"{used_mib} MiB in use, limit {limit_mib} MiB, {awake_mib} MiB before sleep",
     )
@@ -404,19 +452,23 @@ def run_checks(deployment: Deployment, report: Report) -> None:
         f'cache_config_info enable_extensible_kv_cache="True" present: {extensible}',
     )
 
-    cold = run_prompt(deployment, lambda activity: activity.stored_chunks > 0)
+    chunk_size = deployment.chunk_size()
+    cold = run_prompt(deployment, chunk_size, stored)
+    cached = cold.prefix
     report.check(
         "cold prompt is stored to LMCache",
-        cold.activity.stored_chunks > 0,
-        f"{cold.activity.stored_chunks} chunks stored",
+        cached.chunks > 0 and cold.activity.stored_chunks >= cached.chunks,
+        f"{cold.activity.stored_chunks} chunks stored, the prompt has "
+        f"{cached.chunks} full chunks of {chunk_size} tokens",
     )
 
     deployment.reset_prefix_cache()
-    warm = run_prompt(deployment, lambda activity: activity.external_hit_tokens > 0)
+    warm = run_prompt(deployment, chunk_size, hit)
     report.check(
         "prompt hits LMCache before sleep",
-        warm.activity.external_hit_tokens > 0,
-        f"{warm.activity.external_hit_tokens} tokens from LMCache",
+        warm.activity.external_hit_tokens == cached.tokens,
+        f"{warm.activity.external_hit_tokens} tokens from LMCache, "
+        f"expected {cached.tokens}",
     )
     check_output(report, "LMCache hit before sleep", cold.text, warm.text)
 
@@ -432,14 +484,13 @@ def run_checks(deployment: Deployment, report: Report) -> None:
 
     # Sleep clears vLLM's own prefix cache, so this hit comes from the LMCache
     # server writing into the memory committed at wake-up.
-    kept = run_prompt(deployment, lambda activity: activity.external_hit_tokens > 0)
+    kept = run_prompt(deployment, chunk_size, hit_from_l1)
     report.check(
         "prompt hits LMCache after wake-up",
-        kept.activity.external_hit_tokens == warm.activity.external_hit_tokens
+        kept.activity.external_hit_tokens == cached.tokens
         and kept.activity.read_chunks > 0,
         f"{kept.activity.external_hit_tokens} tokens from LMCache, "
-        f"{warm.activity.external_hit_tokens} before sleep, "
-        f"{kept.activity.read_chunks} chunks read",
+        f"expected {cached.tokens}, {kept.activity.read_chunks} chunks read",
     )
     check_output(report, "LMCache hit after wake-up", cold.text, kept.text)
 
@@ -452,23 +503,24 @@ def run_checks(deployment: Deployment, report: Report) -> None:
     )
     check_wake_up(deployment, report, "wake-up clearing LMCache", awake_mib)
 
-    restored = run_prompt(deployment, lambda activity: activity.stored_chunks > 0)
+    restored = run_prompt(deployment, chunk_size, stored)
     report.check(
         "prompt misses the cleared LMCache and is stored again",
         restored.activity.external_hit_tokens == 0
-        and restored.activity.stored_chunks > 0,
+        and restored.activity.stored_chunks >= cached.chunks,
         f"{restored.activity.external_hit_tokens} tokens from LMCache, "
-        f"{restored.activity.stored_chunks} chunks stored",
+        f"{restored.activity.stored_chunks} chunks stored, "
+        f"expected at least {cached.chunks}",
     )
     check_output(report, "cold prompt after wake-up", cold.text, restored.text)
 
     deployment.reset_prefix_cache()
-    reread = run_prompt(deployment, lambda activity: activity.external_hit_tokens > 0)
+    reread = run_prompt(deployment, chunk_size, hit)
     report.check(
         "prompt stored after wake-up hits LMCache",
-        reread.activity.external_hit_tokens == warm.activity.external_hit_tokens,
+        reread.activity.external_hit_tokens == cached.tokens,
         f"{reread.activity.external_hit_tokens} tokens from LMCache, "
-        f"{warm.activity.external_hit_tokens} before sleep",
+        f"expected {cached.tokens}",
     )
     check_output(
         report, "LMCache hit on chunks stored after wake-up", cold.text, reread.text

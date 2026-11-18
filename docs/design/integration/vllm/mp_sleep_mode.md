@@ -113,7 +113,7 @@ one restore.
   prompt                     stored to LMCache
   reset prefix cache, prompt LMCache hit, same output
   /sleep?level=1&reset_connector=false   server: no registration, GPU memory released
-  /wake_up                               server: one registration, GPU memory as before
+  /wake_up                               server: one registration, GPU memory not above before
   prompt                     LMCache hit, same output
   /sleep?level=1&reset_connector=true    same checks as the first sleep
   /wake_up                               same checks as the first wake-up
