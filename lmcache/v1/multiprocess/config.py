@@ -562,8 +562,9 @@ def add_mp_server_args(
         "host) while RETRIEVEs keep the stream wait; 'retrieve' does so for "
         "RETRIEVEs only and 'all' for both. Use it when this server runs "
         "next to the engine on XPU; ignored elsewhere. When 'off', "
-        "LMCACHE_XPU_HOST_EVENT_WAIT=store|retrieve|all sets it. "
-        "(Default is off)",
+        "LMCACHE_XPU_HOST_EVENT_WAIT=store|retrieve|all sets it. 'store' "
+        "measured fastest with LMCACHE_XPU_EVENT_POOL=1 set in vLLM and this "
+        "server; 'all' without it. (Default is off)",
     )
     mp_group.add_argument(
         "--isolated-ipc",

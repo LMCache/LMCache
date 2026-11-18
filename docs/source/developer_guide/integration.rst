@@ -127,3 +127,20 @@ the server environment variable ``LMCACHE_XPU_HOST_EVENT_WAIT`` set to
 .. code-block:: bash
 
    lmcache_server ... --xpu-host-event-wait all
+
+Pair the option with ``LMCACHE_XPU_EVENT_POOL=1``, set in both the
+vLLM worker and the LMCache server environments; it is off by default. Each
+process then reuses the IPC events it exports from a pool, and the peer opens
+each pooled event once and keeps it instead of opening and closing it for
+every transfer. The measured gain comes from the server keeping the worker's
+events, so the worker's setting is the one that matters for it. The pool also
+works around a Level Zero use-after-free on closing an imported event in
+older drivers (NEO 26.27). With the pool, ``store`` measured fastest; without
+it, ``all``:
+
+.. code-block:: bash
+
+   # vLLM worker and LMCache server
+   export LMCACHE_XPU_EVENT_POOL=1
+   # LMCache server
+   lmcache_server ... --xpu-host-event-wait store
