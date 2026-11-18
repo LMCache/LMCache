@@ -1,26 +1,28 @@
 Chunk-Size Resolution
 =====================
 
-The vLLM multiprocess connector resolves an effective chunk size at startup.
-This keeps chunk boundaries aligned with every KV cache group while allowing
-one MP server to serve vLLM models that use different chunk sizes. Other
-inference-engine integrations continue to use the server-wide chunk size.
+Multiprocess connectors resolve an effective chunk size at startup. This keeps
+chunk boundaries aligned with each engine's KV cache geometry while allowing
+one MP server to serve models that use different chunk sizes. vLLM, SGLang,
+ATOM, and TensorRT-LLM support this resolution.
 
 Effective chunk size
 --------------------
 
-``lmcache server --chunk-size`` is the server minimum. The vLLM connector can
-optionally set its own minimum through ``lmcache.mp.chunk_size``. It always
-reads the server minimum, takes the larger minimum, and rounds it up to the
-model's required alignment::
+``lmcache server --chunk-size`` is the server minimum. vLLM and SGLang can
+optionally set a client minimum through ``lmcache.mp.chunk_size``. Every
+connector reads the server minimum, applies any supported client minimum, and
+rounds the result up to the engine's required alignment::
 
     base = max(server_minimum, client_minimum)  # client minimum is optional
     effective_chunk_size = round_up(base, required_alignment)
 
-The required alignment is the least common multiple of the effective token
-span of every cacheable KV group. For attention groups under DCP, that span is
-``block_size * decode_context_parallel_size``. Recurrent-state groups use their
-physical block size because their state is replicated rather than DCP sharded.
+For vLLM and SGLang, the required alignment is the least common multiple of the
+effective token span of every cacheable KV group. For vLLM attention groups
+under DCP, that span is ``block_size * decode_context_parallel_size``.
+Recurrent-state groups use their physical block size because their state is
+replicated rather than DCP sharded. ATOM and TensorRT-LLM align to their paged
+KV block size.
 
 For example, with a server minimum of 256 tokens:
 
@@ -34,7 +36,7 @@ The server minimum remains 256 in every case.
 Initialization flow
 -------------------
 
-#. The vLLM connector computes the model's required alignment.
+#. The connector computes the engine's required alignment.
 #. The scheduler and every worker call ``GET_CHUNK_SIZE`` to read the server
    minimum, even when ``lmcache.mp.chunk_size`` is configured.
 #. Each process computes the same effective chunk size locally.
@@ -66,8 +68,8 @@ model. Normal MP prefix caching does not have this restriction.
 Restart recovery
 ----------------
 
-Scheduler and worker adapters keep the effective size in memory. After an MP
-server restart, heartbeat recovery reads the server minimum again, recomputes
-the effective value, and verifies that it matches the cached value before KV
-caches are re-registered. A mismatch keeps the adapter unhealthy so requests
-cannot silently use different chunk boundaries.
+The vLLM scheduler and worker adapters keep the effective size in memory. After
+an MP server restart, heartbeat recovery reads the server minimum again,
+recomputes the effective value, and verifies that it matches the cached value
+before KV caches are re-registered. A mismatch keeps the adapter unhealthy so
+requests cannot silently use different chunk boundaries.
