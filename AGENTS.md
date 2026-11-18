@@ -126,6 +126,25 @@ self-contained CPU checks spanning both trees; normal accelerator CI must
 retain the root fixtures. Mirrored test directories with identical module
 names need package `__init__.py` files to avoid pytest import mismatches.
 
+### Test-First Workflow
+
+Write tests before you write the implementation. The full order and its
+exemptions are in `docs/coding_standards.md` Section 5.2 ("Test-first order"):
+
+1. Design the user-facing surface: the design doc and, if there is one, the CLI
+   (commands, flags, output, exit codes).
+2. Write the **end-to-end test** against that surface before any implementation.
+3. Finalize the public interface: signatures, type hints, and docstrings, with
+   bodies that `raise NotImplementedError`.
+4. Write **unit tests** against the docstring contract before implementing.
+5. Run the new tests and confirm they fail for the expected reason.
+6. Implement until they pass. Never edit a test to fit the implementation. If
+   the contract was wrong, fix the design or docstring first and say so.
+
+Agents: if neither the user nor a design doc has fixed the CLI or the public
+interface, propose it and get the user's agreement before writing tests against
+it. Report both the failing run (step 5) and the passing run (step 6) in chat.
+
 ### Testing Practices
 
 - All new features and bug fixes should include corresponding tests.
