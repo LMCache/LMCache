@@ -46,39 +46,42 @@ echo ""
 # Previous steps may have left processes in an unknown state.
 # Restart both so vLLM registers its GPU context with the new server.
 echo "============================================"
-echo "=== Restarting LMCache + vLLM ==="
+echo "=== Preparing LMCache + vLLM ==="
 echo "============================================"
 
-PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
+PID_FILE="${MP_TEST_PID_FILE:-/tmp/lmcache_mp_pids_${BUILD_ID}}"
 
-# The launcher is a separate shell, so these PIDs are not our children.
-# Poll their termination rather than using shell wait before reusing ports.
-OLD_PIDS=()
-if [ -f "$PID_FILE" ]; then
-    mapfile -t OLD_PIDS < "$PID_FILE"
-fi
-if ! python3 "${SCRIPT_DIR}/../../stop-processes.py" "${OLD_PIDS[@]:0:2}" \
-    --ports "$LMCACHE_PORT" 8080 "$VLLM_PORT"; then
-    echo "FAIL: Previous LMCache + vLLM processes did not release their ports"
-    exit 1
-fi
+if [[ "${FT_REUSE_SERVICES:-0}" != "1" ]]; then
+    # The launcher is a separate shell, so these PIDs are not our children.
+    # Poll their termination rather than using shell wait before reusing ports.
+    OLD_PIDS=()
+    if [ -f "$PID_FILE" ]; then
+        mapfile -t OLD_PIDS < "$PID_FILE"
+    fi
+    if ! python3 "${SCRIPT_DIR}/../../stop-processes.py" "${OLD_PIDS[@]:0:2}" \
+        --ports "$LMCACHE_PORT" 8080 "$VLLM_PORT"; then
+        echo "FAIL: Previous LMCache + vLLM processes did not release their ports"
+        exit 1
+    fi
 
-export VLLM_KV_LOAD_FAILURE_POLICY=recompute
-launch_status=0
-LAUNCH_BASELINE=false "${SCRIPT_DIR}/../../launch-processes.sh" || launch_status=$?
-# The comprehensive runner still owns its existing baseline server.
-if [ "${#OLD_PIDS[@]}" -gt 2 ]; then
-    printf '%s\n' "${OLD_PIDS[@]:2}" >> "$PID_FILE"
+    export VLLM_KV_LOAD_FAILURE_POLICY=recompute
+    launch_status=0
+    LAUNCH_BASELINE=false "${SCRIPT_DIR}/../../launch-processes.sh" || launch_status=$?
+    # The comprehensive runner still owns its existing baseline server.
+    if [ "${#OLD_PIDS[@]}" -gt 2 ]; then
+        printf '%s\n' "${OLD_PIDS[@]:2}" >> "$PID_FILE"
+    fi
+    if [ "$launch_status" -ne 0 ]; then
+        echo "FAIL: Could not restart LMCache + vLLM"
+        exit 1
+    fi
+    if ! LAUNCH_BASELINE=false "${SCRIPT_DIR}/../../wait-for-servers.sh"; then
+        echo "FAIL: Restarted vLLM failed to become ready"
+        exit 1
+    fi
+    echo ""
+
 fi
-if [ "$launch_status" -ne 0 ]; then
-    echo "FAIL: Could not restart LMCache + vLLM"
-    exit 1
-fi
-if ! LAUNCH_BASELINE=false "${SCRIPT_DIR}/../../wait-for-servers.sh"; then
-    echo "FAIL: Restarted vLLM failed to become ready"
-    exit 1
-fi
-echo ""
 
 # ── Helpers ──────────────────────────────────────────────────
 
@@ -89,7 +92,7 @@ run_bench() {
     echo ""
     echo "--- $description ---"
 
-    vllm bench serve \
+    if ! vllm bench serve \
         --seed "$RANDOM_SEED" \
         --port "$VLLM_PORT" \
         --model "$MODEL" \
@@ -97,20 +100,25 @@ run_bench() {
         --random-input-len "$RANDOM_INPUT_LEN" \
         --random-output-len "$RANDOM_OUTPUT_LEN" \
         --num-prompts "$NUM_PROMPTS" \
+        --request-rate "${FT_REQUEST_RATE:-inf}" \
         --ignore-eos \
-        --backend openai-chat \
-        --endpoint /v1/chat/completions \
+        --backend openai \
+        --endpoint /v1/completions \
         --result-dir "$FT_DIR" \
         --result-filename "$result_file" \
-        --save-result
+        --save-result; then
+        return 1
+    fi
 
     local completed
     completed=$(python3 -c "
 import json
 with open('$FT_DIR/$result_file') as f:
     data = json.load(f)
+if data.get('total_output_tokens', 0) <= 0:
+    raise SystemExit('No generated tokens in benchmark result')
 print(data.get('completed', 0))
-")
+") || return 1
 
     echo "$description: $completed / $NUM_PROMPTS completed"
 
@@ -124,7 +132,7 @@ print(data.get('completed', 0))
 }
 
 get_lmcache_pid() {
-    local pid_file="/tmp/lmcache_mp_pids_${BUILD_ID}"
+    local pid_file="$PID_FILE"
     if [[ -f "$pid_file" ]]; then
         head -1 "$pid_file"
     fi
@@ -142,8 +150,11 @@ fi
 
 # Extract duration to calibrate kill timing
 WARMUP_DURATION=$(python3 -c "import json; print(json.load(open('$FT_DIR/ft_warmup.json'))['duration'])")
-KILL_DELAY=$(python3 -c "print(max(3, int($WARMUP_DURATION * 0.4)))")
+KILL_DELAY="${FT_KILL_DELAY:-$(python3 -c "print(max(3, int($WARMUP_DURATION * 0.4)))")}"
 echo "Warmup took ${WARMUP_DURATION}s. Will kill LMCache after ${KILL_DELAY}s in next run."
+
+curl -fsS --max-time 10 "http://localhost:${LMCACHE_HTTP_PORT:-8080}/status" \
+    > "$FT_DIR/registrations.json" || exit 1
 
 # ── Step 2: Bench with mid-flight LMCache kill ───────────────
 echo ""
@@ -164,11 +175,39 @@ echo "Will kill after ${KILL_DELAY}s into bench."
 run_bench "Mid-flight kill" "ft_midflight.json" &
 BENCH_PID=$!
 
-# Wait, then kill LMCache
+# CLI/tokenizer startup can outlast KILL_DELAY; inject only after serving starts.
+python3 - "$VLLM_PORT" <<'PYWAIT'
+import sys
+import time
+import urllib.error
+import urllib.request
+
+url = f"http://localhost:{sys.argv[1]}/metrics"
+deadline = time.monotonic() + 120
+while time.monotonic() < deadline:
+    try:
+        with urllib.request.urlopen(url, timeout=5) as response:
+            lines = response.read().decode().splitlines()
+        running = sum(float(line.rsplit(" ", 1)[1]) for line in lines
+                      if line.startswith("vllm:num_requests_running{"))
+        if running > 0:
+            print("Observed active vLLM requests before fault injection", flush=True)
+            break
+    except (urllib.error.URLError, TimeoutError):
+        pass
+    time.sleep(0.05)
+else:
+    raise SystemExit("No active inference observed before fault injection")
+PYWAIT
+if [[ $? -ne 0 ]]; then exit 1; fi
 sleep "$KILL_DELAY"
+if ! kill -0 "$BENCH_PID" 2>/dev/null; then
+    echo "FAIL: benchmark finished before fault injection"
+    exit 1
+fi
 echo "Killing LMCache server (PID: $LMCACHE_PID)..."
-kill "$LMCACHE_PID" 2>/dev/null
-wait "$LMCACHE_PID" 2>/dev/null || true
+python3 "${SCRIPT_DIR}/../../stop-processes.py" "$LMCACHE_PID" \
+    --ports "$LMCACHE_PORT" "${LMCACHE_HTTP_PORT:-8080}" || exit 1
 echo "LMCache server killed at +${KILL_DELAY}s."
 
 # Wait for bench to finish
