@@ -216,8 +216,7 @@ GitHub Actions CI runs in two layers:
    start only after it passes. Converting the PR back to draft cancels the in-flight runs,
    Buildkite builds included. If **Test** fails, the remaining **CPU device** jobs are
    cancelled (PRs from branches of this repository). Tick `rust` to run the Rust raw-block
-   tests even when no
-   raw-block file changed.
+   tests even when no raw-block file changed.
 
 The 1-GPU unit tests (`buildkite/k3-unit-tests`) do not run on drafts. They start when you
 click **Ready for review** and on every later push, in parallel with the checks above. The
