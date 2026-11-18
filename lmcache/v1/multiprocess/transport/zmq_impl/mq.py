@@ -15,18 +15,19 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.security.api_key import APIKeyVerifier
-from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.custom_types import (
-    DeviceIPCWrapper,
-    QRingInfo,
     get_customized_decoder,
     get_customized_encoder,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType
-from lmcache.v1.multiprocess.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestServer
-from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
+from lmcache.v1.platform import create_event_notifier
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.transport.futures import MessagingStream
+from lmcache.v1.transport.qstore import QRingInfo
+from lmcache.v1.transport.rpc import RpcOperation, RpcSpec, get_rpc_spec
+from lmcache.v1.transport.zmq.wire import (
     AUTH_ERROR_FRAME,
     ZMQ_ERROR_OPERATION,
     ZmqErrorResponse,
@@ -36,8 +37,6 @@ from lmcache.v1.multiprocess.transport.zmq_impl.wire import (
     encode_operation,
     is_authentication_frame,
 )
-from lmcache.v1.platform import create_event_notifier
-from lmcache.v1.transport.futures import MessagingStream
 
 logger = init_logger(__name__)
 
@@ -67,14 +66,6 @@ _SPECIAL_ENCODER_DECODERS = {
     list[QRingInfo]: (
         get_customized_encoder(list[QRingInfo]),
         get_customized_decoder(list[QRingInfo]),
-    ),
-    MemoryLayoutDesc: (
-        get_customized_encoder(MemoryLayoutDesc),
-        get_customized_decoder(MemoryLayoutDesc),
-    ),
-    dict[int, MemoryLayoutDesc]: (
-        get_customized_encoder(dict[int, MemoryLayoutDesc]),
-        get_customized_decoder(dict[int, MemoryLayoutDesc]),
     ),
 }
 

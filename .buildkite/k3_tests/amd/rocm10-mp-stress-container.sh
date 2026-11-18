@@ -17,7 +17,7 @@ mkdir -p "$OUT"
 
 uv pip install --system --no-cache -r requirements/build.txt
 uv pip install --system --no-cache --no-build-isolation -e . || { echo "LMCache build failed"; exit 2; }
-python3 lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py
+python3 lmcache/v1/transport/grpc/_proto_gen/_generate.py
 
 python3 -m lmcache.v1.multiprocess.http_server \
     --l1-size-gb "${CPU_BUFFER_SIZE:-80}" --eviction-policy LRU \
@@ -29,6 +29,7 @@ sleep 15
 
 VLLM_SERVER_DEV_MODE=1 vllm serve "$MODEL" --tensor-parallel-size "$TP" --port 8000 \
     --max-model-len 8192 --gpu-memory-utilization 0.85 --no-enable-prefix-caching \
+    --enable-extensible-kv-cache \
     --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"lmcache.mp.host":"tcp://localhost","lmcache.mp.port":6555,"lmcache.mp.mq_timeout":10}}' \
     > "$OUT/vllm.log" 2>&1 &
 VLLM=$!

@@ -39,7 +39,7 @@ from lmcache.v1.memory_orchestrator.client import MemoryOrchestratorClient
 from lmcache.v1.memory_orchestrator.server import OrchestratorConfig, parse_args, serve
 from lmcache.v1.memory_orchestrator.service import OrchestratorServicer
 from lmcache.v1.memory_orchestrator.state import RegionState
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import (
+from lmcache.v1.transport.grpc._proto_gen import (
     common_pb2,
     p2p_service_pb2,
 )
