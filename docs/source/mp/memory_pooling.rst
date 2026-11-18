@@ -58,3 +58,23 @@ worker and reconcile its provider grants offline before releasing anything.
 This small API adds no scheduling policy, background loop, or persistent
 recovery service. It is separate from the shared-region ``lmcache memory``
 object service. Hardware/Pangaea qualification remains deployment-specific.
+
+Online workload-pressure test
+-----------------------------
+
+The opt-in ``tests/v1/memory_orchestrator/test_pooling_pressure.py`` runs a
+continuous private L1 DAX workload against real file-backed mappings while a
+test policy samples occupancy through a live HTTP server. Full capacity and
+failed workload allocations trigger growth; sustained low occupancy after the
+burst retires triggers shrink. Payload reads continue across both transitions,
+and provider release checks that the borrowed file has been unmapped.
+
+.. code-block:: bash
+
+   CUDA_VISIBLE_DEVICES='' RUN_DEVDAX_L1_INTEGRATION=1 \
+     python -m pytest --noconftest -q \
+     tests/v1/memory_orchestrator/test_pooling_pressure.py
+
+The policy belongs to the test: production scheduling remains deployment-owned.
+This qualifies the online L1 control workflow, not L2 pressure scaling, model
+serving, real CXL hardware, or a Pangaea adapter.
