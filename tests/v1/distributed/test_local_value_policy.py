@@ -899,13 +899,14 @@ def test_native_storage_manager_executes_admission_and_releases_locks(
     # Third Party
     import torch
 
-    if not torch.cuda.is_available():
-        pytest.skip("native pinned-memory/controller execution requires CUDA runtime")
-
     # First Party
     from lmcache.v1.distributed.api import MemoryLayoutDesc
     from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2Adapter
     from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+    from lmcache.v1.platform import torch_dev
+
+    if not torch_dev.is_available():
+        pytest.skip("native pinned-memory/controller execution requires an accelerator")
 
     bus, _, _ = runtime
     local = importlib.import_module(
