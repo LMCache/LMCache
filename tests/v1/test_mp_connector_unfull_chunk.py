@@ -294,6 +294,7 @@ def _connector(lookup_hit: int) -> tuple[LMCacheMPConnector, MagicMock]:
     scheduler_adapter.lmcache_tokens_per_chunk = CHUNK
     scheduler_adapter.check_lookup_result.return_value = lookup_hit
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._request_snapshot_enabled = False
     connector.request_trackers = {}
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = True

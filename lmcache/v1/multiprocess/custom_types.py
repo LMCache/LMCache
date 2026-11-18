@@ -11,12 +11,18 @@ import msgspec
 import torch
 
 # First Party
-from lmcache.v1.common.custom_types import BlockAllocationRecord
+from lmcache.v1.common.custom_types import (
+    BlockAllocationRecord,
+    RequestSnapshot,
+    RequestSnapshotEntry,
+)
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 __all__ = [
     "BlockAllocationRecord",
     "CustomizedSerdeConfig",
+    "RequestSnapshot",
+    "RequestSnapshotEntry",
     "get_customized_decoder",
     "get_customized_encoder",
 ]
