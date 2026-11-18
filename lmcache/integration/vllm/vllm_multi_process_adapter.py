@@ -34,14 +34,18 @@ from lmcache.utils import (
     _lmcache_nvtx_annotate,
     init_logger,
 )
-from lmcache.v1.client.heartbeat import HeartbeatThread
+from lmcache.v1.client.heartbeat import HeartbeatThread, send_ping
 from lmcache.v1.client.kv_event_subscriber import (
     KVEventStreamClosed,
     MPKVEventSubscriber,
 )
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.client.transport.factory import RequestClientFactory
-from lmcache.v1.client.worker_transfer import TransferContext, create_transfer_context
+from lmcache.v1.client.worker_transfer import (
+    EngineDrivenTransferContext,
+    TransferContext,
+    create_transfer_context,
+)
 from lmcache.v1.common.custom_types import (
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
@@ -1693,14 +1697,9 @@ class LMCacheMPWorkerAdapter:
         return True
 
     def _ensure_heartbeat_started(self) -> None:
-        """Lazily start the heartbeat on first store or retrieve.
+        """Start heartbeat once on first store or retrieve.
 
-        The heartbeat starts healthy (the event was set at construction). A
-        live worker pings every interval, refreshing its server-side
-        ``last_seen``, so it is never reaped while alive -- no re-registration
-        is needed at startup, and the first store/retrieve is not gated. The
-        recover callback still re-registers on a genuine unhealthy->healthy
-        edge (server restart).
+        Registration-aware probes recover lost KV state before restoring health.
         """
         if self._heartbeat is not None:
             return
@@ -1714,8 +1713,34 @@ class LMCacheMPWorkerAdapter:
                 instance_id=self.instance_id,
             )
             heartbeat.register_recover_callback(self._reregister_kv_caches_callback)
+            heartbeat.register_probe_callback(self._probe_registration)
             heartbeat.start()
             self._heartbeat = heartbeat
+
+    def _probe_registration(self) -> bool | None:
+        """Probe primary KV state, except while the engine has released it."""
+        with self._registration_lock:
+            context = None if self._kv_caches_released else self.transfer_ctx
+        if context is None:
+            return (
+                True
+                if send_ping(
+                    self.req_client, self._heartbeat_interval, self.instance_id
+                )
+                else None
+            )
+        registration_type = (
+            "register_kv_cache_engine_driven_context"
+            if isinstance(context, EngineDrivenTransferContext)
+            else "register_kv_cache"
+        )
+        try:
+            return self.req_client.ping_registered(
+                self.instance_id, registration_type
+            ).result(timeout=self._heartbeat_interval)
+        except REQUEST_FAILURES:
+            logger.debug("Worker registration probe failed", exc_info=True)
+            return None
 
     def _heartbeat_stop_requested(self) -> bool:
         """Whether a created heartbeat thread has a stop requested.
@@ -1727,9 +1752,9 @@ class LMCacheMPWorkerAdapter:
         return heartbeat is not None and heartbeat.stop_requested
 
     def _reregister_kv_caches_callback(self) -> bool:
-        """Heartbeat recover callback: re-register KV caches after the
-        server returns. Runs on the heartbeat thread, before the health
-        event is set.
+        """Re-register KV caches after an outage or missing-registration probe.
+
+        Runs on the heartbeat thread before the health event is set.
 
         Returns:
             ``True`` if nothing needs re-registering or registration

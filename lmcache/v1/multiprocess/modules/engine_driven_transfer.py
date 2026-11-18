@@ -93,7 +93,11 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         mode = build_ctx.mp_config.supported_transfer_mode
         if mode == "lmcache_driven":
             return None
-        return cls(build_ctx.engine_context)
+        module = cls(build_ctx.engine_context)
+        build_ctx.registration_targets["register_kv_cache_engine_driven_context"] = (
+            module
+        )
+        return module
 
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
@@ -163,13 +167,16 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         for event, _ in pending:
             self._publish_transfer_end(event, False)
 
-    def touch_instance(self, instance_id: int) -> None:
+    def touch_instance(self, instance_id: int) -> bool:
         """Refresh the worker's last-seen time and mark it ping-proven.
 
         A no-op if the instance is not tracked.
 
         Args:
             instance_id: The worker instance ID.
+
+        Returns:
+            True if the registration exists, otherwise False.
         """
         now = time.monotonic()
         with self._lock:
@@ -177,6 +184,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             if entry is not None:
                 entry.last_seen = now
                 entry.has_liveness_signal = True
+            return entry is not None
 
     def tracked_instance_count(self) -> int:
         """Return the number of currently registered non-GPU instances."""

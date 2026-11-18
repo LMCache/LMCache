@@ -64,7 +64,7 @@ class InstanceLivenessTarget(Protocol):
     touches a module's private state directly.
     """
 
-    def touch_instance(self, instance_id: int) -> None:
+    def touch_instance(self, instance_id: int) -> bool | None:
         """Refresh the worker's last-seen time and mark it ping-proven.
 
         A no-op if the instance is not tracked (already reaped or never
@@ -72,8 +72,12 @@ class InstanceLivenessTarget(Protocol):
 
         Args:
             instance_id: The worker's opaque instance ID.
+
+        Returns:
+            Registration owners return whether the registration exists.
+            Mirrors may return None.
         """
-        return
+        return None
 
     def reap_stale_instances(
         self, reap_timeout_s: float, registration_grace_s: float
@@ -127,6 +131,8 @@ class ModuleBuildContext:
         self.mp_config = mp_config
         self.coordinator_config = coordinator_config
         self.liveness_targets: list[InstanceLivenessTarget] = []
+        # Registration RPC names contributed by their owning transfer modules.
+        self.registration_targets: dict[str, InstanceLivenessTarget] = {}
         self.experimental: list[str] = []
         self._module_configs = {
             module_type: dict(config)
