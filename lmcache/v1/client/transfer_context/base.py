@@ -17,12 +17,10 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import TYPE_CHECKING
-import inspect
 import threading
 import time
 
@@ -37,7 +35,6 @@ from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import resolve_device_ops
-from lmcache.v1.platform.native_block_transfer import transfer_with_address_kernel
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -45,25 +42,6 @@ if TYPE_CHECKING:
     pass
 
 logger = init_logger(__name__)
-
-
-@lru_cache(maxsize=None)
-def _detect_block_transfer_accepts_tensor(transfer_fn: Callable[..., None]) -> bool:
-    """Inspect the selected transfer op, caching capabilities per callable.
-
-    Tensor-capable ops receive tensor lists directly. Native pointer-only ops
-    (including uninspectable pybind functions) need pointer conversion and
-    pinned host buffers. A process may use both CPU and accelerator ops.
-    """
-    try:
-        # TODO: Replace annotation inspection with an explicit ops capability.
-        sig = inspect.signature(transfer_fn)
-        param = sig.parameters.get("lmcache_objects_ptrs")
-        if param is not None and param.annotation is not inspect.Parameter.empty:
-            return "Tensor" in str(param.annotation)
-    except (ValueError, TypeError):
-        pass
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -464,9 +442,6 @@ def gather_paged_kv_to_cpu(
     # KV tensors, not process-wide accelerator availability, select the ops.
     device = get_device(normalized)
     device_ops = resolve_device_ops(device.type)
-    accepts_tensor = _detect_block_transfer_accepts_tensor(
-        device_ops.multi_layer_block_kv_transfer
-    )
     if engine_kv_format is None:
         engine_kv_format = fmt
 
@@ -507,11 +482,8 @@ def gather_paged_kv_to_cpu(
             f"gathered chunks ({len(iter_indices)})"
         )
 
-    # The address-taking native kernel reads host chunks directly, so chunks
-    # allocated here for it are pinned; ``transfer_with_address_kernel``
-    # stages an unpinned ``out``.
-    requires_pinned = not accepts_tensor
-
+    # The address-taking kernel reads host chunks through raw addresses;
+    # it stages unpinned buffers itself, so chunks allocated here are plain.
     if out is None:
         # One object plane per K/V entry: MLA and fused-K/V formats
         # (kv_size == 1) store a single plane, split formats store K and V.
@@ -521,7 +493,6 @@ def gather_paged_kv_to_cpu(
                     (num_layers, window_tokens, content_size),
                     dtype=get_dtype(normalized, engine_kv_format),
                     device=torch.device("cpu"),
-                    pin_memory=requires_pinned,
                 )
                 for _ in iter_indices
             ]
@@ -531,7 +502,6 @@ def gather_paged_kv_to_cpu(
                     (2, num_layers, window_tokens, content_size),
                     dtype=get_dtype(normalized, engine_kv_format),
                     device=torch.device("cpu"),
-                    pin_memory=requires_pinned,
                 )
                 for _ in iter_indices
             ]
@@ -554,46 +524,20 @@ def gather_paged_kv_to_cpu(
         selected_block_ids.extend(chunk[-bpw:])
 
     if selected_block_ids:
-        if accepts_tensor:
-            # Python fallback: accepts tensor list directly for all params.
-            paged_arg = normalized
-            objs_arg = chunks
-            block_ids_arg = selected_block_ids
+        device_ops.multi_layer_block_kv_transfer(
+            normalized,
+            chunks,
+            selected_block_ids,
+            device,
+            lmcache_native.TransferDirection.D2H,
+            shape_desc,
+            window_tokens,
+            engine_kv_format,
+            0,
+        )
 
-            # call kernel in one shot
-            device_ops.multi_layer_block_kv_transfer(
-                paged_arg,
-                objs_arg,
-                block_ids_arg,
-                device,
-                lmcache_native.TransferDirection.D2H,
-                shape_desc,
-                window_tokens,
-                engine_kv_format,
-                0,
-            )
-
-        else:
-            # Compiled CUDA/XPU/NPU kernel: it takes addresses, so the platform
-            # helper builds them and stages an unpinned ``out`` in place.
-            transfer_with_address_kernel(
-                device_ops.multi_layer_block_kv_transfer,
-                normalized,
-                chunks,
-                selected_block_ids,
-                device,
-                lmcache_native.TransferDirection.D2H,
-                shape_desc,
-                window_tokens,
-                engine_kv_format,
-                0,
-            )
-
-    # Fast path: The async GPU copy might still be in progress.
-    # We intentionally omit synchronization here for performance.
-    # WARNING: The caller MUST explicitly synchronize the KV tensor device
-    # before consuming these chunks to ensure data validity.
-
+    # The device copy may still be in flight: the caller must synchronize the
+    # KV tensor device before consuming these chunks.
     return chunks
 
 
@@ -673,9 +617,6 @@ def scatter_cpu_to_paged_kv(
     )
     device = get_device(normalized)
     device_ops = resolve_device_ops(device.type)
-    accepts_tensor = _detect_block_transfer_accepts_tensor(
-        device_ops.multi_layer_block_kv_transfer
-    )
     if engine_kv_format is None:
         engine_kv_format = fmt
 
@@ -734,40 +675,16 @@ def scatter_cpu_to_paged_kv(
     if not selected_block_ids:
         return
 
-    if accepts_tensor:
-        # Python fallback: accepts tensor list directly for all params.
-        paged_arg = normalized
-        objs_arg = chunks
-        block_ids_arg = selected_block_ids
-
-        device_ops.multi_layer_block_kv_transfer(
-            paged_arg,
-            objs_arg,
-            block_ids_arg,
-            device,
-            lmcache_native.TransferDirection.H2D,
-            shape_desc,
-            window_tokens,
-            engine_kv_format,
-            skip_prefix_window,
-        )
-    else:
-        # Compiled CUDA/XPU/NPU kernel: it takes addresses, so the platform
-        # helper builds them; it pins unpinned chunks into temporaries and
-        # synchronizes before returning, so they outlive the async reads.
-        transfer_with_address_kernel(
-            device_ops.multi_layer_block_kv_transfer,
-            normalized,
-            chunks,
-            selected_block_ids,
-            device,
-            lmcache_native.TransferDirection.H2D,
-            shape_desc,
-            window_tokens,
-            engine_kv_format,
-            skip_prefix_window,
-        )
-    # Fast path: The async GPU copy might still be in progress.
-    # We intentionally omit synchronization here for performance.
-    # WARNING: The caller MUST explicitly synchronize the KV tensor device
-    # before consuming these chunks to ensure data validity.
+    device_ops.multi_layer_block_kv_transfer(
+        normalized,
+        chunks,
+        selected_block_ids,
+        device,
+        lmcache_native.TransferDirection.H2D,
+        shape_desc,
+        window_tokens,
+        engine_kv_format,
+        skip_prefix_window,
+    )
+    # The device copy may still be in flight: the caller must synchronize the
+    # KV tensor device before reusing these chunks.
