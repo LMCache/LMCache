@@ -179,6 +179,13 @@ jobs:
         needs: changes
         if: needs.changes.outputs.lmcache == 'true'
         name: Run code quality checks
+        # actions: write is only for code_quality_checks.yml's PR-only
+        # stop-cpu-device-on-test-failure job, skipped here; a called workflow
+        # may not request more than its caller grants.
+        permissions:
+            actions: write
+            contents: read
+            pull-requests: read
         uses: ./.github/workflows/code_quality_checks.yml
 
     # Push to Test PyPI when:

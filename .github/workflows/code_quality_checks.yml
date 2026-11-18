@@ -151,3 +151,31 @@ jobs:
       os: ${{ needs.scope.outputs.cpu_os }}
     secrets:
       hf_token: ${{ secrets.HF_TOKEN }}
+
+  # When the CPU unit tests fail, cancel this run so the CPU device legs free
+  # their runners. Not the other way round: CPU device failures are often lost
+  # runners that cpu_device_rerun.yml reruns, which needs the rest of the run
+  # intact. PRs from forks get a read-only token, so they skip this.
+  stop-cpu-device-on-test-failure:
+    name: Stop CPU device (Test failed)
+    needs: test
+    if: >-
+      failure() &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: true
+          egress-policy: audit
+
+      - name: Cancel this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: gh run cancel "${RUN_ID}" --repo "${REPO}"

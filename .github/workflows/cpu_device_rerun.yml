@@ -11,7 +11,9 @@ name: CPU Device Tests rerun
 
 on:
   workflow_run:
-    workflows: ["CPU Device Tests"]
+    # PR runs of cpu_device.yml are reusable-workflow jobs ("CPU device / ...")
+    # inside the Code Quality run; "CPU Device Tests" covers direct runs.
+    workflows: ["CPU Device Tests", "Code Quality"]
     types: [completed]
 
 permissions:
@@ -69,6 +71,10 @@ jobs:
           repo = __import__("os").environ["REPO"]
           raw = json.loads((workdir / "jobs_raw.json").read_text(encoding="utf-8"))
           jobs = raw["jobs"] if isinstance(raw, dict) else raw
+          run = json.loads((workdir / "run.json").read_text(encoding="utf-8"))
+          if run.get("name") == "Code Quality":
+              # Only the CPU device legs; Test and pre-commit failures are not ours.
+              jobs = [j for j in jobs if j.get("name", "").startswith("CPU device / ")]
           (workdir / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
 
           annotations = {}
