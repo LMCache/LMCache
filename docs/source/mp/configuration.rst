@@ -191,8 +191,10 @@ Source: ``lmcache/v1/multiprocess/config.py``
        request channel and is much slower.  Any other value: create a SHM
        pool named ``lmcache_l1_pool_<name>`` and use it for KV transfers.
        **Requires** ``--no-l1-use-lazy``; with the default lazy allocation
-       (or ``--l1-devdax-path``) the name is ignored and SHM stays
-       disabled.  See :ref:`mp-transfer-mode`.
+       the name is ignored (the server logs a warning) and SHM stays
+       disabled.  Mutually exclusive with ``--l1-devdax-path`` and
+       ``--l1-use-hugepages``: either combination is rejected with a
+       ``ValueError`` at config validation.  See :ref:`mp-transfer-mode`.
    * - ``--kv-event-log-size``
      - ``32768``
      - CPU store-completion and eviction records retained for subscriptions
@@ -416,8 +418,10 @@ single-L1 interface. For placing L1 on CXL-attached memory see
      - Optional ``/dev/dax*`` device or mmap-able file to use as the L1
        backing arena.  When set, disable lazy allocation with
        ``--no-l1-use-lazy`` and leave ``--shm-name`` at its default ``""``
-       (SHM transfer disabled) because the L1 bytes live in the DAX
-       mapping.  A ``dax`` L2 adapter may not map the same device range;
+       because the L1 bytes live in the DAX mapping; a non-empty
+       ``--shm-name`` (or ``--l1-use-lazy``) together with this flag is
+       rejected with a ``ValueError``.  A ``dax`` L2 adapter may not map the
+       same device range;
        give the L1 and the adapter disjoint ranges. Pass the device node,
        for example
        ``--l1-devdax-path /dev/dax0.0 --l1-size-gb 512 --no-l1-use-lazy

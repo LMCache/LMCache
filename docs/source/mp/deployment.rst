@@ -383,18 +383,37 @@ server offers workers one of two engine-driven transports:
        lmcache server ... --supported-transfer-mode engine_driven \
            --shm-name lmcache_pool --no-l1-use-lazy
 
-   ``--shm-name`` is ignored (SHM stays off) when lazy allocation is enabled
-   (the default ``--l1-use-lazy``) or when ``--l1-devdax-path`` is set; it is
-   also rejected together with ``--l1-use-hugepages``.  See
+   With the default lazy allocation (``--l1-use-lazy``) a non-empty
+   ``--shm-name`` is accepted but ignored: the server logs
+   ``--shm-name '...' is set but SHM transfer is disabled`` and workers use
+   the inline path.  ``--shm-name`` is **mutually exclusive** with
+   ``--l1-devdax-path`` and with ``--l1-use-hugepages``: either combination
+   is rejected with a ``ValueError`` during config validation, so leave
+   ``--shm-name`` at ``""`` for those backends.  See
    :ref:`mp/configuration:L1 Memory Manager`.
 
-   Confirm the active transport in the vLLM worker log:
+   Confirm the active transport in the vLLM worker log.  The worker creates
+   its transfer context right after registration and logs which
+   implementation it ended up with:
 
    .. code-block:: text
 
-       Worker engine-driven context registered (instance_id=..., mode=SHM, groups=...)
+       Creating EngineDrivenContextShm (shm_name=lmcache_l1_pool_lmcache_pool, pool_size=...)
 
-   ``mode=inline`` means the fallback is in use.
+   If the SHM segment cannot be attached (for example the worker container
+   lacks ``--ipc host`` or ``/dev/shm`` is too small) the worker falls back
+   at this point and logs:
+
+   .. code-block:: text
+
+       Failed to initialize SHM context (shm_name=...), falling back to inline tensor transport
+       Creating EngineDrivenContextInline
+
+   ``Creating EngineDrivenContextInline`` without a preceding SHM line means
+   the server advertised no pool (``--shm-name`` unset or lazy allocation
+   on).  Check these lines rather than the ``mode=`` field of the later
+   ``Worker engine-driven context registered (...)`` message, which reflects
+   what the server advertised, not whether SHM attachment succeeded.
 
 The typed inline protocol is not compatible with older workers or servers.
 Upgrade both sides together; payloads from the previous untyped protocol are
