@@ -13,6 +13,9 @@ Multiprocess tests run in two Buildkite pipelines:
 - Filter: `(build.pull_request.labels includes "mp" || build.pull_request.labels includes "full" || build.pull_request.labels includes "mp-full") && build.pull_request.draft != true`
 - Rebuild on PR label change: Yes
 - Build when pull request becomes ready for review: Yes
+- Skip when pull request has existing build for commit and branch: No (converting
+  a PR back to draft cancels its builds, so the next ready-for-review on the same
+  commit must build again)
 - Skip queued / cancel running branch builds (Skip / Cancel Intermediate Builds): Yes
 
 Draft PRs never build, even when labeled: 123 GPU-h of multiprocess builds ran
