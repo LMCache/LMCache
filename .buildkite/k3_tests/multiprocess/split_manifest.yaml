@@ -1,6 +1,6 @@
 # Minimal split manifest for LM-1131:
 # Separates k3-multiprocess workloads into an independent PR-smoke tier and a
-# Heavy (dev / nightly / force-ci / mp-full) tier.
+# Heavy (scheduled dev / nightly / force-ci) tier.
 # Scope: strictly scoped to .buildkite/k3_tests/multiprocess/.
 
 schema_version: 1

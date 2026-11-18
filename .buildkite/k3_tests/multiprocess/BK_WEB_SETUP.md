@@ -1,6 +1,6 @@
 # Buildkite Web UI Setup: Multiprocess Tests
 
-Multiprocess tests run in two Buildkite pipelines:
+Multiprocess tests run in two independent, parallel Buildkite pipelines:
 
 | Pipeline | Steps editor | Covers |
 |---|---|---|
@@ -10,7 +10,7 @@ Multiprocess tests run in two Buildkite pipelines:
 `split_manifest.yaml` lists which workload belongs to which tier.
 
 **GitHub trigger settings** (both pipelines):
-- Filter: `(build.pull_request.labels includes "mp" || build.pull_request.labels includes "full" || build.pull_request.labels includes "mp-full") && build.pull_request.draft != true`
+- Filter: `(build.pull_request.labels includes "mp" || build.pull_request.labels includes "full") && build.pull_request.draft != true`
 - Rebuild on PR label change: Yes
 - Build when pull request becomes ready for review: Yes
 - Skip when pull request has existing build for commit and branch: No (converting
@@ -21,30 +21,23 @@ Multiprocess tests run in two Buildkite pipelines:
 Draft PRs never build, even when labeled: 123 GPU-h of multiprocess builds ran
 on draft commits in the 30-day PR CI baseline (2026-10-17 to 2026-11-15).
 
-Both pipelines start on the same labels; `upload-pipeline.sh` then decides
-which one runs:
+Both pipelines start in parallel on the same labels without depending on each
+other; `upload-pipeline.sh` decides which tier runs or bypasses:
 
 | PR labels | PR-smoke | Heavy |
 |---|---|---|
-| `mp` or `full` (auto-merge adds `full`) | runs | skipped, unless the PR changes shared CI files (`.buildkite/k3_tests/`, `.buildkite/k3_harness/`, `pyproject.toml`, `setup.py`, `requirements/`, Docker files) |
-| + `force-ci` | runs, then triggers heavy once smoke passes | runs once, from PR-smoke's trigger; its own webhook build exits green |
-| + `mp-full` | bypassed (exits green) | runs directly |
-| + `skip expensive ci` | skipped | skipped (`force-ci` overrides) |
+| `mp` or `full` (auto-merge adds `full`) | runs | bypassed (exits green), unless the PR changes shared CI files (`.buildkite/k3_tests/`, `.buildkite/k3_harness/`, `pyproject.toml`, `setup.py`, `requirements/`, Docker files) |
+| + `force-ci` | runs | runs in parallel |
+| + `skip expensive ci` | bypassed (exits green) | bypassed (exits green; `force-ci` overrides) |
 
-With `force-ci`, the PR-smoke build waits for the heavy build it triggers, so
-`buildkite/k3-multiprocess-smoke` stays pending until heavy finishes. Make that
-check required as well, or a PR can merge while heavy is still running: heavy's
-own webhook build reports green as soon as it defers.
+Setting `MP_FULL_ON_PR=true` on the heavy pipeline (including manual UI/API
+rebuilds on a PR) restores heavy on every labeled PR. Heavy still runs on
+scheduled builds and on vLLM / SGLang pin verification.
 
-The `mp-full` label does not exist in the repository by default; create it
-before relying on it. Setting `MP_FULL_ON_PR=true` on the heavy pipeline
-restores heavy on every labeled PR.
-
-Heavy still runs on scheduled builds and on vLLM / SGLang pin verification.
-
-PR-smoke runs vLLM only. Every SGLang multiprocess workload is in heavy, so a
-PR exercises SGLang only with `mp-full`, `force-ci` or a shared CI file change;
-otherwise SGLang regressions surface in the `dev` builds after merge.
+**Rollout order (required to avoid an un-gated merge window):**
+1. Create `k3-multiprocess-smoke` on Buildkite with the filter above and add
+   `buildkite/k3-multiprocess-smoke` to `dev` Required Checks first.
+2. Then merge this PR (which enables heavy bypass on ordinary PRs).
 
 > Builds whose only changes are docs/`*.md`/`LICENSE`/`.github/**` auto-pass
 > via the [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes).

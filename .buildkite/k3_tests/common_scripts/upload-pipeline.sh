@@ -46,32 +46,6 @@ if [[ -n "${expensive_pipeline_name}" ]] && \
     exit 0
 fi
 
-if [[ "${PIPELINE_FILE}" == *k3_tests/multiprocess/smoke-pipeline.yml ]] && \
-    [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",mp-full,"* ]] && \
-    [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," != *",force-ci,"* ]]; then
-    echo "+++ :fast_forward: Bypassing PR-smoke (PR has 'mp-full' label; heavy tier runs directly)"
-    if command -v buildkite-agent >/dev/null 2>&1; then
-        buildkite-agent annotate \
-            --style success \
-            --context "mp-smoke-bypass" \
-            "Bypassed PR-smoke: PR has the \`mp-full\` label so the full heavy multiprocess pipeline runs directly." \
-            || true
-    fi
-    exit 0
-fi
-
-if heavy_deferred_to_smoke_trigger "${PIPELINE_FILE}"; then
-    echo "+++ :hourglass: Heavy multiprocess tier starts from PR-smoke after smoke passes (force-ci)"
-    if command -v buildkite-agent >/dev/null 2>&1; then
-        buildkite-agent annotate \
-            --style info \
-            --context "mp-heavy-deferred" \
-            "Deferred: with \`force-ci\`, the PR-smoke build triggers this heavy multiprocess suite once smoke passes." \
-            || true
-    fi
-    exit 0
-fi
-
 merge_pr_base_branch
 
 if [[ "${XPU_CANDIDATE_VALIDATION:-0}" != "1" ]] && should_skip_ci "${PIPELINE_FILE}"; then
@@ -87,12 +61,12 @@ if [[ "${XPU_CANDIDATE_VALIDATION:-0}" != "1" ]] && should_skip_ci "${PIPELINE_F
 fi
 
 if should_skip_multiprocess_heavy "${PIPELINE_FILE}"; then
-    echo "+++ :fast_forward: Skipping heavy multiprocess tier on PR (covered by PR-smoke)"
+    echo "+++ :fast_forward: Bypassing heavy multiprocess tier on PR (covered by PR-smoke)"
     if command -v buildkite-agent >/dev/null 2>&1; then
         buildkite-agent annotate \
             --style success \
             --context "mp-heavy-skip" \
-            "Skipped heavy multiprocess tier on PR; PR-smoke runs independently. Add \`mp-full\` or \`force-ci\` label (or set \`MP_FULL_ON_PR=true\`) to run heavy." \
+            "Bypassed heavy multiprocess tier on PR; PR-smoke runs independently in parallel. Add \`force-ci\` label (or set \`MP_FULL_ON_PR=true\`) to run heavy." \
             || true
     fi
     exit 0

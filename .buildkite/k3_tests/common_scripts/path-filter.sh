@@ -180,7 +180,7 @@ _path_filter_should_skip_for_pipeline() {
 _path_filter_pipeline_kind() {
     case "$1" in
         *k3_tests/unit/pipeline.yml) echo unit ;;
-        *k3_tests/multiprocess/pipeline.yml) echo multiprocess ;;
+        *k3_tests/multiprocess/pipeline.yml|*k3_tests/multiprocess/smoke-pipeline.yml) echo multiprocess ;;
         *k3_tests/blend/pipeline.yml) echo blend ;;
         *k3_tests/xpu/*/pipeline.yml) echo xpu ;;
         *k3_tests/musa/pipeline.yml) echo musa ;;
@@ -339,6 +339,7 @@ has_shared_ci_dependency_change() {
     fi
     while IFS= read -r f; do
         [[ -z "$f" ]] && continue
+        [[ "$f" == *.md ]] && continue
         case "$f" in
             .buildkite/k3_tests/*|.buildkite/k3_harness/*|pyproject.toml|setup.py|requirements/*|Dockerfile*|docker/*)
                 return 0
@@ -366,22 +367,11 @@ should_skip_multiprocess_heavy() {
     if [[ "${MP_FULL_ON_PR:-false}" == "true" ]]; then
         return 1
     fi
-    if [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",force-ci,"* || ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",mp-full,"* ]]; then
+    if [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",force-ci,"* ]]; then
         return 1
     fi
     if has_shared_ci_dependency_change; then
         return 1
     fi
     return 0
-}
-
-# Returns 0 for the heavy multiprocess pipeline's own webhook build on a PR
-# labeled force-ci. PR-smoke triggers heavy once it passes, so this build would
-# run the same heavy suite a second time without waiting for smoke.
-heavy_deferred_to_smoke_trigger() {
-    local pipeline_file="${1:-}"
-    [[ "${pipeline_file}" == *k3_tests/multiprocess/pipeline.yml ]] || return 1
-    [[ -n "${BUILDKITE_PULL_REQUEST:-}" && "${BUILDKITE_PULL_REQUEST}" != "false" ]] || return 1
-    [[ "${BUILDKITE_SOURCE:-}" == "webhook" ]] || return 1
-    [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",force-ci,"* ]]
 }

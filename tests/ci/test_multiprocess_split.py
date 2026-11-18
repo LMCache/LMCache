@@ -73,16 +73,14 @@ def test_split_manifest_schema_and_tiers() -> None:
 
 
 def test_smoke_pipeline_only_contains_0_or_1_gpu_pr_smoke() -> None:
-    """smoke-pipeline.yml must stay fast (0/1-GPU) and cover only pr-smoke."""
+    """smoke-pipeline.yml must stay fast (0/1-GPU) and independent of heavy."""
     smoke = yaml.safe_load(SMOKE_PIPELINE_PATH.read_text(encoding="utf-8"))
     steps = _collect_steps(smoke)
     command_steps = [s for s in steps if "command" in s]
     assert len(command_steps) == 6
 
     trigger_steps = [s for s in steps if "trigger" in s]
-    assert len(trigger_steps) == 1
-    assert trigger_steps[0]["trigger"] == "k3-multiprocess-test"
-    assert "force-ci" in str(trigger_steps[0].get("if", ""))
+    assert len(trigger_steps) == 0
 
     text = SMOKE_PIPELINE_PATH.read_text(encoding="utf-8")
     assert '"nvidia.com/gpu": "2"' not in text
@@ -101,29 +99,28 @@ def test_smoke_pipeline_only_contains_0_or_1_gpu_pr_smoke() -> None:
         assert expected in commands
 
 
-def test_heavy_pipeline_prunes_noop_skip_sglang_variants() -> None:
-    """Known noop_skip sglang matrices are pruned from pipeline.yml."""
+def test_heavy_pipeline_keeps_common_matrix() -> None:
+    """pipeline.yml preserves *common-matrix / *common-inference-engines."""
     heavy = yaml.safe_load(HEAVY_PIPELINE_PATH.read_text(encoding="utf-8"))
     steps = _collect_steps(heavy)
 
     by_label = {str(s.get("label", "")): s for s in steps}
-    for workload in ("long_doc_qa_l2", "deadlock"):
+    for workload in ("long_doc_qa_l2", "deadlock", "restart_recovery"):
         matching = [s for lbl, s in by_label.items() if f"/ {workload} /" in lbl]
         assert len(matching) == 1
-        assert matching[0]["matrix"]["setup"]["inference_engine"] == ["vllm"]
-
-    restart_steps = [s for lbl, s in by_label.items() if "/ restart_recovery /" in lbl]
-    assert len(restart_steps) == 1
-    assert restart_steps[0]["matrix"]["setup"]["inference_engine"] == [
-        "vllm",
-        "sglang",
-    ]
+        assert matching[0]["matrix"]["setup"]["inference_engine"] == [
+            "vllm",
+            "sglang",
+        ]
 
     preempt_steps = [
         s for lbl, s in by_label.items() if "/ lm_eval_preemption /" in lbl
     ]
     assert len(preempt_steps) == 1
-    assert preempt_steps[0]["matrix"]["setup"]["inference_engine"] == ["vllm"]
+    assert preempt_steps[0]["matrix"]["setup"]["inference_engine"] == [
+        "vllm",
+        "sglang",
+    ]
 
 
 def _find_bash() -> str | None:
@@ -154,15 +151,6 @@ def _find_bash() -> str | None:
             {
                 "BUILDKITE_PULL_REQUEST": "42",
                 "BUILDKITE_PULL_REQUEST_LABELS": "force-ci",
-            },
-            "lmcache/v1/cache_engine.py",
-            False,
-        ),
-        # PR with mp-full -> run heavy
-        (
-            {
-                "BUILDKITE_PULL_REQUEST": "42",
-                "BUILDKITE_PULL_REQUEST_LABELS": "mp-full",
             },
             "lmcache/v1/cache_engine.py",
             False,
@@ -234,90 +222,20 @@ should_skip_multiprocess_heavy ".buildkite/k3_tests/multiprocess/pipeline.yml"
 
 
 @pytest.mark.parametrize(
-    ("pipeline_rel", "env_overrides", "expected_deferred"),
-    [
-        # Heavy's own webhook build on a force-ci PR waits for PR-smoke's trigger
-        (
-            ".buildkite/k3_tests/multiprocess/pipeline.yml",
-            {
-                "BUILDKITE_SOURCE": "webhook",
-                "BUILDKITE_PULL_REQUEST_LABELS": "force-ci",
-            },
-            True,
-        ),
-        # The build PR-smoke triggers, and manual rebuilds, run heavy
-        (
-            ".buildkite/k3_tests/multiprocess/pipeline.yml",
-            {
-                "BUILDKITE_SOURCE": "trigger_job",
-                "BUILDKITE_PULL_REQUEST_LABELS": "force-ci",
-            },
-            False,
-        ),
-        (
-            ".buildkite/k3_tests/multiprocess/pipeline.yml",
-            {"BUILDKITE_SOURCE": "ui", "BUILDKITE_PULL_REQUEST_LABELS": "force-ci"},
-            False,
-        ),
-        # mp-full runs heavy straight from the webhook
-        (
-            ".buildkite/k3_tests/multiprocess/pipeline.yml",
-            {"BUILDKITE_SOURCE": "webhook", "BUILDKITE_PULL_REQUEST_LABELS": "mp-full"},
-            False,
-        ),
-        # PR-smoke itself is never deferred
-        (
-            ".buildkite/k3_tests/multiprocess/smoke-pipeline.yml",
-            {
-                "BUILDKITE_SOURCE": "webhook",
-                "BUILDKITE_PULL_REQUEST_LABELS": "force-ci",
-            },
-            False,
-        ),
-    ],
-)
-def test_heavy_deferred_to_smoke_trigger(
-    tmp_path: Path,
-    pipeline_rel: str,
-    env_overrides: dict[str, str],
-    expected_deferred: bool,
-) -> None:
-    """With force-ci, heavy runs once, from PR-smoke's trigger after smoke passes."""
-    bash = _find_bash()
-    if bash is None:
-        pytest.skip("Git Bash / bash not available")
-    assert bash is not None
-
-    clean_pf = tmp_path / "path-filter.sh"
-    clean_pf.write_text(
-        PATH_FILTER_SCRIPT.read_text(encoding="utf-8").replace("\r\n", "\n"),
-        encoding="utf-8",
-    )
-    script = f"""
-source "{clean_pf.as_posix()}"
-heavy_deferred_to_smoke_trigger "{pipeline_rel}"
-"""
-    env = os.environ.copy()
-    env.update({"BUILDKITE_PULL_REQUEST": "42", **env_overrides})
-    proc = subprocess.run([bash, "-c", script], env=env, check=False)
-    assert (proc.returncode == 0) is expected_deferred
-
-
-@pytest.mark.parametrize(
     ("labels", "source", "pipeline_rel", "expected_uploaded"),
     [
-        # mp-full bypasses smoke-pipeline.yml (exits 0) and runs heavy pipeline.yml
+        # full: PR-smoke runs, heavy is bypassed
         (
-            "full,mp-full",
+            "full",
             "webhook",
             ".buildkite/k3_tests/multiprocess/smoke-pipeline.yml",
-            False,
+            True,
         ),
         (
-            "full,mp-full",
+            "full",
             "webhook",
             ".buildkite/k3_tests/multiprocess/pipeline.yml",
-            True,
+            False,
         ),
         # skip expensive ci skips both smoke and heavy
         (
@@ -332,29 +250,29 @@ heavy_deferred_to_smoke_trigger "{pipeline_rel}"
             ".buildkite/k3_tests/multiprocess/pipeline.yml",
             False,
         ),
-        # force-ci: heavy's webhook build defers; PR-smoke's trigger uploads it
+        # force-ci: both smoke and heavy run in parallel from webhook
         (
             "full,force-ci",
             "webhook",
-            ".buildkite/k3_tests/multiprocess/pipeline.yml",
-            False,
+            ".buildkite/k3_tests/multiprocess/smoke-pipeline.yml",
+            True,
         ),
         (
             "full,force-ci",
-            "trigger_job",
+            "webhook",
             ".buildkite/k3_tests/multiprocess/pipeline.yml",
             True,
         ),
     ],
 )
-def test_upload_pipeline_mp_full_and_skip_expensive_ci(
+def test_upload_pipeline_parallel_labels(
     tmp_path: Path,
     labels: str,
     source: str,
     pipeline_rel: str,
     expected_uploaded: bool,
 ) -> None:
-    """Verify the label paths: mp-full, skip expensive ci and force-ci."""
+    """Verify 3-label parallel execution: full, force-ci, and skip expensive ci."""
     bash = _find_bash()
     if bash is None:
         pytest.skip("Git Bash / bash not available")
@@ -412,3 +330,33 @@ bash "{(scripts_dir / "upload-pipeline.sh").as_posix()}" "{pipeline_rel}"
     proc = subprocess.run([bash, "-c", script], env=env, check=False)
     assert proc.returncode == 0
     assert marker.exists() is expected_uploaded
+
+
+def test_smoke_skips_unrelated_paths_and_docs_dont_trigger_heavy(
+    tmp_path: Path,
+) -> None:
+    """Smoke uses multiprocess path-filter; .md edits don't trigger heavy."""
+    bash = _find_bash()
+    if bash is None:
+        pytest.skip("Git Bash / bash not available")
+    assert bash is not None
+
+    clean_pf = tmp_path / "path-filter.sh"
+    clean_pf.write_text(
+        PATH_FILTER_SCRIPT.read_text(encoding="utf-8").replace("\r\n", "\n"),
+        encoding="utf-8",
+    )
+    script = f"""
+source "{clean_pf.as_posix()}"
+_path_filter_get_changed_files() {{ printf 'examples/foo.py\\n'; }}
+should_skip_ci ".buildkite/k3_tests/multiprocess/smoke-pipeline.yml"
+r1=$?
+_path_filter_get_changed_files() {{ printf '.buildkite/k3_tests/README.md\\n'; }}
+has_shared_ci_dependency_change
+r2=$?
+exit $((r1 == 0 && r2 == 1 ? 0 : 1))
+"""
+    env = os.environ.copy()
+    env.update({"BUILDKITE_PULL_REQUEST": "42", "BUILDKITE_PULL_REQUEST_LABELS": ""})
+    proc = subprocess.run([bash, "-c", script], env=env, check=False)
+    assert proc.returncode == 0
