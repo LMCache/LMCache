@@ -10,9 +10,13 @@ Multiprocess tests run in two Buildkite pipelines:
 `split_manifest.yaml` lists which workload belongs to which tier.
 
 **GitHub trigger settings** (both pipelines):
-- Filter: `build.pull_request.labels includes "mp" || build.pull_request.labels includes "full" || build.pull_request.labels includes "mp-full"`
+- Filter: `(build.pull_request.labels includes "mp" || build.pull_request.labels includes "full" || build.pull_request.labels includes "mp-full") && build.pull_request.draft != true`
 - Rebuild on PR label change: Yes
-- Skip queued / cancel running branch builds: Yes
+- Build when pull request becomes ready for review: Yes
+- Skip queued / cancel running branch builds (Skip / Cancel Intermediate Builds): Yes
+
+Draft PRs never build, even when labeled: 123 GPU-h of multiprocess builds ran
+on draft commits in the 30-day PR CI baseline (2026-10-17 to 2026-11-15).
 
 Both pipelines start on the same labels; `upload-pipeline.sh` then decides
 which one runs:
@@ -34,6 +38,10 @@ before relying on it. Setting `MP_FULL_ON_PR=true` on the heavy pipeline
 restores heavy on every labeled PR.
 
 Heavy still runs on scheduled builds and on vLLM / SGLang pin verification.
+
+PR-smoke runs vLLM only. Every SGLang multiprocess workload is in heavy, so a
+PR exercises SGLang only with `mp-full`, `force-ci` or a shared CI file change;
+otherwise SGLang regressions surface in the `dev` builds after merge.
 
 > Builds whose only changes are docs/`*.md`/`LICENSE`/`.github/**` auto-pass
 > via the [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes).
