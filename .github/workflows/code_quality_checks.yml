@@ -9,8 +9,9 @@ name: Code Quality
 #                in parallel with this workflow; see its BK_WEB_SETUP.md.
 # converted_to_draft starts a run that does nothing, so the concurrency group
 # below cancels the in-flight ready-for-review run.
+# PR-only: publish.yml runs the same pre-commit job from pre_commit.yml, so it
+# does not inherit the permissions this layering needs.
 on:
-  workflow_call:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
 
@@ -25,7 +26,7 @@ permissions:
 jobs:
   pre-commit:
     name: Check code quality
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -37,14 +38,7 @@ jobs:
           disable-sudo-and-containers: true
           egress-policy: audit
 
-      - name: Checkout changes
-        if: github.event_name == 'push'
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          fetch-depth: 2
-
       - name: Detect changes
-        if: github.event_name == 'push' || github.event_name == 'pull_request'
         id: filter
         uses: dorny/paths-filter@v3
         with:
@@ -55,14 +49,14 @@ jobs:
               - '!.github/workflows/operator_*.yml'
 
       - name: Checkout code
-        if: github.event_name == 'release' || steps.filter.outputs.lmcache == 'true'
+        if: steps.filter.outputs.lmcache == 'true'
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           # for setuptools-scm
           fetch-depth: 0
 
       - name: Setup Python 3.12 and 3.13
-        if: github.event_name == 'release' || steps.filter.outputs.lmcache == 'true'
+        if: steps.filter.outputs.lmcache == 'true'
         uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
           python-version: |
@@ -70,11 +64,11 @@ jobs:
             3.13
 
       - name: Add mypy matcher
-        if: github.event_name == 'release' || steps.filter.outputs.lmcache == 'true'
+        if: steps.filter.outputs.lmcache == 'true'
         run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
 
       - name: Run code quality checks - lint, format, spell, & static checks
-        if: github.event_name == 'release' || steps.filter.outputs.lmcache == 'true'
+        if: steps.filter.outputs.lmcache == 'true'
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
         with:
           extra_args: --all-files

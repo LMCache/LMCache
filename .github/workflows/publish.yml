@@ -60,7 +60,7 @@ jobs:
                         - 'rust/raw_block/**'
                         - 'docker/**'
                         - '.github/workflows/test.yml'
-                        - '.github/workflows/code_quality_checks.yml'
+                        - '.github/workflows/pre_commit.yml'
                         - '.github/workflows/publish.yml'
                         - '.github/workflows/build_main_artifacts.yml'
                         - '.github/workflows/build_cli_artifacts.yml'
@@ -179,14 +179,7 @@ jobs:
         needs: changes
         if: needs.changes.outputs.lmcache == 'true'
         name: Run code quality checks
-        # actions: write is only for code_quality_checks.yml's PR-only
-        # stop-cpu-device-on-test-failure job, skipped here; a called workflow
-        # may not request more than its caller grants.
-        permissions:
-            actions: write
-            contents: read
-            pull-requests: read
-        uses: ./.github/workflows/code_quality_checks.yml
+        uses: ./.github/workflows/pre_commit.yml
 
     # Push to Test PyPI when:
     # - a new GitHub release is published

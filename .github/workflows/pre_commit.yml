@@ -1,0 +1,69 @@
+name: Pre-commit
+
+# The pre-commit gate publish.yml runs before publishing (pushes to dev and
+# releases). PRs run the same job inside code_quality_checks.yml, which keeps
+# the required check name "Check code quality" and the PR-only layering. The
+# two are separate so publish.yml never has to grant the extra permissions the
+# PR layering needs (actions: write to cancel CPU device when Test fails).
+# Keep this job's steps in sync with the pre-commit job there.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    name: Check code quality
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: true
+          egress-policy: audit
+
+      - name: Checkout changes
+        if: github.event_name == 'push'
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 2
+
+      - name: Detect changes
+        if: github.event_name == 'push'
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            lmcache:
+              - '**'
+              - '!operator/**'
+              - '!.github/workflows/operator_*.yml'
+
+      - name: Checkout code
+        if: github.event_name == 'release' || steps.filter.outputs.lmcache == 'true'
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          # for setuptools-scm
+          fetch-depth: 0
+
+      - name: Setup Python 3.12 and 3.13
+        if: github.event_name == 'release' || steps.filter.outputs.lmcache == 'true'
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: |
+            3.12
+            3.13
+
+      - name: Add mypy matcher
+        if: github.event_name == 'release' || steps.filter.outputs.lmcache == 'true'
+        run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
+
+      - name: Run code quality checks - lint, format, spell, & static checks
+        if: github.event_name == 'release' || steps.filter.outputs.lmcache == 'true'
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+        with:
+          extra_args: --all-files
