@@ -14,9 +14,10 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
-    AttnWindowDesc,
     PrefetchHandle,
     PrefetchResult,
 )
@@ -26,7 +27,6 @@ from lmcache.v1.multiprocess.config import (
     MPServerConfig,
     RuntimePluginConfig,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_module import ModuleBuildContext
 from lmcache.v1.multiprocess.kv_load_policy import KVLoadContext, KVLoadPolicy
 from lmcache.v1.multiprocess.modules.lookup import LookupModule

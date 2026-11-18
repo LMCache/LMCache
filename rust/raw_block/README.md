@@ -92,8 +92,8 @@ To compare `local_disk` vs `rust_raw_block` on a real NVMe device:
 - Unmount it.
 - Run `rust_raw_block` directly on the raw block device.
 
-Use the benchmark commands in:
-- `benchmarks/inprocess/storage_backend_io/README.md`
+Use the multiprocess benchmark tooling under `lmcache bench` to compare the
+backends on the target host.
 
 No fixed numbers are included here because results are host/device/workload dependent.
 

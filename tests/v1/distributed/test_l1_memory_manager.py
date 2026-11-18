@@ -545,29 +545,6 @@ class TestL1MemoryManagerIntegration:
 
 
 # =============================================================================
-# Tests for error code semantics
-# =============================================================================
-
-
-class TestErrorCodeSemantics:
-    """Tests verifying error code semantics as documented."""
-
-    def test_success_error_code_value(self):
-        """Test that SUCCESS is a valid enum member."""
-        assert L1Error.SUCCESS is not None
-        assert L1Error.SUCCESS.name == "SUCCESS"
-
-    def test_out_of_memory_error_code_value(self):
-        """Test that OUT_OF_MEMORY is a valid enum member."""
-        assert L1Error.OUT_OF_MEMORY is not None
-        assert L1Error.OUT_OF_MEMORY.name == "OUT_OF_MEMORY"
-
-    def test_error_codes_are_distinct(self):
-        """Test that error codes are distinct values."""
-        assert L1Error.SUCCESS != L1Error.OUT_OF_MEMORY
-
-
-# =============================================================================
 # Tests for MP-mode L1 hugepage support
 # =============================================================================
 

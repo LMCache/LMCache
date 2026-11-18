@@ -96,6 +96,13 @@ exclusive process-global switches consulted in
 | `isolated_ipc` | `RawCudaIPCWrapper` (raw legacy IPC handles) |
 | `use_vmm_api` (`lmcache.v1.platform.ipc_policy`) | `VmmCudaIPCWrapper` |
 
+The vLLM connector derives `use_vmm_api` from the resolved engine config:
+the extensible KV cache and `enable_cumem_allocator` select the VMM wrapper.
+An explicit `lmcache.mp.use_vmm_api` value overrides detection. Before vLLM
+settles the extensible-cache default, the connector declares exportable VMM
+access unless the user explicitly disables it; this lets vLLM and LMCache
+agree on the allocator without a circular configuration dependency.
+
 `use_vmm_api` composes with `isolated_ipc`, enforced per allocation at
 wrap time: the fabric kind is isolation-clean (inline blob; the IMEX
 channel is device injection, not a shared namespace or volume — the
@@ -168,6 +175,13 @@ the default event backend requires it. The socket is mode `0666`, since
 MP containers may run the engine and the server as different users; a
 peer that connects can only deliver fds, which the server hands out
 solely by the random 16-byte export ids its registrations carry.
+
+The channel is Linux-only, as reported by `is_fd_channel_supported()` in that
+platform module. On unsupported platforms the MP server skips it with an INFO
+message; registrations without fd payloads continue without it. Constructing
+`FdChannelClient` on an unsupported platform raises `RuntimeError`; the worker's
+`kv_wrapper_fds_delivered` context releases its exported fds. Binding failures on
+Linux log ERROR with the exception traceback.
 
 ```
 worker (LMCacheDrivenTransferContext.register)    server (LMCacheDrivenTransferModule)

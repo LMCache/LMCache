@@ -545,9 +545,16 @@ class TestLoadDeadline:
             ctrl.stop()
             adapter.close()
 
-    @pytest.mark.parametrize("policy, kept", [("prefix", []), ("full", [1, 3])])
+    @pytest.mark.parametrize(
+        "policy, kept, retained_chunks",
+        [
+            ("prefix", [[], []], 0),
+            ("full", [[1, 3], [1]], 1),
+            ("whole_chunk", [[1], [1]], 1),
+        ],
+    )
     def test_partial_completion_policy_lock_accounting(
-        self, l1_manager, policy, kept, events
+        self, l1_manager, policy, kept, retained_chunks, events
     ):
         slow, fast = make_gated_adapter(), make_gated_adapter()
         fast.release_loads()
@@ -556,11 +563,15 @@ class TestLoadDeadline:
         rows = [
             [make_object_key(i, kv_rank=rank) for i in range(4)] for rank in range(2)
         ]
-        completed = [row[i] for row in rows for i in (1, 3)]
+        completed = [rows[0][1], rows[0][3], rows[1][1]]
         layout = make_layout()
         ctrl.start()
         try:
-            store_keys_in_l2(slow, [row[i] for row in rows for i in (0, 2)], layout)
+            store_keys_in_l2(
+                slow,
+                [key for row in rows for key in row if key not in completed],
+                layout,
+            )
             store_keys_in_l2(fast, completed, layout)
             req = ctrl.submit_prefetch_request(
                 make_spec(
@@ -577,24 +588,29 @@ class TestLoadDeadline:
             assert wait_for_condition(lambda: result_ready(ctrl, req))
             result = ctrl.query_prefetch_result(req)
             assert result is not None
-            assert [row.get_indices_list() for row in result.hit_cells] == [kept, kept]
-            assert result.l2_hit_count == 2 * len(kept)
-            if policy == "full":
-                assert result.found_cells is not None
-                assert [row.get_indices_list() for row in result.found_cells] == [
-                    [0, 1, 2, 3],
-                    [0, 1, 2, 3],
-                ]
+            assert [row.get_indices_list() for row in result.hit_cells] == kept
+            assert result.l2_hit_count == sum(map(len, kept))
+            assert result.found_cells is not None
+            assert [row.get_indices_list() for row in result.found_cells] == [
+                [0, 1, 2, 3],
+                [0, 1, 2, 3],
+            ]
             probe = l1_manager.unsafe_read(completed)
-            expected = L1Error.SUCCESS if kept else L1Error.KEY_NOT_EXIST
-            assert all(state[0] == expected for state in probe.values())
-            if kept:
-                l1_manager.finish_read(completed)
-                still_locked = l1_manager.unsafe_read(completed)
-                for i in kept:
-                    assert still_locked[rows[0][i]][0] != L1Error.SUCCESS
-                    assert still_locked[rows[1][i]][0] == L1Error.SUCCESS
-                l1_manager.finish_read([rows[1][i] for i in kept])
+            retained = [
+                row[i] for row, indices in zip(rows, kept, strict=True) for i in indices
+            ]
+            assert {
+                key for key, state in probe.items() if state[0] == L1Error.SUCCESS
+            } == set(retained)
+            if retained:
+                l1_manager.finish_read(retained)
+                still_locked = l1_manager.unsafe_read(retained)
+                assert {
+                    key
+                    for key, state in still_locked.items()
+                    if state[0] == L1Error.SUCCESS
+                } == {rows[1][i] for i in kept[1]}
+                l1_manager.finish_read([rows[1][i] for i in kept[1]])
             assert wait_for_condition(
                 lambda: any(
                     e.event_type == EventType.L2_PREFETCH_DEADLINE
@@ -609,8 +625,8 @@ class TestLoadDeadline:
                 and e.metadata["request_id"] == req
             )
             # Count chunks, not rank cells, including non-prefix full-policy hits.
-            assert deadline.metadata["retained_chunks"] == len(kept)
-            assert deadline.metadata["missed_chunks"] == 4 - len(kept)
+            assert deadline.metadata["retained_chunks"] == retained_chunks
+            assert deadline.metadata["missed_chunks"] == 4 - retained_chunks
             slow.release_loads()
             assert wait_for_condition(lambda: in_flight_count(ctrl) == 0)
             assert ctrl.query_prefetch_result(req) is None
