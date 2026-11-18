@@ -35,6 +35,7 @@ from lmcache.v1.client.transport.errors import MPServerUnavailableError
 from lmcache.v1.common.custom_types import (
     KVEventBatch,
     KVEventRecord,
+    ServerCapabilities,
 )
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.token_codec import pack_token_ids
@@ -394,6 +395,11 @@ def fake_adapter(monkeypatch):
     _return_future_from_request_methods(req_client, future)
     req_client.get_experimental.return_value = MagicMock()
     req_client.get_experimental.return_value.result.return_value = []
+    # A server on the workers' device type, so CUDA KV stays lmcache-driven.
+    req_client.get_server_info.return_value = MagicMock()
+    req_client.get_server_info.return_value.result.return_value = ServerCapabilities(
+        device_type="cuda", supported_transfer_modes=["lmcache_driven"]
+    )
 
     FakeHeartbeatThread.instances.clear()
     FakeHeartbeatThread.start_hook = None

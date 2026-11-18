@@ -3,8 +3,9 @@
 // ManagementService wire contract for LMCache mp-mode gRPC.
 //
 // Backs modules/management.py (ManagementModule): engine administration and
-// utility RPCs -- cache clearing, worker liveness pings, chunk-size and
-// experimental-feature queries, plus debug and observability reporting.
+// utility RPCs -- cache clearing, worker liveness pings, chunk-size,
+// experimental-feature and server-capability queries, plus debug and
+// observability reporting.
 // Keep one service per server module; see docs/design/v1/multiprocess.
 
 syntax = "proto3";
@@ -35,6 +36,13 @@ message GetExperimentalRequest {}
 
 message GetExperimentalResponse {
   repeated string names = 1;
+}
+
+message GetServerInfoRequest {}
+
+message GetServerInfoResponse {
+  string device_type = 1;
+  repeated string supported_transfer_modes = 2;
 }
 
 message NoopRequest {}
@@ -71,6 +79,7 @@ service ManagementService {
   rpc NegotiateChunkSize(NegotiateChunkSizeRequest)
       returns (NegotiateChunkSizeResponse);
   rpc GetExperimental(GetExperimentalRequest) returns (GetExperimentalResponse);
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
   rpc Noop(NoopRequest) returns (NoopResponse);
   rpc Ping(PingRequest) returns (PingResponse);
   rpc ReportBlockAllocation(ReportBlockAllocationRequest)

@@ -130,7 +130,9 @@ class ExtraConfigDefault(enum.Enum):
     # Routing mode for ``create_transfer_context``: ``auto`` resolves to
     # the device spec's declared default (derived from
     # ``is_lmcache_driven_available()``: CUDA and NPU -> lmcache_driven;
-    # opt-in-only stacks and others -> engine_driven);
+    # opt-in-only stacks and others -> engine_driven), and to
+    # engine_driven when the server cannot serve lmcache_driven for this
+    # device (``get_server_info``, e.g. a CPU-only server);
     # ``lmcache_driven`` forces the IPC / SHM zero-copy path where the
     # LMCache server pulls data via device handles;
     # ``engine_driven`` forces the worker-side gather/scatter copy path.
