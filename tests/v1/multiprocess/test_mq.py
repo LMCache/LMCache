@@ -1083,12 +1083,8 @@ def test_shared_loop_recreate():
     assert ClientPollingLoop._instance is None
 
 
-def test_polling_loop_does_not_load_server_implementation() -> None:
-    """The client polling loop starts and stops without loading server code.
-
-    MessageQueueClient still imports the shared codec from mq.py, so this
-    covers the loop module only.
-    """
+def test_zmq_client_does_not_load_server_implementation() -> None:
+    """Creating a ZMQ request client loads no server code."""
     script = r"""
 import importlib.abc
 import sys
@@ -1103,22 +1099,20 @@ banned = (
     "lmcache.v1.multiprocess.transport.grpc_impl",
     "lmcache.v1.multiprocess.transport.zmq_impl.mq",
     "lmcache.v1.multiprocess.transport.zmq_impl.server",
-    "lmcache.v1.transport.zmq.wire",
 )
 
 
 class ServerImportBlocker(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path, target=None):
         if any(fullname == name or fullname.startswith(name + ".") for name in banned):
-            raise ImportError(f"polling loop imported server module: {fullname}")
+            raise ImportError(f"ZMQ client imported server module: {fullname}")
         return None
 
 
 sys.meta_path.insert(0, ServerImportBlocker())
-from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
+from lmcache.v1.client.transport.factory import RequestClientFactory
 
-ClientPollingLoop.get_instance()
-ClientPollingLoop.release_instance()
+RequestClientFactory.create("tcp://127.0.0.1:1").close()
 """
     subprocess.run([sys.executable, "-c", script], check=True)
 
@@ -1334,12 +1328,9 @@ def test_client_socket_bounds_connect_attempts():
 def test_q_ring_info_list_zmq_serialization():
     """The ZMQ transport encodes GET_Q_RING replies, which carry IPC wrappers."""
     # First Party
-    from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
-        msgspec_decode,
-        msgspec_encode,
-    )
     from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper
     from lmcache.v1.transport.qstore import QRingInfo
+    from lmcache.v1.transport.zmq.codec import msgspec_decode, msgspec_encode
 
     wrapper = CudaIPCWrapper(torch.randn(4, 2, 3, device=torch_device_type))
     rings = [
