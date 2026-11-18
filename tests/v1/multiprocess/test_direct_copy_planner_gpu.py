@@ -140,6 +140,9 @@ def _make_context(name: str) -> tuple[GPUCacheContext, list[torch.Tensor]]:
         engine_type=EngineType.SGLANG if is_sglang else EngineType.VLLM,
     )
     assert ctx.get_engine_kv_format(0) == expected_fmt
+    # The tensors are filled on the default stream and the transfers run on
+    # the context's stream; without this a store can read them half filled.
+    torch_dev.synchronize()
     return ctx, tensors
 
 
