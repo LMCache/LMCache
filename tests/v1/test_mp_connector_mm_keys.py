@@ -235,6 +235,7 @@ def test_lookup_hint_carries_vllm_prefix_hit() -> None:
     scheduler_adapter.lmcache_tokens_per_chunk = 64
     scheduler_adapter.check_lookup_result.return_value = None
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._kv_format = ""
     connector.request_trackers = {}
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = False
@@ -255,6 +256,7 @@ def test_recurrent_lookup_reserves_final_prompt_token() -> None:
     scheduler_adapter.lmcache_tokens_per_chunk = 64
     scheduler_adapter.check_lookup_result.return_value = 64
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._kv_format = ""
     connector.request_trackers = {}
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = True

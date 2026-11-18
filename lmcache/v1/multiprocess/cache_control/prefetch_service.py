@@ -74,22 +74,26 @@ class PrefetchService:
             )
         ctx = self._engine.context
         registry = ctx.layout_desc_registry
+        cache_format = (tags or {}).get("kv_format", "")
         # Every object group the model registered, each with its own layout
         # and attention window -- the same rows the lookup path submits. One
         # layout for group 0 would warm a fraction of each chunk under
         # --separate-object-groups and report success.
         unregistered = Unavailable(
             f"no layout registered for model_name={model_name!r} "
-            f"world_size={world_size}; the model has not allocated "
+            f"world_size={world_size} cache_format={cache_format!r}; "
+            f"the model has not allocated "
             f"KV cache on this node yet"
         )
-        group_layout_descs = registry.find_group_layout_descs(model_name, world_size)
+        group_layout_descs = registry.find_group_layout_descs(
+            model_name, world_size, cache_format
+        )
         if not group_layout_descs:
             raise unregistered
         try:
-            attn_desc = registry.find_attn_desc(model_name, world_size)
+            attn_desc = registry.find_attn_desc(model_name, world_size, cache_format)
             shard_replication_desc = registry.find_shard_replication_desc(
-                model_name, world_size
+                model_name, world_size, cache_format
             )
         except ValueError:
             # Unregistered between the two reads: the same answer, not a

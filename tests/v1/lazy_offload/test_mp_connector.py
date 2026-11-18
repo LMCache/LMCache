@@ -214,6 +214,7 @@ class _Harness:
 def _make_connector() -> _Harness:
     """Construct the smallest scheduler-side connector these tests need."""
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._kv_format = ""
     manager = _RecordingManager()
     adapter = _FakeSchedulerAdapter(manager.call_log)
     # ``role`` is a read-only property over ``_role`` on the vLLM base.

@@ -394,7 +394,7 @@ def test_mq_noop_multiple_clients():
 def test_mq_register_kv_cache():
     """
     Test MessageQueue with REGISTER_KV_CACHE request type.
-    REGISTER_KV_CACHE takes (gpu_id: int, kv_cache: KVCache) and returns None.
+    REGISTER_KV_CACHE includes the worker's layout and precision identity.
     """
     # First Party
     from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper
@@ -425,6 +425,7 @@ def test_mq_register_kv_cache():
             EngineType.VLLM,
             {"vllm_block_size": 16},
             [],
+            "",
         ],
         expected_response=None,
         num_requests=1,

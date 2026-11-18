@@ -354,7 +354,9 @@ def test_query_rows_come_back_in_token_order_and_are_read_only():
 # Context: building the wrapper from the engine's /status.
 
 
-def _connect(world_size: int = 1, mutate=lambda groups: None, **kernel_group):
+def _connect(
+    world_size: int = 1, mutate=lambda groups: None, *, formats=(None,), **kernel_group
+):
     """Connect a bare KV context as /status would: object layouts from
     qstore's report, the kernel group from the registration's layout."""
     # First Party
@@ -384,12 +386,33 @@ def _connect(world_size: int = 1, mutate=lambda groups: None, **kernel_group):
             "model_name": ctx._model_name,
             "world_size": world_size,
             "object_groups": groups,
+            **({"cache_format": fmt} if fmt is not None else {}),
         }
+        for fmt in formats
     ]
     ctx._connect_sdk(
         {"tokens_per_block": CHUNK, "slots_per_block": CHUNK, **kernel_group}
     )
     return ctx
+
+
+def test_sdk_rejects_ambiguous_layout_before_mapping_ring() -> None:
+    # First Party
+    from lmcache.sdk.context import LMCacheSDKError
+
+    with pytest.raises(LMCacheSDKError, match="Multiple cache formats"):
+        _connect(formats=("format-a", "format-b"))
+
+
+def test_sdk_rejects_request_tag_that_differs_from_connected_layout() -> None:
+    # First Party
+    from lmcache.sdk.context import LMCacheSDKError
+
+    ctx = _connect(formats=("format-a",))
+    with pytest.raises(LMCacheSDKError, match="does not match"):
+        ctx.store(
+            _kv(CHUNK), range(CHUNK), request_configs={"lmcache.tag.kv_format": "b"}
+        )
 
 
 def test_the_context_builds_the_wrapper_from_the_reported_object_layout():

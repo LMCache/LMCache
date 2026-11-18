@@ -26,6 +26,7 @@ from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.engine_context import (
     MPCacheServerContext,
     finish_lookup_read,
+    get_request_cache_format,
 )
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
@@ -69,10 +70,10 @@ def resolve_prefetched_obj_keys(
     end_chunk = start_chunk + len(chunk_hashes)
     registry = ctx.layout_desc_registry
     group_windows = registry.find_attn_desc(
-        key.model_name, key.world_size
+        key.model_name, key.world_size, get_request_cache_format(key)
     ).num_chunks_in_sw
     shard_replication_desc = registry.find_shard_replication_desc(
-        key.model_name, key.world_size
+        key.model_name, key.world_size, get_request_cache_format(key)
     )
 
     obj_keys: list[ObjectKey] = []
@@ -216,6 +217,7 @@ class LookupModule(DiscoverableModule):
             tp_size: Legacy wire field; ignored (kept for payload arity).
         """
         model_name, world_size = key.model_name, key.world_size
+        cache_format = get_request_cache_format(key)
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_REQUEST_START,
@@ -229,7 +231,9 @@ class LookupModule(DiscoverableModule):
             )
         )
 
-        layout_desc = self._ctx.layout_desc_registry.find(model_name, world_size)
+        layout_desc = self._ctx.layout_desc_registry.find(
+            model_name, world_size, cache_format
+        )
         if layout_desc is None:
             logger.error(
                 "No GPU context found for model %s with world size %d during lookup!",
@@ -279,11 +283,11 @@ class LookupModule(DiscoverableModule):
         # Submit one key row per (object group, kv rank), each with its own
         # attention window.
         attn_desc = self._ctx.layout_desc_registry.find_attn_desc(
-            model_name, world_size
+            model_name, world_size, cache_format
         )
         shard_replication_desc = (
             self._ctx.layout_desc_registry.find_shard_replication_desc(
-                model_name, world_size
+                model_name, world_size, cache_format
             )
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
@@ -296,7 +300,7 @@ class LookupModule(DiscoverableModule):
         session.begin_lookup(key)
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
-            model_name, world_size
+            model_name, world_size, cache_format
         )
         if not group_layout_descs:
             logger.error(
@@ -647,9 +651,11 @@ class LookupModule(DiscoverableModule):
             The object keys of all groups and kv ranks for ``chunk_hashes``.
         """
         registry = self._ctx.layout_desc_registry
-        attn_desc = registry.find_attn_desc(key.model_name, key.world_size)
+        attn_desc = registry.find_attn_desc(
+            key.model_name, key.world_size, get_request_cache_format(key)
+        )
         shard_replication_desc = registry.find_shard_replication_desc(
-            key.model_name, key.world_size
+            key.model_name, key.world_size, get_request_cache_format(key)
         )
         per_group = ipc_key_to_object_keys(
             key,
@@ -871,7 +877,7 @@ class LookupModule(DiscoverableModule):
             return 0, 0, {}
         group_layout_descs = (
             self._ctx.layout_desc_registry.find_group_unfull_chunk_layout_descs(
-                key.model_name, key.world_size
+                key.model_name, key.world_size, get_request_cache_format(key)
             )
         )
         # The model may have unregistered since the lookup was submitted.
@@ -880,7 +886,7 @@ class LookupModule(DiscoverableModule):
         object_group_ids = list(range(attn_desc.num_object_groups))
         shard_replication_desc = (
             self._ctx.layout_desc_registry.find_shard_replication_desc(
-                key.model_name, key.world_size
+                key.model_name, key.world_size, get_request_cache_format(key)
             )
         )
         for num_checked, boundary in enumerate(candidate_boundaries, start=1):
