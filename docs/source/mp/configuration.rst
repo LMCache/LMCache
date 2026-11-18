@@ -741,6 +741,22 @@ Source: ``lmcache/v1/distributed/config.py``
        registered file descriptors at this interval, waking
        controller poll loops for L2 adapters that lack native
        async completion callbacks.
+   * - ``--l2-health-check-interval-s``
+     - ``5``
+     - Seconds between health probes of L2 adapters that support them.
+       While an adapter's backend does not answer, no new stores or lookups
+       are sent to it and lookups already waiting on it are given up; when the
+       backend is back the adapter reconnects without restarting the server.  The state is reported in
+       ``/status`` (``l2_health`` and ``l2_degraded``) and in the
+       ``lmcache_mp.l2_adapter_available`` metric.  ``0`` disables probing.
+       Adapters that do not support probing are unaffected.
+   * - ``--l2-health-probe-timeout-s``
+     - ``2``
+     - Seconds a health probe may take before it counts as a failure.
+   * - ``--l2-health-failure-threshold``
+     - ``3``
+     - Consecutive failed probes before an L2 adapter is marked unavailable
+       and no new work is routed to it.
 
 L2 Adapters
 -----------

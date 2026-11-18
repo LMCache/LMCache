@@ -667,6 +667,38 @@ class ShadowL1ManagerConfig(L1ManagerConfig):
 
 
 @dataclass
+class L2HealthConfig:
+    """Settings for the monitor that probes L2 adapters' backends.
+
+    The monitor only acts on adapters that implement
+    ``L2AdapterInterface.probe_health``; for all others these settings have no
+    effect.
+    """
+
+    check_interval_s: float = 5.0
+    """Seconds between probe rounds. ``0`` disables the monitor."""
+
+    probe_timeout_s: float = 2.0
+    """Seconds a probe may take before it counts as a failure."""
+
+    failure_threshold: int = 3
+    """Consecutive failed probes before a healthy adapter is marked
+    unavailable."""
+
+    def __post_init__(self) -> None:
+        if self.check_interval_s < 0:
+            raise ValueError(
+                f"check_interval_s must be >= 0, got {self.check_interval_s}"
+            )
+        if self.probe_timeout_s <= 0:
+            raise ValueError(f"probe_timeout_s must be > 0, got {self.probe_timeout_s}")
+        if self.failure_threshold < 1:
+            raise ValueError(
+                f"failure_threshold must be >= 1, got {self.failure_threshold}"
+            )
+
+
+@dataclass
 class StorageManagerConfig:
     """
     The configuration for the distributed storage manager.
@@ -698,6 +730,9 @@ class StorageManagerConfig:
 
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
+
+    l2_health_config: L2HealthConfig = field(default_factory=L2HealthConfig)
+    """ Settings for probing L2 backends and routing around unavailable ones. """
 
     l1_manager_configs: list[L1ManagerConfig] = field(default_factory=list)
     """All peer L1 configurations. Empty accepts the legacy single-L1 input."""
@@ -1063,9 +1098,43 @@ def add_storage_manager_args(
         help="Interval in ms for the periodic event notifier heartbeat. Default is 5.",
     )
 
+    health_group = parser.add_argument_group(
+        "L2 Health", "Probing L2 backends and routing around unavailable ones"
+    )
+    health_group.add_argument(
+        "--l2-health-check-interval-s",
+        type=float,
+        default=5.0,
+        help="Seconds between health probes of L2 adapters that support them. "
+        "0 disables probing. Default is 5.",
+    )
+    health_group.add_argument(
+        "--l2-health-probe-timeout-s",
+        type=float,
+        default=2.0,
+        help="Seconds a health probe may take before it counts as a failure. "
+        "Default is 2.",
+    )
+    health_group.add_argument(
+        "--l2-health-failure-threshold",
+        type=int,
+        default=3,
+        help="Consecutive failed probes before an L2 adapter is marked "
+        "unavailable and no new work is routed to it. Default is 3.",
+    )
+
     # Adapter config
     add_l2_adapters_args(parser)
     return parser
+
+
+def _l2_health_config_from_args(args: argparse.Namespace) -> L2HealthConfig:
+    """Build the L2 health settings from parsed storage manager arguments."""
+    return L2HealthConfig(
+        check_interval_s=args.l2_health_check_interval_s,
+        probe_timeout_s=args.l2_health_probe_timeout_s,
+        failure_threshold=args.l2_health_failure_threshold,
+    )
 
 
 def get_arg_parser() -> argparse.ArgumentParser:
@@ -1166,6 +1235,7 @@ def parse_args_to_config(
             prefetch_policy=args.l2_prefetch_policy,
             prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
             periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
+            l2_health_config=_l2_health_config_from_args(args),
         )
     if args.l1_size_gb is None or defaults is None:
         raise ValueError(
@@ -1249,6 +1319,7 @@ def parse_args_to_config(
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
+        l2_health_config=_l2_health_config_from_args(args),
     )
     return config
 

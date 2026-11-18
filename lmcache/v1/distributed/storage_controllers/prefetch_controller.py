@@ -17,12 +17,14 @@ releasing a request at any point is a walk over its maps.
 
 # Standard
 from collections import Counter, defaultdict, deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import enum
 import itertools
 import select
 import threading
+import time
 
 # First Party
 from lmcache.lmcache_native import Bitmap
@@ -56,6 +58,7 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     L1ManagerDescriptor,
     L2AdapterDescriptor,
     MapState,
+    all_adapters_available,
     resolve_l1_affinity,
 )
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -74,6 +77,11 @@ logger = init_logger(__name__)
 
 # Poll timeout in milliseconds for the prefetch loop
 PREFETCH_LOOP_POLL_TIMEOUT_MS = 500
+
+# How long to keep waiting for the result of a lookup abandoned on an
+# unavailable adapter before forgetting it. The result is only needed to unlock
+# the keys the lookup pinned.
+ABANDONED_LOOKUP_TTL_S = 600.0
 
 PrefetchRequestId = int
 
@@ -579,7 +587,23 @@ class PrefetchController(StorageControllerInterface):
         adapter_descriptors: list[L2AdapterDescriptor],
         policy: PrefetchPolicy,
         inflight_watermark: float = 0.5,
+        adapter_available: Callable[[int], bool] = all_adapters_available,
     ) -> None:
+        """
+        Args:
+            l1_managers: The L1 managers, parallel to ``l1_manager_descriptors``.
+            l1_manager_descriptors: Descriptors of ``l1_managers``.
+            l2_adapters: Initial L2 adapters, parallel to ``adapter_descriptors``.
+            adapter_descriptors: Descriptors of ``l2_adapters``.
+            policy: Plans which cells load from which tier.
+            inflight_watermark: Fraction of L1 capacity that in-flight L2
+                prefetches may stage before new requests wait.
+            adapter_available: Called with an adapter id; ``False`` means the
+                adapter's backend is down. No new lookup or load goes to it,
+                and lookups already waiting on it are abandoned: the request
+                proceeds as if the adapter had missed every key.
+        """
+        self._adapter_available = adapter_available
         self._l1_managers: dict[int, L1ManagerInterface] = {
             desc.index: mgr
             for desc, mgr in zip(l1_manager_descriptors, l1_managers, strict=True)
@@ -611,6 +635,15 @@ class PrefetchController(StorageControllerInterface):
         self._adapter_ops_lock = threading.Lock()
         self._pending_adapter_ops: list[AddAdapterOp | RemoveAdapterOp] = []
         self._adapter_ctrl_efd = create_event_notifier()
+
+        # Lookups given up on because their adapter became unavailable:
+        # (adapter id, task id) -> (the lookup's keys, monotonic time given up).
+        # A lookup that completes later has locked keys on the adapter; the
+        # entry lets the result be read and those keys unlocked. Background
+        # thread only.
+        self._abandoned_lookups: dict[
+            tuple[int, L2TaskId], tuple[list[ObjectKey], float]
+        ] = {}
 
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
@@ -1010,6 +1043,14 @@ class PrefetchController(StorageControllerInterface):
                         self._abort_request(request)
 
             try:
+                self._abandon_lookups_on_unavailable_adapters()
+                self._drain_abandoned_lookups(signaled_adapters[PrefetchPhase.LOOKUP])
+            except Exception:
+                logger.exception(
+                    "Unexpected error in prefetch loop while abandoning lookups"
+                )
+
+            try:
                 self._start_pending_requests()
             except Exception:
                 logger.exception(
@@ -1043,6 +1084,90 @@ class PrefetchController(StorageControllerInterface):
         if request.phase == PrefetchPhase.PLAN_AND_LOAD and request.all_loads_done():
             self._finish_request(request)
             self._retire_request(request)
+
+    # =========================================================================
+    # Unavailable adapters
+    # =========================================================================
+
+    def _abandon_lookups_on_unavailable_adapters(self) -> None:
+        """Stop waiting on lookups submitted to adapters whose backend is down.
+
+        A lookup holds no L1 buffer, so giving up on it is safe. Each affected
+        request continues with a miss from that adapter; without this it would
+        wait for a result that may never come, and keep counting against the
+        prefetch admission watermark.
+        """
+        unavailable = {
+            idx for idx in self._l2_adapters if not self._adapter_available(idx)
+        }
+        if not unavailable:
+            return
+        now = time.monotonic()
+        for request in list(self._in_flight_requests.values()):
+            stuck = [idx for idx in request.inflight_lookup_tasks if idx in unavailable]
+            if not stuck:
+                continue
+            for idx in stuck:
+                task_id = request.inflight_lookup_tasks.pop(idx)
+                self._abandoned_lookups[(idx, task_id)] = (
+                    request.get_flattened_keys(),
+                    now,
+                )
+            logger.warning(
+                "Prefetch request %d: abandoned lookups on unavailable adapters %s",
+                request.request_id,
+                stuck,
+            )
+            try:
+                # The same hand-off ``_advance_request`` makes once the last
+                # lookup has reported.
+                if request.all_lookups_done():
+                    self._transition_to_load_phase(request)
+                    if request.all_loads_done():
+                        self._finish_request(request)
+                        self._retire_request(request)
+            except Exception:
+                logger.exception(
+                    "Unexpected error finishing the lookup phase of prefetch "
+                    "request %d; aborting it",
+                    request.request_id,
+                )
+                self._abort_request(request)
+
+    def _drain_abandoned_lookups(self, signaled_adapters: set[int]) -> None:
+        """Read the results of abandoned lookups that have come in and unlock
+        the keys they pinned on the adapter.
+
+        Args:
+            signaled_adapters: Adapters whose lookup event fd fired this
+                iteration. An abandoned lookup is checked when its adapter
+                signaled, or when the adapter is available again.
+        """
+        now = time.monotonic()
+        for (adapter_idx, task_id), (keys, abandoned_at) in list(
+            self._abandoned_lookups.items()
+        ):
+            adapter = self._l2_adapters.get(adapter_idx)
+            if adapter is None:
+                del self._abandoned_lookups[(adapter_idx, task_id)]
+                continue
+            if adapter_idx in signaled_adapters or self._adapter_available(adapter_idx):
+                result = adapter.query_lookup_and_lock_result(task_id)
+                if result is not None:
+                    del self._abandoned_lookups[(adapter_idx, task_id)]
+                    pinned = [k for i, k in enumerate(keys) if result.test(i)]
+                    if pinned:
+                        adapter.submit_unlock(pinned)
+                    continue
+            if now - abandoned_at > ABANDONED_LOOKUP_TTL_S:
+                logger.warning(
+                    "Forgetting abandoned lookup %d on adapter %d: no result after "
+                    "%.0f s",
+                    task_id,
+                    adapter_idx,
+                    ABANDONED_LOOKUP_TTL_S,
+                )
+                del self._abandoned_lookups[(adapter_idx, task_id)]
 
     # =========================================================================
     # Dynamic adapter add/remove ops
@@ -1566,8 +1691,9 @@ class PrefetchController(StorageControllerInterface):
             l2_idx: The index of an attached L2 adapter.
 
         Returns:
-            ``True`` if the adapter is not draining, its memory tags are
-            allowed by the request, and it is not a borrower under ``NO_LOCK``.
+            ``True`` if the adapter is not draining, its backend is available,
+            its memory tags are allowed by the request, and it is not a borrower
+            under ``NO_LOCK``.
         """
         if (
             request.lock_mode == PrefetchLockMode.NO_LOCK
@@ -1576,9 +1702,13 @@ class PrefetchController(StorageControllerInterface):
         ):
             # A borrowed view cannot outlive the locks NO_LOCK releases.
             return False
-        return l2_idx not in self._draining and _tags_allowed(
-            self._l2_adapters[l2_idx].get_memory_tags(),
-            request.allowed_l2_memory_tags,
+        return (
+            l2_idx not in self._draining
+            and self._adapter_available(l2_idx)
+            and _tags_allowed(
+                self._l2_adapters[l2_idx].get_memory_tags(),
+                request.allowed_l2_memory_tags,
+            )
         )
 
     def _get_l2_affinity_manager(self, l2_adapter_idx: int) -> int:

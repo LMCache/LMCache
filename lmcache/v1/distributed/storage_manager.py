@@ -55,6 +55,7 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigureError,
 )
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
+from lmcache.v1.distributed.l2_health_monitor import L2HealthMonitor
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.distributed.serde import create_serde_processor
 from lmcache.v1.distributed.storage_controllers import (
@@ -185,12 +186,17 @@ class StorageManager:
             # active for reads, touches, status or capacity.
             self._closing_adapters: set[int] = set()
 
+            # Probes the adapters that support it and tells the controllers
+            # which ones to route around while their backend is down.
+            self._health_monitor = L2HealthMonitor(config.l2_health_config)
+
             for ac in config.l2_adapter_config.adapters:
                 self._check_dax_devices_unowned(ac)
                 adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
                 cleanup.callback(adapter.close)
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
+                self._health_monitor.register(adapter_id, adapter, descriptor.type_name)
 
             PeriodicEventNotifier.create(
                 interval_ms=config.periodic_notifier_interval_ms,
@@ -250,6 +256,7 @@ class StorageManager:
                     [self._l2_adapters[d.index] for d in descriptors],
                     descriptors,
                     create_store_policy(config.store_policy),
+                    adapter_available=self._health_monitor.is_available,
                 )
                 self._store_controllers[manager.l1_manager_id] = controller
                 controller.start()
@@ -265,9 +272,15 @@ class StorageManager:
                 adapter_descriptors=list(self._adapter_descriptors.values()),
                 policy=create_prefetch_policy(config.prefetch_policy),
                 inflight_watermark=config.prefetch_inflight_watermark,
+                adapter_available=self._health_monitor.is_available,
             )
             self._prefetch_controller.start()
             cleanup.callback(self._prefetch_controller.stop)
+
+            # Started after the controllers so the first state change finds
+            # them ready; its cleanup runs before the adapters are closed.
+            self._health_monitor.start()
+            cleanup.callback(self._health_monitor.stop)
 
             # L2 usage gauge — one observation per adapter, tagged by
             # ``l2_name``.  Parallel to the L1 ``l1_memory_usage_bytes`` gauge.
@@ -279,6 +292,16 @@ class StorageManager:
                     "``l2_name`` (one observation per adapter)."
                 ),
                 self.get_l2_usages,
+            )
+            register_gauge(
+                "lmcache.l2",
+                "lmcache_mp.l2_adapter_available",
+                (
+                    "1 while an L2 adapter's backend is usable, 0 while the "
+                    "health monitor has marked it unavailable; one observation "
+                    "per adapter that supports health probes."
+                ),
+                self._health_monitor.get_availability_observations,
             )
             cleanup.pop_all()
 
@@ -1140,6 +1163,7 @@ class StorageManager:
             with self._adapters_lock:
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
+            self._health_monitor.register(adapter_id, adapter, descriptor.type_name)
             owner = manager.l1_manager_id
             self._store_controllers[owner].add_adapter(adapter_id, adapter, descriptor)
             self._prefetch_controller.add_adapter(adapter_id, adapter, descriptor)
@@ -1214,6 +1238,7 @@ class StorageManager:
                     self._closing_adapters.add(adapter_id)
                 self._publish_capacity_changed()
 
+            self._health_monitor.unregister(adapter_id)
             adapter.close()
             with self._adapters_lock:
                 del self._l2_adapters[adapter_id]
@@ -1258,6 +1283,8 @@ class StorageManager:
         fails to close, the L1 managers are left open, since that adapter
         may still access L1 buffers.
         """
+        # First, so that no reconnect starts while the adapters are closed.
+        self._health_monitor.stop()
         self._prefetch_controller.stop()
         for controller in self._store_controllers.values():
             controller.stop()
@@ -1314,6 +1341,7 @@ class StorageManager:
         prefetch = self._prefetch_controller.report_status()
         l2_eviction = self._l2_eviction_controller.report_status()
         adapters = [a.report_status() for _id, _desc, a in self._snapshot_adapters()]
+        l2_health = self._health_monitor.report_status()
         result = {
             "is_healthy": all(
                 c["is_healthy"]
@@ -1332,6 +1360,8 @@ class StorageManager:
             "prefetch_controller": prefetch,
             "l2_eviction_controller": l2_eviction,
             "l2_adapters": adapters,
+            "l2_health": l2_health,
+            "l2_degraded": l2_health["degraded"],
             "num_l2_adapters": len(adapters),
             "l1_usage": self.get_l1_usage(),
             "l1_capacity_bytes_by_backend": dict(capacities),
