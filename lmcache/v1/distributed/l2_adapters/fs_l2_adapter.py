@@ -12,7 +12,7 @@ from __future__ import annotations
 
 # Standard
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Callable, Optional, Union
 import asyncio
 import ctypes
 import errno
@@ -408,11 +408,27 @@ class FSL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
+        return self._submit_read(keys, objects, bounded=False)
+
+    def get_bounded_load_submitter(
+        self,
+    ) -> Callable[[list[ObjectKey], list[MemoryObj]], L2TaskId] | None:
+        """Offer complete framed-record reads on the buffered I/O path."""
+        return None if self._use_odirect else self._submit_bounded_load_task
+
+    def _submit_bounded_load_task(
+        self, keys: list[ObjectKey], objects: list[MemoryObj]
+    ) -> L2TaskId:
+        return self._submit_read(keys, objects, bounded=True)
+
+    def _submit_read(
+        self, keys: list[ObjectKey], objects: list[MemoryObj], *, bounded: bool
+    ) -> L2TaskId:
         with self._lock:
             task_id = self._get_next_task_id()
 
         asyncio.run_coroutine_threadsafe(
-            self._execute_load(keys, objects, task_id),
+            self._execute_load(keys, objects, task_id, bounded=bounded),
             self._loop,
         )
         return task_id
@@ -742,6 +758,8 @@ class FSL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
         task_id: L2TaskId,
+        *,
+        bounded: bool = False,
     ) -> None:
         bitmap = Bitmap(len(keys))
         for i, key in enumerate(keys):
@@ -794,7 +812,22 @@ class FSL2Adapter(L2AdapterInterface):
                         else:
                             num_read = n_head
 
-                    if num_read != expected:
+                    if bounded:
+                        # A full destination can contain only the prefix of a
+                        # larger file. Check EOF on this same open file.
+                        if num_read == expected and await f.read(1):
+                            logger.warning(
+                                "Encoded record exceeds capacity for %s", file_path.name
+                            )
+                            continue
+                        objects[i].set_used_size(num_read)
+                        if len(objects[i].byte_array) != num_read:
+                            logger.error(
+                                "Destination cannot expose encoded length for %s",
+                                file_path.name,
+                            )
+                            continue
+                    elif num_read != expected:
                         logger.warning(
                             "Incomplete read for %s: expected %d, got %d",
                             file_path.name,

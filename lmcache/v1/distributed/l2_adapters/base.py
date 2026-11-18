@@ -10,7 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, Callable, Mapping
 import threading
 
 if TYPE_CHECKING:
@@ -314,6 +314,18 @@ class L2AdapterInterface(ABC):
     #####################
     # Load Interface
     ######################
+
+    def get_bounded_load_submitter(
+        self,
+    ) -> Callable[[list[ObjectKey], list[MemoryObj]], L2TaskId] | None:
+        """Return the optional load operation for variable-length framed records.
+
+        Destinations supply a capacity. On each hit the operation must expose
+        exactly the bytes of the complete stored record via the destination's
+        byte_array before signalling completion. Oversized records are misses.
+        Task IDs and completion use the ordinary load interface.
+        """
+        return None
 
     @abstractmethod
     def submit_load_task(

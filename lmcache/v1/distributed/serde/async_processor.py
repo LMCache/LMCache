@@ -47,6 +47,9 @@ class AsyncSerdeProcessor(SerdeProcessor):
         max_workers: Thread pool size. Default 1 (serialization is
             typically CPU-bound, more threads may help if the transform
             releases the GIL).
+        framed_variable_length: Opt into bounded loads when the decoder
+            validates framing against the actual received byte count and
+            rejects incomplete or trailing data.
     """
 
     def __init__(
@@ -54,7 +57,10 @@ class AsyncSerdeProcessor(SerdeProcessor):
         serializer: Serializer,
         deserializer: Deserializer,
         max_workers: int = 1,
+        *,
+        framed_variable_length: bool = False,
     ) -> None:
+        self.framed_variable_length = framed_variable_length
         self._serializer = serializer
         self._deserializer = deserializer
 
