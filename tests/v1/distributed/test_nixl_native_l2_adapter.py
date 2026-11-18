@@ -33,6 +33,11 @@ from lmcache.v1.distributed.l2_adapters.nixl_native_l2_adapter import (
         ("num_workers", True, "positive integer"),
         ("max_capacity_gb", -1, "non-negative"),
         ("max_capacity_gb", True, "non-negative"),
+        ("enable_reactor", "yes", "boolean"),
+        ("enable_reactor", "false", "boolean"),
+        ("enable_reactor", 1, "boolean"),
+        ("enable_reactor", 0, "boolean"),
+        ("enable_reactor", None, "boolean"),
     ],
 )
 def test_invalid_generic_config_fields(field: str, value: object, message: str) -> None:
@@ -71,6 +76,26 @@ def test_storage_type_setting_is_rejected() -> None:
                 "backend_params": {"file_path": "/tmp/nixl"},
             }
         )
+
+
+def test_enable_reactor_defaults_disabled_and_opt_in_accepted() -> None:
+    """The reactor switch defaults to false and accepts an explicit true."""
+    default = NixlNativeL2AdapterConfig.from_dict(
+        {"backend": "RADOS", "backend_params": {}}
+    )
+    assert default.enable_reactor is False
+    opt_in = NixlNativeL2AdapterConfig.from_dict(
+        {"backend": "RADOS", "backend_params": {}, "enable_reactor": True}
+    )
+    assert opt_in.enable_reactor is True
+
+
+def test_help_documents_enable_reactor() -> None:
+    """Command-line help exposes the opt-in switch and its serial default."""
+    help_text = NixlNativeL2AdapterConfig.help()
+    assert "enable_reactor (bool)" in help_text
+    assert "default false" in help_text
+    assert "serial worker path" in help_text
 
 
 @pytest.mark.parametrize("value", ["yes", 1, 0])
@@ -171,14 +196,63 @@ def test_factory_forwards_l1_arena_and_safe_status(
             "l1_base": l1_desc.ptr,
             "l1_size": l1_desc.size,
             "l1_alignment": l1_desc.align_bytes,
+            "enable_reactor": False,
         }
         status = adapter.report_status()
         assert status["type"] == "nixl_native"
         assert status["backend"] == "OBJ"
         assert status["storage_type"] == "OBJECT"
+        assert status["enable_reactor"] is False
         assert status["supports_delete"] is False
         assert "backend_params" not in status
         assert "must-not-leak" not in repr(status)
+    finally:
+        adapter.close()
+
+
+def test_factory_forwards_reactor_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit true reaches the native client and the status record."""
+    captured: dict[str, object] = {}
+
+    class FakeNixlClient:
+        """Native client stub recording the factory's constructor kwargs."""
+
+        storage_type = "OBJECT"
+        supports_query = True
+        supports_delete = False
+        supports_direct_io = False
+        atomic_publication = False
+
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+            self.read_fd, self.write_fd = os.pipe()
+
+        def event_fd(self) -> int:
+            """Return the pollable completion descriptor."""
+            return self.read_fd
+
+        def close(self) -> None:
+            """Close the fake completion descriptor."""
+            os.close(self.read_fd)
+            os.close(self.write_fd)
+
+    fake_module = ModuleType("lmcache.lmcache_nixl")
+    fake_module.LMCacheNixlClient = FakeNixlClient  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "lmcache.lmcache_nixl", fake_module)
+
+    config = NixlNativeL2AdapterConfig.from_dict(
+        {"backend": "RADOS", "backend_params": {}, "enable_reactor": True}
+    )
+    adapter = create_l2_adapter(
+        config, L1MemoryDesc(ptr=0x12340000, size=0x400000, align_bytes=0x1000)
+    )
+    try:
+        assert captured["enable_reactor"] is True
+        status = adapter.report_status()
+        assert status["backend"] == "RADOS"
+        assert status["enable_reactor"] is True
     finally:
         adapter.close()
 
