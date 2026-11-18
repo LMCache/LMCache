@@ -41,6 +41,10 @@ from lmcache.v1.memory_allocators.lazy_memory_allocator import (  # noqa: E402
     LazyMemoryAllocator,
 )
 from lmcache.v1.memory_management import MemoryObj  # noqa: E402
+from lmcache.v1.multiprocess.native_completion import (  # noqa: E402
+    DeviceHostFuncDispatcher,
+    submit_callback_to_stream,
+)
 from lmcache.v1.multiprocess.object_group_transfer import (  # noqa: E402
     direct_transfer_supported,
     downsample_and_stage_block_ids,
@@ -58,7 +62,6 @@ from lmcache.v1.multiprocess.streaming import FSStreamingReader  # noqa: E402
 from lmcache.v1.platform.devices.cuda.cache_context import (  # noqa: E402
     GPUCacheContext,
 )
-from lmcache.v1.platform.stream import record_completion_event  # noqa: E402
 import lmcache.cuda_ops as cuda_ops  # noqa: E402
 import lmcache.lmcache_native as lmcache_native  # noqa: E402
 
@@ -311,6 +314,7 @@ def test_mixed_fs_windows_match_l1_gpu_bytes_concurrently(
 ):
     """Shared FS windows and resident L1 produce identical GPU KV bytes."""
     contexts = []
+    completion = DeviceHostFuncDispatcher()
     adapter = FSL2Adapter(FSL2AdapterConfig(base_path=str(tmp_path)))
     reader = None
     owner = None
@@ -338,6 +342,10 @@ def test_mixed_fs_windows_match_l1_gpu_bytes_concurrently(
             )
         )
         reader = FSStreamingReader(adapter, capacity, shared_owner=owner)
+        completion.register(
+            "release_streaming_windows", reader.pool.release_completed, list[int]
+        )
+        completion.start()
         keys = [
             ObjectKey(chunk_hash=bytes([i]), model_name="model", kv_rank=0)
             for i in range(1, num_chunks)
@@ -404,8 +412,9 @@ def test_mixed_fs_windows_match_l1_gpu_bytes_concurrently(
                             transfer_key="mixed-fs",
                             block_ids_host=host_ids,
                         )
-                        fence = record_completion_event(ctx.device, ctx.stream)
-                        reader.release_after_transfer([window], fence)
+                        submit_callback_to_stream(
+                            ctx.cupy_stream, "release_streaming_windows", [window.id]
+                        )
                         transferred = True
                     finally:
                         if not transferred:
@@ -419,6 +428,9 @@ def test_mixed_fs_windows_match_l1_gpu_bytes_concurrently(
         with ThreadPoolExecutor(max_workers=num_requests) as executor:
             assert all(executor.map(retrieve, prepared))
     finally:
+        for ctx, _ in contexts:
+            ctx.stream.synchronize()
+        completion.stop()
         if reader is not None:
             reader.close()
         if owner is not None:

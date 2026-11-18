@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared-L1 experiment: permanent reservation excludes hot-cache admission."""
+"""A streaming reservation is excluded from hot-cache capacity and eviction."""
 
 # Standard
 from unittest.mock import MagicMock
@@ -48,7 +48,7 @@ def test_reserved_window_never_becomes_hot_capacity(monkeypatch):
         before = owner.get_memory_usage()
         w = reader.pool.acquire(layout)
         w.memory_obj.raw_tensor.fill_(42)
-        assert reader.pool.release(w)
+        reader.pool.release(w)
         assert owner.get_memory_usage() == before == (8192, 8192)
         assert (
             owner.reserve_write(keys[2:], [False], layout, "hot")[keys[2]][0]

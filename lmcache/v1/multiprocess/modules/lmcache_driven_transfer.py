@@ -71,7 +71,7 @@ from lmcache.v1.platform.fd_channel import (
     fd_channel_path,
     is_fd_channel_supported,
 )
-from lmcache.v1.platform.stream import record_completion_event, synchronize_stream
+from lmcache.v1.platform.stream import synchronize_stream
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -289,6 +289,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             self._release_imported_event,
             payload_type=tuple[int, int],
         )
+        reader = self._ctx.streaming_reader
+        if reader is not None:
+            self._device_host_func_dispatcher.register(
+                "release_streaming_windows", reader.pool.release_completed, list[int]
+            )
         self._device_host_func_dispatcher.start()
 
         # None when no path is configured, the platform is unsupported, or
@@ -506,14 +511,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         """Release GPU resources owned by this module."""
         if self._host_event_waiter is not None:
             self._host_event_waiter.stop()
-        # Stop the drain thread before storage_manager.close() so any
-        # in-flight completions reach a live storage manager.
-        self._device_host_func_dispatcher.stop()
-
         with self._lock:
             entries = list(self._cache_contexts.values())
             self._cache_contexts.clear()
         self._release_entries(entries)
+        # Closing the GPU contexts drains the streams before the final callback drain.
+        self._device_host_func_dispatcher.stop()
         if self._fd_channel is not None:
             set_fd_resolver(None)
             self._fd_channel.close()
@@ -1282,27 +1285,15 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                                 if found_keys != batch_keys:
                                     retrieve_succeeded = False
                                     break
-                                ids_gpu, ids_host = slice_staged_block_ids_for_window(
+                                total_bytes += self._copy_retrieved_window(
                                     cache_context,
                                     block_ids_per_group_gpu,
                                     gpu_block_ids,
-                                    chunk_index,
-                                    len(batch_keys),
-                                )
-                                total_bytes += sum(obj.get_size() for obj in objects)
-                                cache_context.transfer_object_group(
-                                    ids_gpu,
                                     objects,
-                                    object_group_id=obj_group_id,
-                                    batch_size=cache_context.max_batch_size,
-                                    skip_first_n_tokens=max(
-                                        0,
-                                        skip_first_n_tokens
-                                        - chunk_index * self._ctx.chunk_size,
-                                    ),
-                                    direction=lmcache_native.TransferDirection.H2D,
-                                    transfer_key=transfer_key,
-                                    block_ids_host=ids_host,
+                                    obj_group_id,
+                                    chunk_index,
+                                    skip_first_n_tokens,
+                                    transfer_key,
                                 )
                                 prefetched_keys.extend(batch_keys)
                                 chunk_offset = stop
@@ -1345,34 +1336,21 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                                 if not loaded:
                                     retrieve_succeeded = False
                                     break
-                                total_bytes += sum(
-                                    w.memory_obj.get_size() for w in windows
-                                )
-                                ids_gpu, ids_host = slice_staged_block_ids_for_window(
+                                total_bytes += self._copy_retrieved_window(
                                     cache_context,
                                     block_ids_per_group_gpu,
                                     gpu_block_ids,
+                                    [window.memory_obj for window in windows],
+                                    obj_group_id,
                                     chunk_index,
-                                    len(windows),
+                                    skip_first_n_tokens,
+                                    transfer_key,
                                 )
-                                cache_context.transfer_object_group(
-                                    ids_gpu,
-                                    [w.memory_obj for w in windows],
-                                    object_group_id=obj_group_id,
-                                    batch_size=cache_context.max_batch_size,
-                                    skip_first_n_tokens=max(
-                                        0,
-                                        skip_first_n_tokens
-                                        - chunk_index * self._ctx.chunk_size,
-                                    ),
-                                    direction=lmcache_native.TransferDirection.H2D,
-                                    transfer_key=transfer_key,
-                                    block_ids_host=ids_host,
+                                submit_callback_to_stream(
+                                    cache_context.cupy_stream,
+                                    "release_streaming_windows",
+                                    [window.id for window in windows],
                                 )
-                                fence = record_completion_event(
-                                    cache_context.device, cache_context.stream
-                                )
-                                reader.release_after_transfer(windows, fence)
                                 windows.clear()
                                 prefetched_keys.extend(batch_keys)
                                 chunk_offset += len(batch_keys)
@@ -1473,6 +1451,35 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             event_backend.export_event(event, cache_context.device),
             retrieve_succeeded,
         )
+
+    def _copy_retrieved_window(
+        self,
+        cache_context: BaseCacheContext,
+        staged_ids: list[torch.Tensor],
+        gpu_block_ids: list[list[int]],
+        objects: list[MemoryObj],
+        group: int,
+        chunk_index: int,
+        skip_first_n_tokens: int,
+        transfer_key: str,
+    ) -> int:
+        """Copy a run of retrieved objects into its matching device blocks."""
+        ids_gpu, ids_host = slice_staged_block_ids_for_window(
+            cache_context, staged_ids, gpu_block_ids, chunk_index, len(objects)
+        )
+        cache_context.transfer_object_group(
+            ids_gpu,
+            objects,
+            object_group_id=group,
+            batch_size=cache_context.max_batch_size,
+            skip_first_n_tokens=max(
+                0, skip_first_n_tokens - chunk_index * self._ctx.chunk_size
+            ),
+            direction=lmcache_native.TransferDirection.H2D,
+            transfer_key=transfer_key,
+            block_ids_host=ids_host,
+        )
+        return sum(obj.get_size() for obj in objects)
 
     def _publish_token_bindings(
         self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]

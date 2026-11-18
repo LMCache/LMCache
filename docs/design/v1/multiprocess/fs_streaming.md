@@ -31,8 +31,8 @@ The DRAM L1 manager permanently reserves a portion of its existing arena for
 the FS reader. The reader suballocates admission-controlled windows within that
 reservation. Each window holds at most one object; batches are limited by the
 pool's capacity. A completed filesystem read leaves its window reserved through the
-GPU transfer. A reaper polls the device completion fence and releases the
-window for reuse without synchronizing the transfer stream on the caller.
+GPU transfer. The existing stream completion dispatcher returns the window
+after the copy, without synchronizing the transfer stream on the caller.
 If an I/O times out while still in flight, a reaper retains the reservation
 until that I/O completes. Reader shutdown waits for outstanding I/O and active
 windows up to its deadline and does not free memory still in use.

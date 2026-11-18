@@ -32,7 +32,9 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
+from lmcache.v1.distributed.key_codec import encode_fs_filename
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
+from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2AdapterConfig
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.multiprocess import object_group_transfer
 from lmcache.v1.multiprocess.engine_context import (
@@ -571,7 +573,7 @@ def test_free_releases_the_unfull_chunk_at_the_hit_boundary(lookup_module):
 
 
 def test_mixed_streaming_preserves_and_releases_an_unfull_l1_tail(
-    lookup_module, monkeypatch
+    lookup_module, tmp_path
 ):
     """Full L1/FS chunks and an L1 tail form one prefix with owned locks."""
     module, storage_manager, hasher = lookup_module
@@ -580,16 +582,12 @@ def test_mixed_streaming_preserves_and_releases_an_unfull_l1_tail(
     tail_keys = _unfull_keys(hasher, tokens, len(tokens))
     _write(storage_manager, full_keys[:1], is_temporary=False)
     _write(storage_manager, tail_keys, is_temporary=True)
+    storage_manager.add_l2_adapter(FSL2AdapterConfig(str(tmp_path)))
+    (tmp_path / encode_fs_filename(full_keys[1])).write_bytes(b"")
     reader = mock.MagicMock(spec=FSStreamingReader)
-    reader.adapter = object()
+    reader.adapter = storage_manager.l2_adapters()[0][1]
     reader.can_fit.return_value = True
-    hits = lmcache_native.Bitmap(1)
-    hits.set(0)
-    reader.lookup.return_value = hits
     module.context.streaming_reader = reader
-    monkeypatch.setattr(
-        storage_manager, "l2_adapters", lambda: [(None, reader.adapter)]
-    )
 
     assert _lookup(module, tokens, len(tokens), "r1") == len(tokens)
     session = module.context.session_manager.get("r1")

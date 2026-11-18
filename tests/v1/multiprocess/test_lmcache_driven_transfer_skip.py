@@ -243,7 +243,6 @@ def test_streaming_retrieve_batches_windows_and_releases_on_failure(
     for window in windows:
         window.memory_obj.get_size.return_value = 10
     reader.pool.acquire.side_effect = windows
-    reader.pool.release.return_value = True
     reader.max_window_count.return_value = 3
     reader.load_many.return_value = load_success
     module._ctx.streaming_reader = reader
@@ -258,7 +257,8 @@ def test_streaming_retrieve_batches_windows_and_releases_on_failure(
             [host[0][index : index + count]],
         ),
     )
-    monkeypatch.setattr(mod, "record_completion_event", lambda *a: MagicMock())
+    submit_completion = MagicMock()
+    monkeypatch.setattr(mod, "submit_callback_to_stream", submit_completion)
     synchronize = MagicMock()
     monkeypatch.setattr(mod, "synchronize_stream", synchronize)
 
@@ -283,7 +283,11 @@ def test_streaming_retrieve_batches_windows_and_releases_on_failure(
         assert cache_context.transfer_object_group.call_args.kwargs["batch_size"] == 2
     assert reader.pool.acquire.call_count == 3
     if load_success:
-        reader.release_after_transfer.assert_called_once()
+        submit_completion.assert_any_call(
+            cache_context.cupy_stream,
+            "release_streaming_windows",
+            [w.id for w in windows],
+        )
         reader.pool.release.assert_not_called()
         synchronize.assert_not_called()
     else:
@@ -330,7 +334,6 @@ def test_mixed_streaming_reads_l1_and_fs_in_order_and_releases_l1(monkeypatch):
     window = MagicMock()
     window.memory_obj.get_size.return_value = 10
     reader.pool.acquire.return_value = window
-    reader.pool.release.return_value = True
     reader.max_window_count.return_value = 3
     reader.load_many.return_value = True
     module.context.streaming_reader = reader
@@ -351,7 +354,6 @@ def test_mixed_streaming_reads_l1_and_fs_in_order_and_releases_l1(monkeypatch):
             [host[0][index : index + count]],
         ),
     )
-    monkeypatch.setattr(mod, "record_completion_event", lambda *a: MagicMock())
     monkeypatch.setattr(mod, "synchronize_stream", lambda *a: None)
 
     _, ok = module.retrieve(
@@ -409,7 +411,6 @@ def test_mixed_streaming_retrieves_and_releases_unfull_l1_tail(monkeypatch):
             [host[0][index : index + count]],
         ),
     )
-    monkeypatch.setattr(mod, "record_completion_event", lambda *a: MagicMock())
     monkeypatch.setattr(mod, "synchronize_stream", lambda *a: None)
 
     _, ok = module.retrieve(
