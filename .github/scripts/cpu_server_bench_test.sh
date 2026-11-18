@@ -19,6 +19,7 @@
 #   LMCACHE_HEALTHCHECK_TIMEOUT  seconds              (default: 60)
 #   BENCH_NUM_REQUESTS           requests to run      (default: 3)
 #   BENCH_NUM_TOKENS             tokens per request   (default: 512)
+#   LMCACHE_SERVER_VENV          venv whose lmcache to run (default: PATH's)
 
 set -euo pipefail
 
@@ -86,7 +87,7 @@ if [ "${TRANSFER_MODE}" = "engine_driven" ]; then
   SERVER_MODE_ARGS+=(--shm-name "bench_$$")
 fi
 
-lmcache server \
+"${LMCACHE_SERVER_VENV:+${LMCACHE_SERVER_VENV}/bin/}lmcache" server \
   "${TRANSPORT_ARGS[@]}" \
   --port "${REQUEST_PORT}" \
   --http-port "${HTTP_PORT}" \
@@ -145,7 +146,7 @@ echo "==> Running: lmcache bench server" \
   "--end ${BENCH_NUM_REQUESTS}"
 
 BENCH_LOG="${BENCH_OUTPUT_LOG:-/tmp/cpu_server_bench_output.log}"
-lmcache bench server \
+"${LMCACHE_SERVER_VENV:+${LMCACHE_SERVER_VENV}/bin/}lmcache" bench server \
   --rpc-url "${REQUEST_SCHEME}://127.0.0.1:${REQUEST_PORT}" \
   --url "http://127.0.0.1:${HTTP_PORT}" \
   --mode cpu \
