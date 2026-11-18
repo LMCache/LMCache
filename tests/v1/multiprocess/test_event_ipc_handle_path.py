@@ -142,6 +142,7 @@ def test_worker_exports_events_through_platform_backend(
         1,
         1,
         1.0,
+        lmcache_chunk_tokens=256,
     )
     unregister_future = context.unregister()
     stream = MagicMock(name="current_stream")

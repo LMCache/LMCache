@@ -153,7 +153,10 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
 
     event_backend = MagicMock()
     entry = SimpleNamespace(
-        cache_context=cache_context, model_name="m", event_backend=event_backend
+        cache_context=cache_context,
+        model_name="m",
+        event_backend=event_backend,
+        chunk_size=256,
     )
     module.get_and_touch_context_entry = MagicMock(return_value=entry)
 
@@ -215,6 +218,7 @@ def _make_checkpoint_module(
     # Keep recording the copies made through the replacement context.
     context.transfer_object_group = entry.cache_context.transfer_object_group
     entry.cache_context = context
+    entry.chunk_size = 2
     module.context.chunk_size = 2
     module.context.null_block_id = -1
     module.context.session_manager.get.return_value = None

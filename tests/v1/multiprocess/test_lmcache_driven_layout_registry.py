@@ -241,6 +241,59 @@ def test_registry_windows_updated_on_reregister() -> None:
     assert registry.find_attn_desc("m", 1).num_chunks_in_sw == [-1, 4]
 
 
+def test_registry_keeps_chunk_metadata_until_last_unregister() -> None:
+    """All ranks of one registration key share immutable chunk metadata."""
+    # First Party
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    registry.register("m", 2, _layout(), chunk_size=256)
+    registry.register("m", 2, _layout(), chunk_size=256)
+
+    assert registry.get_chunk_size("m", 2) == 256
+    assert registry.get_token_hasher("m", 2).chunk_size == 256
+    with pytest.raises(ValueError, match="already uses chunk size 256"):
+        registry.register("m", 2, _layout(), chunk_size=512)
+
+    registry.unregister("m", 2)
+    assert registry.get_chunk_size("m", 2) == 256
+    registry.unregister("m", 2)
+    registry.register("m", 2, _layout(), chunk_size=512)
+    assert registry.get_chunk_size("m", 2) == 512
+
+
+def test_context_resolves_each_registration_with_its_own_chunk_size() -> None:
+    """Object-key boundaries follow each model's registered chunk size."""
+    # First Party
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
+    from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+
+    config = MagicMock()
+    memory_config = config.l1_manager_config.memory_config
+    memory_config.shm_name = ""
+    memory_config.use_lazy = False
+    memory_config.devdax_path = None
+    tokens = list(range(512))
+
+    with (
+        patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
+        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
+    ):
+        ctx = MPCacheServerContext(config, chunk_size=128)
+        ctx.layout_desc_registry.register("small-chunks", 1, _layout(), chunk_size=128)
+        ctx.layout_desc_registry.register("large-chunks", 1, _layout(), chunk_size=256)
+        small_key = IPCCacheServerKey.from_token_ids(
+            "small-chunks", 1, 0, tokens, end=512, request_id="small"
+        )
+        large_key = IPCCacheServerKey.from_token_ids(
+            "large-chunks", 1, 0, tokens, end=512, request_id="large"
+        )
+
+        assert len(ctx.resolve_obj_keys(small_key, [0])[0]) == 4
+        assert len(ctx.resolve_obj_keys(large_key, [0])[0]) == 2
+        ctx.close()
+
+
 def test_registry_shard_replication_roundtrip_and_default() -> None:
     """register stores the shard replication descriptor;
     find_shard_replication_desc reads it, and a registration that replicates

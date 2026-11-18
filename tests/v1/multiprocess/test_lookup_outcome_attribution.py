@@ -131,6 +131,7 @@ def _end_metadata(
     _sess = ctx.session_manager.get_or_create.return_value
     _sess.take_prefetch_release.return_value = None
     ctx.chunk_size = CHUNK_SIZE
+    ctx.chunk_size = CHUNK_SIZE
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = MagicMock() if layout_found else None
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
@@ -144,7 +145,10 @@ def _end_metadata(
         if group_layouts_found
         else {}
     )
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    token_hasher = MagicMock()
+    token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    ctx.layout_desc_registry.get_chunk_size.return_value = CHUNK_SIZE
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     ctx.storage_manager.submit_prefetch_task.return_value = PrefetchHandle(
         prefetch_request_id=0,
         external_request_id="req-1",
@@ -158,6 +162,11 @@ def _end_metadata(
         _lookup_key(world_size, start_chunks, prompt_tokens, engine_hit_tokens),
         tp_size=1,
     )
+    if layout_found:
+        assert ctx.session_manager.get_or_create.call_args.args == (
+            "req-1",
+            token_hasher,
+        )
     module.query_prefetch_status("req-1")
 
     for call in ctx.event_bus.publish.call_args_list:

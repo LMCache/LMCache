@@ -51,7 +51,7 @@ class MPServerConfig:
 
     chunk_size: int = 256
     """Minimum chunk size for KV cache operations. vLLM connector startup may
-    negotiate this upward to satisfy model-specific KV geometry."""
+    resolve this upward to satisfy model-specific KV geometry."""
 
     max_workers: int = 1
     """Base number of worker threads. Sets default for both GPU and CPU pools."""
@@ -431,7 +431,7 @@ def add_mp_server_args(
         type=int,
         default=256,
         help="Minimum chunk size for KV cache operations. The vLLM connector "
-        "may negotiate this upward to satisfy model-specific KV geometry. "
+        "may resolve this upward to satisfy model-specific KV geometry. "
         "Default is 256.",
     )
     mp_group.add_argument(

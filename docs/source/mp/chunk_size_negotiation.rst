@@ -1,74 +1,73 @@
-Chunk-Size Negotiation
-======================
+Chunk-Size Resolution
+=====================
 
-The vLLM multiprocess connector negotiates a concrete LMCache chunk size at
-startup. This keeps chunk boundaries aligned with every vLLM KV cache group,
-including hybrid-attention, recurrent-state, and decode-context-parallel
-(DCP) layouts.
+The vLLM multiprocess connector resolves an effective chunk size at startup.
+This keeps chunk boundaries aligned with every KV cache group while allowing
+one MP server to serve vLLM models that use different chunk sizes. Other
+inference-engine integrations continue to use the server-wide chunk size.
 
-Final chunk size
-----------------
+Effective chunk size
+--------------------
 
-``lmcache server --chunk-size`` is the minimum, not necessarily the final
-value. The connector computes the effective token span of every cacheable KV
-group, excluding scratch groups, and sends their least common multiple as the
-required alignment::
+``lmcache server --chunk-size`` is the server minimum. The vLLM connector can
+optionally set its own minimum through ``lmcache.mp.chunk_size``. It always
+reads the server minimum, takes the larger minimum, and rounds it up to the
+model's required alignment::
 
-    required_alignment = lcm(group_tokens_per_block...)
-    final_chunk_size = smallest multiple of required_alignment
-                       that is >= --chunk-size
+    base = max(server_minimum, client_minimum)  # client minimum is optional
+    effective_chunk_size = round_up(base, required_alignment)
 
-For attention groups under DCP, the effective span is
-``block_size * decode_context_parallel_size``. Recurrent-state groups use
-their physical block size because their state is replicated rather than DCP
-sharded.
+The required alignment is the least common multiple of the effective token
+span of every cacheable KV group. For attention groups under DCP, that span is
+``block_size * decode_context_parallel_size``. Recurrent-state groups use their
+physical block size because their state is replicated rather than DCP sharded.
 
-For example, with ``--chunk-size 256``:
+For example, with a server minimum of 256 tokens:
 
-* an alignment of 256 resolves to a final chunk size of 256;
-* an alignment of 544 resolves to 544;
-* an alignment of 544 with ``--chunk-size 600`` resolves to 1088; and
-* group spans 32 and 48 have an alignment of 96, so the final size is 288.
+* no client minimum and an alignment of 80 resolves to 320;
+* a client minimum of 128 and an alignment of 16 resolves to 256;
+* a client minimum of 500 and an alignment of 16 resolves to 512; and
+* a client minimum of 300 and an alignment of 80 resolves to 320.
 
-One MP server has one immutable final chunk size. After the first client
-selects it, another model can share that server only when the selected size is
-also a multiple of the new model's required alignment. Use separate MP
-servers for incompatible models. When a vLLM deployment uses multiple MP
-servers, every server must return the same final size.
+The server minimum remains 256 in every case.
 
 Initialization flow
 -------------------
 
-#. vLLM resolves its KV cache groups. ``LMCacheMPConnector`` computes the
-   required alignment from their effective token spans.
-#. The scheduler adapter and each worker adapter send
-   ``NEGOTIATE_CHUNK_SIZE`` before issuing normal cache operations.
-#. The MP server rounds its configured minimum up, then binds the resolved
-   size to the token hasher, session manager, optional CacheBlend matcher,
-   telemetry, and coordinator membership.
-#. The server returns the final size. The connector verifies that it is
-   compatible with every cache group; a multi-server scheduler also verifies
-   that all servers agree.
-#. Workers register their KV caches using the negotiated size.
+#. The vLLM connector computes the model's required alignment.
+#. The scheduler and every worker call ``GET_CHUNK_SIZE`` to read the server
+   minimum, even when ``lmcache.mp.chunk_size`` is configured.
+#. Each process computes the same effective chunk size locally.
+#. The scheduler uses that size for lookup and scheduling. Workers include it
+   when registering their KV caches.
+#. The server stores the size, token hasher, and layouts under
+   ``(model_name, world_size)``. Every rank sharing that key must register the
+   same size.
 
-The MP server rejects a resize after sessions have started. It also does not
-report negotiation success until every chunk-size binding callback succeeds;
-a retry resumes at the first callback that did not complete.
+The final unregister removes the registry entry. A later deployment may then
+register the same ``(model_name, world_size)`` with a different chunk size.
+
+Multiple MP servers
+-------------------
+
+A vLLM scheduler connected to multiple MP servers requires every server to
+resolve to the same effective size. This preserves the common lookup
+granularity used when per-server hit lengths are combined.
+
+Coordinator and CacheBlend
+--------------------------
+
+Coordinator and CacheBlend still use one server-wide chunk size and do not yet
+support model-specific effective sizes. When either feature is enabled, the MP
+server rejects a KV-cache registration whose effective size differs from its
+configured ``--chunk-size``. Configure that value to satisfy every connected
+model. Normal MP prefix caching does not have this restriction.
 
 Restart recovery
 ----------------
 
-The scheduler and worker adapters keep the negotiated size in memory. Their
-heartbeat threads detect an unhealthy-to-healthy transition after an MP
-server restart and perform recovery before marking that server healthy:
-
-#. Re-negotiate using the original required alignment.
-#. Verify that the recovered size exactly matches the adapter's cached size.
-#. On workers, re-register the KV cache handles and any experimental
-   dispatcher state.
-
-If any step fails, the server remains unhealthy from that adapter's point of
-view and normal cache operations stay in degraded mode. Recovery is attempted
-again after the next successful heartbeat. The heartbeat interval defaults to
-10 seconds and can be changed with
-``lmcache.mp.heartbeat_interval`` in ``kv_connector_extra_config``.
+Scheduler and worker adapters keep the effective size in memory. After an MP
+server restart, heartbeat recovery reads the server minimum again, recomputes
+the effective value, and verifies that it matches the cached value before KV
+caches are re-registered. A mismatch keeps the adapter unhealthy so requests
+cannot silently use different chunk boundaries.

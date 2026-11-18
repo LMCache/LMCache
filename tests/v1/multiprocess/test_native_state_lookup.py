@@ -233,7 +233,12 @@ def _lookup(
         for gid, group in enumerate(manager.object_groups)
     }
     registry.register(
-        "native-state", world_size, layouts[0], manager.get_attn_desc(), layouts
+        "native-state",
+        world_size,
+        layouts[0],
+        manager.get_attn_desc(),
+        layouts,
+        chunk_size=CHUNK,
     )
     storage = _PresenceStorage(present)
     ctx = SimpleNamespace(

@@ -42,6 +42,7 @@ class RequestClient(Protocol):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
+        chunk_size: int,
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
@@ -57,6 +58,7 @@ class RequestClient(Protocol):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
+        chunk_size: int,
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
@@ -184,11 +186,6 @@ class RequestClient(Protocol):
 
     @rpc_method
     def get_chunk_size(self) -> MessagingFuture[int]: ...
-
-    @rpc_method
-    def negotiate_chunk_size(
-        self, required_chunk_alignment: int
-    ) -> MessagingFuture[int]: ...
 
     @rpc_method
     def ping(self, instance_id: int | None) -> MessagingFuture[bool]: ...
