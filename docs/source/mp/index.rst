@@ -355,8 +355,10 @@ L1Manager
 ``lmcache/v1/distributed/l1_manager/``
 
 ``BaseL1Manager`` manages objects with a state machine; ``DramL1Manager``,
-``DevDaxL1Manager`` and ``GdsL1Manager`` bind it to a memory medium and are
-selected from the L1 config by ``create_l1_manager``:
+``DevDaxL1Manager``, ``GdsL1Manager`` and ``ShadowL1Manager`` bind it to a
+memory medium and are selected from the L1 config by ``create_l1_manager``.
+``ShadowL1Manager`` owns no memory and only indexes borrowed views of a
+peer's bytes; see :doc:`multi_l1` for when it applies:
 
 .. code-block:: text
 
