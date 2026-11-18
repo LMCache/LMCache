@@ -2,6 +2,28 @@
 # No vLLM required; uses setup-lmcache-only-env.sh for a lighter install.
 
 steps:
+  # GPU time is spent once per commit, after the GitHub Layer 2 checks pass.
+  # This CPU-only pod polls them; non-PR builds pass straight through.
+  - label: ":hourglass: Wait for GitHub Layer 2"
+    command: python3 .buildkite/k3_tests/common_scripts/wait_for_github_l2.py
+    timeout_in_minutes: 180
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                env:
+                  - name: GITHUB_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: buildkite-git-creds
+                        key: GITHUB_TOKEN
+
+  - wait
+
   - label: ":test_tube: Unit Tests"
     command: .buildkite/k3_tests/unit/run.sh
     timeout_in_minutes: 60

@@ -215,8 +215,10 @@ GitHub Actions CI runs in two layers:
    ticked runs every entry. **Code Quality** runs first, and **Test** / **CPU device**
    start only after it passes. Converting the PR back to draft cancels the in-flight runs.
 
-The Buildkite pipelines are not part of these layers: they keep their own triggers and
-run on draft PRs as well.
+The 1-GPU unit tests (`buildkite/k3-unit-tests`) are the third layer: they do not run on
+drafts, and on a ready PR their GPU step waits until **Test** and **CPU device** have
+passed, so each commit uses the GPU once. The check stays pending meanwhile. The other
+Buildkite pipelines keep their own label-based triggers.
 
 If a check fails, open its log from the **Checks** tab on the PR, reproduce and fix it
 locally, and push again. Every push re-runs the checks and cancels the previous in-flight
