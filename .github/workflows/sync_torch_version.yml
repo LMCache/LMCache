@@ -135,8 +135,11 @@ jobs:
           ' "$TARGET_FILE" > "$tmp_output"
 
           mv "$tmp_output" "$TARGET_FILE"
+          # pyproject_client.toml (lmcache-client) carries the same pin.
+          sed -i -E "s/torch==${current}\"/torch==${upstream}\"/" pyproject_client.toml
+          grep -q "\"torch==${upstream}\"" pyproject_client.toml
 
-          if git diff --quiet -- "$TARGET_FILE"; then
+          if git diff --quiet -- "$TARGET_FILE" pyproject_client.toml; then
             echo "No file change detected after update."
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -155,6 +158,7 @@ jobs:
           signoff: true
           add-paths: |
             pyproject.toml
+            pyproject_client.toml
           commit-message: "[Build] sync torch version with vLLM ${{
             steps.vllm.outputs.tag }} (${{ steps.sync.outputs.upstream }})"
           title: "[Build] sync torch version with vLLM ${{

@@ -10,6 +10,7 @@ zero changes to this file.
 from pathlib import Path
 from types import ModuleType
 import importlib.util
+import os
 import re
 import sys
 
@@ -95,6 +96,11 @@ if __name__ == "__main__":
     policy = BuildPolicy()
     profile = policy.resolve_profile()
     ext_modules, cmdclass, req_file = policy.collect_extensions(profile)
+    if os.environ.get("LMCACHE_CLIENT_BUILD") == "1":
+        # lmcache-client (pyproject_client.toml) ships only the extensions
+        # client code loads.
+        client_ext = ("lmcache.lmcache_native", "lmcache.cuda_ops")
+        ext_modules = [ext for ext in ext_modules if ext.name in client_ext]
     cmdclass["build_py"] = _BuildPyWithGrpcStubs
     cmdclass["egg_info"] = _EggInfoWithNixlConnector
 
