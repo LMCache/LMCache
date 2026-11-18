@@ -52,6 +52,27 @@ def batched_iteration_with_skip(
         batch_start_idx += len(batch)
 
 
+def window_blocks_per_chunk(cache_context: BaseCacheContext) -> list[int]:
+    """Trailing blocks of one chunk each kernel group stores and loads.
+
+    Args:
+        cache_context: The cache context containing the KV cache information.
+
+    Returns:
+        Per kernel group, the blocks covering its sub-chunk window (the whole
+        chunk for full attention).
+    """
+    manager = cache_context.kv_layer_groups_manager
+    chunk_tokens = cache_context.lmcache_tokens_per_chunk
+    return [
+        cache_context.calculate_num_blocks(
+            min(chunk_tokens, manager.get_subchunk_sw_size_tokens(kernel_group_id)),
+            kernel_group_id,
+        )
+        for kernel_group_id in range(manager.num_kernel_groups)
+    ]
+
+
 def downsample_and_stage_block_ids(
     cache_context: BaseCacheContext,
     block_ids: list[list[int]],
@@ -94,18 +115,9 @@ def downsample_and_stage_block_ids(
         ]
     """
     num_kernel_groups = cache_context.kv_layer_groups_manager.num_kernel_groups
+    window_blocks = window_blocks_per_chunk(cache_context)
     for kernel_group_id in range(num_kernel_groups):
-        subchunk_sw_size_tokens = (
-            cache_context.kv_layer_groups_manager.get_subchunk_sw_size_tokens(
-                kernel_group_id
-            )
-        )
-        tokens_per_chunk = min(
-            cache_context.lmcache_tokens_per_chunk, subchunk_sw_size_tokens
-        )
-        keep_blocks_per_chunk = cache_context.calculate_num_blocks(
-            tokens_per_chunk, kernel_group_id
-        )
+        keep_blocks_per_chunk = window_blocks[kernel_group_id]
         total_blocks_per_chunk = cache_context.calculate_num_blocks(
             cache_context.lmcache_tokens_per_chunk, kernel_group_id
         )

@@ -93,7 +93,8 @@ def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
     """Global tokens covered by one block id of ``kv_cache_spec``.
 
     Attention blocks span ``block_size * dcp_size`` tokens under DCP
-    (vLLM's ``resolve_kv_cache_block_sizes`` rule); recurrent state is
+    (vLLM's ``resolve_kv_cache_block_sizes`` rule) unless ``dcp_sharded`` is
+    False (e.g. a replicated draft cache); recurrent state is
     replicated, not sharded, and stays at ``block_size``. Scratch specs
     (see :func:`is_scratch_spec`) cover no tokens and yield ``0``.
     """
@@ -102,7 +103,9 @@ def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
     block_size = kv_cache_spec.block_size
     if dcp_size <= 1:
         return block_size
-    if _is_attention_spec(kv_cache_spec):
+    if _is_attention_spec(kv_cache_spec) and getattr(
+        kv_cache_spec, "dcp_sharded", True
+    ):
         return block_size * dcp_size
     return block_size
 
