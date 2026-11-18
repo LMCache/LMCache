@@ -9,12 +9,11 @@ planning) driven from `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.p
 | `planning.py` | batching, block-id downsampling, skip arithmetic shared by every path |
 | `direct_copy.py` | the `direct` path: eligibility and planner |
 | `staged.py` | the `kernel` path: as one native plan, or one batch at a time (`run_staged_loop`): on the caller's stream, or with a staging lane over a load stream and the scatter stream |
-| `retrieve_streams.py` | ties the load and scatter streams of one retrieve call to the caller's stream (gate and join) |
 | `engines.py` | which transfer engine moves an object, the split of a group into same-engine runs, the `DMAEngine` protocol and `stage`, which calls the engine |
 | `gpu_dma.py` | `GpuDmaEngine`: host/GPU copies queued on the stream |
 | `nvme_dma.py` | `NvmeDmaEngine`: GDS slab reads and writes queued on the stream |
 | `nic_dma.py` | `NicDmaEngine`, a placeholder: its `stage` raises `NotImplementedError` |
-| `dispatch.py` | `transfer_kv_per_object_group`: picks each run's copy path |
+| `dispatch.py` | `transfer_kv_per_object_group`: picks each run's copy path, and ties a retrieve's load and scatter streams to the caller's stream (gate and join) |
 | `unfull_chunk.py` | the request's trailing unfull chunk |
 
 Platform side: `lmcache/v1/platform/base/staging_lane.py` (`StagingLane`,
@@ -227,7 +226,7 @@ scatter stream |                                   | scatter b0 ..........      
 
 The caller's stream is where the request is ordered (the engine's event is
 waited on it; the completion event and the lock release are queued on it),
-so `retrieve_streams.py` ties the other streams to it at both ends:
+so `dispatch.py` ties the other streams to it at both ends:
 
 ```
 caller stream  | wait engine | gate ............................. | join | done

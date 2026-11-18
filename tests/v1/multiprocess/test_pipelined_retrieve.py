@@ -17,14 +17,13 @@ import torch
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.multiprocess.object_group_transfer import (
     dispatch,
-    retrieve_streams,
     staged,
     transfer_kv_per_object_group,
 )
-from lmcache.v1.multiprocess.object_group_transfer.engines import TransferEngine
-from lmcache.v1.multiprocess.object_group_transfer.retrieve_streams import (
+from lmcache.v1.multiprocess.object_group_transfer.dispatch import (
     open_retrieve_streams,
 )
+from lmcache.v1.multiprocess.object_group_transfer.engines import TransferEngine
 from lmcache.v1.platform.base.staging_lane import BankSignals, StagingLane
 import lmcache.lmcache_native as lmcache_native
 
@@ -258,7 +257,7 @@ def test_failed_host_load_is_raised_and_queues_nothing_for_its_batch(host_harnes
 
 @pytest.fixture
 def stream_events(monkeypatch):
-    """Fake the platform stream helpers for ``retrieve_streams``; returns
+    """Fake the platform stream helpers for the dispatcher; returns
     the log of ``(recorded on, waited on)`` stream pairs."""
     log: list[tuple] = []
 
@@ -266,7 +265,7 @@ def stream_events(monkeypatch):
         return SimpleNamespace(wait_on=lambda waiter: log.append((stream, waiter)))
 
     monkeypatch.setattr(
-        retrieve_streams,
+        dispatch,
         "platform_stream",
         SimpleNamespace(
             current_stream=lambda device: CALLER,
