@@ -39,8 +39,8 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.server import run_cache_server
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+from lmcache.v1.transport.request_client import RequestClient
 
 CHUNK = 16
 TIMEOUT = 30.0
