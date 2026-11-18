@@ -1,14 +1,17 @@
 # The LMCache Standalone Dockerfile is used to build a LMCache image
 # without vLLM integration.
 
-ARG CUDA_VERSION=13.0
+# CUDA 13.2 follows vLLM main, which publishes only cu132 wheels. On hosts
+# whose driver is older (e.g. 580.x, CUDA 13.0) the image runs through the
+# base image's CUDA forward-compatibility libraries; see docker/README.md.
+ARG CUDA_VERSION=13.2
 ARG UBUNTU_VERSION=24.04
-ARG NGC_VERSION=25.09
+ARG NGC_VERSION=26.05
 ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:${NGC_VERSION}-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
-# vLLM whose torch the image uses; vLLM itself is not installed. Keep in sync
-# with VLLM_VERSION in docker/Dockerfile (see the reason there).
-# VLLM_VERSION=nightly takes torch from vLLM main (wheels.vllm.ai/nightly/<cuda>).
-ARG VLLM_VERSION=0.34.0
+# vLLM whose torch the image uses; vLLM itself is not installed. "nightly"
+# takes torch from vLLM main (wheels.vllm.ai/nightly/<cuda_tag>); a version
+# such as 0.34.0 takes it from that release.
+ARG VLLM_VERSION=nightly
 # With VLLM_VERSION=nightly, fail when the nightly index for CUDA_VERSION is
 # older than this many days, i.e. vLLM stopped building it (0 disables).
 ARG VLLM_NIGHTLY_MAX_AGE_DAYS=7

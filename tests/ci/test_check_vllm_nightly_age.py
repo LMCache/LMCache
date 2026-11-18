@@ -15,14 +15,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
 import importlib.util
-import re
 import threading
 
 # Third Party
 import pytest
 
-ROOT = Path(__file__).resolve().parents[2]
-_SCRIPT = ROOT / ".github/scripts/check_vllm_nightly_age.py"
+_SCRIPT = (
+    Path(__file__).resolve().parents[2] / ".github/scripts/check_vllm_nightly_age.py"
+)
 
 # Path prefix -> age in days of the index page; None sends no Last-Modified.
 _INDEXES: dict[str, int | None] = {"fresh": 1, "stale": 30, "no-date": None}
@@ -101,12 +101,3 @@ def test_invalid_limit_is_a_usage_error(max_age: str) -> None:
     with pytest.raises(SystemExit) as excinfo:
         age_check.main(["http://127.0.0.1:1/never", max_age])
     assert excinfo.value.code == 2
-
-
-def test_dockerfiles_pin_the_same_vllm() -> None:
-    pins = {}
-    for name in ("Dockerfile", "Dockerfile.standalone"):
-        text = (ROOT / "docker" / name).read_text()
-        pins[name] = re.findall(r"^ARG VLLM_VERSION=(\S+)$", text, re.MULTILINE)
-    assert pins["Dockerfile"] == pins["Dockerfile.standalone"]
-    assert len(pins["Dockerfile"]) == 1

@@ -6,9 +6,12 @@
 # docs/source/getting_started/installation.rst
 # docs/source/production/docker_deployment.rst
 
-ARG CUDA_VERSION=13.0
+# CUDA 13.2 follows vLLM main, which publishes only cu132 wheels. On hosts
+# whose driver is older (e.g. 580.x, CUDA 13.0) the image runs through the
+# base image's CUDA forward-compatibility libraries; see docker/README.md.
+ARG CUDA_VERSION=13.2
 ARG UBUNTU_VERSION=24.04
-ARG NGC_VERSION=25.09
+ARG NGC_VERSION=26.05
 ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:${NGC_VERSION}-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 
 #################### BASE BUILD IMAGE ####################
@@ -67,13 +70,10 @@ ARG nvcc_threads=auto
 ENV NVCC_THREADS=$nvcc_threads
 
 ARG CUDA_VERSION
-# vLLM to pair with LMCache. The default is the newest vLLM release with a
-# CUDA 13.0 (cu130) build, so the image runs on R580 drivers. vLLM main
-# publishes nightly wheels only for cu132 since 2026-11-10; those need a
-# CUDA 13.2 driver. Bump this when a newer release ships a cu130 build
-# (the nightly workflow warns when it does).
-# VLLM_VERSION=nightly installs vLLM main from wheels.vllm.ai/nightly/<cuda>.
-ARG VLLM_VERSION=0.34.0
+# vLLM to pair with LMCache: "nightly" installs vLLM main from
+# wheels.vllm.ai/nightly/<cuda_tag>; a version such as 0.34.0 installs that
+# release from wheels.vllm.ai/<version>/<cuda_tag>.
+ARG VLLM_VERSION=nightly
 # With VLLM_VERSION=nightly, fail when the nightly index for CUDA_VERSION is
 # older than this many days, i.e. vLLM stopped building it (0 disables).
 ARG VLLM_NIGHTLY_MAX_AGE_DAYS=7
@@ -132,7 +132,13 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
 
 WORKDIR /workspace
 USER lmcache
-ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
+# The base image's entrypoint runs /etc/shinit_v2, which puts the image's CUDA
+# forward-compatibility driver on LD_LIBRARY_PATH when the host driver is
+# older than the image's CUDA (e.g. 580.x with CUDA 13.2). Calling vllm
+# directly skips that check, and kernels that need PTX JIT (e.g. the Marlin
+# MoE repack for FP4 models) then fail with "the provided PTX was compiled
+# with an unsupported toolchain".
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh", "/opt/venv/bin/vllm", "serve"]
 
 #################### vLLM IMAGE & LMCache (Release, cu13) #######################
 # Integrate vLLM and LMCache stable releases, and expose vLLM OpenAI API.
@@ -176,4 +182,10 @@ RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_nativ
 
 WORKDIR /workspace
 USER lmcache
-ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
+# The base image's entrypoint runs /etc/shinit_v2, which puts the image's CUDA
+# forward-compatibility driver on LD_LIBRARY_PATH when the host driver is
+# older than the image's CUDA (e.g. 580.x with CUDA 13.2). Calling vllm
+# directly skips that check, and kernels that need PTX JIT (e.g. the Marlin
+# MoE repack for FP4 models) then fail with "the provided PTX was compiled
+# with an unsupported toolchain".
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh", "/opt/venv/bin/vllm", "serve"]

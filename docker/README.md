@@ -18,34 +18,32 @@ This directory contains Dockerfiles for building different LMCache images. Each 
 - ✅ Optimized multi-stage build
 
 **Build Targets**:
-- `image-build`: Builds LMCache from source with the vLLM chosen by
-  `VLLM_VERSION` (default: the newest vLLM release with a CUDA 13.0 build;
-  `nightly` installs vLLM main, which vLLM publishes only for CUDA 13.2)
+- `image-build`: Builds LMCache from source with vLLM main (`VLLM_VERSION=nightly`,
+  CUDA 13.2, the default) or a vLLM release (`VLLM_VERSION=<version>`)
 - `image-release`: Uses stable vLLM release and LMCache from PyPI
 
 **Usage**:
 
 ```bash
-# Build LMCache from source with the default vLLM release
+# Build LMCache from source with vLLM main (CUDA 13.2)
 docker build \
-  --build-arg CUDA_VERSION=13.0 \
-  --build-arg UBUNTU_VERSION=24.04 \
   --target image-build \
-  --tag lmcache/vllm-openai:latest \
+  --tag lmcache/vllm-openai:latest-nightly \
   --file docker/Dockerfile .
 
-# Build LMCache from source with vLLM main (needs a CUDA 13.2 driver to run)
+# Build LMCache from source with a vLLM release built for CUDA 13.0
 docker build \
-  --build-arg CUDA_VERSION=13.2 \
-  --build-arg BASE_IMAGE=<a CUDA 13.2 devel image> \
-  --build-arg VLLM_VERSION=nightly \
+  --build-arg CUDA_VERSION=13.0 \
+  --build-arg NGC_VERSION=25.09 \
+  --build-arg VLLM_VERSION=0.34.0 \
   --target image-build \
-  --tag lmcache/vllm-openai:vllm-main \
+  --tag lmcache/vllm-openai:vllm-0.34.0 \
   --file docker/Dockerfile .
 
 # Build with stable releases
 docker build \
   --build-arg CUDA_VERSION=13.0 \
+  --build-arg NGC_VERSION=25.09 \
   --build-arg UBUNTU_VERSION=24.04 \
   --target image-release \
   --tag lmcache/vllm-openai:latest \
@@ -73,6 +71,30 @@ default, so Hugging Face caches under the user's home directory
   Kubernetes, set `securityContext.runAsUser: 0` (or use the `lmcache`
   uid 1000).
 
+**CUDA 13.2 on older drivers**: the nightly image is built for CUDA 13.2
+because vLLM main publishes only CUDA 13.2 wheels. On a host whose driver is
+older, such as NVIDIA 580.x (CUDA 13.0), CUDA can still run code compiled
+ahead of time, but it cannot JIT-compile CUDA 13.2 PTX. Some vLLM kernels are
+JIT-compiled from PTX on Hopper, for example the Marlin MoE weight repack used
+for MXFP4 and NVFP4 models, so loading such a model fails with
+`the provided PTX was compiled with an unsupported toolchain`. Models that
+do not hit those kernels may start without forward compatibility.
+
+- In the image, NVIDIA's entrypoint (`/opt/nvidia/nvidia_entrypoint.sh`)
+  detects the older driver and loads the CUDA forward-compatibility driver
+  bundled in `/usr/local/cuda/compat`. The image's entrypoint goes through
+  it, so `docker run ... lmcache/vllm-openai:latest-nightly <model>` works.
+  Overriding `--entrypoint` with `vllm` skips that step.
+- Outside Docker (a venv with a CUDA 13.2 vLLM), install NVIDIA's
+  `cuda-compat-13-2` package and put it first on the library path:
+  `export LD_LIBRARY_PATH=/usr/local/cuda-13.2/compat:$LD_LIBRARY_PATH`.
+  Use it only while the driver is older than CUDA 13.2.
+- NVIDIA supports forward compatibility only on datacenter-class GPUs (we
+  verified it on H200 with driver 580.105.08); check the supported GPUs and
+  driver branches in NVIDIA's
+  [CUDA Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/)
+  guide.
+
 ---
 
 ### 2. `Dockerfile.standalone` - LMCache Only
@@ -92,9 +114,17 @@ default, so Hugging Face caches under the user's home directory
 **Usage**:
 
 ```bash
+# torch from vLLM main (CUDA 13.2)
+docker build \
+  --target lmcache-final \
+  --tag lmcache/standalone:latest-nightly \
+  --file docker/Dockerfile.standalone .
+
+# torch from a vLLM release built for CUDA 13.0
 docker build \
   --build-arg CUDA_VERSION=13.0 \
-  --build-arg UBUNTU_VERSION=24.04 \
+  --build-arg NGC_VERSION=25.09 \
+  --build-arg VLLM_VERSION=0.34.0 \
   --target lmcache-final \
   --tag lmcache/standalone:latest \
   --file docker/Dockerfile.standalone .
@@ -226,8 +256,9 @@ Both containers share the host IPC namespace (`--ipc host`) so the LMCache serve
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `CUDA_VERSION` | `13.0` | CUDA version to use |
-| `VLLM_VERSION` | `0.34.0` | vLLM release to install (`Dockerfile`) or take the torch version from (`Dockerfile.standalone`); the newest release with a CUDA 13.0 build. `nightly` uses vLLM main, which vLLM publishes only for CUDA 13.2 |
+| `CUDA_VERSION` | `13.2` | CUDA version to use; vLLM main publishes wheels only for CUDA 13.2 |
+| `NGC_VERSION` | `26.05` | Release of the `nvcr.io/nvidia/cuda-dl-base` base image; it must have a `CUDA_VERSION` tag (CUDA 13.0: `25.09`) |
+| `VLLM_VERSION` | `nightly` | vLLM to install (`Dockerfile`) or take the torch version from (`Dockerfile.standalone`): `nightly` for vLLM main, or a release such as `0.34.0` (releases up to 0.34.0 are built for CUDA 13.0) |
 | `VLLM_NIGHTLY_MAX_AGE_DAYS` | `7` | With `VLLM_VERSION=nightly`, fail the build when vLLM's nightly index for `CUDA_VERSION` is missing or older than this many days; `0` disables the check |
 | `UBUNTU_VERSION` | `24.04` | Ubuntu base version |
 | `PYTHON_VERSION` | `3.12` | Python version |

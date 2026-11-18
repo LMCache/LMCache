@@ -429,17 +429,19 @@ runtime, see :doc:`compatibility` before installing.
 
                 .. tab-set::
 
-                    .. tab-item:: CUDA 13.0
+                    .. tab-item:: CUDA 13.2
 
                         .. code-block:: bash
 
                             docker pull lmcache/vllm-openai:latest-nightly
 
                         The nightly image builds LMCache from the ``dev``
-                        branch and pairs it with the newest vLLM release that
-                        has a CUDA 13.0 build, so it runs on NVIDIA 580-series
-                        drivers (CUDA 13.0).
-                        vLLM main publishes nightly wheels only for CUDA 13.2.
+                        branch and pairs it with vLLM main, which is built for
+                        CUDA 13.2. On hosts with an older driver, such as
+                        NVIDIA 580-series drivers (CUDA 13.0) on datacenter
+                        GPUs, the image uses its bundled CUDA
+                        forward-compatibility driver. Keep the image's default
+                        entrypoint: ``--entrypoint`` skips that setup.
 
             .. tab-item:: SGLang
 

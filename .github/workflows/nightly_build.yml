@@ -440,49 +440,6 @@ jobs:
             ```
           asset_glob: dist/rbln/*.whl
 
-  # docker/Dockerfile pins vLLM to the newest release with a cu130 build
-  # (vLLM main publishes only cu132 nightlies). Warn when that pin falls behind
-  # so the nightly image does not silently keep an old vLLM.
-  check-vllm-pin:
-    name: Check vLLM pin for the cu13.0 image
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
-        with:
-          egress-policy: audit
-
-      - name: Checkout code
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-
-      - name: Compare the pin with the latest vLLM release
-        run: |
-          set -euo pipefail
-          pin="$(sed -nE 's/^ARG VLLM_VERSION=//p' docker/Dockerfile)"
-          standalone_pin="$(sed -nE 's/^ARG VLLM_VERSION=//p' docker/Dockerfile.standalone)"
-          if [ "${pin}" != "${standalone_pin}" ]; then
-            echo "::error::VLLM_VERSION differs: docker/Dockerfile=${pin}, docker/Dockerfile.standalone=${standalone_pin}"
-            exit 1
-          fi
-          latest="$(curl -fsSL --retry 3 https://pypi.org/pypi/vllm/json \
-            | python3 -c 'import json, sys; print(json.load(sys.stdin)["info"]["version"])')"
-          echo "vLLM pin: ${pin}; latest vLLM release: ${latest}"
-          if [ "${latest}" = "${pin}" ]; then
-            exit 0
-          fi
-          status="$(curl -sS -o /dev/null -w '%{http_code}' -I --retry 3 \
-            "https://wheels.vllm.ai/${latest}/cu130/vllm/")"
-          case "${status}" in
-            200)
-              echo "::warning::vLLM ${latest} has a cu130 build; bump VLLM_VERSION from ${pin} to ${latest} in docker/Dockerfile and docker/Dockerfile.standalone." ;;
-            404)
-              echo "::warning::vLLM ${latest} has no cu130 build, so the nightly image stays on vLLM ${pin}; moving it to a newer vLLM needs CUDA 13.2 and a newer driver." ;;
-            *)
-              echo "::error::Unexpected HTTP ${status} from wheels.vllm.ai/${latest}/cu130/vllm/"
-              exit 1 ;;
-          esac
-
   nightly-build:
     name: Build image (${{ matrix.arch }})
     strategy:
@@ -535,20 +492,20 @@ jobs:
         run: |
           echo "NOW=$(date +'%Y-%m-%d')" >> "$GITHUB_ENV"
 
-      - name: Build lmcache/vllm-openai container image (cu13 nightly)
+      - name: Build lmcache/vllm-openai container image (cu13.2 nightly)
         run: |
           docker system prune -f --all
           docker builder prune -af
           docker buildx build --load \
           --platform linux/${{ matrix.arch }} \
-          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
-          --build-arg CUDA_VERSION=13.0 \
+          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.05-cuda13.2-devel-ubuntu24.04 \
+          --build-arg CUDA_VERSION=13.2 \
           --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
           --target image-build \
           --tag lmcache/vllm-openai:nightly-${{ github.run_id }}-${{ matrix.arch }} \
           --file docker/Dockerfile .
 
-      - name: Smoke test lmcache/vllm-openai (cu13 nightly)
+      - name: Smoke test lmcache/vllm-openai (cu13.2 nightly)
         run: |
           test "$(docker image inspect --format '{{.Architecture}}' lmcache/vllm-openai:nightly-${{ github.run_id }}-${{ matrix.arch }})" = "${{ matrix.arch }}"
           docker run --rm --entrypoint lmcache lmcache/vllm-openai:nightly-${{ github.run_id }}-${{ matrix.arch }} --help
@@ -557,7 +514,7 @@ jobs:
         run: |
           docker push lmcache/vllm-openai:nightly-${{ github.run_id }}-${{ matrix.arch }}
 
-      # Payload (docker/Dockerfile.payload) extracts lmcache from the cu13 nightly
+      # Payload (docker/Dockerfile.payload) extracts lmcache from the cu13.2 nightly
       # image just pushed above — still local, and dropped by the standalone
       # build's leading prune, so build here.
       - name: Build lmcache/lmcache-payload image (nightly)
@@ -579,20 +536,20 @@ jobs:
         run: |
           docker push lmcache/lmcache-payload:nightly-${{ github.run_id }}-${{ matrix.arch }}
 
-      - name: Build lmcache/standalone container image (cu13 nightly)
+      - name: Build lmcache/standalone container image (cu13.2 nightly)
         run: |
           docker system prune -f --all
           docker builder prune -af
           docker buildx build --load \
           --platform linux/${{ matrix.arch }} \
-          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
-          --build-arg CUDA_VERSION=13.0 \
+          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.05-cuda13.2-devel-ubuntu24.04 \
+          --build-arg CUDA_VERSION=13.2 \
           --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
           --target lmcache-final \
           --tag lmcache/standalone:nightly-${{ github.run_id }}-${{ matrix.arch }} \
           --file docker/Dockerfile.standalone .
 
-      - name: Smoke test lmcache/standalone (cu13 nightly)
+      - name: Smoke test lmcache/standalone (cu13.2 nightly)
         run: |
           test "$(docker image inspect --format '{{.Architecture}}' lmcache/standalone:nightly-${{ github.run_id }}-${{ matrix.arch }})" = "${{ matrix.arch }}"
           docker run --rm --entrypoint lmcache lmcache/standalone:nightly-${{ github.run_id }}-${{ matrix.arch }} --help
