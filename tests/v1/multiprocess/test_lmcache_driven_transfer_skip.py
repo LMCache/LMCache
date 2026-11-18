@@ -59,16 +59,45 @@ def test_mamba_group_one_block_per_chunk_marks_null_prefix():
     assert masks == [[True, True, True, False]]
 
 
-def test_multi_block_per_chunk_null_only_when_all_blocks_zero():
-    # chunk size = 2 blocks. Chunk 0 = [0, 0] (null), chunk 1 = [0, 9] (has a
-    # real block in its second slot) -> not null.
+def test_multi_block_per_chunk_window_block_real():
+    # chunk size = 2 blocks, window = the last block. Chunk 0 = [0, 0] (null),
+    # chunk 1 = [0, 9] (window block real) -> stored.
     masks = all_null_chunk_masks(
         block_ids=[[0, 0, 0, 9]],
         object_groups=[_og([0])],
         blocks_per_chunk=[2],
         num_chunks=2,
+        blocks_per_window=[1],
     )
     assert masks == [[True, False]]
+
+
+def test_multi_block_per_chunk_null_window_block_skipped():
+    # Align-mamba state blocks smaller than the chunk (8 per chunk, e.g. under
+    # decode context parallelism). A step ended inside chunk 0 (block 2 real)
+    # and ran past its end, so the chunk-end block 7 is null: the chunk holds
+    # no state at its end and must not be stored. Chunk 1 ends a step.
+    chunk0 = [0, 0, 5, 0, 0, 0, 0, 0]
+    chunk1 = [0, 0, 0, 0, 0, 0, 0, 6]
+    masks = all_null_chunk_masks(
+        block_ids=[chunk0 + chunk1],
+        object_groups=[_og([0])],
+        blocks_per_chunk=[8],
+        num_chunks=2,
+        blocks_per_window=[1],
+    )
+    assert masks == [[True, False]]
+
+
+def test_whole_chunk_transfer_skips_only_all_null_chunks():
+    # Without a window every block is transferred: skip only all-null chunks.
+    masks = all_null_chunk_masks(
+        block_ids=[[3, 0, 0, 0]],
+        object_groups=[_og([0])],
+        blocks_per_chunk=[2],
+        num_chunks=2,
+    )
+    assert masks == [[False, True]]
 
 
 def test_two_object_groups_independent():
@@ -83,17 +112,16 @@ def test_two_object_groups_independent():
     assert masks == [[False, False, False], [True, True, False]]
 
 
-def test_object_group_null_only_when_all_its_kernel_groups_null():
-    # An object group spanning two kernel groups: a chunk is null only if every
-    # kernel group's blocks for that chunk are null.
+def test_object_group_skipped_when_any_kernel_group_null():
+    # An object group spanning two kernel groups: a chunk is skipped if any
+    # kernel group's transferred block is null (it would store a null page).
     masks = all_null_chunk_masks(
-        block_ids=[[0, 0], [0, 4]],
+        block_ids=[[0, 0, 2], [0, 4, 3]],
         object_groups=[_og([0, 1])],
         blocks_per_chunk=[1, 1],
-        num_chunks=2,
+        num_chunks=3,
     )
-    # chunk 0: kg0=0 and kg1=0 -> null; chunk 1: kg0=0 but kg1=4 -> not null.
-    assert masks == [[True, False]]
+    assert masks == [[True, True, False]]
 
 
 def test_zero_is_real_with_negative_null_block() -> None:
@@ -577,8 +605,10 @@ def test_store_appends_the_unfull_chunk_after_full_chunks(monkeypatch):
     _handle, ok, mask = module.store_with_chunk_mask(
         _unfull_key(request_configs=None),
         1,
-        # Two blocks per full chunk, then the unfull chunk's block.
-        [[0, 1, 5], [-1, 1, 6], [-1, 1, 7]],
+        # Two blocks per full chunk, then the unfull chunk's block. The
+        # fixture's window is the whole chunk, so every full-chunk block is
+        # transferred and must be real.
+        [[0, 1, 5], [2, 1, 6], [3, 1, 7]],
         b"producer",
     )
 

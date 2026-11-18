@@ -392,12 +392,11 @@ class TestValidateBlockChunkSizeConfig:
         with pytest.raises(ValueError, match="lmcache_tokens_per_chunk"):
             self._validate(slots=1, tokens=96, chunk=256)
 
-    def test_subchunk_window_not_block_aligned_raises(self):
-        # A sub-chunk window of 100 tokens does not cover whole 16-token
-        # blocks, so the transfer slot count would disagree with the kept
-        # block IDs.
-        with pytest.raises(ValueError, match="sliding window"):
-            self._validate(slots=16, tokens=16, sw=100)
+    def test_subchunk_window_not_block_aligned_passes(self):
+        # The window is rounded up to whole blocks when transferring.
+        self._validate(slots=16, tokens=16, sw=100)
+        # Block span (DCP-scaled) equal to the chunk, window below it.
+        self._validate(slots=1152, tokens=9216, chunk=9216, sw=2048)
 
 
 class TestKernelGroupIdentity:
@@ -728,15 +727,33 @@ class TestKernelAndObjectGroups:
         )
         assert [g.sw_size_tokens for g in manager.kernel_groups] == [-1, 64]
 
-    def test_subchunk_window_not_block_aligned_rejected(self):
-        # A 64-token window over 256-slot blocks does not cover whole blocks;
-        # construction fails loudly instead of mistransferring.
+    def test_subchunk_window_rounded_up_to_whole_blocks(self):
+        # A 64-token window over 256-token blocks (one block = the whole
+        # 256-token chunk) keeps the whole block.
         tensors = [torch.randn(2, 32, 256, 8, 64, dtype=torch.float16)]
-        with pytest.raises(ValueError, match="sliding window"):
-            _build_manager(
-                tensors,
-                engine_group_infos=[EngineGroupInfo(0, (0,), sw_size_tokens=64)],
-            )
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[EngineGroupInfo(0, (0,), sw_size_tokens=64)],
+        )
+        assert manager.get_subchunk_sw_size_tokens(0) == 256
+        assert manager.get_slots_per_chunk_in_sw(0) == 256
+        # The hit window stays one chunk.
+        assert manager.get_kernel_group_window_chunks(0) == 1
+
+    def test_subchunk_window_rounded_up_compressed_blocks(self):
+        # 32 physical slots per block covering 64 tokens (e.g. a DCP-sharded
+        # block): a 100-token window rounds up to 2 blocks = 128 tokens.
+        tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16)]
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,), tokens_per_block=64, sw_size_tokens=100)
+            ],
+        )
+        assert manager.get_subchunk_sw_size_tokens(0) == 128
+        assert manager.get_slots_per_chunk_in_sw(0) == 64
+        assert manager.calculate_num_blocks(0, 128) == 2
+        assert manager.get_kernel_group_window_chunks(0) == 1
 
     def test_subchunk_sw_size_tokens(self):
         # lmcache chunk size is 256 (default), 32-slot blocks. Sub-chunk
