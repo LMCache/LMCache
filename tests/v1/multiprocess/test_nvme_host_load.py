@@ -4,7 +4,6 @@ or raises only once every read of the batch has ended. The slab read is
 faked, so these run without GDS or CUDA."""
 
 # Standard
-from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 import threading
@@ -26,12 +25,9 @@ def log(monkeypatch) -> list:
     """Fake the slab read; reads are logged as ``("read", object, buffer)``."""
     entries: list = []
     monkeypatch.setattr(
-        nvme_dma, "torch_dev", SimpleNamespace(device=lambda device: nullcontext())
-    )
-    monkeypatch.setattr(
         nvme_dma,
         "read_slab_object",
-        lambda memory_obj, buffer: entries.append(("read", memory_obj, buffer)),
+        lambda memory_obj, buffer, device: entries.append(("read", memory_obj, buffer)),
     )
     return entries
 
@@ -51,7 +47,7 @@ def test_failed_read_is_raised_after_the_other_reads_have_ended(log, monkeypatch
     slow_read_started = threading.Event()
     release_slow_read = threading.Event()
 
-    def read(memory_obj, buffer):
+    def read(memory_obj, buffer, device):
         if memory_obj == "bad":
             slow_read_started.wait(10)
             raise OSError("short slab read")

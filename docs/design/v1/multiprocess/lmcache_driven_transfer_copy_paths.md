@@ -8,7 +8,7 @@ planning) driven from `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.p
 |---|---|
 | `planning.py` | batching, block-id downsampling, skip arithmetic shared by every path |
 | `direct_copy.py` | the `direct` path: eligibility and planner |
-| `staged.py` | the `kernel` path: as one native plan, one batch at a time on the caller's stream (`run_staged_loop`), or one batch at a time over a load stream and the scatter stream (`run_pipelined_retrieve`) |
+| `staged.py` | the `kernel` path: as one native plan, or one batch at a time (`run_staged_loop`): on the caller's stream, or with a staging lane over a load stream and the scatter stream |
 | `retrieve_streams.py` | ties the load and scatter streams of one retrieve call to the caller's stream (gate and join) |
 | `engines.py` | which transfer engine moves an object, the split of a group into same-engine runs, the `DMAEngine` protocol and `stage`, which calls the engine |
 | `gpu_dma.py` | `GpuDmaEngine`: host/GPU copies queued on the stream |
@@ -85,7 +85,7 @@ flowchart TD
     R{"next run<br/>engine, start, end"}
     G1{"host memory, batch memcpy available<br/>and direct_transfer_supported?"}
     G0{"retrieve, and the context<br/>has a scatter stream?"}
-    P["run_pipelined_retrieve, per batch<br/>stage on the engine's lane,<br/>kernel on the scatter stream"]
+    P["run_staged_loop with a lane, per batch<br/>stage on the engine's lane,<br/>kernel on the scatter stream"]
     G2{"host memory and native<br/>plan executor available?"}
     GD["run_direct_transfer<br/>one batched copy per chunk,<br/>host memory to or from the pages"]
     GP["run_object_group_transfer_plan<br/>staging copies and kernels<br/>in one native call"]
@@ -186,7 +186,7 @@ reader threads |               | read c0 | read c2 |                  |         
 scatter stream |                                   | scatter b0 ..........            |
 ```
 
-- For a batch whose engine loads on host threads, the pipelined loop waits
+- For a batch whose engine loads on host threads, the staged loop waits
   on the host until the bank is free (`BankSignals.wait_free_on_host`),
   calls `NvmeDmaEngine.load_from_host`, which fans the batch's objects out
   to the reader threads (`GDSContext.read_blocking`, a blocking slab read
@@ -432,8 +432,8 @@ moves strided 2-D rows more slowly than 1-D entries of the same size
 - `tests/v1/multiprocess/test_staged_loop.py`: the per-batch loop's chunk
   range, block-id slices, skipped chunks, missing objects and the order of
   staging and kernels (CPU only, fakes).
-- `tests/v1/multiprocess/test_pipelined_retrieve.py`: what the pipelined
-  loop queues on the load and the scatter stream, bank rotation, the bank
+- `tests/v1/multiprocess/test_pipelined_retrieve.py`: what the staged loop
+  queues with a lane on the load and the scatter stream, bank rotation, the bank
   freed after a failed launch, the gate and the join, and when the
   dispatcher uses lanes (CPU only, fakes).
 - `tests/v1/platform/test_staging_lane.py`: bank rotation and the bank

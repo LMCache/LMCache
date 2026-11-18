@@ -135,15 +135,9 @@ class BaseCacheContext(ABC):
         ...
 
     def get_scatter_stream(self) -> Any | None:
-        """Return the stream that empties staging lanes into the KV cache.
-
-        A context that returns a stream also implements
-        :meth:`get_staging_lane`; a retrieve can then load on a lane's
-        stream while the block kernels run on this one.
-
-        Returns:
-            The stream, or None when the context has only :attr:`stream`
-            (the default).
+        """Return the stream that empties staging lanes into the KV cache,
+        or None (the default) when the context has only :attr:`stream`. A
+        context that returns one also implements :meth:`get_staging_lane`.
         """
         return None
 
@@ -151,21 +145,14 @@ class BaseCacheContext(ABC):
         """Return the staging lane called ``name``, created on first use.
 
         Args:
-            name: Lane name; one lane per name for the context's lifetime.
+            name: Lane name.
             file_io: Whether the lane's banks are the target of file reads
-                issued on the lane's stream, and so must be registered with
-                the file IO library.
-
-        Returns:
-            The lane.
+                and must be registered with the file IO library.
 
         Raises:
             NotImplementedError: If :meth:`get_scatter_stream` returns None.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} has no staging lanes; "
-            "get_scatter_stream() returns None"
-        )
+        raise NotImplementedError(f"{type(self).__name__} has no staging lanes")
 
     @abstractmethod
     def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> torch.Tensor:

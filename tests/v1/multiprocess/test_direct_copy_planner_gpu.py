@@ -403,7 +403,9 @@ def test_repeated_retrieves_reuse_the_staging_banks(
         ctx.close()
 
 
-def _read_on_host_thread(memory_obj: MemoryObj, buffer: torch.Tensor) -> None:
+def _read_on_host_thread(
+    memory_obj: MemoryObj, buffer: torch.Tensor, device: torch.device
+) -> None:
     """Stand-in for the blocking slab read: fill the staging region from the
     host object and return when the bytes are there."""
     raw = memory_obj.raw_tensor

@@ -363,23 +363,17 @@ class GDSContext:
         self, memory_obj: GDSMemoryObject, gpu_buffer: torch.Tensor
     ) -> None:
         """Read a chunk from its slab region into ``gpu_buffer`` on the
-        calling thread; the bytes are in the buffer on return.
-
-        Not ordered on any stream, so the caller must keep GPU work that
-        reads or overwrites ``gpu_buffer`` away until the call returns.
-        Split at registered-region boundaries like :meth:`transfer_async`.
-        Safe to call from several threads at once.
+        calling thread. Thread-safe; not ordered on any stream, so the
+        caller keeps GPU work off ``gpu_buffer`` until the call returns.
 
         Args:
-            memory_obj: The chunk; ``slab_offset`` / ``get_size()`` give the
-                file offset and length.
-            gpu_buffer: A slice of a registered staging buffer; its first
-                ``get_size()`` bytes are filled.
+            memory_obj: The chunk to read.
+            gpu_buffer: A slice of a registered staging buffer.
 
         Raises:
             RuntimeError: If the slab is not open.
             NotImplementedError: If the backend has no blocking read.
-            OSError: If a read fails or returns fewer bytes than asked.
+            OSError: If a read fails or is short.
         """
         if self._slab_handle is None:
             raise RuntimeError("GDSContext.read_blocking: slab handle not open")

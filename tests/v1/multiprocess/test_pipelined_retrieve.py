@@ -121,7 +121,7 @@ def harness(monkeypatch):
     ops.multi_layer_block_kv_transfer.side_effect = fake_kernel
     monkeypatch.setattr(staged, "device_ops", ops)
     monkeypatch.setattr(staged, "stage", fake_stage)
-    monkeypatch.setattr(staged, "loads_from_host", lambda engine, objs: False)
+    monkeypatch.setattr(staged, "host_loader", lambda engine, objs: None)
     monkeypatch.setattr(staged, "torch_dev", SimpleNamespace(stream=use_stream))
     lane = StagingLane("load", [_Bank("a"), _Bank("b")], _LoggedSignals(log))
     return SimpleNamespace(cc=cc, lane=lane, log=log, ops=ops)
@@ -137,13 +137,14 @@ def _objects(count: int) -> list[MemoryObj | None]:
 
 
 def _run(harness, objs, skip_first_n_tokens=0) -> None:
-    staged.run_pipelined_retrieve(
+    staged.run_staged_loop(
         harness.cc,
         [torch.arange(len(objs) * (CHUNK // BLOCK))],
         objs,
         0,
         SLOTS,
         skip_first_n_tokens,
+        H2D,
         engine=TransferEngine.NVME_DMA,
         lane=harness.lane,
         scatter_stream=SCATTER,
@@ -207,10 +208,9 @@ def test_failed_load_signals_nothing_and_launches_no_kernel(harness, monkeypatch
 def host_harness(harness, monkeypatch):
     """The harness with an engine that loads on host threads; a load is
     logged as ``("load_from_host", chunk names, slots)``."""
-    harness.host_capable = True
     harness.load_error = None
 
-    def fake_load_from_host(engine, memory_objs, buffers, device):
+    def load_from_host(memory_objs, buffers, device):
         if harness.load_error is not None:
             raise harness.load_error
         harness.log.append(
@@ -221,8 +221,8 @@ def host_harness(harness, monkeypatch):
             )
         )
 
-    monkeypatch.setattr(staged, "loads_from_host", lambda e, o: harness.host_capable)
-    monkeypatch.setattr(staged, "load_from_host", fake_load_from_host)
+    loader = SimpleNamespace(load_from_host=load_from_host)
+    monkeypatch.setattr(staged, "host_loader", lambda engine, objs: loader)
     return harness
 
 
@@ -254,21 +254,6 @@ def test_failed_host_load_is_raised_and_queues_nothing_for_its_batch(host_harnes
     with pytest.raises(OSError, match="short slab read"):
         _run(host_harness, _objects(1))
     assert host_harness.log == [("wait_free_on_host", 0)]
-
-
-def test_engine_that_does_not_load_on_host_threads_stages_on_the_lane_stream(
-    host_harness,
-):
-    host_harness.host_capable = False
-    _run(host_harness, _objects(1))
-    assert [entry[0] for entry in host_harness.log] == [
-        "wait_free",
-        "stage",
-        "signal_staged",
-        "wait_staged",
-        "kernel",
-        "signal_free",
-    ]
 
 
 @pytest.fixture
@@ -305,7 +290,7 @@ def test_scatter_stream_is_gated_once_and_every_used_stream_is_joined(
     stream_events,
 ):
     cc = _lane_context()
-    with open_retrieve_streams(cc, SCATTER) as streams:
+    with open_retrieve_streams(cc, H2D) as streams:
         assert stream_events == []
         streams.lane(TransferEngine.GPU_DMA)
         streams.lane(TransferEngine.NVME_DMA)
@@ -320,21 +305,21 @@ def test_scatter_stream_is_gated_once_and_every_used_stream_is_joined(
 
 def test_streams_are_joined_when_the_transfer_raises(stream_events):
     with pytest.raises(ValueError):
-        with open_retrieve_streams(_lane_context(), SCATTER) as streams:
+        with open_retrieve_streams(_lane_context(), H2D) as streams:
             streams.lane(TransferEngine.NVME_DMA)
             raise ValueError("missing object")
     assert stream_events[1:] == [("nvme_dma", CALLER), (SCATTER, CALLER)]
 
 
 def test_call_that_stages_nothing_touches_no_stream(stream_events):
-    with open_retrieve_streams(_lane_context(), SCATTER):
+    with open_retrieve_streams(_lane_context(), H2D):
         pass
     assert stream_events == []
 
 
 def test_only_the_file_engine_asks_for_file_io_banks(stream_events):
     cc = _lane_context()
-    with open_retrieve_streams(cc, SCATTER) as streams:
+    with open_retrieve_streams(cc, H2D) as streams:
         streams.lane(TransferEngine.GPU_DMA)
         streams.lane(TransferEngine.NVME_DMA)
     assert [call.kwargs["file_io"] for call in cc.get_staging_lane.call_args_list] == [
@@ -361,13 +346,13 @@ def _dispatch(monkeypatch, stream_events, direction, direct_copy=False):
     monkeypatch.setattr(
         dispatch,
         "run_staged_loop",
-        lambda *a, **k: calls.append(("staged", k["engine"].value)),
-    )
-    monkeypatch.setattr(
-        dispatch,
-        "run_pipelined_retrieve",
         lambda *a, **k: calls.append(
-            ("pipelined", k["engine"].value, k["lane"].stream, k["scatter_stream"])
+            (
+                "staged",
+                k["engine"].value,
+                k["lane"] and k["lane"].stream,
+                k["scatter_stream"],
+            )
         ),
     )
     transfer_kv_per_object_group(
@@ -386,8 +371,8 @@ def _dispatch(monkeypatch, stream_events, direction, direct_copy=False):
 
 def test_retrieve_stages_every_run_on_its_engines_lane(monkeypatch, stream_events):
     assert _dispatch(monkeypatch, stream_events, H2D) == [
-        ("pipelined", "gpu_dma", "gpu_dma", SCATTER),
-        ("pipelined", "nvme_dma", "nvme_dma", SCATTER),
+        ("staged", "gpu_dma", "gpu_dma", SCATTER),
+        ("staged", "nvme_dma", "nvme_dma", SCATTER),
     ]
     assert stream_events[-1] == (SCATTER, CALLER)
 
@@ -395,13 +380,13 @@ def test_retrieve_stages_every_run_on_its_engines_lane(monkeypatch, stream_event
 def test_retrieve_keeps_the_direct_copy_for_host_memory(monkeypatch, stream_events):
     assert _dispatch(monkeypatch, stream_events, H2D, direct_copy=True) == [
         ("direct",),
-        ("pipelined", "nvme_dma", "nvme_dma", SCATTER),
+        ("staged", "nvme_dma", "nvme_dma", SCATTER),
     ]
 
 
 def test_store_stays_on_the_callers_stream(monkeypatch, stream_events):
     assert _dispatch(monkeypatch, stream_events, D2H) == [
         ("plan",),
-        ("staged", "nvme_dma"),
+        ("staged", "nvme_dma", None, None),
     ]
     assert stream_events == []

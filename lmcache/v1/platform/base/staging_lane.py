@@ -1,19 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Staging lanes: a load stream with two staging banks, and the signals
-that hand a bank between the load and the stream that empties it.
-
-A retrieve that stages its chunks runs two steps per batch: the load (L1
-object to staging bank) and the scatter (staging bank to the paged KV
-blocks). On one stream the two alternate. With a lane the load runs on the
-lane's stream and the scatter on another stream, so the next batch loads
-into the second bank while the previous one scatters::
+"""Staging lanes: a load stream with two staging banks, so a batch loads
+into one bank while the stream that empties them scatters the other::
 
     load stream     | load b0 -> bank 0 | load b1 -> bank 1 | load b2 -> bank 0 |
     scatter stream  |                   | scatter bank 0    | scatter bank 1    |
-
-Each bank needs two signals: "staged" (the load is done, the scatter may
-read the bank) and "free" (the scatter is done, the next load may overwrite
-the bank). :class:`BankSignals` gives them as stream events.
 """
 
 # Future
@@ -31,8 +21,6 @@ import torch
 from lmcache.v1.platform import stream as platform_stream
 
 BANKS_PER_LANE = 2
-# A host thread polls for "free"; the wait is short, since the scatter it
-# waits for was queued a whole load earlier.
 _HOST_POLL_SECONDS = 20e-6
 
 
@@ -53,18 +41,12 @@ class StagingBank(Protocol):
 
 
 class BankSignals:
-    """The "staged" and "free" signals of one lane's banks, as stream
-    events: recorded on one stream, waited for on the other.
+    """Per bank, "staged" (the scatter may read it) and "free" (the next
+    load may overwrite it), as stream events.
 
-    Per bank the calls repeat in this order, one round per batch:
-    :meth:`wait_free`, :meth:`signal_staged`, :meth:`wait_staged`,
-    :meth:`signal_free`. These only queue work on ``stream``; none blocks
-    the caller. A round that queued :meth:`signal_staged` must also queue
-    :meth:`signal_free`, or the bank's next load never starts.
-
-    A load done by host threads cannot queue its wait on a stream; it calls
-    :meth:`wait_free_on_host` in place of :meth:`wait_free`, and gives
-    :meth:`signal_staged` on the reading stream once the bank is written.
+    One round per batch: :meth:`wait_free`, :meth:`signal_staged`,
+    :meth:`wait_staged`, :meth:`signal_free`. A round that signals "staged"
+    must also signal "free", or the bank's next load never starts.
 
     Args:
         device: The device that owns the lane's streams.
@@ -80,69 +62,39 @@ class BankSignals:
         ] * BANKS_PER_LANE
 
     def wait_free(self, bank: int, stream: object) -> None:
-        """Make ``stream`` wait until the previous scatter of ``bank`` ran.
-
-        Args:
-            bank: Bank index in the lane.
-            stream: The stream about to load into the bank.
-        """
+        """Make ``stream`` wait until the last scatter of ``bank`` ran."""
         event = self._free[bank]
-        # A bank no scatter has read yet is free.
         if event is not None:
             event.wait_on(stream)
 
     def wait_free_on_host(self, bank: int) -> None:
-        """Block the calling thread until the previous scatter of ``bank``
-        ran. Call before host threads write the bank.
-
-        Args:
-            bank: Bank index in the lane.
-        """
+        """Block until the last scatter of ``bank`` ran; for loads done by
+        host threads, which cannot queue the wait on a stream."""
         event = self._free[bank]
-        if event is None:
-            return
-        while not event.is_complete():
+        while event is not None and not event.is_complete():
             time.sleep(_HOST_POLL_SECONDS)
 
     def signal_staged(self, bank: int, stream: object) -> None:
-        """Signal "staged" for ``bank`` after the work queued on ``stream``.
-
-        Args:
-            bank: Bank index in the lane.
-            stream: The stream that loaded into the bank, or the reading
-                stream when host threads loaded it.
-        """
+        """Signal "staged" for ``bank`` after the work queued on ``stream``."""
         self._staged[bank] = platform_stream.record_completion_event(
             self._device, stream
         )
 
     def wait_staged(self, bank: int, stream: object) -> None:
-        """Make ``stream`` wait for the last "staged" signal of ``bank``.
-
-        Args:
-            bank: Bank index in the lane.
-            stream: The stream about to read the bank.
-        """
+        """Make ``stream`` wait for the last "staged" signal of ``bank``."""
         event = self._staged[bank]
         if event is not None:
             event.wait_on(stream)
 
     def signal_free(self, bank: int, stream: object) -> None:
-        """Signal "free" for ``bank`` after the work queued on ``stream``.
-
-        Args:
-            bank: Bank index in the lane.
-            stream: The stream that read the bank.
-        """
+        """Signal "free" for ``bank`` after the work queued on ``stream``."""
         self._free[bank] = platform_stream.record_completion_event(self._device, stream)
 
 
 @dataclass
 class StagingLane:
-    """A load stream, its staging banks and their signals.
-
-    One thread uses a lane at a time: the cache context that owns it is
-    driven by one transfer at a time, like its own staging buffer.
+    """A load stream, its staging banks and their signals. Used by one
+    thread at a time, like the cache context's own staging buffer.
 
     Attributes:
         stream: The stream the lane's loads are queued on.
@@ -156,14 +108,7 @@ class StagingLane:
     _next_bank: int = field(default=0, repr=False)
 
     def take_bank(self) -> int:
-        """Return the index of the bank for the next batch.
-
-        Banks are handed out in turn, so a batch never loads into the bank
-        the batch before it is still scattering from.
-
-        Returns:
-            The bank index.
-        """
+        """Return the bank index for the next batch; banks alternate."""
         bank = self._next_bank
         self._next_bank = (bank + 1) % len(self.banks)
         return bank

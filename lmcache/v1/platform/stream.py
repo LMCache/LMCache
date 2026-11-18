@@ -44,11 +44,7 @@ class CompletionEvent:
         return self._spec.is_stream_event_complete(self._event)
 
     def wait_on(self, stream: object) -> None:
-        """Make ``stream`` wait for the event before it runs later work.
-
-        Args:
-            stream: A stream of the device the event was recorded on.
-        """
+        """Make ``stream`` wait for the event before it runs later work."""
         self._spec.wait_stream_event(self._event, stream)
 
 

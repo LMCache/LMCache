@@ -6,7 +6,7 @@ regions hold (a full chunk, an unfull chunk) is the caller's business.
 """
 
 # Standard
-from typing import Protocol, Sequence, cast, runtime_checkable
+from typing import Protocol, Sequence, runtime_checkable
 import enum
 
 # Third Party
@@ -59,13 +59,7 @@ class DMAEngine(Protocol):
 
     An engine only moves bytes between objects and staging regions; it
     knows nothing about chunks, block ids or kernels.
-
-    Attributes:
-        reads_files: Whether the engine's loads are file reads into the
-            staging region, which must then be registered for file IO.
     """
-
-    reads_files: bool
 
     def stage(
         self,
@@ -85,15 +79,10 @@ class DMAEngine(Protocol):
 
 @runtime_checkable
 class HostLoadingEngine(Protocol):
-    """An engine that can also load on host threads instead of a stream."""
+    """An engine that can load on host threads instead of on a stream."""
 
     def loads_from_host(self, memory_objs: Sequence[MemoryObj]) -> bool:
-        """Return whether the engine loads these objects on host threads
-        (:meth:`load_from_host`) and not on the stream (:meth:`stage`).
-
-        Args:
-            memory_objs: Objects of this engine's type.
-        """
+        """Return whether these objects are loaded on host threads."""
         ...
 
     def load_from_host(
@@ -102,19 +91,11 @@ class HostLoadingEngine(Protocol):
         buffers: Sequence[torch.Tensor],
         device: torch.device,
     ) -> None:
-        """Load objects into their staging regions on host threads and
-        return when every load has ended.
-
-        Not ordered on any stream: the caller keeps device work that reads
-        or overwrites the regions away until the call returns.
-
-        Args:
-            memory_objs: Objects for which :meth:`loads_from_host` is True.
-            buffers: One staging region per object.
-            device: The device that owns the regions.
+        """Load objects into their staging regions and return when every
+        load has ended. Not ordered on any stream.
 
         Raises:
-            OSError: If a load failed; the regions then hold incomplete data.
+            OSError: If a load failed.
         """
         ...
 
@@ -153,59 +134,21 @@ def stage(
 def staging_lane(
     cache_context: BaseCacheContext, engine: TransferEngine
 ) -> StagingLane:
-    """Return ``engine``'s staging lane on ``cache_context``.
-
-    Each engine loads on its own stream into its own banks, so a slow
-    engine does not hold up the chunks of a fast one.
-
-    Args:
-        cache_context: A cache context whose ``get_scatter_stream`` returns
-            a stream.
-        engine: The engine.
-
-    Returns:
-        The lane, created on first use.
-    """
+    """Return ``engine``'s staging lane on ``cache_context``."""
     return cache_context.get_staging_lane(
-        engine.value, file_io=_ENGINES[engine].reads_files
+        engine.value, file_io=engine is TransferEngine.NVME_DMA
     )
 
 
-def loads_from_host(engine: TransferEngine, memory_objs: Sequence[MemoryObj]) -> bool:
-    """Return whether ``engine`` loads these objects on host threads.
-
-    Args:
-        engine: The engine of every object in ``memory_objs``.
-        memory_objs: The objects.
-
-    Returns:
-        True if :func:`load_from_host` applies, False if :func:`stage` does.
-    """
+def host_loader(
+    engine: TransferEngine, memory_objs: Sequence[MemoryObj]
+) -> HostLoadingEngine | None:
+    """Return ``engine`` if it loads these objects on host threads, else
+    None."""
     impl = _ENGINES[engine]
-    return isinstance(impl, HostLoadingEngine) and impl.loads_from_host(memory_objs)
-
-
-def load_from_host(
-    engine: TransferEngine,
-    memory_objs: Sequence[MemoryObj],
-    buffers: Sequence[torch.Tensor],
-    device: torch.device,
-) -> None:
-    """Load objects into their staging regions on ``engine``'s host threads
-    and return when every load has ended.
-
-    Args:
-        engine: An engine for which :func:`loads_from_host` is True.
-        memory_objs: The objects.
-        buffers: One staging region per object.
-        device: The device that owns the regions.
-
-    Raises:
-        OSError: If a load failed; the regions then hold incomplete data.
-    """
-    cast(HostLoadingEngine, _ENGINES[engine]).load_from_host(
-        memory_objs, buffers, device
-    )
+    if isinstance(impl, HostLoadingEngine) and impl.loads_from_host(memory_objs):
+        return impl
+    return None
 
 
 def split_into_runs(

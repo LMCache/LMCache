@@ -445,8 +445,8 @@ class GPUCacheContext(BaseCacheContext):
             self._group_kv_pointer_lists.append(list(ptrs))
             self.group_kv_pointers_.append(list_to_gpu_tensor(ptrs, self.device_))
 
-        # Staging lanes and their scatter stream, created on first use: a
-        # context that only ever takes the direct copy never pays for them.
+        # Created on first use: a context that only takes the direct copy
+        # never pays for them.
         self._full_sw_kv = full_sw_kv
         self._scatter_stream: Any | None = None
         self._lanes: dict[str, StagingLane] = {}
@@ -559,18 +559,12 @@ class GPUCacheContext(BaseCacheContext):
         return self._scatter_stream
 
     def get_staging_lane(self, name: str, *, file_io: bool) -> StagingLane:
-        """Return the staging lane called ``name``, created on first use.
-
-        A new lane allocates a stream and two staging banks, each the size
-        of the context's own staging buffer.
+        """Return the staging lane called ``name``, created on first use
+        with a new stream and two banks the size of the staging buffer.
 
         Args:
-            name: Lane name; one lane per name for the context's lifetime.
-            file_io: Whether to register the banks with the GDS library on
-                the lane's stream.
-
-        Returns:
-            The lane.
+            name: Lane name.
+            file_io: Whether to register the banks with the GDS library.
         """
         lane = self._lanes.get(name)
         if lane is not None:
@@ -593,13 +587,6 @@ class GPUCacheContext(BaseCacheContext):
                     self._file_io_banks.append((lane_stream, bank))
         lane = StagingLane(lane_stream, banks, BankSignals(self.device_))
         self._lanes[name] = lane
-        logger.info(
-            "Created staging lane %r on device %s (%d banks of %d bytes)",
-            name,
-            self.device_,
-            len(banks),
-            banks[0].buffer.nbytes,
-        )
         return lane
 
     def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> torch.Tensor:
