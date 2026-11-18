@@ -271,7 +271,7 @@ def test_musa_platform_discovers_factory_and_registers_capability_predicate() ->
 def test_create_transfer_context_auto_keeps_musa_on_data_path() -> None:
     """MUSA auto mode remains on the engine-driven data path."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import (
+    from lmcache.v1.client.worker_transfer import (
         EngineDrivenTransferContext,
         create_transfer_context,
     )
@@ -286,7 +286,7 @@ def test_create_transfer_context_auto_keeps_musa_on_data_path() -> None:
 def test_create_transfer_context_musa_handle_requires_capability() -> None:
     """Forced MUSA handle mode fails closed when its capability is absent."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import create_transfer_context
+    from lmcache.v1.client.worker_transfer import create_transfer_context
 
     with pytest.raises(ValueError, match="not available"):
         create_transfer_context(
@@ -302,7 +302,7 @@ def test_create_transfer_context_musa_handle_allowed_when_available(
 ) -> None:
     """Forced MUSA handle mode is allowed once the platform reports capability."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import (
+    from lmcache.v1.client.worker_transfer import (
         LMCacheDrivenTransferContext,
         create_transfer_context,
     )
@@ -336,7 +336,7 @@ def test_musa_ipc_wrapper_rejects_non_musa_tensor() -> None:
 def test_musa_ipc_wrapper_uses_device_agnostic_wire_base() -> None:
     """MUSA handles use the device-agnostic KVCache wire base."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper, KVCache
+    from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper, KVCache
     from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper
     from lmcache.v1.platform.devices.musa.ipc_wrapper import MusaIPCWrapper
 
@@ -351,7 +351,7 @@ def test_musa_ipc_wrapper_does_not_serialize_receiver_owner(
 ) -> None:
     """The wire payload excludes receiver-local TorchMUSA owner state."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper
+    from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
     from lmcache.v1.platform.devices.musa import ipc_wrapper
 
     class _Owner:

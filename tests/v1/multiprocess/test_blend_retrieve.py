@@ -14,6 +14,7 @@ import pytest
 
 # First Party
 from lmcache import device_ops  # noqa: F401
+from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     ShardReplicationDesc,
@@ -21,7 +22,6 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
 import lmcache.lmcache_native as lmcache_native
 
 # ---------------------------------------------------------------------------
@@ -71,7 +71,7 @@ def _build_plan_engine_and_context(
     eng._cb_plan_done_events = weakref.WeakKeyDictionary()
 
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.common.attn_window import AttnWindowDesc
     from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 
     hidden_dim = n_heads * head_size
@@ -506,7 +506,7 @@ def test_obj_keys_cache_miss_falls_back():
 
 def _release_match(i: int):
     # First Party
-    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+    from lmcache.v1.common.custom_types import CBMatchResult
 
     chunk = 256
     return CBMatchResult(
@@ -608,7 +608,7 @@ class _LockCountingStorageManager:
         self.locks: dict = {}
 
     def submit_prefetch_task(self, spec, external_request_id=None):
-        if spec.fetching_policy == "full":
+        if spec.fetching_policy == "whole_chunk":
             for row in spec.key_groups:
                 for key in row.keys:
                     self.locks[key] = self.locks.get(key, 0) + row.num_kv_readers
@@ -653,7 +653,7 @@ def _unretrieved_ctx(
 ) -> MagicMock:
     """Mock server context with a REAL SessionManager (no cleanup thread)."""
     # First Party
-    from lmcache.v1.distributed.api import AttnWindowDesc
+    from lmcache.v1.common.attn_window import AttnWindowDesc
     from lmcache.v1.multiprocess.session import SessionManager
 
     ctx = MagicMock()
@@ -688,7 +688,7 @@ def _run_unretrieved_lookup(blend, request_id: str, tp_replicas: int = 1):
     every chunk once per rank sharing it (``tp_replicas``). Returns the
     lookup key."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
 
     blend._ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
         ShardReplicationDesc(group_tp_replicas=(tp_replicas,))
@@ -875,7 +875,7 @@ class _Key(str):
 
 def _classify_key(request_id: str = "req-classify"):
     # First Party
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
 
     return IPCCacheServerKey(
         model_name="m",
@@ -890,7 +890,7 @@ def _classify_key(request_id: str = "req-classify"):
 
 def _classify_match(col: int, h: bytes):
     # First Party
-    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+    from lmcache.v1.common.custom_types import CBMatchResult
 
     n = _UNRETRIEVED_CHUNK
     return CBMatchResult(

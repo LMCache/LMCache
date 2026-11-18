@@ -26,6 +26,7 @@ from lmcache.v1.distributed.api import (
     MemoryTags,
     ObjectKey,
 )
+from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
     _obj_to_memoryview,
@@ -62,9 +63,10 @@ class MockNativeConnector:
       - close()
     """
 
-    def __init__(self):
+    def __init__(self, store: dict[str, bytes] | None = None):
+        # Pass a shared ``store`` to simulate storage outliving the process.
         self._efd = create_event_notifier()
-        self._store: dict[str, bytes] = {}
+        self._store: dict[str, bytes] = {} if store is None else store
         self._next_id = 1
         self._completions: list[tuple[int, bool, str, list[bool] | None]] = []
         self._lock = threading.Lock()
@@ -1324,6 +1326,59 @@ class TestDeleteBackwardCompatibility:
             adp.delete([key])  # should not raise, just no-op
         finally:
             adp.close()
+
+
+# =============================================================================
+# Delete After Restart Tests
+# =============================================================================
+
+
+class _DeleteRecorder(L2AdapterListener):
+    def __init__(self) -> None:
+        self.deleted: list[ObjectKey] = []
+
+    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+        pass
+
+    def on_l2_keys_accessed(self, keys: list[ObjectKey]) -> None:
+        pass
+
+    def on_l2_keys_deleted(self, keys: list[ObjectKey]) -> None:
+        self.deleted.extend(keys)
+
+
+class TestDeleteAfterRestart:
+    def test_delete_reports_keys_stored_before_restart(self):
+        """Deleting keys a previous process stored still notifies listeners,
+        and only bytes stored by this process count toward usage."""
+        storage: dict[str, bytes] = {}
+        old_key = create_object_key(1)
+        new_key = create_object_key(2)
+
+        before = NativeConnectorL2Adapter(
+            MockNativeConnector(storage), _MEMORY_TAGS, max_capacity_gb=1
+        )
+        before.submit_store_task([old_key], [create_memory_obj()])
+        assert wait_for_event_fd(before.get_store_event_fd(), timeout=5.0)
+        before.close()
+
+        after = NativeConnectorL2Adapter(
+            MockNativeConnector(storage), _MEMORY_TAGS, max_capacity_gb=1
+        )
+        recorder = _DeleteRecorder()
+        after.register_listener(recorder)
+        try:
+            after.submit_store_task([new_key], [create_memory_obj()])
+            assert wait_for_event_fd(after.get_store_event_fd(), timeout=5.0)
+            assert after.get_usage().total_bytes_used == 1024 * 4
+
+            after.delete([old_key, new_key])
+
+            assert recorder.deleted == [old_key, new_key]
+            assert after.get_usage().total_bytes_used == 0
+            assert storage == {}
+        finally:
+            after.close()
 
 
 # =============================================================================

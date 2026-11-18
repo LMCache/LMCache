@@ -10,7 +10,8 @@ dataclass per message, whose
   delimited strings, since the stats backend stores flat key-value pairs).
 
 The single-process (InProcess) engine only sends
-:mod:`lmcache.inprocess.usage_telemetry.messages`; this module keeps the
+:mod:`lmcache.inprocess.usage_telemetry.messages`, which lives in the
+external LMCache_inprocess package; this module keeps the
 MP-server messages and the messages shared by both modes, so that
 MP-side code never imports InProcess types through the shared schema.
 
@@ -178,7 +179,7 @@ class MPServerMessage(UsageMessage):
             hash_algorithm=mp_config.hash_algorithm,
             engine_type=mp_config.engine_type,
             enable_segmented_prefix=mp_config.enable_segmented_prefix,
-            enable_dedup_content=mp_config.enable_dedup_content,
+            enable_dedup_content=mp_config.enable_dedup_content_fingerprint,
             supported_transfer_mode=mp_config.supported_transfer_mode,
             separate_object_groups=mp_config.separate_object_groups,
             max_gpu_workers=mp_config.max_gpu_workers,

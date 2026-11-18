@@ -11,7 +11,7 @@ wrappers; the server's IPC wrappers claim the fds through the
 connection delivered but the server never claimed are closed when that
 connection closes, so a failed or no-op registration leaks nothing.
 
-The channel is an ``AF_UNIX`` ``SOCK_SEQPACKET`` socket at
+The channel is Linux-only: an ``AF_UNIX`` ``SOCK_SEQPACKET`` socket at
 :func:`fd_channel_path`. ``/dev/shm`` is shared by every deployment that
 shares device memory between the processes (``--ipc host``), so worker
 containers reach the server's socket there. Each message carries one
@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 import errno
 import os
 import socket
+import sys
 import threading
 
 # First Party
@@ -259,9 +260,15 @@ class FdChannelClient:
                 acknowledgement.
 
         Raises:
+            RuntimeError: If POSIX-fd delivery is unsupported on this platform.
             ConnectionError: If the server's channel is unreachable at
                 ``path``.
         """
+        if not is_fd_channel_supported():
+            raise RuntimeError(
+                "POSIX-fd KV cache IPC is only supported on Linux: the fd "
+                "channel requires AF_UNIX SOCK_SEQPACKET and shared /dev/shm."
+            )
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         self._sock.settimeout(timeout)
         try:
@@ -311,6 +318,20 @@ class FdChannelClient:
         tb: TracebackType | None,
     ) -> None:
         self.close()
+
+
+def is_fd_channel_supported() -> bool:
+    """Return whether this platform supports LMCache's fd channel.
+
+    The channel requires Linux's Unix sequenced-packet sockets and the
+    shared ``/dev/shm`` path. Other platforms can still register KV caches
+    whose IPC handles do not require out-of-band fd delivery.
+
+    Returns:
+        ``True`` on Linux. Socket binding and permissions are checked when
+        the channel is opened, so failures there remain operational errors.
+    """
+    return sys.platform.startswith("linux")
 
 
 def fd_channel_path(port: int) -> str:

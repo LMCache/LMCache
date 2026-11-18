@@ -127,20 +127,19 @@ engine-driven compatibility path instead:
 Step 5: Create an LMCache config
 --------------------------------
 
-Example local CPU offload config:
+Configure the vLLM connector to reach the standalone server:
 
 .. code-block:: bash
 
    cat > /tmp/lmcache_musa_e2e.yaml <<'YAML'
-   chunk_size: 256
-   local_cpu: true
-   max_local_cpu_size: 2
+   mp_host: 127.0.0.1
+   mp_port: 5555
    YAML
 
    export LMCACHE_CONFIG_FILE=/tmp/lmcache_musa_e2e.yaml
 
-Step 6: Run vLLM with LMCache
------------------------------
+Step 6: Start LMCache and vLLM
+------------------------------
 
 Example vLLM server command:
 
@@ -154,6 +153,9 @@ Example vLLM server command:
    export VLLM_USE_V1=1
    export MUSA_VISIBLE_DEVICES=7
 
+   lmcache server --host 127.0.0.1 --port 5555 \
+     --l1-size-gb 2 --eviction-policy LRU &
+
    python -m vllm.entrypoints.cli.main serve /path/to/model \
      --served-model-name qwen3-8b \
      --host 127.0.0.1 \
@@ -163,7 +165,7 @@ Example vLLM server command:
      --gpu-memory-utilization 0.35 \
      --enforce-eager \
      --no-enable-prefix-caching \
-     --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+     --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector","kv_role":"kv_both"}'
 
 Step 7: Validate cache store and hit
 ------------------------------------

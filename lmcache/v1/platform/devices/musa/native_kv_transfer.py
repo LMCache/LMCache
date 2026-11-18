@@ -15,7 +15,7 @@ import os
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.kv_format import get_spec_class
+from lmcache.v1.common.kv_format import get_spec_class
 from lmcache.v1.platform.devices.musa.format_capabilities import (
     is_supported_musa_native_block_transfer_spec,
 )

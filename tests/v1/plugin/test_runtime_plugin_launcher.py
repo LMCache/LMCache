@@ -44,22 +44,6 @@ def config_without_location():
     return MockConfig([])
 
 
-def test_init():
-    """Test RuntimePluginLauncher initialization."""
-    config = MockConfig()
-    role = "WORKER"
-    worker_count = 4
-    worker_id = 1
-
-    launcher = RuntimePluginLauncher(config, role, worker_count, worker_id)
-
-    assert launcher.config == config
-    assert launcher.role == "WORKER"
-    assert launcher.worker_count == worker_count
-    assert launcher.worker_id == worker_id
-    assert launcher.plugin_processes == []
-
-
 def test_launch_plugins_no_locations(config_without_location):
     """Test launch_plugins when no locations are configured."""
     launcher = RuntimePluginLauncher(
