@@ -16,7 +16,7 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.common.custom_types import TRANSFER_QUERY
+from lmcache.v1.common.custom_types import TRANSFER_QUERY, IPCCacheServerKey
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
 from lmcache.v1.multiprocess.engine_module import discover_modules
@@ -545,7 +545,7 @@ class _Obj:
         return None
 
 
-def _sdk_module(stub_device, monkeypatch, attn_desc: Any = None):
+def _sdk_module(stub_device, monkeypatch, attn_desc: Any = None, formats=("",)):
     """A module with a Q ring (instance 1) and the engine's KV registration of
     a dense model."""
     # Third Party
@@ -558,15 +558,19 @@ def _sdk_module(stub_device, monkeypatch, attn_desc: Any = None):
     ctx.default_chunk_size = 4
     keys = {0: ["a0", "a1", "a2"]}
     ctx.resolve_obj_keys.side_effect = lambda key, groups: [keys[g] for g in groups]
-    kv_context = MagicMock(name="kv_context")
-    kv_context.kv_layer_groups_manager.num_object_groups = 1
-    kv_context.kv_layer_groups_manager.get_attn_desc.return_value = (
+    groups = MagicMock(num_object_groups=1)
+    groups.get_attn_desc.return_value = (
         attn_desc or AttnWindowDesc(num_chunks_in_sw=[-1], group_kinds=("attention",))
     )
     kv_module = MagicMock(name="kv_module")
-    kv_module.context_entries_snapshot.return_value = {
-        9: ContextEntry(kv_context, "m", 1, 4, time.monotonic())
-    }
+    entries = {}
+    for index, fmt in enumerate(formats):
+        context = MagicMock(kv_layer_groups_manager=groups)
+        context.object_size = _SDK_SIZE // 2 if fmt == "format-b" else _SDK_SIZE
+        entries[index] = ContextEntry(
+            context, "m", 1, 4, time.monotonic(), cache_format=fmt
+        )
+    kv_module.context_entries_snapshot.return_value = entries
     module = QStoreModule(ctx, kv_module)
     ring_context = MagicMock(name="ring_context")
     ring_context.kv_tensors = [
@@ -583,8 +587,8 @@ def _sdk_module(stub_device, monkeypatch, attn_desc: Any = None):
     monkeypatch.setattr(
         qstore_mod,
         "get_layout_desc",
-        lambda _c, _n, object_group_id: SimpleNamespace(
-            shapes=[torch.Size([_SDK_SIZE])], dtypes=[torch.float32]
+        lambda context, _n, object_group_id: SimpleNamespace(
+            shapes=[torch.Size([context.object_size])], dtypes=[torch.float32]
         ),
     )
     callbacks: list = []
@@ -596,8 +600,16 @@ def _sdk_module(stub_device, monkeypatch, attn_desc: Any = None):
     return module, ctx, ring_context, callbacks
 
 
-def _sdk_key() -> Any:
-    return SimpleNamespace(model_name="m", world_size=1, request_id="req")
+def _sdk_key(cache_format: str = "") -> IPCCacheServerKey:
+    return IPCCacheServerKey.from_token_ids(
+        "m",
+        1,
+        0,
+        range(12),
+        end=12,
+        request_id="req",
+        request_configs={"lmcache.tag.kv_format": cache_format} if cache_format else {},
+    )
 
 
 def _piece(ring_context, piece_id: int):
@@ -709,7 +721,7 @@ def test_sdk_retrieve_without_the_kv_registration_is_rejected(
     """Without a registration the keys cannot be resolved; the locks expire
     with the read-lock TTL."""
     module, ctx, _, _ = _sdk_module(stub_device, monkeypatch)
-    key = SimpleNamespace(model_name="other", world_size=1, request_id="req")
+    key = IPCCacheServerKey.from_token_ids("other", 1, 0, [], request_id="req")
 
     assert module.sdk_retrieve(key, 1, [0], [0, 1, 2, 3, 4, 5], b"h") == (
         b"",
@@ -767,6 +779,27 @@ def test_sdk_store_writes_pieces_into_reserved_objects_and_commits(
         )
         assert torch.equal(reserved[f"a{chunk}"].data, expected)
     assert callbacks[-1] == ("finish_write", {"a0": 0, "a1": 0, "a2": 0})
+
+
+@pytest.mark.parametrize("formats", [("format-a", "format-b"), ("format-b", "format-a")])
+def test_sdk_store_uses_the_requested_layout(stub_device, monkeypatch, formats) -> None:
+    module, ctx, _, _ = _sdk_module(stub_device, monkeypatch, formats=formats)
+    storage = ctx.storage_manager
+    storage.reserve_write.return_value = {}
+
+    for fmt, pieces_per_object in [("format-a", 2), ("format-b", 1)]:
+        pieces = list(range(3 * pieces_per_object))
+        assert module.sdk_store(_sdk_key(fmt), 1, [0], pieces, b"h") == (
+            b"event-handle",
+            True,
+        )
+        layout = storage.reserve_write.call_args.args[1]
+        assert layout.shapes[0].numel() * layout.dtypes[0].itemsize == (
+            pieces_per_object * 32
+        )
+    storage.reserve_write.reset_mock()
+    assert module.sdk_store(_sdk_key(), 1, [0], list(range(6)), b"h") == (b"", False)
+    storage.reserve_write.assert_not_called()
 
 
 def test_sdk_store_rejects_pieces_in_blocks_vllm_holds(
@@ -854,7 +887,7 @@ def test_sdk_retrieve_reads_query_objects_with_the_rings_own_layout(
         keys,
         [objects[k] for k in keys],
     )
-    key = SimpleNamespace(model_name="model##query", world_size=2, request_id="r")
+    key = IPCCacheServerKey.from_token_ids("model##query", 2, 0, [], request_id="r")
 
     assert module.sdk_retrieve(key, 1, [0], [5], b"peer") == (b"event-handle", True)
     assert layouts == [ring_context]

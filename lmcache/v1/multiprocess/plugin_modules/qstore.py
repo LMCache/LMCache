@@ -33,7 +33,10 @@ from lmcache.v1.gpu_connector.gds_context import GDSBufferRegistration
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
-from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.engine_context import (
+    MPCacheServerContext,
+    get_request_cache_format,
+)
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
     EngineModule,
@@ -892,21 +895,20 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
 
     # SDK transfers: the engine's L1 objects through the Q ring, as bytes.
 
-    def _layout_entry(self, model_name: str, world_size: int) -> ContextEntry | None:
-        """Return a registration of the model, for its object layout.
-
-        KV objects follow the engine's KV registration; query objects
-        (``<model>##query``) follow the Q ring's own, which ``store_q`` stored
-        them with. Every registration of a model has the same layout (the
-        server keeps one per model), so any matching one serves.
-        """
+    def _layout_entry(self, key: IPCCacheServerKey) -> ContextEntry | None:
+        """Select the KV or query registration that owns this object's layout."""
+        cache_format = get_request_cache_format(key)
         kv_entries = (
             self._kv_module.context_entries_snapshot().values()
             if self._kv_module is not None
             else ()
         )
         for entry in [*kv_entries, *self.context_entries_snapshot().values()]:
-            if entry.model_name == model_name and entry.world_size == world_size:
+            if (
+                entry.model_name == key.model_name
+                and entry.world_size == key.world_size
+                and entry.cache_format == cache_format
+            ):
                 return entry
         return None
 
@@ -931,7 +933,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             of range, repeated, or in a block vLLM holds.
         """
         ring = self.get_and_touch_context_entry(instance_id)
-        kv = self._layout_entry(key.model_name, key.world_size)
+        kv = self._layout_entry(key)
         used: set[int] | None = None
         with self._lock:
             state = self._q_rings.get(instance_id)
@@ -1080,7 +1082,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             key: The rejected retrieve's key.
             object_group_ids: The object groups it asked for.
         """
-        kv = self._layout_entry(key.model_name, key.world_size)
+        kv = self._layout_entry(key)
         if kv is None:
             return
         num_object_groups = kv.cache_context.kv_layer_groups_manager.num_object_groups

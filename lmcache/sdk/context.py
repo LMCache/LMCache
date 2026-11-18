@@ -195,8 +195,8 @@ class LMCacheSDKContext:
 
         Raises:
             LMCacheSDKError: If no engine registered this kind's layout for
-                the model, the layout is unsupported, or no Q ring is
-                registered.
+                the model, multiple formats match, the layout is unsupported,
+                or no Q ring is registered.
         """
         entry = next(
             (
@@ -250,20 +250,23 @@ class LMCacheSDKContext:
 
         Raises:
             LMCacheSDKError: If the server does not report the model's object
-                layout, the layout is not a single full-attention object, is
-                compressed or not chunk-aligned, KV runs with TP > 1, or no Q
-                ring is registered.
+                layout, multiple formats match, the layout is not a single
+                uncompressed, chunk-aligned full-attention object, KV runs
+                with TP > 1, or no Q ring is registered.
         """
         is_kv = self._kind is LMCacheSDKCacheKind.KV
-        object_groups = next(
-            (
-                entry["object_groups"]
-                for entry in self._object_layouts
-                if entry.get("model_name") == self._model_name
-                and int(entry.get("world_size", 0)) == self._world_size
-            ),
-            None,
-        )
+        layouts = [
+            entry
+            for entry in self._object_layouts
+            if entry.get("model_name") == self._model_name
+            and int(entry.get("world_size", 0)) == self._world_size
+        ]
+        if len(layouts) > 1:
+            raise LMCacheSDKError(
+                f"Multiple cache formats registered for {self._model_name!r}, "
+                f"world_size={self._world_size}; the SDK requires a single layout"
+            )
+        object_groups = layouts[0]["object_groups"] if layouts else None
         if not object_groups:
             raise LMCacheSDKError(
                 "the server reports no object layout for "
@@ -330,6 +333,7 @@ class LMCacheSDKContext:
             self._mq_timeout,
             writable=is_kv,
         )
+        self._cache_format = layouts[0].get("cache_format", "")
         logger.info(
             "Transferring %s through vLLM's Q ring on %s: %d bytes per chunk object",
             self._model_name,
@@ -778,6 +782,9 @@ class LMCacheSDKContext:
         Returns:
             IPCCacheServerKey: The constructed key.
         """
+        request_format = (request_configs or {}).get("lmcache.tag.kv_format", "")
+        if request_format != self._cache_format:
+            raise LMCacheSDKError("Request KV format does not match the SDK layout")
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._world_size,
