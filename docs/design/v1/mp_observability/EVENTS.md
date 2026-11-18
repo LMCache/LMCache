@@ -149,8 +149,9 @@ needed when that happens.
 
 ## Timeout Events
 
-Cross-component health event. Published by `LMCacheTimeoutError.__init__`
-(see `lmcache/v1/mp_observability/errors.py`) every time the exception is
+Cross-component health event. Published by `publish_timeout`
+(`lmcache/v1/mp_observability/errors.py`), which `init_event_bus()` registers
+as the `LMCacheTimeoutError` observer, every time the exception is
 constructed, gated by `is_observability_enabled()` so it is a no-op outside
 the MP server process. The `session_id` on the `Event` dataclass correlates
 the timeout with the originating request when the raise site has it; it is
