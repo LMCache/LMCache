@@ -888,6 +888,7 @@ def _create_turboquant_serde(kwargs: dict[str, object]) -> SerdeProcessor:
         block_size=block_size,
         skip_first_layers=skip_first_layers,
         skip_last_layers=skip_last_layers,
+        cuda_device=str(kwargs.get("cuda_device", "")),
     )
 
     return AsyncSerdeProcessor(
