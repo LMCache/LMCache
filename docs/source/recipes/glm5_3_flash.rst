@@ -45,7 +45,7 @@ Validated models
 
       As a KDA hybrid, GLM-5.3-Flash needs prefix caching in vLLM and
       object-group separation on the LMCache server (enabled by default).
-      ``--chunk-size`` does not need to be set: the connector negotiates the
+      ``--chunk-size`` does not need to be set: the connector resolves the
       server's minimum (default ``256``) up to a multiple of vLLM's *unified
       block size* ``N`` (see
       :ref:`mamba-block-size`), which vLLM logs at startup as
@@ -88,12 +88,10 @@ Validated models
 
       |
 
-      At startup the server logs the negotiated chunk size, and the connector
-      logs the geometry it resolved:
+      At startup the connector logs the geometry it resolved:
 
       .. code-block:: text
 
-         Negotiated LMCache MP chunk size to 1152 (configured_min=256, required_alignment=1152)
          Resolved LMCache MP geometry: group_tokens_per_block=[1152, 1152, 1152, 1152, 1152, 0], scheduler_block_size=1152, ...
 
       The four leading groups are the KDA state groups. The fifth holds the

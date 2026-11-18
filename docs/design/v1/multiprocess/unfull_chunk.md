@@ -51,6 +51,9 @@ Requirements, checked at startup:
   GLM-5.3, Qwen3.8-Flash-Next; see [Limits](#limits)).
 - For Mamba hybrids, a vLLM whose `SchedulerOutput` has
   `kv_connector_block_state`.
+- The effective chunk size must equal the MP server's configured
+  `--chunk-size`. Unfull-chunk object keys do not yet encode chunk size, so an
+  object stored under one size could otherwise be read with another layout.
 
 ## Parameters: what is sent and where it goes
 

@@ -137,7 +137,6 @@ class _Calls:
     lookup: tuple[IPCCacheServerKey, int] | None = None
     allocation: tuple[int, str, list[BlockAllocationRecord]] | None = None
     clear_force: bool | None = None
-    chunk_negotiation: int | None = None
 
 
 @pytest.fixture(params=_GRPC_SERVER_MODES)
@@ -216,11 +215,6 @@ def grpc_client(
         @request_handler(HandlerType.BLOCKING)
         def clear(self, force: bool = False) -> None:
             calls.clear_force = force
-
-        @request_handler()
-        def negotiate_chunk_size(self, required_chunk_alignment: int) -> int:
-            calls.chunk_negotiation = required_chunk_alignment
-            return 640
 
         @request_handler(operation="noop")
         def debug(self) -> str:
@@ -314,13 +308,6 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
         clear_codec.request_encoder((), {"force": True})
     ) == (True,)
 
-    negotiate_codec = registry.by_full_name[
-        "lmcache.mp.ManagementService.NegotiateChunkSize"
-    ]
-    assert negotiate_codec.operation == "negotiate_chunk_size"
-    assert negotiate_codec.payload_types == (int,)
-    assert negotiate_codec.response_type is int
-
     registration_codec = registry.by_full_name[
         "lmcache.mp.EngineDrivenService.RegisterKvCacheEngineDrivenContext"
     ]
@@ -335,6 +322,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
             "hidden_dim_size": 128,
             "dtype_str": "float16",
             "use_mla": False,
+            "chunk_size": 32,
             "num_physical_slots": 32,
         },
     )
@@ -348,6 +336,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
             hidden_dim_size=128,
             dtype_str="float16",
             use_mla=False,
+            chunk_size=32,
             num_physical_slots=32,
         ),
     )
@@ -729,6 +718,7 @@ def test_generated_grpc_services_communicate_end_to_end(
             hidden_dim_size=128,
             dtype_str="float16",
             use_mla=False,
+            chunk_size=32,
             num_physical_slots=32,
         )
     ).result(5)
@@ -738,8 +728,6 @@ def test_generated_grpc_services_communicate_end_to_end(
     assert calls.clear_force is False
     assert client.clear(force=True).result(5) is None
     assert calls.clear_force is True
-    assert client.negotiate_chunk_size(640).result(5) == 640
-    assert calls.chunk_negotiation == 640
     assert client.noop().result(5) == "ok"
 
     records = [BlockAllocationRecord("request", [4], [5, 6])]

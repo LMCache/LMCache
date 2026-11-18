@@ -222,6 +222,7 @@ def _make_storage_manager_config(
 def _default_register_payload(
     instance_id: int = 1,
     num_physical_slots: int | None = None,
+    chunk_size: int = 8,
 ) -> "RegisterEngineDrivenContextPayload":
     """Build a default non-GPU registration payload for server-side tests.
 
@@ -229,6 +230,7 @@ def _default_register_payload(
         instance_id: Worker instance id to register. Defaults to ``1``.
         num_physical_slots: Physical slots per gathered chunk. ``None`` uses
             the legacy protocol behavior.
+        chunk_size: Effective logical tokens per LMCache chunk.
 
     Uses fixed values ``model_name="m"``, ``world_size=1``, ``block_size=4``,
     ``num_layers=2``, ``hidden_dim_size=16``, ``dtype_str="float32"``, and
@@ -246,6 +248,7 @@ def _default_register_payload(
         hidden_dim_size=16,
         dtype_str="float32",
         use_mla=False,
+        chunk_size=chunk_size,
         num_physical_slots=num_physical_slots,
     )
 
@@ -1525,7 +1528,6 @@ def server_module_factory(
                 return_value=mock_storage,
             )
         )
-        stack.enter_context(patch("lmcache.v1.multiprocess.engine_context.TokenHasher"))
         session_cls = stack.enter_context(
             patch("lmcache.v1.multiprocess.engine_context.SessionManager")
         )
@@ -1611,7 +1613,7 @@ def test_server_register_and_find_non_cuda_context_layout(
     """Ensure backend-agnostic registration stores metadata and lookup finds layout."""
     module, _, _, ctx = server_module_factory(chunk_size=16)
     response = module.register_kv_cache_engine_driven_context(
-        _default_register_payload(instance_id=1)
+        _default_register_payload(instance_id=1, chunk_size=16)
     )
     assert response.shm_name == ""
     assert response.pool_size == 0
@@ -1627,7 +1629,9 @@ def test_server_register_uses_worker_physical_slots(
 ) -> None:
     """Server must not substitute its logical token chunk for physical slots."""
     module, _, _, ctx = server_module_factory(chunk_size=256)
-    payload = _default_register_payload(instance_id=11, num_physical_slots=128)
+    payload = _default_register_payload(
+        instance_id=11, num_physical_slots=128, chunk_size=256
+    )
 
     module.register_kv_cache_engine_driven_context(payload)
 
@@ -1668,6 +1672,7 @@ def test_register_multigroup_sizes_object_group_count(
             hidden_dim_size=16,
             dtype_str="float32",
             use_mla=False,
+            chunk_size=16,
             group_layouts=[group, group],
         )
     )
@@ -1687,7 +1692,7 @@ def test_register_group_physical_slots(
     from lmcache.v1.common.custom_types import GroupLayout
 
     module, _, _, ctx = server_module_factory(chunk_size=512)
-    payload = _default_register_payload(instance_id=1)
+    payload = _default_register_payload(instance_id=1, chunk_size=512)
     payload.group_layouts = [
         GroupLayout(
             num_layers=1,
@@ -1747,6 +1752,7 @@ def _register_windowed_three_group_instance(module: Any) -> None:
             hidden_dim_size=16,
             dtype_str="float32",
             use_mla=False,
+            chunk_size=16,
             group_layouts=[_group(0), _group(2), _group(1)],
         )
     )
@@ -1837,6 +1843,7 @@ def test_register_multigroup_registers_group_windows_and_kinds(
             hidden_dim_size=16,
             dtype_str="float32",
             use_mla=False,
+            chunk_size=16,
             group_layouts=[_group(0, False), _group(2, False), _group(1, True)],
         )
     )
@@ -1886,6 +1893,7 @@ def test_register_multigroup_sizes_each_group_by_its_kv_size(
             hidden_dim_size=16,
             dtype_str="float32",
             use_mla=use_mla,
+            chunk_size=16,
             group_layouts=[
                 GroupLayout(
                     num_layers=1,

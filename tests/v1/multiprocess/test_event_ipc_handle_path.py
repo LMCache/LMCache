@@ -142,6 +142,7 @@ def test_worker_exports_events_through_platform_backend(
         1,
         1,
         1.0,
+        lmcache_chunk_tokens=256,
     )
     unregister_future = context.unregister()
     stream = MagicMock(name="current_stream")
@@ -280,6 +281,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         cache_context=cast(Any, cache_context),
         model_name="model",
         world_size=1,
+        chunk_size=256,
         event_backend=cast(Any, backend),
     )
     monkeypatch.setattr(

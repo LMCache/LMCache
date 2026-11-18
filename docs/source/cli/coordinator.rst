@@ -53,9 +53,9 @@ Options
      - Eviction fires when usage reaches this fraction of the quota, ``0.0``
        (exclusive) to ``1.0`` (default: ``1.0``).
    * - ``--chunk-size N``
-     - Minimum tokens per KV chunk (default: ``256``). The first MP server
-       binds its negotiated final size for CacheBlend matching and pin-key
-       resolution; see :doc:`/mp/chunk_size_negotiation`.
+     - Fixed tokens per KV chunk for CacheBlend matching and pin-key resolution
+       (default: ``256``). It must match every MP server connected to this
+       coordinator.
    * - ``--hash-algorithm NAME``
      - Token hash algorithm for pin key resolution; must equal the MP servers'
        ``--hash-algorithm``. ``blake3`` (default) is self-contained; other

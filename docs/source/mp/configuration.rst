@@ -86,9 +86,9 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Port to bind the selected request server.
    * - ``--chunk-size``
      - ``256``
-     - Minimum chunk size for KV cache operations (in tokens). The vLLM MP
-       connector may negotiate it upward to satisfy the model's KV geometry;
-       see :doc:`chunk_size_negotiation`.
+     - Server minimum chunk size for KV cache operations (in tokens). Each
+       connector resolves an effective size without changing this value; see
+       :doc:`chunk_size_negotiation`.
    * - ``--null-block-id``
      - ``0``
      - Engine block ID that denotes absent KV data. Keep the default for
@@ -914,13 +914,13 @@ by one interleave layout from being loaded by another. It does not change the
 model name served by vLLM, but the decorated cache model name is visible in MP
 metric labels so operators can distinguish incompatible cache layouts.
 
-The vLLM MP connector automatically negotiates a compatible chunk size. For a
+The vLLM MP connector automatically resolves a compatible chunk size. For a
 single attention group, the required alignment is
 ``block_size * decode_context_parallel_size``. For a hybrid model, it is the
 least common multiple of every attention group's DCP-scaled block span and
-every recurrent-state group's unscaled physical block span. The server treats
-``--chunk-size`` as a minimum and rounds it up to the smallest compatible
-multiple; see :doc:`chunk_size_negotiation`.
+every recurrent-state group's unscaled physical block span. The connector
+treats the server's ``--chunk-size`` as a minimum and rounds it up to the
+smallest compatible multiple; see :doc:`chunk_size_negotiation`.
 
 The example model also needs a vLLM build that can run it under DCP:
 Kimi-Linear DCP support landed after v0.27.1 (vLLM commit ``63ac04a61e``,
@@ -929,7 +929,7 @@ PR #50484). On stock v0.27.1 the command below fails at startup with
 
 .. code-block:: bash
 
-    # block_size 1024 x dcp 2 -> a configured minimum of 256 negotiates to 2048
+    # block_size 1024 x dcp 2 -> a configured minimum of 256 resolves to 2048
     lmcache server --host localhost --port 6000 --chunk-size 256 \
         --l1-size-gb 20 --eviction-policy LRU
 
@@ -1026,7 +1026,10 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        Served from L1 only. Requires the ``lmcache_driven``
        transfer mode; not supported with speculative decoding,
        ``lmcache.mp.lazy_offload``, or compressed-attention models with a
-       per-request ring (DeepSeek-V4.1, GLM-5.3, Qwen3.8-Flash-Next) yet.
+       per-request ring (DeepSeek-V4.1, GLM-5.3, Qwen3.8-Flash-Next) yet. The
+       effective chunk size must equal the MP server's configured
+       ``--chunk-size``; client configuration or model alignment must not raise
+       it to a different value.
    * - ``lmcache.mp.server_urls``
      - *(unset)*
      - Multi-server deployment: list (or comma-separated string) of
@@ -1055,6 +1058,11 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        the initial chunk-size query and KV cache
        registration/unregistration. If the server does not respond within
        this window, the connector raises ``ConnectionError`` on startup.
+   * - ``lmcache.mp.chunk_size``
+     - unset
+     - Optional client-side minimum chunk size. The connector always reads the
+       server's ``--chunk-size``, takes the larger minimum, and rounds it up to
+       the model's required KV-group alignment.
    * - ``lmcache.mp.heartbeat_interval``
      - ``10.0``
      - Interval (seconds) between periodic heartbeat pings sent from the
