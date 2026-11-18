@@ -288,6 +288,7 @@ class ConnectorBase : public IStorageConnector {
     }
 
     if (need_shared) {
+      shared_live_workers_.store(num_workers_, std::memory_order_relaxed);
       workers_.reserve(static_cast<size_t>(num_workers_));
       for (int i = 0; i < num_workers_; i++) {
         workers_.emplace_back([this]() { this->worker_loop(); });
@@ -368,6 +369,8 @@ class ConnectorBase : public IStorageConnector {
     std::condition_variable cv;
     std::queue<Request> requests;
     std::vector<std::thread> workers;
+    std::atomic<int> live_workers{0};
+    bool drained = false;
   };
 
   struct TileRange {
@@ -446,19 +449,40 @@ class ConnectorBase : public IStorageConnector {
     const std::string& key = lane_key_for_op(req.op);
     auto it = lanes_.find(key);
     if (it != lanes_.end()) {
+      WorkerLane& lane = *it->second;
       {
-        std::lock_guard<std::mutex> lk(it->second->mu);
-        it->second->requests.push(std::move(req));
+        std::lock_guard<std::mutex> lk(lane.mu);
+        if (lane.drained) {
+          fail_tile_locally(req,
+                            "connector has no live worker for this "
+                            "operation");
+          return;
+        }
+        lane.requests.push(std::move(req));
       }
-      it->second->cv.notify_one();
+      lane.cv.notify_one();
       return;
     }
 
     {
       std::lock_guard<std::mutex> lk(req_mu_);
+      if (shared_drained_) {
+        fail_tile_locally(req,
+                          "connector has no live worker for this "
+                          "operation");
+        return;
+      }
       requests_.push(std::move(req));
     }
     req_cv_.notify_one();
+  }
+
+  void fail_tile_locally(const Request& req, const std::string& error) {
+    Completion comp;
+    comp.future_id = req.future_id;
+    comp.ok = false;
+    comp.error = error;
+    handle_tile_completion(req, comp);
   }
 
   void push_completion(Completion&& c) {
@@ -507,12 +531,14 @@ class ConnectorBase : public IStorageConnector {
   }
 
   void start_lane_workers(WorkerLane& lane, int num_workers) {
+    lane.live_workers.store(num_workers, std::memory_order_relaxed);
     lane.workers.reserve(static_cast<size_t>(num_workers));
     WorkerLane* lane_ptr = &lane;
     for (int i = 0; i < num_workers; i++) {
       lane.workers.emplace_back([this, lane_ptr]() {
         this->worker_loop_for_queue(lane_ptr->mu, lane_ptr->cv,
-                                    lane_ptr->requests);
+                                    lane_ptr->requests, lane_ptr->live_workers,
+                                    lane_ptr->drained, "lane worker");
       });
     }
   }
@@ -532,11 +558,40 @@ class ConnectorBase : public IStorageConnector {
     }
   }
 
-  void worker_loop() { worker_loop_for_queue(req_mu_, req_cv_, requests_); }
+  void worker_loop() {
+    worker_loop_for_queue(req_mu_, req_cv_, requests_, shared_live_workers_,
+                          shared_drained_, "shared worker");
+  }
+
+  void worker_exit_drain(std::mutex& req_mu, std::queue<Request>& requests,
+                         std::atomic<int>& live_workers, bool& drained,
+                         const std::string& error) {
+    const std::string& reason =
+        error.empty() ? std::string("connector shutting down") : error;
+    if (live_workers.fetch_sub(1, std::memory_order_acq_rel) != 1) {
+      return;  // surviving workers keep serving this queue
+    }
+
+    std::vector<Request> stranded;
+    {
+      std::lock_guard<std::mutex> lk(req_mu);
+      drained = true;
+      while (!requests.empty()) {
+        stranded.push_back(std::move(requests.front()));
+        requests.pop();
+      }
+    }
+    for (auto& req : stranded) {
+      fail_tile_locally(req, reason);
+    }
+  }
 
   void worker_loop_for_queue(std::mutex& req_mu,
                              std::condition_variable& req_cv,
-                             std::queue<Request>& requests) {
+                             std::queue<Request>& requests,
+                             std::atomic<int>& live_workers, bool& drained,
+                             const char* queue_tag) {
+    std::string exit_error;
     try {
       // create connection (derived class specific)
       ConnectionType conn = create_connection();
@@ -586,20 +641,27 @@ class ConnectorBase : public IStorageConnector {
         } catch (const std::exception& e) {
           comp.ok = false;
           comp.error = e.what();
-          // if shutting down, errors are expected
-          if (stop_.load(std::memory_order_acquire)) {
-            break;  // exit without pushing completion
-          }
+        } catch (...) {
+          comp.ok = false;
+          comp.error = "Unknown exception";
         }
 
-        // 3. update shared batch state and push completion when done
+        // 3. always complete the tile so BatchState accounting stays
+        // consistent even when stopping; during close() the completion
+        // queue is discarded anyway, so nothing leaks to Python
         handle_tile_completion(req, comp);
       }
     } catch (const std::exception& e) {
-      fprintf(stderr, "[LMCache Connector Worker Error] %s\n", e.what());
+      // worker is dying — keep error so drain uses it
+      exit_error = e.what();
+      fprintf(stderr, "[LMCache Connector Worker Error (%s)] %s\n", queue_tag,
+              e.what());
     } catch (...) {
-      fprintf(stderr, "[LMCache Connector Worker Error] Unknown exception\n");
+      exit_error = "Unknown exception";
+      fprintf(stderr, "[LMCache Connector Worker Error (%s)] %s\n", queue_tag,
+              exit_error.c_str());
     }
+    worker_exit_drain(req_mu, requests, live_workers, drained, exit_error);
   }
 
   void handle_tile_completion(const Request& req, const Completion& comp) {
@@ -655,6 +717,9 @@ class ConnectorBase : public IStorageConnector {
   std::mutex req_mu_;
   std::condition_variable req_cv_;
   std::queue<Request> requests_;
+  std::atomic<int> shared_live_workers_{0};
+  // last-worker flag; set under req_mu_ after draining requests
+  bool shared_drained_ = false;
 
   // completion queue (CQ)
   std::mutex comp_mu_;
