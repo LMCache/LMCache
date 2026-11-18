@@ -618,23 +618,35 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
 
         Args:
             keys: Original logical keys; used only to derive temp keys.
-            objects: Source (store) or destination (load) MemoryObjs.
-                All entries must share a single ``(shape, dtype)`` — the
-                caller (store/prefetch controller) is responsible for
-                shape-grouping before submission.
+            objects: Source (store) or destination (load) MemoryObjs,
+                positionally aligned with ``keys``. Each buffer is sized from
+                its own object's layout and key.
         """
-        shape_0 = objects[0].get_shapes()
-        dtype_0 = objects[0].get_dtypes()
         temp_keys = [make_temp_key(k) for k in keys]
-        layout = serialized_layout_desc(
-            MemoryLayoutDesc(shapes=shape_0, dtypes=dtype_0), self._serde
-        )
-        results = self._l1_manager.reserve_write(
-            keys=temp_keys,
-            is_temporary=[True] * len(temp_keys),
-            layout_desc=layout,
-            tag=_L1_WRITE_TAG,
-        )
+        # Size each temp buffer for its own key: a per-group serde (e.g.
+        # kvweave) produces a different upper bound per object group, and one
+        # bucket may mix groups. Keys sharing a size share one reserve_write
+        # call, so a group-agnostic serde still issues exactly one call.
+        buckets: dict[int, tuple[MemoryLayoutDesc, list[ObjectKey]]] = {}
+        for key, obj, temp_key in zip(keys, objects, temp_keys, strict=True):
+            layout = serialized_layout_desc(
+                MemoryLayoutDesc(shapes=obj.get_shapes(), dtypes=obj.get_dtypes()),
+                self._serde,
+                key,
+            )
+            size = int(layout.shapes[0][0])
+            bucket = buckets.setdefault(size, (layout, []))
+            bucket[1].append(temp_key)
+        results: dict = {}
+        for layout, bucket_keys in buckets.values():
+            results.update(
+                self._l1_manager.reserve_write(
+                    keys=bucket_keys,
+                    is_temporary=[True] * len(bucket_keys),
+                    layout_desc=layout,
+                    tag=_L1_WRITE_TAG,
+                )
+            )
         # First pass: collect every key whose reserve_write succeeded.
         # We must scan the full list (not bail on the first failure)
         # so a mixed-success result still releases all reserved keys.

@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """SYCL / Intel XPU GPU backend profile.
 
-Builds ``lmcache.xpu_ops`` using the DPC++ compiler (icpx).
+Builds ``lmcache.xpu_ops`` using the DPC++ compiler (icpx). With
+``BUILD_KVWEAVE=1`` it also builds the optional KVWeave quantization kernels
+(``lmcache.kvweave_quant`` for the host CPU and ``lmcache.kvweave_quant_xpu``);
+KVWeave is only built on this (Intel) platform.
 Requires Intel oneAPI environment to be sourced before building.
 """
 
 # Standard
 from typing import TYPE_CHECKING, Optional
 import os
+import platform
 import shutil
 
 if TYPE_CHECKING:
@@ -25,6 +29,15 @@ from setup_extensions.build_profiles import BuildProfile
 # ``lmcache.libs`` although the XPU runtime image already ships them via
 # ``intel-cmplr-lib-rt``.
 _NO_INTEL_LIB = "-no-intel-lib"
+
+
+def is_kvweave_enabled() -> bool:
+    """Return True when the optional KVWeave kernels should be built.
+
+    Controlled by ``BUILD_KVWEAVE`` (default off). Only the SYCL (Intel)
+    profile consults it; other platforms never build KVWeave.
+    """
+    return os.environ.get("BUILD_KVWEAVE", "0") == "1"
 
 
 class SyclProfile(BuildProfile):
@@ -93,8 +106,79 @@ class SyclProfile(BuildProfile):
                 extra_link_args=["-fsycl", _NO_INTEL_LIB],
             ),
         ]
+        if is_kvweave_enabled():
+            ext_modules.extend(self._kvweave_extensions(include_dirs, library_dirs))
         cmdclass = {"build_ext": cpp_extension.BuildExtension}
         return ext_modules, cmdclass
+
+    def _kvweave_extensions(
+        self, include_dirs: list[str], library_dirs: list[str]
+    ) -> list["Extension"]:
+        """KVWeave CPU (x86-64 AVX2) and XPU quantization kernels."""
+        # Third Party
+        from torch.utils import cpp_extension
+
+        ext_modules = []
+        if platform.machine().lower() in {"x86_64", "amd64"}:
+            ext_modules.append(
+                cpp_extension.CppExtension(
+                    "lmcache.kvweave_quant",
+                    sources=[
+                        "csrc/sycl/kvweave/cpu/kvweave_quant_wrapper.cpp",
+                        "csrc/sycl/kvweave/cpu/quant.cpp",
+                    ],
+                    include_dirs=["csrc/sycl/kvweave/cpu"],
+                    extra_compile_args={
+                        "cxx": [
+                            *self.default_cxx_flags(),
+                            "-O3",
+                            "-std=c++20",
+                            "-mavx2",
+                            "-mfma",
+                            "-mf16c",
+                            "-fopenmp",
+                            "-DUSE_MULTITHREADING",
+                        ],
+                    },
+                    extra_link_args=["-fopenmp"],
+                )
+            )
+        else:
+            print(
+                "[KVWeave] WARNING: the KVWeave CPU kernels need x86-64; "
+                "skipping lmcache.kvweave_quant"
+            )
+        ext_modules.append(
+            cpp_extension.CppExtension(
+                "lmcache.kvweave_quant_xpu",
+                sources=[
+                    "csrc/sycl/kvweave/xpu/kvweave_quant_xpu_wrapper.cpp",
+                    "csrc/sycl/kvweave/xpu/quant_sycl.cpp",
+                ],
+                include_dirs=include_dirs,
+                library_dirs=library_dirs,
+                extra_compile_args={
+                    "cxx": [
+                        "-D_GLIBCXX_USE_CXX11_ABI=1",
+                        "-O3",
+                        "-g0",
+                        "-std=c++20",
+                        "-fsycl",
+                        "-fno-sycl-id-queries-fit-in-int",
+                        "-fp-model=precise",
+                        "-DKVWEAVE_XPU=1",
+                        _NO_INTEL_LIB,
+                    ],
+                },
+                extra_link_args=[
+                    "-fsycl",
+                    "-Xspirv-translator",
+                    "-spirv-ext=+SPV_INTEL_split_barrier",
+                    _NO_INTEL_LIB,
+                ],
+            )
+        )
+        return ext_modules
 
     def extra_cxx_flags_for(self, spec) -> list[str]:
         """SYCL uses CXX11 ABI for all common extensions except

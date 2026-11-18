@@ -18,14 +18,21 @@ from lmcache.v1.distributed.serde.base import SerdeProcessor
 def serialized_layout_desc(
     layout_desc: MemoryLayoutDesc,
     serde: SerdeProcessor,
+    key: ObjectKey | None = None,
 ) -> MemoryLayoutDesc:
     """Compute a flat byte-buffer MemoryLayoutDesc for the serialized output.
 
     Returns a single-group uint8 layout whose size is determined by the
     serde processor's ``estimate_serialized_size`` (which already includes
-    any safety margin).
+    any safety margin). When ``key`` is given the key-aware
+    ``estimate_serialized_size_for_key`` is used, so per-group serdes size
+    the buffer for that key's group.
     """
-    buffer_size = serde.estimate_serialized_size(layout_desc)
+    buffer_size = (
+        serde.estimate_serialized_size(layout_desc)
+        if key is None
+        else serde.estimate_serialized_size_for_key(layout_desc, key)
+    )
     return MemoryLayoutDesc(
         shapes=[torch.Size([buffer_size])],
         dtypes=[torch.uint8],

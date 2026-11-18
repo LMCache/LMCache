@@ -208,7 +208,10 @@ sees the temp keys.
 
 1. `reserve_write(temp_keys, is_temporary=True, layout=ser_layout, mode="new")`
    — temps are write-locked and marked temporary so
-   `finish_read` will auto-delete them later.
+   `finish_read` will auto-delete them later. Each temp is sized from its
+   own object's layout and key (`estimate_serialized_size_for_key`), and
+   keys with the same size share one `reserve_write` call, so a store
+   batch may mix object groups of different shapes.
 2. Serialize runs, filling temps.
 3. On success: `finish_write_and_reserve_read(temp_keys)` — temps
    become read-locked so `inner.submit_store_task` can safely read
