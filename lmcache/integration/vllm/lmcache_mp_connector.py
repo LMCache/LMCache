@@ -96,6 +96,12 @@ from lmcache.integration.vllm.utils import (
 from lmcache.utils import CacheRemoveEvent
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.client.worker_transfer import LMCacheDrivenTransferContext
+from lmcache.v1.common.sparse_state import (
+    PROMPT_TOKENS_HINT,
+    SPARSE_STATE_HINT,
+    keeps_windowed_chunk,
+    sparse_state_params,
+)
 
 try:
     # First Party
@@ -629,6 +635,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     - lmcache.mp.pin_windowed_stores: instead, pin those blocks for
       ``lmcache.mp.pin_release_steps`` (>= 2, default 2) scheduler steps;
       workers wait for STOREs older than one step. Defaults to False.
+    - lmcache.mp.sparse_state_every_n_chunks: N > 0 stores the windowed
+      (recurrent / sliding-window) objects of a full chunk only when it ends
+      at a multiple of N chunks or at the prompt's last full chunk. 0
+      (default) stores every chunk's.
     """
 
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
@@ -637,6 +647,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     # Registered KV has sliding-window or recurrent-state groups.
     _has_windowed_groups: bool = False
+    _sparse_state_every_n: int = 0
 
     def __init__(
         self,
@@ -717,6 +728,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             raise ValueError("lmcache.mp.pin_release_steps must be an int >= 2")
         if not isinstance(self._save_decode_cache, bool):
             raise ValueError("lmcache.mp.save_decode_cache must be a boolean")
+        self._sparse_state_every_n = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.sparse_state_every_n_chunks", 0
+            )
+        )
+        if (
+            not isinstance(self._sparse_state_every_n, int)
+            or isinstance(self._sparse_state_every_n, bool)
+            or self._sparse_state_every_n < 0
+        ):
+            raise ValueError(
+                "lmcache.mp.sparse_state_every_n_chunks must be a non-negative int"
+            )
         self._save_unfull_chunk = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.save_unfull_chunk", False
         )
@@ -1278,17 +1302,43 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     def _store_reads_windowed_blocks(self, meta: LMCacheMPRequestMetadata) -> bool:
         """Whether a STORE reads sliding-window or recurrent-state blocks.
 
-        vLLM frees such blocks while the request runs, so ``wait_for_save``
-        waits for these stores when ``lmcache.mp.sync_windowed_stores`` is set.
+        With ``lmcache.mp.sparse_state_every_n_chunks``, a full-chunk STORE
+        reads them only for kept chunks; an unfull-chunk STORE always does.
 
         Args:
             meta: The STORE's request metadata.
 
         Returns:
-            True when the model has such groups.
+            True when the STORE reads such blocks.
         """
-        del meta
-        return self._has_windowed_groups
+        if not self._has_windowed_groups:
+            return False
+        every_n, prompt_tokens = sparse_state_params(meta.request_configs)
+        if every_n <= 0:
+            return True
+        chunk = self.worker_adapter.lmcache_tokens_per_chunk
+        op = meta.op
+        if op.end % chunk != 0:
+            return True
+        return any(
+            keeps_windowed_chunk(end, chunk, every_n, prompt_tokens, window)
+            for end in range(op.start + chunk, op.end + 1, chunk)
+            for window in self._windowed_group_chunks()
+        )
+
+    def _windowed_group_chunks(self) -> tuple[int, ...]:
+        """Distinct windows (chunks) of the windowed engine groups; (1,) if none."""
+        windows = getattr(self, "_windowed_windows_cache", None)
+        if windows is None:
+            chunk = self.worker_adapter.lmcache_tokens_per_chunk
+            found = {
+                max(1, -(-info.sw_size_tokens // chunk))
+                for info in getattr(self.worker_adapter, "engine_group_infos", ())
+                if info.sw_size_tokens > 0
+            }
+            windows = tuple(sorted(found | {1}))
+            self._windowed_windows_cache = windows
+        return windows
 
     # TODO: How does lmcache driven path handle preemption?
     # NOTE1: handle_preemptions is called by vllm each step regardless
@@ -2129,6 +2179,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 save_decode_cache=self._save_decode_cache,
             )
             if r_meta is not None:
+                # Before _pin_store_blocks: pins follow the sparse hints.
+                self._add_sparse_state_hints(r_meta, request_tracker)
+            if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
                 if self.lazy_offload:
                     self._lazy_offload_manager.add_store_candidate(r_meta)
@@ -2140,6 +2193,26 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 self._add_unfull_chunk_stores(
                     scheduler_output, request_tracker, metadata
                 )
+
+    def _add_sparse_state_hints(
+        self,
+        r_meta: LMCacheMPRequestMetadata,
+        tracker: LMCacheMPRequestTracker,
+    ) -> None:
+        """Add the sparse-state hints to a full-chunk STORE's request configs.
+
+        Hints are not ``lmcache.tag.*``, so object keys are unchanged.
+
+        Args:
+            r_meta: Full-chunk STORE metadata from ``GetStoreMetadata``.
+            tracker: The request's tracker.
+        """
+        if self._sparse_state_every_n <= 0:
+            return
+        configs = dict(r_meta.request_configs or {})
+        configs[SPARSE_STATE_HINT] = self._sparse_state_every_n
+        configs[PROMPT_TOKENS_HINT] = tracker.num_prompt_tokens
+        r_meta.request_configs = configs
 
     def _process_cached_requests(
         self,
@@ -2178,6 +2251,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 self._group_tokens_per_block,
                 save_decode_cache=self._save_decode_cache,
             )
+            if r_meta is not None:
+                # Before _pin_store_blocks: pins follow the sparse hints.
+                self._add_sparse_state_hints(r_meta, request_tracker)
 
             if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
@@ -2425,6 +2501,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         num_full_chunks = (op.end - op.start) // chunk
         has_unfull = (op.end - op.start) % chunk != 0
         block_ids: set[int] = set()
+        every_n, prompt_tokens = sparse_state_params(r_meta.request_configs)
         for group, window_tokens in self._windowed_group_tokens.items():
             if group >= len(op.block_ids):
                 continue
@@ -2432,7 +2509,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             ids = op.block_ids[group]
             per_chunk = chunk // span
             keep = -(-min(chunk, window_tokens) // span)
+            window_chunks = -(-window_tokens // chunk)
             for i in range(num_full_chunks):
+                if not keeps_windowed_chunk(
+                    op.start + (i + 1) * chunk,
+                    chunk,
+                    every_n,
+                    prompt_tokens,
+                    window_chunks,
+                ):
+                    continue
                 block_ids.update(ids[(i + 1) * per_chunk - keep : (i + 1) * per_chunk])
             if has_unfull:
                 # Unfull window plus a lead block.
