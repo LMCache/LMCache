@@ -4,10 +4,15 @@ name: Build Client Artifacts
 # build_cli_artifacts.yml builds lmcache-cli, audit it and its lmcache imports,
 # create request clients from the installed wheel, import each of its modules,
 # and check it against the full and CLI wheels. pr_full_build.yml calls this on
-# `full` PRs.
+# `full` PRs, with `cuda` to also build the manylinux CUDA wheel.
 
 on:
     workflow_call:
+        inputs:
+            cuda:
+                description: Also build the CUDA wheel with cibuildwheel.
+                type: boolean
+                default: false
     pull_request:
         types: [opened, synchronize, reopened, ready_for_review]
         branches:
@@ -157,3 +162,42 @@ jobs:
               run: |
                 python .github/scripts/check_client_install.py superset \
                   dist/lmcache_client-*.whl "$RUNNER_TEMP"/full/lmcache-*.whl
+
+    build-client-cuda:
+        # Only pr_full_build.yml passes cuda, so this runs on `full` PRs and
+        # never from the paths trigger above.
+        if: inputs.cuda
+        name: Build lmcache-client (CUDA)
+        runs-on: ubuntu-24.04
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            - name: Prepare artifact build
+              uses: ./.github/actions/build-artifacts
+              with:
+                free_disk_space: "true"
+                python_version: "3.13"
+                pip_packages: cibuildwheel
+                requirements_file: requirements/build.txt
+                release_tag_pattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+            - name: Build the CUDA wheel with cibuildwheel
+              # As build_main_artifacts.yml builds the full wheels, for one Python
+              # on PRs. cibuildwheel's test loads cuda_ops and lmcache_native.
+              env:
+                CIBW_BUILD: cp312-manylinux_x86_64
+              run: |
+                .github/scripts/build_client_wheel.sh --cibuildwheel dist
+                test -z "$(git status --porcelain)"
+
+            - name: Audit the wheel
+              run: python .github/scripts/assert_client_wheel.py dist/lmcache_client-*.whl
