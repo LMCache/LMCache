@@ -5,10 +5,11 @@ name: Code Quality
 #   Ready    L1: pre-commit first, then
 #            L2: test.yml (Python versions) + cpu_device.yml (OSes) from PR
 #                template's "CI scope" checklist (none ticked / full = all),
-#            L3: Buildkite k3-unit-tests (1-GPU) waits for this run to pass
-#                (.buildkite/k3_tests/common_scripts/wait_for_github_l2.py
-#                looks for the newest run where "Check code quality" ran, so
-#                keep that job name in sync).
+#            Buildkite k3-unit-tests (1-GPU) starts once pre-commit passes,
+#                runs in parallel with L2 and stops when an L2 job fails.
+#                .buildkite/k3_tests/common_scripts/github_ci_gate.py reads
+#                this workflow's job names ("Check code quality", "Test / ",
+#                "CPU device / "), so keep them in sync.
 # converted_to_draft starts a run that does nothing, so the concurrency group
 # below cancels the in-flight ready-for-review run.
 on:

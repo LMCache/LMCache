@@ -2,11 +2,13 @@
 # No vLLM required; uses setup-lmcache-only-env.sh for a lighter install.
 
 steps:
-  # GPU time is spent once per commit, after the GitHub Layer 2 checks pass.
-  # This CPU-only pod polls them; non-PR builds pass straight through.
-  - label: ":hourglass: Wait for GitHub Layer 2"
-    command: python3 .buildkite/k3_tests/common_scripts/wait_for_github_l2.py
-    timeout_in_minutes: 180
+  # The GPU starts once GitHub Layer 1 passes and then runs in parallel with
+  # Layer 2, which stops it if test.yml or cpu_device.yml fails. This CPU-only
+  # pod waits for Layer 1 (and for a maintainer to approve a first-time fork
+  # PR's GitHub run); non-PR builds pass straight through.
+  - label: ":hourglass: Wait for GitHub Layer 1"
+    command: python3 .buildkite/k3_tests/common_scripts/github_ci_gate.py wait-l1
+    timeout_in_minutes: 240
     agents: { queue: "k8s" }
     plugins:
       - kubernetes:
@@ -16,16 +18,16 @@ steps:
                 image: lmcache/ci-base:latest
                 imagePullPolicy: Never
                 env:
-                  - name: GITHUB_TOKEN
+                  - name: GITHUB_API_TOKEN
                     valueFrom:
                       secretKeyRef:
-                        name: buildkite-git-creds
-                        key: GITHUB_TOKEN
+                        name: github-api-readonly
+                        key: token
 
   - wait
 
   - label: ":test_tube: Unit Tests"
-    command: .buildkite/k3_tests/unit/run.sh
+    command: bash .buildkite/k3_tests/common_scripts/run-gpu-with-l2-watch.sh .buildkite/k3_tests/unit/run.sh
     timeout_in_minutes: 60
     agents: { queue: "k8s" }
     plugins:
@@ -37,6 +39,13 @@ steps:
                 imagePullPolicy: Never
                 env:
                   - { name: CUDA_LAUNCH_BLOCKING, value: "1" }
+                  # Read by github_ci_gate.py watch-l2. PR code runs in this
+                  # pod, so this must be a token without scopes.
+                  - name: GITHUB_API_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: github-api-readonly
+                        key: token
                 resources:
                   requests:
                     cpu: "32"

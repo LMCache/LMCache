@@ -9,33 +9,47 @@
 - Skip when pull request has existing build for commit and branch: **No**
 - Skip queued / cancel running branch builds: Yes
 
+**Cluster prerequisite**: a Kubernetes secret with a GitHub token that has
+**no scopes**, used only to lift the GitHub API rate limit:
+
+```
+kubectl create secret generic github-api-readonly -n buildkite \
+    --from-literal=token=<GitHub token without scopes>
+```
+
+PR code, including PRs from forks, runs in the pods that read it, so never use
+the repository write token from `buildkite-git-creds` here. Create the secret
+before this pipeline change lands; the steps cannot start without it.
+
 `buildkite/k3-unit-tests` is a required check on `dev`. Each non-draft PR
-commit gets one build, and its GPU step runs only after the GitHub Layer 2
-checks pass:
+commit gets one build:
 
 ```
-PR ready for review / new commit on a ready PR
-  GitHub Actions  Code Quality: pre-commit -> test.yml + cpu_device.yml
-  Buildkite       Wait for GitHub Layer 2 (CPU pod) -> wait -> Unit Tests (1 GPU)
+GitHub Actions  Code Quality: pre-commit (L1) -> test.yml + cpu_device.yml (L2)
+Buildkite       wait for L1 (CPU pod) -> Unit Tests (1 GPU) in parallel with L2
+                                         stopped as soon as an L2 job fails
 ```
 
-The wait step (`common_scripts/wait_for_github_l2.py`) polls the newest
-"Code Quality" run of the PR's head commit in which `Check code quality` ran,
-i.e. a ready-for-review run. It passes when that run succeeds and fails when it
-fails or is cancelled, so the check stays pending until the GPU step finishes
-and the GPU is never used for a commit whose CPU checks failed. It polls through
-the GitHub API, so it works the same for PRs from forks. Non-PR builds skip the
-wait.
+- `github_ci_gate.py wait-l1` polls the newest "Code Quality" run of the PR
+  head commit in which `Check code quality` ran (a ready-for-review run) and
+  passes once that job succeeds. A first-time contributor's fork PR therefore
+  reaches the GPU only after a maintainer approved its GitHub run.
+- `run-gpu-with-l2-watch.sh` runs the tests next to `github_ci_gate.py
+  watch-l2`. When a `Test /` or `CPU device /` job fails or is cancelled (a new
+  push, or the PR going back to draft), it stops the tests and fails the step,
+  releasing the GPU. When Layer 2 passes, the tests run on to their own result.
+- Non-PR builds skip both. GitHub API errors are retried and never fail or stop
+  the tests.
 
 Why each setting:
 - The draft filter keeps draft pushes off the GPU queue; drafts only run the
   Python 3.12 CPU tests on GitHub.
 - "Ready for review" starts the build when a draft leaves draft without a new
   commit.
-- "Skip ... existing build for commit" must be off: converting a PR back to
-  draft cancels its Code Quality run, which fails the waiting build, and the
-  next ready-for-review on the same commit has to build again.
+- "Skip ... existing build for commit" must be off: going back to draft cancels
+  the GitHub run, which fails this build, and the next ready-for-review on the
+  same commit has to build again.
 
 > Builds whose only changes are docs/`*.md`/`LICENSE`/`.github/**` auto-pass
 > via the [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes)
-> before the wait step is uploaded. Add `force-ci` label to the PR to bypass.
+> before these steps are uploaded. Add `force-ci` label to the PR to bypass.
