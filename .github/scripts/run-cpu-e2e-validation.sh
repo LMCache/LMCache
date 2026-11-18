@@ -16,6 +16,7 @@ LMCACHE_LOG="${LMCACHE_LOG_FILE:-/tmp/build_${BUILD_ID}_lmcache_cpu_validation.l
 VLLM_LOG="${VLLM_LOG_FILE:-/tmp/build_${BUILD_ID}_vllm_cpu_validation.log}"
 LMCACHE_PID=""
 VLLM_PID=""
+HEARTBEAT_OBSERVER_PID=""
 LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
 LMCACHE_REQUEST_PORT="${LMCACHE_REQUEST_PORT:-${LMCACHE_ZMQ_PORT:-5555}}"
 LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-grpc}"
@@ -206,6 +207,10 @@ cleanup_processes() {
       "$LMCACHE_PID" --ports "$LMCACHE_REQUEST_PORT" "$LMCACHE_HTTP_PORT" \
       || cleanup_status=$?
   fi
+  if [ -n "$HEARTBEAT_OBSERVER_PID" ] && kill -0 "$HEARTBEAT_OBSERVER_PID" 2>/dev/null; then
+    kill "$HEARTBEAT_OBSERVER_PID"
+    wait "$HEARTBEAT_OBSERVER_PID" 2>/dev/null || true
+  fi
   set -e
   return "$cleanup_status"
 }
@@ -395,7 +400,8 @@ print(json.dumps({
     'kv_connector_module_path': 'lmcache.integration.vllm.lmcache_mp_connector',
     'kv_connector_extra_config': {
         'lmcache.mp.host': '${LMCACHE_REQUEST_SCHEME}://localhost',
-        'lmcache.mp.port': int('${LMCACHE_REQUEST_PORT}'),
+        'lmcache.mp.port': int('${VLLM_LMCACHE_REQUEST_PORT:-$LMCACHE_REQUEST_PORT}'),
+        'lmcache.mp.heartbeat_interval': int('${VLLM_MP_HEARTBEAT_INTERVAL:-10}'),
         # CPU tensors use shared memory, not CUDA driver-mapped allocations.
         'lmcache.mp.use_vmm_api': False,
     },
@@ -607,11 +613,14 @@ fi
 # LMCACHE_SERVER_VENV: the server's own venv with the full wheel, while vLLM
 # runs the lmcache-client wheel (install_lmcache_cpu.sh).
 MP_TEST_LMCACHE_LAUNCH_SCRIPT="$ARTIFACT_DIR/launch-lmcache.sh"
-printf '#!/usr/bin/env bash\nexec ' > "$MP_TEST_LMCACHE_LAUNCH_SCRIPT"
-printf '%q ' env VLLM_TARGET_DEVICE=cpu \
-  "${LMCACHE_SERVER_VENV:+${LMCACHE_SERVER_VENV}/bin/}lmcache" server "${LMCACHE_ARGS[@]}" \
-  >> "$MP_TEST_LMCACHE_LAUNCH_SCRIPT"
-printf '\n' >> "$MP_TEST_LMCACHE_LAUNCH_SCRIPT"
+write_lmcache_launch_script() {
+  printf '#!/usr/bin/env bash\nexec ' > "$MP_TEST_LMCACHE_LAUNCH_SCRIPT"
+  printf '%q ' env VLLM_TARGET_DEVICE=cpu \
+    "${LMCACHE_SERVER_VENV:+${LMCACHE_SERVER_VENV}/bin/}lmcache" server "${LMCACHE_ARGS[@]}" \
+    >> "$MP_TEST_LMCACHE_LAUNCH_SCRIPT"
+  printf '\n' >> "$MP_TEST_LMCACHE_LAUNCH_SCRIPT"
+}
+write_lmcache_launch_script
 bash "$MP_TEST_LMCACHE_LAUNCH_SCRIPT" >"${LMCACHE_LOG}" 2>&1 &
 LMCACHE_PID=$!
 echo "LMCache server started (PID=${LMCACHE_PID})"
@@ -969,6 +978,36 @@ if [[ "$VLLM_MODEL_ID" == "facebook/opt-125m" &&
   RR_SERVER_STOPPED=1 bash "$MP_SCRIPTS/workloads/common/restart-recovery.sh"
   LMCACHE_PID=$(sed -n '1p' "$MP_TEST_PID_FILE")
   echo "✅ Shared fault tolerance and restart recovery passed"
+
+  echo "=== Restart between successful heartbeats (Phase 5) ==="
+  stop_vllm
+  cp "$VLLM_LOG" "$ARTIFACT_DIR/vllm-slow-recovery.log"
+  export VLLM_MP_HEARTBEAT_INTERVAL=120
+  export VLLM_LMCACHE_REQUEST_PORT=$((LMCACHE_REQUEST_PORT + 100))
+  export ENGINE_PORT="$VLLM_PORT"
+  GAP_DIR="$RESULTS_DIR/heartbeat_gap"
+  mkdir -p "$GAP_DIR"
+  GAP_HELPER="$MP_SCRIPTS/workloads/verification/heartbeat-gap.py"
+  python3 "$GAP_HELPER" observe --listen-port "$VLLM_LMCACHE_REQUEST_PORT" \
+    --server-port "$LMCACHE_REQUEST_PORT" --trace "$GAP_DIR/pings.jsonl" \
+    > "$GAP_DIR/observer.log" 2>&1 &
+  HEARTBEAT_OBSERVER_PID=$!
+  for _ in $(seq 1 30); do
+    if [ -f "$GAP_DIR/pings.ready" ]; then break; fi
+    if ! kill -0 "$HEARTBEAT_OBSERVER_PID" 2>/dev/null; then
+      cat "$GAP_DIR/observer.log"
+      false
+    fi
+    sleep 1
+  done
+  test -f "$GAP_DIR/pings.ready"
+  # Keep reaping from becoming a second fault when heartbeats are slowed down.
+  LMCACHE_ARGS+=(--worker-reap-timeout-seconds 600 --worker-registration-grace-seconds 600)
+  write_lmcache_launch_script
+  start_vllm
+  printf '%s\n%s\n' "$LMCACHE_PID" "$VLLM_PID" > "$MP_TEST_PID_FILE"
+  python3 "$GAP_HELPER" verify --trace "$GAP_DIR/pings.jsonl" \
+    --interval "$VLLM_MP_HEARTBEAT_INTERVAL" --output-dir "$GAP_DIR"
 fi
 
 echo "[Phase 3 / Step 12] Cleaning up"

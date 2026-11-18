@@ -79,3 +79,12 @@ line 1); `MP_TEST_LMCACHE_LAUNCH_SCRIPT` supplies the exact server launch comman
 `RR_SERVER_STOPPED=1` resumes after fault tolerance, using its registration
 snapshot and `MP_TEST_DEGRADED_LOG_OFFSET` in the engine log. Results and
 before/after registration snapshots are retained with the CPU E2E artifacts.
+
+The same representative CPU leg also runs `verification/heartbeat-gap.py` after
+ordinary restart recovery. A transparent ZMQ observer records real Scheduler
+and Worker PING replies. With a 120s heartbeat interval, the test restarts the
+Server after fresh replies, proves the outage ended before the next probe,
+then requires both post-restart PINGs to succeed before checking cache service.
+It intentionally fails on the current missing-registration recovery bug; it
+is not marked xfail. Timing, PING replies and registration snapshots are saved
+in `recovery/heartbeat_gap/`. The observer never manufactures a PING or reply.
