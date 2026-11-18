@@ -156,19 +156,6 @@ jobs:
         run: |
           pytest -m "not (cuda or musa or xpu or npu or neuron or rbln)"
 
-      - name: Cancel workflow run on failure
-        if: failure() && github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.run_id }}
-          REPO: ${{ github.repository }}
-        run: |
-          curl -sS -X POST \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/cancel" \
-            >/dev/null || true
-
   hf3fs-native-tests:
     needs: changes
     if: needs.changes.outputs.hf3fs_native == 'true'

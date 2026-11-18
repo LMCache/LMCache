@@ -123,7 +123,6 @@ jobs:
       (github.event.pull_request.draft ||
         (needs.pre-commit.result == 'success' && needs.scope.result == 'success'))
     permissions:
-      actions: write
       contents: read
       pull-requests: read
     uses: ./.github/workflows/test.yml
@@ -142,7 +141,6 @@ jobs:
       needs.pre-commit.result == 'success' &&
       needs.scope.result == 'success'
     permissions:
-      actions: write
       contents: read
       pull-requests: read
     uses: ./.github/workflows/cpu_device.yml
@@ -151,6 +149,10 @@ jobs:
     secrets:
       hf_token: ${{ secrets.HF_TOKEN }}
 
+  # Layer 3 gates GPU time only once the k3-unit-tests pipeline stops building
+  # every PR from its own GitHub webhook; until then this adds a second build.
+  # PRs from forks get no secrets on pull_request events, so they skip this
+  # job and keep relying on the webhook build.
   k3-unit-trigger:
     name: "Layer 3: Trigger k3-unit-tests [1-GPU]"
     needs: [test, cpu-device]
@@ -174,7 +176,7 @@ jobs:
 
       - name: Trigger Buildkite k3-unit-tests
         env:
-          BUILDKITE_API_TOKEN: ${{ secrets.BUILDKITE_API_TOKEN }}
+          BUILDKITE_API_TOKEN: ${{ secrets.BUILD_KITE_API_TOKEN }}
           BUILDKITE_ORG: ${{ vars.BUILDKITE_ORG || 'lmcache' }}
           BUILDKITE_UNIT_PIPELINE: ${{ vars.BUILDKITE_UNIT_PIPELINE || 'k3-unit-tests' }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -183,7 +185,7 @@ jobs:
           BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
         run: |
           if [ -z "${BUILDKITE_API_TOKEN}" ]; then
-            echo "::notice::BUILDKITE_API_TOKEN secret not set; skipping automatic k3-unit-tests trigger (expected on forks)."
+            echo "::notice::BUILD_KITE_API_TOKEN is not available (fork repository or PR from a fork); k3-unit-tests is not triggered from here."
             exit 0
           fi
           curl --fail-with-body -sS -X POST \
