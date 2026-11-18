@@ -47,6 +47,13 @@ spec:
                   fieldPath: status.podIP
             - name: VLLM_HTTP_TIMEOUT_KEEP_ALIVE
               value: "120"
+            # For a gated model, create the Secret `llm-d-hf-token` with the key
+            # `HF_TOKEN`. Then remove the comment marks from the five lines below.
+            # - name: HF_TOKEN
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: llm-d-hf-token
+            #       key: HF_TOKEN
           ports:
             - name: modelserver
               containerPort: 8000
@@ -134,6 +141,13 @@ spec:
                   fieldPath: status.podIP
             - name: VLLM_HTTP_TIMEOUT_KEEP_ALIVE
               value: "120"
+            # For a gated model, create the Secret `llm-d-hf-token` with the key
+            # `HF_TOKEN`. Then remove the comment marks from the five lines below.
+            # - name: HF_TOKEN
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: llm-d-hf-token
+            #       key: HF_TOKEN
           ports:
             - name: vllm
               containerPort: 8200
