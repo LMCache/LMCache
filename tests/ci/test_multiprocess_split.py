@@ -234,31 +234,127 @@ should_skip_multiprocess_heavy ".buildkite/k3_tests/multiprocess/pipeline.yml"
 
 
 @pytest.mark.parametrize(
-    ("labels", "pipeline_rel", "expected_uploaded"),
+    ("pipeline_rel", "env_overrides", "expected_deferred"),
+    [
+        # Heavy's own webhook build on a force-ci PR waits for PR-smoke's trigger
+        (
+            ".buildkite/k3_tests/multiprocess/pipeline.yml",
+            {
+                "BUILDKITE_SOURCE": "webhook",
+                "BUILDKITE_PULL_REQUEST_LABELS": "force-ci",
+            },
+            True,
+        ),
+        # The build PR-smoke triggers, and manual rebuilds, run heavy
+        (
+            ".buildkite/k3_tests/multiprocess/pipeline.yml",
+            {
+                "BUILDKITE_SOURCE": "trigger_job",
+                "BUILDKITE_PULL_REQUEST_LABELS": "force-ci",
+            },
+            False,
+        ),
+        (
+            ".buildkite/k3_tests/multiprocess/pipeline.yml",
+            {"BUILDKITE_SOURCE": "ui", "BUILDKITE_PULL_REQUEST_LABELS": "force-ci"},
+            False,
+        ),
+        # mp-full runs heavy straight from the webhook
+        (
+            ".buildkite/k3_tests/multiprocess/pipeline.yml",
+            {"BUILDKITE_SOURCE": "webhook", "BUILDKITE_PULL_REQUEST_LABELS": "mp-full"},
+            False,
+        ),
+        # PR-smoke itself is never deferred
+        (
+            ".buildkite/k3_tests/multiprocess/smoke-pipeline.yml",
+            {
+                "BUILDKITE_SOURCE": "webhook",
+                "BUILDKITE_PULL_REQUEST_LABELS": "force-ci",
+            },
+            False,
+        ),
+    ],
+)
+def test_heavy_deferred_to_smoke_trigger(
+    tmp_path: Path,
+    pipeline_rel: str,
+    env_overrides: dict[str, str],
+    expected_deferred: bool,
+) -> None:
+    """With force-ci, heavy runs once, from PR-smoke's trigger after smoke passes."""
+    bash = _find_bash()
+    if bash is None:
+        pytest.skip("Git Bash / bash not available")
+    assert bash is not None
+
+    clean_pf = tmp_path / "path-filter.sh"
+    clean_pf.write_text(
+        PATH_FILTER_SCRIPT.read_text(encoding="utf-8").replace("\r\n", "\n"),
+        encoding="utf-8",
+    )
+    script = f"""
+source "{clean_pf.as_posix()}"
+heavy_deferred_to_smoke_trigger "{pipeline_rel}"
+"""
+    env = os.environ.copy()
+    env.update({"BUILDKITE_PULL_REQUEST": "42", **env_overrides})
+    proc = subprocess.run([bash, "-c", script], env=env, check=False)
+    assert (proc.returncode == 0) is expected_deferred
+
+
+@pytest.mark.parametrize(
+    ("labels", "source", "pipeline_rel", "expected_uploaded"),
     [
         # mp-full bypasses smoke-pipeline.yml (exits 0) and runs heavy pipeline.yml
-        ("full,mp-full", ".buildkite/k3_tests/multiprocess/smoke-pipeline.yml", False),
-        ("full,mp-full", ".buildkite/k3_tests/multiprocess/pipeline.yml", True),
+        (
+            "full,mp-full",
+            "webhook",
+            ".buildkite/k3_tests/multiprocess/smoke-pipeline.yml",
+            False,
+        ),
+        (
+            "full,mp-full",
+            "webhook",
+            ".buildkite/k3_tests/multiprocess/pipeline.yml",
+            True,
+        ),
         # skip expensive ci skips both smoke and heavy
         (
             "full,skip expensive ci",
+            "webhook",
             ".buildkite/k3_tests/multiprocess/smoke-pipeline.yml",
             False,
         ),
         (
             "full,skip expensive ci",
+            "webhook",
             ".buildkite/k3_tests/multiprocess/pipeline.yml",
             False,
+        ),
+        # force-ci: heavy's webhook build defers; PR-smoke's trigger uploads it
+        (
+            "full,force-ci",
+            "webhook",
+            ".buildkite/k3_tests/multiprocess/pipeline.yml",
+            False,
+        ),
+        (
+            "full,force-ci",
+            "trigger_job",
+            ".buildkite/k3_tests/multiprocess/pipeline.yml",
+            True,
         ),
     ],
 )
 def test_upload_pipeline_mp_full_and_skip_expensive_ci(
     tmp_path: Path,
     labels: str,
+    source: str,
     pipeline_rel: str,
     expected_uploaded: bool,
 ) -> None:
-    """Verify mp-full bypasses smoke-only and skip expensive ci skips both."""
+    """Verify the label paths: mp-full, skip expensive ci and force-ci."""
     bash = _find_bash()
     if bash is None:
         pytest.skip("Git Bash / bash not available")
@@ -309,6 +405,7 @@ bash "{(scripts_dir / "upload-pipeline.sh").as_posix()}" "{pipeline_rel}"
         {
             "BUILDKITE_PULL_REQUEST": "42",
             "BUILDKITE_PULL_REQUEST_LABELS": labels,
+            "BUILDKITE_SOURCE": source,
             "BUILDKITE_PULL_REQUEST_BASE_BRANCH": "dev",
         }
     )

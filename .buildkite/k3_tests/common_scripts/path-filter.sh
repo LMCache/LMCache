@@ -374,3 +374,14 @@ should_skip_multiprocess_heavy() {
     fi
     return 0
 }
+
+# Returns 0 for the heavy multiprocess pipeline's own webhook build on a PR
+# labeled force-ci. PR-smoke triggers heavy once it passes, so this build would
+# run the same heavy suite a second time without waiting for smoke.
+heavy_deferred_to_smoke_trigger() {
+    local pipeline_file="${1:-}"
+    [[ "${pipeline_file}" == *k3_tests/multiprocess/pipeline.yml ]] || return 1
+    [[ -n "${BUILDKITE_PULL_REQUEST:-}" && "${BUILDKITE_PULL_REQUEST}" != "false" ]] || return 1
+    [[ "${BUILDKITE_SOURCE:-}" == "webhook" ]] || return 1
+    [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",force-ci,"* ]]
+}

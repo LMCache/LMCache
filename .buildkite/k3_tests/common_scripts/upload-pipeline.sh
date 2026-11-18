@@ -60,6 +60,18 @@ if [[ "${PIPELINE_FILE}" == *k3_tests/multiprocess/smoke-pipeline.yml ]] && \
     exit 0
 fi
 
+if heavy_deferred_to_smoke_trigger "${PIPELINE_FILE}"; then
+    echo "+++ :hourglass: Heavy multiprocess tier starts from PR-smoke after smoke passes (force-ci)"
+    if command -v buildkite-agent >/dev/null 2>&1; then
+        buildkite-agent annotate \
+            --style info \
+            --context "mp-heavy-deferred" \
+            "Deferred: with \`force-ci\`, the PR-smoke build triggers this heavy multiprocess suite once smoke passes." \
+            || true
+    fi
+    exit 0
+fi
+
 merge_pr_base_branch
 
 if [[ "${XPU_CANDIDATE_VALIDATION:-0}" != "1" ]] && should_skip_ci "${PIPELINE_FILE}"; then
