@@ -219,7 +219,8 @@ class BlendTokenRangeMatcher:
     def remove_chunks(self, token_hashes: list[bytes]) -> int:
         """Evict the given chunks and release their compact IDs for reuse.
 
-        Later probes cannot match removed chunks. Thread-safe.
+        A chunk's table slot is cleared only when it still maps to that
+        chunk's hash. Thread-safe.
 
         Args:
             token_hashes: Per-chunk content hashes; unknown ones are skipped.
@@ -241,7 +242,9 @@ class BlendTokenRangeMatcher:
                         cid,
                     )
                     continue
-                self._table_id[slot] = -1
+                # Another chunk sharing the slot may hold it now; leave it.
+                if int(self._table_id[slot]) == cid:
+                    self._table_id[slot] = -1
                 self._compact_id_to_slot[cid] = -1
                 self._chunk_token_hash[cid] = None
                 self._chunk_poly_hash[cid] = 0
