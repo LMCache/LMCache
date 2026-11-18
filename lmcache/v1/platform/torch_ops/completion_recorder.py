@@ -18,7 +18,7 @@ def record_completion_on_stream(
     Args:
         cuda_stream_ptr: Ignored on non-CUDA path.
         kind: Dispatch key identifying the handler (e.g. "finish_write").
-        payload: Opaque msgpack-encoded bytes forwarded to the handler.
+        payload: Opaque bytes returned unchanged by the drain.
     """
     with _completion_lock:
         _completion_buffer.append((kind, payload))

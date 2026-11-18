@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Owner-tagged STORE callbacks use the production MessagePack dispatcher."""
+"""Owner-tagged STORE callbacks use the production dispatcher."""
 
 # Standard
 from dataclasses import replace
@@ -8,7 +8,6 @@ from typing import Any, Literal, cast
 from unittest.mock import MagicMock
 
 # Third Party
-import msgspec
 import pytest
 import torch
 
@@ -39,7 +38,7 @@ def test_store_owner_callback_round_trip(
     owner_count: int,
     failure: Literal["none", "copy"],
 ) -> None:
-    """Real reservations survive serialization and finish only after dispatch.
+    """Real reservations reach the dispatcher and finish only after dispatch.
 
     Only pinned-memory and device calls are replaced; this is a CPU contract
     test, not a CUDA ordering test. Existing native tests cover device ordering.
@@ -94,10 +93,18 @@ def test_store_owner_callback_round_trip(
             record_completion_on_stream=record, drain_recorded_completions=drain
         ),
     )
-    # close() performs a synchronous drain through the registered decoder.
+    # close() performs a synchronous drain through the registered handlers.
     monkeypatch.setattr(
         native_completion.DeviceHostFuncDispatcher, "start", lambda self: None
     )
+    submitted: list[tuple[str, Any]] = []
+    real_submit = transfer.submit_callback_to_stream
+
+    def submit(stream: Any, kind: str, payload: Any) -> None:
+        submitted.append((kind, payload))
+        real_submit(stream, kind, payload)
+
+    monkeypatch.setattr(transfer, "submit_callback_to_stream", submit)
     monkeypatch.setattr(transfer, "torch_dev", MagicMock())
     monkeypatch.setattr(transfer, "downsample_and_stage_block_ids", lambda cc, ids: ids)
     layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
@@ -164,18 +171,15 @@ def test_store_owner_callback_round_trip(
             )
         # The imported producer event is released by a callback queued right
         # behind the stream wait, before any copy.
-        release_kind, release_encoded = queued[0]
-        assert release_kind == "release_imported_event"
-        assert msgspec.msgpack.decode(release_encoded, type=tuple[int, int]) == (1, 7)
+        assert submitted[0] == ("release_imported_event", (1, 7))
         if failure != "none":
             assert len(queued) == 1
             assert order == ["callback", "copy", "copy", "record"]
             assert all(obj.is_valid() for obj in copied)
         else:
             assert order == ["callback", "copy", "copy", "record", "callback"]
-            kind, encoded = queued[1]
+            kind, payload = submitted[1]
             assert kind == "finish_write"
-            payload = msgspec.msgpack.decode(encoded, type=dict[ObjectKey, int])
             assert payload == {
                 k: managers[0 if owner_count == 1 else i].l1_manager_id
                 for i, k in enumerate(keys)

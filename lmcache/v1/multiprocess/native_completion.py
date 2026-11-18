@@ -9,7 +9,7 @@ Call graph::
         v
     submit_callback_to_stream(stream, kind, payload)
         |
-        v  Python: msgspec.msgpack.encode(payload)
+        v  Python: park payload under an int handle; encode only the handle
         v  C++:    record_completion_on_stream (gil_scoped_release)
         v  C++:    cudaLaunchHostFunc / hipLaunchHostFunc
         |
@@ -18,11 +18,12 @@ Call graph::
         |
         v  -------- on DeviceHostFuncDispatcher drain thread (Python) --
         v  drain_recorded_completions  (returns list of (kind, bytes))
-        v  msgspec.msgpack.decode(bytes) with the kind's registered type
-        v  handler(decoded_payload)  ← finish_write / finish_read_prefetched
+        v  pop the parked payload by its handle
+        v  handler(payload)  ← finish_write / finish_read_prefetched
 
-Payload round-trips as a single opaque blob. For multi-arg handlers, wrap
-the args in a tuple/struct matching the registered ``payload_type``.
+The handler receives the submitted object itself, not a copy, so callers
+must not mutate a payload after submitting it. For multi-arg handlers, wrap
+the args in a tuple.
 
 Extends PR #2952's AB-BA fix (GIL x driver lock) to Server.store/retrieve.
 """
@@ -32,10 +33,11 @@ from __future__ import annotations
 
 # Standard
 from typing import Any, Callable
+import itertools
+import struct
 import threading
 
 # Third Party
-import msgspec
 import torch  # noqa: F401 — must be imported before native extensions
 
 # First Party
@@ -50,13 +52,14 @@ from lmcache.v1.periodic_thread import (
 
 logger = init_logger(__name__)
 
-# Runs on dispatcher thread with the decoded payload for one submission.
+# Runs on dispatcher thread with the payload of one submission.
 DeviceHostFunc = Callable[[Any], None]
 
-
-class _Registration(msgspec.Struct):
-    handler: DeviceHostFunc
-    decoder: msgspec.msgpack.Decoder
+# Payloads stay in this process; only an int handle crosses the native queue,
+# so the drain thread does not rebuild them under the GIL.
+_HANDLE = struct.Struct("<Q")
+_pending_payloads: dict[int, Any] = {}
+_next_handle = itertools.count()
 
 
 class DeviceHostFuncDispatcher(PeriodicThread):
@@ -71,20 +74,18 @@ class DeviceHostFuncDispatcher(PeriodicThread):
             level=ThreadLevel.HIGH,
             init_wait=0.0,
         )
-        self._registry: dict[str, _Registration] = {}
+        self._registry: dict[str, DeviceHostFunc] = {}
         self._registry_lock = threading.Lock()
         self._dispatched_count = 0
         self._exception_counts: dict[str, int] = {}
         PeriodicThreadRegistry.get_instance().register(self)
 
     def register(self, kind: str, handler: DeviceHostFunc, payload_type: Any) -> None:
-        """Register *handler* for *kind*. ``payload_type`` is the msgspec
-        decode type for the whole payload (e.g. ``list[ObjectKey]``)."""
+        """Register *handler* for *kind*. ``payload_type`` is unused and kept
+        so existing callers keep working; payloads reach the handler as
+        submitted."""
         with self._registry_lock:
-            self._registry[kind] = _Registration(
-                handler=handler,
-                decoder=msgspec.msgpack.Decoder(type=payload_type),
-            )
+            self._registry[kind] = handler
 
     def start(self) -> None:  # type: ignore[override]
         if self.is_running:
@@ -122,17 +123,24 @@ class DeviceHostFuncDispatcher(PeriodicThread):
             return
         with self._registry_lock:
             registry = dict(self._registry)
-        for kind, encoded_payload in completions:
-            reg = registry.get(kind)
-            if reg is None:
+        for kind, encoded_handle in completions:
+            try:
+                payload = _pending_payloads.pop(_HANDLE.unpack(encoded_handle)[0])
+            except Exception:
+                logger.exception(
+                    "DeviceHostFuncDispatcher: unknown completion for kind=%r",
+                    kind,
+                )
+                continue
+            handler = registry.get(kind)
+            if handler is None:
                 logger.warning(
                     "DeviceHostFuncDispatcher: no handler for kind=%r (dropped)",
                     kind,
                 )
                 continue
             try:
-                decoded = reg.decoder.decode(encoded_payload)
-                reg.handler(decoded)
+                handler(payload)
                 self._dispatched_count += 1
             except Exception:
                 with self._registry_lock:
@@ -149,5 +157,10 @@ def submit_callback_to_stream(stream: Any, kind: str, payload: Any) -> None:
     Runs on the dispatcher worker registered for *kind*; never acquires the
     GIL on the driver thread. ``payload`` is delivered to the handler as a
     single argument."""
-    encoded = msgspec.msgpack.encode(payload)
-    _device_ops.record_completion_on_stream(stream.ptr, kind, encoded)
+    handle = next(_next_handle)
+    _pending_payloads[handle] = payload
+    try:
+        _device_ops.record_completion_on_stream(stream.ptr, kind, _HANDLE.pack(handle))
+    except BaseException:
+        _pending_payloads.pop(handle, None)
+        raise

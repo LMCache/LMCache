@@ -131,7 +131,7 @@ reserve_write(keys, layout) -> {key: MemoryObj}     objects carry their owner id
                 | l1_owners = l1_owners_of(objects)   {key: l1_manager_id}
                 v
    GPU copy completes on stream; the callback (kind "finish_write")
-   carries the owners dict as its msgpack payload, never a MemoryObj
+   carries the owners dict as its payload, never a MemoryObj
                 |
                 v
    finish_write(keys, l1_owners)  -> groups the keys by owner
