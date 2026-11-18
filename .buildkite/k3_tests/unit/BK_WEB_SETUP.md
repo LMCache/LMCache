@@ -6,7 +6,7 @@
 - Filter builds using a conditional: `build.pull_request.draft != true`
 - Build when pull request is opened or updated: Yes
 - Build when pull request becomes ready for review: Yes
-- Skip when pull request has existing build for commit and branch: Yes
+- Skip when pull request has existing build for commit and branch: **No**
 
 **Builds settings**: Cancel Intermediate Builds: Yes, so a new push cancels the
 running build of the previous commit.
@@ -14,8 +14,10 @@ running build of the previous commit.
 `buildkite/k3-unit-tests` is a required check on `dev`. It builds every commit
 of a PR that is ready for review, in parallel with the GitHub Actions checks,
 and never builds draft commits. Clicking "Ready for review" builds the current
-commit; going back to draft and ready again on the same commit does not
-rebuild it.
+commit. Converting the PR back to draft cancels its running build
+(`.github/workflows/pr_draft_cancel_buildkite.yml`); that is why "Skip ...
+existing build" must be off, or the next ready-for-review on the same commit
+would leave the required check canceled.
 
 Why ready-for-review commits, in parallel (PR CI baseline, 2026-10-17 to
 2026-11-15, 805 GPU-h of unit tests):

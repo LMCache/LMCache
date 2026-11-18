@@ -22,8 +22,9 @@ zip one file. -->
 **CI scope after "Ready for review"**:
 <!-- While the PR is a draft, CI runs only the CPU unit tests on Python 3.12.
 Clicking "Ready for review" runs Code Quality first, then the CPU unit tests and
-CPU device tests on the entries ticked below. A group with nothing ticked runs
-every entry. Converting the PR back to draft cancels the in-flight runs. -->
+CPU device tests on the entries ticked below. A Python or OS group with nothing
+ticked runs every entry. Converting the PR back to draft cancels the in-flight
+runs, including Buildkite builds. -->
 
 CPU unit tests (**Test**), Python versions:
 
@@ -36,6 +37,11 @@ CPU device tests (**CPU device**), runner OS:
 
 - [ ] `ubuntu-22.04` — also runs the gRPC request-transport legs
 - [ ] `macos-latest`
+
+Rust (`rust/raw_block`): these run whenever a raw-block file changes; tick to
+run them anyway.
+
+- [ ] `rust` — Rust unit tests and raw-block temp-file tests
 
 <details>
 <summary>Before marking ready for review</summary>

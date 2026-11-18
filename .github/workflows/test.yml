@@ -10,6 +10,12 @@ on:
           every supported version otherwise.
         type: string
         default: ""
+      force_rust:
+        description: >-
+          Run the Rust raw-block jobs even when no raw-block path changed
+          (the PR author ticked `rust` in the CI scope checklist).
+        type: boolean
+        default: false
   workflow_dispatch:
   # PR runs are started by code_quality_checks.yml: on drafts directly, and
   # after pre-commit once the PR is ready for review.
@@ -38,7 +44,7 @@ jobs:
       pull-requests: read
     outputs:
       lmcache: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.lmcache == 'true' }}
-      raw_block: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.raw_block == 'true' }}
+      raw_block: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || inputs.force_rust == true || steps.filter.outputs.raw_block == 'true' }}
       hf3fs_native: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.hf3fs_native == 'true' }}
       token_drop: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.token_drop == 'true' }}
       python_versions: ${{ steps.python.outputs.versions }}
