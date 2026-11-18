@@ -7,10 +7,10 @@ l1_round_trip_build_prompt() {
     local prompt_file="$1"
     local prompt_suffix="$2"
 
-    python3 - "$prompt_file" "$prompt_suffix" <<'PYEOF'
+    python3 - "$prompt_file" "$prompt_suffix" "${3:-80}" <<'PYEOF' || return 1
 import sys
 
-prompt_file, prompt_suffix = sys.argv[1:3]
+prompt_file, prompt_suffix, repetitions = sys.argv[1:4]
 paragraph = (
     "The poll() system call waits for one of a set of file descriptors to "
     "become ready to perform I/O. The set of file descriptors to be monitored "
@@ -22,7 +22,7 @@ paragraph = (
     "interrupted by a signal handler, or the timeout expires. "
 )
 with open(prompt_file, "w", encoding="utf-8") as output:
-    output.write(paragraph * 80)
+    output.write(paragraph * int(repetitions))
     output.write(prompt_suffix)
 PYEOF
     echo "Prompt built ($(wc -w < "$prompt_file") words)."
@@ -35,7 +35,7 @@ l1_round_trip_send_completion() {
 
     echo "=== Sending completion ($run_name) on port $ENGINE_PORT ==="
     python3 - "$ENGINE_PORT" "$MODEL" "$PROMPT_FILE" "$MAX_TOKENS" \
-        "$out_file" "${COMPLETION_TIMEOUT:-600}" <<'PYEOF'
+        "$out_file" "${COMPLETION_TIMEOUT:-600}" <<'PYEOF' || return 1
 import json
 import sys
 import urllib.request
@@ -60,6 +60,8 @@ request = urllib.request.Request(
 with urllib.request.urlopen(request, timeout=int(timeout)) as response:
     data = json.load(response)
 text = data["choices"][0]["text"]
+if not text.strip() or data["usage"]["completion_tokens"] <= 0:
+    raise SystemExit("Completion returned no generated text")
 with open(out_file, "w", encoding="utf-8") as output:
     output.write(text)
 print(f"  generated {len(text)} chars")
@@ -142,4 +144,51 @@ l1_round_trip_run() {
     echo "  outputs identical; LMCache served" \
         "$((retrieves_after - retrieves_before)) retrieves."
     echo "============================================"
+}
+
+l1_round_trip_metric() {
+    python3 - "$LMCACHE_HTTP_PORT" "$1" <<'PY'
+import sys
+import urllib.request
+
+port, metric = sys.argv[1:]
+with urllib.request.urlopen(f"http://localhost:{port}/metrics", timeout=10) as response:
+    lines = response.read().decode().splitlines()
+# OTel exports a counter only after its first measurement.
+values = [float(line.rsplit(" ", 1)[1]) for line in lines
+          if line.split("{", 1)[0].split(" ", 1)[0] == metric]
+print(int(sum(values)))
+PY
+}
+
+l1_round_trip_verify_cache_service() {
+    local phase="$1"
+    local writes_before writes_after reads_before reads_after
+    local loaded_before loaded_after deadline
+    writes_before=$(l1_round_trip_metric lmcache_mp_l1_write_chunks_total) || return 1
+    l1_round_trip_send_completion "$OUT_A" "$phase store" || return 1
+    deadline=$((SECONDS + 30))
+    while :; do
+        writes_after=$(l1_round_trip_metric lmcache_mp_l1_write_chunks_total) || return 1
+        if ((writes_after > writes_before)); then break; fi
+        if ((SECONDS >= deadline)); then
+            echo "FAIL: $phase produced no completed L1 writes"
+            return 1
+        fi
+        sleep 1
+    done
+    engine_clear_local_cache "$ENGINE_PORT" || return 1
+    reads_before=$(l1_round_trip_metric lmcache_mp_l1_read_chunks_total) || return 1
+    loaded_before=$(l1_round_trip_metric lmcache_mp_num_chunks_loaded_total) || return 1
+    l1_round_trip_send_completion "$OUT_B" "$phase hit/retrieve" || return 1
+    reads_after=$(l1_round_trip_metric lmcache_mp_l1_read_chunks_total) || return 1
+    loaded_after=$(l1_round_trip_metric lmcache_mp_num_chunks_loaded_total) || return 1
+    if ((reads_after <= reads_before || loaded_after <= loaded_before)) ||
+        ! cmp -s "$OUT_A" "$OUT_B"; then
+        echo "FAIL: $phase did not retrieve cached KV with matching output"
+        return 1
+    fi
+    printf '%s: write_chunks_delta=%s read_chunks_delta=%s loaded_chunks_delta=%s; outputs identical\n' \
+        "$phase" "$((writes_after - writes_before))" "$((reads_after - reads_before))" \
+        "$((loaded_after - loaded_before))"
 }
