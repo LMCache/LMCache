@@ -42,7 +42,7 @@ class RequestClient(Protocol):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
-        chunk_size: int,
+        chunk_size: int | None = None,
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
@@ -58,7 +58,7 @@ class RequestClient(Protocol):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
-        chunk_size: int,
+        chunk_size: int | None = None,
     ) -> MessagingFuture[None]: ...
 
     @rpc_method

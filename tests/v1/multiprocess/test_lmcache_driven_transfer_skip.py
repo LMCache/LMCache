@@ -169,6 +169,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     ctx.chunk_size = 256
     ctx.null_block_id = 0
     ctx.resolve_obj_keys.return_value = obj_keys
+    ctx.layout_desc_registry.get_chunk_size.return_value = 256
 
     read_calls: list[list[str]] = []
 
@@ -220,6 +221,7 @@ def _make_checkpoint_module(
     entry.cache_context = context
     entry.chunk_size = 2
     module.context.chunk_size = 2
+    module.context.layout_desc_registry.get_chunk_size.return_value = 2
     module.context.null_block_id = -1
     module.context.session_manager.get.return_value = None
     module.context.storage_manager.reserve_write.side_effect = lambda keys, layout: {
@@ -465,6 +467,8 @@ def test_downsample_full_attention_keeps_every_block():
 def _unfull_key(**kwargs):
     return SimpleNamespace(
         request_id="req",
+        model_name="m",
+        world_size=1,
         worker_id=1,
         cache_salt="salt",
         end=3,

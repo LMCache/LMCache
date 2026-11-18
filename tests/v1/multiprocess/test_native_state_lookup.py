@@ -216,7 +216,7 @@ def _lookup(
         if missing_page_chunk is not None:
             present.discard(per_group[0][missing_page_chunk])
 
-    registry = LayoutDescRegistry()
+    registry = LayoutDescRegistry(default_chunk_size=CHUNK)
     layouts = {
         gid: MemoryLayoutDesc(
             shapes=[
