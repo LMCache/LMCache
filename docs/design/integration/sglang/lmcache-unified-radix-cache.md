@@ -135,6 +135,15 @@ must use `auto` or `lmcache_driven`. LMCache is incompatible with
 `--enable-unified-cache-external-linker`, and requires radix caching to remain
 enabled.
 
+When SGLang supplies a model revision, the connector adds it as
+`lmcache.tag.revision` to every cache key, including lookup, store, retrieve,
+and lock release. The MP server incorporates the tag into the stored object
+identity. The model path and world size still identify the registered KV
+layout, so revisions that share a registration must have compatible layouts.
+If SGLang starts without `--revision`, the connector omits
+`lmcache.tag.revision`, so requests can still hit KV entries stored before
+revision tagging was added.
+
 Initialization follows this sequence:
 
 ```mermaid

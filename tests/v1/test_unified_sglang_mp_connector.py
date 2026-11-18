@@ -87,10 +87,59 @@ def _new_connector() -> UnifiedLMCacheMPConnector:
     connector._heartbeat_lock = threading.Lock()
     connector._transfer_ctx_lock = threading.Lock()
     connector._closed = False
+    connector._model_revision = None
     connector.tp_size = 1
     connector.pp_size = 1
     connector.tp_group = None
     connector.pp_group = None
+    return connector
+
+
+def _create_connector(
+    revision: str | None, client: Mock, transfer: Mock
+) -> UnifiedLMCacheMPConnector:
+    """Construct the real connector with mocked backend dependencies."""
+    adapter = Mock()
+    adapter.resolve_registered_groups.return_value = [
+        SGLangKVComponentGroup(
+            "full", (torch.empty(32, 2, 3),), tokens_per_block=4, slots_per_block=4
+        )
+    ]
+    adapter.is_mla_enabled.return_value = False
+    config = SimpleNamespace(mp_host="127.0.0.1", mp_port=5555)
+    config.get_extra_config_value = lambda _key, default: default
+    client.get_chunk_size.return_value.result.return_value = 8
+    adapter_name = "lmcache.integration.sglang.unified_kv_adapter"
+    adapter_module = ModuleType(adapter_name)
+    vars(adapter_module)["SGLangUnifiedKVAdapter"] = Mock(return_value=adapter)
+    with (
+        patch.dict("sys.modules", {adapter_name: adapter_module}),
+        patch(
+            "lmcache.v1.client.client_config.load_mp_client_config",
+            return_value=config,
+        ),
+        patch(
+            "lmcache.v1.client.transport.factory.RequestClientFactory.create",
+            return_value=client,
+        ),
+        patch(
+            "lmcache.v1.client.worker_transfer.create_transfer_context",
+            return_value=transfer,
+        ),
+    ):
+        connector = UnifiedLMCacheMPConnector(
+            config_file=None,
+            model_config=SimpleNamespace(model_path="test-model", revision=revision),
+            tp_size=1,
+            tp_rank=0,
+            tp_group=None,
+            page_size=4,
+            token_to_kv_pool_allocator=Mock(),
+            req_to_token_pool=Mock(),
+            tree_components=(),
+            mamba_component=None,
+            sliding_window_size=None,
+        )
     return connector
 
 
@@ -149,7 +198,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         ):
             connector = UnifiedLMCacheMPConnector(
                 config_file=None,
-                model_config=SimpleNamespace(model_path="test-model"),
+                model_config=SimpleNamespace(model_path="test-model", revision=None),
                 tp_size=1,
                 tp_rank=0,
                 tp_group=None,
@@ -1314,49 +1363,8 @@ class TestSGLangStoreRetry(unittest.TestCase):
     """Exercise asynchronous store progress through the public connector API."""
 
     def setUp(self) -> None:
-        adapter = Mock()
-        adapter.resolve_registered_groups.return_value = [
-            SGLangKVComponentGroup(
-                "full", (torch.empty(32, 2, 3),), tokens_per_block=4, slots_per_block=4
-            )
-        ]
-        adapter.is_mla_enabled.return_value = False
-        config = SimpleNamespace(mp_host="127.0.0.1", mp_port=5555)
-        config.get_extra_config_value = lambda _key, default: default
-        client = Mock()
-        client.get_chunk_size.return_value.result.return_value = 8
         self.transfer = Mock()
-        adapter_name = "lmcache.integration.sglang.unified_kv_adapter"
-        adapter_module = ModuleType(adapter_name)
-        vars(adapter_module)["SGLangUnifiedKVAdapter"] = Mock(return_value=adapter)
-        with (
-            patch.dict("sys.modules", {adapter_name: adapter_module}),
-            patch(
-                "lmcache.v1.client.client_config.load_mp_client_config",
-                return_value=config,
-            ),
-            patch(
-                "lmcache.v1.client.transport.factory.RequestClientFactory.create",
-                return_value=client,
-            ),
-            patch(
-                "lmcache.v1.client.worker_transfer.create_transfer_context",
-                return_value=self.transfer,
-            ),
-        ):
-            self.connector = UnifiedLMCacheMPConnector(
-                config_file=None,
-                model_config=SimpleNamespace(model_path="test-model"),
-                tp_size=1,
-                tp_rank=0,
-                tp_group=None,
-                page_size=4,
-                token_to_kv_pool_allocator=Mock(),
-                req_to_token_pool=Mock(),
-                tree_components=(),
-                mamba_component=None,
-                sliding_window_size=None,
-            )
+        self.connector = _create_connector(None, Mock(), self.transfer)
         self.addCleanup(self.connector.close)
 
     def test_failed_prefix_remains_retryable_with_a_later_store_pending(self) -> None:
@@ -1416,3 +1424,54 @@ class TestSGLangStoreRetry(unittest.TestCase):
         )
         assert operation is not None
         return operation
+
+
+class TestSGLangModelRevision(unittest.TestCase):
+    """Exercise revision isolation through public cache operations."""
+
+    def test_model_revision_partitions_cache_objects(self) -> None:
+        """Lookup and store agree on the namespace of each model revision."""
+        tokens = list(range(8))
+        revisions = ("a" * 40, "b" * 40)
+        identities = set()
+        for revision in (*revisions, None):
+            with self.subTest(revision=revision):
+                client = Mock()
+                transfer = Mock()
+                connector = _create_connector(revision, client, transfer)
+                self.addCleanup(connector.close)
+                with patch(
+                    "lmcache.integration.sglang.unified_lmcache_mp_connector."
+                    "HeartbeatThread"
+                ):
+                    connector.submit_lookup(
+                        "lookup", tokens, local_hit_tokens=4, cache_salt="tenant"
+                    )
+                    connector.submit_store(
+                        "store",
+                        tokens,
+                        torch.arange(4, 12),
+                        device_indices_start=0,
+                        cache_salt="tenant",
+                    )
+
+                lookup_key = client.lookup.call_args.args[0]
+                store_key = transfer.submit_store.call_args.args[1]
+                self.assertEqual(
+                    lookup_key.request_configs["lmcache.hint.engine_computed_tokens"], 4
+                )
+                lookup_objects = ipc_key_to_object_keys(
+                    lookup_key, [b"\xab" * 32], [0], DEFAULT_SHARD_REPLICATION_DESC
+                )
+                store_objects = ipc_key_to_object_keys(
+                    store_key, [b"\xab" * 32], [0], DEFAULT_SHARD_REPLICATION_DESC
+                )
+                lookup_identity = lookup_objects[0][0].identity
+                self.assertEqual(lookup_identity, store_objects[0][0].identity)
+                self.assertEqual(
+                    dict(lookup_identity.tags),
+                    {"revision": revision} if revision is not None else {},
+                )
+                identities.add(lookup_identity)
+
+        self.assertEqual(len(identities), 3)
