@@ -103,12 +103,37 @@ one restore.
   `unregister`/`restore` group, both transfer modes with real transfer
   contexts and a stubbed request client) and
   `tests/v1/test_mp_connector_kv_roles.py::test_worker_sleep_hooks_drop_and_redo_registration`.
-- End to end: vLLM with `--enable-extensible-kv-cache --enable-sleep-mode`.
-  Send a prompt, `/sleep?level=1`,
-  `/wake_up`, then send the prompt twice more. vLLM should report
-  `Sleep mode freed` close to the KV cache size, and the server should log
-  `Unregistered KV cache` followed by `Registered KV cache`. vLLM's sleep
-  pauses with `clear_cache`, which also clears the LMCache server, so the
-  first prompt after wake-up stores through the new registration and the
-  second one hits LMCache (`vllm:external_prefix_cache_hits_total`) with
-  identical output.
+- End to end: the `sleep_mode` workload of the k3 multiprocess CI
+  (`.buildkite/k3_tests/multiprocess/scripts/workloads/vllm/sleep-mode.sh`,
+  with the checks in `sleep_mode.py` next to it). It launches vLLM with
+  `--enable-sleep-mode` and the default extensible KV cache, in
+  LMCache-driven transfer, and runs two level 1 sleep/wake-up cycles:
+
+  ```
+  prompt                     stored to LMCache
+  reset prefix cache, prompt LMCache hit, same output
+  /sleep?level=1&reset_connector=false   server: no registration, GPU memory released
+  /wake_up                               server: one registration, GPU memory as before
+  prompt                     LMCache hit, same output
+  /sleep?level=1&reset_connector=true    same checks as the first sleep
+  /wake_up                               same checks as the first wake-up
+  prompt                     LMCache miss, stored again, same output
+  reset prefix cache, prompt LMCache hit, same output
+  ```
+
+  With `reset_connector=false` LMCache keeps its contents, so the first
+  prompt after wake-up is retrieved through the new registration. With
+  `reset_connector=true`, vLLM's default, sleep also clears the LMCache
+  server, so the first prompt after wake-up stores through the new
+  registration and the second one hits LMCache
+  (`vllm:external_prefix_cache_hits_total`). The registration is read from
+  the server's `/status` (`registered_gpu_ids`) and the memory from
+  `nvidia-smi`: at most 25% of the level before sleep while asleep, at most
+  110% of it after wake-up. If the hooks do nothing, the server's import
+  keeps the KV cache alive during sleep, wake-up adds a second copy, and a
+  hit after wake-up returns different output. To run it outside CI, with vLLM
+  and LMCache installed and a free GPU:
+
+  ```bash
+  .buildkite/k3_tests/multiprocess/scripts/run-single-test.sh sleep_mode
+  ```
