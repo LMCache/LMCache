@@ -539,6 +539,29 @@ def test_aborted_waiting_request_frees_its_lookup_locks(
     assert kwargs["before_end_session"] is True
 
 
+def test_abort_while_waiting_also_frees_pending_ranges(
+    mock_io: SimpleNamespace,
+) -> None:
+    """The abort FREE also releases ranges given back before the abort."""
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    scheduler.bind_gpu_block_pool(mock_io.pool)
+    try:
+        scheduler._prefix_replay_tokens = 128
+        request = _request()  # 12 prompt tokens, chunk 4
+        mock_io.scheduler.check_lookup_result.return_value = 12
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (8, True)
+        request.status = RequestStatus.FINISHED_ABORTED
+        scheduler.request_finished(request, [])
+        kwargs = mock_io.scheduler.free_lookup_locks.call_args.kwargs
+        assert (kwargs["start"], kwargs["end"]) == (0, 8)
+        assert kwargs["extra_ranges"] == ((8, 12),)
+    finally:
+        scheduler.shutdown()
+
+
 @pytest.mark.parametrize("num_groups,legacy_api", [(1, False), (2, False), (2, True)])
 @pytest.mark.parametrize("retrieve_success", [False, True])
 def test_receive_failure_reporting(
