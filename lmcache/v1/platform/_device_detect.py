@@ -106,8 +106,8 @@ def _build_backend_registry() -> "dict[str, DeviceSpec]":
     selector, so collisions are resolved deterministically and logged.
     """
     # First Party
+    from lmcache.v1.common.subclass_discovery import discover_subclasses
     from lmcache.v1.platform.base.device_spec import DeviceSpec
-    from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
     registry: dict[str, DeviceSpec] = {}
     specs = [
