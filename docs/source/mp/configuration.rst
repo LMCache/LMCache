@@ -632,7 +632,7 @@ verify the installation.
      - Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on
        ext4). Ignored by ``ugds``, whose IO bypasses the kernel entirely.
    * - ``--gds-l1-read-threads``
-     - ``0``
+     - ``2``
      - Host threads that read a retrieve's slab objects with blocking reads,
        several objects at a time. ``0`` keeps the stream-ordered read, one
        object at a time. cuFile only; other backends ignore it. Measured in

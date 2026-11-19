@@ -216,13 +216,7 @@ class GDSContext:
             raise
         self._slab_path = self._slab_handle.path
         self._read_threads = config.read_threads
-        if self._read_threads and not self._slab_handle.supports_blocking_read:
-            logger.warning(
-                "GDSContext: the %s backend has no blocking read; ignoring "
-                "read_threads=%d",
-                self._backend.name,
-                self._read_threads,
-            )
+        if not self._slab_handle.supports_blocking_read:
             self._read_threads = 0
         logger.info(
             "GDSContext: %s slab opened at %s (%.1f GiB)",

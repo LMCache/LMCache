@@ -77,7 +77,7 @@ TTLs must be positive integers. Unknown fields are rejected.
        the device and that the offset is page aligned.
    * - ``GDS``
      - Required ``path``; ``backend`` (``auto``), ``direct_io`` (true),
-       ``read_threads`` (0).
+       ``read_threads`` (2).
        See :doc:`configuration` for backend requirements and location semantics.
    * - ``SHADOW``
      - Required ``segment`` (``dram``, ``cxl`` or ``gds``): an index of a

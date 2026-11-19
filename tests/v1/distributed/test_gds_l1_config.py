@@ -54,9 +54,9 @@ def test_cli_passes_backend_name_to_config(
 
 
 @pytest.mark.parametrize(
-    "extra, expected", [([], 0), (["--gds-l1-read-threads", "2"], 2)]
+    "extra, expected", [([], 2), (["--gds-l1-read-threads", "0"], 0)]
 )
-def test_cli_reader_threads_default_to_off(extra: list[str], expected: int) -> None:
+def test_cli_reader_threads_default_to_two(extra: list[str], expected: int) -> None:
     parser = argparse.ArgumentParser()
     add_mp_server_args(parser)
     add_storage_manager_args(parser)

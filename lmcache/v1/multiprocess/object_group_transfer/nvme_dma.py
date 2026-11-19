@@ -2,11 +2,11 @@
 """NVMe DMA engine: objects held in a GDS slab.
 
 A retrieve loads slab objects with blocking reads on host threads when the
-slab is configured with reader threads (``--gds-l1-read-threads``; the
-default 0 keeps the stream-ordered read). The caller queues device work for a batch
-only after its reads have returned: the read does device work of its own
-(cuFile compat mode), and kernels queued ahead behind a host-written signal
-deadlocked with it.
+slab has reader threads (``--gds-l1-read-threads``, default 2; 0 keeps the
+stream-ordered read, as does a backend without a blocking read). The caller
+queues device work for a batch only after its reads have returned: the read
+does device work of its own (cuFile compat mode), and kernels queued ahead
+behind a host-written signal deadlocked with it.
 """
 
 # Standard

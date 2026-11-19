@@ -365,9 +365,10 @@ class GdsL1Config:
     align_bytes: int = 4096
     """Allocation alignment; cuFile/hipFile and O_DIRECT require 4 KiB."""
 
-    read_threads: int = 0
+    read_threads: int = 2
     """Host threads that read a retrieve's slab objects with blocking reads
-    (from ``--gds-l1-read-threads``); 0 keeps the stream-ordered read."""
+    (from ``--gds-l1-read-threads``); 0 keeps the stream-ordered read. Used
+    only by a backend with a blocking read (cuFile)."""
 
 
 @dataclass
@@ -590,7 +591,7 @@ class GDSL1ManagerConfig(L1ManagerConfig):
         backend = values.get("backend", "auto")
         if not isinstance(backend, str) or not backend:
             raise ValueError("backend must be a non-empty string")
-        read_threads = values.get("read_threads", 0)
+        read_threads = values.get("read_threads", 2)
         if (
             isinstance(read_threads, bool)
             or not isinstance(read_threads, int)
@@ -977,9 +978,9 @@ def add_storage_manager_args(
     gds_group.add_argument(
         "--gds-l1-read-threads",
         type=int,
-        default=0,
+        default=2,
         help="Host threads that read a retrieve's slab objects with blocking "
-        "reads (cuFile only). Default 0: stream-ordered reads.",
+        "reads (cuFile only). Default 2; 0 keeps the stream-ordered read.",
     )
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
