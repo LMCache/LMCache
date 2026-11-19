@@ -49,8 +49,10 @@ class GrpcMethodCodecRegistry:
     by_full_name: Mapping[str, GrpcMethodCodec]
 
 
-@lru_cache(maxsize=1)
-def get_method_codec_registry() -> GrpcMethodCodecRegistry:
+@lru_cache(maxsize=None)
+def get_method_codec_registry(
+    rpc_client: type | None = None,
+) -> GrpcMethodCodecRegistry:
     """Build and validate codecs for all generated gRPC methods.
 
     Returns:
@@ -63,10 +65,10 @@ def get_method_codec_registry() -> GrpcMethodCodecRegistry:
     """
     by_full_name: dict[str, GrpcMethodCodec] = {}
     operations: set[RpcOperation] = set()
-    for _binding, method in iter_methods():
+    for _binding, method in iter_methods(rpc_client):
         operation = client_method_name(method.name)
         try:
-            rpc_spec = get_rpc_spec(operation)
+            rpc_spec = get_rpc_spec(operation, rpc_client)
         except KeyError as exc:
             raise RuntimeError(
                 f"Generated gRPC method {method.full_name} has no matching "
@@ -107,7 +109,7 @@ def get_method_codec_registry() -> GrpcMethodCodecRegistry:
         by_full_name[method.full_name] = codec
         operations.add(operation)
 
-    missing_methods = set(get_rpc_specs()) - operations
+    missing_methods = set(get_rpc_specs(rpc_client)) - operations
     if missing_methods:
         raise RuntimeError(
             "RequestClient RPCs have no generated gRPC method: "

@@ -1867,9 +1867,10 @@ class TestReservationFailures:
             adapter.close()
             l1_manager.close()
 
-    def test_contended_key_is_dropped_under_prefix(self, l1_manager):
-        """A key admitted by another writer after the lock pass fails to
-        reserve; under "prefix" the hit stops before it."""
+    def test_contended_key_is_served_under_prefix(self, l1_manager):
+        """A key another writer admits after the lock pass is still staged
+        (``allow_resident``); admission read-locks the resident copy, so
+        "prefix" keeps the whole hit instead of stopping before the key."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
@@ -1885,18 +1886,17 @@ class TestReservationFailures:
         req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
         result = wait_for_result(ctrl, req_id)
         ctrl.stop()
-        adapter.close()
 
         assert racing_l1.admitted, "the racing writer never interleaved"
-        assert row_bits(result) == [0]
-        assert_read_locked(l1_manager, keys[:1])
-        assert_absent(l1_manager, keys[2:])
+        assert row_bits(result) == [0, 1, 2]
+        assert_read_locked(l1_manager, keys)
         assert l1_manager.get_staging_memory_usage() == 0
-        l1_manager.finish_read(keys[:1])
-        l1_manager.delete([keys[1]])
+        assert_l2_unlocked(adapter)
+        adapter.close()
+        l1_manager.finish_read(keys)
 
-    def test_contended_key_is_dropped_under_full(self, l1_manager):
-        """Under "full" only the contended key is dropped."""
+    def test_contended_key_is_served_under_full(self, l1_manager):
+        """Under "full" the contended key is served as well."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
@@ -1914,14 +1914,14 @@ class TestReservationFailures:
         )
         result = wait_for_result(ctrl, req_id)
         ctrl.stop()
-        adapter.close()
 
         assert racing_l1.admitted
-        assert row_bits(result) == [1, 2]
-        assert_read_locked(l1_manager, keys[1:])
+        assert row_bits(result) == [0, 1, 2]
+        assert_read_locked(l1_manager, keys)
         assert l1_manager.get_staging_memory_usage() == 0
-        l1_manager.finish_read(keys[1:])
-        l1_manager.delete([keys[0]])
+        assert_l2_unlocked(adapter)
+        adapter.close()
+        l1_manager.finish_read(keys)
 
     def test_l1_hit_survives_racing_evictor(self, l1_manager):
         """A resident key is locked at lookup, so an evictor cannot remove
