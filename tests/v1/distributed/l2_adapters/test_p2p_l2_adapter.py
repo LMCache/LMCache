@@ -1322,3 +1322,129 @@ def test_a_peer_error_on_an_ack_does_not_skip_the_peer():
         adapter.submit_lookup_and_lock_task([_key(1)], {0: _LAYOUT})
         assert req_client.p2p_lookup_and_lock.call_count == 2
         req_client.probe.assert_not_called()
+
+
+def test_a_canary_that_is_never_polled_is_given_up_after_the_lookup_timeout():
+    """A canary whose request was dropped (never polled again) does not keep
+    the peer skipped: after lookup_timeout_s the next lookup probes again."""
+    with _adapter(lookup_timeout_s=0.1) as (adapter, req_client, *_):
+        req_client.p2p_lookup_and_lock.side_effect = [
+            _FakeFuture(exc=MPServerUnavailableError("UNAVAILABLE", "down")),
+            _PendingFuture(),  # the canary, orphaned by its request
+            _PendingFuture(),  # the next canary
+        ]
+        req_client.probe.return_value = _FakeFuture()  # answered at once
+
+        def submit() -> int:
+            return adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+
+        assert adapter.query_lookup_and_lock_result(submit()).popcount() == 0
+        submit()  # a miss that sends the probe, which is answered
+        submit()  # the canary; never polled
+        assert req_client.p2p_lookup_and_lock.call_count == 2
+        submit()
+        assert req_client.probe.call_count == 1
+        time.sleep(0.2)
+        submit()
+        assert req_client.probe.call_count == 2
+        submit()  # the new probe was answered: this one is the next canary
+        assert req_client.p2p_lookup_and_lock.call_count == 3
+
+
+def test_the_query_stall_is_timed_per_query_rpc():
+    """A slow peer that answers each query with "not ready" within the RPC
+    timeout is not marked, however long the lookup takes in total."""
+    addresses = [TransferChannelAddress(offset=100, size=10)]
+    queries = [_PendingFuture() for _ in range(4)]  # the last for the next lookup
+    with (
+        patch.object(p2p_mod, "LOOKUP_RPC_TIMEOUT_S", 0.2),
+        _adapter(lookup_timeout_s=30.0) as (adapter, req_client, *_),
+    ):
+        req_client.p2p_lookup_and_lock.return_value = _FakeFuture(value=7)
+        req_client.p2p_query_lookup_results.side_effect = queries
+        task_id = adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+        for query in queries[:2]:
+            time.sleep(0.12)  # under the timeout for this query
+            assert adapter.query_lookup_and_lock_result(task_id) is None
+            query.resolve(value=None)  # not ready yet
+            assert adapter.query_lookup_and_lock_result(task_id) is None
+        queries[2].resolve(value=addresses)
+        assert adapter.query_lookup_and_lock_result(task_id).popcount() == 1
+        adapter.submit_lookup_and_lock_task([_key(1)], {0: _LAYOUT})
+        assert req_client.p2p_lookup_and_lock.call_count == 2
+        req_client.probe.assert_not_called()
+
+
+def test_a_query_stuck_from_before_a_recovery_does_not_mark_the_peer_again():
+    """Once a canary has cleared the mark, a lookup whose query was sent
+    before that and is still unanswered does not skip the peer again."""
+    addresses = [TransferChannelAddress(offset=100, size=10)]
+    stuck, canary_query = _PendingFuture(), _PendingFuture()
+    with (
+        patch.object(p2p_mod, "LOOKUP_RPC_TIMEOUT_S", 0.05),
+        _adapter(lookup_timeout_s=30.0) as (adapter, req_client, *_),
+    ):
+        req_client.p2p_lookup_and_lock.return_value = _FakeFuture(value=7)
+        req_client.p2p_query_lookup_results.side_effect = [
+            stuck,
+            canary_query,
+            _PendingFuture(),
+        ]
+        req_client.probe.return_value = _FakeFuture()  # answered at once
+        old = adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+        time.sleep(0.1)
+        assert adapter.query_lookup_and_lock_result(old) is None  # marks
+        adapter.submit_lookup_and_lock_task([_key(1)], {0: _LAYOUT})  # probe
+        canary = adapter.submit_lookup_and_lock_task([_key(2)], {0: _LAYOUT})
+        canary_query.resolve(value=addresses)
+        assert adapter.query_lookup_and_lock_result(canary).popcount() == 1
+
+        assert adapter.query_lookup_and_lock_result(old) is None
+        adapter.submit_lookup_and_lock_task([_key(3)], {0: _LAYOUT})
+        assert req_client.p2p_lookup_and_lock.call_count == 3
+
+
+def test_a_canary_whose_rpc_raises_leaves_the_next_lookup_as_the_canary():
+    """If sending the canary raises, the request fails but the check is not
+    stuck: the next lookup goes out as the canary."""
+    with _adapter() as (adapter, req_client, *_):
+        req_client.p2p_lookup_and_lock.side_effect = [
+            _FakeFuture(exc=MPServerUnavailableError("UNAVAILABLE", "down")),
+            RuntimeError("channel closed"),
+            _PendingFuture(),
+        ]
+        req_client.probe.return_value = _FakeFuture()
+
+        def submit() -> int:
+            return adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+
+        assert adapter.query_lookup_and_lock_result(submit()).popcount() == 0
+        submit()  # sends the probe, answered at once
+        with pytest.raises(RuntimeError):
+            submit()
+        submit()
+        assert req_client.p2p_lookup_and_lock.call_count == 3
+        assert req_client.probe.call_count == 1
+
+
+def test_a_canary_rejected_by_the_peer_is_logged():
+    """A canary whose ack fails with a peer error (not unreachability) is
+    logged, although the peer is already marked."""
+    with (
+        _adapter() as (adapter, req_client, *_),
+        patch.object(p2p_mod.logger, "exception") as log_exception,
+    ):
+        req_client.p2p_lookup_and_lock.side_effect = [
+            _FakeFuture(exc=MPServerUnavailableError("UNAVAILABLE", "down")),
+            _FakeFuture(exc=MPRequestError("INTERNAL", "boom")),
+        ]
+        req_client.probe.return_value = _FakeFuture()
+
+        def submit() -> int:
+            return adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+
+        assert adapter.query_lookup_and_lock_result(submit()).popcount() == 0
+        assert log_exception.call_count == 1
+        submit()  # probe
+        assert adapter.query_lookup_and_lock_result(submit()).popcount() == 0
+        assert log_exception.call_count == 2
