@@ -195,6 +195,11 @@ commands that source Bash helpers in `bash -euo pipefail` (as the SGLang
 canary does), and test the uploaded command through a POSIX shell. A Bash
 shebang on a sourced helper does not change its caller's interpreter.
 
+Run vLLM-dependent unit fixtures against the installed nightly as well.
+At source `8700cc9ba`, the streaming-session helper reads `max_model_len`
+and `num_sampled_tokens_per_step`; a `Scheduler.__new__` fixture must set
+those constructor fields before exercising the real streaming update.
+
 vLLM's active nightly index is `cu132`; old tested pins can still point to
 `cu130`. Preserve the archive variant when consuming or promoting a pin.
 The vLLM archive variant and `torch.version.cuda` are independent: source
