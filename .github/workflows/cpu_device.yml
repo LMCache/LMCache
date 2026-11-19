@@ -261,6 +261,12 @@ jobs:
       - name: Install vLLM CPU (prebuilt nightly from PyPI)
         id: install-vllm
         env:
+          # The manifest-aware installer is in #6752. Supply its exact Linux
+          # runtime dependency while this wrapper tests the unchanged #6665 head.
+          PIP_INSTALL_EXTRA_ARGS: >-
+            ${{ matrix.os == 'ubuntu-22.04'
+                && 'https://github.com/triton-lang/triton-cpu/releases/download/v3.8.0/triton-3.8.0+cpu-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl'
+                || '' }}
           # nightly_verify deliberately ignores the pin: its whole job is to
           # find out whether today's build works, and a pinned wheel would
           # just re-validate the same known-good one every night.
