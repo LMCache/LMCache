@@ -29,7 +29,7 @@ defaults:
 
 # Cancel stale runs per ref.
 concurrency:
-    group: ${{ github.workflow }}-${{ github.ref }}
+    group: build-cpu-${{ github.workflow }}-${{ github.ref }}
     cancel-in-progress: true
 
 permissions:

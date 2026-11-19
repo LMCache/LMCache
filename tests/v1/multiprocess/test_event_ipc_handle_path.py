@@ -16,6 +16,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L1ReadReservation
@@ -24,7 +25,6 @@ from lmcache.v1.distributed.storage_manager import (
     L1ReadTransferCompletion,
 )
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import Session
 from lmcache.v1.transport.futures import DeviceMessagingFuture, MessagingFuture
 

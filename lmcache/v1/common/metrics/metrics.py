@@ -3,7 +3,7 @@
 
 Example usage::
 
-    from lmcache.cli.metrics import Metrics
+    from lmcache.v1.common.metrics import Metrics
 
     metrics = Metrics(title="Bench KV Cache Result (30s)")
 
@@ -22,9 +22,9 @@ Example usage::
 from typing import Any, Optional
 
 # First Party
-from lmcache.cli.metrics.handler import FileHandler, MetricsHandler
-from lmcache.cli.metrics.section import Section, sections_to_dict
 from lmcache.logging import init_logger
+from lmcache.v1.common.metrics.handler import FileHandler, MetricsHandler
+from lmcache.v1.common.metrics.section import Section, sections_to_dict
 
 logger = init_logger(__name__)
 
