@@ -379,6 +379,8 @@ class TestAttributionCounters:
                     "hit_tokens": 1024,
                     "l1_hit_tokens": 768,
                     "l2_hit_tokens": 256,
+                    "l1_hit_keys": 30,
+                    "l2_hit_keys": 6,
                     "early_exit_reason": "",
                 },
             )
@@ -389,8 +391,74 @@ class TestAttributionCounters:
         delta = snapshot()
         assert delta["lmcache_mp.lookup_hit_l1"] == 768
         assert delta["lmcache_mp.lookup_hit_l2"] == 256
+        assert delta["lmcache_mp.lookup_hit_l1_keys"] == 30
+        assert delta["lmcache_mp.lookup_hit_l2_keys"] == 6
         assert delta["lmcache_mp.lookups"] == 1
         assert delta.get("lmcache_mp.lookup_early_exit", 0) == 0
+
+    def test_apc_covered_prefix_stays_out_of_the_hit_counters(
+        self, bus, subscriber, snapshot
+    ):
+        """The engine-covered prefix moves neither lookup_requested nor
+        lookup_hit, and gets no counter of its own."""
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id="req-apc-1",
+                metadata={
+                    "found_count": 6,
+                    "requested_tokens": 512,
+                    "apc_covered_tokens": 1024,
+                    "hit_tokens": 512,
+                    "l1_hit_tokens": 256,
+                    "l2_hit_tokens": 256,
+                    "early_exit_reason": "",
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        delta = snapshot()
+        assert delta.get("lmcache_mp.lookup_apc_covered", 0) == 0
+        assert delta["lmcache_mp.lookup_requested"] == 512
+        assert delta["lmcache_mp.lookup_hit"] == 512
+        assert delta["lmcache_mp.lookup_hit_l1"] == 256
+
+    def test_request_level_fields_have_their_own_counters(
+        self, bus, subscriber, snapshot
+    ):
+        """prompt / request_hit land on the request-level counters and leave
+        the lookup-level ones alone; engine_hit is not exported."""
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id="req-rl-1",
+                metadata={
+                    "found_count": 4,
+                    "requested_tokens": 512,
+                    "apc_covered_tokens": 768,
+                    "hit_tokens": 256,
+                    "l1_hit_tokens": 256,
+                    "l2_hit_tokens": 0,
+                    "prompt_tokens": 1380,
+                    "engine_hit_tokens": 818,
+                    "request_hit_tokens": 1024,
+                    "early_exit_reason": "",
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        delta = snapshot()
+        assert delta["lmcache_mp.lookup_prompt"] == 1380
+        assert delta.get("lmcache_mp.lookup_engine_hit", 0) == 0
+        assert delta["lmcache_mp.lookup_request_hit"] == 1024
+        assert delta["lmcache_mp.lookup_requested"] == 512
+        assert delta["lmcache_mp.lookup_hit"] == 256
 
     def test_early_exit_labeled_by_reason(self, bus, subscriber):
         """Early exits count once on the reason-labeled series (with the
@@ -453,5 +521,7 @@ class TestAttributionCounters:
         delta = snapshot()
         assert delta.get("lmcache_mp.lookup_hit_l1", 0) == 0
         assert delta.get("lmcache_mp.lookup_hit_l2", 0) == 0
+        assert delta.get("lmcache_mp.lookup_hit_l1_keys", 0) == 0
+        assert delta.get("lmcache_mp.lookup_hit_l2_keys", 0) == 0
         assert delta["lmcache_mp.lookups"] == 1
         assert delta.get("lmcache_mp.lookup_early_exit", 0) == 0

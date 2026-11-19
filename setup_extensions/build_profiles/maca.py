@@ -104,7 +104,7 @@ class MacaProfile(BuildProfile):
                 sources=cuda_sources,
                 include_dirs=[CSRC_DIR],
                 extra_compile_args={
-                    "cxx": ["-std=c++17", "-DLMCACHE_DISABLE_STREAMING_IO=1"]
+                    "cxx": ["-DLMCACHE_DISABLE_STREAMING_IO=1"]
                     + half_precision_undefs
                     + abi_flag,
                     "nvcc": ["-DLMCACHE_DISABLE_STREAMING_IO=1"]

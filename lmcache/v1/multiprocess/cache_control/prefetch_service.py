@@ -9,6 +9,7 @@ status codes. It owns the node's :class:`WarmPrefetchJobs` table.
 """
 
 # Standard
+from collections.abc import Mapping
 from typing import Any
 
 # First Party
@@ -51,6 +52,8 @@ class PrefetchService:
         cache_salt: str,
         source_tier: Tier,
         target_tier: Tier,
+        *,
+        tags: Mapping[str, str] | None = None,
     ) -> dict[str, object]:
         """Submit a warm prefetch of a token sequence's chunks from L2 into L1.
 
@@ -70,13 +73,28 @@ class PrefetchService:
                 f"{_TARGET_TIER.value!r}"
             )
         ctx = self._engine.context
-        layout_desc = ctx.layout_desc_registry.find(model_name, world_size)
-        if layout_desc is None:
-            raise Unavailable(
-                f"no layout registered for model_name={model_name!r} "
-                f"world_size={world_size}; the model has not allocated "
-                f"KV cache on this node yet"
+        registry = ctx.layout_desc_registry
+        # Every object group the model registered, each with its own layout
+        # and attention window -- the same rows the lookup path submits. One
+        # layout for group 0 would warm a fraction of each chunk under
+        # --separate-object-groups and report success.
+        unregistered = Unavailable(
+            f"no layout registered for model_name={model_name!r} "
+            f"world_size={world_size}; the model has not allocated "
+            f"KV cache on this node yet"
+        )
+        group_layout_descs = registry.find_group_layout_descs(model_name, world_size)
+        if not group_layout_descs:
+            raise unregistered
+        try:
+            attn_desc = registry.find_attn_desc(model_name, world_size)
+            shard_replication_desc = registry.find_shard_replication_desc(
+                model_name, world_size
             )
+        except ValueError:
+            # Unregistered between the two reads: the same answer, not a
+            # malformed request.
+            raise unregistered from None
         try:
             key_groups, chunks = resolve_grouped_object_keys(
                 ctx.token_hasher,
@@ -84,7 +102,10 @@ class PrefetchService:
                 world_size,
                 token_ids,
                 cache_salt,
-                layout_desc,
+                group_layout_descs,
+                attn_desc,
+                shard_replication_desc,
+                tags=tags,
             )
         except ValueError as exc:
             raise InvalidRequest(str(exc)) from None

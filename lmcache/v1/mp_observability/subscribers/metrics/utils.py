@@ -17,12 +17,18 @@ def group_by_salt(keys: list) -> dict[str, int]:
     return Counter(getattr(k, "cache_salt", "") for k in keys)
 
 
-def emit_salt_counts(counter: metrics.Counter, salt_counts: dict[str, int]) -> None:
+def emit_salt_counts(
+    counter: metrics.Counter,
+    salt_counts: dict[str, int],
+    attributes: dict[str, str] | None = None,
+) -> None:
     """Add to *counter* once per entry in *salt_counts*.
 
     *salt_counts* maps ``cache_salt`` values to key counts.
-    Empty salt produces a dimensionless increment (no attribute).
+    Empty salt adds no salt label. Optional attributes label every increment.
     """
     for salt, count in salt_counts.items():
-        attrs = {"cache_salt": salt} if salt else {}
+        attrs = dict(attributes or {})
+        if salt:
+            attrs["cache_salt"] = salt
         counter.add(count, attributes=attrs)

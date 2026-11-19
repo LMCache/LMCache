@@ -38,8 +38,16 @@ from awscrt.io import ClientTlsContext, TlsConnectionOptions, TlsContextOptions
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
+from lmcache.v1.distributed.api import (
+    KeyEntry,
+    KeyListPage,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
 from lmcache.v1.distributed.internal_api import L2StoreResult
+from lmcache.v1.distributed.key_codec import decode_storage_key, encode_storage_key
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -62,54 +70,8 @@ logger = init_logger(__name__)
 
 
 def _string_to_object_key(name: str) -> ObjectKey:
-    """Reverse of :func:`_object_key_to_string`.
-
-    Expects
-    ``<model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>[@<cache_salt>]``.
-
-    Raises:
-        ValueError: ``name`` does not match the expected format.
-    """
-    parts = name.split("@")
-    if len(parts) == 4:
-        model_name, kv_rank_hex, object_group_id_hex, chunk_hash_hex = parts
-        cache_salt = ""
-    elif len(parts) == 5:
-        (
-            model_name,
-            kv_rank_hex,
-            object_group_id_hex,
-            chunk_hash_hex,
-            cache_salt,
-        ) = parts
-    else:
-        raise ValueError(f"unparsable S3 object name {name!r}: wrong field count")
-    try:
-        kv_rank = int(kv_rank_hex, 16)
-    except ValueError as exc:
-        raise ValueError(
-            f"unparsable S3 object name {name!r}: bad kv_rank {kv_rank_hex!r}"
-        ) from exc
-    try:
-        object_group_id = int(object_group_id_hex, 16)
-    except ValueError as exc:
-        raise ValueError(
-            f"unparsable S3 object name {name!r}: "
-            f"bad object_group_id {object_group_id_hex!r}"
-        ) from exc
-    try:
-        chunk_hash = bytes.fromhex(chunk_hash_hex)
-    except ValueError as exc:
-        raise ValueError(
-            f"unparsable S3 object name {name!r}: bad chunk_hash {chunk_hash_hex!r}"
-        ) from exc
-    return ObjectKey(
-        chunk_hash=chunk_hash,
-        model_name=model_name,
-        kv_rank=kv_rank,
-        object_group_id=object_group_id,
-        cache_salt=cache_salt,
-    )
+    """Recover an ObjectKey from its L2 storage name."""
+    return decode_storage_key(name)
 
 
 def _parse_list_response_xml(
@@ -166,26 +128,8 @@ def _parse_list_response_xml(
 
 
 def _object_key_to_string(key: ObjectKey) -> str:
-    """Serialize an ObjectKey to a deterministic S3 object name.
-
-    Unsalted::
-
-        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>
-
-    Salted (trailing ``cache_salt``)::
-
-        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
-
-    ``@`` in ``model_name`` and ``cache_salt`` is rejected by
-    ``ObjectKey.__post_init__``, so the format is unambiguous.
-    """
-    base = (
-        f"{key.model_name}@{key.kv_rank:08x}"
-        f"@{key.object_group_id:x}@{key.chunk_hash.hex()}"
-    )
-    if key.cache_salt:
-        return f"{base}@{key.cache_salt}"
-    return base
+    """Return the shared L2 storage key."""
+    return encode_storage_key(key)
 
 
 def _format_safe_path(key_str: str) -> str:
@@ -438,6 +382,12 @@ class S3L2Adapter(L2AdapterInterface):
     connection-class errors, ``connection_disabled`` is set; all
     subsequent submits short-circuit and record failure without
     touching S3.
+
+    Load sizes: a key counts as loaded only when the object delivered
+    exactly ``obj.get_size()`` bytes. A GET body that would run past the
+    destination is refused before the copy, and a shorter object is a
+    miss, as in the valkey and fs adapters. The object on S3 is left
+    alone; the adapter only forgets its cached size for that key.
     """
 
     max_connection_failures = 3
@@ -775,6 +725,10 @@ class S3L2Adapter(L2AdapterInterface):
             "max_capacity_bytes": usage.total_capacity_bytes,
         }
 
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the memory tags of this adapter: remote storage."""
+        return MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
+
     def close(self) -> None:
         if self._closed:
             return
@@ -870,10 +824,30 @@ class S3L2Adapter(L2AdapterInterface):
     def _get_request(self, key_str: str, mem_obj: MemoryObj):
         req = self._make_request("GET", key_str)
         data_ptr = mem_obj.data_ptr
+        capacity = mem_obj.get_size()
+        # Bytes copied into ``mem_obj`` so far. ``_execute_load`` compares
+        # the total with the destination size once the transfer is over.
+        # The comparison cannot live in ``on_done``: the CRT completes
+        # ``finished_future`` (which ``_execute_load`` awaits) before it
+        # invokes ``on_done``, so an error raised there arrives too late
+        # to change the load result.
+        progress = {"received": 0}
 
         def on_body(chunk, offset, **kwargs):
+            n = len(chunk)
+            if offset < 0 or offset + n > capacity:
+                # Never write outside the caller's buffer. Raising here
+                # makes the CRT abort the transfer and surface the error
+                # through ``finished_future``, so the key is reported as
+                # a miss and nothing past ``capacity`` is touched.
+                raise RuntimeError(
+                    f"S3 GET for {key_str} returned bytes outside the "
+                    f"destination buffer: offset={offset} len={n} "
+                    f"capacity={capacity}"
+                )
             # Write chunk into the caller-provided MemoryObj buffer.
-            ctypes.memmove(data_ptr + offset, chunk, len(chunk))
+            ctypes.memmove(data_ptr + offset, chunk, n)
+            progress["received"] += n
 
         def on_done(error=None, status_code=None, **kwargs):
             ok = (status_code in (200, 206)) or (status_code is None and error is None)
@@ -891,7 +865,7 @@ class S3L2Adapter(L2AdapterInterface):
             credential_provider=self._credentials_provider,
             region=self._region,
         )
-        return s3_req
+        return s3_req, progress
 
     def _put_request(self, key_str: str, mem_obj: MemoryObj):
         stream = MemoryViewStream(mem_obj.byte_array)
@@ -1196,14 +1170,34 @@ class S3L2Adapter(L2AdapterInterface):
     ) -> None:
         bitmap = Bitmap(len(keys))
         futures = []
-        launched_indices = []
+        # (index, key string, expected byte count, GET progress) per GET.
+        launched: list[tuple[int, str, int, dict]] = []
 
         for i, (key, obj) in enumerate(zip(keys, objects, strict=True)):
             try:
                 key_str = _object_key_to_string(key)
-                s3_req = self._get_request(key_str, obj)
+                expected = obj.get_size()
+                with self._lock:
+                    cached_size = self._object_size_cache.get(key_str)
+                if cached_size is not None and cached_size != expected:
+                    # The object on S3 is not the size this load expects:
+                    # written under another layout or serde, or truncated.
+                    # Reading it would fill the destination with the wrong
+                    # bytes, so report a miss and forget the cached size so
+                    # that a later lookup asks S3 again.
+                    logger.warning(
+                        "S3L2Adapter: object %s is %d bytes on S3 but the "
+                        "load expects %d; treating it as a miss",
+                        key_str,
+                        cached_size,
+                        expected,
+                    )
+                    with self._lock:
+                        self._object_size_cache.pop(key_str, None)
+                    continue
+                s3_req, progress = self._get_request(key_str, obj)
                 futures.append(asyncio.wrap_future(s3_req.finished_future))
-                launched_indices.append(i)
+                launched.append((i, key_str, expected, progress))
             except Exception:
                 logger.exception("S3L2Adapter failed to launch GET")
 
@@ -1211,9 +1205,32 @@ class S3L2Adapter(L2AdapterInterface):
         last_error: Optional[str] = None
         any_success = False
 
-        for idx, result in zip(launched_indices, results, strict=True):
+        for (idx, key_str, expected, progress), result in zip(
+            launched, results, strict=True
+        ):
             if isinstance(result, Exception):
                 last_error = str(result)
+                # Whatever failed, the cached size is no longer trustworthy
+                # (the object may have grown or vanished): forget it so the
+                # next lookup asks S3 instead of launching the same GET.
+                with self._lock:
+                    self._object_size_cache.pop(key_str, None)
+                continue
+            received = progress["received"]
+            if received != expected:
+                # The transfer completed but delivered fewer bytes than the
+                # destination holds (more is rejected in ``on_body``). The
+                # buffer is only partly written, so this is a miss, as in
+                # the valkey adapter, not a hit with a stale tail.
+                logger.warning(
+                    "S3L2Adapter: GET for %s delivered %d bytes, expected %d; "
+                    "treating it as a miss",
+                    key_str,
+                    received,
+                    expected,
+                )
+                with self._lock:
+                    self._object_size_cache.pop(key_str, None)
                 continue
             bitmap.set(idx)
             any_success = True

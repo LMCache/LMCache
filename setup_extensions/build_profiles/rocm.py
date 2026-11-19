@@ -59,25 +59,48 @@ def _hipify_wrapper(source_names: list[str]) -> list[str]:
         is_pytorch_extension=True,
         hipify_extra_files_only=True,
     )
+    # torch's bundled hipify map predates the batched-copy API (CUDA 12.8),
+    # so it leaves these tokens untranslated. ROCm 7.x (HIP 7.15) provides
+    # hipMemcpyBatchAsync with the identical signature, so patch the hipified
+    # output directly for the tokens torch's map does not cover.
+    extra_hip_map = {
+        "cudaMemcpyBatchAsync": "hipMemcpyBatchAsync",
+        "cudaMemcpyAttributes": "hipMemcpyAttributes",
+        "cudaMemcpySrcAccessOrderStream": "hipMemcpySrcAccessOrderStream",
+        "cudaStreamPerThread": "hipStreamPerThread",
+    }
+    for patch_root, _patch_dirs, patch_files in os.walk(HIPIFY_OUT_DIR):
+        for patch_name in patch_files:
+            patch_path = Path(patch_root) / patch_name
+            try:
+                original = patch_path.read_text()
+            except (UnicodeDecodeError, OSError):
+                continue
+            patched = original
+            for cuda_token, hip_token in extra_hip_map.items():
+                patched = patched.replace(cuda_token, hip_token)
+            if patched != original:
+                patch_path.write_text(patched)
     hipified_sources: list[str] = []
+    unhipified: list[str] = []
     for source_name in source_names:
         s_abs = os.path.abspath(os.path.join(HIPIFY_OUT_DIR, source_name))
-        hipified_s_abs = (
-            hipify_result[s_abs].hipified_path
-            if (
-                s_abs in hipify_result
-                and hipify_result[s_abs].hipified_path is not None
-            )
-            else s_abs
-        )
+        result = hipify_result.get(s_abs)
+        hipified_s_abs = result.hipified_path if result is not None else None
+        if hipified_s_abs is None:
+            unhipified.append(source_name)
+            continue
         hipified_sources.append(
             os.path.relpath(hipified_s_abs, ROOT_DIR).replace(os.sep, "/")
         )
 
-    if len(hipified_sources) != len(source_names):
+    if unhipified:
+        # Returning the input path instead would hand setuptools the original
+        # CUDA source, so the ROCm build would compile CUDA under hipcc. The
+        # count check this replaces could never fire: the list gains exactly one
+        # entry per requested source, so the two lengths always matched.
         raise RuntimeError(
-            "Hipify failed: expected %d sources, got %d"
-            % (len(source_names), len(hipified_sources))
+            "Hipify did not yield a path for: %s" % ", ".join(unhipified)
         )
     return hipified_sources
 
@@ -124,10 +147,7 @@ class RocmProfile(BuildProfile):
                 "lmcache.cuda_ops",
                 sources=hip_sources,
                 extra_compile_args={
-                    "cxx": [
-                        "-O3",
-                        "-std=c++17",
-                    ],
+                    "cxx": ["-O3"],
                 },
                 include_dirs=[
                     CSRC_DIR,

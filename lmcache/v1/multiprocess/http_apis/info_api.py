@@ -7,8 +7,7 @@ server is up and what it is running:
 - ``GET /`` — static liveness payload (does not touch the engine).
 - ``GET /healthcheck`` — Kubernetes liveness/readiness probe.
 - ``GET /status`` — detailed internal state of all MP components.
-- ``GET /version``, ``/lmc_version``, ``/commit_id`` — version descriptors,
-  re-exposed from the shared ``internal_api_server.vllm`` version router.
+- ``GET /version``, ``/lmc_version``, ``/commit_id`` — version descriptors.
 """
 
 # Standard
@@ -19,13 +18,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 # First Party
-from lmcache.v1.internal_api_server.vllm.version_api import router as _version_router
+from lmcache import utils
 
 router = APIRouter()
-
-# Re-expose the shared version routes (/version, /lmc_version, /commit_id)
-# as part of the basic-info group.
-router.include_router(_version_router)
 
 
 @router.get("/")
@@ -74,3 +69,18 @@ async def status(request: Request) -> Any:
             content={"error": "engine not initialized"},
         )
     return engine.report_status()
+
+
+@router.get("/lmc_version")
+async def get_lmc_version():
+    return utils.VERSION
+
+
+@router.get("/commit_id")
+async def get_commit_id():
+    return utils.COMMIT_ID
+
+
+@router.get("/version")
+async def get_version():
+    return utils.get_version()

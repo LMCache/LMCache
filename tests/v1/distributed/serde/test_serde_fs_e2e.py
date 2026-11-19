@@ -33,7 +33,7 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2AdapterConfig
 from lmcache.v1.distributed.serde import SerdeConfig
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.platform import current_device_spec
 
 # Test helpers
@@ -134,6 +134,8 @@ class TestFp8SerdeFsRoundTrip:
             ),
             eviction_config=EvictionConfig(eviction_policy="LRU"),
             l2_adapter_config=L2AdaptersConfig(adapters=[fs_cfg]),  # type: ignore[list-item]
+            # The leak check expects loaded keys to leave L1 after the read.
+            prefetch_policy="skip_l1",
         )
 
         sm = StorageManager(sm_cfg)
@@ -156,7 +158,7 @@ class TestFp8SerdeFsRoundTrip:
             mem_obj = reserved[k]
             assert mem_obj.tensor is not None
             mem_obj.tensor.view(kv_shape).view(kv_dtype).copy_(orig)
-        sm.finish_write(keys)
+        sm.finish_write(list(reserved), l1_owners_of(reserved))
 
         # ---- Step 2: wait for L2 store to disk ----
         # The FS adapter writes one file per key (staged as "*.tmp" in the

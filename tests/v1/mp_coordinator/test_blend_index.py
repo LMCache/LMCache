@@ -4,6 +4,8 @@ discovery, token-exact verification, chunk lifecycle, and the key
 directory integration that drives it from token bindings."""
 
 # Standard
+from collections.abc import Mapping
+from dataclasses import replace
 import random
 import threading
 
@@ -36,6 +38,16 @@ def _content(*tokens: int) -> np.ndarray:
 
 def _index(probe_stride: int = 1) -> BlendIndex:
     return BlendIndex(chunk_size=CHUNK, probe_stride=probe_stride)
+
+
+def _counts(index: BlendIndex) -> tuple[int, int, int, int]:
+    stats = index.stats()
+    return (
+        stats.num_contents,
+        stats.num_chunks,
+        stats.num_claims,
+        stats.num_namespaces,
+    )
 
 
 def _tuples(matches) -> list[tuple[bytes, int, int]]:
@@ -177,6 +189,81 @@ def test_identical_content_under_two_prefixes_survives_one_eviction():
     assert _tuples(index.match(np.asarray([1, 2, 3, 4], dtype=np.uint64), NS)) == [
         (b"B", 512, 0)
     ]
+
+
+def test_stats_count_contents_chunks_claims_and_namespaces():
+    index = _index()
+    shared = _content(1, 2, 3, 4)
+    index.add(shared, b"A", token_offset=0, namespace=NS)
+    index.add(shared, b"A", token_offset=0, namespace=OTHER_NS)
+    index.add(shared, b"B", token_offset=512, namespace=NS)
+    index.add(_content(5, 6, 7, 8), b"C", token_offset=0, namespace=NS)
+
+    assert _counts(index) == (2, 3, 4, 2)
+
+
+def test_stats_follow_claim_and_chunk_removal():
+    index = _index()
+    shared = _content(1, 2, 3, 4)
+    index.add(shared, b"A", token_offset=0, namespace=NS)
+    index.add(shared, b"A", token_offset=0, namespace=OTHER_NS)
+    index.add(shared, b"B", token_offset=512, namespace=NS)
+
+    index.remove_claim(shared, b"A", OTHER_NS)
+    assert _counts(index) == (1, 2, 2, 1)
+
+    index.remove_chunk(shared, b"B")
+    assert _counts(index) == (1, 1, 1, 1)
+
+    index.remove_claim(shared, b"A", NS)
+    assert _counts(index) == (0, 0, 0, 0)
+
+
+def test_releasing_a_claim_the_namespace_never_held_changes_nothing():
+    index = _index()
+    content = _content(1, 2, 3, 4)
+    index.add(content, b"A", token_offset=0, namespace=NS)
+
+    index.remove_claim(content, b"A", OTHER_NS)
+
+    assert _counts(index) == (1, 1, 1, 1)
+
+
+def test_stats_match_a_recount_after_random_mutations():
+    """The running totals behind stats() must equal a recount of what was
+    added and not yet removed, whatever the order of operations."""
+    rng = random.Random(7)
+    index = _index()
+    contents = [_content(c, c, c, c) for c in range(3)]
+    hashes = [b"H0", b"H1", b"H2", b"H3"]
+    namespaces = [NS, OTHER_NS, BlendNamespace(model_name="third", world_size=2)]
+    # chunk hash -> (content position, claiming namespaces): the model.
+    held: dict[bytes, tuple[int, set[BlendNamespace]]] = {}
+    for _ in range(500):
+        chunk_hash = rng.choice(hashes)
+        namespace = rng.choice(namespaces)
+        op = rng.random()
+        if op < 0.5:
+            position = held[chunk_hash][0] if chunk_hash in held else rng.randrange(3)
+            index.add(contents[position], chunk_hash, 0, namespace)
+            held.setdefault(chunk_hash, (position, set()))[1].add(namespace)
+        elif chunk_hash in held and op < 0.85:
+            position, claimants = held[chunk_hash]
+            index.remove_claim(contents[position], chunk_hash, namespace)
+            claimants.discard(namespace)
+            if not claimants:
+                del held[chunk_hash]
+        elif chunk_hash in held:
+            index.remove_chunk(contents[held[chunk_hash][0]], chunk_hash)
+            del held[chunk_hash]
+
+        expected = (
+            len({position for position, _ in held.values()}),
+            len(held),
+            sum(len(claimants) for _, claimants in held.values()),
+            len({ns for _, claimants in held.values() for ns in claimants}),
+        )
+        assert _counts(index) == expected
 
 
 def test_content_of_the_wrong_length_is_not_indexed():
@@ -333,6 +420,7 @@ def _key(
     world_size: int = 1,
     model_name: str = "m",
     cache_salt: str = "",
+    tags: Mapping[str, str] | None = None,
 ) -> ObjectKey:
     """Build a key the way a server would, so ``kv_rank`` carries the
     world size the namespace is derived from."""
@@ -346,6 +434,7 @@ def _key(
             local_rank=rank,
         ),
         cache_salt=cache_salt,
+        tags=tags or {},
     )
 
 
@@ -410,41 +499,35 @@ def test_deleting_the_last_placement_removes_it_from_fragment_matching():
     assert directory.blend_stats().num_contents == 0
 
 
-def test_chunk_stays_matchable_while_any_rank_holds_it():
-    """Ranks of one namespace hold the same bytes, so the claim survives
-    until the last of them is deleted."""
+def test_chunk_stops_matching_once_any_rank_has_no_copy():
+    """Each rank holds a different part of the chunk, so it is loadable
+    only with all of them: the claim goes when one rank loses its last
+    copy and returns only when that rank is stored again."""
     directory = _directory()
     namespace = BlendNamespace(model_name="m", world_size=2)
-    directory.consume(
-        _store(
-            [_key(1, rank=0, world_size=2), _key(1, rank=1, world_size=2)],
-            [10, 11, 12, 13],
-            seq=1,
-        )
-    )
-    directory.consume(
-        _store(
-            [_key(1, rank=0, world_size=2)],
-            [],
-            seq=2,
-            event_type=CacheEventType.DELETE,
-        )
-    )
+    rank0, rank1 = _key(1, rank=0, world_size=2), _key(1, rank=1, world_size=2)
+    tokens = [10, 11, 12, 13]
+    query = np.asarray(tokens, dtype=np.uint64)
+    matched = [(rank0.chunk_hash, 0, 0)]
+    stored = _store([rank0, rank1], tokens, seq=1)
+    directory.consume(stored)
+    directory.consume(replace(stored, instance_id="node-b"))
 
-    query = np.asarray([10, 11, 12, 13], dtype=np.uint64)
-    assert _tuples(directory.blend_match(query, namespace)) == [
-        (_key(1).chunk_hash, 0, 0)
-    ]
+    # One instance evicts rank 1; the other still holds it.
+    delete = _store([rank1], [], seq=2, event_type=CacheEventType.DELETE)
+    directory.consume(delete)
+    assert _tuples(directory.blend_match(query, namespace)) == matched
 
-    directory.consume(
-        _store(
-            [_key(1, rank=1, world_size=2)],
-            [],
-            seq=3,
-            event_type=CacheEventType.DELETE,
-        )
-    )
+    # Rank 1 has no copy left.
+    directory.consume(replace(delete, instance_id="node-b"))
     assert directory.blend_match(query, namespace) == []
+
+    # Storing the rank that stayed does not bring the chunk back.
+    directory.consume(_store([rank0], tokens, seq=3))
+    assert directory.blend_match(query, namespace) == []
+
+    directory.consume(_store([rank1], [], seq=4))
+    assert _tuples(directory.blend_match(query, namespace)) == matched
 
 
 def test_restoring_a_chunk_with_new_content_retires_the_old_fingerprint():
@@ -686,8 +769,9 @@ def test_remove_chunk_retires_every_namespace_at_once():
         BlendNamespace(model_name="other", world_size=1),
         BlendNamespace(model_name="m", cache_salt="tenant-b", world_size=1),
         BlendNamespace(model_name="m", world_size=2),
+        BlendNamespace(model_name="m", tags={"adapter": "b"}),
     ],
-    ids=["other-model", "other-salt", "other-world-size"],
+    ids=["other-model", "other-salt", "other-world-size", "other-tags"],
 )
 def test_directory_does_not_offer_matches_across_namespaces(
     requester: BlendNamespace,

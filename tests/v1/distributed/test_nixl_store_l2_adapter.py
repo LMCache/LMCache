@@ -13,7 +13,6 @@ import os
 import select
 import shutil
 import tempfile
-import time
 
 # Third Party
 import pytest
@@ -67,6 +66,7 @@ class _RecordingListener(L2AdapterListener):
 # First Party
 from lmcache.v1.memory_management import (  # noqa: E402
     MemoryFormat,
+    MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
@@ -146,13 +146,31 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
     return False
 
 
+def _drain_scheduled_unlocks(adpt: NixlStoreL2Adapter, barrier_key: ObjectKey) -> None:
+    """Deterministically wait until previously scheduled unlocks have run.
+
+    Event-loop callbacks run FIFO, so an eventfd-signaled lookup of a
+    never-stored ``barrier_key`` finishes strictly after every unlock.
+    """
+    task_id = adpt.submit_lookup_and_lock_task([barrier_key], {0: _EMPTY_LAYOUT})
+    assert wait_for_event_fd(adpt.get_lookup_and_lock_event_fd(), timeout=5.0)
+    bitmap = adpt.query_lookup_and_lock_result(task_id)
+    assert bitmap is not None
+    assert not bitmap.test(0)
+
+
 # =============================================================================
 # Test Fixtures
 # =============================================================================
 
 
 @pytest.fixture
-def adapter():
+def pages_per_file():
+    return 1
+
+
+@pytest.fixture
+def adapter(pages_per_file):
     """Create a NixlStoreL2Adapter with POSIX backend and an initialized
     memory buffer.
 
@@ -172,7 +190,11 @@ def adapter():
 
     config = NixlStoreL2AdapterConfig(
         backend="POSIX",
-        backend_params={"file_path": tmp_dir, "use_direct_io": "false"},
+        backend_params={
+            "file_path": tmp_dir,
+            "file_size": str(PAGE_SIZE * pages_per_file),
+            "use_direct_io": "false",
+        },
         pool_size=POOL_SIZE,
     )
     adapter = NixlStoreL2Adapter(config, l1_memory)
@@ -365,6 +387,114 @@ class TestStoreInterface:
         assert wait_for_event_fd(adpt.get_store_event_fd())
         retry_result = adpt.pop_completed_store_tasks()[retry_task_id]
         assert retry_result.is_successful()
+
+    def test_store_fails_atomically_when_batch_exceeds_pool(
+        self, adapter: tuple[NixlStoreL2Adapter, torch.Tensor]
+    ) -> None:
+        """Pool exhaustion should roll back every allocation in the batch."""
+        adpt, buf = adapter
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+        initial_status = adpt.report_status()
+
+        keys = [create_object_key(i) for i in range(POOL_SIZE + 1)]
+        objs: list[MemoryObj] = [
+            create_memory_obj(buf, page_index=i % NUM_BUFFER_PAGES)
+            for i in range(POOL_SIZE + 1)
+        ]
+        store_fd = adpt.get_store_event_fd()
+
+        task_id = adpt.submit_store_task(keys, objs)
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+
+        result = adpt.pop_completed_store_tasks()[task_id]
+        assert not result.is_successful()
+        assert result.bytes_transferred() == 0
+        assert (
+            adpt.report_status()["pool_free_slots"] == initial_status["pool_free_slots"]
+        )
+        assert adpt.get_usage().total_bytes_used == 0
+        assert listener.stored == []
+
+        lookup_fd = adpt.get_lookup_and_lock_event_fd()
+        lookup_task_id = adpt.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
+        assert bitmap is not None
+        for index in range(len(keys)):
+            assert bitmap.test(index) is False
+
+    def test_store_fails_when_pool_is_full(
+        self, adapter: tuple[NixlStoreL2Adapter, torch.Tensor]
+    ) -> None:
+        """Pool exhaustion should preserve existing data and accounting."""
+        adpt, buf = adapter
+        existing_key = create_object_key(1)
+        existing_obj = create_memory_obj(buf, page_index=0, num_pages=POOL_SIZE)
+        store_fd = adpt.get_store_event_fd()
+
+        initial_task_id = adpt.submit_store_task([existing_key], [existing_obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+        initial_result = adpt.pop_completed_store_tasks()[initial_task_id]
+        assert initial_result.is_successful()
+
+        status_before = adpt.report_status()
+        usage_before = adpt.get_usage()
+        new_key = create_object_key(2)
+        new_obj = create_memory_obj(buf, page_index=0)
+
+        task_id = adpt.submit_store_task([new_key], [new_obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+
+        result = adpt.pop_completed_store_tasks()[task_id]
+        assert not result.is_successful()
+        assert result.bytes_transferred() == 0
+        assert (
+            adpt.report_status()["pool_free_slots"] == status_before["pool_free_slots"]
+        )
+        assert adpt.get_usage() == usage_before
+
+        lookup_fd = adpt.get_lookup_and_lock_event_fd()
+        lookup_task_id = adpt.submit_lookup_and_lock_task(
+            [existing_key, new_key], {0: _EMPTY_LAYOUT}
+        )
+        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
+        assert bitmap is not None
+        assert bitmap.test(0) is True
+        assert bitmap.test(1) is False
+        adpt.submit_unlock([existing_key])
+
+    def test_store_existing_keys_succeeds_without_allocating(
+        self, adapter: tuple[NixlStoreL2Adapter, torch.Tensor]
+    ) -> None:
+        """A no-op store should succeed without consuming pool slots."""
+        adpt, buf = adapter
+        key = create_object_key(1)
+        obj = create_memory_obj(buf, page_index=0)
+        store_fd = adpt.get_store_event_fd()
+
+        initial_task_id = adpt.submit_store_task([key], [obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+        initial_result = adpt.pop_completed_store_tasks()[initial_task_id]
+        assert initial_result.is_successful()
+
+        listener = _RecordingListener()
+        adpt.register_listener(listener)
+        status_before = adpt.report_status()
+        usage_before = adpt.get_usage()
+
+        task_id = adpt.submit_store_task([key], [obj])
+        assert wait_for_event_fd(store_fd, timeout=5.0)
+
+        result = adpt.pop_completed_store_tasks()[task_id]
+        assert result.is_successful()
+        assert result.bytes_transferred() == 0
+        assert (
+            adpt.report_status()["pool_free_slots"] == status_before["pool_free_slots"]
+        )
+        assert adpt.get_usage() == usage_before
+        assert listener.stored == []
 
 
 # =============================================================================
@@ -1020,6 +1150,32 @@ class TestReportStatus:
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    @pytest.mark.parametrize("pages_per_file", [1, 4])
+    def test_report_status_counts_slots_for_multi_page_files(
+        self, pages_per_file, adapter
+    ):
+        """pool_free_slots should be no larger than pool_size"""
+        adpt, buffer = adapter
+
+        # Fresh adapter
+        status = adpt.report_status()
+        assert status["pool_size"] == status["pool_free_slots"]
+
+        obj_size_pages = 2
+        key = create_object_key(42)
+        obj = create_memory_obj(buffer, page_index=0, num_pages=obj_size_pages)
+
+        # Adapter after storing one object occupying two pages
+        _store_and_wait(adpt, key, obj)
+
+        status = adpt.report_status()
+        assert status["pool_size"] == status["pool_free_slots"] + obj_size_pages
+
+        # Adapter after deleting the objects
+        adpt.delete([key])
+        status = adpt.report_status()
+        assert status["pool_size"] == status["pool_free_slots"]
+
 
 # =============================================================================
 # Eviction Interface Tests
@@ -1123,9 +1279,10 @@ class TestEvictionInterface:
         adpt.delete([key])
         assert adpt.report_status()["stored_object_count"] == 1
 
-        # Unpin, then delete should succeed
+        # Unpin, then barrier on the event loop so the queued unlock
+        # has applied before the retry.
         adpt.submit_unlock([key])
-        time.sleep(0.1)  # let the unlock execute in the event loop
+        _drain_scheduled_unlocks(adpt, create_object_key(999999))
         adpt.delete([key])
         assert adpt.report_status()["stored_object_count"] == 0
 

@@ -2,8 +2,10 @@
 """Tests for ``lmcache describe kvcache``."""
 
 # Standard
+from argparse import Namespace
+from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Thread
+from threading import Event, Thread
 from unittest.mock import patch
 import json
 
@@ -12,6 +14,7 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.describe import (
+    DescribeCommand,
     DescribeError,
     fetch_health,
     fetch_json,
@@ -101,8 +104,13 @@ class TestNormalizeUrl:
     def test_preserves_http(self):
         assert normalize_url("http://localhost:8000") == "http://localhost:8000"
 
-    def test_preserves_https(self):
-        assert normalize_url("https://host:443") == "https://host:443"
+    @pytest.mark.parametrize(
+        "scheme", ["http", "https", "HTTP", "HTTPS", "HtTp", "hTtPs"]
+    )
+    def test_preserves_scheme_case(self, scheme: str) -> None:
+        """Recognize HTTP(S) schemes without changing case-sensitive URL paths."""
+        url = f"{scheme}://Example.com:443/CaseSensitive"
+        assert normalize_url(url) == url
 
     def test_strips_trailing_slash(self):
         assert normalize_url("http://host:8000/") == "http://host:8000"
@@ -385,6 +393,95 @@ class TestFetchJson:
                 fetch_json(f"http://127.0.0.1:{port}/status")
         finally:
             server.server_close()
+
+    @pytest.mark.parametrize("status", [200, 503])
+    @pytest.mark.parametrize("target", [None, "kvcache", "engine"])
+    def test_truncated_response(
+        self, status: int, target: str | None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        class Handler(_MockHandler):
+            def do_GET(self) -> None:
+                self.send_response(status)
+                self.send_header("Content-Length", "100")
+                self.end_headers()
+                self.wfile.write(b'{"ok":')
+
+        with HTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = Thread(target=server.handle_request, daemon=True)
+            thread.start()
+            try:
+                url = f"http://127.0.0.1:{server.server_port}"
+                if target is None:
+                    with pytest.raises(
+                        DescribeError, match="Incomplete HTTP response"
+                    ) as exc:
+                        fetch_json(f"{url}/status")
+                    assert isinstance(exc.value.__cause__.__cause__, IncompleteRead)
+                else:
+                    with pytest.raises(SystemExit) as exit_info:
+                        DescribeCommand().execute(Namespace(target=target, url=url))
+                    assert exit_info.value.code == 1
+                    stderr = capsys.readouterr().err
+                    assert "Incomplete HTTP response" in stderr
+                    assert url in stderr
+                    assert "Traceback" not in stderr
+            finally:
+                thread.join(timeout=5)
+
+    def test_503_body_timeout(self) -> None:
+        """An unhealthy server can stall after sending its response headers."""
+        release = Event()
+
+        class Handler(_MockHandler):
+            def do_GET(self) -> None:
+                self.send_response(503)
+                self.send_header("Content-Length", "100")
+                self.end_headers()
+                self.wfile.flush()
+                release.wait(timeout=5)
+
+        with HTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = Thread(target=server.handle_request, daemon=True)
+            thread.start()
+            try:
+                url = f"http://127.0.0.1:{server.server_port}/status"
+                with pytest.raises(DescribeError) as exc:
+                    fetch_json(url, timeout=1)
+                assert url in str(exc.value)
+                assert isinstance(exc.value.__cause__.__cause__, TimeoutError)
+            finally:
+                release.set()
+                thread.join(timeout=5)
+
+    @pytest.mark.parametrize("target", [None, "kvcache", "engine"])
+    def test_503_invalid_utf8(
+        self, target: str | None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An undecodable error body must reach the normal CLI error handler."""
+
+        class Handler(_MockHandler):
+            response_code = 503
+            response_body = b"\xff"
+
+        with HTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = Thread(target=server.handle_request, daemon=True)
+            thread.start()
+            try:
+                url = f"http://127.0.0.1:{server.server_port}"
+                if target is None:
+                    with pytest.raises(DescribeError) as exc:
+                        fetch_json(f"{url}/status")
+                    assert url in str(exc.value)
+                    assert isinstance(exc.value.__cause__.__cause__, UnicodeDecodeError)
+                else:
+                    with pytest.raises(SystemExit) as exc_info:
+                        DescribeCommand().execute(Namespace(target=target, url=url))
+                    assert exc_info.value.code == 1
+                    stderr = capsys.readouterr().err
+                    assert url in stderr
+                    assert "Traceback" not in stderr
+            finally:
+                thread.join(timeout=5)
 
     def test_invalid_json(self):
         handler = type(

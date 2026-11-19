@@ -12,7 +12,7 @@ either at module scope would make the whole CLI unusable on that install.
 """
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 
@@ -32,12 +32,17 @@ class Sample:
         documents: Passages retrieved for this question, in dataset order.
         question: The question to ask about ``documents``.
         answers: Gold answers; more than one means alternate phrasings.
+        evidence_indices: Indices into ``documents`` that the dataset marks
+            as supporting the answer (MuSiQue ``is_supporting``, HotpotQA
+            ``supporting_facts``, or a ``gold`` flag in
+            ``context_metadata``).  Empty when the dataset marks none.
     """
 
     sample_id: str
     documents: list[str]
     question: str
     answers: list[str]
+    evidence_indices: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -224,7 +229,8 @@ def _extract_documents(record: dict[str, object]) -> list[str]:
     """Extract this record's passages, whichever schema it uses.
 
     Recognizes MuSiQue's ``paragraphs``, the CacheBlend-style ``ctxs`` /
-    ``contexts``, and HotpotQA's ``context``.
+    ``contexts``, the RAGAS-style ``retrieved_contexts``, and HotpotQA's
+    ``context``.
 
     Args:
         record: One raw dataset record.
@@ -236,7 +242,9 @@ def _extract_documents(record: dict[str, object]) -> list[str]:
     if isinstance(paragraphs, list) and paragraphs:
         return [_passage_text(p) for p in paragraphs]
 
-    passages = record.get("ctxs") or record.get("contexts")
+    passages = (
+        record.get("ctxs") or record.get("contexts") or record.get("retrieved_contexts")
+    )
     if isinstance(passages, list) and passages:
         return [_passage_text(p) for p in passages]
 
@@ -258,6 +266,8 @@ def _extract_answers(record: dict[str, object]) -> list[str]:
     raw = record.get("answers")
     if raw is None:
         raw = record.get("answer")
+    if raw is None:
+        raw = record.get("reference")
 
     answers: list[str] = []
     items = raw if isinstance(raw, list) else [raw]
@@ -267,11 +277,83 @@ def _extract_answers(record: dict[str, object]) -> list[str]:
         elif item is not None:
             answers.append(str(item))
 
-    aliases = record.get("answer_aliases")
-    if isinstance(aliases, list):
-        answers.extend(str(a) for a in aliases)
+    extra = record.get("extra")
+    for aliases in (
+        record.get("answer_aliases"),
+        extra.get("answer_aliases") if isinstance(extra, dict) else None,
+    ):
+        if isinstance(aliases, list):
+            answers.extend(str(a) for a in aliases)
 
-    return [a for a in (answer.strip() for answer in answers) if a]
+    unique = dict.fromkeys(a for a in (answer.strip() for answer in answers) if a)
+    return list(unique)
+
+
+def _supporting_titles(record: dict[str, object]) -> set[str]:
+    """Return the passage titles HotpotQA's ``supporting_facts`` names.
+
+    Handles the Parquet struct of parallel ``title``/``sent_id`` lists and the
+    official JSON's ``[title, sentence_index]`` pairs.
+    """
+    facts = record.get("supporting_facts")
+    if isinstance(facts, dict):
+        titles = facts.get("title") or []
+        return {str(t) for t in titles} if isinstance(titles, list) else set()
+    if isinstance(facts, list):
+        return {
+            str(fact[0]) for fact in facts if isinstance(fact, (list, tuple)) and fact
+        }
+    return set()
+
+
+def _context_titles(record: dict[str, object]) -> list[str]:
+    """Return one title per HotpotQA ``context`` passage, in passage order."""
+    context = record.get("context")
+    if isinstance(context, dict):
+        titles = context.get("title") or []
+        return [str(t) for t in titles] if isinstance(titles, list) else []
+    if isinstance(context, list):
+        return [
+            str(entry[0])
+            for entry in context
+            if isinstance(entry, (list, tuple)) and len(entry) == 2
+        ]
+    return []
+
+
+def _extract_evidence(record: dict[str, object]) -> list[int]:
+    """Return indices of the passages this record marks as evidence.
+
+    Indices refer to the passage list :func:`_extract_documents` returns,
+    before empty passages are dropped.
+
+    Args:
+        record: One raw dataset record.
+
+    Returns:
+        Sorted passage indices; empty when the record marks none.
+    """
+    paragraphs = record.get("paragraphs")
+    if isinstance(paragraphs, list) and paragraphs:
+        return [
+            i
+            for i, p in enumerate(paragraphs)
+            if isinstance(p, dict) and bool(p.get("is_supporting"))
+        ]
+
+    metadata = record.get("context_metadata")
+    if isinstance(metadata, list) and metadata:
+        return [
+            i
+            for i, m in enumerate(metadata)
+            if isinstance(m, dict) and m.get("gold") is True
+        ]
+
+    supporting = _supporting_titles(record)
+    if supporting:
+        return [i for i, t in enumerate(_context_titles(record)) if t in supporting]
+
+    return []
 
 
 def load_samples(path: str) -> list[Sample]:
@@ -297,8 +379,16 @@ def load_samples(path: str) -> list[Sample]:
     for index, record in enumerate(records):
         if not isinstance(record, dict):
             continue
-        documents = [doc for doc in _extract_documents(record) if doc]
-        question = str(record.get("question") or record.get("query") or "").strip()
+        raw_documents = _extract_documents(record)
+        kept = [i for i, doc in enumerate(raw_documents) if doc]
+        documents = [raw_documents[i] for i in kept]
+        evidence = set(_extract_evidence(record))
+        question = str(
+            record.get("question")
+            or record.get("query")
+            or record.get("user_input")
+            or ""
+        ).strip()
         answers = _extract_answers(record)
         if not documents or not question or not answers:
             continue
@@ -309,13 +399,17 @@ def load_samples(path: str) -> list[Sample]:
                 documents=documents,
                 question=question,
                 answers=answers,
+                evidence_indices=[
+                    new for new, old in enumerate(kept) if old in evidence
+                ],
             )
         )
 
     if not samples:
         raise ValueError(
             f"{path}: no usable QA samples found. Records need passages "
-            f"(paragraphs/ctxs/context), a question, and gold answers."
+            f"(paragraphs/ctxs/retrieved_contexts/context), a question, and "
+            f"gold answers."
         )
 
     logger.info("Loaded %d QA samples from %s", len(samples), path)

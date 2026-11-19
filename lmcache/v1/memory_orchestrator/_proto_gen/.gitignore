@@ -1,0 +1,5 @@
+# Runtime bindings and unused type stubs are generated during build/test.
+*_pb2.py
+*_pb2.pyi
+!memory_orchestrator_pb2.pyi
+*_pb2_grpc.py

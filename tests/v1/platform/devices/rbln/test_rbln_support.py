@@ -134,13 +134,13 @@ def test_detect_device_selects_rbln_when_forced(
 
 
 def test_handle_transfer_is_unavailable() -> None:
-    """RBLN opts out of the base class' permissive default.
+    """RBLN cannot serve the LMCache-driven path.
 
     ``torch.rbln`` exposes no ``Event`` type, so ``mp_transfer_mode=
     lmcache_driven`` must fail at its documented validation point.
     """
-    assert DeviceSpec().is_handle_transfer_available() is True
-    assert RblnDeviceSpec().is_handle_transfer_available() is False
+    assert DeviceSpec().is_lmcache_driven_available() is False
+    assert RblnDeviceSpec().is_lmcache_driven_available() is False
 
 
 def test_no_ipc_wrapper_and_no_event_backend() -> None:

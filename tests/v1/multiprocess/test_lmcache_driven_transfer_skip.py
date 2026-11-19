@@ -9,10 +9,9 @@
 """
 
 # Standard
-from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import cast
-from unittest.mock import MagicMock
+from typing import Any, cast
+from unittest.mock import MagicMock, call
 
 # Third Party
 import pytest
@@ -145,6 +144,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
         get_attn_desc=lambda: SimpleNamespace(
             num_chunks_in_sw=num_chunks_in_sw, group_kinds=tuple(group_kinds)
         ),
+        object_groups=[],
     )
     cache_context = MagicMock()
     cache_context.kv_layer_groups_manager = kvlgm
@@ -162,37 +162,38 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
         [f"g{g}c{c}" for c in range(num_chunks)] for g in range(num_object_groups)
     ]
     ctx = MagicMock()
+    ctx.get_read_owners.return_value = None
     ctx.chunk_size = 256
     ctx.null_block_id = 0
     ctx.resolve_obj_keys.return_value = obj_keys
 
     read_calls: list[list[str]] = []
 
-    @contextmanager
-    def fake_read(keys):
+    def fake_read(keys, l1_owners=None):
         read_calls.append(list(keys))
-        yield [MagicMock(get_size=MagicMock(return_value=10)) for _ in keys]
+        return list(keys), [
+            MagicMock(get_size=MagicMock(return_value=10)) for _ in keys
+        ]
 
-    ctx.storage_manager.read_prefetched_results = MagicMock(side_effect=fake_read)
+    ctx.storage_manager.unsafe_read = MagicMock(side_effect=fake_read)
     module._ctx = ctx
 
     transfer_calls: list[tuple[int, list]] = []
 
     def fake_transfer(
-        cache_context,
         block_ids,
         memory_objs,
+        *,
         object_group_id,
         batch_size,
         skip_first_n_tokens,
         direction,
-        *,
         transfer_key,
         block_ids_host=(),
     ):
         transfer_calls.append((object_group_id, list(memory_objs)))
 
-    monkeypatch.setattr(mod, "transfer_kv_per_object_group", fake_transfer)
+    cache_context.transfer_object_group.side_effect = fake_transfer
     monkeypatch.setattr(mod, "downsample_and_stage_block_ids", lambda cc, b: b)
     monkeypatch.setattr(mod, "submit_callback_to_stream", lambda *a, **k: None)
     monkeypatch.setattr(mod, "torch_dev", MagicMock())
@@ -210,7 +211,10 @@ def _make_checkpoint_module(
     context.kv_layer_groups_manager.get_attn_desc = lambda: SimpleNamespace(
         num_chunks_in_sw=[-1, 1], group_kinds=("attention", "recurrent")
     )
-    module.get_and_touch_context_entry(1).cache_context = context
+    entry = module.get_and_touch_context_entry(1)
+    # Keep recording the copies made through the replacement context.
+    context.transfer_object_group = entry.cache_context.transfer_object_group
+    entry.cache_context = context
     module.context.chunk_size = 2
     module.context.null_block_id = -1
     module.context.session_manager.get.return_value = None
@@ -229,7 +233,7 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
 ) -> None:
     module, context, _reads, transfers = _make_checkpoint_module(monkeypatch)
     _handle, ok = module.store(
-        SimpleNamespace(request_id="req", worker_id=1),
+        SimpleNamespace(request_id="req", worker_id=1, has_unfull_chunk=_no_unfull),
         1,
         [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
         b"producer",
@@ -249,6 +253,34 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
     ]
 
 
+def test_store_skip_chunks_drops_caller_masked_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller-masked chunk (blend ``--enable-dedup-content-kv``) is never
+    reserved in any object group and reports False in the stored mask."""
+    module, _context, _reads, _transfers = _make_checkpoint_module(monkeypatch)
+    key: Any = SimpleNamespace(
+        request_id="req", worker_id=1, has_unfull_chunk=_no_unfull
+    )
+    _handle, ok, mask = module.store_with_chunk_mask(
+        key,
+        1,
+        [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
+        b"producer",
+        skip_chunks=[False, True],
+    )
+    assert ok
+    reserved = [
+        call.args[0]
+        for call in cast(
+            MagicMock, module.context.storage_manager.reserve_write
+        ).call_args_list
+    ]
+    assert all("g0c1" not in keys and "g1c1" not in keys for keys in reserved)
+    assert ["g0c0"] in reserved
+    assert mask[1] is False
+
+
 def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
     # Group 0 = full attention (-1): whole prefix; group 1 = mamba window 1:
     # only the last chunk.
@@ -260,7 +292,9 @@ def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
     gpu_block_ids = [[1, 2, 3, 4, 5], [0, 0, 0, 0, 9]]
 
     _handle, ok = module.retrieve(
-        key=SimpleNamespace(request_id="req", cache_salt="salt"),
+        key=SimpleNamespace(
+            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+        ),
         instance_id=1,
         gpu_block_ids=gpu_block_ids,
         event_ipc_handle=b"x",
@@ -287,7 +321,9 @@ def test_retrieve_full_attention_only_reads_everything(monkeypatch):
         monkeypatch, num_chunks, num_chunks_in_sw=[-1]
     )
     _handle, ok = module.retrieve(
-        key=SimpleNamespace(request_id="req", cache_salt="salt"),
+        key=SimpleNamespace(
+            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+        ),
         instance_id=1,
         gpu_block_ids=[[1, 2, 3]],
         event_ipc_handle=b"x",
@@ -315,7 +351,9 @@ def test_retrieve_never_reads_aux_groups(monkeypatch):
     gpu_block_ids = [[0, 0, 7], [1, 2, 3], [9, 9, 9]]
 
     _handle, ok = module.retrieve(
-        key=SimpleNamespace(request_id="req", cache_salt="salt"),
+        key=SimpleNamespace(
+            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+        ),
         instance_id=1,
         gpu_block_ids=gpu_block_ids,
         event_ipc_handle=b"x",
@@ -326,3 +364,234 @@ def test_retrieve_never_reads_aux_groups(monkeypatch):
     # the aux group is read by NOBODY and transferred by nobody.
     assert read_calls == [["g0c2"], [f"g1c{c}" for c in range(3)]]
     assert [g for g, _ in transfer_calls] == [0, 1]
+
+
+def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):
+    module, reads, _ = _make_module(monkeypatch, 2, [-1, 1])
+    cache_context = module.get_and_touch_context_entry(1).cache_context
+    cache_context.hold_imported_event.return_value = 7
+    owners = {"g0c0": 10, "g0c1": 10, "g1c1": 20}
+    completion = [(10, ["g0c0", "g0c1"]), (20, ["g1c1"])]
+    module.context.get_read_owners.return_value = owners
+    module.context.storage_manager.prepare_read_completion.return_value = completion
+    callback = MagicMock()
+    monkeypatch.setattr(mod, "submit_callback_to_stream", callback)
+    cache_context.transfer_object_group.side_effect = RuntimeError(
+        "partly enqueued transfer"
+    )
+    _, ok = module.retrieve(
+        SimpleNamespace(
+            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+        ),
+        1,
+        [[1, 2], [0, 3]],
+        b"producer",
+    )
+    assert not ok
+    assert reads == [["g0c0", "g0c1"]]
+    module.context.storage_manager.prepare_read_completion.assert_called_once_with(
+        ["g0c0", "g0c1", "g1c1"], owners
+    )
+    assert callback.call_args_list == [
+        call(cache_context.cupy_stream, "release_imported_event", (1, 7)),
+        call(cache_context.cupy_stream, "finish_read_by_owner", completion),
+    ]
+    module.context.storage_manager.finish_read_prefetched.assert_not_called()
+
+
+# ------------------------------------------------------------------ #
+#  downsample_and_stage_block_ids (DSv4 sub-chunk SWA)
+# ------------------------------------------------------------------ #
+
+
+def _dsv4_swa_cache_context(chunk_tokens: int, sw_tokens: int, tpb: int):
+    """Fake context: slots_per_block == tpb so calculate_num_blocks = tokens/tpb."""
+
+    def calculate_num_blocks(num_tokens: int, kernel_group_idx: int) -> int:
+        del kernel_group_idx
+        return num_tokens // tpb
+
+    kgm = SimpleNamespace(
+        num_kernel_groups=1,
+        get_subchunk_sw_size_tokens=lambda kg: sw_tokens,
+    )
+    ctx = SimpleNamespace(
+        kv_layer_groups_manager=kgm,
+        lmcache_tokens_per_chunk=chunk_tokens,
+        calculate_num_blocks=calculate_num_blocks,
+        stage_block_ids=lambda ids: ids,
+    )
+    return ctx
+
+
+@pytest.mark.no_shared_allocator
+def test_downsample_keeps_last_window_of_each_chunk_dsv4_swa():
+    """DSv4 SWA: chunk 4096, window 128, tpb 32 → keep last 4 block ids / chunk."""
+    chunk, sw, tpb, n_chunks = 4096, 128, 32, 19
+    ctx = _dsv4_swa_cache_context(chunk, sw, tpb)
+    bpc = chunk // tpb  # 128
+    keep = sw // tpb  # 4
+    original = list(range(n_chunks * bpc))
+    out = mod.downsample_and_stage_block_ids(ctx, [list(original)])
+    assert len(out[0]) == n_chunks * keep
+    for c in range(n_chunks):
+        src = original[c * bpc : (c + 1) * bpc]
+        got = out[0][c * keep : (c + 1) * keep]
+        assert got == src[-keep:]
+    # Retrieve of the last object uses start_object_idx = n_chunks-1.
+    start = (n_chunks - 1) * keep
+    assert out[0][start:] == original[-keep:]
+
+
+@pytest.mark.no_shared_allocator
+def test_downsample_full_attention_keeps_every_block():
+    chunk, tpb, n_chunks = 4096, 128, 19
+    ctx = _dsv4_swa_cache_context(chunk, sw_tokens=chunk, tpb=tpb)
+    bpc = chunk // tpb
+    raw = [list(range(n_chunks * bpc))]
+    out = mod.downsample_and_stage_block_ids(ctx, [list(raw[0])])
+    assert out[0] == raw[0]
+
+
+# ------------------------------------------------------------------ #
+#  unfull chunk (store / retrieve in the same transaction)             #
+# ------------------------------------------------------------------ #
+
+
+def _unfull_key(**kwargs):
+    return SimpleNamespace(
+        request_id="req",
+        worker_id=1,
+        cache_salt="salt",
+        end=3,
+        has_unfull_chunk=lambda chunk_size: True,
+        **kwargs,
+    )
+
+
+def _make_unfull_store_module(monkeypatch, obj_keys):
+    """``obj_keys`` lists each object group's keys, its unfull chunk's last."""
+    module, context, _reads, _transfers = _make_checkpoint_module(monkeypatch)
+    module.context.resolve_obj_keys.return_value = [keys[:-1] for keys in obj_keys]
+    module.context.resolve_unfull_chunk_obj_keys.return_value = [
+        keys[-1] for keys in obj_keys
+    ]
+    reserved: list[tuple[list, bool]] = []
+
+    def reserve_write(keys, layout, is_temporary=False):
+        reserved.append((list(keys), is_temporary))
+        return {key: MagicMock(get_size=MagicMock(return_value=10)) for key in keys}
+
+    module.context.storage_manager.reserve_write.side_effect = reserve_write
+    unfull_transfers: list[tuple[int, list, list]] = []
+    monkeypatch.setattr(
+        mod,
+        "transfer_unfull_chunk",
+        lambda cc, block_ids, skips, leads, memory_obj, group, buffer, direction: (
+            unfull_transfers.append((group, list(block_ids), list(skips)))
+        ),
+    )
+    monkeypatch.setattr(mod, "get_unfull_chunk_layout_desc", lambda *a: object())
+    monkeypatch.setattr(mod, "get_unfull_chunk_staging_buffer", lambda *a: object())
+    return module, reserved, unfull_transfers
+
+
+def test_store_of_only_an_unfull_chunk_reserves_temporary_objects(monkeypatch):
+    module, reserved, unfull_transfers = _make_unfull_store_module(
+        monkeypatch, [["g0u"], ["g1u"]]
+    )
+
+    _handle, ok, mask = module.store_with_chunk_mask(
+        _unfull_key(request_configs={"lmcache.temporary_unfull_chunk": True}),
+        1,
+        [[5], [6], [7]],
+        b"producer",
+    )
+
+    assert ok and mask == [True]
+    assert reserved[-2:] == [(["g0u"], True), (["g1u"], True)]
+    # Each list is right-aligned to the 2-block window; the padding is skipped.
+    fitted = ([[5, 5], [6, 6], [7, 7]], [1, 1, 1])
+    assert unfull_transfers == [(0, *fitted), (1, *fitted)]
+
+
+def test_store_skips_an_unfull_chunk_that_does_not_fit_the_staging_buffer(
+    monkeypatch,
+):
+    module, reserved, unfull_transfers = _make_unfull_store_module(
+        monkeypatch, [["g0c0", "g0u"], ["g1c0", "g1u"]]
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_unfull_chunk_staging_buffer",
+        lambda cc, group: None if group == 1 else object(),
+    )
+
+    _handle, ok, _mask = module.store_with_chunk_mask(
+        _unfull_key(request_configs=None),
+        1,
+        [[0, 1, 5], [-1, 1, 6], [-1, 1, 7]],
+        b"producer",
+    )
+
+    # The full chunk is still stored; no group of the tail is reserved.
+    assert ok
+    assert (["g0c0"], False) in reserved
+    assert all(keys not in (["g0u"], ["g1u"]) for keys, _ in reserved)
+    assert unfull_transfers == []
+
+
+def test_store_appends_the_unfull_chunk_after_full_chunks(monkeypatch):
+    module, reserved, unfull_transfers = _make_unfull_store_module(
+        monkeypatch, [["g0c0", "g0u"], ["g1c0", "g1u"]]
+    )
+
+    _handle, ok, mask = module.store_with_chunk_mask(
+        _unfull_key(request_configs=None),
+        1,
+        # Two blocks per full chunk, then the unfull chunk's block.
+        [[0, 1, 5], [-1, 1, 6], [-1, 1, 7]],
+        b"producer",
+    )
+
+    assert ok and mask == [True, True]
+    assert (["g0c0"], False) in reserved and (["g0u"], False) in reserved
+    assert [group for group, _, _ in unfull_transfers] == [0, 1]
+    assert unfull_transfers[0][1:] == ([[5, 5], [6, 6], [7, 7]], [1, 1, 1])
+
+
+def test_retrieve_of_only_an_unfull_chunk_skips_aux_groups(monkeypatch):
+    module, read_calls, transfer_calls = _make_module(
+        monkeypatch,
+        1,
+        num_chunks_in_sw=[1, -1, -1],
+        group_kinds=("recurrent", "attention", "aux"),
+    )
+    module.context.resolve_obj_keys.return_value = [[], [], []]
+    module.context.resolve_unfull_chunk_obj_keys.return_value = ["g0u", "g1u", "g2u"]
+    monkeypatch.setattr(
+        mod,
+        "trim_and_stage_unfull_chunk_block_ids",
+        lambda cc, b, num_tokens, skip_tokens: (b, [0] * len(b), [0] * len(b)),
+    )
+    monkeypatch.setattr(mod, "get_unfull_chunk_staging_buffer", lambda *a: object())
+    unfull_transfers: list[int] = []
+    monkeypatch.setattr(
+        mod,
+        "transfer_unfull_chunk",
+        lambda cc, block_ids, skips, leads, memory_obj, group, buffer, direction: (
+            unfull_transfers.append(group)
+        ),
+    )
+
+    _handle, ok = module.retrieve(_unfull_key(), 1, [[4], [5], [6]], b"x")
+
+    assert ok is True
+    assert read_calls == [["g0u", "g1u"]]
+    assert transfer_calls == []
+    assert unfull_transfers == [0, 1]
+
+
+def _no_unfull(chunk_size: int) -> bool:
+    """``has_unfull_chunk`` of a key double that addresses full chunks only."""
+    return False

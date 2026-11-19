@@ -74,18 +74,26 @@ VLLM_HF_OFFLINE="${VLLM_HF_OFFLINE:-1}"
 # Transport mode selection:
 #   LMCACHE_MP_TRANSFER_MODE=engine_driven  -> engine-driven data path,
 #       sub-selected by LMCACHE_SHM_NAME:
-#       LMCACHE_SHM_NAME=""              -> pickle transport
+#       LMCACHE_SHM_NAME=""              -> typed inline transport
 #       LMCACHE_SHM_NAME=__default__     -> shm transport (default)
 #   LMCACHE_MP_TRANSFER_MODE=lmcache_driven -> lmcache-driven IPC handle path
 LMCACHE_SHM_NAME="${LMCACHE_SHM_NAME-__default__}"
 LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-engine_driven}"
 
+# grpc-aio and grpc-native are the gRPC transport served by
+# --grpc-server-mode aio and native.
+LMCACHE_TRANSPORT_ARGS=(--transport "${LMCACHE_REQUEST_TRANSPORT}")
 case "${LMCACHE_REQUEST_TRANSPORT}" in
   zmq) LMCACHE_REQUEST_SCHEME="tcp" ;;
   grpc) LMCACHE_REQUEST_SCHEME="grpc" ;;
+  grpc-aio|grpc-native)
+    LMCACHE_REQUEST_SCHEME="grpc"
+    LMCACHE_TRANSPORT_ARGS=(--transport grpc
+      --grpc-server-mode "${LMCACHE_REQUEST_TRANSPORT#grpc-}")
+    ;;
   *)
     echo "Unknown LMCACHE_REQUEST_TRANSPORT='${LMCACHE_REQUEST_TRANSPORT}'" >&2
-    echo "Valid values: zmq, grpc" >&2
+    echo "Valid values: zmq, grpc, grpc-aio, grpc-native" >&2
     exit 1
     ;;
 esac
@@ -532,7 +540,7 @@ echo "[Phase 2 / Step 3] Starting LMCache server"
 echo "LMCache log: ${LMCACHE_LOG}"
 # Build lmcache server args
 LMCACHE_ARGS=(
-  --transport "${LMCACHE_REQUEST_TRANSPORT}"
+  "${LMCACHE_TRANSPORT_ARGS[@]}"
   --port "${LMCACHE_REQUEST_PORT}"
   --http-port "${LMCACHE_HTTP_PORT}"
   --l1-size-gb "${LMCACHE_L1_SIZE_GB}"
@@ -542,7 +550,7 @@ LMCACHE_ARGS=(
 # `engine_driven` / `lmcache_driven` resolve to different worker-side
 # TransferContexts:
 #   engine_driven -> EngineDrivenTransferContext (worker gathers/scatters data)
-#     sub-mode: SHM (--shm-name __default__) or pickle (--shm-name "")
+#     sub-mode: SHM (--shm-name __default__) or inline (--shm-name "")
 #   lmcache_driven -> LMCacheDrivenTransferContext (server-side IPC handle)
 # The server only loads the paths named by --supported-transfer-mode
 # (default: lmcache_driven), so every leg passes it explicitly. Likewise
@@ -557,9 +565,9 @@ if [ "${LMCACHE_MP_TRANSFER_MODE}" = "engine_driven" ]; then
     LMCACHE_ARGS+=(--shm-name "e2e_$$")
     EXPECTED_TRANSPORT="shm"
   else
-    echo "Transport mode: engine-driven/pickle (--shm-name '${LMCACHE_SHM_NAME}')"
+    echo "Transport mode: engine-driven/inline (--shm-name '${LMCACHE_SHM_NAME}')"
     LMCACHE_ARGS+=(--shm-name "${LMCACHE_SHM_NAME}")
-    EXPECTED_TRANSPORT="pickle"
+    EXPECTED_TRANSPORT="inline"
   fi
 elif [ "${LMCACHE_MP_TRANSFER_MODE}" = "lmcache_driven" ]; then
   echo "Transport mode: lmcache-driven (IPC handle path)"
@@ -574,9 +582,9 @@ else
     LMCACHE_ARGS+=(--shm-name "e2e_$$")
     EXPECTED_TRANSPORT="shm"
   else
-    echo "Transport mode: data/pickle (--shm-name '${LMCACHE_SHM_NAME}')"
+    echo "Transport mode: data/inline (--shm-name '${LMCACHE_SHM_NAME}')"
     LMCACHE_ARGS+=(--shm-name "${LMCACHE_SHM_NAME}")
-    EXPECTED_TRANSPORT="pickle"
+    EXPECTED_TRANSPORT="inline"
   fi
 fi
 
@@ -595,6 +603,15 @@ if ! wait_for_endpoint_contains "http://localhost:${LMCACHE_HTTP_PORT}/healthche
   false
 fi
 echo "✅ LMCache server is healthy"
+case "${LMCACHE_REQUEST_TRANSPORT}" in
+  grpc-aio|grpc-native)
+    # A wrong flag would quietly start the sync server instead.
+    if ! grep -q "gRPC cache server (${LMCACHE_REQUEST_TRANSPORT#grpc-})" "${LMCACHE_LOG}"; then
+      echo "❌ LMCache server is not in ${LMCACHE_REQUEST_TRANSPORT#grpc-} mode. See ${LMCACHE_LOG}"
+      false
+    fi
+    ;;
+esac
 
 echo "[Phase 2 / Step 4] Installing system libs (Linux only) and starting vLLM server"
 if [ "$(uname -s)" = "Linux" ]; then
@@ -617,7 +634,7 @@ if [ "$(uname -s)" = "Linux" ]; then
   # torchcodec supports FFmpeg 4-8; the distro's ffmpeg package provides a
   # compatible libavutil. Detect via ldconfig so we match whichever
   # soname (56..60) the runner already ships.
-  if ! ldconfig -p 2>/dev/null | grep -q 'libavutil\.so'; then
+  if ! ldconfig -p 2>/dev/null | grep 'libavutil\.so' >/dev/null; then
     MISSING_PKGS+=(ffmpeg)
   fi
   if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
@@ -635,11 +652,11 @@ if [ "$(uname -s)" = "Linux" ]; then
 
   # Do not let a missing runtime library turn into a misleading native
   # operator error from vLLM during worker initialization.
-  if ! ldconfig -p 2>/dev/null | grep -q 'libnuma\.so\.1'; then
+  if ! ldconfig -p 2>/dev/null | grep 'libnuma\.so\.1' >/dev/null; then
     echo "❌ Required runtime library libnuma.so.1 is unavailable"
     false
   fi
-  if ! ldconfig -p 2>/dev/null | grep -q 'libavutil\.so'; then
+  if ! ldconfig -p 2>/dev/null | grep 'libavutil\.so' >/dev/null; then
     echo "❌ Required FFmpeg runtime library libavutil.so is unavailable"
     false
   fi
@@ -679,7 +696,7 @@ echo "[Phase 2 / Step 5.5] Verifying transport mode: expecting '${EXPECTED_TRANS
 # of truth for which TransferContext the worker actually entered. Note:
 # the worker is a child of `vllm serve`, so its LMCache log lines land in
 # VLLM_LOG (vllm's stdout), not in LMCACHE_LOG (lmcache server's stdout).
-# The shm/pickle branches still grep LMCACHE_LOG because the strategy
+# The shm/inline branches still grep LMCACHE_LOG because the strategy
 # line is emitted by the lmcache server itself.
 if [ "${EXPECTED_TRANSPORT}" = "lmcache_driven" ]; then
   if ! grep -q "Creating transfer context.*mode=lmcache_driven" "${VLLM_LOG}" 2>/dev/null; then
@@ -689,19 +706,19 @@ if [ "${EXPECTED_TRANSPORT}" = "lmcache_driven" ]; then
   fi
   echo "✅ Transport mode confirmed: lmcache-driven (IPC handle path)"
 elif [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
-  if ! grep -q "Using shm non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
+  if ! grep -q "Using shm engine-driven transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
     echo "❌ Expected shm transport but server strategy line not found in log"
     tail -50 "${LMCACHE_LOG}"
     false
   fi
   echo "✅ Transport mode confirmed: shm"
-elif [ "${EXPECTED_TRANSPORT}" = "pickle" ]; then
-  if ! grep -q "Using pickle non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
-    echo "❌ Expected pickle transport but server strategy line not found in log"
+elif [ "${EXPECTED_TRANSPORT}" = "inline" ]; then
+  if ! grep -q "Using safe inline engine-driven transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
+    echo "❌ Expected inline transport but server strategy line not found in log"
     tail -50 "${LMCACHE_LOG}"
     false
   fi
-  echo "✅ Transport mode confirmed: pickle"
+  echo "✅ Transport mode confirmed: safe inline tensor codec"
 fi
 
 echo "[Phase 2 / Step 6] Cleaning up Phase 2 vLLM"
@@ -735,10 +752,9 @@ print(story, end='')
 " > "${PROMPT_FILE}"
 echo "Generated prompt file: ${PROMPT_FILE} ($(wc -c < "${PROMPT_FILE}") bytes)"
 
-# Reset metrics to have a clean baseline
-echo "[Phase 3 / Step 1] Resetting LMCache metrics"
-curl -fsS -X POST "http://localhost:${LMCACHE_HTTP_PORT}/metrics/reset" >/dev/null
-echo "✅ Metrics reset"
+# /metrics/reset is a no-op in MP mode (OTel counters are cumulative), so the
+# checks below compare /metrics scrapes taken before and after each request.
+echo "[Phase 3 / Step 1] Using before/after metric deltas (no metrics reset)"
 
 # Start vLLM instance 1
 echo "[Phase 3 / Step 2] Starting vLLM (instance 1)"

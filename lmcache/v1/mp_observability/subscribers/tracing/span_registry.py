@@ -2,9 +2,10 @@
 
 """Shared OTel span registry for cross-subscriber context propagation.
 
-:class:`SpanRegistry` stores active spans keyed by ``(session_id, span_name)``
-so that multiple subscribers sharing the same instance can look up parent
-span contexts without tight coupling.
+:class:`SpanRegistry` stores active spans keyed by
+``(session_id, span_name, transfer_key)`` so that multiple subscribers sharing
+the same instance can look up parent span contexts without tight coupling.
+Request-level and legacy spans use an empty transfer key.
 
 All reads and writes happen on the single EventBus drain thread — no locking
 is needed.
@@ -23,10 +24,12 @@ logger = init_logger(__name__)
 
 
 class SpanRegistry:
-    """Registry of active OTel spans, keyed by ``(session_id, span_name)``.
+    """Registry of spans keyed by session, logical name and transfer key.
 
     ``span_name`` is a logical identifier (e.g. ``"request"``, ``"retrieve"``,
     ``"store"``) that decouples parent-lookup from the concrete OTel span name.
+    ``transfer_key`` distinguishes concurrent transfers of the same request;
+    omit it for request-level spans and events without a transfer key.
 
     All methods must be called from the EventBus drain thread; no locking is
     performed.
@@ -38,16 +41,28 @@ class SpanRegistry:
         bus.register_subscriber(MyL1TracingSubscriber(registry))
 
         # Inside MyL1TracingSubscriber._on_l1_start:
-        parent_ctx = registry.get_context(session_id, "retrieve") \\
-                     or registry.get_context(session_id, "request")
+        parent_ctx = (
+            registry.get_context(
+                session_id, "retrieve", transfer_key=transfer_key
+            )
+            or registry.get_context(session_id, "request")
+        )
         span = tracer.start_span("l1.read", context=parent_ctx, ...)
     """
 
     def __init__(self) -> None:
-        # (session_id, span_name) -> (span, otel_context)
-        self._active: dict[tuple[str, str], tuple[Any, Any]] = {}
+        # (session_id, span_name, transfer_key) -> (span, otel_context)
+        self._active: dict[tuple[str, str, str], tuple[Any, Any]] = {}
 
-    def open(self, session_id: str, span_name: str, span: Any, ctx: Any) -> None:
+    def open(
+        self,
+        session_id: str,
+        span_name: str,
+        span: Any,
+        ctx: Any,
+        *,
+        transfer_key: str = "",
+    ) -> None:
         """Register an open span and its OTel context.
 
         Args:
@@ -57,22 +72,30 @@ class SpanRegistry:
             span: The OTel span object.
             ctx: The OTel context containing the span (from
                 ``trace.set_span_in_context(span)``).
+            transfer_key: Operation identifier, or empty for request-level
+                and legacy spans.
         """
-        self._active[(session_id, span_name)] = (span, ctx)
+        self._active[(session_id, span_name, transfer_key)] = (span, ctx)
 
-    def get(self, session_id: str, span_name: str) -> tuple[Any, Any] | None:
+    def get(
+        self, session_id: str, span_name: str, *, transfer_key: str = ""
+    ) -> tuple[Any, Any] | None:
         """Return ``(span, context)`` for an open span, or ``None``.
 
         Args:
             session_id: The request session identifier.
             span_name: Logical span name to look up.
+            transfer_key: Operation identifier; empty selects a request-level
+                or legacy span, not an arbitrary active transfer.
 
         Returns:
             ``(span, otel_context)`` if the span is registered, else ``None``.
         """
-        return self._active.get((session_id, span_name))
+        return self._active.get((session_id, span_name, transfer_key))
 
-    def get_context(self, session_id: str, span_name: str) -> Any | None:
+    def get_context(
+        self, session_id: str, span_name: str, *, transfer_key: str = ""
+    ) -> Any | None:
         """Return the OTel context for an open span, or ``None``.
 
         Convenience wrapper over :meth:`get` for callers that only need the
@@ -81,24 +104,30 @@ class SpanRegistry:
         Args:
             session_id: The request session identifier.
             span_name: Logical span name to look up.
+            transfer_key: Operation identifier; empty selects a request-level
+                or legacy span.
 
         Returns:
             The OTel context, or ``None`` if the span is not registered.
         """
-        entry = self._active.get((session_id, span_name))
+        entry = self.get(session_id, span_name, transfer_key=transfer_key)
         return entry[1] if entry is not None else None
 
-    def pop(self, session_id: str, span_name: str) -> tuple[Any, Any] | None:
+    def pop(
+        self, session_id: str, span_name: str, *, transfer_key: str = ""
+    ) -> tuple[Any, Any] | None:
         """Remove and return ``(span, context)``, or ``None`` if absent.
 
         Args:
             session_id: The request session identifier.
             span_name: Logical span name to remove.
+            transfer_key: Operation identifier; empty selects a request-level
+                or legacy span.
 
         Returns:
             ``(span, otel_context)`` if the span was registered, else ``None``.
         """
-        return self._active.pop((session_id, span_name), None)
+        return self._active.pop((session_id, span_name, transfer_key), None)
 
     def all_session_ids(self) -> set[str]:
         """Return the set of session IDs that have at least one open span.

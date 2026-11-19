@@ -2,6 +2,7 @@
 """Tests for the rag-qa-quality workload."""
 
 # Standard
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 import json
@@ -11,6 +12,7 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.config import WarmupPolicy
+from lmcache.cli.commands.bench.engine_bench.quality import alignment
 from lmcache.cli.commands.bench.engine_bench.stats import RequestResult
 from lmcache.cli.commands.bench.engine_bench.workloads import rag_qa_quality
 from lmcache.cli.commands.bench.engine_bench.workloads.rag_qa_quality import (
@@ -23,6 +25,15 @@ from lmcache.cli.commands.bench.engine_bench.workloads.rag_qa_quality import (
 from ..fake_tokenizer import make_fake_tokenizer
 
 _CHUNK = rag_qa_quality.DEFAULT_DOC_ALIGN_TOKENS
+
+
+def _tokens(text: str) -> int:
+    """Token length of *text* under the fake tokenizer the workload loads."""
+    return len(make_fake_tokenizer().encode(text, add_special_tokens=False))
+
+
+# Tokens the fake chat template places ahead of the user content.
+_PREFIX_TOKENS = _tokens("user\n")
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +98,7 @@ def _make_workload(
     ``output_path`` defaults to a file under ``tmp_path``, which is not
     known until call time.
     """
-    monkeypatch.setattr(rag_qa_quality, "_FILLER_VOCAB_SIZE", 200)
+    monkeypatch.setattr(alignment, "_FILLER_VOCAB_SIZE", 200)
     monkeypatch.setattr(
         rag_qa_quality, "try_load_tokenizer", lambda _name: make_fake_tokenizer()
     )
@@ -212,25 +223,21 @@ class TestPromptConstruction:
         """A document must occupy whole chunks or none of it is reusable."""
         workload, _ = _make_workload(tmp_path, monkeypatch)
         for block in workload._document_blocks.values():
-            assert workload._token_length(block) % _CHUNK == 0
+            assert _tokens(block) % _CHUNK == 0
 
     def test_documents_honour_a_custom_alignment(self, tmp_path, monkeypatch) -> None:
         """Alignment tracks the deployment's chunk size, not the default."""
         align = 64
         workload, _ = _make_workload(tmp_path, monkeypatch, doc_align_tokens=align)
         for block in workload._document_blocks.values():
-            assert workload._token_length(block) % align == 0
-        total = workload._chat_prefix_tokens() + workload._token_length(
-            workload._system_block
-        )
+            assert _tokens(block) % align == 0
+        total = _PREFIX_TOKENS + _tokens(workload._system_block)
         assert total % align == 0
 
     def test_system_block_ends_on_a_chunk_boundary(self, tmp_path, monkeypatch) -> None:
         """So every document starts on a boundary."""
         workload, _ = _make_workload(tmp_path, monkeypatch)
-        total = workload._chat_prefix_tokens() + workload._token_length(
-            workload._system_block
-        )
+        total = _PREFIX_TOKENS + _tokens(workload._system_block)
         assert total % _CHUNK == 0
 
     def test_shared_documents_are_padded_once(self, tmp_path, monkeypatch) -> None:
@@ -291,6 +298,65 @@ class TestRunFingerprint:
         baseline, _ = _make_workload(tmp_path, monkeypatch)
         changed, _ = _make_workload(tmp_path, monkeypatch, **override)
         assert baseline._run_fingerprint() != changed._run_fingerprint()
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("question", "when?"),
+            ("ctxs", [{"text": "changed body"}, {"text": "beta body"}]),
+            ("ctxs", [{"text": "beta body"}, {"text": "alpha body"}]),
+            ("answers", ["Lyon"]),
+        ],
+    )
+    def test_rewritten_dataset_changes_exported_fingerprint(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        field: str,
+        value: str | list[str] | list[dict[str, str]],
+    ) -> None:
+        """Stable paths and ids must not hide different prompts or gold answers."""
+        reports = []
+        for index in range(2):
+            records = deepcopy(_RECORDS)
+            if index:
+                records[0][field] = value
+            output = tmp_path / f"run{index}.json"
+            workload, sender = _make_workload(
+                tmp_path,
+                monkeypatch,
+                records=records,
+                num_samples=1,
+                responses=["<final_answer>Paris</final_answer>"],
+                output_path=str(output),
+            )
+            sender.close = AsyncMock()
+            workload.run(WarmupPolicy.SKIP)
+            reports.append(json.loads(output.read_text()))
+
+        assert reports[0]["config"]["dataset"] == reports[1]["config"]["dataset"]
+        assert reports[0]["per_sample"][0]["sample_id"] == "s0"
+        assert reports[1]["per_sample"][0]["sample_id"] == "s0"
+        assert reports[0]["summary"]["f1_mean"] == 1.0
+        assert reports[1]["summary"]["f1_mean"] == (0.0 if field == "answers" else 1.0)
+        assert reports[0]["run_fingerprint"] != reports[1]["run_fingerprint"]
+
+    def test_unmeasured_records_do_not_change_fingerprint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only selected samples determine the measured prompts and scores."""
+        baseline, _ = _make_workload(tmp_path, monkeypatch, num_samples=1)
+        records = deepcopy(_RECORDS)
+        records[1]["question"] = "a different, unmeasured question"
+        changed, _ = _make_workload(
+            tmp_path, monkeypatch, records=records, num_samples=1
+        )
+        sections = [baseline.extra_metric_sections(), changed.extra_metric_sections()]
+        fingerprints = [
+            next(value for key, _, value in section[0].entries if key == "fingerprint")
+            for section in sections
+        ]
+        assert fingerprints[0] == fingerprints[1]
 
 
 # ---------------------------------------------------------------------------

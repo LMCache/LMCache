@@ -14,6 +14,10 @@ exporters:
     endpoint: 0.0.0.0:8889
     resource_to_telemetry_conversion:
       enabled: true
+    # Keep each sample's export time instead of Prometheus' scrape time, so
+    # timestamp() tells when a process last exported: the coordinator
+    # dashboard's "Last export" and age panels depend on it.
+    send_timestamps: true
 
 service:
   pipelines:

@@ -10,12 +10,14 @@ while using the device-independent native module for shared enums.
 # Standard
 from types import ModuleType
 from typing import Any
+from unittest.mock import MagicMock
 import importlib
 import inspect
 import sys
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache import device_ops, torch_dev, torch_device_type
@@ -52,6 +54,9 @@ def isolated_registry() -> Any:
     """Snapshot the device-spec table so tests can install fakes safely."""
     saved_backends = dict(platform_pkg._DEVICE_REGISTRY)
     saved_device_types = dict(platform_pkg._DEVICE_TYPE_REGISTRY)
+    # Resolution is cached per device type, so fakes need a cold cache and
+    # must not leak their specs into later tests.
+    platform_pkg._resolve_device_spec.cache_clear()
     try:
         yield saved_backends, saved_device_types
     finally:
@@ -59,9 +64,19 @@ def isolated_registry() -> Any:
         platform_pkg._DEVICE_REGISTRY.update(saved_backends)
         platform_pkg._DEVICE_TYPE_REGISTRY.clear()
         platform_pkg._DEVICE_TYPE_REGISTRY.update(saved_device_types)
+        platform_pkg._resolve_device_spec.cache_clear()
 
 
 # -- Contract --------------------------------------------------------------
+
+
+def test_synchronize_follows_tensor_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CPU skips synchronization; CUDA uses the tensor's device index."""
+    synchronize = MagicMock()
+    monkeypatch.setattr(torch.cuda, "synchronize", synchronize)
+    for device in ("cpu", "cuda:1", "cpu"):
+        platform_pkg.synchronize_device(torch.device(device))
+    synchronize.assert_called_once_with(torch.device("cuda:1"))
 
 
 def test_base_class_declares_every_op_as_instance_method() -> None:
@@ -108,15 +123,18 @@ def test_every_registered_device_has_all_ops(isolated_registry: Any) -> None:
 # -- Dispatch (MRO) --------------------------------------------------------
 
 
-def test_cpu_inherits_baseline_verbatim() -> None:
-    """CpuDeviceOps adds no overrides: every method resolves to the base."""
+def test_cpu_overrides_pointer_construction_only() -> None:
+    """CPU owns pointer construction and inherits the remaining baseline."""
     for name in _OP_NAMES:
-        assert getattr(CpuDeviceOps, name) is getattr(DeviceOps, name), name
+        if name == "tensor_from_ptr":
+            assert getattr(CpuDeviceOps, name) is not getattr(DeviceOps, name)
+        else:
+            assert getattr(CpuDeviceOps, name) is getattr(DeviceOps, name), name
 
 
 @pytest.mark.musa
 def test_musa_overrides_transfer_and_stream_ordering_ops() -> None:
-    """MusaDeviceOps owns transfer and stream-ordering adaptation."""
+    """MusaDeviceOps owns transfer, codec and stream-ordering adaptation."""
     musa_mod = pytest.importorskip(
         "lmcache.v1.platform.devices.musa.device_ops",
         reason="musa platform package unavailable",
@@ -127,10 +145,15 @@ def test_musa_overrides_transfer_and_stream_ordering_ops() -> None:
         if getattr(musa_mod.MusaDeviceOps, name) is not getattr(DeviceOps, name)
     ]
     assert overridden == [
+        "calculate_cdf",
+        "decode_fast_new",
+        "decode_fast_prefsum",
+        "encode_fast_new",
         "lmcache_memcpy_async",
         "multi_layer_block_kv_transfer",
         "record_completion_on_stream",
         "record_event_on_stream",
+        "tensor_from_ptr",
     ]
 
 
@@ -392,3 +415,55 @@ def test_new_device_needs_zero_resolver_edits(
         {**device_type_registry, "dummy": (dummy_spec,)},
     )
     assert type(resolve_device_ops("dummy")) is DummyDeviceOps
+
+
+def test_shared_device_type_auto_selects_once(
+    isolated_registry: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Backends sharing a device type are probed once, not on every lookup."""
+    probed: list[str] = []
+
+    class SharedDeviceOps(DeviceOps):
+        device_type = "shared"
+
+    class SharedDeviceSpec(DeviceSpec):
+        def __init__(self, backend_name: str, available: bool) -> None:
+            self._backend_name = backend_name
+            self._available = available
+
+        @property
+        def device_type(self) -> str:
+            return "shared"
+
+        @property
+        def backend_name(self) -> str:
+            return self._backend_name
+
+        @property
+        def ops_cls(self) -> "type[DeviceOps]":
+            return SharedDeviceOps
+
+        def is_available(self) -> bool:
+            probed.append(self._backend_name)
+            return self._available
+
+    backend_registry, device_type_registry = isolated_registry
+    vendor_a = SharedDeviceSpec("vendor-a", available=True)
+    vendor_b = SharedDeviceSpec("vendor-b", available=False)
+    monkeypatch.delenv("LMCACHE_DEVICE_BACKEND", raising=False)
+    monkeypatch.setattr(
+        platform_pkg,
+        "_DEVICE_REGISTRY",
+        {**backend_registry, "vendor-a": vendor_a, "vendor-b": vendor_b},
+    )
+    monkeypatch.setattr(
+        platform_pkg,
+        "_DEVICE_TYPE_REGISTRY",
+        {**device_type_registry, "shared": (vendor_a, vendor_b)},
+    )
+
+    ops = resolve_device_ops("shared")
+    for _ in range(3):
+        assert resolve_device_ops("shared") is ops
+    assert ops is vendor_a.get_ops()
+    assert sorted(probed) == ["vendor-a", "vendor-b"]

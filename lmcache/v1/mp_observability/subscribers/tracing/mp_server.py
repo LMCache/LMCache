@@ -41,6 +41,8 @@ class MPServerTracingSubscriber(EventSubscriber):
 
     Each session gets one root ``"request"`` span that nests all child spans
     (``mp.lookup_prefetch``, ``mp.retrieve``, ``mp.store``) beneath it.
+    Store/retrieve children are correlated by ``transfer_key`` when present,
+    so overlapping transfers do not overwrite each other's spans.
 
     The root span is opened eagerly at ``MP_REQUEST_START`` and closed at
     ``MP_REQUEST_END``, with deferral if GPU stores are still in flight.
@@ -69,7 +71,13 @@ class MPServerTracingSubscriber(EventSubscriber):
         EventType.MP_LOOKUP_PREFETCH_START: "lookup_prefetch",
     }
 
-    def __init__(self, registry: SpanRegistry | None = None) -> None:
+    def __init__(
+        self,
+        registry: SpanRegistry | None = None,
+        token_trace_enabled: bool = False,
+    ) -> None:
+        self._token_trace_enabled = token_trace_enabled
+
         # Shared span registry.  When a registry is provided, other subscribers
         # that share the same instance can look up the root "request" span or
         # any child span ("store", "retrieve", "lookup_prefetch") as a parent
@@ -77,8 +85,9 @@ class MPServerTracingSubscriber(EventSubscriber):
         # remains usable without a shared registry.
         self._registry = registry if registry is not None else SpanRegistry()
 
-        # session_id -> (span, start_event_type) for pending child spans
-        self._pending: dict[str, tuple[Any, EventType]] = {}
+        # (transfer_key or session_id, start_event_type) -> pending child span.
+        # Session IDs preserve pairing for legacy and lookup events.
+        self._pending: dict[tuple[str, EventType], tuple[Any, EventType]] = {}
 
         # session_id -> number of MP_STORE_SUBMITTED events without a
         # matching MP_STORE_END; guards against REQUEST_END racing GPU stores
@@ -98,7 +107,7 @@ class MPServerTracingSubscriber(EventSubscriber):
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         """Return the event-to-callback mapping for this subscriber."""
-        return {
+        subscriptions: dict[EventType, EventCallback] = {
             EventType.MP_REQUEST_START: self._on_request_start,
             EventType.MP_STORE_SUBMITTED: self._on_store_submitted,
             EventType.MP_RETRIEVE_SUBMITTED: self._on_retrieve_submitted,
@@ -110,6 +119,9 @@ class MPServerTracingSubscriber(EventSubscriber):
             EventType.MP_LOOKUP_PREFETCH_START: self._on_start,
             EventType.MP_LOOKUP_PREFETCH_END: self._on_end,
         }
+        if self._token_trace_enabled:
+            subscriptions[EventType.MP_LOOKUP] = self._on_lookup
+        return subscriptions
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -149,6 +161,37 @@ class MPServerTracingSubscriber(EventSubscriber):
         if not _HAS_OTEL:
             return
         self._get_or_create_request_span(event.session_id, event.timestamp)
+
+    def _on_lookup(self, event: Event) -> None:
+        """Emit the lookup's prompt as a zero-duration child of the root span.
+
+        The span starts and ends at the event timestamp so it exports on the
+        next batch instead of holding the prompt until the request finishes.
+        ``lmcache.input_ids`` carries the prompt token ids and
+        ``lmcache.model`` the model name. A request the engine looks up again
+        emits one span per lookup; consumers that want one prompt per request
+        key on ``session_id``.
+
+        Args:
+            event: ``MP_LOOKUP`` event with ``token_ids`` and ``model_name``
+                metadata.
+        """
+        if not _HAS_OTEL:
+            return
+        sid = event.session_id
+        root_ctx = self._registry.get_context(sid, "request")
+        if root_ctx is None:
+            root_ctx = self._registry.get_context(sid, "cb.request")
+        ts = int(event.timestamp * 1e9)
+        span = _tracer.start_span(
+            "mp.request.trace",
+            context=root_ctx,
+            start_time=ts,
+        )
+        span.set_attribute("session_id", sid)
+        span.set_attribute("lmcache.model", event.metadata["model_name"])
+        span.set_attribute("lmcache.input_ids", event.metadata["token_ids"])
+        span.end(end_time=ts)
 
     def _on_store_submitted(self, event: Event) -> None:
         """Increment the in-flight store counter for the session.
@@ -205,7 +248,8 @@ class MPServerTracingSubscriber(EventSubscriber):
         """Create a child span nested under the root span.
 
         Falls back to ``_get_or_create_request_span`` if ``MP_REQUEST_START`` was
-        never emitted (e.g. store-only path with no lookup).
+        never emitted (e.g. store-only path with no lookup). Uses the transfer
+        key, when present, for both pending spans and shared parent contexts.
 
         Args:
             event: One of ``MP_STORE_START``, ``MP_RETRIEVE_START``, or
@@ -226,17 +270,24 @@ class MPServerTracingSubscriber(EventSubscriber):
             span.set_attribute(k, str(v))
         span.set_attribute("session_id", sid)
 
-        key = f"{sid}:{event.event_type.value}"
+        transfer_key = str(event.metadata.get("transfer_key", ""))
+        key = (transfer_key or sid, event.event_type)
         self._pending[key] = (span, event.event_type)
 
         # Also register in the shared registry so other subscribers can use
         # this span as a parent context for nested sub-spans.
         logical = self._LOGICAL_NAMES.get(event.event_type)
         if logical:
-            self._registry.open(sid, logical, span, trace.set_span_in_context(span))
+            self._registry.open(
+                sid,
+                logical,
+                span,
+                trace.set_span_in_context(span),
+                transfer_key=transfer_key,
+            )
 
     def _on_end(self, event: Event) -> None:
-        """Close a pending child span and handle store-count deferral.
+        """Close the matching transfer's child span and handle count deferral.
 
         On ``MP_STORE_END``: decrements the store counter; if it reaches zero
         and a deferred session-end timestamp exists, closes the root span.
@@ -249,7 +300,8 @@ class MPServerTracingSubscriber(EventSubscriber):
             return
         sid = event.session_id
         start_type = self._END_TO_START[event.event_type]
-        key = f"{sid}:{start_type.value}"
+        transfer_key = str(event.metadata.get("transfer_key", ""))
+        key = (transfer_key or sid, start_type)
         entry = self._pending.pop(key, None)
         if entry is None:
             logger.debug(
@@ -266,7 +318,7 @@ class MPServerTracingSubscriber(EventSubscriber):
         # Remove the child span from the shared registry now that it is closed.
         logical = self._LOGICAL_NAMES.get(start_type)
         if logical:
-            self._registry.pop(sid, logical)
+            self._registry.pop(sid, logical, transfer_key=transfer_key)
 
         if event.event_type == EventType.MP_LOOKUP_PREFETCH_END:
             root_entry = self._registry.get(sid, "request")
@@ -290,6 +342,31 @@ class MPServerTracingSubscriber(EventSubscriber):
                 root_span.set_attribute("l2_hit_tokens", l2_hit_tokens)
                 root_span.set_attribute("l1_hit_rate", l1_hit_tokens / denom)
                 root_span.set_attribute("l2_hit_rate", l2_hit_tokens / denom)
+                root_span.set_attribute(
+                    "apc_covered_tokens",
+                    int(event.metadata.get("apc_covered_tokens", 0)),
+                )
+                # Request-level view over the whole prompt, not just the
+                # range LMCache looked up.
+                prompt_tokens = int(event.metadata.get("prompt_tokens", 0))
+                engine_hit_tokens = int(event.metadata.get("engine_hit_tokens", 0))
+                request_hit_tokens = int(event.metadata.get("request_hit_tokens", 0))
+                prompt_denom = prompt_tokens or 1  # 0.0 rates on an empty prompt
+                root_span.set_attribute("prompt_tokens", prompt_tokens)
+                root_span.set_attribute("engine_hit_tokens", engine_hit_tokens)
+                root_span.set_attribute("request_hit_tokens", request_hit_tokens)
+                root_span.set_attribute(
+                    "engine_hit_rate", engine_hit_tokens / prompt_denom
+                )
+                root_span.set_attribute(
+                    "request_hit_rate", request_hit_tokens / prompt_denom
+                )
+                root_span.set_attribute(
+                    "l1_hit_keys", int(event.metadata.get("l1_hit_keys", 0))
+                )
+                root_span.set_attribute(
+                    "l2_hit_keys", int(event.metadata.get("l2_hit_keys", 0))
+                )
                 root_span.set_attribute(
                     "early_exit_reason", str(event.metadata["early_exit_reason"])
                 )

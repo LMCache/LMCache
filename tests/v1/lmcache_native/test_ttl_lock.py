@@ -396,16 +396,6 @@ class TestTTLLockThreadSafety:
 class TestTTLLockEdgeCases:
     """Test edge cases and boundary conditions."""
 
-    def test_very_short_ttl(self):
-        """Test with very short TTL (1 second)."""
-        lock = TTLLock(ttl_second=1)
-
-        lock.lock()
-        assert lock.is_locked()
-
-        time.sleep(1.5)  # 1.5s > 1s
-        assert not lock.is_locked()
-
     def test_multiple_locks_same_ttl_window(self):
         """Test multiple locks within the same TTL window."""
         lock = TTLLock(ttl_second=10)

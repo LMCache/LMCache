@@ -5,13 +5,13 @@
 #              | hma_lm_eval_gemma4 | vllm_bench
 #              | long_doc_qa | high_concurrency | long_doc_qa_l2
 #              | fault_tolerance | deadlock | mp_autostart_tp2
-#              | restart_recovery | gds_smoke | p2p | kimi_linear_tp
-#              | dsv4_flash_tp | lazy_offload
+#              | restart_recovery | gds_smoke | p2p | p2p_write
+#              | kimi_linear_tp | dsv4_flash_tp | lazy_offload
 # Thin wrapper: sets up environment, then delegates to scripts/.
 # No Docker -- all processes run natively in the pod.
 set -euo pipefail
 
-TEST_NAME="${1:?Usage: $0 <test_name>  (lm_eval|lm_eval_preemption|preemption_correctness|hma_lm_eval_gemma4|vllm_bench|long_doc_qa|high_concurrency|long_doc_qa_l2|fault_tolerance|deadlock|mp_autostart_tp2|restart_recovery|cache_stats|lazy_offload|http_api|gds_smoke|p2p|kimi_linear_tp|dsv4_flash_tp)}"
+TEST_NAME="${1:?Usage: $0 <test_name>  (lm_eval|lm_eval_preemption|preemption_correctness|hma_lm_eval_gemma4|vllm_bench|long_doc_qa|high_concurrency|long_doc_qa_l2|fault_tolerance|deadlock|mp_autostart_tp2|restart_recovery|cache_stats|lazy_offload|http_api|gds_smoke|p2p|p2p_write|kimi_linear_tp|dsv4_flash_tp)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 INFERENCE_ENGINE="${INFERENCE_ENGINE:-vllm}"
@@ -56,6 +56,9 @@ export INFERENCE_ENGINE
 
 # Install test extras (lm-eval for eval workload, openai/pandas/matplotlib for benchmarks)
 uv pip install 'lm-eval[api]' openai pandas matplotlib
+if [[ "$TORCH_DEVICE_TYPE" == "xpu" ]]; then
+    python -c "from importlib.metadata import version; print('vLLM version:', version('vllm'))"
+fi
 
 # ── Ensure all scripts are executable ────────────────────────
 find "${SCRIPT_DIR}/scripts" -type f -name '*.sh' -exec chmod +x {} +
