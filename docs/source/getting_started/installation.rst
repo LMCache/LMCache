@@ -441,7 +441,10 @@ runtime, see :doc:`compatibility` before installing.
                         NVIDIA 580-series drivers (CUDA 13.0) on datacenter
                         GPUs, the image uses its bundled CUDA
                         forward-compatibility driver. Keep the image's default
-                        entrypoint: ``--entrypoint`` skips that setup.
+                        entrypoint: ``--entrypoint`` or a Kubernetes
+                        ``command:`` that runs ``vllm`` or ``lmcache``
+                        directly skips that setup. Start such commands with
+                        ``/opt/nvidia/nvidia_entrypoint.sh`` instead.
 
             .. tab-item:: SGLang
 

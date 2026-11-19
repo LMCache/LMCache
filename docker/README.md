@@ -84,7 +84,14 @@ do not hit those kernels may start without forward compatibility.
   detects the older driver and loads the CUDA forward-compatibility driver
   bundled in `/usr/local/cuda/compat`. The image's entrypoint goes through
   it, so `docker run ... lmcache/vllm-openai:latest-nightly <model>` works.
-  Overriding `--entrypoint` with `vllm` skips that step.
+  Anything that runs a program directly skips that step: `docker run
+  --entrypoint vllm ...`, or a Kubernetes container whose `command:` is
+  `["vllm", "serve"]` or `["/opt/venv/bin/lmcache", "server"]`. Start such
+  commands with the NVIDIA script, for example
+  `command: ["/opt/nvidia/nvidia_entrypoint.sh", "/opt/venv/bin/lmcache", "server"]`,
+  or run them through `bash -c` (bash loads `/etc/shinit_v2` via `BASH_ENV`).
+  This applies to every process that uses the GPU, including the LMCache
+  server next to vLLM.
 - Outside Docker (a venv with a CUDA 13.2 vLLM), install NVIDIA's
   `cuda-compat-13-2` package and put it first on the library path:
   `export LD_LIBRARY_PATH=/usr/local/cuda-13.2/compat:$LD_LIBRARY_PATH`.
@@ -271,11 +278,14 @@ Both containers share the host IPC namespace (`--ipc host`) so the LMCache serve
 **Example with custom arguments**:
 
 ```bash
+# vLLM 0.34.0 on CUDA 13.0, with more parallel compile jobs
 docker build \
-  --build-arg CUDA_VERSION=12.4 \
+  --build-arg CUDA_VERSION=13.0 \
+  --build-arg NGC_VERSION=25.09 \
+  --build-arg VLLM_VERSION=0.34.0 \
   --build-arg max_jobs=4 \
   --target image-build \
-  --tag lmcache/vllm-openai:cuda12.4 \
+  --tag lmcache/vllm-openai:vllm-0.34.0-cu130 \
   --file docker/Dockerfile .
 ```
 

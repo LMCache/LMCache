@@ -782,6 +782,10 @@ jobs:
               run: |
                 test "$(docker image inspect --format '{{.Architecture}}' lmcache/vllm-openai:${{ env.LATEST_TAG }}-${{ matrix.arch }})" = "${{ matrix.arch }}"
                 docker run --rm --entrypoint lmcache lmcache/vllm-openai:${{ env.LATEST_TAG }}-${{ matrix.arch }} --help
+                # Keep the default entrypoint (nvidia_entrypoint.sh, then vllm serve) so a
+                # base image without that script or a broken entrypoint fails here.
+                docker run --rm lmcache/vllm-openai:${{ env.LATEST_TAG }}-${{ matrix.arch }} --help > /tmp/vllm-serve-help.txt
+                tail -n 3 /tmp/vllm-serve-help.txt
 
             - name: Push lmcache/vllm-openai container image to DockerHub
               run: |
@@ -1028,6 +1032,10 @@ jobs:
               run: |
                 test "$(docker image inspect --format '{{.Architecture}}' lmcache/vllm-openai:${{ env.LATEST_RC_TAG }}-${{ matrix.arch }})" = "${{ matrix.arch }}"
                 docker run --rm --entrypoint lmcache lmcache/vllm-openai:${{ env.LATEST_RC_TAG }}-${{ matrix.arch }} --help
+                # Keep the default entrypoint (nvidia_entrypoint.sh, then vllm serve) so a
+                # base image without that script or a broken entrypoint fails here.
+                docker run --rm lmcache/vllm-openai:${{ env.LATEST_RC_TAG }}-${{ matrix.arch }} --help > /tmp/vllm-serve-help.txt
+                tail -n 3 /tmp/vllm-serve-help.txt
 
             - name: Push lmcache/vllm-openai RC image to DockerHub
               run: |
