@@ -425,6 +425,8 @@ class MPServer:
             str(self._rpc_port),
             "--http-port",
             str(self._http_port),
+            "--transport",
+            "zmq",
             "--chunk-size",
             str(CHUNK_SIZE),
             "--l1-size-gb",
