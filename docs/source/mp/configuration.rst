@@ -123,8 +123,8 @@ Source: ``lmcache/v1/multiprocess/config.py``
        All three serve the same clients over TCP.
        In ``native`` mode the native front reports the call count and
        duration metrics itself (pygrpc-native 0.3.0 or later), under the
-       same names, but not the message size ones. Used only with
-       ``--transport grpc``.
+       same names, but not the message size ones. Used with
+       ``--transport grpc`` and by the P2P listener.
    * - ``--hash-algorithm``
      - ``blake3``
      - Hash algorithm for token-based operations.

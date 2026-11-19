@@ -72,7 +72,8 @@ class MPServerConfig:
     and hands only the handlers to worker threads. ``native`` does the HTTP/2
     and gRPC framing in Rust, off the GIL, and needs the
     ``pygrpc-native`` package. ``auto`` picks ``native`` when that package is
-    installed and ``aio`` otherwise. Only used by gRPC transport."""
+    installed and ``aio`` otherwise. Used by gRPC transport and by the P2P
+    listener."""
 
     api_key_files: list[str] = field(default_factory=list)
     """Key files shared by authentication-enabled HTTP and request entry points."""
@@ -478,7 +479,8 @@ def add_mp_server_args(
         "loop and hands only the handlers to worker threads. native does the "
         "HTTP/2 and gRPC framing in Rust, off the GIL, and needs the "
         "pygrpc-native package. auto picks native when pygrpc-native is "
-        "installed and aio otherwise. Only used by --transport grpc. "
+        "installed and aio otherwise. Used by --transport grpc and by the "
+        "P2P listener. "
         "Default is auto.",
     )
     mp_group.add_argument(

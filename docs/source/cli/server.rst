@@ -69,7 +69,8 @@ Commonly used flags include:
    * - ``--grpc-server-workers N``
      - gRPC dispatch threads (used only with ``--transport grpc``).
    * - ``--grpc-server-mode {auto,sync,aio,native}``
-     - gRPC server implementation (used only with ``--transport grpc``).
+     - gRPC server implementation (used with ``--transport grpc`` and by
+       the P2P listener).
        Default is ``auto``, which picks ``native`` when the
        ``pygrpc-native`` package is installed and ``aio`` otherwise.
    * - ``--api-key-file PATH``
