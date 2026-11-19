@@ -31,13 +31,14 @@
 # After sourcing the following are set (possibly empty) and exported:
 #   PINNED_VLLM_VERSION         -- e.g. 0.23.1rc1.dev508+gc6dd32a81
 #   PINNED_VLLM_FULL_SHA        -- 40-char commit SHA, if recorded in pin
+#   VLLM_CUDA_VARIANT          -- archive variant, e.g. cu130 or cu132
 #   PINNED_VLLM_ARCHIVE_INDEX_URL
 #                               -- permanent PEP 503 simple index, if recorded
 #   PINNED_XPU_IMAGE            -- XPU runtime image (never empty)
 #   PINNED_RBLN_IMAGE           -- RBLN rbln-serve image (never empty)
 #
-# The script never fails the build: a missing/unreachable pin file just
-# falls through to the unpinned path, mirroring the previous behaviour.
+# A missing/unreachable pin file falls through to the unpinned path.
+# A malformed CUDA variant is rejected before package installation.
 #
 # Image resolution selects each runtime's latest Buildkite-verified digest
 # from tested_runtimes.jsonl. Without one, it uses that runtime's configured
@@ -91,6 +92,25 @@ fi
 export PINNED_VLLM_VERSION
 export PINNED_VLLM_ARCHIVE_INDEX_URL
 export PINNED_VLLM_FULL_SHA
+
+# Preserve archived pins, including cu130 wheels validated before the
+# upstream nightly moved to CUDA 13.2. Legacy pins without an archive URL
+# also predate that move. Unpinned canaries follow the current cu132 build.
+if [[ -n "${PINNED_VLLM_ARCHIVE_INDEX_URL}" ]]; then
+    vllm_archive_path="${PINNED_VLLM_ARCHIVE_INDEX_URL%/}"
+    VLLM_CUDA_VARIANT="${vllm_archive_path##*/}"
+elif [[ -z "${VLLM_CUDA_VARIANT:-}" ]]; then
+    if [[ -n "${PINNED_VLLM_VERSION}" ]]; then
+        VLLM_CUDA_VARIANT=cu130
+    else
+        VLLM_CUDA_VARIANT=cu132
+    fi
+fi
+if [[ ! "${VLLM_CUDA_VARIANT}" =~ ^cu[0-9]{3}$ ]]; then
+    echo "[ERROR] invalid VLLM_CUDA_VARIANT '${VLLM_CUDA_VARIANT}'" >&2
+    return 1
+fi
+export VLLM_CUDA_VARIANT
 
 if [[ -n "${PINNED_VLLM_VERSION}" ]]; then
     echo "[resolve-pinned-vllm] Pinned vLLM version: ${PINNED_VLLM_VERSION}" >&2
