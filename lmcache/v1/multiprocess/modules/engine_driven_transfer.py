@@ -484,12 +484,18 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 payload.model_name,
                 payload.world_size,
                 layout_desc,
+                self._ctx.chunk_size,
+                self._ctx.hash_algorithm_name,
                 attn_desc=attn_desc,
                 group_layout_descs=dict(enumerate(group_layouts)),
             )
         else:
             self._ctx.layout_desc_registry.register(
-                payload.model_name, payload.world_size, layout_desc
+                payload.model_name,
+                payload.world_size,
+                layout_desc,
+                self._ctx.chunk_size,
+                self._ctx.hash_algorithm_name,
             )
         return RegisterEngineDrivenContextResponse(
             shm_name=shm_name,
