@@ -847,19 +847,15 @@ async function setLogLevel() {
     }
 }
 
-// Read MP configuration, falling back to the same node's legacy endpoint on 404.
+// Read a top-level section from the MP configuration endpoint.
 async function readConfig(configKey = '') {
-    const legacyPath = transformPath('conf');
-    let response = await fetch(transformPath('config'));
-    if (response.status === 404) {
-        const query = configKey ? `?names=${encodeURIComponent(configKey)}` : '';
-        response = await fetch(legacyPath + query);
-    } else if (response.ok && configKey) {
-        const data = await response.json();
-        return JSON.stringify(configKey in data ? {[configKey]: data[configKey]} : {}, null, 2);
-    }
+    const response = await fetch(transformPath('config'));
     if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+    }
+    if (configKey) {
+        const data = await response.json();
+        return JSON.stringify(Object.hasOwn(data, configKey) ? {[configKey]: data[configKey]} : {}, null, 2);
     }
     return response.text();
 }

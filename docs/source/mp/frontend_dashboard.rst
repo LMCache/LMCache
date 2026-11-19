@@ -245,12 +245,11 @@ The table labels the proxy flag and parent ID separately. **Edit** retains
 the original node identity, so changing **Node Name** renames that entry.
 
 The **Config** tab reads MP server configuration from ``GET /config``.
-For embedded servers without that endpoint, it falls back to ``GET /conf``.
-A configuration key selects a top-level MP configuration section or a named
-embedded configuration setting. HTTP errors appear as failures.
-This read behavior does not change configuration writes.
-Both requests in a fallback read stay bound to the node selected when the
-read began, even if the selection changes while the first request is pending.
+A configuration key selects a top-level MP configuration section; an unknown
+section returns an empty object. HTTP errors, including 404, appear as failures.
+Servers predating the removal of the in-process API are not supported by this
+read path. Configuration writes still use the legacy API and are not supported
+on MP servers; this PR changes reads only.
 
 
 - **Node tree view** — shows all proxies and their child nodes in a
