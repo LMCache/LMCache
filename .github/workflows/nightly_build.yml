@@ -1,37 +1,54 @@
-name: Aggregate verified CPU runtime (2026-11-19 recovery)
+# Corrected arm64 release; dispatch only after merged #6752 and all guards pass.
+name: Promote verified CPU runtime (2026-11-19 recovery)
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   actions: read
+  pull-requests: read
+  issues: write
 
 jobs:
-  aggregate:
+  promote:
     if: github.repository == 'LMCache/LMCache'
     runs-on: ubuntu-22.04
     timeout-minutes: 15
+    concurrency:
+      group: github-nightly-vllm-pin
+      cancel-in-progress: false
     steps:
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
           python-version: "3.12"
-      - name: Require seven successful immutable model validations
+      - name: Require merged consumer support and successful validation
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api repos/LMCache/LMCache/actions/runs/44451525443 > run.json
-          gh api 'repos/LMCache/LMCache/actions/runs/44451525443/jobs?per_page=100' > jobs.json
+          gh api repos/LMCache/LMCache/pulls/6752 > consumer.json
+          gh api repos/LMCache/LMCache/actions/runs/44619051586 > run.json
+          gh api 'repos/LMCache/LMCache/actions/runs/44619051586/jobs?per_page=100' > jobs.json
           python - <<'PY'
           import json
           from pathlib import Path
-
-          run = json.loads(Path("run.json").read_text())
-          assert run["head_sha"] == "b3692189937f706bc9d193be6b0c4412a6e8737e"
-          jobs = json.loads(Path("jobs.json").read_text())["jobs"]
-          legs = [j for j in jobs if j["name"].startswith("CPU device tests / CPU device (")]
-          assert len(legs) == 7 and all(j["conclusion"] == "success" for j in legs)
+          pr = json.loads(Path('consumer.json').read_text())
+          if not pr['merged'] is True:
+              raise SystemExit('Merge #6752 before advancing shared pins')
+          if not pr['head']['sha'] == '4f7d30f7f8193c94f02f65bfa937570e83697f12':
+              raise SystemExit("Verification guard failed: pr['head']['sha'] == '4f7d30f7f8193c94f02f65bfa937570e83697f12'")
+          run = json.loads(Path('run.json').read_text())
+          if not run['head_sha'] == 'b3692189937f706bc9d193be6b0c4412a6e8737e':
+              raise SystemExit("Verification guard failed: run['head_sha'] == 'b3692189937f706bc9d193be6b0c4412a6e8737e'")
+          if not (run['status'] == 'completed' and run['conclusion'] == 'success'):
+              raise SystemExit("Verification guard failed: run['status'] == 'completed' and run['conclusion'] == 'success'")
+          jobs = json.loads(Path('jobs.json').read_text())['jobs']
+          legs = [j for j in jobs if j['name'].startswith('CPU device tests / CPU device (')]
+          if not (len(legs) == 7 and all((j['conclusion'] == 'success' for j in legs))):
+              raise SystemExit("Verification guard failed: len(legs) == 7 and all((j['conclusion'] == 'success' for j in legs))")
+          if not any((j['name'] == 'Pin or report vLLM' and j['conclusion'] == 'success' for j in jobs)):
+              raise SystemExit("Verification guard failed: any((j['name'] == 'Pin or report vLLM' and j['conclusion'] == 'success' for j in jobs))")
           PY
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
@@ -41,7 +58,7 @@ jobs:
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           github-token: ${{ github.token }}
-          run-id: 44451525443
+          run-id: 44619051586
           pattern: verify-result-*
           path: verify-results
       - name: Verify complete coverage, published version and fresh provenance
@@ -50,30 +67,49 @@ jobs:
           import datetime
           import json
           from pathlib import Path
-
-          files = list(Path("verify-results").glob("*/verify_result.json"))
-          assert len(files) == 7
+          files = list(Path('verify-results').glob('*/verify_result.json'))
+          if not len(files) == 7:
+              raise SystemExit('Verification guard failed: len(files) == 7')
           results = [json.loads(p.read_text()) for p in files]
-          expected = {("ubuntu-22.04", "opt-125m", t) for t in ("zmq", "grpc", "grpc-aio", "grpc-native")}
-          expected |= {("ubuntu-22.04", "deepseek-v2-lite", "zmq"), ("macos-latest", "opt-125m", "zmq"), ("macos-latest", "deepseek-v2-lite", "zmq")}
-          assert {(r["os"], r["model"], r["request_transport"]) for r in results} == expected
+          expected = {('ubuntu-22.04', 'opt-125m', t) for t in ('zmq', 'grpc', 'grpc-aio', 'grpc-native')}
+          expected |= {('ubuntu-22.04', 'deepseek-v2-lite', 'zmq'), ('macos-latest', 'opt-125m', 'zmq'), ('macos-latest', 'deepseek-v2-lite', 'zmq')}
+          if not {(r['os'], r['model'], r['request_transport']) for r in results} == expected:
+              raise SystemExit("Verification guard failed: {(r['os'], r['model'], r['request_transport']) for r in results} == expected")
           now = datetime.datetime.now(datetime.timezone.utc)
           for result in results:
-              assert result["status"] == "ok"
-              assert result["vllm_version"] == "0.34.1.dev202611190133"
-              assert result["source_sha"] == "8700cc9ba0016bf14d8f2756f3b673e93fbcf2fd"
-              assert result["run_id"] == "44451525443"
-              built = datetime.datetime.fromisoformat(result["built_at"])
-              assert datetime.timedelta(0) <= now - built < datetime.timedelta(hours=48)
-              print(result["os"], result["model"], result["request_transport"], result["source_sha"], result["built_at"])
+              if not result['status'] == 'ok':
+                  raise SystemExit("Verification guard failed: result['status'] == 'ok'")
+              if not result['vllm_version'] == '0.34.1.dev202611191847':
+                  raise SystemExit("Verification guard failed: result['vllm_version'] == '0.34.1.dev202611191847'")
+              if not result['source_sha'] == 'b2c92fa9c1d8be6790ddd0852b547bbf927bfbd0':
+                  raise SystemExit("Verification guard failed: result['source_sha'] == 'b2c92fa9c1d8be6790ddd0852b547bbf927bfbd0'")
+              if not result['run_id'] == '44619051586':
+                  raise SystemExit("Verification guard failed: result['run_id'] == '44619051586'")
+              built = datetime.datetime.fromisoformat(result['built_at'])
+              if not datetime.timedelta(0) <= now - built < datetime.timedelta(hours=48):
+                  raise SystemExit('Verification guard failed: datetime.timedelta(0) <= now - built < datetime.timedelta(hours=48)')
+              print(result['os'], result['model'], result['request_transport'], result['source_sha'], result['built_at'])
           PY
-      - name: Dry-run the trusted aggregation and pin writer
+      - name: Require the architecture-verified published wheel pair
+        run: |
+          python - <<'PYCODE'
+          import json
+          import urllib.request
+          expected = {'vllm_cpu_nightly-0.34.1.dev202611191847-cp312-cp312-macosx_11_0_arm64.whl': '341e4c250a4fd323631f924bdde21fa1091a94a919eed8e706de7a8fb8d22001', 'vllm_cpu_nightly-0.34.1.dev202611191847-cp312-cp312-manylinux_2_28_x86_64.whl': '8f38b6e575a3fb093f3ca11b1dbf03996a9707260aecf03a673296e90813b05c'}
+          url = 'https://pypi.org/pypi/vllm-cpu-nightly/0.34.1.dev202611191847/json'
+          release = json.load(urllib.request.urlopen(url, timeout=30))
+          actual = {p['filename']: p['digests']['sha256'] for p in release['urls']}
+          if actual != expected:
+              raise SystemExit('Published CPU files differ from the architecture-verified native build')
+          print('Both published platform hashes match the audited native artifacts')
+          PYCODE
+      - name: Promote the verified CPU pointers and provenance history
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PIN_SCRIPT: ${{ github.workspace }}/.github/scripts/pin-tested-vllm.sh
           EXPECTED_OSS: ubuntu-22.04 macos-latest
-          DRY_RUN: "1"
+          DRY_RUN: "0"
           COMMIT_SHA: 4f7d30f7f8193c94f02f65bfa937570e83697f12
-          BUILD_NUMBER: "44451525443"
-          BUILD_URL: https://github.com/LMCache/LMCache/actions/runs/44451525443
+          BUILD_NUMBER: "44619051586"
+          BUILD_URL: https://github.com/LMCache/LMCache/actions/runs/44619051586
         run: bash .github/scripts/nightly-aggregate-vllm-verify.sh
