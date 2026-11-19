@@ -19,6 +19,10 @@ def connector_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     monkeypatch.setattr(
         module.KVConnectorBase_V1, "__init__", MagicMock(return_value=None)
     )
+    # These tests isolate configuration parsing from engine capabilities.
+    monkeypatch.setattr(
+        module.KVConnectorBase_V1, "on_kv_cache_ready", MagicMock(), raising=False
+    )
     for name in (
         "validate_mamba_step_alignment",
         "validate_kv_cache_groups",

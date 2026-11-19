@@ -29,12 +29,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (  # noqa: E402
     MultiConnector,
 )
+from vllm.v1 import kv_cache_interface as kv_cache_api  # noqa: E402
 from vllm.v1.core.sched.output import SchedulerOutput  # noqa: E402
-from vllm.v1.kv_cache_interface import (  # noqa: E402
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig  # noqa: E402
 from vllm.v1.outputs import KVConnectorOutput  # noqa: E402
 from vllm.v1.request import Request, RequestStatus  # noqa: E402
 from vllm.v1.utils import ConstantList  # noqa: E402
@@ -138,6 +135,11 @@ def lazy_offload(request: pytest.FixtureRequest) -> bool:
 @pytest.fixture
 def mock_io(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """Stub transport, telemetry and GPU resources, keeping worker logic real."""
+    # Direct connector tests can exercise readiness with the stable vLLM wheel.
+    # Real MultiConnector readiness dispatch is tested only when upstream has it.
+    monkeypatch.setattr(
+        KVConnectorBase_V1, "on_kv_cache_ready", MagicMock(), raising=False
+    )
     scheduler = MagicMock(lmcache_tokens_per_chunk=4)
     scheduler.check_lookup_result.return_value = 0
     transfer = MagicMock()
@@ -485,15 +487,29 @@ def test_receive_failure_reporting(
             kv_connector_extra_config={"lmcache.mp.lazy_offload": lazy_offload},
         )
     )
-    spec = FullAttentionSpec(
-        block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float32
-    )
+    # vLLM main moved allocation policy from FullAttentionSpec into the group.
+    spec_type = getattr(kv_cache_api, "FullAttentionSpec", kv_cache_api.AttentionSpec)
+    spec = spec_type(block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float32)
+    if hasattr(kv_cache_api, "KVCacheGroupSpec"):
+        groups = [
+            kv_cache_api.KVCacheGroupSpec([f"layer{i}"], spec)
+            for i in range(num_groups)
+        ]
+    else:
+        # Third Party
+        from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+        manager = kv_cache_api.ManagerConfig(
+            FullAttentionManager, FullAttentionManager.Params()
+        )
+        groups = [
+            kv_cache_api.KVCacheGroup({f"layer{i}": spec}, manager, spec.block_size)
+            for i in range(num_groups)
+        ]
     cache_config = KVCacheConfig(
         num_blocks=8,
         kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec([f"layer{i}"], spec) for i in range(num_groups)
-        ],
+        kv_cache_groups=groups,
     )
     worker = LMCacheMPConnector(config, KVConnectorRole.WORKER, cache_config)
     try:
@@ -677,6 +693,10 @@ def test_delayed_request_is_reported_by_ranks_without_its_store(
 
 @pytest.mark.parametrize("mp_role", ["kv_both", "kv_consumer"])
 @pytest.mark.parametrize("peer_delays_free", [False, True])
+@pytest.mark.skipif(
+    not hasattr(MultiConnector, "on_kv_cache_ready"),
+    reason="Real MultiConnector readiness requires vLLM #66574",
+)
 def test_multi_connector_child_role_and_completion(
     mp_role: str,
     peer_delays_free: bool,
@@ -1034,3 +1054,17 @@ def test_startup_registration_waits_for_ready(mock_io: SimpleNamespace) -> None:
         mock_io.heartbeat.return_value.start.assert_called_once_with()
     finally:
         worker.shutdown()
+
+
+def test_worker_rejects_vllm_without_ready_hook(
+    mock_io: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An old engine is rejected before creating a transfer context."""
+    monkeypatch.delattr(KVConnectorBase_V1, "on_kv_cache_ready")
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    with pytest.raises(RuntimeError, match="requires vLLM's on_kv_cache_ready"):
+        LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    mock_io.transfer.register.assert_not_called()
+    mock_io.heartbeat.assert_not_called()

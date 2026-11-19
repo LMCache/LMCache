@@ -121,6 +121,13 @@ and connector import tests. For these focused checks, use
 `python -m pytest --confcutdir=tests/v1 tests/v1/gpu_connector/` so the root
 `tests/conftest.py` GPU allocator fixtures are not loaded. This validates CPU
 imports and shared layout/GDS behavior, not accelerator kernel roundtrips.
+When upgrading `vllm-cpu-nightly` in a reused validation environment, remove
+stale synthetic `vllm-<version>+cpu.dist-info` directories and regenerate the
+alias with `.github/scripts/install_vllm_cpu.sh`. Do not uninstall the synthetic
+`vllm` distribution with pip: its copied `RECORD` names the real package files.
+CPU serving tests must set `lmcache.mp.use_vmm_api=false` in connector extra
+config: current vLLM checks the declared cache access before initializing the
+device and rejects the automatic CUDA VMM export mode on CPU.
 When combining these tests with `tests/inprocess/`, use `--noconftest` for
 self-contained CPU checks spanning both trees; normal accelerator CI must
 retain the root fixtures. Mirrored test directories with identical module
