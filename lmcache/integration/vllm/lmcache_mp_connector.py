@@ -624,6 +624,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
     # appends. The scheduler role sets it from the vLLM config.
     _mamba_relocation_window: int = 0
+    # Draft tokens per step; 0 without speculative decoding.
+    _num_speculative_tokens: int = 0
 
     def __init__(
         self,
@@ -687,16 +689,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if not isinstance(self._save_unfull_chunk, bool):
             raise ValueError("lmcache.mp.save_unfull_chunk must be a boolean")
         spec_config = getattr(vllm_config, "speculative_config", None)
-        if (
-            self._save_unfull_chunk
-            and spec_config is not None
-            and (spec_config.num_speculative_tokens or 0) > 0
-        ):
-            # Draft rows sit past the prompt end in relocated Mamba blocks,
-            # so the state at the prompt end is not isolated.
-            raise ValueError(
-                "lmcache.mp.save_unfull_chunk does not support speculative decoding"
-            )
+        # Draft tokens per step (EAGLE / MTP). Unfull chunks stay supported:
+        # grid tails read attention rows below the prompt end or vLLM's
+        # boundary-state snapshots, which draft tokens never touch.
+        self._num_speculative_tokens = (
+            spec_config.num_speculative_tokens or 0 if spec_config is not None else 0
+        )
         if (
             self._save_unfull_chunk
             and kv_cache_config is not None
@@ -2288,6 +2286,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._unfull_chunk_grid,
             boundary_state_blocks,
             self._boundary_state_groups,
+            num_speculative_tokens=self._num_speculative_tokens,
         ):
             if pool is not None and boundary_state_block_ids:
                 pool.touch(
