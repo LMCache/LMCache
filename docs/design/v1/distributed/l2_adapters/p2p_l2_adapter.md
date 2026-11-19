@@ -113,15 +113,21 @@ shared with those callbacks and guarded by a lock. Failures stay bounded:
 - a failed query is retried once, and a second failure is a miss;
 - the lookup deadline (`lookup_timeout_s`) still bounds the whole lookup;
 - a lookup acknowledgement that fails because the peer is down
-  (`UNAVAILABLE` at once) or past the ~3 s lookup deadline (a frozen peer)
-  marks the peer unresponsive; other ack errors are only a miss. While
-  marked, lookups to the peer are a miss at once, without an RPC, until a
-  probe is answered. The probe is an unlock of no keys sent by the adapter,
-  one at a time; no request waits on it. It waits for a connection, up to the
-  same deadline, so a peer that is down is probed at most once per deadline.
-  An answered probe shows that the peer's RPC server is up, not that its
-  lookup path works. The trade-off: a peer that stalls past the deadline and
-  recovers misses hits until the next lookup's probe is answered.
+  (`UNAVAILABLE` or `CANCELLED` at once) or past the ~3 s lookup deadline (a
+  frozen peer), or a result query still unanswered after ~3 s, marks the
+  peer unresponsive; other ack errors are only a miss. A stalled query's
+  late answer is still used by its lookup. While marked, lookups to the peer
+  are a miss at once, without an RPC. Recovery is checked one step at a
+  time. First the adapter sends a probe, an unlock of no keys, that no
+  request waits on; it waits for a connection, up to the same deadline, so a
+  peer that is down is probed at most once per deadline. An answered probe
+  only shows that the peer's RPC server is up, so the next lookup then goes
+  out as a canary while the others still miss. The mark is cleared only when
+  the canary completes; if its ack or query fails or stalls, the next lookup
+  probes again. A peer whose RPC server answers but whose lookups stall thus
+  costs one waiting request per check instead of every request. The
+  trade-off: a peer that stalls past the deadline and recovers misses hits
+  until a probe and a canary complete.
 
 The lookup deadline also stops lookups from piling up behind a peer that is
 down: without it, lookups waiting for a connection were all sent, and
