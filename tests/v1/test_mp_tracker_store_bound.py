@@ -96,7 +96,7 @@ def test_without_engine_position_falls_back_to_hits():
 
 
 def test_lookahead_holds_back_chunk_until_next_token_exists():
-    """A chunk whose lookahead token is not known yet is not stored."""
+    """A chunk is not saved until the token after it exists."""
     request = SimpleNamespace(
         request_id="req-la",
         cache_salt="",

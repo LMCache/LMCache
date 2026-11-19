@@ -343,9 +343,8 @@ class LMCacheMPRequestMetadata:
             save_decode_cache: Whether to store chunks containing generated
                 tokens. Defaults to storing only complete chunks within the
                 initial prompt, including when decode fills its partial tail.
-            lookahead_tokens: Tokens after each block that vLLM folds into
-                its block hash (EAGLE / MTP). A chunk is held back until those
-                tokens exist, since vLLM cannot hash its last block before.
+            lookahead_tokens: How many tokens vLLM needs after a block before
+                it can hash it (speculative decoding). A chunk waits for them.
 
         Returns:
             Metadata for newly storable chunks, or None when no complete
@@ -465,8 +464,8 @@ class LMCacheMPRequestMetadata:
         - Exact, ``B = P``, for a request that ends at its prompt
           (``tracker.ends_at_prompt``, e.g. a disaggregated prefill) once the
           prompt is computed. Skipped when ``P`` is a multiple of ``C``, and
-          for boundary-state groups under speculative decoding: it reads the
-          running Mamba block, which draft tokens advance past ``P``.
+          for Mamba models with speculative decoding (guessed tokens change
+          that state).
 
         Notes:
             The stored blocks are never rewritten after ``B``: attention rows
@@ -487,8 +486,8 @@ class LMCacheMPRequestMetadata:
                 ``{boundary token: {engine group: block id}}``.
             boundary_state_groups: Engine groups whose state at a grid
                 boundary must come from ``boundary_state_blocks``.
-            num_speculative_tokens: Draft tokens per step (EAGLE / MTP); 0
-                without speculative decoding.
+            num_speculative_tokens: Tokens the draft model guesses per step; 0
+                when speculative decoding is off.
 
         Returns:
             One ``(metadata, boundary-state block IDs it reads)`` pair per newly

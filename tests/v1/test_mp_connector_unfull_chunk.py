@@ -81,8 +81,8 @@ def test_prompt_ending_request_also_stores_its_exact_tail():
 
 
 def test_mamba_exact_tail_is_not_stored_under_speculative_decoding():
-    """Draft tokens advance the running Mamba state past the prompt end, so
-    only the grid tail, read from vLLM's boundary-state snapshot, is stored."""
+    """With speculative decoding, a Mamba model saves only the grid tail: its
+    end-of-prompt state keeps changing as guessed tokens are added."""
     tracker = _tracker(max_tokens=1)
     tracker.increase_num_scheduled_tokens(PROMPT)
 
@@ -96,8 +96,8 @@ def test_mamba_exact_tail_is_not_stored_under_speculative_decoding():
 
 
 def test_attention_tails_are_stored_under_speculative_decoding():
-    """Attention rows below the prompt end never change; draft rows are
-    written past it. Both the grid and the exact tail are stored."""
+    """An attention-only model saves both tails: guessed tokens are written
+    after the prompt, so the saved rows never change."""
     tracker = _tracker(max_tokens=1)
     tracker.increase_num_scheduled_tokens(PROMPT)
 
@@ -111,7 +111,7 @@ def test_attention_tails_are_stored_under_speculative_decoding():
 def test_speculative_decoding_does_not_block_unfull_chunks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``lmcache.mp.save_unfull_chunk`` starts with EAGLE / MTP enabled."""
+    """Partial chunks can be turned on together with speculative decoding."""
     monkeypatch.setattr(
         connector_mod,
         "LMCacheMPSchedulerAdapter",

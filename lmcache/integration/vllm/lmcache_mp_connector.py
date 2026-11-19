@@ -624,7 +624,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
     # appends. The scheduler role sets it from the vLLM config.
     _mamba_relocation_window: int = 0
-    # Draft tokens per step; 0 without speculative decoding.
+    # Tokens the draft model guesses per step; 0 when speculative decoding is off.
     _num_speculative_tokens: int = 0
 
     def __init__(
@@ -689,9 +689,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if not isinstance(self._save_unfull_chunk, bool):
             raise ValueError("lmcache.mp.save_unfull_chunk must be a boolean")
         spec_config = getattr(vllm_config, "speculative_config", None)
-        # Draft tokens per step (EAGLE / MTP). Unfull chunks stay supported:
-        # grid tails read attention rows below the prompt end or vLLM's
-        # boundary-state snapshots, which draft tokens never touch.
+        # Partial chunks work with speculative decoding: guessed tokens are
+        # written after the prompt, never inside a saved partial chunk.
         self._num_speculative_tokens = (
             spec_config.num_speculative_tokens or 0 if spec_config is not None else 0
         )
@@ -815,11 +814,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.lazy_offload = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.lazy_offload", False
         )
-        # Lazy offload snapshots each block's vLLM hash when a store is
-        # offered and drops the store if the hash is missing or later changes.
-        # With EAGLE / MTP lookahead block hashes, vLLM hashes a block only
-        # once its next lookahead tokens exist, so hold those tokens back.
-        # vLLM releases before lookahead hashing do not define the field.
+        # With speculative decoding, vLLM hashes a block only after the next few
+        # tokens exist, and lazy offload skips blocks without a hash. So wait for
+        # those tokens before saving (older vLLM has no such field: use 0).
         self._store_lookahead_tokens: int = (
             getattr(vllm_config, "num_hash_lookahead_tokens", 0)
             if self.lazy_offload
