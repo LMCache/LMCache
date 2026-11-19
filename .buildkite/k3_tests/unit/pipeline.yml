@@ -3,6 +3,7 @@
 
 steps:
   - label: ":test_tube: Unit Tests"
+    if: build.pull_request.draft != true
     command: .buildkite/k3_tests/unit/run.sh
     timeout_in_minutes: 60
     agents: { queue: "k8s" }
