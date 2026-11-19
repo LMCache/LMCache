@@ -51,3 +51,17 @@ def test_cli_passes_backend_name_to_config(
     assert gds_config.backend == backend
     assert gds_config.file_location == "/dev/ugds_drv0"
     assert gds_config.size_in_bytes == 8 << 30
+
+
+@pytest.mark.parametrize(
+    "extra, expected", [([], 0), (["--gds-l1-read-threads", "2"], 2)]
+)
+def test_cli_reader_threads_default_to_off(extra: list[str], expected: int) -> None:
+    parser = argparse.ArgumentParser()
+    add_mp_server_args(parser)
+    add_storage_manager_args(parser)
+    args = ["--l1-size-gb", "8", "--eviction-policy", "LRU", "--gds-l1-path", "/slab"]
+    config = parse_args_to_config(parser.parse_args(args + extra))
+    gds_config = config.l1_manager_config.gds_l1_config
+    assert gds_config is not None
+    assert gds_config.read_threads == expected

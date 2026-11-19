@@ -43,6 +43,10 @@ class CompletionEvent:
         """Return whether the event's preceding stream work has completed."""
         return self._spec.is_stream_event_complete(self._event)
 
+    def wait(self) -> None:
+        """Block the calling thread until the event has completed."""
+        self._spec.synchronize_stream_event(self._event)
+
     def wait_on(self, stream: object) -> None:
         """Make ``stream`` wait for the event before it runs later work."""
         self._spec.wait_stream_event(self._event, stream)
@@ -68,9 +72,16 @@ def synchronize_device(device: object) -> None:
     _get_spec(device).synchronize_device(device)
 
 
-def record_completion_event(device: object, stream: object) -> CompletionEvent:
-    """Record a pollable completion event after work queued on ``stream``."""
+def record_completion_event(
+    device: object, stream: object, *, blocking: bool = False
+) -> CompletionEvent:
+    """Record a pollable completion event after work queued on ``stream``;
+    ``blocking`` makes :meth:`CompletionEvent.wait` sleep instead of spin."""
     spec = _get_spec(device)
-    event = spec.create_stream_event(device)
+    event = (
+        spec.create_stream_event(device, blocking=True)
+        if blocking
+        else spec.create_stream_event(device)
+    )
     spec.record_stream_event(event, stream)
     return CompletionEvent(spec, event)

@@ -44,9 +44,12 @@ class _FakeDeviceSpec:
     def synchronize_device(self, device: object) -> None:
         self.calls.append(("synchronize_device", device))
 
-    def create_stream_event(self, device: object) -> object:
+    def create_stream_event(self, device: object, blocking: bool = False) -> object:
         self.calls.append(("create_stream_event", device))
-        return "event"
+        return "blocking event" if blocking else "event"
+
+    def synchronize_stream_event(self, event: object) -> None:
+        self.calls.append(("synchronize_stream_event", event))
 
     def record_stream_event(self, event: object, value: object) -> None:
         self.calls.append(("record_stream_event", event, value))
@@ -76,6 +79,8 @@ def test_stream_operations_dispatch_through_device_spec(
     spec.event_complete = True
     assert completion.is_complete() is True
 
+    stream.record_completion_event(device, current, blocking=True).wait()
+
     lookup.assert_called_once_with("example")
     assert spec.calls == [
         ("current_stream", device),
@@ -86,6 +91,9 @@ def test_stream_operations_dispatch_through_device_spec(
         ("record_stream_event", "event", "stream"),
         ("is_stream_event_complete", "event"),
         ("is_stream_event_complete", "event"),
+        ("create_stream_event", device),
+        ("record_stream_event", "blocking event", "stream"),
+        ("synchronize_stream_event", "blocking event"),
     ]
 
 

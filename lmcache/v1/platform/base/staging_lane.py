@@ -11,7 +11,6 @@ from __future__ import annotations
 
 # Standard
 from typing import Any, Protocol, Sequence
-import time
 
 # Third Party
 import torch
@@ -20,7 +19,6 @@ import torch
 from lmcache.v1.platform import stream as platform_stream
 
 BANKS_PER_LANE = 2
-_HOST_POLL_SECONDS = 20e-6
 
 
 class StagingBank(Protocol):
@@ -79,8 +77,8 @@ class StagingLane:
         """Block until the last scatter of ``bank`` ran; for loads done by
         host threads, which cannot queue the wait on a stream."""
         event = self._free[bank]
-        while event is not None and not event.is_complete():
-            time.sleep(_HOST_POLL_SECONDS)
+        if event is not None:
+            event.wait()
 
     def signal_staged(self, bank: int, stream: object) -> None:
         """Signal "staged" for ``bank`` after the work queued on ``stream``."""
@@ -96,4 +94,6 @@ class StagingLane:
 
     def signal_free(self, bank: int, stream: object) -> None:
         """Signal "free" for ``bank`` after the work queued on ``stream``."""
-        self._free[bank] = platform_stream.record_completion_event(self._device, stream)
+        self._free[bank] = platform_stream.record_completion_event(
+            self._device, stream, blocking=True
+        )

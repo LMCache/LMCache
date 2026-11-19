@@ -194,9 +194,11 @@ class DeviceSpec:
         """Wait until work already enqueued on ``device`` has completed."""
         self._get_torch_module().synchronize(device=device)
 
-    def create_stream_event(self, device: object) -> object:
-        """Create an event used to observe completion on ``device``'s stream."""
-        return self._get_torch_module().Event()
+    def create_stream_event(self, device: object, blocking: bool = False) -> object:
+        """Create an event used to observe completion on ``device``'s stream;
+        ``blocking`` makes a host wait for it sleep instead of spin."""
+        event_type = self._get_torch_module().Event
+        return event_type(blocking=True) if blocking else event_type()
 
     def record_stream_event(self, event: Any, stream: object) -> None:
         """Record ``event`` after work already queued on ``stream``."""
@@ -205,6 +207,10 @@ class DeviceSpec:
     def wait_stream_event(self, event: object, stream: Any) -> None:
         """Make ``stream`` wait for a previously recorded ``event``."""
         stream.wait_event(event)
+
+    def synchronize_stream_event(self, event: Any) -> None:
+        """Block the calling thread until ``event`` has completed."""
+        event.synchronize()
 
     def is_stream_event_complete(self, event: object) -> bool:
         """Return whether a previously recorded stream event has completed."""

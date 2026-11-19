@@ -13,17 +13,15 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.object_group_transfer import nvme_dma
-from lmcache.v1.multiprocess.object_group_transfer.nvme_dma import (
-    ENV_GDS_READ_THREADS,
-    NvmeDmaEngine,
-    gds_read_threads,
-)
+from lmcache.v1.multiprocess.object_group_transfer.nvme_dma import NvmeDmaEngine
 
 
 @pytest.fixture
 def log(monkeypatch) -> list:
-    """Fake the slab read; reads are logged as ``("read", object, buffer)``."""
+    """Fake the slab read on a slab with two reader threads; reads are
+    logged as ``("read", object, buffer)``."""
     entries: list = []
+    monkeypatch.setattr(nvme_dma, "read_threads", lambda memory_obj: 2)
     monkeypatch.setattr(
         nvme_dma,
         "read_slab_object",
@@ -56,39 +54,27 @@ def test_failed_read_is_raised_after_the_other_reads_have_ended(log, monkeypatch
         log.append(("read", memory_obj, buffer))
 
     monkeypatch.setattr(nvme_dma, "read_slab_object", read)
-    monkeypatch.setenv(ENV_GDS_READ_THREADS, "2")
     threading.Timer(0.2, release_slow_read.set).start()
     with pytest.raises(OSError, match="short slab read"):
         NvmeDmaEngine().load_from_host(["slow", "bad"], ["b0", "b1"], "gpu")
     assert log == [("read", "slow", "b0")]
 
 
-def _slab_object(blocking_read: bool, monkeypatch) -> MagicMock:
+def _slab_object(read_threads: int, monkeypatch) -> MagicMock:
+    """An object whose slab is configured with ``read_threads`` threads."""
     monkeypatch.setattr(
         nvme_dma,
         "get_l1_gds_context",
-        lambda owner: SimpleNamespace(supports_blocking_read=owner),
+        lambda owner: SimpleNamespace(read_threads=owner),
     )
     obj = MagicMock()
-    obj.get_l1_manager.return_value = blocking_read
+    obj.get_l1_manager.return_value = read_threads
     return obj
 
 
-def test_host_load_needs_a_blocking_read_on_every_objects_slab(monkeypatch):
+def test_host_load_needs_reader_threads_on_every_objects_slab(monkeypatch):
     engine = NvmeDmaEngine()
-    blocking = _slab_object(True, monkeypatch)
-    stream_only = _slab_object(False, monkeypatch)
-    assert engine.loads_from_host([blocking, blocking]) is True
-    assert engine.loads_from_host([blocking, stream_only]) is False
-
-
-def test_zero_reader_threads_turns_the_host_load_off(monkeypatch):
-    monkeypatch.setenv(ENV_GDS_READ_THREADS, "0")
-    assert NvmeDmaEngine().loads_from_host([_slab_object(True, monkeypatch)]) is False
-
-
-def test_two_reader_threads_by_default(monkeypatch):
-    monkeypatch.delenv(ENV_GDS_READ_THREADS, raising=False)
-    assert gds_read_threads() == 2
-    monkeypatch.setenv(ENV_GDS_READ_THREADS, "8")
-    assert gds_read_threads() == 8
+    threaded = _slab_object(2, monkeypatch)
+    stream_only = _slab_object(0, monkeypatch)
+    assert engine.loads_from_host([threaded, threaded]) is True
+    assert engine.loads_from_host([threaded, stream_only]) is False

@@ -331,7 +331,9 @@ class TestReadBlocking:
         backend.open_slab.return_value = handle
         handle.path = "slab"
         ctx = GDSContext(backend)
-        ctx.initialize(GdsL1Config(file_location="slab", size_in_bytes=1 << 26))
+        ctx.initialize(
+            GdsL1Config(file_location="slab", size_in_bytes=1 << 26, read_threads=2)
+        )
         monkeypatch.setattr(backend, "register_buffer", lambda b: None)
         monkeypatch.setattr(backend, "register_stream", lambda raw: None)
         _use_fake_stream(monkeypatch, 0)
@@ -344,7 +346,7 @@ class TestReadBlocking:
         handle = Mock(supports_blocking_read=True)
         handle.read_blocking.side_effect = lambda base, size, file_off, off: size
         ctx = self._context(monkeypatch, backend, buf, handle)
-        assert ctx.supports_blocking_read is True
+        assert ctx.read_threads == 2
         mem_obj = SimpleNamespace(get_size=lambda: 12288, slab_offset=1 << 20)
         # The chunk starts 4 KiB before the first region's end.
         ctx.read_blocking(mem_obj, buf[region - 4096 :])
@@ -362,8 +364,13 @@ class TestReadBlocking:
         with pytest.raises(OSError):
             ctx.read_blocking(mem_obj, buf)
 
-    def test_context_without_an_open_slab_has_no_blocking_read(self, backend):
-        assert GDSContext(backend).supports_blocking_read is False
+    def test_reader_threads_need_a_backend_with_a_blocking_read(
+        self, monkeypatch, backend
+    ):
+        assert GDSContext(backend).read_threads == 0
+        handle = Mock(supports_blocking_read=False)
+        ctx = self._context(monkeypatch, backend, torch.empty(4096), handle)
+        assert ctx.read_threads == 0
 
 
 class TestPerStreamRegistration:

@@ -2,8 +2,8 @@
 """NVMe DMA engine: objects held in a GDS slab.
 
 A retrieve loads slab objects with blocking reads on host threads when the
-backend has a blocking read (``LMCACHE_GDS_READ_THREADS``, default 2; 0
-keeps the stream-ordered read). The caller queues device work for a batch
+slab is configured with reader threads (``--gds-l1-read-threads``; the
+default 0 keeps the stream-ordered read). The caller queues device work for a batch
 only after its reads have returned: the read does device work of its own
 (cuFile compat mode), and kernels queued ahead behind a host-written signal
 deadlocked with it.
@@ -12,7 +12,6 @@ deadlocked with it.
 # Standard
 from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Sequence, cast
-import os
 import threading
 
 # Third Party
@@ -24,12 +23,11 @@ from lmcache.v1.gpu_connector.gds_context import SlabDirection, get_l1_gds_conte
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 import lmcache.lmcache_native as lmcache_native
 
-ENV_GDS_READ_THREADS = "LMCACHE_GDS_READ_THREADS"
 
-
-def gds_read_threads() -> int:
-    """Return the number of host threads that read slab objects (0: none)."""
-    return int(os.environ.get(ENV_GDS_READ_THREADS, 2))
+def read_threads(memory_obj: MemoryObj) -> int:
+    """Return the reader threads configured for the object's slab (0: none)."""
+    slab_obj = cast(GDSMemoryObject, memory_obj)
+    return get_l1_gds_context(slab_obj.get_l1_manager()).read_threads
 
 
 def read_slab_object(
@@ -79,16 +77,9 @@ class NvmeDmaEngine:
             )
 
     def loads_from_host(self, memory_objs: Sequence[MemoryObj]) -> bool:
-        """Return whether these objects are read on host threads: reader
-        threads are enabled and every object's slab has a blocking read."""
-        if gds_read_threads() == 0:
-            return False
-        return all(
-            get_l1_gds_context(
-                cast(GDSMemoryObject, memory_obj).get_l1_manager()
-            ).supports_blocking_read
-            for memory_obj in memory_objs
-        )
+        """Return whether these objects are read on host threads: every
+        object's slab is configured with reader threads."""
+        return all(read_threads(memory_obj) > 0 for memory_obj in memory_objs)
 
     def load_from_host(
         self,
@@ -105,7 +96,8 @@ class NvmeDmaEngine:
         with self._readers_lock:
             if self._readers is None:
                 self._readers = ThreadPoolExecutor(
-                    gds_read_threads(), thread_name_prefix="lmcache-gds-read"
+                    read_threads(memory_objs[0]),
+                    thread_name_prefix="lmcache-gds-read",
                 )
         reads = [
             self._readers.submit(read_slab_object, memory_obj, buffer, device)

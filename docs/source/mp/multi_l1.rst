@@ -76,7 +76,8 @@ TTLs must be positive integers. Unknown fields are rejected.
        device with disjoint ranges. The allocator checks that the range fits
        the device and that the offset is page aligned.
    * - ``GDS``
-     - Required ``path``; ``backend`` (``auto``), ``direct_io`` (true).
+     - Required ``path``; ``backend`` (``auto``), ``direct_io`` (true),
+       ``read_threads`` (0).
        See :doc:`configuration` for backend requirements and location semantics.
    * - ``SHADOW``
      - Required ``segment`` (``dram``, ``cxl`` or ``gds``): an index of a

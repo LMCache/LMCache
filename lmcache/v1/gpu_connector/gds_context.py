@@ -169,6 +169,7 @@ class GDSContext:
         self._slab_path = ""
         self._backend = backend
         self._slab_handle: Optional[GDSHandle] = None
+        self._read_threads = 0
         # Per-stream in-flight submissions (keyed by raw GPU stream), released
         # once a GPU event recorded on that stream completes. Guarded by
         # ``_submissions_lock`` (see ``_record_submission``).
@@ -214,6 +215,15 @@ class GDSContext:
                 logger.warning("GDS driver cleanup failed: %s", cleanup_error)
             raise
         self._slab_path = self._slab_handle.path
+        self._read_threads = config.read_threads
+        if self._read_threads and not self._slab_handle.supports_blocking_read:
+            logger.warning(
+                "GDSContext: the %s backend has no blocking read; ignoring "
+                "read_threads=%d",
+                self._backend.name,
+                self._read_threads,
+            )
+            self._read_threads = 0
         logger.info(
             "GDSContext: %s slab opened at %s (%.1f GiB)",
             self._backend.name,
@@ -353,11 +363,10 @@ class GDSContext:
             pos += seg_len
 
     @property
-    def supports_blocking_read(self) -> bool:
-        """Whether :meth:`read_blocking` can be used on this context's slab."""
-        return self._slab_handle is not None and (
-            self._slab_handle.supports_blocking_read
-        )
+    def read_threads(self) -> int:
+        """Host threads that read this slab with :meth:`read_blocking`; 0
+        when off, or when the backend has no blocking read."""
+        return self._read_threads
 
     def read_blocking(
         self, memory_obj: GDSMemoryObject, gpu_buffer: torch.Tensor

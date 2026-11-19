@@ -181,20 +181,21 @@ scatter stream |      (gate) | scatter b0 | scatter b1 | scatter b2  |
 #### Host-thread loads (NVMe DMA)
 
 A stream-ordered GDS read moves one object at a time, so the NVMe engine
-loads on host threads by default: `NvmeDmaEngine.load_from_host` fans a
+can load on host threads instead: `NvmeDmaEngine.load_from_host` fans a
 batch's objects out to reader threads (`GDSContext.read_blocking`) and
 returns when every read has ended.
 
 - **Order.** The staged loop waits on the host until the bank is free
-  (`StagingLane.wait_free_on_host`), loads it, and only then queues the
+  (`StagingLane.wait_free_on_host`, a blocking event wait), loads it, and only then queues the
   batch on the scatter stream. Nothing is queued on the lane's stream.
 - **No stream waits for a host thread.** Queueing the kernels ahead, behind
   a signal a host thread writes after the reads, deadlocked with
   `cuFileRead` in compat mode, which does device work of its own. The cost
   is that the handler waits for the reads.
-- **Default.** Two reader threads; `LMCACHE_GDS_READ_THREADS` changes the
-  number and `0` returns to the stream-ordered read, as does a GDS backend
-  without a blocking read (only cuFile implements it).
+- **Default.** Off, because it is measured in cuFile compat mode only.
+  `--gds-l1-read-threads` (`read_threads` in a multi-L1 config) sets the
+  number; a GDS backend without a blocking read ignores it (only cuFile
+  implements one).
 - **Failure.** A failed or short read raises `OSError` from the retrieve
   call after the other reads of the batch have ended; no kernel is queued
   for that batch.

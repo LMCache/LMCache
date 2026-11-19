@@ -29,8 +29,8 @@ def test_lane_hands_out_its_banks_in_turn():
 @pytest.fixture
 def events(monkeypatch):
     """Fake stream events; returns the log of ``("record", n, stream)``,
-    ``("wait", n, stream)`` and ``("poll", n)`` entries, where ``n`` numbers
-    the events. An event is complete from its third poll on."""
+    ``("wait", n, stream)`` and ``("host_wait", n)`` entries, where ``n``
+    numbers the events."""
     log: list[tuple] = []
 
     class _Event:
@@ -40,12 +40,12 @@ def events(monkeypatch):
         def wait_on(self, stream: object) -> None:
             log.append(("wait", self._number, stream))
 
-        def is_complete(self) -> bool:
-            polls = sum(1 for entry in log if entry == ("poll", self._number))
-            log.append(("poll", self._number))
-            return polls == 2
+        def wait(self) -> None:
+            log.append(("host_wait", self._number))
 
-    def record_completion_event(device: object, stream: object) -> _Event:
+    def record_completion_event(
+        device: object, stream: object, blocking: bool = False
+    ) -> _Event:
         number = sum(1 for entry in log if entry[0] == "record")
         log.append(("record", number, stream))
         return _Event(number)
@@ -82,13 +82,13 @@ def test_each_side_waits_for_the_other_sides_last_event(events):
     ]
 
 
-def test_host_wait_polls_the_last_free_event_until_complete(events):
+def test_host_wait_blocks_on_the_last_free_event(events):
     lane = _lane()
     lane.wait_free_on_host(0)
     assert events == []
     lane.signal_free(0, SCATTER)
     lane.wait_free_on_host(0)
-    assert events == [("record", 0, SCATTER)] + [("poll", 0)] * 3
+    assert events == [("record", 0, SCATTER), ("host_wait", 0)]
 
 
 def test_bank_events_keep_the_banks_apart(events):

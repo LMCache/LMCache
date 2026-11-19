@@ -631,6 +631,13 @@ verify the installation.
      - ``True``
      - Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on
        ext4). Ignored by ``ugds``, whose IO bypasses the kernel entirely.
+   * - ``--gds-l1-read-threads``
+     - ``0``
+     - Host threads that read a retrieve's slab objects with blocking reads,
+       several objects at a time. ``0`` keeps the stream-ordered read, one
+       object at a time. cuFile only; other backends ignore it. Measured in
+       cuFile compatibility mode only: two threads raised retrieve
+       throughput on one NVMe drive from about 4.3 to 5.5 GiB/s.
 
 L1 Manager TTLs
 ----------------

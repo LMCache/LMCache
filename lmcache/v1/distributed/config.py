@@ -365,6 +365,10 @@ class GdsL1Config:
     align_bytes: int = 4096
     """Allocation alignment; cuFile/hipFile and O_DIRECT require 4 KiB."""
 
+    read_threads: int = 0
+    """Host threads that read a retrieve's slab objects with blocking reads
+    (from ``--gds-l1-read-threads``); 0 keeps the stream-ordered read."""
+
 
 @dataclass
 class L1ManagerConfig:
@@ -574,19 +578,32 @@ class GDSL1ManagerConfig(L1ManagerConfig):
             ValueError: A field is unknown, malformed, or incompatible.
         """
         config = _parse_l1_common(
-            cls, values, defaults, read_ttl, write_ttl, {"path", "backend", "direct_io"}
+            cls,
+            values,
+            defaults,
+            read_ttl,
+            write_ttl,
+            {"path", "backend", "direct_io", "read_threads"},
         )
         if config.memory_config.align_bytes < 4096:
             raise ValueError("GDS align_bytes must be at least 4096")
         backend = values.get("backend", "auto")
         if not isinstance(backend, str) or not backend:
             raise ValueError("backend must be a non-empty string")
+        read_threads = values.get("read_threads", 0)
+        if (
+            isinstance(read_threads, bool)
+            or not isinstance(read_threads, int)
+            or read_threads < 0
+        ):
+            raise ValueError("read_threads must be a non-negative integer")
         config.gds_l1_config = GdsL1Config(
             _l1_path(values),
             config.memory_config.size_in_bytes,
             _l1_bool(values, "direct_io", True),
             backend,
             config.memory_config.align_bytes,
+            read_threads,
         )
         return config
 
@@ -957,6 +974,13 @@ def add_storage_manager_args(
         choices=("auto", *available_backends()),
         help="GDS backend. auto selects the default for this environment.",
     )
+    gds_group.add_argument(
+        "--gds-l1-read-threads",
+        type=int,
+        default=0,
+        help="Host threads that read a retrieve's slab objects with blocking "
+        "reads (cuFile only). Default 0: stream-ordered reads.",
+    )
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
         "L1 Manager TTL", "TTL configuration for L1 manager locks"
@@ -1222,6 +1246,7 @@ def parse_args_to_config(
             size_in_bytes=int(args.l1_size_gb * (1 << 30)),
             use_direct_io=args.gds_l1_use_direct_io,
             backend=args.gds_l1_backend,
+            read_threads=args.gds_l1_read_threads,
         )
 
     l1_manager_config = L1ManagerConfig(

@@ -433,6 +433,7 @@ def test_host_thread_loads_match_single_engine(
     write the pages the direct copy writes."""
     monkeypatch.setattr(NvmeDmaEngine, "loads_from_host", lambda self, objs: True)
     monkeypatch.setattr(nvme_dma, "read_slab_object", _read_on_host_thread)
+    monkeypatch.setattr(nvme_dma, "read_threads", lambda memory_obj: 2)
     ctx, tensors = _make_context(name)
     _, _, chunk, num_chunks = _CASES[name]
     blocks_per_chunk = ctx.calculate_num_blocks(chunk, 0)
