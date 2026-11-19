@@ -20,6 +20,13 @@ spec:
         app.kubernetes.io/name: lmcache
         app.kubernetes.io/instance: lmcache-engine
     spec:
+      # The `nvidia` RuntimeClass gives this pod access to the GPUs of the node.
+      # A GPU Operator with CDI and NRI can have no `nvidia` RuntimeClass. On
+      # such a cluster, remove this line and request the management CDI device
+      # with a pod annotation. The key of the annotation contains the container
+      # name, here `lmcache`. Refer to "GPU Operator NRI/CDI" in
+      # docs/source/mp/deployment.rst:
+      # https://docs.lmcache.ai/mp/deployment.html#gpu-operator-nri-cdi
       runtimeClassName: nvidia
       nodeSelector:
         nvidia.com/gpu.present: "true"   # GPU nodes only

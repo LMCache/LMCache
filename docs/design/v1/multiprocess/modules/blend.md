@@ -155,6 +155,12 @@ misses, so it has to leave the matcher. Two paths remove it:
   and `L2_KEYS_DELETED`, and removes a fingerprint as soon as one key of its
   chunk has no copy left, before any lookup misses on it.
 
+Removing a fingerprint clears its table slot only when the slot still maps
+to that chunk's hash. A slot holds one chunk, so when the same text is
+stored behind several prefixes (or two chunks collide), evicting a copy that
+does not hold the slot leaves the holder matchable. A shadowed chunk is not
+restored when the slot holder is removed.
+
 `FingerprintEvictionTracker` decides when a key has no copy left. It keeps
 the L1 copies it was told about (key → L1 tags) and the keys L2 deleted
 while L1 still held them:

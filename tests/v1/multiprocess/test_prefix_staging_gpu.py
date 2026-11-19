@@ -21,6 +21,7 @@ from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.ops_types import TransferPhase
 import lmcache.lmcache_native as native
 import lmcache.v1.multiprocess.object_group_transfer as transfer
+import lmcache.v1.multiprocess.object_group_transfer.staged as staged
 
 pytest.importorskip("cupy", reason="GPU cache context requires cupy")
 pytest.importorskip("lmcache.cuda_ops", reason="Requires CUDA extension")
@@ -62,8 +63,8 @@ def timing(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Enable native public byte samples without starting a global event bus."""
     bus = EventBus(EventBusConfig(enabled=True))
     bus.subscribe(EventType.MP_TRANSFER_PHASE_SAMPLES, lambda event: None)
-    monkeypatch.setattr(transfer, "is_observability_enabled", lambda: True)
-    monkeypatch.setattr(transfer, "get_event_bus", lambda: bus)
+    monkeypatch.setattr(staged, "is_observability_enabled", lambda: True)
+    monkeypatch.setattr(staged, "get_event_bus", lambda: bus)
     device_ops.pop_completed_phase_timings()
     yield
     device_ops.pop_completed_phase_timings()

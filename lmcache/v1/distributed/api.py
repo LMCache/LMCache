@@ -12,11 +12,9 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, get_args
 import enum
 
-# Third Party
-import torch
-
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.api import MemoryLayoutDesc as MemoryLayoutDesc
 from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.utils.frozen_dict import freeze_dict
 
@@ -26,6 +24,9 @@ if TYPE_CHECKING:
     from lmcache.v1.common.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
+
+_OBJECT_KEY_HASH_ATTR = "_hash_value"
+"""Instance attribute holding an ``ObjectKey``'s hash once computed."""
 
 FetchingPolicy = Literal["prefix", "full", "whole_chunk"]
 """Which found objects a prefetch loads and reports.
@@ -326,6 +327,39 @@ class ObjectKey:
             dict(extra_attributes) if extra_attributes is not None else {},
         )
 
+    def __hash__(self) -> int:
+        """Hash the identity, computing it at most once per object.
+
+        Returns:
+            The hash of ``identity``; ``extra_attributes`` never contributes.
+
+        Note:
+            The value is kept as a non-field instance attribute, so it stays
+            out of ``repr``, equality, ``dataclasses.fields`` and msgspec
+            encoding. It is set lazily because msgspec decoding bypasses
+            ``__init__``.
+        """
+        # A miss is the common first call, so avoid raising KeyError for it.
+        value = self.__dict__.get(_OBJECT_KEY_HASH_ATTR)
+        if value is None:
+            value = hash(self.identity)
+            self.__dict__[_OBJECT_KEY_HASH_ATTR] = value
+        return value
+
+    def __getstate__(self) -> dict[str, object]:
+        """Return the pickling and copying state without the kept hash.
+
+        Returns:
+            The instance attributes except the kept hash value.
+
+        Note:
+            ``str`` and ``bytes`` hashes differ between processes, so a kept
+            hash must never travel with a pickled key.
+        """
+        state = dict(self.__dict__)
+        state.pop(_OBJECT_KEY_HASH_ATTR, None)
+        return state
+
     @property
     def chunk_hash(self) -> bytes:
         """Read chunk_hash from the identity."""
@@ -534,22 +568,6 @@ class KeyListPage:
     next_page_token: str | None
     """``None`` means this is the last page. Otherwise pass the token
     verbatim to the next call to fetch the next page."""
-
-
-@dataclass(frozen=True)
-class MemoryLayoutDesc:
-    """
-    Describes the layout of a memory object
-    """
-
-    shapes: list[torch.Size]
-    dtypes: list[torch.dtype]
-
-    def __post_init__(self):
-        if len(self.shapes) != len(self.dtypes):
-            raise ValueError(
-                "MemoryLayoutDesc: shapes and dtype must have the same length"
-            )
 
 
 @dataclass(frozen=True)

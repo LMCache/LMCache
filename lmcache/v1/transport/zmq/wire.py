@@ -88,9 +88,7 @@ LEGACY_OPERATION_IDS = MappingProxyType(
         "cb_unregister_rope": 26,
         "cb_retrieve_pre_computed": 27,
         "cb_unified_lookup": 28,
-        "p2p_lookup_and_lock": 29,
-        "p2p_query_lookup_results": 30,
-        "p2p_unlock_objects": 31,
+        # IDs 29-31 belonged to P2P; retired and must not be reused.
         "get_experimental": 32,
         "cb_protocol_handshake": 33,
     }

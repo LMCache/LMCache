@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from lmcache.v1.client.transport.zmq_impl.client import (
         ZmqMultiprocessClient,
     )
-    from lmcache.v1.multiprocess.transport.base import RequestClient
+    from lmcache.v1.transport.request_client import RequestClient
 
 
 def __getattr__(name: str) -> Any:
