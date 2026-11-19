@@ -129,6 +129,16 @@ unacked and a FREE handled first would release the previous lookup's result
 again. For the same reason, the `pending_free_ranges` of an APC-shrink
 re-lookup that is still running are left to the read-lock TTL.
 
+Why the client, not END_SESSION, releases a consumed lookup: once the server
+hands the hit over, only the scheduler knows whether a load was scheduled for
+it. Each TP rank's RETRIEVE releases its share of the locks from its own
+connection after its copy finishes, and nothing orders END_SESSION after
+those RETRIEVEs. Read locks are anonymous per-object counts, so an
+END_SESSION that released a consumed hit whose RETRIEVE is still coming would
+either drop another request's lock on the same object or unlock an object a
+copy is still reading. The client sends the FREE only while the tracker is
+still `PREFETCHING`, before `update_state_after_alloc` can plan a load.
+
 ## Known gaps
 
 - `request_finished` calls `cleanup_lookup_result` before `end_session`, and
