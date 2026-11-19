@@ -658,11 +658,15 @@ class LookupModule(DiscoverableModule):
         shard_replication_desc = registry.find_shard_replication_desc(
             key.model_name, key.world_size
         )
+        group_layout_descs = registry.find_group_layout_descs(
+            key.model_name, key.world_size
+        )
         per_group = ipc_key_to_object_keys(
             key,
             chunk_hashes,
             list(range(attn_desc.num_object_groups)),
             shard_replication_desc,
+            group_layout_descs=group_layout_descs,
         )
         return [obj_key for group_keys in per_group for obj_key in group_keys]
 

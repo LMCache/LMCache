@@ -199,7 +199,11 @@ class TestIpcKeyToGroupedObjectKeys:
             DEFAULT_SHARD_REPLICATION_DESC,
         )
         flat = ipc_key_to_object_keys(
-            _ipc_key(2), hashes, [0, 1], DEFAULT_SHARD_REPLICATION_DESC
+            _ipc_key(2),
+            hashes,
+            [0, 1],
+            DEFAULT_SHARD_REPLICATION_DESC,
+            group_layout_descs={0: LAYOUT, 1: LAYOUT},
         )
         assert sorted((k for r in rows for k in r.keys), key=repr) == sorted(
             (k for g in flat for k in g), key=repr
