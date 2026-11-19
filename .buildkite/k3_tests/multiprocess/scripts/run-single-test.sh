@@ -5,6 +5,7 @@
 #              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
 #              | restart_recovery | lazy_offload | sleep_mode | gds_smoke
 #              | eviction_aware_lazy_offload
+#              | abort_lookup_locks
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -143,6 +144,16 @@ elif [ "$TEST_NAME" = "eviction_aware_lazy_offload" ]; then
     # pool; the workload's documents are 8000 tokens.
     export MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
     export MODEL="${MODEL:-$DEFAULT_MODEL}"
+elif [ "$TEST_NAME" = "abort_lookup_locks" ]; then
+    # TP=2 on both GPUs through the shared launcher. A small block pool keeps
+    # most requests WAITING after their lookups hit, which is what the abort
+    # must release.
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
+    export TENSOR_PARALLEL_SIZE=2
+    export GPU_FOR_ENGINE="0,1"
+    export ENGINE_USE_ALL_DEVICES=true
+    export NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-1024}"
+    export MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 elif [ "$TEST_NAME" = "lazy_offload" ]; then
     # The shared GPU launcher includes these values in the real vLLM
     # kv-transfer configuration only for this integration test.
