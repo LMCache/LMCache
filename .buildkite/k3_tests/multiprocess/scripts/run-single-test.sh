@@ -121,6 +121,11 @@ elif [ "$TEST_NAME" = "deadlock" ]; then
     export CHUNK_SIZE=256
     export CPU_BUFFER_SIZE=50
     export MAX_WORKERS=2
+elif [ "$TEST_NAME" = "vllm_bench" ]; then
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
+    # vLLM's extensible KV cache chooses 64-token blocks, while its baseline
+    # defaults to 16. Compare identical attention geometry on random prompts.
+    export VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-64}"
 elif [ "$TEST_NAME" = "lazy_offload" ]; then
     # The shared GPU launcher includes these values in the real vLLM
     # kv-transfer configuration only for this integration test.
@@ -161,7 +166,7 @@ echo "Results dir: $RESULTS_DIR"
 echo ""
 
 # Tests that still handle their own server lifecycle.
-SELF_CONTAINED_TESTS=" mp_autostart_tp2 p2p kimi_linear_tp dsv4_flash_tp "
+SELF_CONTAINED_TESTS=" mp_autostart_tp2 p2p p2p_write kimi_linear_tp dsv4_flash_tp "
 
 # Tests that compare against a baseline engine (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything

@@ -9,6 +9,9 @@
 # both platforms, same as run-cpu-e2e-validation.sh next to it; the
 # buildkite pipeline invokes it by path.
 #
+# A tested CUDA wheel also requires VLLM_CUDA_VARIANT (e.g. cu132), carried
+# from the successful canary. The wheel version alone does not encode it.
+#
 # Target branch controlled by PIN_VLLM_BRANCH (defaults below per-platform).
 # Every wheel and image validation appends one self-contained record to
 # tested_runtimes.jsonl. The legacy latest_tested_vllm*.txt files remain derived
@@ -85,6 +88,14 @@ esac
 PIN_VLLM_STATUS="${PIN_VLLM_STATUS:-tested}"
 PIN_VLLM_REASON="${PIN_VLLM_REASON:-}"
 
+# CUDA wheel versions do not encode their download-index variant. The
+# successful canary must provide it instead of guessing an archive URL.
+if [[ "${PIN_BACKEND}" == "cuda" && "${PIN_VLLM_STATUS}" == "tested" \
+    && ! "${VLLM_CUDA_VARIANT:-}" =~ ^cu[0-9]{3}$ ]]; then
+    echo "[ERROR] tested CUDA pins require VLLM_CUDA_VARIANT (for example cu132)" >&2
+    exit 1
+fi
+
 # Per-platform OS identifier (e.g. ubuntu-22.04, macos-latest, or
 # empty for buildkite which runs on a single OS).
 OS_PLATFORM="${OS_PLATFORM:-}"
@@ -152,8 +163,9 @@ if [[ -n "${VLLM_SHORT_SHA}" ]]; then
     done
 fi
 
-if [[ -n "${VLLM_FULL_SHA}" && "${PIN_BACKEND}" == "cuda" ]]; then
-    VLLM_ARCHIVE_INDEX="https://wheels.vllm.ai/${VLLM_FULL_SHA}/cu130"
+if [[ -n "${VLLM_FULL_SHA}" && "${PIN_BACKEND}" == "cuda" \
+    && "${VLLM_CUDA_VARIANT:-}" =~ ^cu[0-9]{3}$ ]]; then
+    VLLM_ARCHIVE_INDEX="https://wheels.vllm.ai/${VLLM_FULL_SHA}/${VLLM_CUDA_VARIANT}"
     echo "Resolved full SHA: ${VLLM_FULL_SHA}"
     echo "Archive index:     ${VLLM_ARCHIVE_INDEX}"
 else
