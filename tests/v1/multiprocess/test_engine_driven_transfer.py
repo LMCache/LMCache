@@ -2145,6 +2145,28 @@ def test_server_failed_retrieve_page_releases_later_pages(
     assert events[-1].metadata["retrieved_count"] == 0
 
 
+def test_server_page_without_inline_data_releases_later_pages(
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """An SHM server's answer to an inline worker's first page ends the retrieve."""
+    keys = ["obj0", "obj1", "obj2"]
+    storage = MagicMock()
+    module, _, _, _ = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(),
+        object_keys=keys,
+        mock_storage=storage,
+    )
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=2)
+    )
+    _, strategy = module._resolve_for_transfer(2)
+    shm_answer = PrepareRetrieveResponse(success=True, data=b"", context={})
+    with patch.object(strategy, "prepare_retrieve", return_value=shm_answer):
+        module.prepare_retrieve(_default_key(tokens=24), 2, 0, 1)
+    released = [c.args[0] for c in storage.finish_read_prefetched.call_args_list]
+    assert released == [["obj1", "obj2"]]
+
+
 @pytest.mark.parametrize("finish", ["invalid_commit", "unregister", "reap", "close"])
 def test_server_closes_failed_transfer_events(
     server_module_factory: ServerModuleFactory,

@@ -685,9 +685,10 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
         A large inline retrieve is read as several pages. Windows are
         computed over the whole key, so each page returns its part of every
-        group's window. The transfer starts on the first page. A failed page
-        ends it and releases the read locks of the pages after it, which the
-        worker no longer requests.
+        group's window. The transfer starts on the first page. A page that
+        fails, or succeeds without inline data (an SHM server's answer, which
+        an inline worker cannot read), ends it and releases the read locks of
+        the pages after it, which the worker no longer requests.
 
         Args:
             key: Cache key for the token range to retrieve.
@@ -765,7 +766,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     response.context,
                     window_keys,
                 )
-        if not whole and not response.success:
+        if not whole and not (response.success and response.data):
             self._abandon_retrieve(
                 key, instance_id, chunk_start, end, window_keys, window_firsts
             )
@@ -780,10 +781,11 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         window_keys: "list[list[ObjectKey]] | None",
         window_firsts: list[int],
     ) -> None:
-        """End a paged retrieve whose page ``[chunk_start, end)`` failed.
+        """End a paged retrieve after page ``[chunk_start, end)``.
 
-        The failed page released its own locks; the pages after it are never
-        requested, so their prefetch read locks are released here.
+        The page's own locks are released by the strategy or at
+        ``commit_retrieve``; the pages after it are never requested, so their
+        prefetch read locks are released here.
         """
         if chunk_start > 0:
             self._finish_transfer(key, instance_id, EventType.MP_RETRIEVE_START, False)
