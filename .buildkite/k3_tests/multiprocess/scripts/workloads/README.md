@@ -35,6 +35,18 @@ GPU memory must be released and come back, and the prompt must hit LMCache
 with the output from before sleep. `LMCACHE_MP_TRANSFER_MODE` selects which
 registration of the server's `/status` the checks read.
 
+The two P2P workloads under `vllm/` launch their own coordinator and LMCache
+servers on localhost:
+
+- `p2p.sh`: two engines, each with its own server; the second engine must be
+  served the first engine's KV over P2P.
+- `p2p-write.sh`: one engine whose server runs with `--enable-p2p-write`,
+  plus a headless peer server with no engine. Prompts fill the main server's
+  small L1 past the usage threshold; the early ones must stay local, the later
+  ones must land on the peer, and all of them must be served from LMCache on
+  replay. Requests and checks are in `p2p_write_verify.py`; its verdict runs on
+  CPU with recorded rows (`tests/ci/test_p2p_write_verify.py`).
+
 The harness converts a test name from underscores to hyphens and discovers the
 script automatically. For example, `long_doc_qa` resolves to
 `common/long-doc-qa.sh`, while `cache_stats` with `INFERENCE_ENGINE=vllm`

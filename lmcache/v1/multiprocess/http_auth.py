@@ -15,10 +15,8 @@ from lmcache.security.api_key import (
     load_api_keys_from_files,
     load_service_api_keys,
 )
-from lmcache.security.http import (
-    HTTPBearerAuthenticationMiddleware,
-    bearer_token,
-)
+from lmcache.security.bearer import bearer_token
+from lmcache.security.http import HTTPBearerAuthenticationMiddleware
 
 PUBLIC_HTTP_PATHS = frozenset({"/", "/healthcheck"})
 HTTP_API_KEY_ENV_VAR = "LMCACHE_HTTP_API_KEY"
