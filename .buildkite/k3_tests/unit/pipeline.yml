@@ -1,9 +1,20 @@
 # Unit tests — runs pytest with coverage against LMCache source.
-# No vLLM required; uses setup-lmcache-only-env.sh for a lighter install.
+# Isolated 2026-11-19 validation installs the exact vLLM nightly first.
+# The regular PR unit pipeline remains LMCache-only; this branch tests both.
 
 steps:
   - label: ":test_tube: Unit Tests"
-    command: .buildkite/k3_tests/unit/run.sh
+    command: |
+      bash -euo pipefail <<'BASH'
+      source .buildkite/k3_harness/setup-env.sh
+      python3 - <<'PY'
+      import vllm
+      if vllm.__version__ != "0.34.0rc1.dev872+g8700cc9ba":
+          raise SystemExit("Unexpected vLLM revision in isolated unit validation")
+      print("Full integration unit suite uses vLLM", vllm.__version__)
+      PY
+      .buildkite/k3_tests/unit/run.sh
+      BASH
     timeout_in_minutes: 60
     agents: { queue: "k8s" }
     plugins:
