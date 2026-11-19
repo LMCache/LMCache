@@ -133,6 +133,16 @@ self-contained CPU checks spanning both trees; normal accelerator CI must
 retain the root fixtures. Mirrored test directories with identical module
 names need package `__init__.py` files to avoid pytest import mismatches.
 
+### Inference runtime pins in CI
+
+When requiring a new upstream engine hook, check the independently pinned
+CPU wheel, CUDA wheel and ROCm serving image. The AMD benchmark's released
+image can lag behind the ROCm 10 probe image; verify the source revision and
+the required capability before selecting an immutable image digest.
+For isolated CPU nightly verification, `nightly-aggregate-vllm-verify.sh`
+reads `DRY_RUN=1` and forwards it as `PIN_VLLM_DRY_RUN` to the pin writer.
+Setting only `PIN_VLLM_DRY_RUN` on the aggregator does not prevent pin writes.
+
 ### Test-First Workflow
 
 Write tests before you write the implementation. The full order and its
