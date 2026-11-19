@@ -103,7 +103,9 @@ without registration. The whole mapping must fit in the device's
 registration budget, which is shared with other live registrations on that
 device. If it does not fit, the worker warns and continues unpinned. The
 worker log reports the result as ``SHM pinned=True`` or
-``SHM pinned=False``.
+``SHM pinned=False``. torch-rbln splits a large registration into several
+native registrations, and a copy that crosses one of their boundaries takes
+the ordinary path, so a few chunks of a large pool are not copied directly.
 
 Registering commits the pool's pages at worker startup. Bind the worker's
 CPUs to the NPU's NUMA node to reduce startup and transfer costs. Read the

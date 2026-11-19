@@ -54,6 +54,15 @@ continues unpinned. Check `SHM pinned=True` or `SHM pinned=False` in the
 worker log. A direct transfer also needs a page-aligned host address and a
 range contained in a single native registration.
 
+torch-rbln registers a large range as several native registrations: a
+separate leading fragment when the range starts off a 2 MiB boundary, then
+units of at most 1 GiB with the default registration profile. A chunk whose
+copy crosses one of those boundaries takes the ordinary path, so a few chunks
+of a large pool are copied as if unregistered. The kernel chooses where the
+worker maps the pool, and the pool keeps ordinary pages: a tmpfs file gets
+huge pages only if its mount allows it, and LMCache does not change the
+host's mount policy.
+
 Registration commits the pool's pages up front, so worker startup takes
 longer as the pool grows. Size the pool within the device's available
 registration budget: the runtime attempts the whole registration first and
