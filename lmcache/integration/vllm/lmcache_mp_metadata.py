@@ -12,6 +12,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorWorkerMetadata,
 )
 from vllm.v1.utils import ConstantList
+
+try:
+    # Third Party
+    from vllm.utils.torch_utils import token_ids_to_tensor
+except ImportError:
+    # Older vLLM versions do not provide token_ids_to_tensor.
+    token_ids_to_tensor = None  # type: ignore[assignment]
+
+# Third Party
 import torch
 
 # First Party
@@ -36,11 +45,7 @@ if TYPE_CHECKING:
 
 def _make_token_ids_tensor(token_ids: Sequence[int]) -> torch.Tensor:
     """Convert token IDs to a tensor without unpacking supported buffers."""
-    try:
-        # Third Party
-        from vllm.utils.torch_utils import token_ids_to_tensor
-    except ImportError:
-        # Older vLLM versions do not provide token_ids_to_tensor.
+    if token_ids_to_tensor is None:
         return torch.tensor(token_ids)
     return token_ids_to_tensor(token_ids)
 
@@ -259,14 +264,17 @@ class LMCacheMPRequestTracker:
         }
 
     def get_token_ids(self, start: int, end: int) -> list[int]:
-        """Return a token-id range without building the whole list.
+        """Return token IDs used for LMCache key derivation.
+
+        Multimodal placeholder spans are replaced with values derived from
+        their multimodal identifiers. Only the requested range is built.
 
         Args:
             start: Absolute start position.
             end: Absolute end position (exclusive).
 
         Returns:
-            The token ids in ``[start, end)``.
+            The key-derivation token IDs in ``[start, end)``.
         """
         num_prompt_tokens = len(self.mm_adjusted_prompt_ids)
         if end <= num_prompt_tokens:

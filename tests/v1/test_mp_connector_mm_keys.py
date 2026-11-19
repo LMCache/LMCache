@@ -24,7 +24,7 @@ pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
     KVConnectorRole,
 )
-from vllm.v1.request import RequestStatus  # noqa: E402
+from vllm.v1.request import Request, RequestStatus  # noqa: E402
 from vllm.v1.utils import ConstantList  # noqa: E402
 
 # First Party
@@ -128,6 +128,70 @@ def test_array_backed_all_tokens_pack_with_a_decode_tail():
     request.prefill_token_ids = array("i", [*prompt, 500])
 
     assert unpack_token_ids(tracker.packed_token_ids()) == [*prompt, 500]
+
+
+def test_real_vllm_prefill_token_ids_uses_int32_buffer():
+    """The optimized vLLM token source qualifies for bulk packing."""
+    if not hasattr(Request, "prefill_token_ids"):
+        pytest.skip("vLLM does not expose prefill_token_ids")
+
+    # Third Party
+    from vllm import SamplingParams
+
+    request = Request(
+        request_id="request",
+        prompt_token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+    )
+    token_ids = request.prefill_token_ids
+
+    assert not isinstance(token_ids, list)
+    assert isinstance(token_ids, array)
+    assert token_ids.typecode == "i"
+    assert token_ids.itemsize == 4
+
+
+def test_real_vllm_request_packs_tokens_after_streaming_session_update():
+    """The optimized token source follows a real streaming vLLM request."""
+    if not hasattr(Request, "prefill_token_ids"):
+        pytest.skip("vLLM does not expose prefill_token_ids")
+
+    # Third Party
+    from vllm import SamplingParams
+    from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.request import StreamingUpdate
+
+    session = Request(
+        request_id="session",
+        prompt_token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=4),
+        pooling_params=None,
+        resumable=True,
+    )
+    tracker = LMCacheMPRequestTracker(session)
+    assert unpack_token_ids(tracker.packed_token_ids()) == [1, 2, 3]
+
+    session.append_output_token_ids([10, 11])
+    session.num_computed_tokens = 4
+    assert unpack_token_ids(tracker.packed_token_ids()) == [1, 2, 3, 10, 11]
+
+    update = StreamingUpdate(
+        mm_features=None,
+        prompt_token_ids=[4, 5],
+        max_tokens=4,
+        arrival_time=1.0,
+        sampling_params=SamplingParams(max_tokens=4),
+    )
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.hash_block_size = 16
+    scheduler.log_stats = False
+    scheduler.num_waiting_for_streaming_input = 0
+    scheduler._update_request_as_session(session, update)
+
+    expected = list(session.all_token_ids)
+    assert list(session.prefill_token_ids) == expected
+    assert unpack_token_ids(tracker.packed_token_ids()) == expected
 
 
 def test_mm_request_overwrites_placeholder_span():
