@@ -18,11 +18,11 @@ import pytest
 from lmcache.cli.main import main
 
 Reply = tuple[int, dict[str, object] | str]
-Request = tuple[str, str, bytes]
+Request = tuple[str, str, bytes, str]
 
 NEXT_PAGE_TOKEN = "opaque+/=?& %游标"
 PAGE: dict[str, object] = {
-    "adapter": "fs",
+    "adapter": "s3",
     "shared": True,
     "entries": [
         {
@@ -40,7 +40,7 @@ PAGE: dict[str, object] = {
     "next_page_token": NEXT_PAGE_TOKEN,
 }
 FLAT_PAGE: dict[str, object] = {
-    "adapter": "fs",
+    "adapter": "s3",
     "shared": True,
     "entries": [
         {
@@ -56,7 +56,7 @@ FLAT_PAGE: dict[str, object] = {
     "next_page_token": NEXT_PAGE_TOKEN,
 }
 EMPTY_PAGE: dict[str, object] = {
-    "adapter": "fs",
+    "adapter": "s3",
     "shared": False,
     "entries": [],
     "next_page_token": None,
@@ -65,7 +65,7 @@ EMPTY_PAGE: dict[str, object] = {
 
 @dataclass
 class CacheServer:
-    """HTTP boundary with queued replies and captured method, path, and body."""
+    """HTTP boundary with queued replies and captured requests."""
 
     url: str
     replies: Queue[Reply]
@@ -86,7 +86,9 @@ def cache_server() -> Iterator[CacheServer]:
         def do_GET(self) -> None:
             """Capture one request and send the next reply without interpreting it."""
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            requests.put((self.command, self.path, body))
+            requests.put(
+                (self.command, self.path, body, self.headers.get("Content-Type", ""))
+            )
             try:
                 status, payload = replies.get_nowait()
             except Empty:
@@ -127,7 +129,7 @@ def test_list_one_page_and_resume(
     main(tokens)
     output = json.loads(capsys.readouterr().out)
     assert output == {"title": "L2 Cache Objects", "metrics": FLAT_PAGE}
-    method, target, body = cache_server.requests.get(timeout=5)
+    method, target, body, _content_type = cache_server.requests.get(timeout=5)
     assert (method, urlsplit(target).path, body) == ("GET", "/cache/objects", b"")
     assert parse_qs(urlsplit(target).query) == {"tier": ["l2"], "page_size": ["500"]}
     assert cache_server.requests.empty()
@@ -135,7 +137,7 @@ def test_list_one_page_and_resume(
     cache_server.replies.put((200, EMPTY_PAGE))
     main([*tokens, "--page-token", output["metrics"]["next_page_token"]])
     assert json.loads(capsys.readouterr().out)["metrics"] == EMPTY_PAGE
-    method, target, body = cache_server.requests.get(timeout=5)
+    method, target, body, _content_type = cache_server.requests.get(timeout=5)
     assert (method, urlsplit(target).path, body) == ("GET", "/cache/objects", b"")
     assert parse_qs(urlsplit(target).query) == {
         "tier": ["l2"],
@@ -164,7 +166,7 @@ def test_list_filters_and_page_size(cache_server: CacheServer, page_size: int) -
             str(page_size),
         ]
     )
-    method, target, body = cache_server.requests.get(timeout=5)
+    method, target, body, _content_type = cache_server.requests.get(timeout=5)
     assert (method, urlsplit(target).path, body) == ("GET", "/cache/objects", b"")
     assert parse_qs(urlsplit(target).query) == {
         "tier": ["l2"],
@@ -211,7 +213,7 @@ def test_list_terminal_output(
     main(["kvcache", "list", "--url", cache_server.url])
     text = capsys.readouterr().out
     assert "L2 Cache Objects" in text
-    assert "Adapter:" in text and "fs" in text
+    assert "Adapter:" in text and "s3" in text
     assert "Next page token:" in text
     if page["entries"]:
         for header in ("Chunk hash", "Model", "Rank", "Group", "Salt", "Bytes"):
@@ -230,6 +232,7 @@ def test_list_terminal_output(
         ((404, {"detail": "no L2 adapter"}), "no L2 adapter"),
         ((503, {"detail": "listing unsupported"}), "listing unsupported"),
         ((503, {"error": "engine not initialized"}), "engine not initialized"),
+        ((400, {"message": "disk full"}), "disk full"),
         ((200, "not json"), "Invalid JSON response"),
     ],
     ids=[
@@ -237,6 +240,7 @@ def test_list_terminal_output(
         "unknown-adapter",
         "unsupported-listing",
         "error-key",
+        "message-key",
         "invalid-json",
     ],
 )
@@ -287,13 +291,51 @@ def test_output_flags_belong_to_subcommands(cache_server: CacheServer) -> None:
     assert cache_server.requests.empty()
 
 
+LEGACY_PAGE: dict[str, object] = {
+    "adapter": "s3",
+    "shared": False,
+    "entries": [
+        {
+            "key": {
+                "chunk_hash_hex": "c0ffee",
+                "model_name": "org/model",
+                "kv_rank": 1,
+            },
+            "size_bytes": 2048,
+        }
+    ],
+    "next_page_token": None,
+}
+
+
+def test_list_legacy_keys_get_protocol_defaults(
+    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Fields omitted by older servers flatten to typed defaults, not null."""
+    cache_server.replies.put((200, LEGACY_PAGE))
+    main(["kvcache", "list", "--format", "json", "--url", cache_server.url])
+    output = json.loads(capsys.readouterr().out)
+    assert output["metrics"]["entries"] == [
+        {
+            "chunk_hash_hex": "c0ffee",
+            "model_name": "org/model",
+            "kv_rank": 1,
+            "object_group_id": 0,
+            "cache_salt": "",
+            "tags": {},
+            "size_bytes": 2048,
+        }
+    ]
+
+
 def test_clear_preserves_l1_post(
     cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Adding list keeps the existing clear operation and report unchanged."""
     cache_server.replies.put((200, {"ok": True}))
     main(["kvcache", "clear", "--format", "json", "--url", cache_server.url])
-    method, target, body = cache_server.requests.get(timeout=5)
+    method, target, body, content_type = cache_server.requests.get(timeout=5)
+    assert content_type == "application/json"
     assert (method, target, json.loads(body)) == (
         "POST",
         "/cache/clear",

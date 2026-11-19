@@ -13,6 +13,10 @@ DEFAULT_URLS: dict[str, str] = {
     "engine": "http://localhost:8000",
 }
 
+# Upper bound on error-body bytes read for a diagnostic; the rest of an
+# oversized body is not buffered, and the response is closed either way.
+_MAX_ERROR_BODY_BYTES = 4096
+
 
 class CLIHTTPError(Exception):
     """Raised when a CLI HTTP request fails."""
@@ -34,32 +38,60 @@ def normalize_url(url: str) -> str:
     return url.rstrip("/")
 
 
-def _error_detail(exc: urllib.error.HTTPError) -> str:
-    """Extract a human-readable reason from an HTTP error response body.
-
-    Prefers FastAPI-style ``{"detail": ...}`` bodies, then the ``error`` and
-    ``message`` keys used by some endpoints. Bodies that are not a JSON
-    object, or that cannot be read, fall back to the status-line reason.
+def _error_body(url: str, exc: urllib.error.HTTPError) -> str:
+    """Read a bounded prefix of an HTTP error body for diagnostics.
 
     Args:
-        exc: The HTTP error whose response body should be inspected.
+        url: The URL the failed request targeted (used in error messages).
+        exc: The HTTP error whose response body should be read.
 
     Returns:
-        The explanation to show alongside the status code.
+        The decoded body text, truncated when longer than the bound.
+
+    Raises:
+        CLIHTTPError: When the body is truncated or cannot be read or
+            decoded; the original failure is chained as the cause.
     """
     try:
-        raw = exc.read().decode()
-    except (IncompleteRead, OSError, UnicodeDecodeError):
-        return str(exc.reason)
+        raw = exc.read(_MAX_ERROR_BODY_BYTES + 1)
+        body = raw[:_MAX_ERROR_BODY_BYTES].decode()
+    except IncompleteRead as read_exc:
+        raise CLIHTTPError(
+            f"Incomplete HTTP response from {url}: {read_exc}"
+        ) from read_exc
+    except (OSError, UnicodeDecodeError) as read_exc:
+        raise CLIHTTPError(
+            f"Cannot read HTTP {exc.code} response from {url}: {read_exc}"
+        ) from read_exc
+    finally:
+        exc.close()
+    if len(raw) > _MAX_ERROR_BODY_BYTES:
+        body += " [truncated]"
+    return body
+
+
+def _detail_from_body(body: str) -> str | None:
+    """Extract a human-readable reason from a JSON error body.
+
+    Prefers FastAPI-style ``{"detail": ...}`` bodies, then the ``error``
+    and ``message`` keys used by some endpoints.
+
+    Args:
+        body: The decoded error body text.
+
+    Returns:
+        The explanation, or ``None`` when the body is not a JSON object
+        carrying one of the known fields.
+    """
     try:
-        payload = json.loads(raw)
+        payload = json.loads(body)
     except json.JSONDecodeError:
-        return str(exc.reason)
+        return None
     if not isinstance(payload, dict):
-        return str(exc.reason)
+        return None
     detail = payload.get("detail") or payload.get("error") or payload.get("message")
     if not detail:
-        return str(exc.reason)
+        return None
     return detail if isinstance(detail, str) else json.dumps(detail)
 
 
@@ -83,8 +115,9 @@ def fetch_json(
 
     Raises:
         CLIHTTPError: On network or HTTP errors — including the server's
-            ``detail``/``error`` explanation from JSON error bodies when
-            present — and on JSON decoding errors.
+            ``detail``/``error``/``message`` explanation from JSON error
+            bodies when present — and on JSON decoding errors. HTTP 503
+            keeps the legacy ``Server unhealthy: ...`` wording.
     """
     body = None
     headers: dict[str, str] = {}
@@ -96,9 +129,15 @@ def fetch_json(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
-        raise CLIHTTPError(
-            f"HTTP {exc.code} from {url}: {_error_detail(exc)}"
-        ) from exc
+        error_body = _error_body(url, exc)
+        detail = _detail_from_body(error_body)
+        if exc.code == 503:
+            # Legacy contract kept for existing consumers (see the
+            # describe design doc); non-JSON bodies are shown verbatim.
+            reason = detail if detail is not None else error_body
+            raise CLIHTTPError(f"Server unhealthy: {reason}") from exc
+        reason = detail if detail is not None else str(exc.reason)
+        raise CLIHTTPError(f"HTTP {exc.code} from {url}: {reason}") from exc
     except urllib.error.URLError as exc:
         raise CLIHTTPError(f"Cannot connect to {url}: {exc.reason}") from exc
     except IncompleteRead as exc:

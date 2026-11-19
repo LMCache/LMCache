@@ -94,7 +94,7 @@ Each sub-command owns the shared output options (`--format`, `--output`,
 
 ```bash
 lmcache kvcache list --format json --url http://localhost:8080 \
-    --adapter fs --model-name org/model --page-size 100
+    --adapter s3 --model-name org/model --page-size 100
 ```
 
 Send one `GET /cache/objects` with `tier=l2`, `page_size` (default 500,

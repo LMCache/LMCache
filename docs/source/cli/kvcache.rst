@@ -27,11 +27,12 @@ list
 
 List one page of object keys and sizes from an L2 storage adapter. This calls
 ``GET /cache/objects?tier=l2`` on the MP HTTP server. It does not read KV tensor
-payloads. The selected adapter must support object listing.
+payloads. The selected adapter must support object listing (currently
+only the S3 adapter).
 
 .. code-block:: bash
 
-   lmcache kvcache list --url http://localhost:8080 --adapter fs \
+   lmcache kvcache list --url http://localhost:8080 --adapter s3 \
        --model-name org/model --page-size 100
 
 Omitting ``--adapter`` selects the server's primary (first-configured) L2
@@ -49,11 +50,11 @@ token, not the number of entries, to determine whether more pages exist.
 .. code-block:: bash
 
    lmcache kvcache list --format json --url http://localhost:8080 \
-       --adapter fs --page-size 100 > page.json
+       --adapter s3 --page-size 100 > page.json
    TOKEN=$(jq -r '.metrics.next_page_token // empty' page.json)
    if [ -n "$TOKEN" ]; then
        lmcache kvcache list --format json --url http://localhost:8080 \
-           --adapter fs --page-size 100 --page-token "$TOKEN"
+           --adapter s3 --page-size 100 --page-token "$TOKEN"
    fi
 
 The JSON report preserves the server's ``adapter``, ``shared``, ``entries``
@@ -66,7 +67,7 @@ flattened next to ``size_bytes``, so every key field — including ``kv_rank``,
    {
      "title": "L2 Cache Objects",
      "metrics": {
-       "adapter": "fs",
+       "adapter": "s3",
        "shared": false,
        "next_page_token": null,
        "entries": [

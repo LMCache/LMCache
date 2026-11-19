@@ -2,6 +2,7 @@
 """``lmcache kvcache list`` — list one page of L2 cache objects."""
 
 # Standard
+from typing import Any
 import argparse
 import sys
 import urllib.parse
@@ -20,6 +21,24 @@ _KEY_COLUMNS: tuple[tuple[str, str], ...] = (
     ("cache_salt", "Salt"),
     ("tags", "Tags"),
 )
+
+
+def _default_key_row() -> dict[str, Any]:
+    """Return protocol defaults for every key field, fresh per row.
+
+    ``object_group_id`` (``0``), ``cache_salt`` (``""``), and ``tags``
+    (``{}``) are optional on the wire for backward compatibility with
+    older servers; the other fields default to their declared types too,
+    so flattened rows never expose ``null`` for a key field.
+    """
+    return {
+        "chunk_hash_hex": "",
+        "model_name": "",
+        "kv_rank": 0,
+        "object_group_id": 0,
+        "cache_salt": "",
+        "tags": {},
+    }
 
 
 def _page_size(value: str) -> int:
@@ -95,7 +114,10 @@ class ListCommand(BaseCommand):
             "entries", "Objects", *_KEY_COLUMNS, ("size_bytes", "Bytes")
         )
         for entry in result["entries"]:
-            row = {field: entry["key"].get(field) for field, _header in _KEY_COLUMNS}
+            row = _default_key_row()
+            for field in row:
+                if field in entry["key"]:
+                    row[field] = entry["key"][field]
             row["size_bytes"] = entry["size_bytes"]
             entries.add_row(**row)
         metrics.emit()
