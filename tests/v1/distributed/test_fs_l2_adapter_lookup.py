@@ -130,10 +130,10 @@ def test_slow_filesystem_lookup_does_not_block_other_tasks(
     assert wait_for_lookup(adapter, slow).get_indices_list() == [0]
 
 
-def test_close_stops_a_batch_after_its_inflight_metadata_read(
+def test_close_discards_an_inflight_lookup_result(
     adapter: FSL2Adapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Closing a lookup must not continue the remaining filesystem walk."""
+    """An executor may finish a metadata walk after the adapter closes."""
     keys = [make_key(i) for i in range(3)]
     paths = [tmp_path / encode_fs_filename(key) for key in keys]
     for path in paths:
@@ -157,12 +157,13 @@ def test_close_stops_a_batch_after_its_inflight_metadata_read(
     monkeypatch.setattr(os, "stat", stat_with_slow_path)
     closer = Thread(target=close_adapter)
     try:
-        adapter.submit_lookup_and_lock_task(keys, {})
+        task = adapter.submit_lookup_and_lock_task(keys, {})
         assert entered.wait(timeout=5)
         closer.start()
         assert closed.wait(timeout=5)
         release.set()
-        assert not extra_read.wait(timeout=0.2)
+        assert extra_read.wait(timeout=5)
+        assert adapter.query_lookup_and_lock_result(task) is None
     finally:
         release.set()
         if closer.ident is not None:

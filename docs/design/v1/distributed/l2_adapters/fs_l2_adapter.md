@@ -31,10 +31,9 @@ batches can run on separate workers in the existing bounded default pool. On a
 slow filesystem, a large batch holds its worker longer; there is no new pool or
 concurrency setting. Store and load scheduling are unchanged.
 
-Cancelling the awaiting coroutine sets a per-batch event. A worker checks it
-between syscalls and stops after its current syscall returns. This preserves
-shutdown behavior: cancelling an asyncio future alone cannot stop a running
-executor function, and must not leave it traversing the rest of a large batch.
+Closing the adapter cancels the coroutine that publishes the result. The
+executor can finish its read-only metadata walk, which owns only the keys and
+its result bitmap.
 
 ## Results and races
 
@@ -56,4 +55,4 @@ adapter contract without testing executor internals. Existing store/load/delete
 and O_DIRECT tests exercise the surrounding filesystem behavior.
 
 The shutdown case blocks a metadata read, closes the adapter, then releases the
-read and checks that the remaining files are not probed.
+read and confirms no result is published.

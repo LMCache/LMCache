@@ -483,12 +483,6 @@ class FSL2Adapter(L2AdapterInterface):
         return MemoryTags(MemorySegment.STORAGE, residency)
 
     def close(self) -> None:
-        """Cancel pending tasks, stop the loop, and release completion fds.
-
-        An in-flight metadata syscall may finish after this returns, but a
-        cancelled lookup batch does not start further filesystem checks.
-        """
-
         async def _stop_tasks():
             tasks = [
                 t
@@ -532,7 +526,7 @@ class FSL2Adapter(L2AdapterInterface):
     def _key_to_path(self, key: ObjectKey) -> Path:
         return self._base_path / _object_key_to_filename(key)
 
-    def _lookup_keys(self, keys: list[ObjectKey], cancelled: threading.Event) -> Bitmap:
+    def _lookup_keys(self, keys: list[ObjectKey]) -> Bitmap:
         """Check one batch against disk in an executor worker.
 
         Each lookup observes the filesystem directly so other nodes' writes
@@ -541,8 +535,6 @@ class FSL2Adapter(L2AdapterInterface):
         """
         bitmap = Bitmap(len(keys))
         for i, key in enumerate(keys):
-            if cancelled.is_set():
-                break
             if os.path.exists(self._key_to_path(key)):
                 bitmap.set(i)
         return bitmap
@@ -733,14 +725,7 @@ class FSL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         task_id: L2TaskId,
     ) -> None:
-        cancelled = threading.Event()
-        try:
-            bitmap = await self._loop.run_in_executor(
-                None, self._lookup_keys, keys, cancelled
-            )
-        finally:
-            # Cancelling an asyncio future cannot interrupt its worker thread.
-            cancelled.set()
+        bitmap = await self._loop.run_in_executor(None, self._lookup_keys, keys)
 
         with self._lock:
             self._completed_lookup_tasks[task_id] = bitmap
