@@ -111,8 +111,10 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - ``32``
      - gRPC request-dispatch threads. Used only with ``--transport grpc``.
    * - ``--grpc-server-mode``
-     - ``sync``
-     - gRPC server implementation: ``sync``, ``aio`` or ``native``.
+     - ``auto``
+     - gRPC server implementation: ``auto``, ``sync``, ``aio`` or ``native``.
+       ``auto`` picks ``native`` when ``pygrpc-native`` is installed and
+       ``aio`` otherwise.
        ``aio`` receives requests on one event loop and hands only the
        handlers to worker threads. ``native`` does the HTTP/2 and gRPC
        framing in Rust, outside the GIL; it needs the ``pygrpc-native``
