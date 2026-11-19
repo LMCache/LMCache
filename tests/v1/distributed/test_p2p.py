@@ -316,17 +316,19 @@ def test_independent_peer_channel(
         engine.close()
 
 
-def test_lookup_fails_fast_on_a_down_peer_and_is_bounded_on_a_frozen_one(
+def test_lookup_and_query_fail_fast_and_only_the_lookup_has_a_deadline(
     monkeypatch: pytest.MonkeyPatch,
     unused_tcp_port_factory: Callable[[], int],
 ) -> None:
-    """Lookup and query calls do not wait for a peer that is down, and a peer
-    that accepts calls but never answers fails them at the deadline. A probe
-    waits for a connection, up to the same deadline, and succeeds once the
-    peer is up."""
+    """Lookup and query calls do not wait for a peer that is down. A lookup to
+    a peer that accepts calls but never answers fails at the deadline, while a
+    query answered after that deadline still returns its result (the peer
+    hands it out once). A probe waits for a connection, up to the deadline,
+    and succeeds once the peer is up."""
     monkeypatch.setattr(p2p_mod, "LOOKUP_RPC_TIMEOUT_S", 0.5)
     keys = [ObjectKey(b"chunk", "model", 0)]
     layouts = {0: MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])}
+    addresses = [TransferChannelAddress(offset=8, size=16)]
     port = unused_tcp_port_factory()
     client = P2PClient(f"grpc://127.0.0.1:{port}")
     frozen = threading.Event()
@@ -336,7 +338,14 @@ def test_lookup_fails_fast_on_a_down_peer_and_is_bounded_on_a_frozen_one(
             frozen.wait()
 
         def P2PQueryLookupResults(self, request: Any, context: Any) -> Any:
-            frozen.wait()
+            time.sleep(0.8)  # past the 0.5 s deadline
+            return p2p_service_pb2.P2pQueryLookupResultsResponse(
+                addresses=p2p_service_pb2.TransferChannelAddressList(
+                    addresses=[
+                        p2p_service_pb2.TransferChannelAddress(offset=8, size=16)
+                    ]
+                )
+            )
 
         def P2PUnlockObjects(self, request: Any, context: Any) -> Any:
             return p2p_service_pb2.P2pUnlockObjectsResponse()
@@ -344,24 +353,22 @@ def test_lookup_fails_fast_on_a_down_peer_and_is_bounded_on_a_frozen_one(
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
     p2p_service_pb2_grpc.add_P2PServiceServicer_to_server(FrozenPeer(), server)
     try:
-        start = time.monotonic()
         with pytest.raises(MPServerUnavailableError):
             client.p2p_lookup_and_lock(keys, layouts).result(5)
         with pytest.raises(MPServerUnavailableError):
             client.p2p_query_lookup_results(0).result(5)
-        assert time.monotonic() - start < 0.4
         with pytest.raises(MPRequestError, match="DEADLINE_EXCEEDED"):
             client.probe().result(5)
 
         server.add_insecure_port(f"127.0.0.1:{port}")
         server.start()
-        # The probe reconnects at once; a failed-fast call would wait for
-        # the channel's reconnect backoff.
+        # A new channel: the old one may still be in its reconnect backoff.
+        client.close()
+        client = P2PClient(f"grpc://127.0.0.1:{port}")
         assert client.probe().result(5) is None
         with pytest.raises(MPRequestError, match="DEADLINE_EXCEEDED"):
             client.p2p_lookup_and_lock(keys, layouts).result(5)
-        with pytest.raises(MPRequestError, match="DEADLINE_EXCEEDED"):
-            client.p2p_query_lookup_results(0).result(5)
+        assert client.p2p_query_lookup_results(0).result(5) == addresses
     finally:
         frozen.set()
         client.close()

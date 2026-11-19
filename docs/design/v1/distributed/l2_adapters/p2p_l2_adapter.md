@@ -106,22 +106,30 @@ shared with those callbacks and guarded by a lock. Failures stay bounded:
 
 - an ack that does not arrive within ~3 s, or a failed ack, is a miss;
 - an unanswered result query is not sent again: the lookup and query calls
-  fail fast when the peer is not connected and carry a ~3 s gRPC deadline, so
-  a query fails on its own;
+  fail fast when the peer is not connected, and the lookup deadline
+  (`lookup_timeout_s`) bounds a query that is never answered. The query has
+  no gRPC deadline of its own: the peer returns a result only once, so a
+  reply that arrived after a deadline would be lost with its read locks;
 - a failed query is retried once, and a second failure is a miss;
 - the lookup deadline (`lookup_timeout_s`) still bounds the whole lookup;
-- a lookup the peer did not acknowledge (down: `UNAVAILABLE` at once; frozen:
-  past the deadline) marks the peer unresponsive: lookups to it are a miss at
-  once, without an RPC, until a probe is answered. The probe is an unlock of
-  no keys sent by the adapter, one at a time, with the same deadline; no
-  request waits on it. It waits for a connection, which also makes the
-  channel reconnect as soon as the peer is back instead of after its
-  reconnect backoff. The trade-off: a peer that stalls past the deadline
-  and recovers misses hits until the next lookup's probe is answered.
+- a lookup acknowledgement that fails because the peer is down
+  (`UNAVAILABLE` at once) or past the ~3 s lookup deadline (a frozen peer)
+  marks the peer unresponsive; other ack errors are only a miss. While
+  marked, lookups to the peer are a miss at once, without an RPC, until a
+  probe is answered. The probe is an unlock of no keys sent by the adapter,
+  one at a time; no request waits on it. It waits for a connection, up to the
+  same deadline, so a peer that is down is probed at most once per deadline.
+  An answered probe shows that the peer's RPC server is up, not that its
+  lookup path works. The trade-off: a peer that stalls past the deadline and
+  recovers misses hits until the next lookup's probe is answered.
 
-The deadline also keeps abandoned lookups from piling up: an expired call is
-cancelled, so it is neither sent later to a peer that comes back nor run by a
-frozen peer once it resumes, and takes no read locks that nobody releases.
+The lookup deadline also stops lookups from piling up behind a peer that is
+down: without it, lookups waiting for a connection were all sent, and
+read-locked their keys until the peer's read TTL, when the peer came back.
+It does not stop a peer from running a lookup that it received in time but
+handled after the deadline (for example while its handler threads were
+busy): the requester has dropped it by then, so its read locks last until the
+TTL.
 
 The transfer-channel read exposes no completion fd: the RDMA read completes
 inside the transfer engine. So the adapter also registers its lookup and load
