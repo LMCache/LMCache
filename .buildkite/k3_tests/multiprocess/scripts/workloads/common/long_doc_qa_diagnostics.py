@@ -28,14 +28,10 @@ def summarize_round(csv_path: Path) -> str:
     latencies = [
         float(row["request_end"]) - float(row["request_start"]) for row in successful
     ]
-    metrics = [
+    for metric, values in (
         ("ttft", ttfts),
         ("request_latency", latencies),
-    ]
-    # Archived benchmark CSVs predate per-request TTOT.
-    if "ttot" in successful[0]:
-        metrics.append(("ttot", [float(row["ttot"]) for row in successful]))
-    for metric, values in metrics:
+    ):
         ordered = sorted(values)
         p95 = ordered[math.ceil(0.95 * len(ordered)) - 1]
         lines.append(

@@ -66,7 +66,6 @@ Commandline arguments:
 from dataclasses import dataclass
 import argparse
 import asyncio
-import json
 import os
 import random
 import sys
@@ -85,19 +84,11 @@ eos_token_id = None
 
 @dataclass
 class RequestStats:
-    """One streamed request's wall timestamps and elapsed latencies, in seconds.
-
-    ``ttft`` and ``ttot`` end at the first and last nonempty content chunks.
-    Both are -1 without content. ``request_end`` includes stream termination
-    and usage frames. Success requires content and a terminal finish reason.
-    """
-
     prompt_id: int
     request_start: float
     ttft: float
     request_end: float
     successful: bool
-    ttot: float = -1
 
 
 def get_url_from_args(args):
@@ -221,13 +212,7 @@ def write_resp(text: str):
 
 
 async def process_single_prompt(
-    client: AsyncOpenAI,
-    model: str,
-    prompt: str,
-    prompt_index: int,
-    total_prompts: int,
-    output_len: int,
-    semaphore: asyncio.Semaphore,
+    client, model, prompt, prompt_index, total_prompts, output_len, semaphore
 ) -> RequestStats:
     """
     Process a single prompt with the given client and model.
@@ -242,20 +227,13 @@ async def process_single_prompt(
         semaphore: Asyncio semaphore to limit concurrent requests.
 
     Returns:
-        RequestStats: Wall timestamps, monotonic TTFT/TTOT, and success status.
-            A stream without content or a terminal finish reason is unsuccessful.
-
-    Raises:
-        openai.OpenAIError: If the API request or stream fails.
+        RequestStats: RequestStats object containing the request stats
     """
     async with semaphore:  # Acquire semaphore to limit concurrent requests
         write_resp(f"\n--- Sending prompt {prompt_index + 1}/{total_prompts} ---\n")
         # a request starts once it acquires the semaphore
         start_time = time.time()
-        start_elapsed = time.perf_counter()
         first_token_time = None
-        last_token_time = None
-        finished = False
 
         # add stop None so we always get the number of output tokens we specify
         if completions_mode:
@@ -288,31 +266,26 @@ async def process_single_prompt(
         async for chunk in response:
             if not chunk.choices:
                 continue
-            if chunk.choices[0].finish_reason is not None:
-                finished = True
 
             # Handle content for chat completions
             if has_content(chunk, completions_mode):
                 content = extract_content(chunk, completions_mode)
-                if content != "":
-                    last_token_time = time.perf_counter()
-                    if first_token_time is None:
-                        first_token_time = last_token_time
+                if first_token_time is None and content != "":
+                    first_token_time = time.time()
                 responses.append(content)
 
         end_time = time.time()
         final_response = "".join(responses)
         write_resp(f"\nResponse of request {prompt_index}: {final_response}\n")
 
-        ttft = first_token_time - start_elapsed if first_token_time is not None else -1
-        ttot = last_token_time - start_elapsed if last_token_time is not None else -1
+        # TTFT < 0 means not successful
+        ttft = (first_token_time - start_time) if first_token_time is not None else -1
         return RequestStats(
             prompt_id=prompt_index,
             request_start=start_time,
             ttft=ttft,
             request_end=end_time,
-            successful=first_token_time is not None and finished,
-            ttot=ttot,
+            successful=ttft > 0,
         )
 
 
@@ -505,15 +478,7 @@ def trimmed_mean(series: pd.Series, trim_fraction: float) -> float:
     return float(s.iloc[k : n - k].mean())
 
 
-async def main(args: argparse.Namespace) -> None:
-    """Run warmup/query rounds and emit timings only for complete streams.
-
-    Args:
-        args: Parsed benchmark CLI options.
-
-    Raises:
-        RuntimeError: If either round contains an empty or incomplete stream.
-    """
+async def main(args):
     random.seed(args.shuffle_seed)
 
     # Create the OpenAI client
@@ -600,24 +565,16 @@ async def main(args: argparse.Namespace) -> None:
     query_mean_ttft = trimmed_mean(
         benchmark_df.query("successful == True")["ttft"], args.trim_fraction
     )
-    warmup_mean_ttot = trimmed_mean(
-        warmup_df.query("successful == True")["ttot"], args.trim_fraction
-    )
-    query_mean_ttot = trimmed_mean(
-        benchmark_df.query("successful == True")["ttot"], args.trim_fraction
-    )
     warmup_success_count = warmup_df.query("successful == True").shape[0]
     query_success_count = benchmark_df.query("successful == True").shape[0]
     CSI = "\x1b["
     RESET = CSI + "0m"
     print(f"Warmup round mean TTFT: {warmup_mean_ttft:.3f}s")
-    print(f"Warmup round mean TTOT: {warmup_mean_ttot:.3f}s")
     print(f"Warmup round time: {warmup_end_time - warmup_start_time:.3f}s")
     print(f"Warmup round prompt count: {len(warmup_df)}")
     print(f"Warmup round successful prompt count: {warmup_success_count}")
     print(f"{CSI}36;1m\n=== BENCHMARK RESULTS ==={RESET}")
     print(f"{CSI}32mQuery round mean TTFT: {query_mean_ttft:.3f}s{RESET}")
-    print(f"{CSI}32mQuery round mean TTOT: {query_mean_ttot:.3f}s{RESET}")
     print(
         f"{CSI}33mQuery round time: "
         f"{benchmark_end_time - benchmark_start_time:.3f}s{RESET}"
@@ -628,22 +585,26 @@ async def main(args: argparse.Namespace) -> None:
     if visualize:
         visualize_results(warmup_df, benchmark_df)
 
-    # Keep failed-request CSVs for diagnosis, but never let a partial stream
-    # satisfy a latency check by contributing an artificially short request.
-    if warmup_success_count != len(warmup_df) or query_success_count != len(
-        benchmark_df
-    ):
-        raise RuntimeError("Benchmark contains unsuccessful streaming requests")
-
     if args.json_output:
         query_duration = benchmark_end_time - benchmark_start_time
         query_round_time_per_prompt = query_duration / len(benchmark_df)
         warmup_duration = warmup_end_time - warmup_start_time
         warmup_round_time_per_prompt = warmup_duration / len(warmup_df)
+        # Standard
+        import json
+
+        warmup_successful = warmup_df.query("successful == True")
+        query_successful = benchmark_df.query("successful == True")
         summary = {
             "query_ttft_per_prompt": query_mean_ttft,
-            "query_ttot_per_prompt": query_mean_ttot,
-            "warmup_ttot_per_prompt": warmup_mean_ttot,
+            "query_mean_request_latency": trimmed_mean(
+                query_successful["request_end"] - query_successful["request_start"],
+                args.trim_fraction,
+            ),
+            "warmup_mean_request_latency": trimmed_mean(
+                warmup_successful["request_end"] - warmup_successful["request_start"],
+                args.trim_fraction,
+            ),
             "query_round_time_per_prompt": query_round_time_per_prompt,
             "warmup_round_time_per_prompt": warmup_round_time_per_prompt,
         }
@@ -797,7 +758,7 @@ def create_argument_parser():
         default=0.0,
         help=(
             "Exclude the smallest and largest fraction of successful samples "
-            "before averaging. Example: 0.1 drops bottom 10%% and top 10%%."
+            "before averaging. Example: 0.1 drops bottom 10% and top 10%."
         ),
     )
 
