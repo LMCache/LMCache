@@ -31,6 +31,12 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
+from lmcache.v1.distributed.l2_adapters.mooncake_process_adapter import (
+    MooncakeProcessConfig,
+    create_process_adapter,
+    parse_process_options,
+)
+from lmcache.v1.distributed.l2_adapters.mooncake_resilience import GuardConfig
 
 logger = init_logger(__name__)
 
@@ -40,6 +46,8 @@ _LMCACHE_ONLY_KEYS = {
     "num_workers",
     "eviction",
     "per_op_workers",
+    "process",
+    "serde",
 }
 
 
@@ -64,6 +72,9 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
             (``"lookup"``, ``"retrieve"``, ``"store"``,
             ``"delete"``) to dedicated worker counts.  Ops
             not mentioned use the shared ``num_workers`` pool.
+        process_config: Opt-in isolated SDK process policy. Requires a named
+            shared L1 arena and non-expiring controller I/O pins.
+        guard_config: Admission and recovery policy used in process mode.
     """
 
     def __init__(
@@ -71,6 +82,8 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
         setup_config: dict[str, str],
         num_workers: int = 4,
         per_op_workers: dict[str, int] | None = None,
+        process_config: MooncakeProcessConfig | None = None,
+        guard_config: GuardConfig | None = None,
     ):
         super().__init__()
         self.num_workers = L2AdapterConfigBase._validate_num_workers(num_workers)
@@ -78,13 +91,15 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
             per_op_workers
         )
         self.setup_config: dict[str, str] = dict(setup_config)
+        self.process_config = process_config
+        self.guard_config = guard_config or GuardConfig()
 
     @classmethod
     def from_dict(cls, d: dict[str, object]) -> "MooncakeStoreL2AdapterConfig":
         """Construct a config from a raw configuration dict.
 
         LMCache-only keys (``type``, ``num_workers``, ``eviction``,
-        ``per_op_workers``) are consumed locally.  All other keys are
+        ``per_op_workers``, ``process``, ``serde``) are consumed locally. Other keys are
         forwarded to mooncake as string values.
 
         Args:
@@ -100,6 +115,12 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
         num_workers = cast(int, d.get("num_workers", 4))  # validated in __init__
 
         per_op_workers = L2AdapterConfigBase._parse_per_op_workers_from_dict(d)
+        process_config = None
+        guard_config = None
+        if "process" in d:
+            if d.get("serde") is not None:
+                raise ValueError("Process Mooncake does not support serde buffers")
+            process_config, guard_config = parse_process_options(d["process"])
         # Everything except LMCache-only keys is
         # forwarded to mooncake as str values.
         setup: dict[str, str] = {}
@@ -113,6 +134,8 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
             setup_config=setup,
             num_workers=num_workers,
             per_op_workers=per_op_workers,
+            process_config=process_config,
+            guard_config=guard_config,
         )
 
     @classmethod
@@ -134,7 +157,10 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
             "dict mapping lane keys to dedicated worker "
             "counts. Valid keys: lookup, retrieve, "
             "store, delete. Ops not mentioned use the "
-            "shared num_workers pool."
+            "shared num_workers pool.\n"
+            "- process (dict, optional): Enable isolated SDK workers and the "
+            "admission guard. Requires Linux, named shared L1, no lazy allocator "
+            "and no serde. Nested guard config controls probe/admission policy."
         )
 
 
@@ -156,6 +182,19 @@ def _create_mooncake_store_l2_adapter(
         ValueError: If RDMA protocol is requested but
             ``l1_memory_desc`` is missing or invalid.
     """
+    if not isinstance(config, MooncakeStoreL2AdapterConfig):
+        raise ValueError(f"Expected MooncakeStoreL2AdapterConfig, got {type(config)}")
+    if config.process_config is not None:
+        if config.serde_config is not None:
+            raise ValueError("Process Mooncake does not support serde buffers")
+        return create_process_adapter(
+            config.setup_config,
+            config.num_workers,
+            config.per_op_workers,
+            l1_memory_desc,
+            config.process_config,
+            config.guard_config,
+        )
     try:
         # First Party
         from lmcache.lmcache_mooncake import (

@@ -18,8 +18,10 @@ interface docstrings. The tests focus on:
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from unittest.mock import MagicMock
 import threading
+import uuid
 
 # Third Party
 import pytest
@@ -51,6 +53,27 @@ if not torch_dev.is_available():
         f"Requires available {torch_device_type} runtime",
         allow_module_level=True,
     )
+
+
+@pytest.mark.parametrize("leading_slash", [False, True])
+def test_shared_descriptor_names_the_actual_allocator_backing(
+    leading_slash: bool,
+) -> None:
+    """Process attachment needs the real canonical SHM name, not the raw config."""
+    name = "lmcache_l1_pool_descriptor_" + uuid.uuid4().hex
+    manager = L1MemoryManager(
+        L1MemoryManagerConfig(
+            size_in_bytes=4 * 1024 * 1024,
+            use_lazy=False,
+            shm_name=("/" if leading_slash else "") + name,
+        )
+    )
+    try:
+        descriptor = manager.get_l1_memory_desc()
+        assert descriptor.shm_name == name
+        assert Path("/dev/shm", name).stat().st_size == descriptor.size
+    finally:
+        manager.close()
 
 
 # =============================================================================

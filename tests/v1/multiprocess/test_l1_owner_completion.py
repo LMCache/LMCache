@@ -33,11 +33,11 @@ from tests.v1.distributed.utils import ROUND_ROBIN_WRITE_POLICY
 
 
 @pytest.mark.parametrize("owner_count", [1, 2])
-@pytest.mark.parametrize("failure", ["none", "copy"])
+@pytest.mark.parametrize("failure", ["none", "copy", "owner"])
 def test_store_owner_callback_round_trip(
     monkeypatch: pytest.MonkeyPatch,
     owner_count: int,
-    failure: Literal["none", "copy"],
+    failure: Literal["none", "copy", "owner"],
 ) -> None:
     """Real reservations survive serialization and finish only after dispatch.
 
@@ -109,6 +109,8 @@ def test_store_owner_callback_round_trip(
         copied.extend(args[1])
         if failure == "copy" and len(copied) == 2:
             raise RuntimeError("device copy failed")
+        if failure == "owner" and len(copied) == 2:
+            copied[0].reset_l1_manager()
 
     keys = [ObjectKey(b"chunk", "model", 0, gid) for gid in range(2)]
     ctx = SimpleNamespace(
