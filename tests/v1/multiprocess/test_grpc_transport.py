@@ -20,6 +20,10 @@ import torch
 import zmq
 
 # First Party
+from lmcache.v1.client.kv_event_subscriber import (
+    KVEventStreamClosed,
+    MPKVEventSubscriber,
+)
 from lmcache.v1.client.transport.errors import (
     MPRequestError,
     MPServerUnavailableError,
@@ -941,6 +945,67 @@ def test_auto_server_mode_follows_pygrpc_native(
             p2p.close(wait=True)
     finally:
         worker.close(wait=True)
+
+
+@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
+def test_kv_event_subscriber_resubscribes_after_stream_handler_error(
+    grpc_server_mode: str,
+) -> None:
+    subscriptions = 0
+
+    class Module:
+        @request_handler()
+        def subscribe_kv_events(
+            self, instance_id: int, model_name: str, cursor: int, max_events: int
+        ) -> MessagingStream[KVEventBatch]:
+            nonlocal subscriptions
+            subscriptions += 1
+            attempt = subscriptions
+            sent = False
+
+            def read(closed: threading.Event) -> KVEventBatch:
+                nonlocal sent
+                if not sent:
+                    sent = True
+                    return KVEventBatch(True, attempt, attempt, False, [])
+                if attempt == 1:
+                    raise RuntimeError("event bus failed")
+                closed.wait()
+                raise StopIteration
+
+            return MessagingStream(read, lambda: None)
+
+    config = MPServerConfig(
+        transport="grpc",
+        host="127.0.0.1",
+        port=0,
+        grpc_server_mode=cast(Any, grpc_server_mode),
+    )
+    server = build_grpc_request_server([cast(Any, Module())], config)
+    server.start()
+    client = GrpcMultiprocessClient(f"grpc://127.0.0.1:{server.bound_port}")  # type: ignore[abstract]
+    updates: list[KVEventBatch | KVEventStreamClosed] = []
+    resubscribed = threading.Event()
+
+    def on_update(subscriber: MPKVEventSubscriber) -> None:
+        for update in subscriber.drain():
+            updates.append(update)
+            if isinstance(update, KVEventBatch) and update.incarnation == 2:
+                resubscribed.set()
+
+    subscriber = MPKVEventSubscriber(client, 1, "model", on_update)
+    try:
+        subscriber.start()
+        assert resubscribed.wait(10)
+        assert updates == [
+            KVEventBatch(True, 1, 1, False, []),
+            KVEventStreamClosed(),
+            KVEventBatch(True, 2, 2, False, []),
+        ]
+    finally:
+        subscriber.close()
+        client.close()
+        server.close()
 
 
 def test_aio_server_releases_threads_when_bind_fails() -> None:
