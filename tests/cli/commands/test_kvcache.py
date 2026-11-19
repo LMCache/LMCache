@@ -18,6 +18,7 @@ import pytest
 from lmcache.cli.main import main
 
 Reply = tuple[int, dict[str, object] | str | bytes]
+ReplyWithLength = tuple[Reply, int]
 Request = tuple[str, str, bytes, str]
 
 NEXT_PAGE_TOKEN = "opaque+/=?& %游标"
@@ -68,7 +69,7 @@ class CacheServer:
     """HTTP boundary with queued replies and captured requests."""
 
     url: str
-    replies: Queue[Reply]
+    replies: Queue[Reply | ReplyWithLength]
     requests: Queue[Request]
 
 
@@ -79,7 +80,7 @@ def cache_server() -> Iterator[CacheServer]:
     Yields:
         The server URL, reply queue, and captured requests.
     """
-    replies: Queue[Reply] = Queue()
+    replies: Queue[Reply | ReplyWithLength] = Queue()
     requests: Queue[Request] = Queue()
 
     class Handler(BaseHTTPRequestHandler):
@@ -90,9 +91,14 @@ def cache_server() -> Iterator[CacheServer]:
                 (self.command, self.path, body, self.headers.get("Content-Type", ""))
             )
             try:
-                status, payload = replies.get_nowait()
+                reply = replies.get_nowait()
             except Empty:
-                status, payload = 500, {"detail": "unexpected extra request"}
+                reply = (500, {"detail": "unexpected extra request"})
+            if len(reply) == 3:
+                status, payload, declared = reply
+            else:
+                status, payload = reply
+                declared = None
             if isinstance(payload, bytes):
                 encoded = payload
             else:
@@ -101,7 +107,13 @@ def cache_server() -> Iterator[CacheServer]:
                 ).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(encoded)))
+            if declared is not None and declared > len(encoded):
+                self.close_connection = True
+                self.send_header("Connection", "close")
+            self.send_header(
+                "Content-Length",
+                str(declared if declared is not None else len(encoded)),
+            )
             self.end_headers()
             self.wfile.write(encoded)
 
@@ -412,8 +424,65 @@ def _page_with(key: dict[str, object] | None, size_bytes: object) -> dict[str, o
             _page_with(None, 1),
             "'key' is not an object",
         ),
+        (
+            _page_with(
+                {"chunk_hash_hex": "c0ffee", "model_name": "m", "kv_rank": True}, 1
+            ),
+            "required key field 'kv_rank' must be int",
+        ),
+        (
+            _page_with(
+                {"chunk_hash_hex": "c0ffee", "model_name": "m", "kv_rank": 0}, True
+            ),
+            "'size_bytes' must be an integer",
+        ),
+        (
+            _page_with(
+                {
+                    "chunk_hash_hex": "c0ffee",
+                    "model_name": "m",
+                    "kv_rank": 0,
+                    "object_group_id": False,
+                },
+                1,
+            ),
+            "optional key field 'object_group_id' must be int",
+        ),
+        (
+            _page_with(
+                {
+                    "chunk_hash_hex": "c0ffee",
+                    "model_name": "m",
+                    "kv_rank": 0,
+                    "tags": {"version": 2},
+                },
+                1,
+            ),
+            "tag values must be strings",
+        ),
+        (
+            _page_with(
+                {
+                    "chunk_hash_hex": "c0ffee",
+                    "model_name": "m",
+                    "kv_rank": 0,
+                    "tags": {"": "ok"},
+                },
+                1,
+            ),
+            "tag names must be non-empty strings",
+        ),
     ],
-    ids=["null-rank", "null-size", "null-key"],
+    ids=[
+        "null-rank",
+        "null-size",
+        "null-key",
+        "bool-rank",
+        "bool-size",
+        "bool-group",
+        "tag-value-type",
+        "tag-empty-name",
+    ],
 )
 def test_list_rejects_mistyped_entries(
     cache_server: CacheServer,
@@ -465,7 +534,7 @@ def test_list_multibyte_char_across_body_bound(
     cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A multi-byte character split by the 4 KiB bound keeps the JSON detail."""
-    body = b'{"detail": "kaboom"}' + b" " * (4095 - 19) + "雪".encode()
+    body = b'{"detail": "kaboom"}'.ljust(4095, b" ") + "雪".encode()
     cache_server.replies.put((400, body))
     with pytest.raises(SystemExit) as exc:
         main(["kvcache", "list", "--quiet", "--url", cache_server.url])
@@ -479,7 +548,7 @@ def test_list_json_detail_beyond_whitespace_bound(
     cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A parseable detail survives legal padding past the 4 KiB bound."""
-    body = b'{"detail": "full-detail"}' + b" " * (4097 - 24)
+    body = b'{"detail": "full-detail"}'.ljust(4097, b" ")
     cache_server.replies.put((503, body))
     with pytest.raises(SystemExit) as exc:
         main(["kvcache", "list", "--quiet", "--url", cache_server.url])
@@ -487,3 +556,44 @@ def test_list_json_detail_beyond_whitespace_bound(
     captured = capsys.readouterr()
     assert "Server unhealthy: full-detail" in captured.err
     assert "[truncated]" not in captured.err
+
+
+def test_list_short_body_reports_remaining_bytes(
+    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A body cut short of its Content-Length reports the remaining count."""
+    cache_server.replies.put((400, b'{"ok":', 100))
+    with pytest.raises(SystemExit) as exc:
+        main(["kvcache", "list", "--quiet", "--url", cache_server.url])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "Incomplete HTTP response" in captured.err
+    assert "94 more expected" in captured.err
+
+
+def test_list_bodyless_status_not_flagged_incomplete(
+    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A 304 response carries no body and is not an incomplete read."""
+    cache_server.replies.put((304, b'{"detail": "nope"}'))
+    with pytest.raises(SystemExit) as exc:
+        main(["kvcache", "list", "--quiet", "--url", cache_server.url])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "304" in captured.err
+    assert "Not Modified" in captured.err
+    assert "Incomplete" not in captured.err
+
+
+def test_list_invalid_utf8_inside_oversized_body(
+    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Invalid bytes before the bound stay an error, not silent data loss."""
+    body = b'{"detail": "a\xffb"}'.ljust(4097, b" ")
+    cache_server.replies.put((400, body))
+    with pytest.raises(SystemExit) as exc:
+        main(["kvcache", "list", "--quiet", "--url", cache_server.url])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "Cannot read HTTP 400 response" in captured.err
+    assert "Traceback" not in captured.err
