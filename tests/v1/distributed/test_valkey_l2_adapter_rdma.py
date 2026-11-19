@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 import ctypes
 import logging
+import os
 import select
-import subprocess
 import sys
 import threading
 import time
@@ -1004,54 +1004,68 @@ class TestWindowDerivation:
 # rdma_interface: "auto"
 # ===========================================================================
 
-# What `fi_info -p efa -f efa-direct` prints on a host with three EFA devices:
-# one block per endpoint, so a domain may repeat, and not in name order.
-_FI_INFO_OUTPUT = """\
-provider: efa
-    fabric: efa-direct
-    domain: rdmap111s0-rdm
-    version: 203.10
-    type: FI_EP_RDM
-    protocol: FI_PROTO_EFA
-provider: efa
-    fabric: efa-direct
-    domain: rdmap110s0-rdm
-    version: 203.10
-    type: FI_EP_RDM
-    protocol: FI_PROTO_EFA
-provider: efa
-    fabric: efa-direct
-    domain: rdmap111s0-rdm
-    version: 203.10
-    type: FI_EP_RDM
-    protocol: FI_PROTO_EFA
-provider: efa
-    fabric: efa-direct
-    domain: rdmap112s0-rdm
-    version: 203.10
-    type: FI_EP_RDM
-    protocol: FI_PROTO_EFA
-"""
+# A p5en.48xlarge as a container sees it (recorded with libfabric 2.7.0amzn2.0):
+# every EFA device of the host under /sys/class/infiniband, each with the
+# uverbs node it owns. Only the nodes of the devices the container was given
+# appear in /dev/infiniband.
+_P5EN_DEVICES: dict[str, str] = {
+    "rdmap85s0": "uverbs0",
+    "rdmap86s0": "uverbs1",
+    "rdmap87s0": "uverbs2",
+    "rdmap88s0": "uverbs3",
+    "rdmap110s0": "uverbs4",
+    "rdmap111s0": "uverbs5",
+    "rdmap112s0": "uverbs6",
+    "rdmap113s0": "uverbs7",
+    "rdmap135s0": "uverbs8",
+    "rdmap136s0": "uverbs9",
+    "rdmap137s0": "uverbs10",
+    "rdmap138s0": "uverbs11",
+    "rdmap160s0": "uverbs12",
+    "rdmap161s0": "uverbs13",
+    "rdmap162s0": "uverbs14",
+    "rdmap163s0": "uverbs15",
+}
+
+# The `domain:` lines `fi_info -p efa -f efa-direct` printed on that host, given
+# all 16 devices (each line appears once, as `domain: rdmapNNs0-rdm`).
+_P5EN_FI_INFO_ALL = tuple(sorted(f"{d}-rdm" for d in _P5EN_DEVICES))
+
+# ... and given 2 of the 16 (vpc.amazonaws.com/efa: "2", nodes uverbs6 and
+# uverbs10), while /sys/class/infiniband still listed all 16.
+_P5EN_FI_INFO_TWO = ("rdmap112s0-rdm", "rdmap137s0-rdm")
 
 
-def _fake_fi_info(
-    monkeypatch: pytest.MonkeyPatch,
-    stdout: str = "",
-    stderr: str = "",
-    returncode: int = 0,
-    raises: Optional[BaseException] = None,
-) -> list[list[str]]:
-    """Replace the pool module's ``subprocess.run``; return the commands run."""
-    commands: list[list[str]] = []
+def _efa_host(
+    root: Any,
+    devices: dict[str, str],
+    allocated: Optional[set[str]] = None,
+    driver: str = "efa",
+) -> tuple[str, str]:
+    """Build a fake /sys/class/infiniband and /dev/infiniband under ``root``.
 
-    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
-        commands.append(list(command))
-        if raises is not None:
-            raise raises
-        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+    ``devices`` maps a device to its uverbs node, ``allocated`` names the
+    nodes present in /dev (all of them by default). Returns the two paths.
+    """
+    sysfs = os.path.join(str(root), "sys", "class", "infiniband")
+    dev = os.path.join(str(root), "dev", "infiniband")
+    drivers = os.path.join(str(root), "sys", "bus", "pci", "drivers")
+    os.makedirs(sysfs, exist_ok=True)
+    os.makedirs(dev, exist_ok=True)
+    for device, node in devices.items():
+        device_dir = os.path.join(sysfs, device, "device")
+        os.makedirs(os.path.join(device_dir, "infiniband_verbs", node))
+        os.makedirs(os.path.join(drivers, driver), exist_ok=True)
+        os.symlink(os.path.join(drivers, driver), os.path.join(device_dir, "driver"))
+    for node in devices.values() if allocated is None else allocated:
+        open(os.path.join(dev, node), "w").close()
+    return sysfs, dev
 
-    monkeypatch.setattr(rdma_worker_pool.subprocess, "run", run)
-    return commands
+
+def _use_efa_host(monkeypatch: pytest.MonkeyPatch, paths: tuple[str, str]) -> None:
+    """Point the pool's discovery at a fake host."""
+    monkeypatch.setattr(rdma_worker_pool, "SYSFS_INFINIBAND_DIR", paths[0])
+    monkeypatch.setattr(rdma_worker_pool, "DEV_INFINIBAND_DIR", paths[1])
 
 
 def _fake_discovery(
@@ -1069,56 +1083,52 @@ def _fake_discovery(
 
 
 class TestDomainDiscovery:
-    def test_domains_are_parsed_deduplicated_and_sorted(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        commands = _fake_fi_info(monkeypatch, stdout=_FI_INFO_OUTPUT)
-        assert discover_efa_direct_domains() == (
-            "rdmap110s0-rdm",
-            "rdmap111s0-rdm",
-            "rdmap112s0-rdm",
-        )
-        assert commands == [["fi_info", "-p", "efa", "-f", "efa-direct"]]
+    def test_all_devices_match_fi_info(self, tmp_path):
+        sysfs, dev = _efa_host(tmp_path, _P5EN_DEVICES)
+        assert discover_efa_direct_domains(sysfs, dev) == _P5EN_FI_INFO_ALL
 
-    def test_a_missing_fi_info_is_named(self, monkeypatch: pytest.MonkeyPatch):
-        _fake_fi_info(monkeypatch, raises=FileNotFoundError(2, "No such file"))
-        with pytest.raises(RuntimeError, match="fi_info tool is not on PATH") as raised:
-            discover_efa_direct_domains()
+    def test_only_the_devices_given_to_the_container(self, tmp_path):
+        # sysfs lists all 16; /dev holds the 2 the container may open.
+        sysfs, dev = _efa_host(
+            tmp_path, _P5EN_DEVICES, allocated={"uverbs6", "uverbs10"}
+        )
+        assert len(os.listdir(sysfs)) == 16
+        assert discover_efa_direct_domains(sysfs, dev) == _P5EN_FI_INFO_TWO
+
+    def test_other_rdma_devices_are_ignored(self, tmp_path):
+        sysfs, dev = _efa_host(tmp_path, {"rdmap85s0": "uverbs0"})
+        # A non-EFA card (e.g. a Mellanox HCA) next to the EFA device.
+        _efa_host(tmp_path, {"mlx5_0": "uverbs1"}, driver="mlx5_core")
+        assert sorted(os.listdir(sysfs)) == ["mlx5_0", "rdmap85s0"]
+        assert discover_efa_direct_domains(sysfs, dev) == ("rdmap85s0-rdm",)
+
+    def test_no_rdma_devices_is_an_error(self, tmp_path):
+        missing = os.path.join(str(tmp_path), "sys", "class", "infiniband")
+        with pytest.raises(RuntimeError, match="cannot be read") as raised:
+            discover_efa_direct_domains(missing, str(tmp_path))
         assert "explicit list" in str(raised.value)
-        assert isinstance(raised.value.__cause__, FileNotFoundError)
 
-    def test_a_failing_fi_info_reports_its_status_and_output(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        _fake_fi_info(
-            monkeypatch,
-            stderr="fi_getinfo: -61 (No data available)\n",
-            returncode=61,
-        )
-        with pytest.raises(RuntimeError, match="exited with status 61") as raised:
-            discover_efa_direct_domains()
+    def test_no_efa_device_is_an_error(self, tmp_path):
+        sysfs, dev = _efa_host(tmp_path, {"mlx5_0": "uverbs0"}, driver="mlx5_core")
+        with pytest.raises(
+            RuntimeError, match="no device with the efa driver"
+        ) as raised:
+            discover_efa_direct_domains(sysfs, dev)
         message = str(raised.value)
-        assert "No data available" in message
+        assert "mlx5_0" in message
         assert "explicit list" in message
 
-    @pytest.mark.parametrize("stdout", ["", "provider: efa\n    fabric: efa-direct\n"])
-    def test_no_domains_is_an_error(self, monkeypatch: pytest.MonkeyPatch, stdout: str):
-        _fake_fi_info(monkeypatch, stdout=stdout)
-        with pytest.raises(RuntimeError, match="listed no domains") as raised:
-            discover_efa_direct_domains()
-        assert "explicit list" in str(raised.value)
+    def test_efa_devices_not_given_to_the_container_are_an_error(self, tmp_path):
+        sysfs, dev = _efa_host(tmp_path, _P5EN_DEVICES, allocated=set())
+        with pytest.raises(RuntimeError, match="16 EFA device") as raised:
+            discover_efa_direct_domains(sysfs, dev)
+        message = str(raised.value)
+        assert "vpc.amazonaws.com/efa" in message
+        assert "explicit list" in message
 
-    def test_a_hung_fi_info_is_an_error(self, monkeypatch: pytest.MonkeyPatch):
-        _fake_fi_info(monkeypatch, raises=subprocess.TimeoutExpired("fi_info", 30))
-        with pytest.raises(RuntimeError, match="did not finish") as raised:
-            discover_efa_direct_domains()
-        assert "explicit list" in str(raised.value)
-
-    def test_an_unrunnable_fi_info_is_an_error(self, monkeypatch: pytest.MonkeyPatch):
-        _fake_fi_info(monkeypatch, raises=PermissionError(13, "Permission denied"))
-        with pytest.raises(RuntimeError, match="could not be run") as raised:
-            discover_efa_direct_domains()
-        assert "explicit list" in str(raised.value)
+    def test_the_defaults_are_the_real_paths(self):
+        assert rdma_worker_pool.SYSFS_INFINIBAND_DIR == "/sys/class/infiniband"
+        assert rdma_worker_pool.DEV_INFINIBAND_DIR == "/dev/infiniband"
 
 
 class TestInterfaceAuto:
@@ -1181,15 +1191,23 @@ class TestInterfaceAuto:
             _make_config(rdma_interface=value)
 
     def test_workers_are_spread_across_the_discovered_domains(
-        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
-        commands = _fake_fi_info(monkeypatch, stdout=_FI_INFO_OUTPUT)
+        _use_efa_host(
+            monkeypatch,
+            _efa_host(
+                tmp_path,
+                {
+                    d: _P5EN_DEVICES[d]
+                    for d in ("rdmap110s0", "rdmap111s0", "rdmap112s0")
+                },
+            ),
+        )
         workers = 3
         adapter = ValkeyL2Adapter(
             _make_config(num_workers=workers, rdma_interface="auto"), arena.desc
         )
         try:
-            assert len(commands) == 1
             gate = threading.Barrier(workers)
             _SERVER.faults["set"] = lambda key: (gate.wait(timeout=5), None)[1]
             keys = [_key(i) for i in range(workers)]
@@ -1254,10 +1272,10 @@ class TestInterfaceAuto:
         assert "found 2 efa-direct domain(s): efa0, efa1" in found[0].getMessage()
 
     def test_a_failed_discovery_fails_construction_before_any_client(
-        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
-        _fake_fi_info(monkeypatch, raises=FileNotFoundError(2, "No such file"))
-        with pytest.raises(RuntimeError, match="fi_info"):
+        _use_efa_host(monkeypatch, _efa_host(tmp_path, _P5EN_DEVICES, allocated=set()))
+        with pytest.raises(RuntimeError, match="could not discover EFA devices"):
             ValkeyL2Adapter(_make_config(rdma_interface="auto"), arena.desc)
         assert _SERVER.configs == []
         assert _SERVER.registrations == []
@@ -1265,17 +1283,17 @@ class TestInterfaceAuto:
     def test_nothing_is_discovered_without_auto(
         self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
     ):
-        commands = _fake_fi_info(monkeypatch, stdout=_FI_INFO_OUTPUT)
+        calls = _fake_discovery(monkeypatch, ("efa0",))
         for interface in (None, "efa0", ["efa0", "efa1"]):
             ValkeyL2Adapter(
                 _make_config(num_workers=1, rdma_interface=interface), arena.desc
             ).close()
-        assert commands == []
+        assert calls == []
 
     def test_help_describes_auto(self):
         text = ValkeyL2AdapterConfig.help()
         assert "'auto'" in text
-        assert "fi_info -p efa -f efa-direct" in text
+        assert "/sys/class/infiniband" in text
 
 
 class TestRegistrationFailureHint:

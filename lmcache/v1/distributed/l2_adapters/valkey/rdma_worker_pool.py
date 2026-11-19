@@ -14,7 +14,7 @@ bound to the client that registered it and carries one transfer at a time.
 On a host with several fabric cards, ``rdma_interface`` may list them and the
 workers are spread across the cards round-robin, so the transfers in flight
 are not all funnelled through one card. ``rdma_interface="auto"`` builds that
-list from the efa-direct domains ``fi_info`` reports.
+list from the EFA devices this process can open, read from sysfs.
 The window is derived from the ``memoryview`` the adapter already passes, so
 the submit API is unchanged. A buffer outside the arena fails its key.
 
@@ -34,7 +34,7 @@ from collections.abc import Sequence
 from typing import Any, Callable, Optional, TypeVar, Union
 import ctypes
 import math
-import subprocess
+import os
 import threading
 
 # First Party
@@ -58,17 +58,18 @@ RDMA_INTERFACE_AUTO: str = "auto"
 #: The only provider ``rdma_interface="auto"`` can discover domains for.
 RDMA_AUTO_PROVIDER: str = "efa-direct"
 
-#: Lists the efa-direct fabric's domains, one ``domain:`` line per endpoint.
-FI_INFO_EFA_DIRECT_COMMAND: tuple[str, ...] = (
-    "fi_info",
-    "-p",
-    "efa",
-    "-f",
-    "efa-direct",
-)
+#: Where the kernel lists every RDMA device of the host.
+SYSFS_INFINIBAND_DIR: str = "/sys/class/infiniband"
 
-#: How long ``fi_info`` may take before discovery gives up, in seconds.
-FI_INFO_TIMEOUT_SECS: float = 30.0
+#: Where a process finds the verbs device nodes it can open. In a container
+#: these are only the devices it was given.
+DEV_INFINIBAND_DIR: str = "/dev/infiniband"
+
+#: Kernel driver of an EFA device.
+EFA_DRIVER: str = "efa"
+
+#: libfabric names an EFA device's efa-direct (RDM) domain ``<device>-rdm``.
+EFA_RDM_DOMAIN_SUFFIX: str = "-rdm"
 
 _EXPLICIT_LIST_HINT = (
     "Set rdma_interface to an explicit list of fabric domain names instead "
@@ -105,66 +106,74 @@ def require_auto_rdma_provider(rdma_provider: str) -> None:
         )
 
 
-def discover_efa_direct_domains() -> tuple[str, ...]:
+def discover_efa_direct_domains(
+    sysfs_dir: Optional[str] = None, dev_dir: Optional[str] = None
+) -> tuple[str, ...]:
     """List the efa-direct fabric domains this process can open.
 
-    Runs ``fi_info -p efa -f efa-direct`` and collects its ``domain:`` lines.
-    glide exposes no call that lists domains, so libfabric's own tool is
-    asked.
+    Reads sysfs instead of asking libfabric, so it needs no tool on ``PATH``:
+    every device under ``/sys/class/infiniband`` whose driver is ``efa`` and
+    whose verbs node (``uverbsN``) is present in ``/dev/infiniband``, named as
+    libfabric names its efa-direct domain, ``<device>-rdm``.
+
+    The ``/dev`` check matters in containers: sysfs lists every device of the
+    host, while ``/dev/infiniband`` holds only the nodes of the devices the
+    container was given (for example, a Kubernetes pod requesting 2 of a
+    node's 16 EFA devices still sees all 16 in sysfs). Those are the devices
+    libfabric can open and lists.
+
+    Args:
+        sysfs_dir: Overrides ``SYSFS_INFINIBAND_DIR``; for tests.
+        dev_dir: Overrides ``DEV_INFINIBAND_DIR``; for tests.
 
     Returns:
-        The domain names (on EFA, like ``rdmap71s0-rdm``), de-duplicated and
-        sorted; never empty.
+        The domain names (on EFA, like ``rdmap85s0-rdm``), sorted; never
+        empty.
 
     Raises:
-        RuntimeError: If ``fi_info`` is missing, fails or times out, or
-            reports no efa-direct domain. The message names the cause and
-            how to list the domains by hand.
+        RuntimeError: If no EFA device is listed, or none of them can be
+            opened by this process. The message names the cause and how to
+            list the domains by hand.
     """
-    command = " ".join(FI_INFO_EFA_DIRECT_COMMAND)
+    sysfs_dir = sysfs_dir or SYSFS_INFINIBAND_DIR
+    dev_dir = dev_dir or DEV_INFINIBAND_DIR
     prefix = f'rdma_interface "{RDMA_INTERFACE_AUTO}" could not discover EFA devices: '
     try:
-        result = subprocess.run(
-            list(FI_INFO_EFA_DIRECT_COMMAND),
-            capture_output=True,
-            text=True,
-            timeout=FI_INFO_TIMEOUT_SECS,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise RuntimeError(
-            f"{prefix}the fi_info tool is not on PATH (it ships with libfabric "
-            f"and the AWS EFA installer). {_EXPLICIT_LIST_HINT}"
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"{prefix}`{command}` did not finish within "
-            f"{FI_INFO_TIMEOUT_SECS:g} s. {_EXPLICIT_LIST_HINT}"
-        ) from exc
+        devices = sorted(os.listdir(sysfs_dir))
     except OSError as exc:
         raise RuntimeError(
-            f"{prefix}`{command}` could not be run: {exc}. {_EXPLICIT_LIST_HINT}"
+            f"{prefix}{sysfs_dir} cannot be read ({exc.strerror or exc}), so this "
+            f"host lists no RDMA device. {_EXPLICIT_LIST_HINT}"
         ) from exc
 
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip() or "no output"
-        raise RuntimeError(
-            f"{prefix}`{command}` exited with status {result.returncode} "
-            f"({detail}). Check that this host has EFA devices and a libfabric "
-            f"with the efa-direct fabric. {_EXPLICIT_LIST_HINT}"
-        )
+    efa_devices: list[str] = []
+    domains: list[str] = []
+    for device in devices:
+        device_dir = os.path.join(sysfs_dir, device, "device")
+        driver = os.path.basename(os.path.realpath(os.path.join(device_dir, "driver")))
+        if driver != EFA_DRIVER:
+            continue
+        efa_devices.append(device)
+        try:
+            verbs = os.listdir(os.path.join(device_dir, "infiniband_verbs"))
+        except OSError:
+            continue
+        if any(os.path.exists(os.path.join(dev_dir, node)) for node in verbs):
+            domains.append(device + EFA_RDM_DOMAIN_SUFFIX)
 
-    domains: set[str] = set()
-    for line in result.stdout.splitlines():
-        fields = line.split()
-        if len(fields) >= 2 and fields[0] == "domain:":
-            domains.add(fields[1])
+    if not efa_devices:
+        raise RuntimeError(
+            f"{prefix}{sysfs_dir} lists no device with the {EFA_DRIVER} driver "
+            f"(found: {', '.join(devices) or 'none'}). {_EXPLICIT_LIST_HINT}"
+        )
     if not domains:
         raise RuntimeError(
-            f"{prefix}`{command}` listed no domains. Check that EFA devices "
-            f"are attached and visible to this process. {_EXPLICIT_LIST_HINT}"
+            f"{prefix}this host has {len(efa_devices)} EFA device(s), but none of "
+            f"their verbs nodes is in {dev_dir}, so this process cannot open "
+            "them. In a container, request the devices (on Kubernetes, the "
+            f"vpc.amazonaws.com/efa resource). {_EXPLICIT_LIST_HINT}"
         )
-    return tuple(sorted(domains))
+    return tuple(domains)
 
 
 def normalize_rdma_interfaces(
@@ -236,8 +245,8 @@ class ValkeyRdmaWorkerPool(ValkeyWorkerPool):
                 for libfabric's software provider (development and tests).
             rdma_interface: Fabric domain, or domains, to open on a multi-card
                 host; workers take them round-robin. ``None`` lets the provider
-                choose. ``"auto"`` uses every efa-direct domain ``fi_info``
-                reports (``efa-direct`` only).
+                choose. ``"auto"`` uses every EFA device this process can open
+                (``efa-direct`` only).
             **pool_kwargs: Forwarded to ``ValkeyWorkerPool``.
 
         Raises:

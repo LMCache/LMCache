@@ -31,7 +31,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 import functools
 import threading
 
@@ -203,8 +203,8 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         tests). RDMA only.
       * ``rdma_interface``: Fabric domain, or list of domains, to open on
         a multi-card host; workers are spread across them round-robin.
-        ``"auto"`` uses every efa-direct domain ``fi_info`` reports, found
-        when the adapter is built; ``efa-direct`` only. RDMA only.
+        ``"auto"`` uses every EFA device this process can open, found when
+        the adapter is built; ``efa-direct`` only. RDMA only.
     """
 
     def __init__(
@@ -496,11 +496,12 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             "- rdma_interface (str or list of str, optional): fabric domain or "
             "domains to open on a host with more than one card; workers are "
             "spread across a list round-robin. Omit to let the provider "
-            "choose. 'auto' uses every efa-direct domain that "
-            "`fi_info -p efa -f efa-direct` lists, so each worker's "
-            "registration of the L1 arena lands on its own EFA device while "
-            "num_workers does not exceed the device count; needs "
-            "rdma_provider 'efa-direct' and the fi_info tool. RDMA only."
+            "choose. 'auto' uses every EFA device this process can open (the "
+            "efa-direct domains `fi_info -p efa -f efa-direct` would list, "
+            "read from /sys/class/infiniband and /dev/infiniband), so each "
+            "worker's registration of the L1 arena lands on its own EFA "
+            "device while num_workers does not exceed the device count; "
+            "needs rdma_provider 'efa-direct'. RDMA only."
         )
 
 
@@ -1224,10 +1225,10 @@ class ValkeyL2Adapter(L2AdapterInterface):
         }
         if self._config.uses_rdma and self._l1_memory_desc is not None:
             status["rdma_provider"] = self._config.rdma_provider
-            # The pool's list, which is the discovered one under "auto".
-            status["rdma_interfaces"] = list(
-                getattr(self._pool, "rdma_interfaces", self._config.rdma_interfaces)
-            )
+            # The pool's list, which is the discovered one under "auto". With
+            # RDMA the pool is always a ValkeyRdmaWorkerPool (see _create_pool).
+            rdma_pool = cast(ValkeyRdmaWorkerPool, self._pool)
+            status["rdma_interfaces"] = list(rdma_pool.rdma_interfaces)
             status["l1_arena_bytes"] = self._l1_memory_desc.size
         # In cluster mode also expose the server's real per-node memory
         # (``current_size_bytes`` above is LMCache's aggregate logical
