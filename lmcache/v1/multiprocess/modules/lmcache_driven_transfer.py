@@ -720,8 +720,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             store is skipped and nothing is committed; a subsequent retrieve misses
             and the engine recomputes. The boolean result reports whether the
             store completed without such a failure.
-            Failed copies or completion preparation abort their reservations
-            on the copy stream, after the queued GPU writes into them drain.
+            On failure, reservations whose owners were captured are aborted
+            on the copy stream after queued GPU writes drain. If owner capture
+            fails, uncaptured reservations retain their write-TTL lifetime.
             A key addressing an unfull chunk (``key.has_unfull_chunk``) also
             stores that chunk in the same transaction; its block IDs follow
             the full chunks' in every group, and its mask entry comes last.
@@ -1424,8 +1425,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             key: The store key; it addresses the unfull chunk.
             obj_keys: The unfull chunk's object key per object group.
             block_ids: The unfull chunk's block IDs per kernel group.
-            l1_owners: Transaction owners, updated before each copy so failed
-                stores can abort every reservation after the stream drains.
+            l1_owners: Transaction owners, captured before each copy for abort
+                after the stream drains. Uncaptured reservations retain write TTL.
 
         Returns:
             The reserved objects, keyed by object key.
