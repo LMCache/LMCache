@@ -10,21 +10,30 @@ function dashboard(respond = () => new Response('{}')) {
     const elements = new Map();
     const requests = [];
     const alerts = [];
-    const buttons = [];
+    function buttons() {
+        const result = [];
+        function visit(node) {
+            for (const child of node.children) {
+                if (child.className?.split(' ').some(name => ['edit-node', 'delete-node'].includes(name))) {
+                    child.kind = child.className.includes('edit-node') ? 'edit-node' : 'delete-node';
+                    result.push(child);
+                }
+                visit(child);
+            }
+        }
+        for (const node of elements.values()) visit(node);
+        return result;
+    }
     function element() {
         return {
             value: '', dataset: {}, checked: false, disabled: false,
-            textContent: '', innerHTML: '', children: [], listeners: {},
+            textContent: '', children: [], listeners: {},
+            get innerHTML() { return this.html || ''; },
+            set innerHTML(value) { this.html = value; this.children = []; },
             classList: {add() {}, remove() {}},
             addEventListener(event, callback) { this.listeners[event] = callback; },
             appendChild(child) {
                 this.children.push(child);
-                for (const match of child.innerHTML.matchAll(/class="[^"]*(edit-node|delete-node)[^"]*" data-name="([^"]+)"/g)) {
-                    const button = element();
-                    button.kind = match[1];
-                    button.dataset.name = match[2];
-                    buttons.push(button);
-                }
             },
         };
     }
@@ -37,7 +46,7 @@ function dashboard(respond = () => new Response('{}')) {
         addEventListener() {},
         querySelector() { return {id: 'metrics'}; },
         querySelectorAll(selector) {
-            return buttons.filter(button => selector === `.${button.kind}`);
+            return buttons().filter(button => selector === `.${button.kind}`);
         },
     };
     const window = {
@@ -56,7 +65,7 @@ function dashboard(respond = () => new Response('{}')) {
     });
     vm.runInContext(source, context);
     return {
-        document, requests, alerts, buttons, context, window,
+        document, requests, alerts, get buttons() { return buttons(); }, context, window,
         run: code => vm.runInContext(code, context),
         field: (id, value) => { document.getElementById(id).value = value; },
     };

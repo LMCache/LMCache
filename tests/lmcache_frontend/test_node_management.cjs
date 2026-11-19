@@ -44,7 +44,7 @@ test('Current Nodes headings match the rendered row columns', async () => {
     await ui.run('loadNodeListForManagement()');
     const row = ui.document.getElementById('nodeListBody').children[0];
     assert.deepEqual(headings, ['Name', 'Host', 'Port/Socket', 'Is Proxy', 'Proxy ID', 'Actions']);
-    assert.equal([...row.innerHTML.matchAll(/<td>/g)].length, headings.length);
+    assert.equal(row.children.length, headings.length);
 });
 
 test('Edit retains the original identifier across repeated renames', async () => {
@@ -91,9 +91,9 @@ test('Current Nodes includes children and retains existing proxy rows in order',
     ]}));
     await ui.run('loadNodeListForManagement()');
     const rows = ui.document.getElementById('nodeListBody').children;
-    assert.deepEqual(rows.map(row => row.innerHTML.match(/<td>(.*?)<\/td>/)[1]),
+    assert.deepEqual(rows.map(row => row.children[0].textContent),
         ['proxy', 'empty-proxy', 'child']);
-    assert.deepEqual([...rows[2].innerHTML.matchAll(/<td>(.*?)<\/td>/g)].map(match => match[1]),
+    assert.deepEqual(rows[2].children.slice(0, 5).map(cell => cell.textContent),
         ['child', 'cache.local', '8085', 'No', 'proxy']);
 });
 
