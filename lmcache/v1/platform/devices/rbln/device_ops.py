@@ -14,13 +14,10 @@ keep LMCache's canonical token-major wire layout (``[2, L, T, H*D]``), so a
 chunk written from an RBLN cache is byte-compatible with every other device --
 the case that matters for cross-device KV sharing and PD disaggregation.
 
-HND restores use chiplet-sharded device staging and a compiled head/token
-swap. Stores keep kv_ops' per-thread host staging and host transpose, so
-commit workers do not compile or submit swaps. Both directions check bf16,
-head size divisible by 64 and compiled-copy support before copying, then
-reserve the shared restore set. Placement is optional; without its APIs the
-set uses one unplaced shard. Restores run serially on the model-driving
-thread and hold the set's lock for the whole call. MLA is unchanged.
+HND transfers use chiplet-sharded device staging and a compiled head/token
+swap in both directions. A store copies directly from device staging to
+the canonical host chunk. Store and restore buffers are independent,
+and every compiled swap is serialized. MLA keeps its existing path.
 
 All layouts require the engine's KV caches to be real device tensors
 (vLLM-RBLN: ``VLLM_RBLN_USE_DEVICE_TENSOR=1``). With the default compile-mode
@@ -41,15 +38,13 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.platform.base.device_ops import DeviceOps
-from lmcache.v1.platform.devices.rbln.hnd_ops import restore_hnd
+from lmcache.v1.platform.devices.rbln.hnd_ops import transfer_hnd
 from lmcache.v1.platform.devices.rbln.kv_layout import (
     squeeze_singleton_axis,
     squeeze_singleton_axis_kv_first,
     validate_mla_layers,
 )
 from lmcache.v1.platform.devices.rbln.kv_ops import (
-    gather_blocks_to_chunk_hnd,
-    gather_blocks_to_chunk_hnd_kv_first,
     gather_blocks_to_chunk_mla,
     scatter_chunk_to_blocks_mla,
 )
@@ -84,9 +79,8 @@ class RblnDeviceOps(DeviceOps):
         """Move whole paged blocks between RBLN KV and token-major chunks.
 
         The layout is picked by its ``KVFormatSpec`` layout facts. HND uses
-        device staging and a compiled swap for restores, and kv_ops' host
-        staging for stores. Both directions validate restore requirements and
-        reserve restore memory before any copy; there is no restore fallback.
+        device staging and a compiled swap in both directions. It validates
+        the requirements and reserves device buffers before any HND copy.
 
         Args:
             paged_buffer_ptrs_tensor: Per-layer KV tensors --
@@ -101,7 +95,7 @@ class RblnDeviceOps(DeviceOps):
             shape_desc: Paged-buffer shape descriptor.
             lmcache_chunk_size: Tokens per staging chunk.
             engine_kv_format: Engine KV layout.
-            skip_prefix_n_blocks: Leading blocks neither read nor written.
+            skip_prefix_n_blocks: Leading blocks to skip during restore.
 
         Raises:
             ValueError: If the operands are not tensor lists, the format's
@@ -233,29 +227,23 @@ class RblnDeviceOps(DeviceOps):
                 heads,
                 tokens_per_block,
                 head_size,
+                store=is_d2h,
             )
-            if not is_d2h:
-                layers = (
-                    paged_layers
-                    if format_spec.is_two_major
-                    else [layer.transpose(0, 1) for layer in paged_layers]
-                )
-                restore_hnd(
-                    layers,
-                    flat_blocks,
-                    chunks,
-                    blocks_per_chunk,
-                    skip_prefix_n_blocks,
-                    staged,
-                )
-                return
-            gather = (
-                gather_blocks_to_chunk_hnd_kv_first
+            layers = (
+                paged_layers
                 if format_spec.is_two_major
-                else gather_blocks_to_chunk_hnd
+                else [layer.transpose(0, 1) for layer in paged_layers]
             )
-        else:
-            gather = gather_blocks_to_chunk_mla
+            transfer_hnd(
+                layers,
+                flat_blocks,
+                chunks,
+                blocks_per_chunk,
+                skip_prefix_n_blocks,
+                staged,
+                store=is_d2h,
+            )
+            return
 
         consumed = 0
         for chunk_idx, chunk in enumerate(chunks):
@@ -265,7 +253,7 @@ class RblnDeviceOps(DeviceOps):
             if not blocks:
                 break
             if is_d2h:
-                gather(paged_layers, blocks, chunk)
+                gather_blocks_to_chunk_mla(paged_layers, blocks, chunk)
             else:
                 # The prefix skip is global across the transfer; translate it
                 # into this chunk's local block offset.

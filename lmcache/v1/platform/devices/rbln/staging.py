@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Device staging for RBLN HND restores.
+"""Device staging for RBLN HND transfers.
 
 RBLN device DRAM is one pool per chiplet. An unplaced allocation lands on
 chiplet 0 next to that chiplet's share of the model, so staging rows are
 split into one shard per chiplet when placement is available.
 
-The restore set holds head-major and token-major buffers per chiplet shard.
+Each direction has its own head-major and token-major pair per chiplet.
 Placement spreads the rows over chiplets when its APIs are available; the
 unplaced path reserves one pair on chiplet 0. The first HND transfer in
 either direction reserves this memory, before a store can publish chunks.
@@ -32,7 +32,7 @@ _CHIPLET_COUNTS_LOCK = threading.Lock()
 
 @dataclass(frozen=True)
 class HndStaging:
-    """Restore staging of one geometry, placed per chiplet when supported.
+    """Staging for one direction, placed per chiplet when supported.
 
     Attributes:
         head_major: Per-shard ``[rows, NH, BS, HS]`` buffers.
@@ -47,7 +47,7 @@ class HndStaging:
 
 _Geometry = tuple[str, torch.dtype, int, int, int, int, int]
 _GEOMETRY: _Geometry | None = None
-_STAGING: HndStaging | None = None
+_STAGING: tuple[HndStaging, HndStaging] | None = None
 _STAGING_LOCK = threading.Lock()
 _PLACEMENT_WARNING_LOGGED = False
 
@@ -120,8 +120,10 @@ def hnd_staging(
     num_heads: int,
     block_size: int,
     head_size: int,
+    *,
+    store: bool = False,
 ) -> HndStaging:
-    """Return the shared restore staging for one HND block.
+    """Return the staging for the requested direction for one HND block.
 
     The ``2 * num_layers`` rows are split over ``min(chiplets, num_layers)``
     shards when placement is available. Otherwise one unplaced shard is
@@ -129,7 +131,7 @@ def hnd_staging(
     HND transfer in either direction reserves physical memory so allocation
     failures occur before a store publishes chunks. Allocation does not copy
     or compile. Only the latest geometry is retained; callers use one loaded
-    model geometry and hold the set's lock for the whole restore call.
+    model geometry and hold the set's lock for the whole transfer.
 
     Args:
         device: Device of the paged KV cache.
@@ -138,9 +140,10 @@ def hnd_staging(
         num_heads: KV heads.
         block_size: Tokens per block.
         head_size: Elements per head.
+        store: Select the store set; otherwise select the restore set.
 
     Returns:
-        One restore set with a head/token buffer pair per shard.
+        A head/token buffer pair per shard for the requested direction.
 
     Raises:
         RuntimeError: If reservation or placement fails. The failed set is
@@ -168,8 +171,12 @@ def hnd_staging(
             restored = _allocate(
                 device, dtype, num_layers, num_heads, block_size, head_size, shards
             )
-            _GEOMETRY, _STAGING = key, restored
-        return _STAGING
+            stored = _allocate(
+                device, dtype, num_layers, num_heads, block_size, head_size, shards
+            )
+            _GEOMETRY, _STAGING = key, (restored, stored)
+        restored, stored = _STAGING
+        return stored if store else restored
 
 
 def _allocate(

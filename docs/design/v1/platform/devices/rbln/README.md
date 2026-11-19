@@ -119,7 +119,7 @@ scatter, all of which resolve it via `normalize_kv_and_discover_format` and
 never touch a connector -- which is why the format must be recognised by
 detection rather than by a connector.
 
-**Transfer.** HND restores use `hnd_ops.restore_hnd`. Blocks-first
+**Transfer.** Both HND directions use the device buffers in `hnd_ops`. Blocks-first
 layers are transposed as an addressing view to `[2, NB, NH, BS, HS]`;
 K/V-first layers already have that form. Neither view moves bytes. Row `r`
 in staging corresponds to `layers[r % L][r // L][block]`.
@@ -139,12 +139,13 @@ restores pair each contiguous `[BS, NH*HS]` layer slice with its staging row.
 One-block chunks group contiguous spans per shard and K/V half. This avoids
 an extra host transpose or temporary host tensors on restore.
 
-HND stores keep `kv_ops.gather_blocks_to_chunk_hnd` and its K/V-first
-variant. Contiguous paged blocks land in per-thread host staging, then a
-host transpose writes canonical `[2, L, T, NH*HS]` chunks. Stores do not
-submit or compile device swaps and may run on asynchronous commit workers.
-They write every requested block; trailing partial chunks leave unused tokens
-untouched. There is no host-staged restore path.
+Stores reverse the device data flow. They batch paged blocks into head-major
+staging, swap each shard into token-major staging on the device, then batch
+contiguous copies directly into the canonical host chunk. A one-block chunk
+with unsharded staging needs one contiguous host copy. Split chiplet
+allocations and strided token windows in multi-block chunks use multiple
+contiguous spans. Stores write every requested block; a partial chunk leaves
+its unused tokens untouched.
 
 ## The K/V-first layout
 
@@ -204,8 +205,8 @@ How the two layouts relate inside the backend:
   transfer boundary -- but returns the tensors unchanged.
 - **Per-format addressing, shared bookkeeping.**
   `RblnDeviceOps.multi_layer_block_kv_transfer` dispatches on the format
-  spec's layout facts (see above). HND restores run per block in `hnd_ops`;
-  HND stores and MLA keep chunk-oriented operations in `kv_ops`.
+  spec's layout facts (see above). HND transfers run per block in `hnd_ops`;
+  MLA uses chunk-oriented operations in `kv_ops`.
 
 All RBLN layouts require the engine's KV caches to be real device tensors
 (vLLM-RBLN: `VLLM_RBLN_USE_DEVICE_TENSOR=1`). With the default compile-mode
@@ -222,7 +223,7 @@ bf16 KV/chunks, head size a multiple of 64, and a
 Unsupported dtype/head size raises `ValueError`; a missing compiled copy
 raises `RuntimeError`. These checks apply to stores too, so the first store
 refuses a cache that cannot later be restored. There is no native extension
-or transfer-path configuration, and no host-staged restore fallback. Paged
+or transfer-path configuration, and no host-staged HND fallback. Paged
 layers and canonical host chunks must be contiguous.
 
 Placement is optional. When `torch.rbln.set_device_alloc` and
@@ -230,39 +231,37 @@ Placement is optional. When `torch.rbln.set_device_alloc` and
 `min(num_chiplet, L)` shards, using
 `get_device_properties(device).num_chiplet`. Each shard owns a head-major
 `[rows, NH, BS, HS]` tensor and a token-major `[rows, BS, NH, HS]` tensor,
-placed whole on its chiplet. Without either placement API, the restore set
+placed whole on its chiplet. Without either placement API, each set
 uses one unplaced shard and no device-properties query is made. A warning
 names the missing APIs once per process and states that staging is not
-spread over chiplets. The unplaced pair occupies chiplet 0, so all restore
-staging memory must fit there alongside that chiplet's model and KV cache.
+spread over chiplets. Without placement, all HND staging must fit on
+chiplet 0 alongside that chiplet's model and KV cache.
 
-One restore set is shared process-wide for the latest geometry. It is
-physically reserved on the first HND transfer in either direction, so a first
-store surfaces an allocation error before publishing chunks. Allocation does
-not copy or compile. Errors propagate and a failed set is not cached.
-Worker-side engine-driven KV registration has no DeviceSpec/DeviceOps hook
-receiving the caches, so this is not a startup reservation; deployments must
-leave room when sizing KV.
+The store and restore sets are shared process-wide for the latest geometry.
+Both are physically reserved on the first HND transfer, so the first store
+surfaces an allocation error before publishing chunks. Allocation does not
+copy or compile. Worker-side engine-driven KV registration does not pass the
+caches to a DeviceSpec or DeviceOps hook, so deployments must leave this
+memory free when sizing KV.
 
-Total bf16 device staging is `2 * 2L * NH * BS * HS * 2 bytes`, independent
-of commit-worker count. For Qwen3-1.7B (`L=28`, `NH=8`, `BS=1024`, `HS=128`),
-that is 234,881,024 bytes (about 235 MB, 224 MiB), spread across chiplets when
-placement is available or held on chiplet 0 otherwise. Stores additionally
-retain their per-thread host landing buffers from `kv_ops`.
+For element size `E` bytes, device staging uses
+`2 directions * 2 buffers * 2L * NH * BS * HS * E` bytes, independent of
+commit-worker count. Qwen3-1.7B needs 448 MiB for both sets with bf16 and
+1024-token blocks.
 
 ## HND submission and caller contract
 
-The shared restore set's lock covers the whole restore call, including all
-shard swaps and the final blocking paged-block copies. This prevents another
-restore from submitting a swap or reusing staging while the call still uses
-its bytes; no separate swap lock is needed. Stores use per-thread host buffers
-and never enter the restore swap program. Only the loaded model's latest KV
-geometry is retained; concurrent geometry changes are outside the contract.
+Each direction holds its staging lock until the transfer completes. Separate
+sets allow a restore to overlap a store's copies. A process-wide swap lock
+serializes the compiled swaps, including swaps for different directions
+and geometries. Only the loaded model's latest KV geometry is retained;
+concurrent geometry changes are outside the caller contract.
 
-Restores run serially on the model-driving thread's current stream. Device
-swap programs compile only during a restore on that thread, so the first
-cache hit pays the one-time compilation cost for its geometry. Subsequent
-restores reuse the programs. The plain copies respect stream ordering and
-finish before the restore lock is released. Callers still own ordering
-relative to model execution and completion/publication through the transfer
-context.
+Restores run serially on the model-driving thread's current stream. A first
+swap on a new geometry may compile on the invoking thread. An engine using
+asynchronous stores should warm the swaps on the model-driving thread
+before submitting work to commit workers. LMCache's engine-driven
+registration has no RBLN callback that can do this automatically.
+
+Callers own ordering relative to model execution and publish a transfer
+only when the transfer context reports completion.

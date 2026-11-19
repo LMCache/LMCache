@@ -235,15 +235,15 @@ def test_missing_placement_uses_one_shard(
 
 
 @pytest.mark.parametrize("direction", [TransferDirection.D2H, TransferDirection.H2D])
-def test_first_transfer_reserves_restore_memory_and_recovers(
+def test_first_transfer_reserves_both_sets_and_recovers(
     cpu_rbln: Any, direction: TransferDirection
 ) -> None:
-    """Insufficient restore memory fails before either direction copies bytes."""
+    """Capacity for only one direction fails before either direction copies bytes."""
     layers, chunks = _operands()
     chunks[0].fill_(37)
     before = [tensor.clone() for tensor in layers + chunks]
     needed = 2 * 2 * 3 * 2 * 4 * 64 * 2
-    cpu_rbln.byte_limit = needed - 2
+    cpu_rbln.byte_limit = needed
     with ThreadPoolExecutor(max_workers=1) as pool:
         with pytest.raises(RuntimeError, match="placement capacity"):
             pool.submit(_transfer, layers, chunks, direction).result(timeout=10)
@@ -264,23 +264,28 @@ def test_first_transfer_reserves_restore_memory_and_recovers(
             assert torch.all(layers[layer][[5, 2]] == 37)
 
 
-def test_store_does_not_submit_a_swap(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stores succeed with canonical bytes when a device swap would refuse to run."""
+def test_failed_store_swap_leaves_chunk_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A store cannot publish bytes before its device swap succeeds."""
     layers, chunks = _operands(11)
+    expected = chunks[0].clone()
     original = torch.Tensor.copy_
 
     def copy(
         dst: torch.Tensor, src: torch.Tensor, *args: Any, **kwargs: Any
     ) -> torch.Tensor:
         if src.ndim == 4 and not src.is_contiguous():
-            raise RuntimeError("device swap is unavailable on this thread")
+            raise RuntimeError("device swap failed")
         return original(dst, src, *args, **kwargs)
 
     monkeypatch.setattr(torch.Tensor, "copy_", copy)
     with ThreadPoolExecutor(max_workers=1) as pool:
-        pool.submit(_transfer, layers, chunks, TransferDirection.D2H).result(timeout=10)
-    for layer in range(3):
-        assert torch.all(chunks[0][:, layer] == 11 + layer)
+        with pytest.raises(RuntimeError, match="device swap failed"):
+            pool.submit(_transfer, layers, chunks, TransferDirection.D2H).result(
+                timeout=10
+            )
+    assert torch.equal(chunks[0], expected)
 
 
 def test_cpu_reference_ignores_device_memory_apis(
@@ -318,7 +323,7 @@ def test_only_latest_geometry_is_kept() -> None:
 
 
 def test_store_and_restore_do_not_share_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A host-staged store and a device-staged restore preserve independent bytes."""
+    """Store and restore can run overlapping copies without sharing staging bytes."""
     store_layers, stored = _operands(11)
     restored, source = _operands(31)
     source[0].fill_(37)
@@ -393,23 +398,69 @@ def test_restores_serialize_the_whole_transfer(monkeypatch: pytest.MonkeyPatch) 
         assert torch.all(second_layers[layer][[0, 1, 3, 4, 6, 7]] == 31 + layer)
 
 
-def test_parallel_stores_keep_host_staging_per_thread(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Four stores paused after gathering still publish their own canonical bytes."""
-    gate = threading.Barrier(4)
-    original = torch._foreach_copy_
+def test_store_and_restore_swaps_serialize(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A restore cannot submit a swap while a store is submitting one."""
+    store_layers, stored = _operands(11)
+    restored, source = _operands(31)
+    source[0].fill_(37)
+    original = torch.Tensor.copy_
+    first_swap = threading.Event()
+    release = threading.Event()
+    restore_staged = threading.Event()
+    local = threading.local()
 
-    def interleave(dst: list[torch.Tensor], src: list[torch.Tensor]) -> None:
-        original(dst, src)
-        gate.wait(timeout=10)
+    def copy(
+        dst: torch.Tensor, src: torch.Tensor, *args: Any, **kwargs: Any
+    ) -> torch.Tensor:
+        if src.ndim == 4 and not src.is_contiguous():
+            if getattr(local, "storing", False) and not first_swap.is_set():
+                first_swap.set()
+                if not release.wait(timeout=10):
+                    raise RuntimeError("test did not release store swap")
+            elif not getattr(local, "storing", False) and not release.is_set():
+                raise RuntimeError("restore swap overlapped store swap")
+        return original(dst, src, *args, **kwargs)
+
+    original_foreach = torch._foreach_copy_
+
+    def foreach(dst: list[torch.Tensor], src: list[torch.Tensor]) -> None:
+        original_foreach(dst, src)
+        if not getattr(local, "storing", False):
+            restore_staged.set()
+
+    def store() -> None:
+        local.storing = True
+        _transfer(store_layers, stored, TransferDirection.D2H)
+
+    monkeypatch.setattr(torch.Tensor, "copy_", copy)
+    monkeypatch.setattr(torch, "_foreach_copy_", foreach)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(store)
+        try:
+            assert first_swap.wait(timeout=2)
+            second = pool.submit(_transfer, restored, source, TransferDirection.H2D)
+            assert restore_staged.wait(timeout=2)
+            with pytest.raises(TimeoutError):
+                second.result(timeout=0.05)
+        finally:
+            release.set()
+        first.result(timeout=10)
+        second.result(timeout=10)
+    for layer in range(3):
+        assert torch.all(stored[0][:, layer] == 11 + layer)
+        assert torch.all(restored[layer][[5, 2]] == 37)
+
+
+def test_parallel_stores_publish_independent_bytes() -> None:
+    """Four simultaneous commit workers store independent chunks."""
+    gate = threading.Barrier(4)
 
     def store(fill: int) -> list[torch.Tensor]:
         layers, chunks = _operands(fill)
+        gate.wait(timeout=10)
         _transfer(layers, chunks, TransferDirection.D2H)
         return chunks
 
-    monkeypatch.setattr(torch, "_foreach_copy_", interleave)
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [(fill, pool.submit(store, fill)) for fill in (11, 21, 31, 41)]
         for fill, future in futures:
