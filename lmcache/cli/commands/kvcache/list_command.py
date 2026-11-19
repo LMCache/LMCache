@@ -23,21 +23,44 @@ _KEY_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _default_key_row() -> dict[str, Any]:
-    """Return protocol defaults for every key field, fresh per row.
+def _flatten_entry(index: int, entry: dict[str, Any]) -> dict[str, Any]:
+    """Flatten one ``{key, size_bytes}`` wire object into a table/JSON row.
 
     ``object_group_id`` (``0``), ``cache_salt`` (``""``), and ``tags``
     (``{}``) are optional on the wire for backward compatibility with
-    older servers; the other fields default to their declared types too,
-    so flattened rows never expose ``null`` for a key field.
+    older servers and are filled with their protocol defaults. The other
+    key fields are required, and a missing one is reported as a format
+    error instead of being passed off as a default value.
+
+    Args:
+        index: Position of the entry in the page, for error messages.
+        entry: One wire entry with ``key`` and ``size_bytes``.
+
+    Returns:
+        The flattened row, ready for ``Section.add_row``.
+
+    Raises:
+        CLIHTTPError: If a required key field or ``size_bytes`` is missing.
     """
+    key = entry.get("key", {})
+    for field in ("chunk_hash_hex", "model_name", "kv_rank"):
+        if field not in key:
+            raise CLIHTTPError(
+                f"Invalid cache object at index {index}: "
+                f"missing required key field {field!r}"
+            )
+    if "size_bytes" not in entry:
+        raise CLIHTTPError(
+            f"Invalid cache object at index {index}: missing 'size_bytes'"
+        )
     return {
-        "chunk_hash_hex": "",
-        "model_name": "",
-        "kv_rank": 0,
-        "object_group_id": 0,
-        "cache_salt": "",
-        "tags": {},
+        "chunk_hash_hex": key["chunk_hash_hex"],
+        "model_name": key["model_name"],
+        "kv_rank": key["kv_rank"],
+        "object_group_id": key.get("object_group_id", 0),
+        "cache_salt": key.get("cache_salt", ""),
+        "tags": key.get("tags") or {},
+        "size_bytes": entry["size_bytes"],
     }
 
 
@@ -102,22 +125,16 @@ class ListCommand(BaseCommand):
         )
         try:
             result = fetch_json(url)
+            metrics = self.create_metrics("L2 Cache Objects", args)
+            metrics.add("adapter", "Adapter", result["adapter"])
+            metrics.add("shared", "Shared", result["shared"])
+            metrics.add("next_page_token", "Next page token", result["next_page_token"])
+            entries = metrics.add_table(
+                "entries", "Objects", *_KEY_COLUMNS, ("size_bytes", "Bytes")
+            )
+            for index, entry in enumerate(result["entries"]):
+                entries.add_row(**_flatten_entry(index, entry))
+            metrics.emit()
         except CLIHTTPError as exc:
             print(str(exc), file=sys.stderr)
             raise SystemExit(1) from exc
-
-        metrics = self.create_metrics("L2 Cache Objects", args)
-        metrics.add("adapter", "Adapter", result["adapter"])
-        metrics.add("shared", "Shared", result["shared"])
-        metrics.add("next_page_token", "Next page token", result["next_page_token"])
-        entries = metrics.add_table(
-            "entries", "Objects", *_KEY_COLUMNS, ("size_bytes", "Bytes")
-        )
-        for entry in result["entries"]:
-            row = _default_key_row()
-            for field in row:
-                if field in entry["key"]:
-                    row[field] = entry["key"][field]
-            row["size_bytes"] = entry["size_bytes"]
-            entries.add_row(**row)
-        metrics.emit()

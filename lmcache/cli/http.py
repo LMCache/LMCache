@@ -38,7 +38,7 @@ def normalize_url(url: str) -> str:
     return url.rstrip("/")
 
 
-def _error_body(url: str, exc: urllib.error.HTTPError) -> str:
+def _error_body(url: str, exc: urllib.error.HTTPError) -> tuple[str, bool]:
     """Read a bounded prefix of an HTTP error body for diagnostics.
 
     Args:
@@ -46,28 +46,52 @@ def _error_body(url: str, exc: urllib.error.HTTPError) -> str:
         exc: The HTTP error whose response body should be read.
 
     Returns:
-        The decoded body text, truncated when longer than the bound.
+        ``(body, truncated)`` — the decoded body text, cut at the last
+        complete character when the bound splits one, and whether the
+        bound truncated the body at all.
 
     Raises:
-        CLIHTTPError: When the body is truncated or cannot be read or
-            decoded; the original failure is chained as the cause.
+        CLIHTTPError: When the body ends before its declared length or
+            cannot be read or decoded; the original failure is chained
+            as the cause.
     """
     try:
-        raw = exc.read(_MAX_ERROR_BODY_BYTES + 1)
-        body = raw[:_MAX_ERROR_BODY_BYTES].decode()
-    except IncompleteRead as read_exc:
-        raise CLIHTTPError(
-            f"Incomplete HTTP response from {url}: {read_exc}"
-        ) from read_exc
-    except (OSError, UnicodeDecodeError) as read_exc:
-        raise CLIHTTPError(
-            f"Cannot read HTTP {exc.code} response from {url}: {read_exc}"
-        ) from read_exc
+        try:
+            raw = exc.read(_MAX_ERROR_BODY_BYTES + 1)
+        except IncompleteRead as read_exc:
+            raise CLIHTTPError(
+                f"Incomplete HTTP response from {url}: {read_exc}"
+            ) from read_exc
+        except OSError as read_exc:
+            raise CLIHTTPError(
+                f"Cannot read HTTP {exc.code} response from {url}: {read_exc}"
+            ) from read_exc
+
+        # A bounded read returns a short body instead of raising when the
+        # server declares Content-Length and closes early; detect that.
+        declared = exc.headers.get("Content-Length")
+        try:
+            expected = int(declared) if declared is not None else None
+        except ValueError:
+            expected = None
+        if expected is not None and len(raw) < min(expected, _MAX_ERROR_BODY_BYTES + 1):
+            incomplete = IncompleteRead(raw, expected)
+            raise CLIHTTPError(
+                f"Incomplete HTTP response from {url}: {incomplete}"
+            ) from incomplete
+
+        truncated = len(raw) > _MAX_ERROR_BODY_BYTES
+        try:
+            return raw[:_MAX_ERROR_BODY_BYTES].decode(), truncated
+        except UnicodeDecodeError as read_exc:
+            if truncated:
+                # The bound split a multi-byte character, not the server.
+                return raw[:_MAX_ERROR_BODY_BYTES].decode("utf-8", "ignore"), True
+            raise CLIHTTPError(
+                f"Cannot read HTTP {exc.code} response from {url}: {read_exc}"
+            ) from read_exc
     finally:
         exc.close()
-    if len(raw) > _MAX_ERROR_BODY_BYTES:
-        body += " [truncated]"
-    return body
 
 
 def _detail_from_body(body: str) -> str | None:
@@ -129,12 +153,14 @@ def fetch_json(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
-        error_body = _error_body(url, exc)
+        error_body, truncated = _error_body(url, exc)
         detail = _detail_from_body(error_body)
         if exc.code == 503:
             # Legacy contract kept for existing consumers (see the
             # describe design doc); non-JSON bodies are shown verbatim.
             reason = detail if detail is not None else error_body
+            if truncated and detail is None:
+                reason += " [truncated]"
             raise CLIHTTPError(f"Server unhealthy: {reason}") from exc
         reason = detail if detail is not None else str(exc.reason)
         raise CLIHTTPError(f"HTTP {exc.code} from {url}: {reason}") from exc

@@ -328,6 +328,28 @@ def test_list_legacy_keys_get_protocol_defaults(
     ]
 
 
+def test_list_rejects_missing_required_key_field(
+    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A key missing a required field is a format error, not a default."""
+    page: dict[str, object] = {
+        "adapter": "s3",
+        "shared": False,
+        "entries": [
+            {
+                "key": {"chunk_hash_hex": "c0ffee", "model_name": "org/model"},
+                "size_bytes": 2048,
+            }
+        ],
+        "next_page_token": None,
+    }
+    cache_server.replies.put((200, page))
+    with pytest.raises(SystemExit) as exc:
+        main(["kvcache", "list", "--quiet", "--url", cache_server.url])
+    assert exc.value.code == 1
+    assert "missing required key field 'kv_rank'" in capsys.readouterr().err
+
+
 def test_clear_preserves_l1_post(
     cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
 ) -> None:
