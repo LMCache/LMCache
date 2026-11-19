@@ -437,6 +437,8 @@ def _start_cache_server(
     # stock hybrid clients.
     is_blend = mp_config.engine_type == "blend"
 
+    # TODO(chunxiaozheng): Support multiple chunk sizes in CacheBlend and
+    # Coordinator, then remove this compatibility guard.
     ctx = MPCacheServerContext(
         storage_manager_config=storage_manager_config,
         chunk_size=mp_config.chunk_size,
@@ -445,6 +447,7 @@ def _start_cache_server(
         separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,
         session_ttl_seconds=mp_config.session_ttl_seconds,
+        requires_global_chunk_size=is_blend or bool(coordinator_config.url),
     )
 
     components = _build_server_components(ctx, mp_config, coordinator_config)

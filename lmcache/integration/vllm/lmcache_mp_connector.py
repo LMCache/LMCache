@@ -607,6 +607,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     - lmcache.mp.port: the port of the LMCache server.
 
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
+    - lmcache.mp.chunk_size: optional client-side minimum chunk size.
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
     - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request

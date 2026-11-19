@@ -413,6 +413,8 @@ class MPCacheServerContext:
             True.
         null_block_id: Engine block ID that denotes absent KV data.
         session_ttl_seconds: Idle seconds before a request session is reaped.
+        requires_global_chunk_size: Whether registrations must use the server
+            chunk size for CacheBlend or Coordinator compatibility.
     """
 
     def __init__(
@@ -424,11 +426,13 @@ class MPCacheServerContext:
         full_sw_kv: bool = False,
         null_block_id: int = 0,
         session_ttl_seconds: float = SessionManager.DEFAULT_SESSION_TTL,
+        requires_global_chunk_size: bool = False,
     ) -> None:
         self._configured_chunk_size = chunk_size
         self._chunk_size = chunk_size
         self._null_block_id = null_block_id
         self._hash_algorithm = hash_algorithm
+        self._requires_global_chunk_size = requires_global_chunk_size
         self._session_ttl_seconds = session_ttl_seconds
         self._chunk_size_lock = threading.Lock()
         self._chunk_size_selected = False
@@ -482,18 +486,27 @@ class MPCacheServerContext:
         return self._hash_algorithm
 
     def validate_chunk_size(self, chunk_size: int) -> None:
-        """Validate an effective registration chunk size.
+        """Validate an effective chunk size against server-wide constraints.
 
         Args:
             chunk_size: Effective logical tokens per registered chunk.
 
         Raises:
-            ValueError: If the size is below the server chunk size.
+            ValueError: If the size is below the server chunk size, or
+                differs from the server chunk size when one global size is
+                required.
         """
         if chunk_size < self._chunk_size:
             raise ValueError(
                 f"chunk_size must be at least the current server chunk size "
                 f"{self._chunk_size}, got {chunk_size}"
+            )
+        if self._requires_global_chunk_size and chunk_size != self._chunk_size:
+            raise ValueError(
+                "CacheBlend or Coordinator requires one global chunk size: "
+                f"the server uses {self._chunk_size}, but the KV cache "
+                f"registration uses {chunk_size}. Configure --chunk-size to a "
+                "value compatible with every connected model."
             )
 
     def negotiate_chunk_size(self, required_alignment: int) -> int:
