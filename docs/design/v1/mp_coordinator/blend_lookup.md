@@ -106,7 +106,9 @@ is the only source. The two are never combined.
 
 Coordinator responses belong to individual submissions. After `take_match`
 clears a timed-out or consumed query, reusing its request ID starts a new
-query; a late response from the old submission cannot complete it.
+query; a late response from the old submission cannot complete it or recreate
+cleared state. This applies even when the new query has identical tokens:
+an abandoned failure must not turn a retry into an empty match result.
 
 **Why fleet-only rather than additive.** With event reporting on, this
 server's own stores reach the fleet index through the same event stream,
