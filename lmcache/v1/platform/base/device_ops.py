@@ -219,14 +219,8 @@ class DeviceOps:
     def multi_layer_kv_transfer(self, *args, **kwargs):
         return torch_ops.multi_layer_kv_transfer(*args, **kwargs)
 
-    def multi_layer_kv_transfer_unilateral(self, *args, **kwargs):
-        return torch_ops.multi_layer_kv_transfer_unilateral(*args, **kwargs)
-
     def single_layer_kv_transfer(self, *args, **kwargs):
         return torch_ops.single_layer_kv_transfer(*args, **kwargs)
-
-    def single_layer_kv_transfer_sgl(self, *args, **kwargs):
-        return torch_ops.single_layer_kv_transfer_sgl(*args, **kwargs)
 
     # ── Ops: KV reshape ──────────────────────────────────────────────
 

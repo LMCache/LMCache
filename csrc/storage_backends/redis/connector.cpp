@@ -8,6 +8,12 @@
 namespace lmcache {
 namespace connector {
 
+namespace {
+
+constexpr size_t kMaxRespLineLength = 1024 * 1024;
+
+}  // namespace
+
 void WorkerConn::connect(const std::string& h, int p) {
   host = h;
   port = p;
@@ -132,6 +138,10 @@ std::string WorkerConn::recv_line() {
   std::string line;
   line.reserve(128);
   for (;;) {
+    if (line.size() >= kMaxRespLineLength) {
+      throw std::runtime_error("RESP line exceeds maximum length");
+    }
+
     char c;
     recv_exactly(&c, 1);
     line.push_back(c);

@@ -7,10 +7,13 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
     GroupedObjectKeys,
     MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
     ObjectKey,
     PrefetchHandle,
     PrefetchLockMode,
@@ -108,7 +111,9 @@ class TestPrefetchHandle:
         assert codecs.decode_value(encoded).sliding_windows == ()
 
 
-def _grouped_object_keys(gid: int, window: int = -1) -> GroupedObjectKeys:
+def _grouped_object_keys(
+    gid: int, window: int = -1, num_kv_readers: int = 1
+) -> GroupedObjectKeys:
     return GroupedObjectKeys(
         keys=[
             ObjectKey(
@@ -121,6 +126,7 @@ def _grouped_object_keys(gid: int, window: int = -1) -> GroupedObjectKeys:
             shapes=[torch.Size([2, 3])], dtypes=[torch.float16]
         ),
         sliding_window_size=window,
+        num_kv_readers=num_kv_readers,
     )
 
 
@@ -141,15 +147,40 @@ class TestGroupedObjectKeys:
 class TestPrefetchTaskSpec:
     def test_roundtrip(self):
         spec = PrefetchTaskSpec(
-            key_groups=[_grouped_object_keys(0), _grouped_object_keys(1, window=2)],
-            num_kv_readers=2,
+            key_groups=[
+                _grouped_object_keys(0),
+                _grouped_object_keys(1, window=2, num_kv_readers=2),
+            ],
             fetching_policy="full",
             lock_mode=PrefetchLockMode.NO_LOCK,
         )
         out = _roundtrip(spec)
         assert out == spec
+        assert out.key_groups[1].num_kv_readers == 2
         assert out.fetching_policy == "full"
         assert out.lock_mode is PrefetchLockMode.NO_LOCK
+
+    @pytest.mark.parametrize(
+        "allowed",
+        [
+            None,
+            frozenset(),
+            frozenset(
+                {
+                    MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL),
+                    MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE),
+                }
+            ),
+        ],
+        ids=["all", "none", "some"],
+    )
+    def test_memory_tag_filters_roundtrip(self, allowed):
+        spec = PrefetchTaskSpec(
+            key_groups=[_grouped_object_keys(0)],
+            allowed_l1_memory_tags=allowed,
+            allowed_l2_memory_tags=allowed,
+        )
+        assert _roundtrip(spec) == spec
 
 
 class TestAttnWindowDesc:

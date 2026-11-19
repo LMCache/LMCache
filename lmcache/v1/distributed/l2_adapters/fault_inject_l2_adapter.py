@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import MemoryTags
 from lmcache.v1.distributed.l2_adapters.base import (
     AdapterUsage,
     L2AdapterInterface,
@@ -97,7 +98,7 @@ class FaultInjectL2AdapterConfig(L2AdapterConfigBase):
         The ``"inner"`` sub-dict is dispatched through the L2 adapter config
         registry (lazy-importing its module if needed), mirroring
         ``parse_args_to_l2_adapters_config`` so the inner adapter's own
-        eviction / persist / serde keys are honored.
+        shared / eviction / persist / serde keys are honored.
 
         Args:
             d: The adapter spec dict (see the class docstring for fields).
@@ -127,6 +128,7 @@ class FaultInjectL2AdapterConfig(L2AdapterConfigBase):
 
         inner_cls = get_l2_adapter_config_class(inner_type)
         inner_config = inner_cls.from_dict(inner)
+        inner_config.shared = bool(inner.get("shared", False))
         inner_config.eviction_config = cls._parse_eviction_config(inner)
         inner_config.persist_config = cls._parse_persist_config(inner)
         inner_config.serde_config = cls._parse_serde_config(inner)
@@ -176,6 +178,10 @@ class FaultInjectL2AdapterConfig(L2AdapterConfigBase):
             "- gap_tail_ratios (list[float]): distance-from-tail / load-length "
             "in [0,1] (0=last, 0.5=middle, 1=first); workload-agnostic"
         )
+
+    def get_wanted_l1_memory_tags(self) -> tuple[MemoryTags, ...]:
+        """Return the wrapped adapter's wanted L1 memory tags."""
+        return self.inner_config.get_wanted_l1_memory_tags()
 
 
 # -----------------------------------------------------------------------------
@@ -416,6 +422,10 @@ class FaultInjectL2Adapter(L2AdapterInterface):
             "gap_tail_ratios": list(self._gap_tail_ratios),
         }
         return status
+
+    def get_memory_tags(self) -> MemoryTags:
+        """Return the inner adapter's memory tags."""
+        return self._inner.get_memory_tags()
 
     def close(self) -> None:
         """Clear the per-task key map, then close the inner adapter."""

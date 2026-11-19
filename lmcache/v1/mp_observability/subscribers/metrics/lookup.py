@@ -13,7 +13,10 @@ tokens requested by a lookup that were served from the L1 or L2 caches
 ``lookup_hit_l1`` / ``lookup_hit_l2`` split ``lookup_hit`` by tier
 (``l1 + l2 == hit`` per event); ``lookups`` counts completed lookups and
 ``lookup_early_exit`` those that short-circuited before a cache probe,
-labeled by ``reason``.
+labeled by ``reason``.  Both sides of the ratio exclude the prefix the
+engine's own prefix cache already held.  ``lookup_prompt`` /
+``lookup_request_hit`` give the same ratio over the whole prompt, counting
+the engine's prefix cache and LMCache together.
 
 All counters carry ``model_name`` and ``cache_salt`` attributes so they can
 be sliced per model and per tenant / isolation domain on the dashboard.
@@ -69,6 +72,10 @@ class LookupMetricsSubscriber(EventSubscriber):
     - ``lmcache_mp.lookup_hit_l1_keys`` — hit keys (one per object group,
       kv rank and chunk) L1 already held.
     - ``lmcache_mp.lookup_hit_l2_keys`` — hit keys loaded from L2.
+    - ``lmcache_mp.lookup_prompt`` — whole prompt length of each looked-up
+      request, sub-chunk tail included (request-level denominator).
+    - ``lmcache_mp.lookup_request_hit`` — prefix of the prompt served by
+      the engine's prefix cache or LMCache (request-level numerator).
     - ``lmcache_mp.lookups`` — completed lookups (denominator for
       ``lookup_early_exit``).
     - ``lmcache_mp.lookup_early_exit`` — lookups that exited before a
@@ -126,6 +133,22 @@ class LookupMetricsSubscriber(EventSubscriber):
             description="Hit keys loaded from L2 into L1.",
             unit="keys",
         )
+        self._prompt_tokens = meter.create_counter(
+            "lmcache_mp.lookup_prompt",
+            description=(
+                "Whole prompt length of each looked-up request (denominator "
+                "of the request-level hit rate)."
+            ),
+            unit="tokens",
+        )
+        self._request_hit_tokens = meter.create_counter(
+            "lmcache_mp.lookup_request_hit",
+            description=(
+                "Prefix of the prompt served by the engine's prefix cache or "
+                "LMCache (numerator of the request-level hit rate)."
+            ),
+            unit="tokens",
+        )
         self._lookups = meter.create_counter(
             "lmcache_mp.lookups",
             description="Completed lookups (denominator for lookup_early_exit).",
@@ -158,6 +181,12 @@ class LookupMetricsSubscriber(EventSubscriber):
         )
         self._l2_hit_tokens.add(
             event.metadata.get("l2_hit_tokens", 0), attributes=attrs
+        )
+        self._prompt_tokens.add(
+            event.metadata.get("prompt_tokens", 0), attributes=attrs
+        )
+        self._request_hit_tokens.add(
+            event.metadata.get("request_hit_tokens", 0), attributes=attrs
         )
         self._l1_hit_keys.add(event.metadata.get("l1_hit_keys", 0), attributes=attrs)
         self._l2_hit_keys.add(event.metadata.get("l2_hit_keys", 0), attributes=attrs)

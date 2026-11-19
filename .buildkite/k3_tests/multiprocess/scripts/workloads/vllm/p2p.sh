@@ -27,6 +27,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../../.." && pwd)"
 
 source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
+source "${REPO_ROOT}/.buildkite/k3_tests/multiprocess/scripts/engines/vllm.sh"
+engine_configure_defaults
 
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
 BUILD_ID="${BUILD_ID:-local_$$}"
@@ -34,6 +36,7 @@ RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
 CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 MAX_WORKERS="${MAX_WORKERS:-4}"
+P2P_RPC_PORT_MODE="${P2P_RPC_PORT_MODE:-default}"
 
 # Ports (localhost, single pod).
 COORDINATOR_PORT="${COORDINATOR_PORT:-12300}"
@@ -42,6 +45,23 @@ LMCACHE_A_PORT=6555; LMCACHE_A_HTTP=7555; LMCACHE_A_P2P="127.0.0.1:8555"
 LMCACHE_B_PORT=6556; LMCACHE_B_HTTP=7556; LMCACHE_B_P2P="127.0.0.1:8556"
 VLLM_A_PORT=8000
 VLLM_B_PORT=8001
+
+case "$P2P_RPC_PORT_MODE" in
+    default)
+        LMCACHE_A_P2P_RPC=""
+        LMCACHE_B_P2P_RPC=""
+        echo "P2P RPC port mode: default (no --p2p-rpc-port arguments)"
+        ;;
+    explicit)
+        LMCACHE_A_P2P_RPC="${LMCACHE_A_P2P_RPC:-9555}"
+        LMCACHE_B_P2P_RPC="${LMCACHE_B_P2P_RPC:-9556}"
+        echo "P2P RPC port mode: explicit (A=${LMCACHE_A_P2P_RPC}, B=${LMCACHE_B_P2P_RPC})"
+        ;;
+    *)
+        echo "Unsupported P2P_RPC_PORT_MODE: $P2P_RPC_PORT_MODE" >&2
+        exit 2
+        ;;
+esac
 
 # Tell cleanup.sh which ports to free (PID-file kill covers the rest).
 export VLLM_PORT="$VLLM_A_PORT"
@@ -58,28 +78,18 @@ mkdir -p "$P2P_DIR"
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 > "$PID_FILE"
 
-# vLLM GPU-memory fraction: clamp on very large GPUs so APC does not cover the
-# whole prefix and hide the LMCache path (mirrors launch-processes.sh).
-GPU_MEMORY_UTIL_ARG=""
-GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${GPU_A}" | tr -d ' ')
-GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
-echo "Detected GPU memory: ${GPU_MEMORY_GB}GB"
-if [ -n "${GPU_MEMORY_UTILIZATION:-}" ]; then
-    GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization ${GPU_MEMORY_UTILIZATION}"
-elif [ "$GPU_MEMORY_GB" -gt 90 ]; then
-    GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
-fi
-
-CONNECTOR_CONFIG() {
-    # $1 = lmcache mp port
-    echo "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $1, \"lmcache.mp.mq_timeout\": 10}}"
-}
-
 launch_lmcache() {
-    # $1=gpu $2=request_port $3=http_port $4=p2p_advertise $5=instance_id $6=logname
-    CUDA_VISIBLE_DEVICES="$1" \
+    # $1=gpu $2=request_port $3=http_port $4=p2p_advertise $5=instance_id
+    # $6=logname $7=p2p_rpc_port (empty means OS-assigned)
+    local -a p2p_rpc_args=()
+    if [ -n "$7" ]; then
+        p2p_rpc_args=(--p2p-rpc-port "$7")
+    fi
+    env "${DEVICE_AFFINITY_VAR}=$1" \
+    "VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE}" \
     lmcache server \
         --transport "$LMCACHE_REQUEST_TRANSPORT" \
+        --supported-transfer-mode "${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}" \
         --l1-size-gb "$CPU_BUFFER_SIZE" \
         --eviction-policy LRU \
         --max-workers "$MAX_WORKERS" \
@@ -90,6 +100,7 @@ launch_lmcache() {
         --coordinator-url "$COORDINATOR_URL" \
         --coordinator-advertise-ip 127.0.0.1 \
         --p2p-advertise-url "$4" \
+        "${p2p_rpc_args[@]}" \
         > "/tmp/build_${BUILD_ID}_${6}.log" 2>&1 &
     local pid=$!
     echo "$pid" >> "$PID_FILE"
@@ -98,25 +109,11 @@ launch_lmcache() {
 
 launch_vllm() {
     # $1=gpu $2=serving_port $3=lmcache_mp_port $4=logname
-    # Unset VLLM_PORT so vLLM's get_open_port() picks a random internal port
-    # for torch.distributed instead of colliding on serving_port+1.
-    env -u VLLM_PORT \
-    CUDA_VISIBLE_DEVICES="$1" \
-    VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-    VLLM_SERVER_DEV_MODE=1 \
-    VLLM_BATCH_INVARIANT=1 \
-    PYTHONHASHSEED=0 \
-    vllm serve "$MODEL" \
-        --kv-transfer-config "$(CONNECTOR_CONFIG "$3")" \
-        --attention-backend FLASH_ATTN \
-        --port "$2" \
-        --no-async-scheduling \
-        --max-model-len auto \
-        $GPU_MEMORY_UTIL_ARG \
-        > "/tmp/build_${BUILD_ID}_${4}.log" 2>&1 &
-    local pid=$!
-    echo "$pid" >> "$PID_FILE"
-    echo "$pid"
+    local LMCACHE_PORT="$3"
+    engine_prepare_launch "$1"
+    engine_launch lmcache "$2" "$1" "/tmp/build_${BUILD_ID}_${4}.log"
+    echo "$ENGINE_PID" >> "$PID_FILE"
+    echo "$ENGINE_PID"
 }
 
 # ── Step 1: coordinator ──────────────────────────────────────
@@ -133,9 +130,9 @@ done
 # ── Step 2: two LMCache MP servers ───────────────────────────
 echo "=== Launching LMCache servers ==="
 launch_lmcache "$GPU_A" "$LMCACHE_A_PORT" "$LMCACHE_A_HTTP" "$LMCACHE_A_P2P" \
-    "p2p-a-${BUILD_ID}" "lmcache_a" > /dev/null
+    "p2p-a-${BUILD_ID}" "lmcache_a" "$LMCACHE_A_P2P_RPC" > /dev/null
 launch_lmcache "$GPU_B" "$LMCACHE_B_PORT" "$LMCACHE_B_HTTP" "$LMCACHE_B_P2P" \
-    "p2p-b-${BUILD_ID}" "lmcache_b" > /dev/null
+    "p2p-b-${BUILD_ID}" "lmcache_b" "$LMCACHE_B_P2P_RPC" > /dev/null
 echo "Waiting for LMCache servers to initialize..."
 sleep 10
 
@@ -160,6 +157,48 @@ if [ "$discovered" != "true" ]; then
     echo "--- coordinator instances ---"; curl -s "${COORDINATOR_URL}/instances" || true
     exit 1
 fi
+
+# ── Step 3b: verify the registered P2P RPC ports are reachable ───────────────
+echo "=== Verifying P2P RPC port selection ==="
+INSTANCES_FILE="$P2P_DIR/coordinator_instances_${P2P_RPC_PORT_MODE}.json"
+curl -sf "${COORDINATOR_URL}/instances" > "$INSTANCES_FILE"
+python3 - "$INSTANCES_FILE" "$P2P_RPC_PORT_MODE" "$BUILD_ID" \
+    "$LMCACHE_A_P2P_RPC" "$LMCACHE_B_P2P_RPC" \
+    "$LMCACHE_A_PORT" "$LMCACHE_B_PORT" <<'PY'
+import json
+import socket
+import sys
+
+(
+    instances_file,
+    mode,
+    build_id,
+    expected_a,
+    expected_b,
+    worker_a,
+    worker_b,
+) = sys.argv[1:]
+body = json.load(open(instances_file, encoding="utf-8"))
+instances = {item["instance_id"]: item for item in body["instances"]}
+instance_a = instances[f"p2p-a-{build_id}"]
+instance_b = instances[f"p2p-b-{build_id}"]
+ports = [int(instance_a["mq_port"]), int(instance_b["mq_port"])]
+
+if mode == "default":
+    assert all(port > 0 for port in ports), ports
+    assert len(set(ports)) == 2, ports
+    assert not set(ports) & {int(worker_a), int(worker_b)}, ports
+else:
+    assert ports == [int(expected_a), int(expected_b)], (ports, expected_a, expected_b)
+
+for port in ports:
+    with socket.create_connection(("127.0.0.1", port), timeout=5):
+        pass
+
+print(json.dumps(body, indent=2, sort_keys=True))
+print(f"PASS: {mode} P2P RPC ports registered as A={ports[0]}, B={ports[1]}")
+print("PASS: both registered P2P RPC ports accept TCP connections")
+PY
 
 # ── Step 4: two vLLM servers ─────────────────────────────────
 echo "=== Launching vLLM servers ==="

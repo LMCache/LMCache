@@ -131,6 +131,9 @@ class Hf3fsConnector : public ConnectorBase<WorkerHf3fsConn> {
    * @param time_out I/O timeout in milliseconds (default 200)
    * @param enable_key_buffer Enable in-memory key buffer for accelerated
    * exists lookups (default true)
+   * @param shard_dirs Store each file under two chunk-hash prefix
+   * subdirectories (``<base>/ab/cd/<file>``) instead of directly in the base
+   * path (default false)
    * @param worker_pool_config Per-operation worker lane configuration
 +  * (default empty, uses shared worker pool). Maps lane keys
 +  * ("lookup", "retrieve", "store", "delete") to worker counts.
@@ -143,6 +146,7 @@ class Hf3fsConnector : public ConnectorBase<WorkerHf3fsConn> {
                  int num_workers, int ior_entries = 256, int io_depth = 0,
                  int numa_id = -1, size_t iov_size = 209715200,
                  int time_out = 200, bool enable_key_buffer = true,
+                 bool shard_dirs = false,
                  WorkerPoolConfig worker_pool_config = {});
 
   ~Hf3fsConnector() override = default;
@@ -155,7 +159,6 @@ class Hf3fsConnector : public ConnectorBase<WorkerHf3fsConn> {
                      const void* buf, size_t len, size_t chunk_size) override;
   bool do_single_exists(WorkerHf3fsConn& conn, const std::string& key) override;
   bool do_single_delete(WorkerHf3fsConn& conn, const std::string& key) override;
-  void do_batch_exists(WorkerHf3fsConn& conn, const Request& req) override;
   void shutdown_connections() override;
 
  private:
@@ -173,8 +176,14 @@ class Hf3fsConnector : public ConnectorBase<WorkerHf3fsConn> {
   concurrent_hash::sharded_flat_hash_set<std::string> key_buffer_;
   const bool buffer_enabled_;
 
+  // Directory sharding: shard subdirectories are created on first store and
+  // remembered so later stores skip the mkdir metadata round trip.
+  const bool shard_dirs_;
+  concurrent_hash::sharded_flat_hash_set<std::string> created_dirs_;
+  void ensure_parent_dir_(const std::string& file_path);
+
   void scan_and_build_buffer_();
-  void buffer_scan_worker_(const std::vector<std::string>& base_paths,
+  void buffer_scan_worker_(const std::vector<std::string>& scan_roots,
                            std::unordered_set<std::string>& local_set);
   void buffer_add_(const std::string& key);
   void buffer_remove_(const std::string& key);

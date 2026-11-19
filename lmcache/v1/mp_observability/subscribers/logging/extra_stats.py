@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Opt-in periodic INFO logging of L0<->L1 transfer stats, grouped by GPU.
+"""Opt-in periodic INFO logging of L0<->L1 transfer stats, grouped by device.
 
 Enabled via ``--enable-extra-logging``.  Accumulates per-device window and
 cumulative stats from ``MP_STORE_*`` / ``MP_RETRIEVE_*`` events and emits a
@@ -49,10 +49,12 @@ def _format_side(label: str, stats: _TransferStats) -> str:
 
 
 class ExtraStatsLoggingSubscriber(EventSubscriber):
-    """Logs per-GPU L0<->L1 store/retrieve stats at a fixed interval.
+    """Logs per-device L0<->L1 store/retrieve stats at a fixed interval.
 
     Emits two INFO lines per active device on each flush: the last-window
-    stats and the cumulative totals since start.
+    stats and the cumulative totals since start. Timing pairs use
+    ``(transfer_key, device)``, falling back to ``session_id`` for publishers
+    without a transfer key.
 
     Args:
         interval: Seconds between flushes.  Must be positive.
@@ -111,10 +113,14 @@ class ExtraStatsLoggingSubscriber(EventSubscriber):
 
     @staticmethod
     def _correlation_key(event: Event) -> tuple[str, str] | None:
+        """Pair by transfer and device without changing device aggregation."""
         device = event.metadata.get("device")
         if not event.session_id or device is None:
             return None
-        return (event.session_id, str(device))
+        return (
+            str(event.metadata.get("transfer_key", event.session_id)),
+            str(device),
+        )
 
     def _record_end(
         self,

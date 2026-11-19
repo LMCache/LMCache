@@ -7,8 +7,9 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.distributed.api import ShardReplicationDesc
 from lmcache.v1.kv_layer_groups import (
-    EXCLUDED_ENGINE_GROUP,
     KernelGroupIdentity,
     KernelGroupInfo,
     KVLayerGroupInfo,
@@ -19,7 +20,9 @@ from lmcache.v1.kv_layer_groups import (
     group_layers_by_identity,
     parse_kvcache_shape_spec,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    _fold_shard_replication_desc,
+)
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -400,6 +403,47 @@ class TestValidateBlockChunkSizeConfig:
 class TestKernelGroupIdentity:
     """The grouping key is a named tuple; ``LayerGroupIdentity`` is its alias."""
 
+    def test_mixed_block_strides_split_without_changing_engine_group(self) -> None:
+        tensors = [
+            torch.empty_strided(
+                (8, 128, 1, 512), (stride, 512, 512, 1), dtype=torch.bfloat16
+            )
+            for stride in (65536, 65536, 65536, 73856)
+        ]
+        formats = [lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS] * 4
+        groups = group_layers_by_identity(tensors, formats, [2] * 4)
+        assert [indices for _, indices in groups] == [[0, 1, 2], [3]]
+        assert [identity.block_stride_elems for identity, _ in groups] == [
+            65536,
+            73856,
+        ]
+        manager = KVLayerGroupsManager(
+            tensors,
+            engine_kv_formats=formats,
+            engine_group_infos=[
+                EngineGroupInfo(2, (0, 1, 2)),
+                EngineGroupInfo(2, (3,)),
+            ],
+        )
+        assert [g.engine_group_idx for g in manager.kernel_groups] == [2, 2]
+        assert [g.shape_desc.block_stride_elems for g in manager.kernel_groups] == [
+            65536,
+            73856,
+        ]
+
+    def test_unsupported_dim0_padding_still_rejected(self) -> None:
+        nb, bs, nh, hs = 8, 128, 2, 128
+        row = bs * nh * hs
+        # fmt2 per-layer layout: [NB, 2, BS, NH, HS], with dim-0 spanning an
+        # adjacent layer's block (twice the tight step).
+        tensors = [
+            torch.empty_strided((nb, 2, bs, nh, hs), (4 * row, row, nh * hs, hs, 1))
+            for _ in range(2)
+        ]
+        formats = [lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS] * 2
+        with pytest.raises(ValueError, match="dim-0 padding"):
+            group_layers_by_identity(tensors, formats)
+
     def test_fields_and_alias(self):
         # First Party
 
@@ -420,6 +464,7 @@ class TestKernelGroupIdentity:
         assert ident.engine_group_idx == 0
         assert ident.dtype == torch.float16
         assert ident.engine_kv_format == fmt
+        assert ident.block_stride_elems is None
         assert LayerGroupIdentity is KernelGroupIdentity
 
     def test_hashable_as_dict_key(self):
@@ -428,9 +473,6 @@ class TestKernelGroupIdentity:
         fmt = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
         ident = KernelGroupIdentity(2, 8, 64, 16, 0, torch.float16, fmt)
         assert {ident: "x"}[ident] == "x"
-
-    def test_excluded_engine_group_sentinel(self):
-        assert EXCLUDED_ENGINE_GROUP == -1
 
     def test_format_in_identity_splits_same_geometry(self):
         """Two layers with identical geometry but different layouts (NHD vs HND,
@@ -611,10 +653,11 @@ class TestKernelAndObjectGroups:
         assert manager.object_groups[1].kernel_group_indices == [1, 2]
         assert manager.object_groups[1].aux
 
-    def test_full_sw_kv_exempts_recurrent_groups(self):
-        # Blend-mode full-window forcing widens sliding-window ATTENTION
-        # groups to full attention, but recurrent-state groups keep their
-        # restore window: position-bound snapshots the blend never touches.
+    def test_full_sw_kv_keeps_prefix_windows(self):
+        # Blend-mode full_sw_kv makes every chunk object hold the full chunk
+        # (so a chunk can be reused at any position), but it does not widen
+        # the prefix windows: a prefix hit still needs only the in-window
+        # chunks of a sliding-window attention group or a recurrent group.
         tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(3)]
         manager = _build_manager(
             tensors,
@@ -625,14 +668,26 @@ class TestKernelAndObjectGroups:
             ],
             separate_object_groups=True,
         )
+        windows_before = list(manager.get_attn_desc().num_chunks_in_sw)
+        chunk_tokens = manager.get_subchunk_sw_size_tokens(0)
+        # Without full_sw_kv the sliding-window group stores only its
+        # sub-chunk window of each chunk.
+        assert manager.get_subchunk_sw_size_tokens(1) == 64
+
         manager.enable_full_sw_kv()
         attn_desc = manager.get_attn_desc()
-        assert attn_desc.num_chunks_in_sw[0] == -1
-        # The sliding-window attention group is forced to full attention...
-        assert attn_desc.num_chunks_in_sw[1] == -1
-        # ...but the recurrent group keeps its one-block window.
-        assert attn_desc.num_chunks_in_sw[2] >= 1
         assert attn_desc.group_kinds == ("attention", "attention", "recurrent")
+        # Full attention stays full attention; both windowed groups keep
+        # their one-chunk prefix window.
+        assert list(attn_desc.num_chunks_in_sw) == windows_before == [-1, 1, 1]
+        assert manager.get_kernel_group_window_chunks(0) == -1
+        assert manager.get_kernel_group_window_chunks(1) == 1
+        assert manager.get_kernel_group_window_chunks(2) == 1
+        # Every group's chunk object now holds the full chunk.
+        for kernel_group_idx in range(3):
+            assert manager.get_subchunk_sw_size_tokens(kernel_group_idx) == (
+                chunk_tokens
+            )
 
     def test_object_group_separation_disabled_ignores_aux_flag(self):
         # With separation off, the extra-group tag has no effect: everything
@@ -804,6 +859,41 @@ class TestKernelAndObjectGroups:
         assert group.slots_per_block == 8
         assert group.tokens_per_block // group.slots_per_block == 2
         assert manager.calculate_num_blocks(0, 256) == 16
+
+
+def test_object_groups_expose_their_kernel_groups_tp_replication():
+    """Under separate object groups each object group reports whether its
+    kernel groups are replicated, and ``_fold_shard_replication_desc`` carries
+    one entry per object group."""
+    tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
+    infos = [
+        EngineGroupInfo(0, (0,), tp_replicas=4, dcp_shards=2),
+        EngineGroupInfo(1, (1,), sw_size_tokens=64),
+    ]
+    manager = _build_manager(
+        tensors, engine_group_infos=infos, separate_object_groups=True
+    )
+    assert _fold_shard_replication_desc(
+        manager.object_groups, infos
+    ) == ShardReplicationDesc(group_tp_replicas=(4, 1), group_dcp_shards=(2, 1))
+
+
+def test_bundled_object_group_is_replicated_only_if_all_kernel_groups_are():
+    """Without separation one object holds every kernel group and is stored
+    whole, so a replicated kernel group bundled with a sharded one leaves the
+    object stored by every worker."""
+    tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
+    infos = [
+        EngineGroupInfo(0, (0,), tp_replicas=4, dcp_shards=2),
+        EngineGroupInfo(1, (1,)),
+    ]
+    manager = _build_manager(
+        tensors, engine_group_infos=infos, separate_object_groups=False
+    )
+    assert (
+        _fold_shard_replication_desc(manager.object_groups, infos)
+        == ShardReplicationDesc()
+    )
 
 
 if __name__ == "__main__":

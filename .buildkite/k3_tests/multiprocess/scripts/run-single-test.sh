@@ -101,14 +101,14 @@ elif [ "$TEST_NAME" = "hma_lm_eval_qwen3_5" ]; then
     export LIMIT="${LIMIT:-300}"
 elif [ "$TEST_NAME" = "kimi_linear_tp" ]; then
     # Self-contained test: kimi-linear-tp.sh owns the server lifecycle and
-    # all launch flags (TP=2, trust-remote-code, align, chunk/batch sizes). Only
-    # the model name is declared here so the banner and the script's ${MODEL:-}
-    # fallback both resolve to Kimi-Linear rather than the generic default below.
+    # all engine-specific launch flags for TP=2. Only the model name is declared
+    # here so the banner and the script's ${MODEL:-} fallback both resolve to
+    # Kimi-Linear rather than the generic default below.
     export MODEL="${MODEL:-moonshotai/Kimi-Linear-48B-A3B-Instruct}"
 elif [ "$TEST_NAME" = "dsv4_flash_tp" ]; then
     # Self-contained test: dsv4-flash-tp.sh owns the server lifecycle and
-    # all launch flags (TP=4, fp8_ds_mla, deepseek_v4 tokenizer). Only the
-    # model name is declared here so the banner and the script's ${MODEL:-}
+    # each engine-specific implementation owns its TP=4 launch flags. Only
+    # the model name is declared here so the banner and the script's ${MODEL:-}
     # fallback both resolve to DeepSeek-V4-Flash.
     export MODEL="${MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
 elif [ "$TEST_NAME" = "deadlock" ]; then
@@ -125,9 +125,10 @@ elif [ "$TEST_NAME" = "lazy_offload" ]; then
     # The shared GPU launcher includes these values in the real vLLM
     # kv-transfer configuration only for this integration test.
     export LMCACHE_MP_LAZY_OFFLOAD=true
-    # vLLM's default paged-block size is 16 tokens. Matching it keeps this
-    # test's expected LMCache chunk counts exact and small.
+    # Keep both sides aligned: this test counts stored chunks, while LMCache's
+    # chunk-size negotiation cannot change vLLM's paged-cache block size.
     export CHUNK_SIZE="${CHUNK_SIZE:-16}"
+    export VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-$CHUNK_SIZE}"
     export MODEL="${MODEL:-$DEFAULT_MODEL}"
 else
     export MODEL="${MODEL:-$DEFAULT_MODEL}"
@@ -160,7 +161,7 @@ echo "Results dir: $RESULTS_DIR"
 echo ""
 
 # Tests that still handle their own server lifecycle.
-SELF_CONTAINED_TESTS=" mp_autostart_tp2 p2p kimi_linear_tp dsv4_flash_tp "
+SELF_CONTAINED_TESTS=" mp_autostart_tp2 p2p p2p_write kimi_linear_tp dsv4_flash_tp "
 
 # Tests that compare against a baseline engine (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything

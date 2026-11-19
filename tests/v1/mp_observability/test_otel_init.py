@@ -4,6 +4,7 @@
 # Standard
 from types import ModuleType
 from unittest.mock import MagicMock, patch
+import os
 import sys
 
 # Third Party
@@ -28,6 +29,9 @@ def _mock_otel_provider(monkeypatch):
     from opentelemetry import metrics as otel_metrics
 
     monkeypatch.setattr(otel_metrics, "set_meter_provider", MagicMock())
+    monkeypatch.setattr(otel_init, "_GRPC_METRICS_ENABLED", False)
+    monkeypatch.setattr(otel_init, "_METRICS_RESOURCE", None)
+    monkeypatch.setattr(otel_init, "_METRICS_SOURCES", [])
 
 
 def test_init_otel_metrics_starts_http_server_by_default():
@@ -117,6 +121,24 @@ def test_init_grpc_otel_metrics_registers_official_plugin(monkeypatch):
 
     assert len(registered_plugins) == 1
     assert registered_plugins[0].meter_provider is provider
+
+
+@pytest.mark.parametrize("user_value", [None, "1.0"])
+def test_init_grpc_otel_metrics_defaults_export_interval(monkeypatch, user_value):
+    env_var = "GRPC_PYTHON_CENSUS_EXPORT_BATCH_INTERVAL_SECS"
+    if user_value is None:
+        monkeypatch.delenv(env_var, raising=False)
+    else:
+        monkeypatch.setenv(env_var, user_value)
+    module = ModuleType("grpc_observability")
+    module.OpenTelemetryPlugin = MagicMock()
+    monkeypatch.setitem(sys.modules, "grpc_observability", module)
+    monkeypatch.setattr(otel_init.sys, "platform", "linux")
+    monkeypatch.setattr(otel_init, "_GRPC_OTEL_PLUGIN", None)
+
+    init_grpc_otel_metrics(object())
+
+    assert os.environ[env_var] == (user_value or "0.05")
 
 
 def test_init_grpc_otel_metrics_is_idempotent(monkeypatch):
@@ -245,3 +267,58 @@ def test_init_observability_propagates_grpc_metrics_enabled(monkeypatch):
         init_observability(cfg)
     mock_init.assert_called_once()
     assert mock_init.call_args.kwargs["enable_grpc_metrics"] is True
+
+
+def test_metrics_sources_are_exported_with_sdk_metrics(monkeypatch):
+    # Third Party
+    from opentelemetry.exporter.prometheus import PrometheusMetricReader
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import (
+        AggregationTemporality,
+        Metric,
+        NumberDataPoint,
+        Sum,
+    )
+    from prometheus_client import REGISTRY, generate_latest
+
+    reader = otel_init._with_metrics_sources(PrometheusMetricReader)()
+    provider = MeterProvider(metric_readers=[reader])
+    provider.get_meter("sdk").create_counter("sdk.calls").add(1)
+
+    # Nothing registered: the collection is passed on untouched.
+    assert otel_init._add_source_metrics(None) is None
+
+    def source():
+        point = NumberDataPoint(
+            attributes={"kind": "native"},
+            start_time_unix_nano=1,
+            time_unix_nano=2,
+            value=7,
+        )
+        return [
+            Metric(
+                name="native.calls",
+                description="",
+                unit="",
+                data=Sum(
+                    data_points=[point],
+                    aggregation_temporality=AggregationTemporality.CUMULATIVE,
+                    is_monotonic=True,
+                ),
+            )
+        ]
+
+    def broken():
+        raise RuntimeError("source failed")
+
+    otel_init.register_metrics_source(broken)
+    unregister = otel_init.register_metrics_source(source)
+    try:
+        text = generate_latest(REGISTRY).decode()
+    finally:
+        unregister()
+        provider.shutdown()
+
+    assert 'native_calls_total{kind="native"} 7.0' in text
+    assert "sdk_calls_total" in text
+    assert otel_init._METRICS_SOURCES == [broken]
