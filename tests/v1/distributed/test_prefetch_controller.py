@@ -2396,7 +2396,7 @@ class TestP2PPeerFailures:
         timeout rather than the 30 s lookup deadline."""
         keys = [make_object_key(i) for i in range(4)]
         with (
-            patch.object(p2p_mod, "_LOOKUP_RPC_TIMEOUT_S", 0.2),
+            patch.object(p2p_mod, "LOOKUP_RPC_TIMEOUT_S", 0.2),
             _p2p_peers([behavior, "holds"], len(keys)) as (adapters, _),
         ):
             ctrl = make_controller(l1_manager, adapters, DefaultPrefetchPolicy())

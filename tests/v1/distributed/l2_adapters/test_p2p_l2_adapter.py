@@ -33,7 +33,10 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     PeerL2AdapterBase,
 )
 from lmcache.v1.distributed.p2p import P2PClient
-from lmcache.v1.transport.errors import MPRequestError
+from lmcache.v1.transport.errors import (
+    MPRequestError,
+    MPServerUnavailableError,
+)
 from lmcache.v1.transport.futures import MessagingFuture
 
 _LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
@@ -656,7 +659,7 @@ def test_unacknowledged_lookup_is_a_miss_at_the_rpc_timeout():
     """A peer that never acknowledges costs the RPC timeout, not the much
     longer lookup deadline."""
     with (
-        patch.object(p2p_mod, "_LOOKUP_RPC_TIMEOUT_S", 0.05),
+        patch.object(p2p_mod, "LOOKUP_RPC_TIMEOUT_S", 0.05),
         _adapter(lookup_timeout_s=30.0) as (adapter, req_client, *_),
     ):
         req_client.p2p_lookup_and_lock.return_value = _PendingFuture()
@@ -1179,60 +1182,59 @@ def test_replies_from_another_thread_resolve_each_lookup_once():
         assert adapter.report_status()["in_flight_lookups"] == 0
 
 
-def test_unresponsive_peer_is_probed_once_per_interval():
-    """After a lookup goes unacknowledged past the RPC timeout, lookups skip
-    the peer (a signalled miss at once, no RPC) except one probe per probe
-    interval, even when requests arrive one after another. An ack ends that,
-    and a later outage starts it again."""
-    probe = _PendingFuture()
-    with (
-        patch.object(p2p_mod, "_LOOKUP_RPC_TIMEOUT_S", 0.05),
-        patch.object(p2p_mod, "_UNRESPONSIVE_PROBE_INTERVAL_S", 0.3),
-        _adapter(lookup_timeout_s=30.0) as (adapter, req_client, *_),
-    ):
-        req_client.p2p_query_lookup_results.return_value = _FakeFuture(value=None)
+@pytest.mark.parametrize(
+    "ack_error",
+    [
+        MPServerUnavailableError("UNAVAILABLE", "peer down"),
+        MPRequestError("DEADLINE_EXCEEDED", "peer frozen"),
+    ],
+    ids=["down", "frozen"],
+)
+def test_unacknowledged_peer_is_skipped_until_a_probe_is_answered(ack_error):
+    """After a lookup is not acknowledged, every lookup to the peer is a
+    signalled miss at once with no RPC; the first of them sends a probe that
+    no request waits on, one probe at a time. Lookups resume once a probe is
+    answered, and a later outage starts this again."""
+    first_ack, straggler_ack, recovered_ack = (_PendingFuture() for _ in range(3))
+    probes = [_PendingFuture() for _ in range(3)]
+    with _adapter(lookup_timeout_s=30.0) as (adapter, req_client, *_):
         req_client.p2p_lookup_and_lock.side_effect = [
-            _PendingFuture(),  # never answered: the peer looks dead
-            _PendingFuture(),  # first probe, never answered
-            probe,  # second probe, after the interval: the peer is back
-            _PendingFuture(),  # sent normally after recovery, never answered
-            _PendingFuture(),  # the first probe of the second outage
+            first_ack,
+            straggler_ack,
+            recovered_ack,
         ]
+        req_client.probe.side_effect = probes
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
 
-        def expire(task_id: int) -> None:
-            time.sleep(0.1)  # past the 0.05 s RPC timeout
-            assert adapter.query_lookup_and_lock_result(task_id).popcount() == 0
-
         def assert_skipped() -> None:
-            sent = req_client.p2p_lookup_and_lock.call_count
             task_id = adapter.submit_lookup_and_lock_task([_key(9)], {0: _LAYOUT})
-            assert req_client.p2p_lookup_and_lock.call_count == sent
-            assert _fd_ready(lookup_fd, timeout_s=1.0)
+            assert _fd_ready(lookup_fd)
             assert adapter.query_lookup_and_lock_result(task_id).popcount() == 0
+            assert req_client.p2p_lookup_and_lock.call_count == 2
 
-        expire(adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT}))
-        for _ in range(3):  # sequential requests inside the interval
-            assert_skipped()
-        assert req_client.p2p_lookup_and_lock.call_count == 1
+        first = adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+        adapter.submit_lookup_and_lock_task([_key(1)], {0: _LAYOUT})
+        first_ack.resolve(exc=ack_error)
+        assert adapter.query_lookup_and_lock_result(first).popcount() == 0
 
-        time.sleep(0.4)  # the interval passed: one probe goes out
-        probe_1 = adapter.submit_lookup_and_lock_task([_key(1)], {0: _LAYOUT})
-        assert req_client.p2p_lookup_and_lock.call_count == 2
-        assert_skipped()  # a concurrent request while the probe is pending
-        expire(probe_1)  # the probe goes unanswered too
-        assert_skipped()  # and restarts the interval
-
-        time.sleep(0.4)
-        probe_2 = adapter.submit_lookup_and_lock_task([_key(2)], {0: _LAYOUT})
-        assert req_client.p2p_lookup_and_lock.call_count == 3
-        probe.resolve(value=7)  # the peer is back
-        assert adapter.query_lookup_and_lock_result(probe_2) is None
-        normal = adapter.submit_lookup_and_lock_task([_key(3)], {0: _LAYOUT})
-        assert req_client.p2p_lookup_and_lock.call_count == 4
-
-        expire(normal)  # a second outage
+        # The first lookup after the failure probes at once, even with
+        # another lookup from before the failure still unacknowledged.
         assert_skipped()
-        time.sleep(0.4)
-        adapter.submit_lookup_and_lock_task([_key(4)], {0: _LAYOUT})
-        assert req_client.p2p_lookup_and_lock.call_count == 5
+        assert req_client.probe.call_count == 1
+        straggler_ack.resolve(exc=ack_error)
+        assert_skipped()  # the probe is still pending: no second one
+        assert req_client.probe.call_count == 1
+
+        probes[0].resolve(exc=ack_error)  # the peer is still out
+        assert_skipped()
+        assert req_client.probe.call_count == 2
+
+        probes[1].resolve()  # the peer is back
+        adapter.submit_lookup_and_lock_task([_key(2)], {0: _LAYOUT})
+        assert req_client.p2p_lookup_and_lock.call_count == 3
+
+        recovered_ack.resolve(exc=ack_error)  # a second outage
+        task_id = adapter.submit_lookup_and_lock_task([_key(3)], {0: _LAYOUT})
+        assert adapter.query_lookup_and_lock_result(task_id).popcount() == 0
+        assert req_client.p2p_lookup_and_lock.call_count == 3
+        assert req_client.probe.call_count == 3

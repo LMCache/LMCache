@@ -105,17 +105,23 @@ wakeup instead of the next periodic pulse (one pulse is up to
 shared with those callbacks and guarded by a lock. Failures stay bounded:
 
 - an ack that does not arrive within ~3 s, or a failed ack, is a miss;
-- an unanswered result query is not sent again: a gRPC call fails once the
-  connection is seen to drop, and a copy of one stuck behind an unready
-  channel or a silent peer would wait the same way;
+- an unanswered result query is not sent again: the lookup and query calls
+  fail fast when the peer is not connected and carry a ~3 s gRPC deadline, so
+  a query fails on its own;
 - a failed query is retried once, and a second failure is a miss;
 - the lookup deadline (`lookup_timeout_s`) still bounds the whole lookup;
-- once an ack has not arrived within ~3 s the peer is treated as
-  unresponsive: lookups to it complete as a miss at once, without an RPC,
-  except one probe at a time and at most one every 5 s; the next ack ends
-  this. A dead or frozen peer thus costs one RPC timeout per 5 s instead of
-  one per lookup until discovery removes it. The trade-off: a peer that
-  stalls for over 3 s and recovers can miss hits for up to 5 s.
+- a lookup the peer did not acknowledge (down: `UNAVAILABLE` at once; frozen:
+  past the deadline) marks the peer unresponsive: lookups to it are a miss at
+  once, without an RPC, until a probe is answered. The probe is an unlock of
+  no keys sent by the adapter, one at a time, with the same deadline; no
+  request waits on it. It waits for a connection, which also makes the
+  channel reconnect as soon as the peer is back instead of after its
+  reconnect backoff. The trade-off: a peer that stalls past the deadline
+  and recovers misses hits until the next lookup's probe is answered.
+
+The deadline also keeps abandoned lookups from piling up: an expired call is
+cancelled, so it is neither sent later to a peer that comes back nor run by a
+frozen peer once it resumes, and takes no read locks that nobody releases.
 
 The transfer-channel read exposes no completion fd: the RDMA read completes
 inside the transfer engine. So the adapter also registers its lookup and load

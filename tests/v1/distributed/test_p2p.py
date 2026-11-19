@@ -3,19 +3,24 @@
 
 # Standard
 from collections.abc import Callable
+from concurrent import futures
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal, cast
 from unittest.mock import MagicMock
 import argparse
+import threading
+import time
 
 # Third Party
+import grpc
 import pytest
 import torch
 
 # First Party
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed import p2p as p2p_mod
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -42,7 +47,14 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
     build_grpc_request_server,
 )
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
-from lmcache.v1.transport.errors import MPRequestError
+from lmcache.v1.transport.errors import (
+    MPRequestError,
+    MPServerUnavailableError,
+)
+from lmcache.v1.transport.grpc._proto_gen import (
+    p2p_service_pb2,
+    p2p_service_pb2_grpc,
+)
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 
@@ -277,6 +289,8 @@ def test_independent_peer_channel(
         assert client.p2p_query_lookup_results(41).result(5) == addresses
         assert client.p2p_unlock_objects(keys).result(5) is None
         assert unlocked == keys
+        assert client.probe().result(5) is None
+        assert unlocked == keys
         write_keys = [ObjectKey(b"a", "model", 0), ObjectKey(b"b", "model", 0)]
         assert client.p2p_reserve_write(write_keys, layouts[0]).result(5) == (
             write_addresses
@@ -300,3 +314,55 @@ def test_independent_peer_channel(
         worker_client.close()
         worker.close()
         engine.close()
+
+
+def test_lookup_fails_fast_on_a_down_peer_and_is_bounded_on_a_frozen_one(
+    monkeypatch: pytest.MonkeyPatch,
+    unused_tcp_port_factory: Callable[[], int],
+) -> None:
+    """Lookup and query calls do not wait for a peer that is down, and a peer
+    that accepts calls but never answers fails them at the deadline. A probe
+    waits for a connection, up to the same deadline, and succeeds once the
+    peer is up."""
+    monkeypatch.setattr(p2p_mod, "LOOKUP_RPC_TIMEOUT_S", 0.5)
+    keys = [ObjectKey(b"chunk", "model", 0)]
+    layouts = {0: MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])}
+    port = unused_tcp_port_factory()
+    client = P2PClient(f"grpc://127.0.0.1:{port}")
+    frozen = threading.Event()
+
+    class FrozenPeer(p2p_service_pb2_grpc.P2PServiceServicer):
+        def P2PLookupAndLock(self, request: Any, context: Any) -> Any:
+            frozen.wait()
+
+        def P2PQueryLookupResults(self, request: Any, context: Any) -> Any:
+            frozen.wait()
+
+        def P2PUnlockObjects(self, request: Any, context: Any) -> Any:
+            return p2p_service_pb2.P2pUnlockObjectsResponse()
+
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    p2p_service_pb2_grpc.add_P2PServiceServicer_to_server(FrozenPeer(), server)
+    try:
+        start = time.monotonic()
+        with pytest.raises(MPServerUnavailableError):
+            client.p2p_lookup_and_lock(keys, layouts).result(5)
+        with pytest.raises(MPServerUnavailableError):
+            client.p2p_query_lookup_results(0).result(5)
+        assert time.monotonic() - start < 0.4
+        with pytest.raises(MPRequestError, match="DEADLINE_EXCEEDED"):
+            client.probe().result(5)
+
+        server.add_insecure_port(f"127.0.0.1:{port}")
+        server.start()
+        # The probe reconnects at once; a failed-fast call would wait for
+        # the channel's reconnect backoff.
+        assert client.probe().result(5) is None
+        with pytest.raises(MPRequestError, match="DEADLINE_EXCEEDED"):
+            client.p2p_lookup_and_lock(keys, layouts).result(5)
+        with pytest.raises(MPRequestError, match="DEADLINE_EXCEEDED"):
+            client.p2p_query_lookup_results(0).result(5)
+    finally:
+        frozen.set()
+        client.close()
+        server.stop(None)

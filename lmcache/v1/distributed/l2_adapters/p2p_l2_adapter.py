@@ -57,7 +57,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
     register_l2_adapter_type,
 )
 from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_factory
-from lmcache.v1.distributed.p2p import P2PClient
+from lmcache.v1.distributed.p2p import LOOKUP_RPC_TIMEOUT_S, P2PClient
 from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
@@ -67,11 +67,6 @@ from lmcache.v1.transport.grpc.endpoint import parse_grpc_target
 
 logger = init_logger(__name__)
 
-_LOOKUP_RPC_TIMEOUT_S = 3.0
-# After a probe of an unresponsive peer goes unacknowledged, lookups skip the
-# peer for this long before the next probe. Bounds the cost of a dead peer to
-# one RPC timeout per interval, whatever the request rate.
-_UNRESPONSIVE_PROBE_INTERVAL_S = 5.0
 _PERIODIC_NOTIFIER_INTERVAL_MS = 5
 
 
@@ -268,14 +263,12 @@ class PeerL2AdapterBase(L2AdapterInterface):
         # sent under it, and a completion that is already there runs on the
         # sending thread.
         self._lookup_lock = threading.RLock()
-        # Set when a lookup's ack never arrived, cleared by the next ack. While
-        # set, one lookup at a time (the probe), at most one per probe
-        # interval, is sent and the others are a miss at once, so a dead or
-        # frozen peer costs one ack timeout per interval rather than one per
-        # request until discovery drops it.
+        # Set when a lookup is not acknowledged (peer down, or past the RPC
+        # deadline), cleared when a probe is answered. While set, lookups are
+        # a miss at once and send no RPC, so no request waits on a frozen
+        # peer; one probe at a time, which no request waits on, checks it.
         self._unresponsive = False
-        self._probe_task_id: L2TaskId | None = None
-        self._next_probe_at = 0.0
+        self._probing = False
 
         # Store-loop-thread state (store no-op completions).
         self._next_store_task_id: L2TaskId = 0
@@ -367,21 +360,20 @@ class PeerL2AdapterBase(L2AdapterInterface):
         task = _LookupTask(
             keys=keys,
             deadline=now + self._config.lookup_timeout_s,
-            ack_deadline=now + _LOOKUP_RPC_TIMEOUT_S,
+            ack_deadline=now + LOOKUP_RPC_TIMEOUT_S,
         )
         with self._lookup_lock:
             self._lookup_tasks[task_id] = task
             if self._closed:
                 task.failed = True
                 return task_id
-            if self._unresponsive and (
-                self._probe_task_id is not None or now < self._next_probe_at
-            ):
+            if self._unresponsive:
                 task.failed = True
                 self._lookup_efd.notify()
+                if not self._probing:
+                    self._probing = True
+                    self._req_client.probe().add_done_callback(self._on_probe_done)
                 return task_id
-            if self._unresponsive:
-                self._probe_task_id = task_id
             future = self._req_client.p2p_lookup_and_lock(keys, group_layout_descs)
             future.add_done_callback(lambda fut: self._on_lookup_ack(task_id, fut))
         return task_id
@@ -401,9 +393,8 @@ class PeerL2AdapterBase(L2AdapterInterface):
             if not (done or expired):
                 # The peer had no result yet: ask again. The answer signals
                 # the fd, or is already here if it completed synchronously.
-                # An unanswered query is not re-sent: a gRPC call fails on
-                # its own when cut off, and the lookup deadline bounds one
-                # stuck behind an unready channel.
+                # An unanswered query is not re-sent: it fails on its own when
+                # cut off or past its deadline.
                 if (
                     task.remote_task_id is not None
                     and not task.query_in_flight
@@ -414,19 +405,6 @@ class PeerL2AdapterBase(L2AdapterInterface):
                 if not (task.failed or task.addresses is not None):
                     return None
             del self._lookup_tasks[task_id]
-            if self._probe_task_id == task_id:
-                self._probe_task_id = None
-            if expired and task.remote_task_id is None:
-                self._next_probe_at = now + _UNRESPONSIVE_PROBE_INTERVAL_S
-            if expired and task.remote_task_id is None and not self._unresponsive:
-                self._unresponsive = True
-                logger.warning(
-                    "P2P peer %s did not acknowledge a lookup within %.1f s; "
-                    "skipping it except one probe every %.1f s",
-                    self._config.peer_mq_server_url,
-                    _LOOKUP_RPC_TIMEOUT_S,
-                    _UNRESPONSIVE_PROBE_INTERVAL_S,
-                )
 
         # The task left the table under the lock, so no completion can change
         # it any more.
@@ -522,26 +500,47 @@ class PeerL2AdapterBase(L2AdapterInterface):
         # escapes the callback is only logged, leaving the task pending until
         # its ack deadline.
         except Exception:
-            if not self._closed:
-                logger.exception(
-                    "P2P lookup submit to %s failed; treating as a miss",
-                    self._config.peer_mq_server_url,
-                )
+            with self._lookup_lock:
+                if not (self._closed or self._unresponsive):
+                    self._unresponsive = True
+                    logger.exception(
+                        "P2P lookup submit to %s failed; lookups to it miss "
+                        "until it answers a probe",
+                        self._config.peer_mq_server_url,
+                    )
             self._finish_lookup(task_id, failed=True)
             return
         with self._lookup_lock:
-            self._probe_task_id = None
-            if self._unresponsive:
-                self._unresponsive = False
-                logger.info(
-                    "P2P peer %s acknowledged again", self._config.peer_mq_server_url
-                )
             task = self._lookup_tasks.get(task_id)
             if task is None or self._closed:
                 return
             task.remote_task_id = remote_task_id
             task.query_in_flight = True
             self._submit_query(task_id, remote_task_id)
+
+    def _on_probe_done(self, future: MessagingFuture[None]) -> None:
+        """End the probe; once the peer answers one, look it up again.
+
+        Runs on the gRPC channel's thread, or on the sending thread when the
+        call is already done.
+
+        Args:
+            future: The completed probe future.
+        """
+        try:
+            future.result()
+            answered = True
+        # A failure only ends this probe: the next lookup sends another.
+        except REQUEST_FAILURES:
+            answered = False
+        with self._lookup_lock:
+            self._probing = False
+            if answered:
+                self._unresponsive = False
+                logger.info(
+                    "P2P peer %s answered a probe; looking it up again",
+                    self._config.peer_mq_server_url,
+                )
 
     def _submit_query(self, task_id: L2TaskId, remote_task_id: int) -> None:
         """Send ``p2p_query_lookup_results`` and handle its answer when it lands.
