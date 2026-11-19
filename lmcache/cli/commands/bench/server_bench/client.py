@@ -257,6 +257,7 @@ class ServerBenchClient:
         self._allocator = BlockAllocator(
             self._num_engine_group_infos,
             self._num_blocks,
+            null_block_id=self._config.null_block_id,
             allocation_order=self._config.block_allocation,
         )
         self._started = True

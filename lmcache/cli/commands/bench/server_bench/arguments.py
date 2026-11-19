@@ -151,6 +151,15 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         default=16,
         help="Tokens per block (default: 16)",
     )
+    kv.add_argument(
+        "--null-block-id",
+        type=int,
+        default=0,
+        help=(
+            "Server null block id, never allocated (default: 0; must match "
+            "the server's --null-block-id)"
+        ),
+    )
 
     parser.add_argument(
         "--start",

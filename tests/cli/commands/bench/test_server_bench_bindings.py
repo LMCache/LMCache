@@ -82,8 +82,8 @@ def test_live_requests_are_disjoint_and_released_blocks_can_be_reused(
 ) -> None:
     client, _ = bench
     first, second = _request(client), _request(client, 1)
-    assert first.block_allocation.as_block_ids() == [[0, 1], [0, 1]]
-    assert second.block_allocation.as_block_ids() == [[2, 3], [2, 3]]
+    assert first.block_allocation.as_block_ids() == [[1, 2], [1, 2]]
+    assert second.block_allocation.as_block_ids() == [[3, 4], [3, 4]]
     cleanup = MagicMock(
         side_effect=RuntimeError("cleanup failed") if cleanup_fails else None
     )

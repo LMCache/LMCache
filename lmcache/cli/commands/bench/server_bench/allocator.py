@@ -27,22 +27,47 @@ class RequestBlocks:
 
 
 class BlockAllocator:
-    """Single-threaded, request-exclusive allocation without prefix sharing."""
+    """Single-threaded, request-exclusive allocation without prefix sharing.
+
+    The server's null block (``--null-block-id``, default ``0``) is never
+    handed out: the MP server drops every chunk whose block ids are all
+    null, so allocating it would silently lose data (issue #6741).
+    """
 
     def __init__(
         self,
         groups: int,
         capacity: int,
         *,
+        null_block_id: int = 0,
         allocation_order: Literal["sequential", "random"] = "sequential",
         seed: int = 0,
     ) -> None:
-        """Create one free pool per group with a reproducible allocation order."""
+        """Create one free pool per group with a reproducible allocation order.
+
+        Args:
+            groups: Number of engine groups, each with its own pool.
+            capacity: Block id space size per group (ids ``0..capacity-1``);
+                the null block is excluded, leaving ``capacity - 1``
+                allocatable blocks when it is in range.
+            null_block_id: Block id reserved as the server's null block.
+            allocation_order: Hand out the lowest free ids or sample randomly.
+            seed: Seed for the random allocation order.
+
+        Raises:
+            ValueError: If groups or capacity is negative, the allocation
+                order is unsupported, or the null block id is not a valid
+                block id for a non-empty pool.
+        """
         if groups < 0 or capacity < 0:
             raise ValueError("groups and capacity must be non-negative")
         if allocation_order not in ("sequential", "random"):
             raise ValueError(f"unsupported allocation order: {allocation_order}")
-        self._free = [set(range(capacity)) for _ in range(groups)]
+        if capacity > 0 and not 0 <= null_block_id < capacity:
+            raise ValueError(
+                f"null block id must be in [0, {capacity}), got {null_block_id}"
+            )
+        self._free = [set(range(capacity)) - {null_block_id} for _ in range(groups)]
         self._allocation_order = allocation_order
         self._random = random.Random(seed)
 
