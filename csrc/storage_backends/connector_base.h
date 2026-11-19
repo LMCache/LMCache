@@ -362,6 +362,26 @@ class ConnectorBase : public IStorageConnector {
     return num_workers_;
   }
 
+  // Helpers for derived connectors that complete batches outside workers_.
+  void validate_batch_inputs(const std::vector<std::string>& keys,
+                             const std::vector<void*>& bufs,
+                             const std::vector<size_t>& lens) {
+    if (keys.size() != bufs.size() || keys.size() != lens.size()) {
+      throw std::runtime_error("keys, bufs, and lens size mismatch");
+    }
+    if (keys.empty()) {
+      throw std::runtime_error("keys list is empty");
+    }
+  }
+
+  void push_completion(Completion&& c) {
+    {
+      std::lock_guard<std::mutex> lk(comp_mu_);
+      completions_.push(std::move(c));
+    }
+    signal_eventfd_();
+  }
+
  private:
   struct WorkerLane {
     std::mutex mu;
@@ -385,17 +405,6 @@ class ConnectorBase : public IStorageConnector {
     size_t start = tile_idx * base_tile_size + std::min(tile_idx, larger_tiles);
     size_t tile_size = base_tile_size + (tile_idx < larger_tiles ? 1 : 0);
     return {start, start + tile_size};
-  }
-
-  void validate_batch_inputs(const std::vector<std::string>& keys,
-                             const std::vector<void*>& bufs,
-                             const std::vector<size_t>& lens) {
-    if (keys.size() != bufs.size() || keys.size() != lens.size()) {
-      throw std::runtime_error("keys, bufs, and lens size mismatch");
-    }
-    if (keys.empty()) {
-      throw std::runtime_error("keys list is empty");
-    }
   }
 
   // returns: (batch_future_id, batch_state, num_tiles)
@@ -459,14 +468,6 @@ class ConnectorBase : public IStorageConnector {
       requests_.push(std::move(req));
     }
     req_cv_.notify_one();
-  }
-
-  void push_completion(Completion&& c) {
-    {
-      std::lock_guard<std::mutex> lk(comp_mu_);
-      completions_.push(std::move(c));
-    }
-    signal_eventfd_();
   }
 
   void drain_eventfd_() { notifier_->consume(); }

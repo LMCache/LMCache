@@ -249,7 +249,7 @@ class StorageManager:
                     manager,
                     [self._l2_adapters[d.index] for d in descriptors],
                     descriptors,
-                    create_store_policy(config.store_policy),
+                    create_store_policy(config.store_policy, self._l1_managers),
                 )
                 self._store_controllers[manager.l1_manager_id] = controller
                 controller.start()
