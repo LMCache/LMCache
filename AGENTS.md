@@ -298,3 +298,12 @@ When asked to review a PR, use the `pr-review` skill; before creating a PR,
 self-check with the `pre-pr-check` skill (both under `.claude/skills/`). Create
 the PR as a draft and leave the ready-for-review transition to the submitting
 human after their self-review.
+
+## Local macOS release-provenance checks
+
+In this macOS setup, Homebrew Python 3.12 `urllib` failed HTTPS certificate
+validation while the system Python and `gh` could validate the same API host.
+Use an API client with verified system certificate trust for local release
+checks; do not disable TLS verification. Keep Python 3.12 first on `PATH` for
+pre-commit and project tests. This local CA issue does not establish a Linux CI
+failure, so validate the actual workflow separately.
