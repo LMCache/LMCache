@@ -36,8 +36,9 @@ class BenchConfig:
         concurrency: Number of clients sending requests at the same time.
         isolated_ipc: Whether clients use the isolated IPC policy.
         block_allocation: Allocate the lowest free IDs or sample free IDs randomly.
-        null_block_id: Server null block id, excluded from allocation;
-            ``-1`` disables the null block.
+        null_block_id: Server null block id; an id inside the block pool
+            is excluded from allocation, an id outside it (e.g. ``-1``)
+            reserves nothing, mirroring the server.
         transfer_timeout_s: Positive, finite shared wait budget per transfer call.
     """
 
@@ -75,10 +76,6 @@ class BenchConfig:
 
         if self.block_allocation not in ("sequential", "random"):
             raise ValueError(f"unsupported block allocation: {self.block_allocation}")
-        if self.null_block_id < -1:
-            raise ValueError(
-                f"null_block_id must be -1 or non-negative, got {self.null_block_id}"
-            )
         if not math.isfinite(self.transfer_timeout_s) or self.transfer_timeout_s <= 0:
             raise ValueError("transfer_timeout_s must be finite and positive")
 

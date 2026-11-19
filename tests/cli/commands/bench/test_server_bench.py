@@ -493,7 +493,7 @@ class TestCommandArguments:
         args = parser.parse_args(["bench", "server"])
         assert parse_args_to_config(args).null_block_id == 0
 
-    def test_negative_null_block_id_is_rejected(
+    def test_out_of_pool_null_block_ids_parse_like_on_the_server(
         self,
         parser: argparse.ArgumentParser,
     ) -> None:
@@ -502,13 +502,10 @@ class TestCommandArguments:
             parse_args_to_config,
         )
 
-        args = parser.parse_args(["bench", "server", "--null-block-id", "-2"])
-        with pytest.raises(
-            ValueError, match="null_block_id must be -1 or non-negative"
-        ):
-            parse_args_to_config(args)
         args = parser.parse_args(["bench", "server", "--null-block-id", "-1"])
         assert parse_args_to_config(args).null_block_id == -1
+        args = parser.parse_args(["bench", "server", "--null-block-id", "-2"])
+        assert parse_args_to_config(args).null_block_id == -2
 
     def test_isolated_ipc_rejected_in_cpu_mode(
         self,

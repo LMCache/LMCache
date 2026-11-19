@@ -1157,8 +1157,9 @@ Options
      - Fallback tokens per block; overridden by the shape spec.
    * - ``--null-block-id N``
      - ``0``
-     - Server null block id, never allocated; must match the server's
-       ``--null-block-id`` (``-1`` disables it) so one-block chunks are
+     - Server null block id; an id inside the block pool is never
+       allocated, an id outside it (e.g. ``-1``) reserves nothing. Must
+       match the server's ``--null-block-id`` so one-block chunks are
        not silently dropped.
    * - ``--start N``
      - ``0``

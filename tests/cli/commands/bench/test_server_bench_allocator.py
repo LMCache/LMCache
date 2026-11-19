@@ -77,17 +77,11 @@ def test_custom_null_block_id_is_excluded() -> None:
         allocator.allocate(1)
 
 
-def test_minus_one_disables_the_null_block() -> None:
-    """-1 is the server's no-null-block sentinel: every id carries data."""
-    allocator = BlockAllocator(1, 3, null_block_id=-1)
-    assert allocator.allocate(3).as_block_ids() == [[0, 1, 2]]
-
-
-@pytest.mark.parametrize("null_block_id", [-2, 8])
-def test_out_of_range_null_block_id_is_rejected(null_block_id: int) -> None:
-    """A null block id outside the id space fails loudly, not silently."""
-    with pytest.raises(ValueError, match="null block id must be -1 or in"):
-        BlockAllocator(1, 8, null_block_id=null_block_id)
+@pytest.mark.parametrize("null_block_id", [-1, -2, 8])
+def test_out_of_pool_sentinel_reserves_nothing(null_block_id: int) -> None:
+    """Sentinels the server also accepts outside the pool keep every block."""
+    allocator = BlockAllocator(1, 8, null_block_id=null_block_id)
+    assert allocator.allocate(8).as_block_ids() == [list(range(8))]
 
 
 def test_exhaustion_when_the_only_block_is_null() -> None:
