@@ -7,10 +7,11 @@ geometry helpers.
 """
 
 # First Party
-from lmcache.v1.common.types import PageBufferShapeDesc
+from lmcache import device_ops
 from lmcache.v1.common.utils import (
     get_concrete_engine_kv_shape_from_shape_desc,
 )
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -18,7 +19,7 @@ def _make_shape_desc(
     *, kv_size: int, nl: int, nb: int, bs: int, nh: int, hs: int
 ) -> PageBufferShapeDesc:
     """Build a ``PageBufferShapeDesc`` with the given geometry."""
-    sd = PageBufferShapeDesc()
+    sd = device_ops.PageBufferShapeDesc()
     sd.kv_size = kv_size
     sd.nl = nl
     sd.nb = nb

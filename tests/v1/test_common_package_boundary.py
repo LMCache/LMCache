@@ -1,93 +1,86 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the package boundary and location of PageBufferShapeDesc.
+"""Tests for the package boundary of lmcache.v1.common and kv_layer_groups.
 
-Verifies that PageBufferShapeDesc is canonicalized in lmcache.v1.common.types,
-accessible via lmcache.v1.common and lmcache.v1.common.utils, and re-exported
-from lmcache.v1.platform.ops_types with preserved object identity.
-Also verifies that lmcache.v1.common does not import platform or device_ops.
+Verifies that lmcache.v1.common and lmcache.v1.kv_layer_groups do not import
+from lmcache.v1.platform or import device_ops.
 """
 
 # Standard
+from pathlib import Path
 import ast
 
 # First Party
-from lmcache.v1.common import PageBufferShapeDesc as CommonPageBufferShapeDesc
-from lmcache.v1.common.types import PageBufferShapeDesc as TypesPageBufferShapeDesc
-from lmcache.v1.common.utils import PageBufferShapeDesc as UtilsPageBufferShapeDesc
-from lmcache.v1.common.utils import (
-    get_concrete_engine_kv_shape_from_shape_desc,
-)
-from lmcache.v1.platform.ops_types import (
-    PageBufferShapeDesc as PlatformPageBufferShapeDesc,
-)
 from tests.import_utils import lmcache_path
-import lmcache.lmcache_native as lmcache_native
 
 
-def test_page_buffer_shape_desc_identity_across_imports() -> None:
-    """PageBufferShapeDesc preserves object identity across all exposed paths."""
-    assert CommonPageBufferShapeDesc is TypesPageBufferShapeDesc
-    assert UtilsPageBufferShapeDesc is TypesPageBufferShapeDesc
-    assert PlatformPageBufferShapeDesc is TypesPageBufferShapeDesc
-    assert TypesPageBufferShapeDesc is lmcache_native.PageBufferShapeDesc
+def _collect_boundary_violations(
+    pyfile: Path,
+    lmcache_root: Path,
+) -> list[str]:
+    """Parse *pyfile* and return any forbidden imports of platform or device_ops."""
+    tree = ast.parse(pyfile.read_text(), filename=str(pyfile))
+    violations: list[str] = []
 
+    pkg_parts = ["lmcache"] + list(pyfile.parent.relative_to(lmcache_root).parts)
 
-def test_page_buffer_shape_desc_instantiation_and_usage() -> None:
-    """PageBufferShapeDesc can be instantiated and inspected via common utils."""
-    desc = TypesPageBufferShapeDesc()
-    desc.kv_size = 2
-    desc.nl = 4
-    desc.nb = 128
-    desc.bs = 16
-    desc.nh = 8
-    desc.hs = 64
-    desc.element_size = 2
-    desc.block_stride_elems = 0
+    def is_forbidden(name: str) -> bool:
+        if name == "lmcache.v1.platform" or name.startswith("lmcache.v1.platform."):
+            return True
+        if (
+            name == "lmcache.device_ops"
+            or name.startswith("lmcache.device_ops.")
+            or name == "device_ops"
+        ):
+            return True
+        return False
 
-    shape_str = get_concrete_engine_kv_shape_from_shape_desc(
-        desc, lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS
-    )
-    assert shape_str == "4 x [128, 16, 8, 64]"
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if is_forbidden(alias.name):
+                    violations.append(f"{pyfile.name} imports {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if node.level > 0:
+                if node.level == 1:
+                    base = pkg_parts
+                elif node.level - 1 < len(pkg_parts):
+                    base = pkg_parts[: -(node.level - 1)]
+                else:
+                    base = []
+                resolved_mod = ".".join(base)
+                resolved_mod = f"{resolved_mod}.{mod}" if mod else resolved_mod
+            else:
+                resolved_mod = mod
+
+            if is_forbidden(resolved_mod):
+                violations.append(f"{pyfile.name} imports from {resolved_mod}")
+            for alias in node.names:
+                full_name = (
+                    f"{resolved_mod}.{alias.name}" if resolved_mod else alias.name
+                )
+                if is_forbidden(full_name):
+                    violations.append(f"{pyfile.name} imports {full_name}")
+
+    return violations
 
 
 def test_common_package_has_no_platform_or_device_ops_imports() -> None:
     """lmcache.v1.common must not import from platform or import device_ops."""
+    lmcache_root = lmcache_path()
     common_dir = lmcache_path("v1", "common")
     violations: list[str] = []
 
     for pyfile in common_dir.rglob("*.py"):
-        tree = ast.parse(pyfile.read_text(), filename=str(pyfile))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                if node.module and "platform" in node.module:
-                    violations.append(f"{pyfile.name} imports from {node.module}")
-                for alias in node.names:
-                    if alias.name == "device_ops":
-                        violations.append(f"{pyfile.name} imports device_ops")
-            elif isinstance(node, ast.Import):
-                for alias in node.names:
-                    if "platform" in alias.name or alias.name == "device_ops":
-                        violations.append(f"{pyfile.name} imports {alias.name}")
+        violations.extend(_collect_boundary_violations(pyfile, lmcache_root))
 
     assert not violations, "Boundary violations detected:\n" + "\n".join(violations)
 
 
 def test_kv_layer_groups_has_no_platform_or_device_ops_imports() -> None:
     """kv_layer_groups must not import from platform or import device_ops."""
+    lmcache_root = lmcache_path()
     target_file = lmcache_path("v1", "kv_layer_groups.py")
-    violations: list[str] = []
 
-    tree = ast.parse(target_file.read_text(), filename=str(target_file))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            if node.module and "platform" in node.module:
-                violations.append(f"{target_file.name} imports from {node.module}")
-            for alias in node.names:
-                if alias.name == "device_ops":
-                    violations.append(f"{target_file.name} imports device_ops")
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if "platform" in alias.name or alias.name == "device_ops":
-                    violations.append(f"{target_file.name} imports {alias.name}")
-
+    violations = _collect_boundary_violations(target_file, lmcache_root)
     assert not violations, "Boundary violations detected:\n" + "\n".join(violations)

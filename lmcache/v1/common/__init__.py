@@ -3,10 +3,3 @@
 
 This package must remain independent of client and server implementations.
 """
-
-# First Party
-from lmcache.v1.common.types import PageBufferShapeDesc
-
-__all__ = [
-    "PageBufferShapeDesc",
-]

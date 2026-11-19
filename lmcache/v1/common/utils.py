@@ -25,8 +25,9 @@ from lmcache.v1.common.kv_format import (
     get_spec_class,
 )
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache, LayoutHints
-from lmcache.v1.common.types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
+
+PageBufferShapeDesc = lmcache_native.PageBufferShapeDesc
 
 logger = init_logger(__name__)
 

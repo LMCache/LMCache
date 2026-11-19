@@ -16,8 +16,9 @@ from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
 from lmcache.v1.common.attn_window import AttnWindowDesc, GroupKind
 from lmcache.v1.common.group_view import EXCLUDED_ENGINE_GROUP
-from lmcache.v1.common.types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
+
+PageBufferShapeDesc = lmcache_native.PageBufferShapeDesc
 
 if TYPE_CHECKING:
     # First Party
