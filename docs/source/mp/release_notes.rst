@@ -7,15 +7,16 @@ Unreleased
 KV-cache STORE completeness
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The LMCache-driven MP STORE path now checks presence after window downsampling
-and skips an object if any required retained block is absent. This prevents
+The LMCache-driven MP STORE and engine-driven multigroup STORE paths skip
+an object if any block they would copy is absent. This prevents
 incomplete recurrent-state or sliding-window data from being published under
 valid token hashes and reused by a later prefix-cache hit.
 
-In the default merged configuration, an absent STATE slice also prevents
-storing otherwise complete PAGE data in that object. Use
-``--separate-object-groups`` to retain complete PAGE objects independently;
-see :doc:`hybrid_models` for the tradeoff.
+When groups are merged with ``--no-separate-object-groups``, an absent STATE
+slice also prevents storing otherwise complete PAGE data in that object. The
+default ``--separate-object-groups`` keeps complete PAGE objects independent
+for full chunks. A partial final chunk still requires all groups. See
+:doc:`hybrid_models` for the tradeoff.
 
 .. warning::
 

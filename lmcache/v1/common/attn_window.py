@@ -2,6 +2,7 @@
 """Per-object-group attention windows, independent of either endpoint."""
 
 # Standard
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, get_args
 
@@ -9,6 +10,23 @@ GroupKind = Literal["attention", "recurrent", "aux"]
 """Object-group kind label: attention KV, recurrent state pages, or a
 connector-private aux group. Derived server-side from
 ``EngineGroupInfo.extra_object_group_tag``; never sent on the wire."""
+
+
+def retained_blocks_missing(
+    block_ids: Sequence[int], start: int, end: int, null_block_id: int
+) -> bool:
+    """Return whether an ID in the transfer's half-open range is absent.
+
+    Args:
+        block_ids: Host-side engine block IDs for one kernel group.
+        start: First block to copy, after any discarded prefix or padding.
+        end: Exclusive end of the copy range.
+        null_block_id: The engine's absent-block sentinel.
+
+    Returns:
+        True if the range contains the sentinel.
+    """
+    return null_block_id in block_ids[start:end]
 
 
 @dataclass(frozen=True)

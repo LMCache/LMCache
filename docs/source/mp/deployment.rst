@@ -13,7 +13,7 @@ Upgrading STORE completeness validation
 
 .. warning::
 
-   Earlier versions of the LMCache-driven MP STORE path could publish an
+   Earlier versions of MP STORE could publish an
    incomplete hybrid-cache object under a valid token hash. The completeness
    fix prevents new invalid writes; it does not detect, repair, or invalidate
    existing entries. Restarting services alone does not remove entries in

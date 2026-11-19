@@ -400,7 +400,10 @@ def test_store_requires_every_retained_block_in_hybrid_object(
         block_ids.append([block for chunk in chunks for block in chunk])
 
     _, ok, stored = module.store_with_chunk_mask(
-        SimpleNamespace(request_id="req", worker_id=1), 1, block_ids, b"producer"
+        IPCCacheServerKey.from_token_ids("m", 1, 1, range(1024), end=1024),
+        1,
+        block_ids,
+        b"producer",
     )
 
     assert ok
@@ -628,6 +631,29 @@ def _make_unfull_store_module(monkeypatch, obj_keys):
     return module, reserved, unfull_transfers
 
 
+def test_store_does_not_reserve_a_partial_tail_with_one_missing_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, reserved, transfers = _make_unfull_store_module(
+        monkeypatch, [["g0u"], ["g1u"]]
+    )
+    cast(MagicMock, module.context).chunk_size = 4
+    context = module.get_and_touch_context_entry(1).cache_context
+    context.lmcache_tokens_per_chunk = 4
+    context.kv_layer_groups_manager.get_subchunk_sw_size_tokens = lambda group: 4
+
+    _, ok, mask = module.store_with_chunk_mask(
+        IPCCacheServerKey.from_token_ids("m", 1, 1, [0, 1, 2], end=3),
+        1,
+        [[1, 2, 3], [4, -1, 6], [7, 8, 9]],
+        b"producer",
+    )
+
+    assert ok and mask == [False]
+    assert not any(keys for keys, _temporary in reserved)
+    assert transfers == []
+
+
 def test_store_of_only_an_unfull_chunk_reserves_temporary_objects(monkeypatch):
     module, reserved, unfull_transfers = _make_unfull_store_module(
         monkeypatch, [["g0u"], ["g1u"]]
@@ -682,7 +708,7 @@ def test_store_appends_the_unfull_chunk_after_full_chunks(monkeypatch):
         _unfull_key(request_configs=None),
         1,
         # Two blocks per full chunk, then the unfull chunk's block.
-        [[0, 1, 5], [-1, 1, 6], [-1, 1, 7]],
+        [[0, 1, 5], [2, 1, 6], [2, 1, 7]],
         b"producer",
     )
 

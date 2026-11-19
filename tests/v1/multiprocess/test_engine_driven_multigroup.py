@@ -247,22 +247,24 @@ class _FakeGroupedContext:
         return None
 
 
-def _fanout_ctx(monkeypatch) -> tuple[EngineDrivenTransferContext, list[dict]]:
+def _fanout_ctx(
+    monkeypatch, blocks_per_chunk: tuple[int, int] = (2, 1)
+) -> tuple[EngineDrivenTransferContext, list[dict]]:
     """Worker context with two registered groups and a capturing gather."""
     ctx = EngineDrivenTransferContext(1, MagicMock())
     ctx._group_states = [
         worker_transfer._GroupState(
             layer_names=["layer_0", "layer_1"],
             engine_kv_format=MagicMock(),
-            blocks_in_chunk=2,
-            blocks_per_window=1,  # sliding-window group: keeps 1 of 2 blocks/chunk
+            blocks_in_chunk=blocks_per_chunk[0],
+            blocks_per_window=1,  # keep only the last block
             layout_desc=MagicMock(),
         ),
         worker_transfer._GroupState(
             layer_names=["layer_2"],
             engine_kv_format=MagicMock(),
-            blocks_in_chunk=1,
-            blocks_per_window=1,  # full attention (window == chunk)
+            blocks_in_chunk=blocks_per_chunk[1],
+            blocks_per_window=blocks_per_chunk[1],  # full attention
             layout_desc=MagicMock(),
         ),
     ]
@@ -1127,9 +1129,8 @@ def test_register_payload_carries_group_windows_and_kinds() -> None:
     assert [s.window_chunks for s in ctx._group_states] == [-1, 2, 1]
 
 
-def test_store_multigroup_inline_leaves_out_all_null_chunks(monkeypatch) -> None:
-    """A chunk whose engine blocks are all the null block carries no KV: it is
-    neither gathered nor sent, and its key is never written."""
+def test_store_multigroup_inline_leaves_out_incomplete_chunks(monkeypatch) -> None:
+    """Only chunks with every transferred block are gathered and committed."""
     ctx, pctx, _ = _inline_worker_ctx(monkeypatch)
     gathered: list[dict] = []
 
@@ -1149,10 +1150,9 @@ def test_store_multigroup_inline_leaves_out_all_null_chunks(monkeypatch) -> None
     monkeypatch.setattr(pctx, "commit_store", _commit)
     kv = {name: torch.zeros(1) for name in ("layer_0", "layer_1", "layer_2")}
 
-    # Group 0 (2 blocks/chunk): chunk 0 is all null. Group 1 (1 block/chunk):
-    # chunk 0 is null. A partly-null chunk is still stored.
+    # Group 0 retains the last block: [3, 0] is missing, [0, 4] is valid.
     future = ctx.submit_store(
-        "req", MagicMock(), kv, [[0, 0, 0, 4], [0, 6]], MagicMock(), 2
+        "req", MagicMock(), kv, [[3, 0, 0, 4], [0, 6]], MagicMock(), 2
     )
     assert future.result(timeout=1) is True
     assert [g["chunk_indices"] for g in gathered] == [[1], [1]]
@@ -1169,24 +1169,27 @@ def test_store_multigroup_inline_leaves_out_all_null_chunks(monkeypatch) -> None
     assert gathered == [] and committed == [] and prepared == []
 
 
-def test_store_multigroup_shm_asks_server_to_skip_all_null_chunks(
+def test_store_multigroup_shm_skips_missing_checkpoint_and_partial_full_chunk(
     monkeypatch,
 ) -> None:
-    ctx, _ = _fanout_ctx(monkeypatch)
+    ctx, _ = _fanout_ctx(monkeypatch, blocks_per_chunk=(8, 2))
     t = [torch.zeros(1) for _ in range(2)]
     fake = _FakeGroupedContext(t, [1, 1], [0, 1])
     ctx._engine_driven_context = fake  # type: ignore[assignment]
     kv = {name: torch.zeros(1) for name in ("layer_0", "layer_1", "layer_2")}
 
+    # The eight-block state group reproduces the layout reported in #6705:
+    # an interior checkpoint cannot stand in for the missing endpoint.
+    state = [0, 0, 5, 0, 0, 0, 0, 0] + [0] * 7 + [6]
     future = ctx.submit_store(
-        "req", MagicMock(), kv, [[0, 0, 3, 4], [0, 6]], MagicMock(), 2
+        "req", MagicMock(), kv, [state, [3, 0, 4, 5]], MagicMock(), 2
     )
     assert future.result(timeout=1) is True
     assert fake.skipped == ((0,), (0,))
 
     # No null chunks: the RPC carries no skip list at all.
     future = ctx.submit_store(
-        "req", MagicMock(), kv, [[1, 2, 3, 4], [5, 6]], MagicMock(), 2
+        "req", MagicMock(), kv, [[1] * 16, [2] * 4], MagicMock(), 2
     )
     assert future.result(timeout=1) is True
     assert fake.skipped == ()

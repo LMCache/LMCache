@@ -17,6 +17,7 @@ from lmcache.utils import (
     EngineType,
     _lmcache_nvtx_annotate,
 )
+from lmcache.v1.common.attn_window import retained_blocks_missing
 from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.token_codec import unpack_token_ids
@@ -138,9 +139,8 @@ def incomplete_chunk_masks(
             is_null = False
             for kg in group.kernel_group_indices:
                 bpc = blocks_per_chunk[kg]
-                if any(
-                    block == null_block_id
-                    for block in block_ids[kg][i * bpc : (i + 1) * bpc]
+                if retained_blocks_missing(
+                    block_ids[kg], i * bpc, (i + 1) * bpc, null_block_id
                 ):
                     is_null = True
                     break
@@ -1421,18 +1421,17 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         Raises:
             ValueError: If a kernel group has no block for the unfull chunk.
         """
-        manager = cache_context.kv_layer_groups_manager
         block_ids_gpu, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
             cache_context, block_ids, key.end % self._ctx.chunk_size
         )
-        null_groups = all_null_chunk_masks(
-            block_ids,
-            manager.object_groups,
-            [len(group_block_ids) for group_block_ids in block_ids],
-            1,
-            self._ctx.null_block_id,
-        )
-        if any(null_mask[0] for null_mask in null_groups):
+        # Lead blocks are copied separately; padding is skipped only in the
+        # regular part of the tail.
+        null_id = self._ctx.null_block_id
+        if any(
+            (lead and ids[0] == null_id)
+            or retained_blocks_missing(ids, lead + skip, len(ids), null_id)
+            for ids, lead, skip in zip(block_ids, lead_blocks, skip_blocks, strict=True)
+        ):
             return {}
         object_buffers: list[torch.Tensor] = []
         for obj_group_id in range(len(obj_keys)):

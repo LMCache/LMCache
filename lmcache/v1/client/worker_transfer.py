@@ -27,6 +27,7 @@ from lmcache.v1.client.transfer_context.base import (
 )
 from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
+from lmcache.v1.common.attn_window import retained_blocks_missing
 from lmcache.v1.common.custom_types import (
     GroupLayout,
     RegisterEngineDrivenContextPayload,
@@ -1303,25 +1304,21 @@ class EngineDrivenTransferContext(TransferContext):
         return picked, [chunk_indices[i] for i in idxs]
 
     def _null_chunk_indices(self, block_ids: list[list[int]]) -> list[list[int]]:
-        """Per group, the chunks whose engine blocks are all the null block.
-
-        Sliding-window groups lose their out-of-window blocks and align-mode
-        recurrent (Mamba/linear-attention) groups keep only the block holding
-        the last state, so their earlier chunks are entirely the null block.
-        Those chunks carry no valid KV and must never be stored: object keys
-        are prefix hashes, so a later shorter-prefix hit would restore them.
-        Mirrors ``all_null_chunk_masks`` on the lmcache-driven path.
-        """
+        """Per group, skip chunks missing any block the gather would copy."""
         null_id = self._null_block_id
         skipped: list[list[int]] = []
         for gid, state in enumerate(self._group_states):
             bpc = state.blocks_in_chunk
+            # gather_paged_kv_to_cpu selects chunk[-blocks_per_window:].
+            width = state.blocks_per_window
             ids = block_ids[gid]
             skipped.append(
                 [
                     c
                     for c in range(len(ids) // bpc)
-                    if all(b == null_id for b in ids[c * bpc : (c + 1) * bpc])
+                    if retained_blocks_missing(
+                        ids, (c + 1) * bpc - width, (c + 1) * bpc, null_id
+                    )
                 ]
             )
         return skipped
@@ -1343,9 +1340,9 @@ class EngineDrivenTransferContext(TransferContext):
     ) -> "list[_GroupStorePlan] | None":
         """Decide what each group stores and where it gathers to.
 
-        All-null chunks are left out on both transports. Over SHM the server
-        reserves slots for the rest (and none for skipped chunks) and they are
-        the gather targets. Inline has no slots: ``alloc``, when given,
+        Both transports leave out chunks missing a retained block. Over SHM,
+        the server reserves gather slots only for the remaining chunks.
+        Inline has no slots: ``alloc``, when given,
         provides each group's gather targets (the async path's pinned
         staging), otherwise gather allocates fresh CPU tensors.
 

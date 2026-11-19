@@ -56,6 +56,12 @@ when PAGE and STATE are separate object groups. In a merged object, an absent
 STATE slice also prevents storing its attention pages; separation lets complete
 attention objects remain independently storable.
 
+The engine-driven multigroup STORE uses the same check over each gather's
+trailing window, before requesting shared-memory slots or gathering inline.
+For a partial final chunk on the LMCache-driven path, padding is excluded;
+if a copied block is missing in any group, no tail objects are reserved,
+because lookup needs the tail in every group.
+
 LMCache already skips these copies in the transfer layer. On store, skipped
 objects become `None` entries and the D2H loop does not launch a kernel for
 them. On retrieve, the existing sliding-window/object-prefix logic starts from

@@ -136,12 +136,12 @@ included) forms another. Pass ``--no-separate-object-groups`` to make every
 layer share a single full-attention object group.
 
 STORE validates the blocks retained after per-chunk window downsampling. If any
-required block is absent, LMCache skips that object. In the default merged
-configuration, a missing recurrent STATE slice therefore also prevents storing
+required block is absent, LMCache skips that object. When groups are merged
+with ``--no-separate-object-groups``, a missing STATE slice also prevents storing
 the chunk's complete attention PAGE data. This is intentional: a cache hit for
 the merged object must mean that every required slice is present.
 
-With ``--separate-object-groups``, complete PAGE objects can still be stored
+With the default ``--separate-object-groups``, complete PAGE objects can be stored
 when a separate STATE object is incomplete. The tradeoff is made at the object
 group boundary; incomplete objects are never partially published. For example,
 a chunk with complete PAGE blocks and an absent STATE checkpoint is skipped
