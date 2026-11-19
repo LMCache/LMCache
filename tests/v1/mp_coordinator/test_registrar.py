@@ -7,7 +7,6 @@ the coordinator is unreachable.
 """
 
 # Standard
-from unittest.mock import MagicMock
 import asyncio
 import contextlib
 
@@ -15,11 +14,7 @@ import contextlib
 import httpx
 
 # First Party
-from lmcache.v1.mp_coordinator.registrar import (
-    bind_coordinator_chunk_size,
-    keep_registered,
-    register,
-)
+from lmcache.v1.mp_coordinator.registrar import keep_registered, register
 
 _BASE = "http://coord:9300"
 
@@ -47,50 +42,7 @@ def test_register_returns_assigned_id():
     asyncio.run(run())
 
 
-def test_bind_coordinator_chunk_size(monkeypatch):
-    response = httpx.Response(
-        200,
-        json={"chunk_size": 640},
-        request=httpx.Request("PUT", f"{_BASE}/config/chunk-size"),
-    )
-    request = MagicMock(return_value=response)
-    monkeypatch.setattr(httpx, "put", request)
-
-    assert bind_coordinator_chunk_size(f"{_BASE}/", 640, timeout=3.0) == 640
-    request.assert_called_once_with(
-        f"{_BASE}/config/chunk-size",
-        json={"chunk_size": 640},
-        headers={},
-        timeout=3.0,
-    )
-
-
-def test_bind_coordinator_chunk_size_uses_cli_key_file(tmp_path, monkeypatch):
-    key_file = tmp_path / "key"
-    key_file.write_text("fleet-secret\n", encoding="utf-8")
-    for name in (
-        "LMCACHE_API_KEY",
-        "LMCACHE_API_KEY_FILE",
-        "LMCACHE_HTTP_API_KEY",
-        "LMCACHE_HTTP_API_KEY_FILE",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    response = httpx.Response(
-        200,
-        json={"chunk_size": 640},
-        request=httpx.Request("PUT", f"{_BASE}/config/chunk-size"),
-    )
-    request = MagicMock(return_value=response)
-    monkeypatch.setattr(httpx, "put", request)
-
-    bind_coordinator_chunk_size(_BASE, 640, api_key_files=[str(key_file)])
-
-    assert request.call_args.kwargs["headers"] == {
-        "Authorization": "Bearer fleet-secret"
-    }
-
-
-def test_register_forwards_p2p_and_mq_fields():
+def test_register_forwards_p2p_mq_and_chunk_size_fields():
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -313,35 +265,6 @@ def test_on_registered_fires_for_every_registration():
     asyncio.run(run())
     assert calls["register"] >= 2, "expected a re-registration after the 404"
     assert calls["hook"] == calls["register"]
-
-
-def test_keep_registered_refreshes_chunk_size_on_reregistration():
-    seen: list[int | None] = []
-    sizes = iter([None, 640])
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST":
-            # Standard
-            import json
-
-            seen.append(json.loads(request.content)["chunk_size"])
-            return httpx.Response(
-                200, json={"instance_id": "i1", "re_registered": False}
-            )
-        if request.method == "PUT":
-            return httpx.Response(404, json={"error": "unknown"})
-        return httpx.Response(204)
-
-    async def run():
-        async with _client(handler) as client:
-            await _run_loop_briefly(
-                client,
-                instance_id="i1",
-                chunk_size_provider=lambda: next(sizes, 640),
-            )
-
-    asyncio.run(run())
-    assert seen[:2] == [None, 640]
 
 
 def test_on_registered_is_required():

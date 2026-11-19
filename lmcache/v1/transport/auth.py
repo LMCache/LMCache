@@ -70,7 +70,7 @@ def request_client_auth_headers(
     """Build outbound HTTP headers carrying the single configured client key.
 
     Used by the MP server's calls to an authenticated coordinator (instance
-    registration, heartbeats, event publishing, chunk-size negotiation) and by
+    registration, heartbeats, and event publishing) and by
     the coordinator's calls to authenticated MP servers.
 
     Returns:
