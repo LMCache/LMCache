@@ -20,14 +20,19 @@ import torch
 import zmq
 
 # First Party
+from lmcache.v1.client.kv_event_subscriber import (
+    KVEventStreamClosed,
+    MPKVEventSubscriber,
+)
 from lmcache.v1.client.transport.errors import (
     MPRequestError,
     MPServerUnavailableError,
 )
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.client.transport.grpc_impl.client import (
+    GrpcMultiprocessClient,
+)
+from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
     CBUnifiedLookupResult,
@@ -39,8 +44,9 @@ from lmcache.v1.multiprocess.custom_types import (
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
-from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.modules.blend import BlendModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
@@ -51,39 +57,14 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
 from lmcache.v1.multiprocess.plugin_modules.qstore import QStoreModule
-from lmcache.v1.multiprocess.protocols.server_module import (
-    ServerModuleCallRequest,
-    ServerModuleCallResponse,
-)
 from lmcache.v1.multiprocess.request_handler import (
     HandlerType,
     iter_request_handlers,
     request_handler,
 )
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
-from lmcache.v1.multiprocess.transport.grpc_impl import (
-    proto_codec,
-)
 from lmcache.v1.multiprocess.transport.grpc_impl import (
     server_builder as grpc_server_builder,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.client import (
-    CONNECT_TIMEOUT_MS,
-    INITIAL_RECONNECT_BACKOFF_MS,
-    MAX_RECONNECT_BACKOFF_MS,
-    GrpcMultiprocessClient,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
-    get_message_codec_registry,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
-    get_service_bindings,
-    iter_methods,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl.method_registry import (
-    get_method_codec_registry,
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server import (
     GrpcMultiprocessServer,
@@ -91,14 +72,37 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server import (
 from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
     build_grpc_request_server,
 )
+from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
+    validate_method_handler,
+)
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
+from lmcache.v1.transport.futures import MessagingStream
+from lmcache.v1.transport.grpc import proto_codec
+from lmcache.v1.transport.grpc.codecs import (
+    get_message_codec_registry,
+)
+from lmcache.v1.transport.grpc.descriptors import (
+    get_service_bindings,
+    iter_methods,
+)
+from lmcache.v1.transport.grpc.method_registry import (
+    get_method_codec_registry,
+)
+from lmcache.v1.transport.grpc.utils import (
+    CONNECT_TIMEOUT_MS,
+    INITIAL_RECONNECT_BACKOFF_MS,
+    MAX_RECONNECT_BACKOFF_MS,
+)
+from lmcache.v1.transport.server_module import (
+    ServerModuleCallRequest,
+    ServerModuleCallResponse,
+)
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 _GRPC_MODULE_TYPES = (
     LookupModule,
     ManagementModule,
     KVEventModule,
-    P2PController,
     LMCacheDrivenTransferModule,
     EngineDrivenTransferModule,
     QStoreModule,
@@ -109,7 +113,6 @@ _GRPC_MODULE_TYPES = (
 _GRPC_SERVICE_NAME_OVERRIDES = {
     EngineDrivenTransferModule: "EngineDrivenService",
     LMCacheDrivenTransferModule: "LMCacheDrivenService",
-    P2PController: "P2PService",
     ExtServerModuleRouter: "ExtensionService",
 }
 
@@ -251,25 +254,6 @@ def grpc_client(
             )
 
         @request_handler(HandlerType.BLOCKING)
-        def p2p_lookup_and_lock(
-            self,
-            keys: list[ObjectKey],
-            group_layout_descs: dict[int, MemoryLayoutDesc],
-        ) -> int:
-            assert keys[0].cache_salt == "tenant"
-            assert keys[0].extra_attributes == {"encryption_key": "key-1"}
-            assert group_layout_descs[0].shapes == [torch.Size([2, 4])]
-            assert group_layout_descs[0].dtypes == [torch.float16]
-            return 41
-
-        @request_handler(HandlerType.BLOCKING)
-        def p2p_query_lookup_results(
-            self, task_id: int
-        ) -> list[TransferChannelAddress] | None:
-            assert task_id == 41
-            return [TransferChannelAddress(offset=8, size=16)]
-
-        @request_handler(HandlerType.BLOCKING)
         def server_module_call(
             self, request: ServerModuleCallRequest
         ) -> ServerModuleCallResponse:
@@ -391,7 +375,7 @@ def test_module_annotations_cover_and_match_generated_grpc_methods() -> None:
 
     assert set(handlers) == {codec.operation for codec in codecs}
     for codec in codecs:
-        codec.validate_handler(handlers[codec.operation])
+        validate_method_handler(codec, handlers[codec.operation])
 
 
 def test_grpc_imports_do_not_load_zmq_runtime() -> None:
@@ -414,8 +398,48 @@ class LegacyProtocolBlocker(importlib.abc.MetaPathFinder):
 
 
 sys.meta_path.insert(0, LegacyProtocolBlocker())
-import lmcache.v1.multiprocess.transport.grpc_impl.client
+import lmcache.v1.client.transport.grpc_impl.client
 import lmcache.v1.multiprocess.transport.grpc_impl.server
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
+
+
+def test_grpc_client_import_does_not_load_server_implementation() -> None:
+    """Creating a gRPC request client loads no server code, lazily or not."""
+    script = r"""
+import importlib.abc
+import sys
+
+banned = (
+    "lmcache.v1.multiprocess.affinity_pool",
+    "lmcache.v1.multiprocess.engine_module",
+    "lmcache.v1.multiprocess.ext_server_module",
+    "lmcache.v1.multiprocess.modules",
+    "lmcache.v1.multiprocess.request_handler",
+    "lmcache.v1.multiprocess.server",
+    "lmcache.v1.multiprocess.transport.grpc_impl.aio_server",
+    "lmcache.v1.multiprocess.transport.grpc_impl.auth",
+    "lmcache.v1.multiprocess.transport.grpc_impl.native_server",
+    "lmcache.v1.multiprocess.transport.grpc_impl.server",
+    "lmcache.v1.multiprocess.transport.grpc_impl.server_base",
+    "lmcache.v1.multiprocess.transport.grpc_impl.server_builder",
+    "lmcache.v1.multiprocess.transport.grpc_impl.server_handlers",
+    "starlette",
+)
+
+
+class ServerImportBlocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if any(fullname == name or fullname.startswith(name + ".") for name in banned):
+            raise ImportError(f"gRPC client imported server module: {fullname}")
+        return None
+
+
+sys.meta_path.insert(0, ServerImportBlocker())
+from lmcache.v1.client.transport.factory import RequestClientFactory
+
+for url in ("grpc://127.0.0.1:1", "grpc+unix:///tmp/lmcache-boundary.sock"):
+    RequestClientFactory.create(url, api_key="boundary-test").close()
 """
     subprocess.run([sys.executable, "-c", script], check=True)
 
@@ -429,8 +453,8 @@ import sys
 banned = (
     "cachetools",
     "lmcache.utils",
-    "lmcache.v1.multiprocess.futures",
-    "lmcache.v1.multiprocess.transport.base",
+    "lmcache.v1.transport.futures",
+    "lmcache.v1.transport.request_client",
 )
 
 
@@ -444,7 +468,7 @@ class RuntimeDependencyBlocker(importlib.abc.MetaPathFinder):
 
 
 sys.meta_path.insert(0, RuntimeDependencyBlocker())
-import lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.common_pb2
+import lmcache.v1.transport.grpc._proto_gen.common_pb2
 """
     subprocess.run([sys.executable, "-c", script], check=True)
 
@@ -455,7 +479,7 @@ def test_generated_protobuf_type_stubs_are_available() -> None:
         "common_pb2",
         "p2p_service_pb2",
     )
-    package = "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen"
+    package = "lmcache.v1.transport.grpc._proto_gen"
 
     for module_name in module_names:
         module = importlib.import_module(f"{package}.{module_name}")
@@ -536,6 +560,7 @@ def test_build_grpc_request_server_uses_configured_server_workers(
             max_gpu_workers: int,
             grpc_server_workers: int,
             authentication: Any,
+            rpc_client: type | None = None,
         ) -> None:
             self.args = (
                 bind_url,
@@ -604,10 +629,10 @@ def test_service_message_codec_registry_round_trips_custom_types() -> None:
     """Service-owned codecs handle only their registered protobuf types."""
     registry = get_message_codec_registry()
     common_pb2 = importlib.import_module(
-        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.common_pb2"
+        "lmcache.v1.transport.grpc._proto_gen.common_pb2"
     )
     p2p_service_pb2 = importlib.import_module(
-        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.p2p_service_pb2"
+        "lmcache.v1.transport.grpc._proto_gen.p2p_service_pb2"
     )
 
     wrapper = CpuShmTensorWrapper(
@@ -634,7 +659,7 @@ def test_response_encoder_compiles_its_codec_once(
 ) -> None:
     """Encoding many responses compiles the structural codec only once."""
     kv_event_service_pb2 = importlib.import_module(
-        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.kv_event_service_pb2"
+        "lmcache.v1.transport.grpc._proto_gen.kv_event_service_pb2"
     )
     compiled: list[Any] = []
     compile_message_codec = proto_codec._compile_message_codec
@@ -656,28 +681,6 @@ def test_response_encoder_compiles_its_codec_once(
         assert encode(batch).SerializeToString() == first
     assert after_first > 0
     assert len(compiled) == after_first
-
-
-def test_grpc_object_key_without_extra_attributes_decodes_empty() -> None:
-    """New servers accept ObjectKey messages emitted by older clients."""
-    p2p_service_pb2 = importlib.import_module(
-        "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.p2p_service_pb2"
-    )
-    message = p2p_service_pb2.ObjectKey(
-        identity={
-            "chunk_hash": b"chunk",
-            "model_name": "model",
-            "kv_rank": 0,
-            "object_group_id": 0,
-            "cache_salt": "tenant",
-        }
-    )
-
-    _writer, reader = proto_codec._compile_message_codec(message.DESCRIPTOR, ObjectKey)
-    decoded = reader(message)
-
-    assert decoded.extra_attributes == {}
-    assert decoded.identity == ObjectKey(b"chunk", "model", 0, 0, "tenant").identity
 
 
 def test_generated_grpc_services_communicate_end_to_end(
@@ -752,23 +755,6 @@ def test_generated_grpc_services_communicate_end_to_end(
         prefix_coverage_tokens=16,
         non_prefix_segments=[CBMatchResult(0, 2, 4, 6, b"hash")],
     )
-
-    task_id = client.p2p_lookup_and_lock(
-        [
-            ObjectKey(
-                b"chunk",
-                "model",
-                0,
-                cache_salt="tenant",
-                extra_attributes={"encryption_key": "key-1"},
-            )
-        ],
-        {0: MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])},
-    ).result(5)
-    assert task_id == 41
-    assert client.p2p_query_lookup_results(task_id).result(5) == [
-        TransferChannelAddress(offset=8, size=16)
-    ]
 
 
 def test_generated_grpc_server_module_call_round_trips(
@@ -928,6 +914,67 @@ def test_stalled_stream_subscriber_stops_server_reads(grpc_server_mode: str) -> 
         server.close()
 
 
+@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
+def test_kv_event_subscriber_resubscribes_after_stream_handler_error(
+    grpc_server_mode: str,
+) -> None:
+    subscriptions = 0
+
+    class Module:
+        @request_handler()
+        def subscribe_kv_events(
+            self, instance_id: int, model_name: str, cursor: int, max_events: int
+        ) -> MessagingStream[KVEventBatch]:
+            nonlocal subscriptions
+            subscriptions += 1
+            attempt = subscriptions
+            sent = False
+
+            def read(closed: threading.Event) -> KVEventBatch:
+                nonlocal sent
+                if not sent:
+                    sent = True
+                    return KVEventBatch(True, attempt, attempt, False, [])
+                if attempt == 1:
+                    raise RuntimeError("event bus failed")
+                closed.wait()
+                raise StopIteration
+
+            return MessagingStream(read, lambda: None)
+
+    config = MPServerConfig(
+        transport="grpc",
+        host="127.0.0.1",
+        port=0,
+        grpc_server_mode=cast(Any, grpc_server_mode),
+    )
+    server = build_grpc_request_server([cast(Any, Module())], config)
+    server.start()
+    client = GrpcMultiprocessClient(f"grpc://127.0.0.1:{server.bound_port}")  # type: ignore[abstract]
+    updates: list[KVEventBatch | KVEventStreamClosed] = []
+    resubscribed = threading.Event()
+
+    def on_update(subscriber: MPKVEventSubscriber) -> None:
+        for update in subscriber.drain():
+            updates.append(update)
+            if isinstance(update, KVEventBatch) and update.incarnation == 2:
+                resubscribed.set()
+
+    subscriber = MPKVEventSubscriber(client, 1, "model", on_update)
+    try:
+        subscriber.start()
+        assert resubscribed.wait(10)
+        assert updates == [
+            KVEventBatch(True, 1, 1, False, []),
+            KVEventStreamClosed(),
+            KVEventBatch(True, 2, 2, False, []),
+        ]
+    finally:
+        subscriber.close()
+        client.close()
+        server.close()
+
+
 def test_aio_server_releases_threads_when_bind_fails() -> None:
     """A failed bind leaves no event loop or worker threads behind."""
     before = set(threading.enumerate())
@@ -1025,6 +1072,63 @@ def test_second_server_cannot_bind_a_served_port(grpc_server_mode: str) -> None:
 
 def _affinity_workers() -> int:
     return sum(t.name.startswith("grpc-affinity") for t in threading.enumerate())
+
+
+@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
+def test_zmq_client_reports_a_grpc_server_instead_of_waiting(
+    grpc_server_mode: str,
+) -> None:
+    """A ZMQ client pointed at a gRPC server fails its calls with a clear error
+    instead of waiting for them to time out, including a call already sent."""
+    server = build_grpc_request_server(
+        [],
+        MPServerConfig(
+            transport="grpc",
+            host="127.0.0.1",
+            port=0,
+            grpc_server_mode=cast(Any, grpc_server_mode),
+        ),
+    )
+    server.start()
+    client = RequestClientFactory.create(f"tcp://127.0.0.1:{server.bound_port}")
+    try:
+        in_flight = client.noop()
+        with pytest.raises(ConnectionError, match="speaks gRPC"):
+            in_flight.result(timeout=10)
+        with pytest.raises(ConnectionError, match="speaks gRPC"):
+            client.noop().result(timeout=2)
+        with pytest.raises(ConnectionError, match="speaks gRPC"):
+            next(client.subscribe_kv_events(1, "model", 0, 16))
+    finally:
+        client.close()
+        server.close()
+
+
+@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
+def test_zmq_stream_open_before_grpc_detection_fails(grpc_server_mode: str) -> None:
+    """A stream opened right after connecting is usually already sent when the
+    mismatch is found. It fails with the error instead of ending quietly."""
+    server = build_grpc_request_server(
+        [],
+        MPServerConfig(
+            transport="grpc",
+            host="127.0.0.1",
+            port=0,
+            grpc_server_mode=cast(Any, grpc_server_mode),
+        ),
+    )
+    server.start()
+    try:
+        for _ in range(3):
+            client = RequestClientFactory.create(f"tcp://127.0.0.1:{server.bound_port}")
+            try:
+                stream = client.subscribe_kv_events(1, "model", 0, 16)
+                with pytest.raises(ConnectionError, match="speaks gRPC"):
+                    next(stream)
+            finally:
+                client.close()
+    finally:
+        server.close()
 
 
 def test_client_reports_a_zmq_server_instead_of_waiting() -> None:

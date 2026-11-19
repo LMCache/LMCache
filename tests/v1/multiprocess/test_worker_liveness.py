@@ -22,7 +22,8 @@ import zmq
 
 # First Party
 from lmcache.v1.client.transport.factory import RequestClientFactory
-from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -78,7 +79,9 @@ def _event_module(
             model,
             world_size,
             MemoryLayoutDesc([torch.Size([1])], [torch.float16]),
-            AttnWindowDesc(num_chunks_in_sw=[-1] * groups),
+            chunk_size=256,
+            hash_algorithm="blake3",
+            attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1] * groups),
         )
     ctx = MagicMock(event_bus=bus, layout_desc_registry=layouts)
     return KVEventModule(ctx, kv_event_log_size=size), bus
@@ -702,7 +705,12 @@ def test_cpu_events_require_registered_nonempty_geometry(
     registry.unregister("model", 1)
     if groups is not None:
         registry.register(
-            "model", 1, MemoryLayoutDesc([], []), group_layout_descs=groups
+            "model",
+            1,
+            MemoryLayoutDesc([], []),
+            chunk_size=256,
+            hash_algorithm="blake3",
+            group_layout_descs=groups,
         )
     key = _event_key(1)
     _bind_kv(bus, [key])

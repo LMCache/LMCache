@@ -5,6 +5,7 @@
 from collections.abc import Sequence
 from pathlib import Path
 import argparse
+import hashlib
 import os
 import secrets
 
@@ -198,6 +199,17 @@ class APIKeyVerifier:
         for expected_api_key in self._api_keys:
             matched |= secrets.compare_digest(token_bytes, expected_api_key)
         return matched
+
+    def sha256_digests(self) -> tuple[bytes, ...]:
+        """Return the SHA-256 digest of each accepted key.
+
+        For verifiers that check tokens outside Python and should hold only
+        digests, such as the native gRPC server.
+
+        Returns:
+            One 32-byte digest per configured key, in configuration order.
+        """
+        return tuple(hashlib.sha256(key).digest() for key in self._api_keys)
 
     def __repr__(self) -> str:
         """Return a representation that never includes API keys."""
