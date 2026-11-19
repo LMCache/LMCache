@@ -1192,9 +1192,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             # chunk's object into; skip it below instead of failing the
             # whole retrieve. A group with blocks while another has none is
             # a real inconsistency and is left to raise in
-            # trim_and_stage_unfull_chunk_block_ids.
-            unfull_chunk_missing_blocks = bool(unfull_obj_keys) and not any(
-                unfull_block_ids
+            # trim_and_stage_unfull_chunk_block_ids. So is a tail-only
+            # retrieve (num_chunks == 0): with no full chunk loaded either,
+            # skipping would report success while copying nothing.
+            unfull_chunk_missing_blocks = (
+                bool(unfull_obj_keys) and num_chunks > 0 and not any(unfull_block_ids)
             )
 
             # Per object group, the prefetch only locked the in-window suffix
@@ -1322,7 +1324,15 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         event_type=EventType.MP_RETRIEVE_END,
                         session_id=key.request_id,
                         metadata={
-                            "retrieved_count": len(prefetched_keys),
+                            # prefetched_keys keeps a skipped unfull chunk so the
+                            # all-retained check above holds, but nothing was
+                            # copied for it, so do not report it as retrieved.
+                            "retrieved_count": len(prefetched_keys)
+                            - (
+                                len(unfull_retained_keys)
+                                if unfull_chunk_missing_blocks
+                                else 0
+                            ),
                             "device": str(cache_context.device),
                             "engine_id": instance_id,
                             "model_name": model_name,
