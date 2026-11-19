@@ -313,7 +313,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         ("release_imported_event", (1, 1)),
     ]
     for kind, payload in callbacks:
-        module._release_imported_event(payload)
+        module._release_imported_event(cast(tuple[int, int], payload))
     assert released == [0, 1]
     assert sum(call[0] == "record" for call in backend.calls) == 2
     assert sum(call[0] == "export" for call in backend.calls) == 2
