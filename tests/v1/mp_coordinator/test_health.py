@@ -3,10 +3,12 @@
 instance takes down with it."""
 
 # Standard
+from types import SimpleNamespace
 import time
 
 # Third Party
 from fastapi.testclient import TestClient
+import pytest
 
 # First Party
 from lmcache.v1.mp_coordinator.app import create_app
@@ -42,7 +44,14 @@ def test_health_loop_reaps_only_instances_whose_heartbeat_lapsed():
         assert _instance_ids(client) == {"fresh"}
 
 
-def test_health_loop_keeps_instances_that_heartbeat():
+def test_health_loop_keeps_instances_that_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A heartbeat preserves a live instance while the same sweep reaps an idle one."""
+    now = 100.0
+    clock = SimpleNamespace(time=time.time, monotonic=lambda: now)
+    monkeypatch.setattr("lmcache.v1.mp_coordinator.http_apis.instances_api.time", clock)
+    monkeypatch.setattr("lmcache.v1.mp_coordinator.views.instance_registry.time", clock)
     config = MPCoordinatorConfig(
         health_check_interval=0.05,
         instance_timeout=0.3,
@@ -50,9 +59,13 @@ def test_health_loop_keeps_instances_that_heartbeat():
     )
     with TestClient(create_app(config)) as client:
         _register(client, "a")
-        # Several health passes, each well inside the timeout.
-        for _ in range(12):
-            client.put("/instances/a/heartbeat")
+        _register(client, "idle")
+        now += 0.2
+        assert client.put("/instances/a/heartbeat").status_code == 200
+        now += 0.2
+
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and "idle" in _instance_ids(client):
             time.sleep(0.05)
 
         assert _instance_ids(client) == {"a"}
