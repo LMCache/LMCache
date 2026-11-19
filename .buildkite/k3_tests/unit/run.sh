@@ -33,9 +33,11 @@ uv pip install -r requirements/test.txt
 python lmcache/v1/transport/grpc/_proto_gen/_generate.py
 
 # ── Run unit tests with coverage ─────────────────────────────
+# This isolated nightly validation collects every failure in one run.
+# The regular PR pipeline retains its normal first-failure stop.
 RUN_DEVDAX_L1_INTEGRATION=1 RUN_DAX_L2_INTEGRATION=1 \
 LMCACHE_TEST_DEVDAX_L1_PATHS="" LMCACHE_TRACK_USAGE="false" \
-pytest --maxfail=1 --cov=lmcache \
+pytest --maxfail=0 --cov=lmcache \
     --cov-report term --cov-report=html:coverage-test \
     --cov-report=xml:coverage-test.xml --html=durations/test.html \
     --ignore=tests/skipped

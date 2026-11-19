@@ -199,6 +199,10 @@ Run vLLM-dependent unit fixtures against the installed nightly as well.
 At source `8700cc9ba`, the streaming-session helper reads `max_model_len`
 and `num_sampled_tokens_per_step`; a `Scheduler.__new__` fixture must set
 those constructor fields before exercising the real streaming update.
+The SDK ring-buffer fixture must construct `FullAttentionSpec` on older
+engines or `AttentionSpec` on source `8700cc9ba`, where the former class was
+removed. Keep the real `AttentionSpec` instance and layer-selection assertions;
+do not replace this compatibility check with an engine-dependent skip.
 
 vLLM's active nightly index is `cu132`; old tested pins can still point to
 `cu130`. Preserve the archive variant when consuming or promoting a pin.
