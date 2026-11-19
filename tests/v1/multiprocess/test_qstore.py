@@ -79,7 +79,7 @@ def test_register_inserts_unlatched_entry(monkeypatch) -> None:
 
     assert module.tracked_instance_count() == 1
     entry = module.get_and_touch_context_entry(1)
-    assert entry is not None
+    assert entry is not None and entry.chunk_size == 256
 
 
 def test_duplicate_register_refreshes_without_rebuilding(monkeypatch) -> None:
@@ -98,6 +98,17 @@ def test_duplicate_register_refreshes_without_rebuilding(monkeypatch) -> None:
     assert module.tracked_instance_count() == 1
     assert entry.last_seen > 0.0
 
+    with pytest.raises(ValueError, match="already registered"):
+        module.register_q_cache(
+            1,
+            MagicMock(),
+            *REGISTER_ARGS,
+            MagicMock(),
+            MagicMock(),
+            [],
+            chunk_size=512,
+        )
+
 
 def test_reap_uses_two_tier_windows() -> None:
     """Check that the reaper uses two time windows to decide which entries to drop.
@@ -106,9 +117,9 @@ def test_reap_uses_two_tier_windows() -> None:
     old = time.monotonic() - 1000.0
     module._q_contexts.update(
         {
-            1: ContextEntry(MagicMock(), *REGISTER_ARGS, old, True),
-            2: ContextEntry(MagicMock(), *REGISTER_ARGS, old, False),
-            3: ContextEntry(MagicMock(), *REGISTER_ARGS, time.monotonic(), True),
+            1: ContextEntry(MagicMock(), *REGISTER_ARGS, 256, old, True),
+            2: ContextEntry(MagicMock(), *REGISTER_ARGS, 256, old, False),
+            3: ContextEntry(MagicMock(), *REGISTER_ARGS, 256, time.monotonic(), True),
         }
     )
 
@@ -134,7 +145,7 @@ def test_unregister_releases_context_and_layout(monkeypatch) -> None:
     module = _module()
     context = MagicMock()
     context.close.side_effect = lambda: calls.append("close")
-    module._q_contexts[1] = ContextEntry(context, *REGISTER_ARGS, time.monotonic())
+    module._q_contexts[1] = ContextEntry(context, *REGISTER_ARGS, 256, time.monotonic())
 
     module.unregister_q_cache(1)
 
@@ -155,7 +166,9 @@ def test_release_tolerates_backends_without_ipc_collect(monkeypatch) -> None:
         qstore_mod, "torch_dev", SimpleNamespace(empty_cache=lambda: None)
     )
     module = _module()
-    module._q_contexts[1] = ContextEntry(MagicMock(), *REGISTER_ARGS, time.monotonic())
+    module._q_contexts[1] = ContextEntry(
+        MagicMock(), *REGISTER_ARGS, 256, time.monotonic()
+    )
 
     module.unregister_q_cache(1)
 
@@ -249,6 +262,7 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
     module._q_contexts[1] = ContextEntry(
         cache_context,
         *REGISTER_ARGS,
+        256,
         time.monotonic(),
         event_backend=stub_device,
     )
@@ -468,7 +482,11 @@ def test_store_q_tracks_its_blocks_until_completed(stub_device, monkeypatch) -> 
     cache_context.kv_layer_groups_manager.num_kernel_groups = 1
     cache_context.calculate_num_blocks.return_value = 2
     module._q_contexts[1] = ContextEntry(
-        cache_context, *REGISTER_ARGS, time.monotonic(), event_backend=stub_device
+        cache_context,
+        *REGISTER_ARGS,
+        256,
+        time.monotonic(),
+        event_backend=stub_device,
     )
     state = _ring_state(module)
 
@@ -539,7 +557,7 @@ def _sdk_module(stub_device, monkeypatch, attn_desc: Any = None):
     )
     kv_module = MagicMock(name="kv_module")
     kv_module.context_entries_snapshot.return_value = {
-        9: ContextEntry(kv_context, "m", 1, time.monotonic())
+        9: ContextEntry(kv_context, "m", 1, 4, time.monotonic())
     }
     module = QStoreModule(ctx, kv_module)
     ring_context = MagicMock(name="ring_context")
@@ -547,7 +565,11 @@ def _sdk_module(stub_device, monkeypatch, attn_desc: Any = None):
         torch.zeros(_SDK_BLOCKS, 2, 4) for _ in range(_SDK_LAYERS)
     ]
     module._q_contexts[1] = ContextEntry(
-        ring_context, *REGISTER_ARGS, time.monotonic(), event_backend=stub_device
+        ring_context,
+        *REGISTER_ARGS,
+        4,
+        time.monotonic(),
+        event_backend=stub_device,
     )
     _ring_state(module)
     monkeypatch.setattr(
@@ -582,7 +604,11 @@ def test_ring_imports_are_held_on_the_workers_kv_registration(stub_device) -> No
     module = QStoreModule(_ctx(), kv_module)
     ring_context = MagicMock(name="ring_context")
     ring = ContextEntry(
-        ring_context, *REGISTER_ARGS, time.monotonic(), event_backend=stub_device
+        ring_context,
+        *REGISTER_ARGS,
+        256,
+        time.monotonic(),
+        event_backend=stub_device,
     )
     kv_context = kv_module.get_and_touch_context_entry.return_value.cache_context
     kv_context.hold_imported_event.return_value = 7
@@ -599,7 +625,11 @@ def test_ring_imports_without_kv_registration_synchronize(stub_device) -> None:
     module = QStoreModule(_ctx(), None)
     ring_context = MagicMock(name="ring_context")
     ring = ContextEntry(
-        ring_context, *REGISTER_ARGS, time.monotonic(), event_backend=stub_device
+        ring_context,
+        *REGISTER_ARGS,
+        256,
+        time.monotonic(),
+        event_backend=stub_device,
     )
 
     with patch.object(qstore_mod, "submit_callback_to_stream") as submit:
@@ -855,12 +885,12 @@ def test_status_reports_object_layouts_from_the_layout_registry() -> None:
     )
     kv_module = MagicMock(name="kv_module")
     kv_module.context_entries_snapshot.return_value = {
-        9: ContextEntry(MagicMock(), "m", 1, time.monotonic())
+        9: ContextEntry(MagicMock(), "m", 1, 256, time.monotonic())
     }
     module = QStoreModule(ctx, kv_module)
     ring = MagicMock()
     ring.report_status.return_value = {}
-    module._q_contexts[1] = ContextEntry(ring, "m##query", 1, time.monotonic())
+    module._q_contexts[1] = ContextEntry(ring, "m##query", 1, 256, time.monotonic())
 
     layouts = module.report_status()["object_layouts"]
 

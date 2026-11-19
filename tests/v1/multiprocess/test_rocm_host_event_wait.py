@@ -124,6 +124,7 @@ def _build(
     server_context = SimpleNamespace(
         chunk_size=1,
         hash_algorithm_name="blake3",
+        validate_chunk_size=lambda chunk_size: None,
         null_block_id=0,
         storage_manager=_FakeStorageManager(),
         get_read_owners=lambda request_id: None,
@@ -177,6 +178,7 @@ def _build(
             cache_context=cast(Any, cache_context),
             model_name="model",
             world_size=1,
+            chunk_size=256,
             event_backend=cast(
                 Any, waiter.wrap(backend) if waiter is not None else backend
             ),
