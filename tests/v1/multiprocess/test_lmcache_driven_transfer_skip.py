@@ -592,6 +592,45 @@ def test_retrieve_of_only_an_unfull_chunk_skips_aux_groups(monkeypatch):
     assert unfull_transfers == [0, 1]
 
 
+def test_retrieve_skips_unfull_chunk_with_no_allocated_blocks(monkeypatch):
+    """A full-prompt hit vLLM cut back to a chunk boundary (its own cache
+    recomputed the prompt's exact tail locally) allocates GPU blocks for the
+    full chunks only. The retrieve must not fail: there is nothing to load
+    the unfull chunk's object into, so it is skipped instead of raising
+    (regression test for #6751)."""
+    module, read_calls, transfer_calls = _make_module(
+        monkeypatch, 1, num_chunks_in_sw=[-1]
+    )
+    module.context.resolve_unfull_chunk_obj_keys.return_value = ["g0u"]
+    trim_calls: list[Any] = []
+    monkeypatch.setattr(
+        mod,
+        "trim_and_stage_unfull_chunk_block_ids",
+        lambda *a, **k: trim_calls.append(a) or (a[1], [0], [0]),
+    )
+    unfull_transfers: list[int] = []
+    monkeypatch.setattr(
+        mod,
+        "transfer_unfull_chunk",
+        lambda cc, block_ids, skips, leads, memory_obj, group, buffer, direction: (
+            unfull_transfers.append(group)
+        ),
+    )
+
+    # Exactly 1 block == num_chunks(1) * blocks_per_chunk(1): no extra block
+    # was allocated for the trailing unfull chunk.
+    _handle, ok = module.retrieve(_unfull_key(), 1, [[7]], b"x")
+
+    assert ok is True
+    # Only the full chunk is read and transferred; the unfull chunk's
+    # object is never read or transferred, and trim_and_stage is never
+    # reached (it would have raised "unfull chunk has no block for group").
+    assert read_calls == [["g0c0"]]
+    assert [g for g, _ in transfer_calls] == [0]
+    assert trim_calls == []
+    assert unfull_transfers == []
+
+
 def _no_unfull(chunk_size: int) -> bool:
     """``has_unfull_chunk`` of a key double that addresses full chunks only."""
     return False

@@ -1185,6 +1185,18 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 (instance_id, import_token),
             )
 
+            # A full-prompt hit vLLM cut back to a chunk boundary (e.g. it
+            # recomputed the prompt's exact tail locally) allocates GPU
+            # blocks for only the num_chunks full chunks, none for the
+            # trailing unfull chunk. There is then nothing to load that
+            # chunk's object into; skip it below instead of failing the
+            # whole retrieve. A group with blocks while another has none is
+            # a real inconsistency and is left to raise in
+            # trim_and_stage_unfull_chunk_block_ids.
+            unfull_chunk_missing_blocks = bool(unfull_obj_keys) and not any(
+                unfull_block_ids
+            )
+
             # Per object group, the prefetch only locked the in-window suffix
             # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
             # attention, where the value is < 0). Read and transfer only those.
@@ -1258,18 +1270,30 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     )
                     prefetched_keys.extend(in_window_keys)
                 if retrieve_succeeded and unfull_retained_keys:
-                    total_bytes += self._retrieve_unfull_chunk_objects(
-                        cache_context,
-                        key,
-                        unfull_retained_keys,
-                        [
-                            group
-                            for group in range(num_object_groups)
-                            if group not in skipped_groups
-                        ],
-                        unfull_block_ids,
-                        max(0, skip_first_n_tokens - num_chunks * self._ctx.chunk_size),
-                    )
+                    if unfull_chunk_missing_blocks:
+                        logger.info(
+                            "No GPU blocks allocated for request %s's unfull "
+                            "chunk; skipping it and keeping the %d full "
+                            "chunks already retrieved.",
+                            key.request_id,
+                            num_chunks,
+                        )
+                    else:
+                        total_bytes += self._retrieve_unfull_chunk_objects(
+                            cache_context,
+                            key,
+                            unfull_retained_keys,
+                            [
+                                group
+                                for group in range(num_object_groups)
+                                if group not in skipped_groups
+                            ],
+                            unfull_block_ids,
+                            max(
+                                0,
+                                skip_first_n_tokens - num_chunks * self._ctx.chunk_size,
+                            ),
+                        )
                     prefetched_keys.extend(unfull_retained_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
@@ -1284,7 +1308,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     )
                 num_tokens = (
                     num_chunks * self._ctx.chunk_size
-                    + (key.end % self._ctx.chunk_size if unfull_obj_keys else 0)
+                    + (
+                        key.end % self._ctx.chunk_size
+                        if unfull_obj_keys and not unfull_chunk_missing_blocks
+                        else 0
+                    )
                     if len(prefetched_keys) == expected_retained
                     else 0
                 )
