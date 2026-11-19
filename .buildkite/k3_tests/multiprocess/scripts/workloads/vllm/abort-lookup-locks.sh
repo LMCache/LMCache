@@ -9,6 +9,8 @@
 #      wait for GPU blocks after their lookups hit (and read-lock the hit).
 #   4. Disconnects every client after ABORT_AFTER_SECONDS, which aborts all
 #      requests, WAITING ones included.
+#      It requires vllm:num_requests_waiting > 0 and read-locked objects at
+#      that moment, so a run that never aborts a WAITING hit fails.
 #   5. Asserts the L1 read_locked_count returns to 0 within
 #      LOCK_RELEASE_TIMEOUT seconds, far below the 300 s read-lock TTL that
 #      released the leaked locks before the fix.
@@ -79,6 +81,21 @@ def read_locked_count() -> int:
         status = json.load(response)
     l1_managers = status["storage_manager"]["l1_managers"]
     return sum(l1["read_locked_count"] for l1 in l1_managers.values())
+
+
+def vllm_gauge(name: str) -> int:
+    """Sum a vLLM Prometheus gauge over its label sets."""
+    with urllib.request.urlopen(
+        f"http://localhost:{VLLM_PORT}/metrics", timeout=10
+    ) as response:
+        body = response.read().decode()
+    return int(
+        sum(
+            float(line.rsplit(" ", 1)[1])
+            for line in body.splitlines()
+            if line.startswith(name + "{") or line.startswith(name + " ")
+        )
+    )
 
 
 def complete(prompt: str) -> None:
@@ -165,7 +182,9 @@ deadline = time.monotonic() + ABORT_AFTER_SECONDS
 while time.monotonic() < deadline:
     peak = max(peak, read_locked_count())
     time.sleep(0.2)
-# Locks held at the abort belong to requests still waiting after a hit.
+# The precondition: requests still WAITING while lookup locks are held.
+waiting_at_abort = vllm_gauge("vllm:num_requests_waiting")
+running_at_abort = vllm_gauge("vllm:num_requests_running")
 at_abort = read_locked_count()
 peak = max(peak, at_abort)
 
@@ -175,6 +194,7 @@ for thread in threads:
     thread.join(timeout=30)
 aborted_at = time.monotonic()
 print(f"read_locked_count: peak {peak}, at the abort {at_abort}")
+print(f"vLLM at the abort: {waiting_at_abort} waiting, {running_at_abort} running")
 errors = [status for status in statuses if b" 200 " not in status]
 if errors:
     sys.exit(f"FAIL: streamed requests returned {errors[:3]}")
@@ -194,6 +214,8 @@ with open(os.path.join(TEST_DIR, "result.json"), "w") as output:
             "num_docs": NUM_DOCS,
             "peak_read_locked_count": peak,
             "read_locked_count_at_abort": at_abort,
+            "num_requests_waiting_at_abort": waiting_at_abort,
+            "num_requests_running_at_abort": running_at_abort,
             "final_read_locked_count": count,
             "seconds_after_abort": elapsed,
             "samples": samples,
@@ -202,10 +224,15 @@ with open(os.path.join(TEST_DIR, "result.json"), "w") as output:
         indent=2,
     )
 
-# Without locks at the abort no request was aborted after a hit: the test
-# would pass without exercising the fix.
-if at_abort == 0:
-    sys.exit("FAIL: no object was read-locked at the abort; no hit was aborted")
+# Without WAITING requests and held locks at the abort, no request was
+# aborted while waiting after a hit: the test would pass without exercising
+# the fix. Shrink NUM_GPU_BLOCKS_OVERRIDE or raise NUM_DOCS if this trips.
+if waiting_at_abort == 0 or at_abort == 0:
+    sys.exit(
+        "FAIL: precondition not met at the abort: "
+        f"{waiting_at_abort} requests WAITING, {at_abort} objects read-locked "
+        "(both must be > 0)"
+    )
 if count != 0:
     sys.exit(
         f"FAIL: {count} objects still read-locked {elapsed:.1f}s after aborting "

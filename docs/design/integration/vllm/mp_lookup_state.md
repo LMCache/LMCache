@@ -133,11 +133,15 @@ Why the client, not END_SESSION, releases a consumed lookup: once the server
 hands the hit over, only the scheduler knows whether a load was scheduled for
 it. Each TP rank's RETRIEVE releases its share of the locks from its own
 connection after its copy finishes, and nothing orders END_SESSION after
-those RETRIEVEs. Read locks are anonymous per-object counts, so an
-END_SESSION that released a consumed hit whose RETRIEVE is still coming would
-either drop another request's lock on the same object or unlock an object a
-copy is still reading. The client sends the FREE only while the tracker is
-still `PREFETCHING`, before `update_state_after_alloc` can plan a load.
+those RETRIEVEs: vLLM finishes an aborted `WAITING_FOR_REMOTE_KVS` request
+whose load already started right away, keeping only its blocks
+(`Scheduler.finish_requests`), so its END_SESSION can reach the server while
+the ranks still retrieve. Read locks are anonymous per-object counts, so an
+END_SESSION that also released that hit would either drop another request's
+lock on the same object (see `test_lookup_lock_release_tp2.py`) or unlock an
+object a copy still reads, which `L1Manager.delete` may then free. The
+client sends the FREE only while the tracker is still `PREFETCHING`, before
+`update_state_after_alloc` can plan a load.
 
 ## Known gaps
 
@@ -155,3 +159,9 @@ still `PREFETCHING`, before `update_state_after_alloc` can plan a load.
   and a server that never answers the FREE never gets the END_SESSION. vLLM
   appends a random suffix to request ids, so the first occurs only with
   `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION` set.
+- A lookup the server consumed whose reply has not reached the client when
+  the request is aborted gets no FREE, and END_SESSION does not release a
+  consumed result, so its locks wait for the read-lock TTL. Measured on CPU
+  at world size 2: 4 of 4 per-rank and 2 of 2 replicated objects stay
+  read-locked. Closing it needs the scheduler's "no load planned" bit to reach
+  the server, for example a defaulted flag on END_SESSION.
