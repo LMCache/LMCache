@@ -866,6 +866,10 @@ def _engine_with_layout(group_kinds):
     entry.cache_context.kv_layer_groups_manager.get_attn_desc.return_value = MagicMock(
         num_object_groups=len(group_kinds), group_kinds=group_kinds
     )
+    # No stream: fingerprint jobs go to the plain queue. A mock stream would
+    # submit them to the process-global CUDA completion recorder on a GPU
+    # host, leaking completions into later tests that drain it.
+    entry.cache_context.cupy_stream = None
     eng._transfer_module.get_and_touch_context_entry.return_value = entry
     return eng
 
