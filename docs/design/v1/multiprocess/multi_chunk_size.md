@@ -314,11 +314,9 @@ support model-specific effective chunk sizes. While either feature is enabled:
 - the MP server requires each registration's effective chunk size to equal its
   configured `--chunk-size` and rejects mismatches;
 - an MP server registering with Coordinator continues to report its configured
-  `--chunk-size`. The existing `PUT /config/chunk-size` binding and the
-  `chunk_size` field in `POST /instances` remain part of the registration
-  protocol;
+  `--chunk-size` through the `chunk_size` field in `POST /instances`;
 - Coordinator returns HTTP 409 when a server reports a value different from
-  the fleet's finalized global chunk size, so the mismatched server is not
+  the Coordinator's configured global chunk size, so the mismatched server is not
   registered; and
 - deployments must configure the MP servers and Coordinator with one chunk size
   that satisfies every connected model.

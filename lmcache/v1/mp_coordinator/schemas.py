@@ -131,7 +131,8 @@ class RegisterRequest(BaseModel):
         http_port: Port of the mp server's HTTP server, which the coordinator
             calls to push work to this instance.
         metadata: Free-form registration hints.
-        chunk_size: Final chunk size, when negotiation has already completed.
+        chunk_size: Configured MP server chunk size. Optional for compatibility
+            with servers that predate coordinator chunk-size validation.
         p2p_advertised_url: URL the instance advertises for peer-to-peer
             transfers. Optional -- empty when the instance does not participate
             in P2P.
@@ -185,18 +186,6 @@ class HeartbeatResponse(BaseModel):
     """
 
     instance_id: str
-
-
-class ChunkSizeBindRequest(BaseModel):
-    """Final chunk size negotiated by an MP server fleet."""
-
-    chunk_size: int = Field(ge=1)
-
-
-class ChunkSizeBindResponse(BaseModel):
-    """Coordinator chunk size after a successful binding."""
-
-    chunk_size: int
 
 
 # -- Quota management --------------------------------------------------------

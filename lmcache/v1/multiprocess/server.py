@@ -27,7 +27,6 @@ from lmcache.v1.distributed.config import (
     parse_args_to_config,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
-from lmcache.v1.mp_coordinator.registrar import bind_coordinator_chunk_size
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
     add_observability_args,
@@ -473,19 +472,7 @@ def _start_cache_server(
             engine.attach_p2p_server(p2p_server)
 
         InitializeMPUsageContext(mp_config, storage_manager_config)
-        continuous_usage = InitializeMPContinuousUsage(event_bus, ctx.chunk_size)
-        if continuous_usage is not None:
-            ctx.add_chunk_size_bind_listener(continuous_usage.update_chunk_size)
-        if coordinator_config.url:
-
-            def bind_chunk_size_to_coordinator(chunk_size: int) -> None:
-                bind_coordinator_chunk_size(
-                    coordinator_config.url,
-                    chunk_size,
-                    api_key_files=mp_config.api_key_files,
-                )
-
-            ctx.add_chunk_size_bind_listener(bind_chunk_size_to_coordinator)
+        InitializeMPContinuousUsage(event_bus, ctx.chunk_size)
         InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
         InitializeL1Usage(event_bus, ctx.storage_manager)
 
