@@ -27,6 +27,7 @@ pytest.importorskip("cupy", reason="GPU cache context tests require cupy")
 pytest.importorskip("lmcache.cuda_ops", reason="Requires lmcache.cuda_ops")
 
 # First Party
+from lmcache.v1.common.kv_format.types import LayoutHints  # noqa: E402
 from lmcache.v1.memory_allocators.lazy_memory_allocator import (  # noqa: E402
     LazyMemoryAllocator,
 )
@@ -34,7 +35,14 @@ from lmcache.v1.memory_management import MemoryObj  # noqa: E402
 from lmcache.v1.multiprocess.object_group_transfer import (  # noqa: E402
     direct_transfer_supported,
     downsample_and_stage_block_ids,
+    engines,
     transfer_kv_per_object_group,
+)
+from lmcache.v1.multiprocess.object_group_transfer.gpu_dma import (  # noqa: E402
+    GpuDmaEngine,
+)
+from lmcache.v1.multiprocess.object_group_transfer.nvme_dma import (  # noqa: E402
+    NvmeDmaEngine,
 )
 from lmcache.v1.platform.devices.cuda.cache_context import (  # noqa: E402
     GPUCacheContext,
@@ -100,7 +108,17 @@ _CASES = {
         256,
         6,
     ),
+    # vLLM unified KV in HND with a single KV head per rank: same bytes as
+    # NHD, so it takes the direct path (64-token blocks keep it above the
+    # direct path's 32 KB block floor).
+    "hnd_one_head": (
+        [96, 1, 64, 2 * 128],
+        lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS,
+        256,
+        6,
+    ),
 }
+_LAYOUT_HINTS: dict[str, LayoutHints] = {"hnd_one_head": {"kv_layout": "HND"}}
 _NUM_LAYERS = 4
 
 
@@ -113,6 +131,7 @@ def _make_context(name: str) -> tuple[GPUCacheContext, list[torch.Tensor]]:
     ctx = GPUCacheContext(
         [_FakeIPCWrapper(t) for t in tensors],  # type: ignore
         lmcache_tokens_per_chunk=chunk_tokens,
+        layout_hints=_LAYOUT_HINTS.get(name),
         engine_type=EngineType.SGLANG if is_sglang else EngineType.VLLM,
     )
     assert ctx.get_engine_kv_format(0) == expected_fmt
@@ -233,6 +252,9 @@ def test_retrieve_direct_matches_kernel(name: str, allocator: LazyMemoryAllocato
         after_kernel = [t.clone() for t in tensors]
         for t, snap in zip(tensors, before, strict=True):
             t.copy_(snap)
+        # The restore runs on the default stream; finish it before the next
+        # transfer starts on the context's stream.
+        torch_dev.synchronize()
 
         _run(
             ctx, block_ids, objs, H2D, "direct", ctx.max_batch_size, skip_first_n_tokens
@@ -245,6 +267,130 @@ def test_retrieve_direct_matches_kernel(name: str, allocator: LazyMemoryAllocato
             for k, snap in zip(after_kernel, before, strict=True)
         )
         for obj in objs:
+            allocator.free(obj)
+    finally:
+        ctx.close()
+
+
+def test_multi_head_hnd_is_not_direct(allocator: LazyMemoryAllocator) -> None:
+    """The same HND layout with several KV heads per rank stays on the kernel
+    path: its paged block is not one token-major run."""
+    tensors = [
+        torch.rand([96, 2, 16, 2 * 128], dtype=_DTYPE, device=_DEVICE)
+        for _ in range(_NUM_LAYERS)
+    ]
+    ctx = GPUCacheContext(
+        [_FakeIPCWrapper(t) for t in tensors],  # type: ignore
+        lmcache_tokens_per_chunk=256,
+        layout_hints={"kv_layout": "HND"},
+    )
+    try:
+        assert (
+            ctx.get_engine_kv_format(0)
+            == lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS
+        )
+        objs = _allocate_objects(allocator, ctx, 1, fill=False)
+        assert direct_transfer_supported(ctx, 0, objs, [[0]]) is False
+        for obj in objs:
+            allocator.free(obj)
+    finally:
+        ctx.close()
+
+
+def _mix_engines(monkeypatch, objs: list[MemoryObj], storage_first: bool) -> None:
+    """Treat every other pair of chunks as storage-backed, so the group
+    splits into several runs across both engines. ``storage_first`` makes
+    the first pair storage-backed, else the second.
+
+    The objects are host memory, so the NVMe engine's staging step is
+    replaced by the host copy; its runs still take the staged loop."""
+    staged = {
+        id(obj)
+        for index, obj in enumerate(objs)
+        if ((index // 2) % 2 == 0) == storage_first
+    }
+    monkeypatch.setattr(NvmeDmaEngine, "stage", GpuDmaEngine.stage)
+    monkeypatch.setattr(
+        engines,
+        "select_engine",
+        lambda obj: (
+            engines.TransferEngine.NVME_DMA
+            if id(obj) in staged
+            else engines.TransferEngine.GPU_DMA
+        ),
+    )
+
+
+# ``storage_first`` puts the skipped token prefix in a staged run. ``kernel``
+# withholds the host block ids, so host-memory runs take the native plan
+# with a chunk range and not the direct copy.
+_MIXES = [(False, "direct"), (True, "direct"), (False, "kernel"), (True, "kernel")]
+
+
+@pytest.mark.parametrize("storage_first, mode", _MIXES)
+@pytest.mark.parametrize("name", sorted(_CASES))
+def test_retrieve_mixed_engines_matches_single_engine(
+    name: str,
+    storage_first: bool,
+    mode: str,
+    allocator: LazyMemoryAllocator,
+    monkeypatch,
+):
+    """H2D with the chunks split across engines, batch size 4 and a skipped
+    token prefix: the same pages as when one engine moves the whole group."""
+    ctx, tensors = _make_context(name)
+    _, _, chunk, num_chunks = _CASES[name]
+    blocks_per_chunk = ctx.calculate_num_blocks(chunk, 0)
+    block_ids = [random.sample(range(ctx.num_blocks), num_chunks * blocks_per_chunk)]
+    skip_first_n_tokens = chunk + chunk // blocks_per_chunk
+    try:
+        objs = _allocate_objects(allocator, ctx, num_chunks, fill=True)
+        before = [t.clone() for t in tensors]
+        _run(
+            ctx, block_ids, objs, H2D, "direct", ctx.max_batch_size, skip_first_n_tokens
+        )
+        single = [t.clone() for t in tensors]
+        for t, snap in zip(tensors, before, strict=True):
+            t.copy_(snap)
+        # The restore runs on the default stream; finish it before the next
+        # transfer starts on the context's stream.
+        torch_dev.synchronize()
+
+        _mix_engines(monkeypatch, objs, storage_first)
+        _run(ctx, block_ids, objs, H2D, mode, ctx.max_batch_size, skip_first_n_tokens)
+        for expected, got in zip(single, tensors, strict=True):
+            assert _bitwise_equal(expected, got)
+        for obj in objs:
+            allocator.free(obj)
+    finally:
+        ctx.close()
+
+
+@pytest.mark.parametrize("storage_first, mode", _MIXES)
+@pytest.mark.parametrize("name", sorted(_CASES))
+def test_store_mixed_engines_matches_single_engine(
+    name: str,
+    storage_first: bool,
+    mode: str,
+    allocator: LazyMemoryAllocator,
+    monkeypatch,
+):
+    """D2H with the chunks split across engines: the same object bytes as
+    when one engine moves the whole group."""
+    ctx, _tensors = _make_context(name)
+    _, _, _chunk, num_chunks = _CASES[name]
+    blocks_per_chunk = ctx.calculate_num_blocks(ctx.lmcache_tokens_per_chunk, 0)
+    block_ids = [random.sample(range(ctx.num_blocks), num_chunks * blocks_per_chunk)]
+    try:
+        single_objs = _allocate_objects(allocator, ctx, num_chunks, fill=False)
+        mixed_objs = _allocate_objects(allocator, ctx, num_chunks, fill=False)
+        _run(ctx, block_ids, single_objs, D2H, "direct", ctx.max_batch_size, 0)
+        _mix_engines(monkeypatch, mixed_objs, storage_first)
+        _run(ctx, block_ids, mixed_objs, D2H, mode, ctx.max_batch_size, 0)
+        for expected, got in zip(single_objs, mixed_objs, strict=True):
+            assert torch.equal(_object_bytes(expected), _object_bytes(got))
+            assert int(_object_bytes(got).sum()) != 0  # something was copied
+        for obj in single_objs + mixed_objs:
             allocator.free(obj)
     finally:
         ctx.close()

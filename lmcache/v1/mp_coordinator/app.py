@@ -343,7 +343,7 @@ def _outbound_http_headers(
     if authentication is not None:
         return authentication.client_auth_headers()
     # First Party
-    from lmcache.v1.multiprocess.transport.auth import request_client_auth_headers
+    from lmcache.v1.transport.auth import request_client_auth_headers
 
     return request_client_auth_headers()
 

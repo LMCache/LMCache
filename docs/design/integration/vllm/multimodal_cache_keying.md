@@ -88,7 +88,7 @@ Do the migration when the first of these lands, not before:
 - **A second engine integration wants shared keys with vLLM semantics**
   (SGLang/TRT-LLM beyond the bypass guard).
 
-Migration sketch: (1) extend `CacheEngineKey`/`_hash_tokens` call sites to
+Migration sketch: (1) extend `ObjectKey`/`_hash_tokens` call sites to
 accept per-chunk `extra_keys`; (2) version the MP wire protocol and storage
 key schema (old entries miss, never collide); (3) reimplement `mm_hash` as
 an extra-key producer; (4) drop `apply_mm_hashes_to_token_ids` after one
@@ -105,8 +105,9 @@ Substitution is applied on:
   [`LMCache_inprocess`](https://github.com/LMCache/LMCache_inprocess)
   package: save, load, lookup),
 - the main MP connector (`lmcache_mp_metadata.py`; every key-carrying call
-  in `lmcache_mp_connector.py` — lookup, store, retrieve, lock management,
-  eager prefetch — goes through the tracker's `get_token_ids()`).
+  reads the tracker's substituted ids through `packed_token_ids()`: lookup,
+  eager prefetch and lock release in `lmcache_mp_connector.py`, store and
+  retrieve metadata in `lmcache_mp_metadata.py`).
 
 NOT yet handled (multimodal requests on these paths can still cross-hit and
 need either substitution or an MM bypass guard):

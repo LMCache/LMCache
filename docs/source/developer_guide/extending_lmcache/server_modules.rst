@@ -230,7 +230,7 @@ Both ZMQ and gRPC clients expose ``server_module_call``:
 
    import msgspec
 
-   from lmcache.v1.multiprocess.protocols.server_module import (
+   from lmcache.v1.transport.server_module import (
        ServerModuleCallRequest,
    )
 

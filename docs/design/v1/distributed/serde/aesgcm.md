@@ -13,6 +13,11 @@ RAM) and L0 (GPU) hold plaintext, so a party with access to a running MP server
 process is not defended against — a different threat model. This is
 at-rest confidentiality for the durable tier, not end-to-end.
 
+Each frame is also authenticated together with its object key: a modified
+frame, or a frame found under a key other than the one it was stored under,
+fails to load instead of being served as that key's KV (see
+[Binding a frame to its object key](#binding-a-frame-to-its-object-key)).
+
 ## Why the serde layer
 
 The serde runs on both legs of the L1↔L2 round trip — `serialize` on store,
@@ -42,8 +47,8 @@ composed before encryption.
 [1B version][12B IV][ciphertext || 16B GCM tag]
 ```
 
-- **version** — format byte, so the scheme can evolve without breaking stored
-  blobs.
+- **version** — format byte, so the scheme can evolve. The current version is
+  `2`; version `1` frames are rejected (see below).
 - **IV** — a fresh random 96-bit nonce per chunk, stored in the clear (not
   secret; must be unique — a repeated (key, IV) breaks GCM).
 - **ciphertext ‖ tag** — AES-GCM output; ciphertext is the plaintext length (no
@@ -52,9 +57,35 @@ composed before encryption.
 Fixed overhead is 29 bytes/chunk, so `estimate_serialized_size` is exact
 (plaintext + 29), not an upper bound.
 
-A tag mismatch (tampering or wrong key) raises `InvalidTag`, which the wrapper
-turns into a load failure → treated as a cache miss (re-fetch / recompute),
-never silent corruption.
+A tag mismatch (tampering, wrong key, or a frame stored under another object
+key) raises `InvalidTag`, which the wrapper turns into a load failure → treated
+as a cache miss (re-fetch / recompute), never silent corruption.
+
+### Binding a frame to its object key
+
+The AES key depends only on `cache_salt`, so every object of one salt shares
+it. To tie a frame to the object it was computed for, each frame also passes
+the full object identity as AES-GCM associated data on both encrypt and
+decrypt. A frame then decrypts only under its own key, so a storage-side
+mix-up, such as an off-by-one chunk mapping, is a cache miss rather than KV for
+other tokens. Associated data is authenticated
+but not stored, so the frame size is unchanged. It is encoded unambiguously:
+
+```
+"lmcache-l2-aesgcm-aad-v2"
+u32 len ‖ chunk_hash
+u32 len ‖ model_name (UTF-8)
+i64 kv_rank ‖ u64 object_group_id
+u32 len ‖ cache_salt (UTF-8)
+u32 tag count ‖ (u32 len ‖ name ‖ u32 len ‖ value) per tag, sorted by name
+```
+
+Integers are big-endian. Request-scoped `extra_attributes` are not part of the
+identity, so they are excluded.
+
+Version `1` frames have no associated data and fail with the
+malformed/unknown-version `ValueError`, so objects stored by earlier versions
+are recomputed once after an upgrade.
 
 ### Deserialize length derivation
 

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.transport.base import RequestClient
+    from lmcache.v1.transport.request_client import RequestClient
 
 
 def create_request_client(
@@ -35,7 +35,7 @@ def create_request_client(
     from lmcache.v1.client.transport.grpc_impl.client import (
         GrpcMultiprocessClient,
     )
-    from lmcache.v1.multiprocess.transport.auth import load_request_client_api_key
+    from lmcache.v1.transport.auth import load_request_client_api_key
 
     # Descriptor-derived methods are installed on the class at import time.
     return GrpcMultiprocessClient(  # type: ignore[abstract]

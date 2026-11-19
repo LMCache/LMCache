@@ -8,6 +8,7 @@ import threading
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -27,7 +28,6 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     PeerL2AdapterBase,
     PeerL2AdapterConfigBase,
 )
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.memory_management import BorrowedMemoryObj, MemoryObj
 
 
@@ -129,9 +129,7 @@ class BorrowingMockL2Adapter(PeerL2AdapterBase):
         # lookups of the same key outstanding at once.
         self.hold_lookups = False
         with (
-            patch.object(
-                p2p_mod.RequestClientFactory, "create", return_value=self._owner
-            ),
+            patch.object(p2p_mod, "P2PClient", return_value=self._owner),
             patch.object(p2p_mod, "PeriodicEventNotifier") as notifier,
         ):
             notifier.get.return_value = MagicMock()

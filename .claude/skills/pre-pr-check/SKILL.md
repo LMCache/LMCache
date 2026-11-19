@@ -102,17 +102,18 @@ These are judgment calls and should be reported, not auto-fixed:
 15. **Boolean parameters on public APIs** (Section 4.3).
 16. **New features without tests** (Section 5.2).
 17. **Bug fixes without regression tests** (Section 5.2).
-18. **Unbounded collection growth** (Section 7.6): A set/dict that is appended to without cleanup.
-19. **Error paths that leave state inconsistent** (Section 7.5): Exceptions that skip lock release, FD close, or pool free.
-20. **Missing design doc** for non-trivial new features (Section 5.1).
-21. **PR scope too large** (Section 1.1): If the diff touches many unrelated modules, suggest how to split.
-22. **Lock protocol violations** (Section 8): Debug methods not holding `self._lock`; shared state accessed without synchronization.
-23. **Defensive programming** (Section 10.1): Handling for failures that cannot occur — speculative `None` checks, fallback defaults, or a broad `try/except` wrapping a large block outside a thread/RPC/background-loop boundary.
-24. **AI comment/TODO violations** (Section 10.2): Comments narrating the change ("now we...", "previously..."), boilerplate docstrings restating signatures on internal helpers, or TODOs that defer required work or lack a GitHub handle.
-25. **Engine or model leakage** (Section 4.6): Inference-engine types, scheduler semantics, model-family branches, or engine-specific cache layouts outside `lmcache/integration/<engine>/`.
-26. **Middle-layer backend coupling** (Section 4.6): Orchestration code branches on concrete accelerator, storage-backend, or transport names instead of using the corresponding platform, storage, or transfer contract.
-27. **Closed extension points** (Section 4.6): Independently maintained implementations require edits to a central vendor list when a bounded registry, entry point, plugin, or subclass discovery boundary is appropriate.
-28. **Unnecessary indirection** (Section 4.6): Opaque data structures, reflection, metaprogramming, or inheritance on a non-critical path without a demonstrated extension or performance requirement.
+18. **User-facing features without an end-to-end test** (Section 5.2): a new or changed CLI command, flag, or server API that only has unit tests. Ask for a test that drives the feature through that entry point.
+19. **Unbounded collection growth** (Section 7.6): A set/dict that is appended to without cleanup.
+20. **Error paths that leave state inconsistent** (Section 7.5): Exceptions that skip lock release, FD close, or pool free.
+21. **Missing design doc** for non-trivial new features (Section 5.1).
+22. **PR scope too large** (Section 1.1): If the diff touches many unrelated modules, suggest how to split.
+23. **Lock protocol violations** (Section 8): Debug methods not holding `self._lock`; shared state accessed without synchronization.
+24. **Defensive programming** (Section 10.1): Handling for failures that cannot occur — speculative `None` checks, fallback defaults, or a broad `try/except` wrapping a large block outside a thread/RPC/background-loop boundary.
+25. **AI comment/TODO violations** (Section 10.2): Comments narrating the change ("now we...", "previously..."), boilerplate docstrings restating signatures on internal helpers, or TODOs that defer required work or lack a GitHub handle.
+26. **Engine or model leakage** (Section 4.6): Inference-engine types, scheduler semantics, model-family branches, or engine-specific cache layouts outside `lmcache/integration/<engine>/`.
+27. **Middle-layer backend coupling** (Section 4.6): Orchestration code branches on concrete accelerator, storage-backend, or transport names instead of using the corresponding platform, storage, or transfer contract.
+28. **Closed extension points** (Section 4.6): Independently maintained implementations require edits to a central vendor list when a bounded registry, entry point, plugin, or subclass discovery boundary is appropriate.
+29. **Unnecessary indirection** (Section 4.6): Opaque data structures, reflection, metaprogramming, or inheritance on a non-critical path without a demonstrated extension or performance requirement.
 
 ### Step 4 -- Apply fixes
 

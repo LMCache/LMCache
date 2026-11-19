@@ -18,7 +18,6 @@ from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.auth import (
     GrpcAioAuthenticationInterceptor,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import ServiceBinding
 from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
     GrpcMultiprocessServerBase,
 )
@@ -28,6 +27,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     client_affinity_key,
 )
 from lmcache.v1.transport.futures import MessagingStream
+from lmcache.v1.transport.grpc.descriptors import ServiceBinding
 
 logger = init_logger(__name__)
 
@@ -90,6 +90,7 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
         max_gpu_workers: int,
         grpc_server_workers: int,
         authentication: APIKeyVerifier | None = None,
+        rpc_client: type | None = None,
     ) -> None:
         super().__init__(
             bind_url,
@@ -97,6 +98,7 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
             max_gpu_workers,
             grpc_server_workers,
             authentication,
+            rpc_client,
         )
         # The loop must not block, so normal handlers need their own threads
         # here instead of the sync server's semaphore.

@@ -57,7 +57,7 @@ issues = "https://github.com/LMCache/LMCache"
 version_file = "lmcache/_version.py"
 # do not include +gREV local version, required for Test PyPI upload
 local_scheme = "no-local-version"
-# only treat vX.Y.Z-style tags as version anchors; ignores nightly/nightly-cu129 tags
+# only treat vX.Y.Z-style tags as version anchors; ignores nightly tags
 tag_regex = "^v?(?P<version>\\d+\\.\\d+\\.\\d+.*)$"
 git_describe_command = ["git", "describe", "--tags", "--long", "--match", "v[0-9]*.[0-9]*", "--exclude", "v*-*"]
 
@@ -171,7 +171,7 @@ follow_imports = "silent"
 
 [[tool.mypy.overrides]]
 module = [
-    "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.*",
+    "lmcache.v1.transport.grpc._proto_gen.*",
     "lmcache.v1.memory_orchestrator._proto_gen.*",
 ]
 ignore_errors = true

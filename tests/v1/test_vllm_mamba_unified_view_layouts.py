@@ -2,6 +2,7 @@
 """Layout coverage for the Mamba unified-state view in kv_cache_group_edits."""
 
 # Standard
+from dataclasses import replace
 from typing import cast
 
 # Third Party
@@ -11,9 +12,9 @@ import torch
 pytest.importorskip("vllm", reason="kv_cache_group_edits imports vLLM at module top")
 
 # Third Party
+from vllm.v1 import kv_cache_interface  # noqa: E402
 from vllm.v1.kv_cache_interface import (  # noqa: E402
     KVCacheConfig,
-    KVCacheGroupSpec,
     MambaSpec,
 )
 
@@ -21,7 +22,7 @@ from vllm.v1.kv_cache_interface import (  # noqa: E402
 from lmcache.integration.vllm.kv_cache_group_edits import (  # noqa: E402
     apply_kv_cache_group_edits,
 )
-from lmcache.v1.gpu_connector.utils import LayoutHints  # noqa: E402
+from lmcache.v1.common.utils import LayoutHints  # noqa: E402
 
 NUM_BLOCKS = 3
 BLOCK_SIZE = 16
@@ -31,6 +32,28 @@ BLOCK_STEP = 8064
 # ceil(STATE_ROW / BLOCK_SIZE) = 500, rounded up to the 16-byte (8 x bf16)
 # alignment: 504 * 16 * 2 bytes fills the padded page exactly.
 HEAD_SIZE = 504
+
+
+def _mamba_config(spec: MambaSpec) -> KVCacheConfig:
+    """Build an align-mode Mamba group using either vLLM cache-group API."""
+    if hasattr(kv_cache_interface, "KVCacheGroup"):
+        # Third Party
+        from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+        group = kv_cache_interface.KVCacheGroup(
+            kv_cache_specs={"layer.0": spec},
+            manager_config=kv_cache_interface.ManagerConfig(
+                MambaManager, MambaManager.Params(mamba_cache_mode="align")
+            ),
+            block_size=spec.block_size,
+        )
+    else:
+        group = kv_cache_interface.KVCacheGroupSpec(
+            ["layer.0"], replace(spec, mamba_cache_mode="align")
+        )
+    return KVCacheConfig(
+        num_blocks=NUM_BLOCKS, kv_cache_tensors=[], kv_cache_groups=[group]
+    )
 
 
 def _unified_mamba_layer() -> tuple[KVCacheConfig, dict[str, torch.Tensor]]:
@@ -50,13 +73,8 @@ def _unified_mamba_layer() -> tuple[KVCacheConfig, dict[str, torch.Tensor]]:
         shapes=((STATE_ROW,),),
         dtypes=(torch.bfloat16,),
         page_size_padded=BLOCK_STEP * storage.element_size(),
-        mamba_cache_mode="align",
     )
-    config = KVCacheConfig(
-        num_blocks=NUM_BLOCKS,
-        kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
-    )
+    config = _mamba_config(spec)
     return config, {"layer.0": kv_cache}
 
 
@@ -100,13 +118,8 @@ def _unpadded_byte_state_layer(
         shapes=((row,),),
         dtypes=(torch.uint8,),
         page_size_padded=row,
-        mamba_cache_mode="align",
     )
-    config = KVCacheConfig(
-        num_blocks=NUM_BLOCKS,
-        kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
-    )
+    config = _mamba_config(spec)
     return config, {"layer.0": kv_cache}
 
 
