@@ -146,7 +146,10 @@ afterwards.
 4. **Reserve** (`_transition_to_load_phase`). For each L2 adapter in the plan,
    `reserve_write` staging buffers in its affinity L1 manager under a
    per-request write tag, with retention decided per key by
-   `policy.plan_l1_retention` (every key is retained under `NO_LOCK`).
+   `policy.plan_l1_retention` (every key is retained under `NO_LOCK`). For an
+   L1 the request may read, it passes `allow_resident=True`, so a key another
+   request landed since the lookup is staged anyway and admission read-locks
+   the resident copy.
    Reservation failure is **per cell**: `L2_PREFETCH_FAILED` is published with
    reason `l1_oom` or `l1_contended`, the affected L2 locks are returned, and
    the request is re-planned on what was reserved. Staging buffers the replan
@@ -253,9 +256,15 @@ Gauges: `lmcache_mp.num_inflight_l2_loads`,
 - **L2 recency skips L1-only requests.** Adapters that refresh LRU recency on
   lookup (S3, Valkey, Bigtable, HF bucket, SageMaker HyperPod) do not see a
   request L1 alone serves, so a chunk hot in L1 can age out of L2 first.
-- **Write conflicts are misses.** A key that becomes resident between the
-  lookup and the reserve step fails reservation (`l1_contended`) and is
-  reported as a miss; the engine recomputes and re-stores it.
+- **Write conflicts cost a redundant load.** A key that becomes resident in a
+  readable L1 between the lookup and the reserve step is staged and loaded
+  anyway, and admission keeps the resident copy. `l1_contended` reports a key
+  resident in an affinity L1 the request may not read.
+- **`NO_LOCK` can be served a temporary object.** `NO_LOCK` retains every
+  key it loads, but admission of a key that landed meanwhile keeps the
+  resident object as it is. If another request loaded that object as
+  temporary, the cell is reported as a hit, but the object is freed when its
+  last reader releases it, so a warm prefetch can leave the key out of L1.
 - **Uniform rows.** Every key group has the same number of keys.
 
 ## Contract-anchoring tests
@@ -265,10 +274,11 @@ with a real `DramL1Manager` and `MockL2Adapter`:
 
 - `TestL1AndL2` — an L1 suffix extends an L2 prefix into one hit; resident
   keys are not reloaded; L1 hits outside the prefix are released.
-- `TestReservationFailures` — an out-of-memory or contended cell drops its L2
-  lock and the request replans (`"prefix"` shortens the hit, `"full"` keeps
-  the other cells, `"whole_chunk"` keeps only the columns every row
-  reserved); an L1 hit survives a racing evictor.
+- `TestReservationFailures` — an out-of-memory cell drops its L2 lock and the
+  request replans (`"prefix"` shortens the hit, `"full"` keeps the other
+  cells, `"whole_chunk"` keeps only the columns every row reserved); a key
+  another writer admits after the lock pass is still served under both
+  `"prefix"` and `"full"`; an L1 hit survives a racing evictor.
 - `TestLockModeAndRetention` — `NO_LOCK` releases every L1 lock at finish and
   leaves loaded objects permanent; `"skip_l1"` deletes loaded keys after the
   retrieve, `"default"` keeps them.
