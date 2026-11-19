@@ -1198,7 +1198,6 @@ class TestHf3fsShardDirs:
             assert not any(_wait_for_completions(client)[0][3])
         finally:
             client.close()
-            shutil.rmtree(base, ignore_errors=True)
 
     def test_concurrent_stores_create_shared_shard_dir(
         self, hf3fs_test_base_path: Path
@@ -1220,7 +1219,6 @@ class TestHf3fsShardDirs:
             )
         finally:
             client.close()
-            shutil.rmtree(base, ignore_errors=True)
 
     def test_key_buffer_scan_finds_sharded_files(
         self, hf3fs_test_base_path: Path
@@ -1250,7 +1248,6 @@ class TestHf3fsShardDirs:
         finally:
             scanner.close()
             flat_reader.close()
-            shutil.rmtree(base, ignore_errors=True)
 
     def test_multi_base_path_with_shard_dirs(self) -> None:
         """Sharding applies inside each base path selected for a key."""
