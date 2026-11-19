@@ -19,13 +19,13 @@ from starlette.types import ASGIApp
 from typing_extensions import Self
 
 # First Party
-from lmcache.security.api_key import (
+from lmcache.security.http import HTTPBearerAuthenticationMiddleware
+from lmcache.v1.common.security.api_key import (
     APIKeyVerifier,
     load_api_keys_from_files,
     load_service_api_keys,
 )
-from lmcache.security.bearer import bearer_token
-from lmcache.security.http import HTTPBearerAuthenticationMiddleware
+from lmcache.v1.common.security.bearer import bearer_token
 
 # Paths that stay reachable without credentials even when authentication is on.
 # ``/healthz`` is the orchestrator liveness probe: it returns only
