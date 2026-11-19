@@ -170,6 +170,12 @@ is required for engine-driven mode because a restarted server exposes a new
 shared-memory/IPC context. Operations skipped while unhealthy return cache
 misses or failed placeholders, allowing SGLang to recompute the KV data.
 
+Recovery callbacks flag a store progress reset. `ready_prefix_count()` propagates
+the request through its existing `MIN` collective so all TP/PP ranks reset together.
+This keeps store decisions aligned. For example, if TP0 recovers after all ranks
+stored `[0, 512)`, every rank resets to zero at the next poll, allowing that range
+to be retried.
+
 ## Data model and registration
 
 ### Token, page, and chunk granularity
@@ -215,9 +221,10 @@ must reuse `group_layers_by_identity` or include physical block stride in its
 key. Otherwise, the engine/server group mismatch fails registration in
 `KVLayerGroupsManager` instead of transferring data with the wrong layout.
 
-When SWA or recurrent-state groups are present, the LMCache MP server must use
-`--separate-object-groups`. Without it, the distinct retention requirements are
-collapsed into full-attention semantics.
+When groups resolve to different cross-chunk retention windows, or any group
+holds recurrent state, object-group separation must remain enabled on the
+LMCache MP server. It is enabled by default; explicitly disabling it collapses
+distinct retention requirements into full-attention semantics.
 
 ### One-time GPU tensor registration
 

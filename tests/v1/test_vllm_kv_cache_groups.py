@@ -502,6 +502,86 @@ def test_conversion_tokens_per_block_unscaled_without_dcp():
     assert [g.tokens_per_block for g in explicit] == [16, 16]
 
 
+class FullAttentionManager:
+    pass
+
+
+class SlidingWindowManager:
+    pass
+
+
+class MambaManager:
+    pass
+
+
+class CircularBufferManager:
+    pass
+
+
+@dataclass
+class KVCacheGroup:
+    """Double of vLLM's ``KVCacheGroup`` after vllm-project/vllm#61452: layers
+    keep their own specs, and the policy lives on ``manager_config``."""
+
+    kv_cache_specs: "dict[str, object]"
+    manager_cls: type
+    block_size: int
+    params: object = field(default_factory=SimpleNamespace)
+    dcp_sharded: bool = True
+    prefix_cacheable: bool = True
+
+    @property
+    def manager_config(self) -> SimpleNamespace:
+        return SimpleNamespace(manager_cls=self.manager_cls, params=self.params)
+
+    @property
+    def layer_names(self) -> list[str]:
+        return list(self.kv_cache_specs)
+
+    @property
+    def distinct_specs(self) -> tuple[object, ...]:
+        return tuple(self.kv_cache_specs.values())
+
+
+def test_conversion_reads_kv_cache_group_manager_config() -> None:
+    """The window, the Mamba mode and scratch groups come from the manager
+    config; the spec's own Mamba mode is ignored."""
+    groups = [
+        KVCacheGroup({"layer.0": AttentionSpec(16)}, FullAttentionManager, 16),
+        KVCacheGroup(
+            {"layer.1": AttentionSpec(16)},
+            SlidingWindowManager,
+            16,
+            SimpleNamespace(sliding_window=64),
+        ),
+        KVCacheGroup(
+            {"layer.2": MambaSpec(16, mamba_cache_mode="none")},
+            MambaManager,
+            16,
+            SimpleNamespace(mamba_cache_mode="align"),
+            dcp_sharded=False,
+        ),
+        KVCacheGroup(
+            {"layer.3": AttentionSpec(16)},
+            CircularBufferManager,
+            16,
+            prefix_cacheable=False,
+        ),
+    ]
+    names = ["layer.0", "layer.1", "layer.2", "layer.3"]
+
+    spec = create_engine_group_infos_from_vllm(
+        SimpleNamespace(kv_cache_groups=groups),
+        _same_shape_caches(names),
+        dcp_size=2,
+    )
+
+    assert [g.engine_group_id for g in spec] == [0, 1, 2]
+    assert [g.sw_size_tokens for g in spec] == [-1, 64, 16]
+    assert [g.tokens_per_block for g in spec] == [32, 32, 16]
+    assert [g.recurrent_state for g in spec] == [False, False, True]
+
+
 @dataclass
 class CircularBufferSpec(AttentionSpec):
     """Per-request scratch ring (QSA compressor state); opts out of caching."""

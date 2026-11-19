@@ -337,7 +337,7 @@ class KVLayerGroupsManager:
         engine_kv_formats: "Sequence[lmcache_native.EngineKVFormat]",
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         lmcache_tokens_per_chunk: int = 256,
-        separate_object_groups: bool = False,
+        separate_object_groups: bool = True,
     ) -> None:
         """Partition the layers into kernel groups for this set of KV caches.
 
@@ -355,10 +355,9 @@ class KVLayerGroupsManager:
             engine_group_infos: Engine KV cache group metadata, one info per
                 kernel group in kernel-group order, or empty.
             lmcache_logical_chunk_size: Tokens per LMCache chunk
-            separate_object_groups: When True, split kernel groups
-                into one object group per sliding-window size; when False
-                (default), all kernel groups share a single full-attention
-                object group.
+            separate_object_groups: When True (default), split kernel groups
+                into one object group per sliding-window size; when False, all
+                kernel groups share a single full-attention object group.
         """
         # Import here to break a circular import via
         # External connectors may import metadata while this module initializes.
@@ -632,9 +631,8 @@ class KVLayerGroupsManager:
             groups apart.
 
         Note:
-            With object-group separation disabled (the default), the result
-            has a single full-attention entry. ``full_sw_kv`` does not affect
-            the windows.
+            With object-group separation disabled, the result has a single
+            full-attention entry. ``full_sw_kv`` does not affect the windows.
         """
         kinds: tuple[GroupKind, ...] = tuple(
             "aux" if g.aux else ("recurrent" if g.recurrent else "attention")
@@ -677,8 +675,8 @@ class KVLayerGroupsManager:
         """Bucket kernel groups into object groups.
 
         Puts all kernel groups into a single object group when object-group
-        separation is disabled (the default). Otherwise groups the kernel
-        groups by (recurrent, sliding-window chunks), except that tagged
+        separation is disabled. Otherwise groups the kernel groups by
+        (recurrent, sliding-window chunks), except that tagged
         extra groups (``extra_object_group_tag``, connector-private) bucket
         by tag — and always sort after the regular groups, so the shared
         group ids match a registration without any extras.
