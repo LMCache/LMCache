@@ -869,9 +869,9 @@ def test_serialized_handler_error_returns_remote_error() -> None:
         server.close()
 
 
-def test_serialized_stream_handler_error_closes_client_stream() -> None:
-    """A failing serialized stream handler must end the client's stream
-    promptly instead of leaving it open."""
+def test_serialized_stream_handler_error_reaches_client_stream() -> None:
+    """A failing serialized stream handler must fail the client's stream
+    promptly with the handler's error instead of leaving it open."""
 
     def failing_subscribe(
         instance_id: int, model_name: str, cursor: int, max_events: int
@@ -890,11 +890,19 @@ def test_serialized_stream_handler_error_closes_client_stream() -> None:
             client.submit_request("subscribe_kv_events", [1, "model", 0, 16])
         )
         assert isinstance(stream, MessagingStream)
-        closed = threading.Event()
-        stream.add_close_callback(closed.set)
-        assert closed.wait(timeout=1)
-        with pytest.raises(StopIteration):
-            next(stream)
+        outcomes: queue.Queue[KVEventBatch | Exception] = queue.Queue()
+
+        def read_next(subscription: MessagingStream[KVEventBatch]) -> None:
+            try:
+                outcomes.put(next(subscription))
+            except Exception as exc:
+                outcomes.put(exc)
+
+        threading.Thread(target=read_next, args=(stream,), daemon=True).start()
+        outcome = outcomes.get(timeout=1)
+        assert isinstance(outcome, MPRequestError), outcome
+        assert outcome.code == "handler_error"
+        assert outcome.details == "subscribe_kv_events: subscribe exploded"
     finally:
         client.close()
         server.close()

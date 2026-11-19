@@ -354,6 +354,17 @@ class MessageQueueClient:
 
         if request_uid in self.pending_streams:
             stream, rpc_spec, responses = self.pending_streams[request_uid]
+            if (
+                decode_operation(b_operation) == ZMQ_ERROR_OPERATION
+                and len(b_response) == 1
+            ):
+                error = decode_error_response(b_response[0])
+                self.pending_streams.pop(request_uid, None)
+                put_stream_error(
+                    responses,
+                    MPRequestError(error.code, f"{error.operation}: {error.message}"),
+                )
+                return
             try:
                 if (
                     decode_operation(b_operation) != rpc_spec.operation
