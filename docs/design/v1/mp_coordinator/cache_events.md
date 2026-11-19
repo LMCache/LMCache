@@ -143,7 +143,9 @@ listener plumbing or a dedicated flush task:
   zero with event reporting off (and no hashing anywhere: the directory
   indexes tokens by the chunk hash already in every key). Only
   worker 0 reports: bindings depend on token content alone, so one
-  report covers every rank's keys. Other store paths (engine-driven
+  report covers every rank's keys. A LOOKUP on a server with an L2
+  adapter publishes the same event for the chunks it may load, so L1
+  `STORE` entries of loaded chunks carry tokens too. Other store paths (engine-driven
   transfer, blend pre-computed docs, the qstore plugin module) do not emit
   bindings yet — the engine-driven path can publish the same event from
   its ``commit_store`` when it needs directory tokens.
