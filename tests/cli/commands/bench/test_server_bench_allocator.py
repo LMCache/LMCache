@@ -77,15 +77,26 @@ def test_custom_null_block_id_is_excluded() -> None:
         allocator.allocate(1)
 
 
-@pytest.mark.parametrize("null_block_id", [-1, 8])
+def test_minus_one_disables_the_null_block() -> None:
+    """-1 is the server's no-null-block sentinel: every id carries data."""
+    allocator = BlockAllocator(1, 3, null_block_id=-1)
+    assert allocator.allocate(3).as_block_ids() == [[0, 1, 2]]
+
+
+@pytest.mark.parametrize("null_block_id", [-2, 8])
 def test_out_of_range_null_block_id_is_rejected(null_block_id: int) -> None:
     """A null block id outside the id space fails loudly, not silently."""
-    with pytest.raises(ValueError, match="null block id must be in"):
+    with pytest.raises(ValueError, match="null block id must be -1 or in"):
         BlockAllocator(1, 8, null_block_id=null_block_id)
 
 
-def test_empty_allocator_accepts_default_null_block_id() -> None:
-    """The zero-capacity placeholder used before startup stays constructible."""
-    allocator = BlockAllocator(0, 0)
-    with pytest.raises(RuntimeError):
+def test_exhaustion_when_the_only_block_is_null() -> None:
+    """A pool whose single block is the null block allocates nothing."""
+    allocator = BlockAllocator(1, 1)
+    with pytest.raises(RuntimeError, match="only 0 free"):
         allocator.allocate(1)
+
+
+def test_empty_allocator_stays_constructible() -> None:
+    """The zero-capacity placeholder used before startup stays constructible."""
+    assert BlockAllocator(0, 0).allocate(1).as_block_ids() == []

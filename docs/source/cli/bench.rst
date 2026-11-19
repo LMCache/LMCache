@@ -1158,7 +1158,8 @@ Options
    * - ``--null-block-id N``
      - ``0``
      - Server null block id, never allocated; must match the server's
-       ``--null-block-id`` so one-block chunks are not silently dropped.
+       ``--null-block-id`` (``-1`` disables it) so one-block chunks are
+       not silently dropped.
    * - ``--start N``
      - ``0``
      - First sequence number to run.

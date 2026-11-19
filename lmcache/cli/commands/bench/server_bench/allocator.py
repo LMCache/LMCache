@@ -32,6 +32,8 @@ class BlockAllocator:
     The server's null block (``--null-block-id``, default ``0``) is never
     handed out: the MP server drops every chunk whose block ids are all
     null, so allocating it would silently lose data (issue #6741).
+    ``-1`` disables the null block, as on the server, making every id
+    allocatable.
     """
 
     def __init__(
@@ -50,24 +52,27 @@ class BlockAllocator:
             capacity: Block id space size per group (ids ``0..capacity-1``);
                 the null block is excluded, leaving ``capacity - 1``
                 allocatable blocks when it is in range.
-            null_block_id: Block id reserved as the server's null block.
+            null_block_id: Block id reserved as the server's null block,
+                or ``-1`` when the server disables the null block and every
+                id carries data.
             allocation_order: Hand out the lowest free ids or sample randomly.
             seed: Seed for the random allocation order.
 
         Raises:
             ValueError: If groups or capacity is negative, the allocation
-                order is unsupported, or the null block id is not a valid
-                block id for a non-empty pool.
+                order is unsupported, or the null block id is neither ``-1``
+                nor a valid block id of a non-empty pool.
         """
         if groups < 0 or capacity < 0:
             raise ValueError("groups and capacity must be non-negative")
         if allocation_order not in ("sequential", "random"):
             raise ValueError(f"unsupported allocation order: {allocation_order}")
-        if capacity > 0 and not 0 <= null_block_id < capacity:
+        if capacity > 0 and null_block_id != -1 and not 0 <= null_block_id < capacity:
             raise ValueError(
-                f"null block id must be in [0, {capacity}), got {null_block_id}"
+                f"null block id must be -1 or in [0, {capacity}), got {null_block_id}"
             )
-        self._free = [set(range(capacity)) - {null_block_id} for _ in range(groups)]
+        reserved = set() if null_block_id == -1 else {null_block_id}
+        self._free = [set(range(capacity)) - reserved for _ in range(groups)]
         self._allocation_order = allocation_order
         self._random = random.Random(seed)
 
