@@ -271,36 +271,6 @@ class KeyDirectory(View):
             self._blend_chunk_size = chunk_size
             self._blend_probe_stride = probe_stride
 
-    def bind_chunk_size(self, chunk_size: int) -> None:
-        """Rebuild the optional blend index for the fleet's finalized size."""
-        with self._lock:
-            if not self._blend_lookup_enabled or self._blend_chunk_size == chunk_size:
-                return
-
-            blend_index = BlendIndex(
-                chunk_size=chunk_size, probe_stride=self._blend_probe_stride
-            )
-            for chunk_hash, binding in self._token_bindings.items():
-                if (
-                    not binding.token_ids.size
-                    or binding.token_offset == UNKNOWN_TOKEN_OFFSET
-                ):
-                    continue
-                namespaces = {
-                    BlendNamespace.from_object_key(key) for key in binding.keys
-                }
-                for namespace in namespaces:
-                    if binding.is_missing_a_key_in(namespace):
-                        continue
-                    blend_index.add(
-                        binding.token_ids,
-                        chunk_hash,
-                        binding.token_offset,
-                        namespace,
-                    )
-            self._blend_index = blend_index
-            self._blend_chunk_size = chunk_size
-
     def consume(self, batch: CacheEventBatch) -> None:
         """Apply one gate-admitted batch, idempotently: re-storing
         upserts the placement (and its token binding), deleting an
