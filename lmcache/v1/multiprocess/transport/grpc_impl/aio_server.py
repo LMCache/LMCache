@@ -13,7 +13,7 @@ import grpc
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.security.api_key import APIKeyVerifier
+from lmcache.v1.common.security.api_key import APIKeyVerifier
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.auth import (
     GrpcAioAuthenticationInterceptor,

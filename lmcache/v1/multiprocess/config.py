@@ -13,7 +13,7 @@ import uuid
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.security.api_key import add_api_key_args
+from lmcache.v1.common.security.api_key import add_api_key_args
 from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleSpec,
     parse_server_module_specs,
