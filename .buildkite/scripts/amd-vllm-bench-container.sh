@@ -79,4 +79,7 @@ for device_idx in range(torch.cuda.device_count()):
     )
 PY
 
+# Compare identical attention block geometry on both servers.
+export VLLM_BLOCK_SIZE=64
+
 exec .buildkite/k3_tests/multiprocess/scripts/run-single-test.sh vllm_bench
