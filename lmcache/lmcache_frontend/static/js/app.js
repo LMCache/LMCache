@@ -757,41 +757,32 @@ function escapeHtmlStr(str) {
     return div.innerHTML;
 }
 
-// Load metrics information
-async function loadMetrics() {
+// Keep text diagnostics and their stale-response checks together.
+async function loadTextTab(path, contentId, label) {
     if (!currentNode) return;
     const node = currentNode;
-
-    const contentDiv = document.getElementById('metricsContent');
+    const contentDiv = document.getElementById(contentId);
     contentDiv.textContent = 'Loading...';
 
     try {
-        const response = await fetch(transformPath('metrics'));
-        const metrics = await response.text();
+        const response = await fetch(transformPath(path));
+        const text = await response.text();
         if (currentNode !== node) return;
-        contentDiv.textContent = metrics;
+        contentDiv.textContent = text;
     } catch (error) {
         if (currentNode !== node) return;
-        contentDiv.textContent = `Failed to load metrics: ${error.message}`;
+        contentDiv.textContent = `Failed to load ${label}: ${error.message}`;
     }
 }
 
-// Load threads information
-async function loadThreads() {
-    if (!currentNode) return;
-    const node = currentNode;
-    const contentDiv = document.getElementById('threadsContent');
-    contentDiv.textContent = 'Loading...';
+// Load metrics information
+function loadMetrics() {
+    return loadTextTab('metrics', 'metricsContent', 'metrics');
+}
 
-    try {
-        const response = await fetch(transformPath('threads'));
-        const threads = await response.text();
-        if (currentNode !== node) return;
-        contentDiv.textContent = threads;
-    } catch (error) {
-        if (currentNode !== node) return;
-        contentDiv.textContent = `Failed to load threads: ${error.message}`;
-    }
+// Load threads information
+function loadThreads() {
+    return loadTextTab('threads', 'threadsContent', 'threads');
 }
 
 // Load log level
@@ -943,41 +934,13 @@ async function setConfig() {
 }
 
 // Load meta information
-async function loadMeta() {
-    if (!currentNode) return;
-    const node = currentNode;
-
-    const contentDiv = document.getElementById('metaContent');
-    contentDiv.textContent = 'Loading...';
-
-    try {
-        const response = await fetch(transformPath('meta'));
-        const text = await response.text();
-        if (currentNode !== node) return;
-        contentDiv.textContent = text;
-    } catch (error) {
-        if (currentNode !== node) return;
-        contentDiv.textContent = `Failed to load meta information: ${error.message}`;
-    }
+function loadMeta() {
+    return loadTextTab('meta', 'metaContent', 'meta information');
 }
 
 // Load inference information
-async function loadInference() {
-    if (!currentNode) return;
-    const node = currentNode;
-
-    const contentDiv = document.getElementById('inferenceContent');
-    contentDiv.textContent = 'Loading...';
-
-    try {
-        const response = await fetch(transformPath('inference_info'));
-        const text = await response.text();
-        if (currentNode !== node) return;
-        contentDiv.textContent = text;
-    } catch (error) {
-        if (currentNode !== node) return;
-        contentDiv.textContent = `Failed to load inference information: ${error.message}`;
-    }
+function loadInference() {
+    return loadTextTab('inference_info', 'inferenceContent', 'inference information');
 }
 
 // Load environment variables

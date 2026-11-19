@@ -78,3 +78,76 @@ test('An old configuration read cannot overwrite a newly selected node', async (
     assert.equal(ui.document.getElementById('configContent').textContent, 'Node B configuration');
     assert.ok(ui.requests.every(request => request.url.startsWith('/proxy2/node-a/')));
 });
+
+// These controls prove that Overview reaches each renderer before testing cancellation.
+for (const mode of ['mp', 'version', 'version-error']) {
+    test(`Overview renders the ${mode} path while its target remains selected`, async () => {
+        const ui = dashboard(url => {
+            if (url.endsWith('/api/status')) return mode === 'mp'
+                ? Response.json({is_healthy: true, engine_type: '<MP & engine>'})
+                : new Response('Not Found', {status: 404});
+            if (mode === 'version-error') throw new Error('<offline & unavailable>');
+            return new Response('<version & value>');
+        });
+        ui.run("currentNode = {name: 'cache', host: 'localhost', port: 8080}");
+        await ui.run('loadOverview()');
+        const html = ui.document.getElementById('overviewContent').innerHTML;
+        assert.match(html, mode === 'mp' ? /&lt;MP &amp; engine&gt;/
+            : mode === 'version' ? /&lt;version &amp; value&gt;/
+            : /Failed to load overview: &lt;offline &amp; unavailable&gt;/);
+        assert.equal(ui.requests.length, mode === 'mp' ? 1 : 2);
+    });
+}
+
+for (const mode of ['mp', 'version', 'version-error']) {
+    for (const selection of ['clear', 'switch']) {
+        test(`Overview ${mode} cannot overwrite the UI after ${selection}`, async () => {
+            let complete;
+            let started;
+            const waiting = new Promise(resolve => { started = resolve; });
+            const ui = dashboard(url => {
+                if (url === '/api/proxies') return Response.json({proxies: []});
+                if (mode !== 'mp' && url.endsWith('/api/status')) return new Response('', {status: 404});
+                started();
+                return new Promise((resolve, reject) => { complete = mode === 'version-error' ? reject : resolve; });
+            });
+            ui.run("currentNode = {name: 'node-a', host: 'localhost', port: 8080}");
+            const pending = ui.run('loadOverview()');
+            await waiting;
+            if (selection === 'clear') ui.run('clearEnvFilter()');
+            else {
+                ui.run("currentNode = {name: 'node-b'}");
+                ui.document.getElementById('overviewContent').innerHTML = 'Node B overview';
+            }
+            complete(mode === 'version-error' ? new Error('offline') : mode === 'mp'
+                ? Response.json({is_healthy: true, engine_type: 'MP'}) : new Response('old version'));
+            await pending;
+            assert.equal(ui.document.getElementById('overviewContent').innerHTML,
+                selection === 'clear' ? 'Please select a target node first' : 'Node B overview');
+            assert.ok(ui.requests.filter(request => request.url !== '/api/proxies')
+                .every(request => request.url.startsWith('/proxy2/node-a/')));
+        });
+    }
+}
+
+for (const [loader, path, content, label] of [
+    ['loadMetrics', 'metrics', 'metricsContent', 'metrics'],
+    ['loadThreads', 'threads', 'threadsContent', 'threads'],
+    ['loadMeta', 'meta', 'metaContent', 'meta information'],
+    ['loadInference', 'inference_info', 'inferenceContent', 'inference information'],
+]) {
+    test(`${loader} preserves its endpoint, text and error label`, async () => {
+        let failed = false;
+        const ui = dashboard(() => {
+            if (failed) throw new Error('offline');
+            return new Response('<diagnostic text>');
+        });
+        ui.run("currentNode = {name: 'cache'}");
+        await ui.run(`${loader}()`);
+        assert.equal(ui.requests.at(-1).url, `/proxy2/cache/${path}`);
+        assert.equal(ui.document.getElementById(content).textContent, '<diagnostic text>');
+        failed = true;
+        await ui.run(`${loader}()`);
+        assert.equal(ui.document.getElementById(content).textContent, `Failed to load ${label}: offline`);
+    });
+}
