@@ -862,7 +862,6 @@ def test_store_omits_skip_mask_when_disabled_or_nothing_cached(enabled, chunks):
 
 def _engine_with_layout(group_kinds):
     eng = _store_hook_engine([True, True])
-    eng._cb_fingerprint_groups = BlendModule._cb_fingerprint_groups.__get__(eng)
     entry = MagicMock()
     entry.cache_context.kv_layer_groups_manager.get_attn_desc.return_value = MagicMock(
         num_object_groups=len(group_kinds), group_kinds=group_kinds

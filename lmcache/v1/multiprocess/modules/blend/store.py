@@ -93,9 +93,18 @@ class StoreMixin:
         # Fingerprint a chunk once the groups a blend reads (attention + aux)
         # hold it: under align-mode Mamba the recurrent group stores only the
         # checkpoint chunk, and requiring it would fingerprint that one chunk.
-        read_gids = self._cb_fingerprint_groups(instance_id)
-        if read_gids is not None:
-            extra["mask_object_groups"] = read_gids
+        # With no registered instance or blend read set, check every group.
+        try:
+            entry = self._transfer_module.get_and_touch_context_entry(instance_id)
+            if entry is not None:
+                attn_desc = entry.cache_context.kv_layer_groups_manager.get_attn_desc()
+                extra["mask_object_groups"] = _classify_cb_read_groups(
+                    attn_desc.num_object_groups, attn_desc.group_kinds
+                ).blend_gids
+        except Exception:
+            logger.debug(
+                "CB fingerprint groups unresolved for instance %d", instance_id
+            )
         handle, store_ok, stored_mask = self._transfer_module.store_with_chunk_mask(
             key, instance_id, gpu_block_ids, event_ipc_handle, **extra
         )
@@ -176,33 +185,6 @@ class StoreMixin:
             )
 
         return result
-
-    def _cb_fingerprint_groups(self, instance_id: int) -> tuple[int, ...] | None:
-        """Object groups a stored chunk must be committed in to be fingerprinted.
-
-        These are the groups a blend reads (attention + aux, never recurrent
-        state). Never raises.
-
-        Args:
-            instance_id: The GPU instance the store comes from.
-
-        Returns:
-            The blend read groups, or None (check every object group) when the
-            instance is unregistered or its layout has no blend read set.
-        """
-        try:
-            entry = self._transfer_module.get_and_touch_context_entry(instance_id)
-            if entry is None:
-                return None
-            attn_desc = entry.cache_context.kv_layer_groups_manager.get_attn_desc()
-            return _classify_cb_read_groups(
-                attn_desc.num_object_groups, attn_desc.group_kinds
-            ).blend_gids
-        except Exception:
-            logger.debug(
-                "CB fingerprint groups unresolved for instance %d", instance_id
-            )
-            return None
 
     def _record_prompt(self, key: IPCCacheServerKey, session: Any) -> None:
         """Remember a stored prompt for the reorder planner. The chain starts
