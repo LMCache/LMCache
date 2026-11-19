@@ -33,11 +33,12 @@ from lmcache.v1.transport.grpc.utils import GRPC_CHANNEL_OPTIONS, request_error
 from lmcache.v1.transport.rpc import rpc_method
 
 T = TypeVar("T")
-# Deadline of a lookup, query or probe call. The lookup and query also fail
-# fast instead of waiting for a connection: a request must not wait on a peer
-# that is down, and a call abandoned at its deadline is cancelled, so it is
-# not replayed when the peer comes back (which would take read locks nobody
-# releases until the peer's read TTL).
+# Deadline of a lookup or probe call. Lookups and queries also fail fast
+# instead of waiting for a connection, so no request waits on a peer that is
+# down. A lookup queued behind a down peer is dropped at the deadline instead
+# of being sent, and read-locking keys, when the peer comes back. The query
+# has no deadline: the peer hands out a result once, so a reply that came
+# after a deadline would be lost; the lookup deadline bounds the wait.
 LOOKUP_RPC_TIMEOUT_S = 3.0
 _lookup_request, _ = compile_request_codec_for_types(
     pb.P2pLookupAndLockRequest, (list[ObjectKey], dict[int, MemoryLayoutDesc])
@@ -124,8 +125,7 @@ class P2PClient:
         """Poll the task; None means pending, a list contains peer addresses."""
         return _future(
             self._stub.P2PQueryLookupResults.future(
-                pb.P2pQueryLookupResultsRequest(task_id=task_id),
-                timeout=LOOKUP_RPC_TIMEOUT_S,
+                pb.P2pQueryLookupResultsRequest(task_id=task_id)
             ),
             _query_result,
         )
@@ -167,9 +167,10 @@ class P2PClient:
     def probe(self) -> MessagingFuture[None]:
         """Check that the peer answers, with an unlock of no keys.
 
-        Unlike a lookup, the call waits for a connection (up to the lookup
-        deadline), which also makes the channel reconnect to a peer that is
-        back without waiting for its reconnect backoff.
+        Unlike a lookup, the call waits for a connection, up to the lookup
+        deadline, so a peer that is down is probed at most once per deadline.
+        An answer shows that the peer's RPC server is up, not that its lookup
+        path works.
 
         Returns:
             A future that completes when the peer answers, or fails with the

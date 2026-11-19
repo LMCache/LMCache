@@ -1238,3 +1238,18 @@ def test_unacknowledged_peer_is_skipped_until_a_probe_is_answered(ack_error):
         assert adapter.query_lookup_and_lock_result(task_id).popcount() == 0
         assert req_client.p2p_lookup_and_lock.call_count == 3
         assert req_client.probe.call_count == 3
+
+
+def test_a_peer_error_on_an_ack_does_not_skip_the_peer():
+    """An ack the peer answered with an error is a miss for that lookup only:
+    the next lookup is still sent and no probe goes out."""
+    with _adapter() as (adapter, req_client, *_):
+        req_client.p2p_lookup_and_lock.side_effect = [
+            _FakeFuture(exc=MPRequestError("INTERNAL", "boom")),
+            _PendingFuture(),
+        ]
+        task_id = adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+        assert adapter.query_lookup_and_lock_result(task_id).popcount() == 0
+        adapter.submit_lookup_and_lock_task([_key(1)], {0: _LAYOUT})
+        assert req_client.p2p_lookup_and_lock.call_count == 2
+        req_client.probe.assert_not_called()

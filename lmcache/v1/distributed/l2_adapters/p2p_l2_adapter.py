@@ -61,7 +61,11 @@ from lmcache.v1.distributed.p2p import LOOKUP_RPC_TIMEOUT_S, P2PClient
 from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
-from lmcache.v1.transport.errors import REQUEST_FAILURES
+from lmcache.v1.transport.errors import (
+    REQUEST_FAILURES,
+    MPRequestError,
+    MPServerUnavailableError,
+)
 from lmcache.v1.transport.futures import MessagingFuture
 from lmcache.v1.transport.grpc.endpoint import parse_grpc_target
 
@@ -263,10 +267,11 @@ class PeerL2AdapterBase(L2AdapterInterface):
         # sent under it, and a completion that is already there runs on the
         # sending thread.
         self._lookup_lock = threading.RLock()
-        # Set when a lookup is not acknowledged (peer down, or past the RPC
-        # deadline), cleared when a probe is answered. While set, lookups are
-        # a miss at once and send no RPC, so no request waits on a frozen
-        # peer; one probe at a time, which no request waits on, checks it.
+        # Set when a lookup is not acknowledged because the peer is down or
+        # past the RPC deadline, cleared when a probe is answered. While set,
+        # lookups are a miss at once and send no RPC, so no request waits on
+        # a frozen peer; one probe at a time, which no request waits on,
+        # checks it.
         self._unresponsive = False
         self._probing = False
 
@@ -499,15 +504,25 @@ class PeerL2AdapterBase(L2AdapterInterface):
         # Any transport or server error must become a miss now: an error that
         # escapes the callback is only logged, leaving the task pending until
         # its ack deadline.
-        except Exception:
+        except Exception as exc:
+            # Only a peer that is down or past the deadline is skipped; any
+            # other error is a miss for this lookup alone.
+            unreachable = isinstance(exc, MPServerUnavailableError) or (
+                isinstance(exc, MPRequestError) and exc.code == "DEADLINE_EXCEEDED"
+            )
             with self._lookup_lock:
                 if not (self._closed or self._unresponsive):
-                    self._unresponsive = True
                     logger.exception(
-                        "P2P lookup submit to %s failed; lookups to it miss "
-                        "until it answers a probe",
+                        "P2P lookup submit to %s failed; treating as a miss",
                         self._config.peer_mq_server_url,
                     )
+                    if unreachable:
+                        self._unresponsive = True
+                        logger.warning(
+                            "P2P peer %s is unreachable; lookups to it miss "
+                            "until it answers a probe",
+                            self._config.peer_mq_server_url,
+                        )
             self._finish_lookup(task_id, failed=True)
             return
         with self._lookup_lock:
