@@ -111,8 +111,10 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - ``32``
      - gRPC request-dispatch threads. Used only with ``--transport grpc``.
    * - ``--grpc-server-mode``
-     - ``sync``
-     - gRPC server implementation: ``sync``, ``aio`` or ``native``.
+     - ``auto``
+     - gRPC server implementation: ``auto``, ``sync``, ``aio`` or ``native``.
+       ``auto`` picks ``native`` when ``pygrpc-native`` is installed and
+       ``aio`` otherwise.
        ``aio`` receives requests on one event loop and hands only the
        handlers to worker threads. ``native`` does the HTTP/2 and gRPC
        framing in Rust, outside the GIL; it needs the ``pygrpc-native``
@@ -121,8 +123,8 @@ Source: ``lmcache/v1/multiprocess/config.py``
        All three serve the same clients over TCP.
        In ``native`` mode the native front reports the call count and
        duration metrics itself (pygrpc-native 0.3.0 or later), under the
-       same names, but not the message size ones. Used only with
-       ``--transport grpc``.
+       same names, but not the message size ones. Used with
+       ``--transport grpc`` and by the P2P listener.
    * - ``--hash-algorithm``
      - ``blake3``
      - Hash algorithm for token-based operations.

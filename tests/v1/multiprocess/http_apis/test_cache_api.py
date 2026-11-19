@@ -461,6 +461,9 @@ class _FakeLayoutRegistry:
             raise ValueError(f"no shard replication descriptor for {model_name!r}")
         return ShardReplicationDesc()
 
+    def get_token_hasher(self, model_name: str, world_size: int) -> "_FakeTokenHasher":
+        return _FakeTokenHasher()
+
 
 class _PrefetchHandle:
     def __init__(self, total: int) -> None:
