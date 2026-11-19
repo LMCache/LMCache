@@ -2,7 +2,7 @@
 # Example script to build the LMCache integrated with vLLM container image
 
 # Update the following variables accordingly
-CUDA_VERSION=13.0
+CUDA_VERSION=13.2
 DOCKERFILE_NAME='Dockerfile'
 # Set VLLM_VERSION to a specific version before running this script,
 # e.g.: VLLM_VERSION=0.9.1 ./example_build.sh

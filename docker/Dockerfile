@@ -6,9 +6,9 @@
 # docs/source/getting_started/installation.rst
 # docs/source/production/docker_deployment.rst
 
-ARG CUDA_VERSION=13.0
+ARG CUDA_VERSION=13.2
 ARG UBUNTU_VERSION=24.04
-ARG NGC_VERSION=25.09
+ARG NGC_VERSION=26.05
 ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:${NGC_VERSION}-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 
 #################### BASE BUILD IMAGE ####################
