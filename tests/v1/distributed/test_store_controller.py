@@ -296,6 +296,41 @@ class TestStoreControllerSingleAdapter:
         ctrl.stop()
         adapter.close()
 
+    def test_l1_only_write_is_not_stored_to_l2(self, l1_manager):
+        """L1-only objects (unfull-chunk tails) stay out of L2, while full
+        chunks committed in the same call are still stored."""
+        adapter = make_adapter()
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([l1_manager]),
+        )
+        ctrl.start()
+
+        layout = make_layout()
+        tail, full = make_object_key(0), make_object_key(1)
+        reserved = l1_manager.reserve_write(
+            keys=[tail], is_temporary=[False], layout_desc=layout, l1_only=True
+        )
+        assert reserved[tail][1] is not None
+        reserved = l1_manager.reserve_write(
+            keys=[full], is_temporary=[False], layout_desc=layout
+        )
+        assert reserved[full][1] is not None
+        l1_manager.finish_write([tail, full])
+
+        assert wait_for_condition(lambda: adapter.debug_has_key(full))
+        time.sleep(0.3)
+        assert not adapter.debug_has_key(tail)
+        assert adapter.debug_get_stored_object_count() == 1
+        # The tail is still resident in L1.
+        assert l1_manager.reserve_read([tail])[tail][0] == L1Error.SUCCESS
+        l1_manager.finish_read([tail])
+
+        ctrl.stop()
+        adapter.close()
+
     def test_submit_failure_releases_l1_read_lock(self, l1_manager, monkeypatch):
         """An adapter submission failure should not leak L1 read locks."""
         adapter = make_adapter()

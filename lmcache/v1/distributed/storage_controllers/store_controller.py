@@ -76,7 +76,12 @@ class StoreListener(L1ManagerListener):
     The ``on_keys_write_finished`` callback is invoked inside L1Manager's
     lock, so it must be non-blocking. It appends keys to an internal list
     and signals an eventfd to wake up the controller's select.poll().
+
+    Keys reserved with ``l1_only`` are not reported to it, so they are never
+    stored to L2.
     """
+
+    receives_l1_only_writes = False
 
     def __init__(self) -> None:
         self._pending_keys: list[ObjectKey] = []

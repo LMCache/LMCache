@@ -94,6 +94,10 @@ class L1ObjectState:
     is_temporary: bool
     """ Whether the object is temporary (need to be deleted after read). """
 
+    l1_only: bool = False
+    """ Whether the object stays out of L2: ``finish_write`` does not report
+    it to listeners that hand keys to L2. """
+
     staging_charge: int = 0
     """ Bytes added to the staging counter while the object is staged.
 
@@ -479,6 +483,7 @@ class BaseL1Manager(L1ManagerInterface):
         tag: str = "",
         *,
         allow_resident: bool = False,
+        l1_only: bool = False,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Reserve a staging object for each of the given keys.
 
@@ -495,6 +500,10 @@ class BaseL1Manager(L1ManagerInterface):
                 resident one (see :meth:`finish_write_and_reserve_read`), so a
                 writer that raced another writer still ends up holding the
                 resident object, at the cost of a redundant write.
+            l1_only: Keep the keys in L1 only. ``finish_write`` still reports
+                them to the listeners and the event bus, except to listeners
+                whose ``receives_l1_only_writes`` is ``False``, so they are
+                never offloaded to L2. Eviction is unchanged.
 
         Returns:
             A dictionary mapping each object key to a tuple of
@@ -542,6 +551,7 @@ class BaseL1Manager(L1ManagerInterface):
                 )
                 staged.write_lock.lock()
                 staged.is_temporary = is_temp
+                staged.l1_only = l1_only
                 ret[key] = (L1Error.SUCCESS, staged.memory_obj)
                 successful_keys.append(key)
                 continue
@@ -574,6 +584,7 @@ class BaseL1Manager(L1ManagerInterface):
                     write_lock=TTLLock(self._write_ttl_seconds),
                     read_lock=TTLLock(self._read_ttl_seconds),
                     is_temporary=is_temp,
+                    l1_only=l1_only,
                 )
                 entry.write_lock.lock()
                 self._put_staging(key, tag, entry)
@@ -607,7 +618,9 @@ class BaseL1Manager(L1ManagerInterface):
 
         Temporary objects are unlocked normally but do not emit write-finished
         notifications because they are internal staging buffers that must not
-        be routed to L2 storage.
+        be routed to L2 storage. Objects reserved with ``l1_only`` are
+        reported to every listener and the event bus except listeners whose
+        ``receives_l1_only_writes`` is ``False``, which keeps them out of L2.
 
         Args:
             keys: The list of object keys to finish write access for.
@@ -630,6 +643,7 @@ class BaseL1Manager(L1ManagerInterface):
         ret: dict[ObjectKey, L1Error] = {}
         notification_keys: list[ObjectKey] = []
         notification_keys_meta: list[L1ObjectMeta] = []
+        l2_eligible_keys: list[ObjectKey] = []
         discarded: list[MemoryObj] = []
 
         for key in keys:
@@ -650,12 +664,20 @@ class BaseL1Manager(L1ManagerInterface):
             if not entry.is_temporary:
                 notification_keys.append(key)
                 notification_keys_meta.append(self._object_meta(entry.memory_obj))
+                if not entry.l1_only:
+                    l2_eligible_keys.append(key)
 
         self._memory_manager.free(discarded)
 
         if notification_keys:
             for listener in self._registered_listeners:
-                listener.on_l1_keys_write_finished(notification_keys)
+                listener_keys = (
+                    notification_keys
+                    if listener.receives_l1_only_writes
+                    else l2_eligible_keys
+                )
+                if listener_keys:
+                    listener.on_l1_keys_write_finished(listener_keys)
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L1_WRITE_FINISHED,

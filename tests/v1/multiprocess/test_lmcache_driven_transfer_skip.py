@@ -476,10 +476,11 @@ def _make_unfull_store_module(monkeypatch, obj_keys):
     module.context.resolve_unfull_chunk_obj_keys.return_value = [
         keys[-1] for keys in obj_keys
     ]
-    reserved: list[tuple[list, bool]] = []
+    # (keys, is_temporary, l1_only) per reserve_write call.
+    reserved: list[tuple[list, bool, bool]] = []
 
-    def reserve_write(keys, layout, is_temporary=False):
-        reserved.append((list(keys), is_temporary))
+    def reserve_write(keys, layout, is_temporary=False, l1_only=False):
+        reserved.append((list(keys), is_temporary, l1_only))
         return {key: MagicMock(get_size=MagicMock(return_value=10)) for key in keys}
 
     module.context.storage_manager.reserve_write.side_effect = reserve_write
@@ -509,7 +510,7 @@ def test_store_of_only_an_unfull_chunk_reserves_temporary_objects(monkeypatch):
     )
 
     assert ok and mask == [True]
-    assert reserved[-2:] == [(["g0u"], True), (["g1u"], True)]
+    assert reserved[-2:] == [(["g0u"], True, True), (["g1u"], True, True)]
     # Each list is right-aligned to the 2-block window; the padding is skipped.
     fitted = ([[5, 5], [6, 6], [7, 7]], [1, 1, 1])
     assert unfull_transfers == [(0, *fitted), (1, *fitted)]
@@ -536,8 +537,8 @@ def test_store_skips_an_unfull_chunk_that_does_not_fit_the_staging_buffer(
 
     # The full chunk is still stored; no group of the tail is reserved.
     assert ok
-    assert (["g0c0"], False) in reserved
-    assert all(keys not in (["g0u"], ["g1u"]) for keys, _ in reserved)
+    assert (["g0c0"], False, False) in reserved
+    assert all(keys not in (["g0u"], ["g1u"]) for keys, _, _ in reserved)
     assert unfull_transfers == []
 
 
@@ -555,7 +556,9 @@ def test_store_appends_the_unfull_chunk_after_full_chunks(monkeypatch):
     )
 
     assert ok and mask == [True, True]
-    assert (["g0c0"], False) in reserved and (["g0u"], False) in reserved
+    # Full chunks may go to L2; the tail is kept in L1 only (#6747).
+    assert (["g0c0"], False, False) in reserved
+    assert (["g0u"], False, True) in reserved
     assert [group for group, _, _ in unfull_transfers] == [0, 1]
     assert unfull_transfers[0][1:] == ([[5, 5], [6, 6], [7, 7]], [1, 1, 1])
 

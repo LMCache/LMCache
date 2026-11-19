@@ -14,6 +14,7 @@ from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface, L1ManagerListener
 from lmcache.v1.distributed.l1_manager import DevDaxL1Manager, DramL1Manager
+from lmcache.v1.distributed.storage_controllers.store_controller import StoreListener
 import lmcache.v1.memory_management as memory_management
 
 pytestmark = pytest.mark.no_shared_allocator
@@ -103,6 +104,43 @@ def test_write_commit_read_release(l1: L1ManagerInterface) -> None:
     assert l1.unsafe_read([key(1)])[key(1)][0] is not L1Error.SUCCESS
     assert listener.read_reserved == [key(1)]
     assert listener.read_finished == [key(1)]
+
+
+def test_l1_only_write_is_kept_from_the_l2_store_listener(
+    l1: L1ManagerInterface,
+) -> None:
+    store_listener = StoreListener()
+    recorder = RecordingListener()
+    l1.register_listener(store_listener)
+    l1.register_listener(recorder)
+    tail, full = key(10), key(11)
+
+    assert l1.reserve_write([tail], [False], LAYOUT, l1_only=True)[tail][0] is (
+        L1Error.SUCCESS
+    )
+    assert l1.reserve_write([full], [False], LAYOUT)[full][0] is L1Error.SUCCESS
+    assert l1.finish_write([tail, full]) == {
+        tail: L1Error.SUCCESS,
+        full: L1Error.SUCCESS,
+    }
+
+    # Only the full chunk is handed to the L2 store path; other listeners
+    # (eviction) still hear about both.
+    assert store_listener.pop_pending_keys() == [full]
+    assert recorder.written == [tail, full]
+
+    # A write of only L1-only keys does not wake the store listener at all.
+    other_tail = key(12)
+    l1.reserve_write([other_tail], [False], LAYOUT, l1_only=True)
+    assert l1.finish_write([other_tail]) == {other_tail: L1Error.SUCCESS}
+    assert store_listener.pending_count() == 0
+    assert recorder.written == [tail, full, other_tail]
+
+    # Unlike a temporary object, an L1-only object stays resident after a read.
+    for _ in range(2):
+        assert l1.reserve_read([tail])[tail][0] is L1Error.SUCCESS
+        assert l1.finish_read([tail]) == {tail: L1Error.SUCCESS}
+    store_listener.close()
 
 
 def test_aborted_write_is_never_readable(l1: L1ManagerInterface) -> None:
