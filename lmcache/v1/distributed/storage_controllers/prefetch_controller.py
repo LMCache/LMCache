@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Prefetch Controller: asynchronously prefetches data from L2 adapters into L1.
+Prefetch Controller: plans L1/L2 hits and prefetches L2 objects into L1.
 
 A prefetch request names its objects as a grid: one row per key group (an
 object group on one kv rank) and one column per chunk. The controller locks
-what L1 already holds, asks every live L2 adapter what it holds, lets the
-prefetch policy decide which cells to serve from L1 and which to load from
-L2, reserves L1 staging buffers for the loads, and admits each adapter's
-loaded objects into L1 as its load task completes. The result is one bitmap
-per key group marking the cells resident in L1 when the request finished.
+what L1 already holds, queries the eligible L2 adapters, and lets the
+prefetch policy choose a source for each hit. Ordinary prefetch reserves
+L1 staging buffers and reports objects available in L1 at completion.
+A request with ``defer_l2_load`` queries L2 for L1 misses and reports planned
+L2 hits for the caller to load. Both paths return bitmaps over the same grid.
 
 Every lock the controller holds on behalf of a request is recorded in the
 request's key states, and every phase leaves those states consistent, so
@@ -402,6 +402,7 @@ def _build_request(
         lock_mode=spec.lock_mode,
         allowed_l1_memory_tags=spec.allowed_l1_memory_tags,
         allowed_l2_memory_tags=spec.allowed_l2_memory_tags,
+        defer_l2_load=spec.defer_l2_load,
     )
 
 
@@ -468,6 +469,7 @@ class InFlightPrefetchRequest:
     # to use; None allows all (immutable)
     allowed_l1_memory_tags: frozenset[MemoryTags] | None
     allowed_l2_memory_tags: frozenset[MemoryTags] | None
+    defer_l2_load: bool = False
 
     # The locked and reserved keys during the prefetch lifecycle.
     key_states: PrefetchKeyState = field(default_factory=PrefetchKeyState)
@@ -475,6 +477,10 @@ class InFlightPrefetchRequest:
     # In flight L2 operations: L2 adapter idx -> L2 task ID
     inflight_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
     inflight_load_tasks: dict[int, L2TaskId] = field(default_factory=dict)
+
+    # Deferred streaming lookups submit only cells absent from L1. This mask
+    # maps each adapter's compact result back to the original request grid.
+    l2_lookup_cells: Bitmap2D | None = None
 
     # L2 adapter idx -> L1 bytes reserved for that adapter's in-flight load.
     # Entries are removed as load results arrive.
@@ -533,7 +539,7 @@ class InFlightPrefetchRequest:
 
 class PrefetchController(StorageControllerInterface):
     """
-    Asynchronously prefetches data from L2 adapters into L1 memory.
+    Plans cache hits and asynchronously loads L2 objects for ordinary prefetch.
 
     The controller:
     1. Accepts prefetch requests via submit_prefetch_request (thread-safe).
@@ -552,6 +558,10 @@ class PrefetchController(StorageControllerInterface):
        adapter's L2 locks.
     7. Folds the L1 locked cells into the final hit, releases the rest, and
        publishes one bitmap per key group via query_prefetch_result.
+
+    With ``defer_l2_load``, step 2 queries only L1 misses and step 3 is followed
+    by completion. The result includes planned L2 hits, and the caller loads
+    them after the controller returns the L2 locks.
 
     Args:
         l1_managers: The L1 manager instances.
@@ -1163,13 +1173,13 @@ class PrefetchController(StorageControllerInterface):
         Returns:
             True if ``spec`` may start.
         """
-        if not self._in_flight_requests:
+        if spec.defer_l2_load or not self._in_flight_requests:
             return True
         request_bytes = _get_max_load_bytes(spec.key_groups)
         lookup_bytes = sum(
             request.get_max_load_bytes()
             for request in self._in_flight_requests.values()
-            if request.phase == PrefetchPhase.LOOKUP
+            if request.phase == PrefetchPhase.LOOKUP and not request.defer_l2_load
         )
         target_l1_indices = {
             self._l2_affinity[adapter_idx]
@@ -1224,15 +1234,17 @@ class PrefetchController(StorageControllerInterface):
             self._retire_request(request)
             return
 
-        # TODO(ApostaC): Here, we submit the full keys to L2 adapters.
-        # In the future, we can do `All keys - L1 hit keys` to reduce the
-        # L2 lookup overhead.
-        # However, for P2P case, this will require the storage manager to
-        # support unequal length of key groups. We left this as future refactor
-        # TODOs.
+        # Deferred streaming reads only need keys absent from L1. Ordinary
+        # prefetch keeps its full-grid lookup for existing adapter policies.
+        lookup_keys = flattened_keys
+        if request.defer_l2_load:
+            request.l2_lookup_cells = (
+                request.found_cells.ones_like() - request.found_cells
+            )
+            lookup_keys = _gather_keys(request.key_groups, request.l2_lookup_cells)
         for adapter_idx, adapter in active_adapters.items():
             task_id = adapter.submit_lookup_and_lock_task(
-                flattened_keys, spec.group_layout_descs
+                lookup_keys, spec.group_layout_descs
             )
             request.inflight_lookup_tasks[adapter_idx] = task_id
 
@@ -1241,9 +1253,9 @@ class PrefetchController(StorageControllerInterface):
                 event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
                 metadata={
                     "request_id": request_id,
-                    "key_count": len(flattened_keys),
+                    "key_count": len(lookup_keys),
                     "adapter_count": len(request.inflight_lookup_tasks),
-                    "key_count_per_salt": Counter(k.cache_salt for k in flattened_keys),
+                    "key_count_per_salt": Counter(k.cache_salt for k in lookup_keys),
                 },
             )
         )
@@ -1362,12 +1374,12 @@ class PrefetchController(StorageControllerInterface):
             if result is None:
                 continue
 
-            # Update the l2 locked key states
-            # NOTE: since we do full global bitmap for L2 load, we use
-            # _scatter_bitmaps_full_global instead of _scatter_bitmaps here.
-            # Will be changed in the future after we implemented partial L2
-            # lookup.
-            l2_found_bitmap = _scatter_bitmaps_full_global(result, num_rows, num_cols)
+            # Restore compact streaming results to the original key grid.
+            l2_found_bitmap = (
+                _scatter_bitmaps(request.l2_lookup_cells, result)
+                if request.l2_lookup_cells is not None
+                else _scatter_bitmaps_full_global(result, num_rows, num_cols)
+            )
             request.key_states.l2_locked_keys[adapter_idx] = l2_found_bitmap
             request.found_cells += l2_found_bitmap
 
@@ -1378,13 +1390,11 @@ class PrefetchController(StorageControllerInterface):
     # Load phase
     # =========================================================================
     def _transition_to_load_phase(self, request: InFlightPrefetchRequest) -> None:
-        """Plan the loads, reserve their L1 buffers, and submit the load
-        tasks.
+        """Plan the loads and start ordinary prefetch I/O.
 
-        On return the locked maps equal the plan, the reserved map equals the
-        L2 plan, and one load task is in flight per adapter in it. With an
-        empty L2 plan no task is submitted and the request is ready to
-        finish.
+        With deferred loading, the locked maps hold the plan and the caller
+        will load its L2 objects. Ordinary prefetch reserves L1 staging
+        buffers and submits one task per adapter for the resulting L2 plan.
         """
         states = request.key_states
 
@@ -1396,6 +1406,8 @@ class PrefetchController(StorageControllerInterface):
             if self._is_l2_eligible(request, l2_idx)
         }
         self._plan_load(request, active_l2_descs)
+        if request.defer_l2_load:
+            return
 
         # Step 3: reserve L1 write buffers for the planned L2 keys
         # with L1-L2 affinity.
@@ -1699,15 +1711,16 @@ class PrefetchController(StorageControllerInterface):
     # =========================================================================
 
     def _finish_request(self, request: InFlightPrefetchRequest) -> None:
-        """Settle the request's L1 locks and publish its result.
+        """Settle the request's read locks and publish its result.
 
-        The prefetch policy plans once more on the L1 locks alone: the cells
-        it keeps are the hit, and the rest are released. Touch hit keys in
-        chunk order so eviction prioritizes earlier chunks across groups.
+        Ordinary prefetch replans on the final L1 locks after load completion.
+        Deferred loading includes the planned L2 hits and returns their L2
+        locks before publishing. Touch L1 hits in chunk order so eviction
+        prioritizes earlier chunks across groups.
 
         Args:
-            request: The request to finish. Its L2 locked map and reserved
-                map hold nothing at this point.
+            request: The request to finish. The L1 reservation map is empty.
+                For deferred loading, the L2 locked map holds planned hits.
 
         Note:
             Reads and writes only ``request.key_states`` and the result
@@ -1716,8 +1729,11 @@ class PrefetchController(StorageControllerInterface):
         states = request.key_states
         # A failed load can leave less in L1 than was planned; the policy
         # decides what the cells that did land still serve.
-        self._plan_load(request, {})
+        if not request.defer_l2_load:
+            self._plan_load(request, {})
         hit_cells = _merged_or_zeros(states.l1_locked_keys, request.key_groups)
+        if request.defer_l2_load and len(states.l2_locked_keys.merge()) > 0:
+            hit_cells += states.l2_locked_keys.merge()
 
         for l1_idx, locked in states.l1_locked_keys.items():
             if request.lock_mode == PrefetchLockMode.NO_LOCK:
@@ -1732,7 +1748,13 @@ class PrefetchController(StorageControllerInterface):
             if hit_keys:
                 self._l1_managers[l1_idx].touch_keys(hit_keys)
 
-        if len(request.l2_loaded_cells) > 0:
+        if request.defer_l2_load and len(states.l2_locked_keys.merge()) > 0:
+            l2_hit_cells = hit_cells & states.l2_locked_keys.merge()
+            for adapter_idx, cells in states.l2_locked_keys.items():
+                keys = _gather_keys(request.key_groups, cells)
+                if keys:
+                    self._l2_adapters[adapter_idx].submit_unlock(keys)
+        elif len(request.l2_loaded_cells) > 0:
             l2_hit_cells = hit_cells & request.l2_loaded_cells
         else:
             l2_hit_cells = hit_cells.zeros_like()

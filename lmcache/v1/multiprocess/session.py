@@ -29,6 +29,17 @@ logger = init_logger(__name__)
 
 
 @dataclass
+class _StreamingLookup:
+    start: int
+    end: int
+    owners: dict[ObjectKey, int]
+    finished: bool = False
+
+    def contains(self, start: int, end: int) -> bool:
+        return self.start <= start and end <= self.end
+
+
+@dataclass
 class Session:
     """Tracks accumulated token IDs and computed chunk hashes for a request.
 
@@ -51,6 +62,10 @@ class Session:
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
+    _streaming_lookup: _StreamingLookup | None = field(default=None, repr=False)
+    _abandoned_streaming: list[_StreamingLookup] = field(
+        default_factory=list, repr=False
+    )
     extras: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -198,6 +213,10 @@ class Session:
     def begin_lookup(self, key: IPCCacheServerKey) -> None:
         """Record a new lookup and reset the previous lookup's result."""
         with self._lock:
+            current = self._streaming_lookup
+            if current is not None and not current.finished:
+                self._abandoned_streaming.append(current)
+            self._streaming_lookup = None
             self.lookup_ipc_key = key
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
@@ -219,6 +238,100 @@ class Session:
         """Snapshot the L1 owners whose read locks this session's lookup retained."""
         with self._lock:
             return self._prefetch_owners.copy()
+
+    def add_streaming_range(
+        self, start: int, end: int, l1_owners: dict[ObjectKey, int] | None = None
+    ) -> None:
+        """Record a mixed range and its L1 read-lock owners."""
+        with self._lock:
+            self._streaming_lookup = _StreamingLookup(start, end, dict(l1_owners or {}))
+
+    def finish_current_streaming_range(self, start: int, end: int) -> None:
+        """Mark the current streaming lookup finished when its full range is done.
+
+        Args:
+            start: First token in the released range.
+            end: Exclusive end of the released range.
+        """
+        with self._lock:
+            current = self._streaming_lookup
+            if current is not None and start <= current.start and end >= current.end:
+                current.finished = True
+
+    def finish_current_streaming_retrieve(self) -> None:
+        """Mark the current lookup scheduled for retrieval and lock release."""
+        with self._lock:
+            if self._streaming_lookup is not None:
+                self._streaming_lookup.finished = True
+
+    def abandoned_streaming_range_owners(
+        self, start: int, end: int
+    ) -> dict[ObjectKey, int] | None:
+        """Return owners of the oldest abandoned lookup with these boundaries.
+
+        Args:
+            start: First token in the abandoned range.
+            end: Exclusive end of the abandoned range.
+
+        Returns:
+            A copy of the retained L1 owners, or None if no range matches.
+        """
+        with self._lock:
+            for lookup in self._abandoned_streaming:
+                if (lookup.start, lookup.end) == (start, end):
+                    return lookup.owners.copy()
+            return None
+
+    def finish_abandoned_streaming_range(self, start: int, end: int) -> None:
+        """Forget the oldest abandoned lookup after its entire range is freed.
+
+        Args:
+            start: First token in the released range.
+            end: Exclusive end of the released range.
+        """
+        with self._lock:
+            for index, lookup in enumerate(self._abandoned_streaming):
+                if (lookup.start, lookup.end) == (start, end):
+                    self._abandoned_streaming.pop(index)
+                    break
+
+    def current_streaming_range_owners(
+        self, start: int, end: int
+    ) -> dict[ObjectKey, int] | None:
+        """Snapshot the L1 owners if the current streaming lookup covers this range.
+
+        Args:
+            start: First token in the requested range.
+            end: Exclusive end of the requested range.
+
+        Returns:
+            The current lookup's owners, including an empty map for an FS-only
+            hit, or None if the range is outside the current streaming lookup.
+        """
+        with self._lock:
+            current = self._streaming_lookup
+            if current is None or not current.contains(start, end):
+                return None
+            return current.owners.copy()
+
+    def extend_current_streaming_range(
+        self, end: int, l1_owners: dict[ObjectKey, int]
+    ) -> None:
+        """Include a read-locked partial L1 chunk in the current mixed range."""
+        with self._lock:
+            current = self._streaming_lookup
+            if current is None or end <= current.end:
+                raise ValueError(
+                    "partial chunk must extend the current streaming range"
+                )
+            current.end = end
+            current.owners.update(l1_owners)
+
+    def is_current_streaming_range(self, start: int, end: int) -> bool:
+        """Return whether the latest lookup serves this range from FS windows."""
+        with self._lock:
+            current = self._streaming_lookup
+            return current is not None and current.contains(start, end)
 
 
 class SessionManager:

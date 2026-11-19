@@ -713,6 +713,9 @@ class PrefetchTaskSpec:
         allowed_l2_memory_tags: Memory tags of the L2 adapters to look up and
             load from. ``None`` allows every L2 adapter; an empty set allows
             none.
+        defer_l2_load: Return the L1/L2 hit plan without reserving or loading
+            L2 data. The caller loads planned L2 objects after lookup, and must
+            handle objects disappearing before load. Requires prefix and LOCK.
 
     Note:
         Every key group holds the same number of keys (``group_size``). The
@@ -729,8 +732,13 @@ class PrefetchTaskSpec:
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
     allowed_l1_memory_tags: frozenset[MemoryTags] | None = None
     allowed_l2_memory_tags: frozenset[MemoryTags] | None = None
+    defer_l2_load: bool = False
 
     def __post_init__(self) -> None:
+        if self.defer_l2_load and (
+            self.fetching_policy != "prefix" or self.lock_mode != PrefetchLockMode.LOCK
+        ):
+            raise ValueError("deferred L2 load requires prefix fetching and read locks")
         if not self.key_groups:
             raise ValueError("PrefetchTaskSpec: key_groups must not be empty")
         if self.fetching_policy not in _VALID_FETCHING_POLICIES:
@@ -787,9 +795,10 @@ class PrefetchResult:
     """The outcome of a prefetch task, one bitmap per key group of the task.
 
     Bit ``i`` of ``hit_cells[k]`` is set iff key ``i`` of key group ``k`` is
-    resident in L1 when the task finished (and read-locked under ``LOCK``).
+    available when the task finished (and L1 hits read-locked under ``LOCK``).
+    Deferred L2 hits are not loaded and may disappear before the later read.
     ``l1_hit_cells`` marks the hit cells L1 already held, ``l2_hit_cells``
-    those the task loaded from L2.
+    those loaded from L2, or planned from L2 when ``defer_l2_load`` is set.
 
     Note:
         ``l1_hit_cells`` and ``l2_hit_cells`` are disjoint and their union is

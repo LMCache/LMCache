@@ -22,10 +22,12 @@ from lmcache.v1.distributed.api import (
     PrefetchHandle,
     PrefetchResult,
     ShardReplicationDesc,
+    ipc_key_to_object_keys,
 )
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.session import Session
 from lmcache.v1.transport.rpc import get_rpc_spec
 
 # Test helpers
@@ -151,6 +153,8 @@ def _make_free_locks_ctx(
     session = ctx.session_manager.get_or_create.return_value
     session.prefetch_hit_chunks = hit_chunks
     session.prefetch_locked_gids = tuple(locked_gids)
+    session.current_streaming_range_owners.return_value = None
+    session.abandoned_streaming_range_owners.return_value = None
     session.lookup_ipc_key = _free_locks_key(1024, start=lookup_start, end=1024)
     return ctx
 
@@ -310,6 +314,162 @@ def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
     # Window 1 with hit=4 (the range end): only chunk 3; full attention:
     # chunks 2-3 (floored to the range start).
     assert released == {(0, b"h3"), (1, b"h2"), (1, b"h3")}
+
+
+def test_completed_streaming_lookup_does_not_mask_later_normal_release():
+    ctx = _make_free_locks_ctx([b"h0"], windows=[-1], hit_chunks=1)
+    session = Session("req-sw", ctx.token_hasher)
+    ctx.session_manager.get_or_create.return_value = session
+    key = _free_locks_key(256, 0, 256)
+    session.begin_lookup(key)
+    session.add_streaming_range(0, 256, {})
+    session.record_prefetch_result(1, (0,), {})
+    module = LookupModule(ctx)
+    module.free_lookup_locks(key, 1)
+
+    session.begin_lookup(key)
+    session.record_prefetch_result(1, (0,), {})
+    module.free_lookup_locks(_free_locks_key(256, 0, 0), 1, extra_ranges=((0, 256),))
+
+    ctx.storage_manager.finish_read_prefetched.assert_called_once()
+    assert session.current_streaming_range_owners(0, 256) is None
+    assert session.abandoned_streaming_range_owners(0, 256) is None
+
+
+def test_abandoned_streaming_range_is_released_once_after_relookup():
+    ctx = _make_free_locks_ctx([b"h0"], windows=[-1], hit_chunks=1)
+    session = Session("req-sw", ctx.token_hasher)
+    ctx.session_manager.get_or_create.return_value = session
+    key = _free_locks_key(256, 0, 256)
+    obj = ipc_key_to_object_keys(key, [b"h0"], [0], DEFAULT_SHARD_REPLICATION_DESC)[0][
+        0
+    ]
+    owners = {obj: 7}
+    session.begin_lookup(key)
+    session.add_streaming_range(0, 256, owners)
+    session.record_prefetch_result(1, (0,), owners)
+    session.begin_lookup(key)
+    session.record_prefetch_result(1, (0,), {})
+
+    LookupModule(ctx).free_lookup_locks(
+        _free_locks_key(256, 0, 0), 1, extra_ranges=((0, 256),)
+    )
+
+    ctx.storage_manager.finish_read_prefetched.assert_called_once_with(
+        [obj], read_locks=1, l1_owners=owners
+    )
+    assert session.abandoned_streaming_range_owners(0, 256) is None
+
+
+def test_identical_abandoned_streaming_ranges_release_in_lookup_order():
+    ctx = _make_free_locks_ctx([b"h0"], windows=[-1], hit_chunks=1)
+    session = Session("req-sw", ctx.token_hasher)
+    ctx.session_manager.get_or_create.return_value = session
+    key = _free_locks_key(256, 0, 256)
+    obj = ipc_key_to_object_keys(key, [b"h0"], [0], DEFAULT_SHARD_REPLICATION_DESC)[0][
+        0
+    ]
+    for owner in (7, 8):
+        session.begin_lookup(key)
+        session.add_streaming_range(0, 256, {obj: owner})
+        session.record_prefetch_result(1, (0,), {obj: owner})
+    session.begin_lookup(key)
+    session.record_prefetch_result(1, (0,), {})
+
+    LookupModule(ctx).free_lookup_locks(
+        _free_locks_key(256, 0, 0), 1, extra_ranges=((0, 256), (0, 256))
+    )
+
+    assert [
+        call.kwargs["l1_owners"]
+        for call in ctx.storage_manager.finish_read_prefetched.call_args_list
+    ] == [{obj: 7}, {obj: 8}]
+
+
+def test_current_streaming_free_uses_current_owners_when_old_range_matches() -> None:
+    """A cold chunk in the old lookup can be L1-resident in the new lookup."""
+    ctx = _make_free_locks_ctx([b"h0"], windows=[-1], hit_chunks=2)
+    key = _free_locks_key(512, 0, 512)
+    obj = ipc_key_to_object_keys(key, [b"h0"], [0], DEFAULT_SHARD_REPLICATION_DESC)[0][
+        0
+    ]
+    session = Session(key.request_id, ctx.token_hasher)
+    ctx.session_manager.get_or_create.return_value = session
+    session.begin_lookup(_free_locks_key(512, 0, 256))
+    session.add_streaming_range(0, 256, {})
+    session.record_prefetch_result(1, (0,), {})
+    session.begin_lookup(key)
+    session.add_streaming_range(0, 512, {obj: 7})
+    session.record_prefetch_result(2, (0,), {obj: 7})
+
+    LookupModule(ctx).free_lookup_locks(
+        _free_locks_key(512, 0, 256), 1, extra_ranges=((0, 256),)
+    )
+
+    ctx.storage_manager.finish_read_prefetched.assert_called_once_with(
+        [obj], read_locks=1, l1_owners={obj: 7}
+    )
+
+
+def test_abandoned_streaming_free_releases_its_unfull_tail() -> None:
+    """Free the abandoned lookup's L1 tail using its recorded owner."""
+    ctx = _make_free_locks_ctx([b"h1"], windows=[-1], hit_chunks=2)
+    old_key = _free_locks_key(700, 256, 700)
+    new_key = _free_locks_key(700, 0, 700)
+    tail = ipc_key_to_object_keys(
+        old_key, [b"partial"], [0], DEFAULT_SHARD_REPLICATION_DESC
+    )[0][0]
+    session = Session(old_key.request_id, ctx.token_hasher)
+    ctx.session_manager.get_or_create.return_value = session
+    session.begin_lookup(old_key)
+    session.add_streaming_range(256, 512, {})
+    session.extend_current_streaming_range(700, {tail: 7})
+    session.record_prefetch_result(2, (0,), {tail: 7})
+    session.begin_lookup(new_key)
+    session.record_prefetch_result(2, (0,), {})
+
+    LookupModule(ctx).free_lookup_locks(
+        _free_locks_key(700, 0, 0), 1, extra_ranges=((256, 700),)
+    )
+
+    ctx.storage_manager.finish_read_prefetched.assert_called_once_with(
+        [tail], read_locks=1, l1_owners={tail: 7}
+    )
+
+
+def test_retrieved_streaming_range_is_retired_at_next_lookup():
+    ctx = _make_free_locks_ctx([b"h0"], windows=[-1], hit_chunks=1)
+    session = Session("req-sw", ctx.token_hasher)
+    key = _free_locks_key(256, 0, 256)
+    session.begin_lookup(key)
+    session.add_streaming_range(0, 256, {})
+    session.record_prefetch_result(1, (0,), {})
+    session.finish_current_streaming_retrieve()
+    session.begin_lookup(key)
+    assert session.current_streaming_range_owners(0, 256) is None
+    assert session.abandoned_streaming_range_owners(0, 256) is None
+
+
+def test_freeing_exact_abandoned_range_keeps_a_shorter_prior_range():
+    ctx = _make_free_locks_ctx([b"h0", b"h1"], windows=[-1], hit_chunks=2)
+    session = Session("req-sw", ctx.token_hasher)
+    key = _free_locks_key(512, 0, 512)
+    session.begin_lookup(key)
+    session.add_streaming_range(0, 256, {})
+    session.record_prefetch_result(1, (0,), {})
+    session.begin_lookup(key)
+    session.add_streaming_range(0, 512, {})
+    session.record_prefetch_result(2, (0,), {})
+    session.begin_lookup(key)
+    session.record_prefetch_result(2, (0,), {})
+    ctx.session_manager.get_or_create.return_value = session
+
+    LookupModule(ctx).free_lookup_locks(
+        _free_locks_key(512, 0, 0), 1, extra_ranges=((0, 512),)
+    )
+
+    assert session.abandoned_streaming_range_owners(0, 512) is None
+    assert session.abandoned_streaming_range_owners(0, 256) == {}
 
 
 def test_server_free_lookup_locks_without_result_releases_nothing():

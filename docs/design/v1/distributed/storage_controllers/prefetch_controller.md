@@ -26,6 +26,9 @@ leaves nothing behind.
 
 ## Invariants
 
+The following describe ordinary prefetch. Deferred loading uses the same key
+grid, source policy, and L1 read-lock accounting, with the differences below.
+
 - **Observation is acquisition.** L1 is probed by read-locking it
   (`reserve_read`); L2 is probed by `lookup_and_lock`. A key required for the
   reported hit is lock-held from the moment it is discovered until the request
@@ -81,10 +84,20 @@ its result is queryable when the call returns. Otherwise it is queued for the
 background loop and admitted in arrival order under the in-flight watermark
 (see [Admission](#admission)).
 
-`PrefetchResult` carries `hit_cells` (one bitmap per key group, in
+`PrefetchResult` from ordinary prefetch carries `hit_cells` (one bitmap per key group, in
 `key_groups` order), split into the disjoint `l1_hit_cells` (L1 already held
 them) and `l2_hit_cells` (loaded by this request). Under `LOCK` every hit cell
 is read-locked its row's `num_kv_readers` times for the caller.
+
+### Deferred L2 loads for FS streaming
+
+The MP lookup for [reserved FS streaming windows](../../multiprocess/fs_streaming.md)
+uses `defer_l2_load` with prefix fetching and `LOCK`. It asks the FS adapter
+about L1 misses and uses the same prefix planning policy. The controller skips
+the L1 staging watermark and the L2 load phase. The result's `l2_hit_cells`
+are planned FS hits. At completion the controller returns L2 locks and
+retains the L1 read locks. MP retrieve reads the FS objects through the
+reserved windows and handles failures that occur after lookup.
 
 ## Admission
 
