@@ -619,10 +619,9 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         Args:
             keys: Original logical keys; used only to derive temp keys.
             objects: Source (store) or destination (load) MemoryObjs.
-                They may differ in layout: store batches can mix object
-                groups, and a prefetch loads every object group of a
-                request in one task per L2 adapter. Each temp buffer is
-                sized for its own object.
+                They may differ in layout: a prefetch loads every object
+                group of a request in one task per L2 adapter. Each temp
+                buffer is sized for its own object.
         """
         temp_keys = [make_temp_key(k) for k in keys]
         # reserve_write takes one layout per call, so reserve per buffer size.
