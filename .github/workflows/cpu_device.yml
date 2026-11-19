@@ -34,7 +34,7 @@ permissions:
   contents: read
 
 env:
-  PINNED_VLLM_VERSION: "0.34.1.dev202611190133"
+  PINNED_VLLM_VERSION: "0.34.1.dev202611191847"
 
 defaults:
   run:
@@ -204,7 +204,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
-          ref: fc5c3c3493157b6ed3321aebedece240dcdff31a
+          ref: 32ad1b22c95aadf6a0116144ae30630cc4ecbaff
           fetch-depth: 1
 
       - name: Setup Python 3.12
@@ -284,8 +284,10 @@ jobs:
 
           dist = md.distribution("vllm-cpu-nightly")
           manifest = json.loads(dist.read_text("cpu-nightly.json"))
-          assert dist.version == "0.34.1.dev202611190133"
-          assert manifest["source_sha"] == "8700cc9ba0016bf14d8f2756f3b673e93fbcf2fd"
+          if dist.version != "0.34.1.dev202611191847":
+              raise SystemExit("Unexpected CPU wheel version")
+          if manifest["source_sha"] != "b2c92fa9c1d8be6790ddd0852b547bbf927bfbd0":
+              raise SystemExit("Unexpected vLLM source")
           print("Verified source:", manifest["source_sha"], "built:", manifest["built_at"])
           PY
 
