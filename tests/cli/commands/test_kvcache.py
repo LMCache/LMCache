@@ -2,7 +2,7 @@
 """Exercise KV cache commands through the public CLI and real loopback HTTP."""
 
 # Standard
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,8 +17,9 @@ import pytest
 # First Party
 from lmcache.cli.main import main
 
-Reply = tuple[int, dict[str, object] | str | bytes]
-ReplyWithLength = tuple[Reply, int]
+ReplyPayload = Mapping[str, object] | str | bytes
+Reply = tuple[int, ReplyPayload]
+ReplyWithLength = tuple[int, ReplyPayload, int]
 Request = tuple[str, str, bytes, str]
 
 NEXT_PAGE_TOKEN = "opaque+/=?& %游标"
@@ -575,7 +576,7 @@ def test_list_bodyless_status_not_flagged_incomplete(
     cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A 304 response carries no body and is not an incomplete read."""
-    cache_server.replies.put((304, b'{"detail": "nope"}'))
+    cache_server.replies.put((304, b"", 18))
     with pytest.raises(SystemExit) as exc:
         main(["kvcache", "list", "--quiet", "--url", cache_server.url])
     assert exc.value.code == 1
@@ -597,3 +598,60 @@ def test_list_invalid_utf8_inside_oversized_body(
     captured = capsys.readouterr()
     assert "Cannot read HTTP 400 response" in captured.err
     assert "Traceback" not in captured.err
+
+
+_VALID_PAGE: dict[str, object] = {
+    "adapter": "s3",
+    "shared": False,
+    "entries": [],
+    "next_page_token": None,
+}
+
+
+@pytest.mark.parametrize(
+    ("page", "error"),
+    [
+        ("[]", "body is not an object"),
+        (
+            {k: v for k, v in _VALID_PAGE.items() if k != "adapter"},
+            "'adapter' must be a string",
+        ),
+        ({**_VALID_PAGE, "shared": "false"}, "'shared' must be a boolean"),
+        (
+            {k: v for k, v in _VALID_PAGE.items() if k != "next_page_token"},
+            "'next_page_token' is missing",
+        ),
+        (
+            {**_VALID_PAGE, "next_page_token": {"cursor": "p2"}},
+            "'next_page_token' must be a string or null",
+        ),
+    ],
+    ids=["top-array", "no-adapter", "shared-string", "no-token", "token-object"],
+)
+def test_list_rejects_malformed_pages(
+    cache_server: CacheServer,
+    page: dict[str, object] | str,
+    error: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A malformed page object fails before any report is written."""
+    cache_server.replies.put((200, page))
+    output = tmp_path / "failed.json"
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "kvcache",
+                "list",
+                "--quiet",
+                "--output",
+                str(output),
+                "--url",
+                cache_server.url,
+            ]
+        )
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert f"Invalid response: {error}" in captured.err
+    assert "Traceback" not in captured.err
+    assert not output.exists()
