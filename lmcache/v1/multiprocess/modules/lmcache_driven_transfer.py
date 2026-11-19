@@ -1271,7 +1271,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     prefetched_keys.extend(in_window_keys)
                 if retrieve_succeeded and unfull_retained_keys:
                     if unfull_chunk_missing_blocks:
-                        logger.info(
+                        logger.debug(
                             "No GPU blocks allocated for request %s's unfull "
                             "chunk; skipping it and keeping the %d full "
                             "chunks already retrieved.",
