@@ -151,7 +151,10 @@ def test_store_owner_callback_round_trip(
         object_groups=[ObjectGroupInfo(kernel_group_indices=[i]) for i in range(2)],
     )
     entry = SimpleNamespace(
-        cache_context=cache_context, model_name="model", event_backend=backend
+        cache_context=cache_context,
+        model_name="model",
+        chunk_size=1,
+        event_backend=backend,
     )
     monkeypatch.setattr(module, "get_and_touch_context_entry", lambda _: entry)
     try:

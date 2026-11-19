@@ -444,6 +444,21 @@ class MPCacheServerContext:
         """Hash algorithm used for token hashing."""
         return self._hash_algorithm
 
+    def validate_chunk_size(self, chunk_size: int) -> None:
+        """Validate an effective registration chunk size.
+
+        Args:
+            chunk_size: Effective logical tokens per registered chunk.
+
+        Raises:
+            ValueError: If the size is below the configured server minimum.
+        """
+        if chunk_size < self._configured_chunk_size:
+            raise ValueError(
+                f"chunk_size must be at least the server minimum "
+                f"{self._configured_chunk_size}, got {chunk_size}"
+            )
+
     def negotiate_chunk_size(self, required_alignment: int) -> int:
         """Negotiate the server chunk size against model geometry.
 

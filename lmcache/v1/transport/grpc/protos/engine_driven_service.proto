@@ -31,6 +31,9 @@ message RegisterKvCacheEngineDrivenContextRequest {
   int64 hidden_dim_size = 6;
   string dtype_str = 7;
   bool use_mla = 8;
+  // Declaration order follows RegisterEngineDrivenContextPayload; tag 11
+  // preserves the existing wire tags of the fields below.
+  int64 chunk_size = 11;
   optional int64 num_physical_slots = 9;
   repeated GroupLayout group_layouts = 10;
 }

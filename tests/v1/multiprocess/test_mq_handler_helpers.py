@@ -41,6 +41,7 @@ def register_kv_cache_handler(
     engine_type: EngineType,
     layout_hints: LayoutHints,
     engine_group_infos: list[EngineGroupInfo],
+    chunk_size: int | None = None,
 ) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
@@ -54,6 +55,7 @@ def register_kv_cache_handler(
         layout_hints: Engine-provided hints dict.
         engine_group_infos: Engine-neutral KV cache group metadata,
             msgspec-decoded from the request payload.
+        chunk_size: Effective logical tokens per LMCache chunk.
 
     Returns:
         None
