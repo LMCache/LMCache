@@ -582,6 +582,24 @@ def test_failed_unlock_keeps_the_address_until_the_retry():
         assert not tc_client.submit_read.called, "the retry kept the address"
 
 
+def test_unlock_failing_on_its_future_still_drops_the_address():
+    """Nothing retries an unlock whose RPC fails on its future, so the address
+    is dropped anyway; the peer's read-lock TTL frees the lock it missed."""
+    key = _key(0)
+    address = TransferChannelAddress(offset=64, size=64)
+    obj = MagicMock(shm_offset=0, shm_byte_length=64)
+    with _adapter() as (adapter, req_client, _tc_ctx, tc_client, _notifier):
+        req_client.p2p_lookup_and_lock.return_value = _FakeFuture(value=1)
+        req_client.p2p_query_lookup_results.return_value = _FakeFuture(value=[address])
+        task = adapter.submit_lookup_and_lock_task([key], {0: _LAYOUT})
+        assert adapter.query_lookup_and_lock_result(task) is not None
+
+        req_client.p2p_unlock_objects.return_value = _answered(RuntimeError("injected"))
+        adapter.submit_unlock([key])
+        adapter.submit_load_task([key], [obj])
+        assert not tc_client.submit_read.called, "a failed future kept the address"
+
+
 def test_lookup_miss_holds_no_address():
     """A miss caches nothing, so its key cannot keep another lookup's address
     alive past that lookup's unlock."""
