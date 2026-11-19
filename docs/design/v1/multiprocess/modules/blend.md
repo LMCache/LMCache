@@ -257,7 +257,7 @@ the engine's own prefix-cache hit, which stays in place.
    run. The first `keep_prefix` tokens are the first piece, in place; `P`'s
    last `LMIN` tokens are never moved, so the question stays last.
    Run comparison stops at the first token mismatch or already-used input
-   position. It starts with at most 1024 tokens, then doubles the slice size
+   position. It starts with at most 256 tokens, then doubles the slice size
    after each fully matching slice. Repeated document headers therefore do
    not force a scan of the entire remaining prompt for every candidate;
    growing slices keep long exact matches efficient. Hash collisions are
