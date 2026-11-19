@@ -549,6 +549,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._device: torch.device | None = None
         self._event_backend: EventIPCBackend | None = None
         self._mq_timeout: float = 0.0
+        self._chunk_size: int | None = None
         self._inflight_stores: list[MessagingFuture] = []
         self._inflight_lock = threading.Lock()
 
@@ -595,6 +596,8 @@ class LMCacheDrivenTransferContext(TransferContext):
             layout_hints: Optional KV-layout metadata.
             engine_group_infos: Optional engine KV-group metadata.
             engine_type: Serving engine that produced the caches.
+            lmcache_chunk_tokens: Effective logical tokens per LMCache chunk,
+                or ``None`` to use the server default.
 
         Raises:
             RuntimeError: If event IPC is unsupported for the KV-cache device,
@@ -622,6 +625,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                     layout_hints or {},
                     list(engine_group_infos),
                     None,
+                    lmcache_chunk_tokens,
                 )
             )
             future.result(timeout=mq_timeout)
@@ -630,6 +634,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._device = device
         self._event_backend = event_backend
         self._mq_timeout = mq_timeout
+        self._chunk_size = lmcache_chunk_tokens
 
     def create_recorded_event(self) -> IPCEvent:
         """Create and record an exportable event for handle-based transfer.
@@ -680,6 +685,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                 EngineType.VLLM,
                 layout_hints or {},
                 list(engine_group_infos),
+                self._chunk_size,
             )
             future.result(timeout=mq_timeout)
 
@@ -860,7 +866,7 @@ class EngineDrivenTransferContext(TransferContext):
         self._group_states: list = []
         # Engine block ID the server treats as absent KV (from registration).
         self._null_block_id = 0
-        # Tokens in one LMCache chunk (multi-group registration).
+        # Tokens in one LMCache chunk, set during registration.
         self._chunk_tokens = 0
 
     @property
@@ -975,7 +981,6 @@ class EngineDrivenTransferContext(TransferContext):
                         f"sizes (lcm {local_lcm})"
                     )
                 chunk_tokens = lmcache_chunk_tokens
-            self._chunk_tokens = chunk_tokens
             layer_names = list(kv_caches)
             normalized_kv, per_layer_formats = normalize_and_discover_per_layer_formats(
                 list(kv_caches.values()),
@@ -1056,6 +1061,11 @@ class EngineDrivenTransferContext(TransferContext):
             layout_desc = group_states[0].layout_desc
             num_physical_slots = chunk_tokens
         else:
+            chunk_tokens = (
+                blocks_in_chunk * block_size
+                if lmcache_chunk_tokens is None
+                else lmcache_chunk_tokens
+            )
             shape = (
                 torch.Size([num_layers, blocks_in_chunk * block_size, hidden_dim_size])
                 if use_mla_flag
@@ -1066,6 +1076,7 @@ class EngineDrivenTransferContext(TransferContext):
             dtype = getattr(torch, dtype_str)
             layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
             num_physical_slots = blocks_in_chunk * block_size
+        self._chunk_tokens = chunk_tokens
         self._group_states = group_states
 
         future = self._submit_registration(
@@ -1079,6 +1090,7 @@ class EngineDrivenTransferContext(TransferContext):
                     hidden_dim_size=hidden_dim_size,
                     dtype_str=dtype_str,
                     use_mla=use_mla_flag,
+                    chunk_size=chunk_tokens,
                     num_physical_slots=num_physical_slots,
                     group_layouts=group_layouts,
                 )

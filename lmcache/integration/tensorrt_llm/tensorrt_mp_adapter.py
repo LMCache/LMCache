@@ -365,6 +365,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             layout_hints,
             [],
             None,
+            self._chunk_size,
         )
 
         try:
