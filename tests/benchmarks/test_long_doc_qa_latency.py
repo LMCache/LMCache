@@ -27,6 +27,14 @@ def long_doc_qa_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     return module
 
 
+def test_trim_fraction_help_formats_percentages(
+    long_doc_qa_module: ModuleType,
+) -> None:
+    """A literal percent sign must survive argparse's help interpolation."""
+    help_text = long_doc_qa_module.create_argument_parser().format_help()
+    assert "bottom 10% and top 10%." in " ".join(help_text.split())
+
+
 @pytest.mark.asyncio
 async def test_cli_summary_uses_successful_request_latency(
     long_doc_qa_module: ModuleType,
