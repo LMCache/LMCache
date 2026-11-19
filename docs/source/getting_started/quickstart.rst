@@ -56,7 +56,8 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             ``lmcache.mp.port`` in ``kv_connector_extra_config``. The host may
             include a transport prefix: ``tcp://`` for ZMQ or ``grpc://`` for
             gRPC. A bare ``host``/``host:port`` is also accepted and is
-            normalized to ``tcp://`` automatically. See
+            normalized to ``grpc://`` automatically. ZMQ endpoints still work
+            but are deprecated; see :doc:`/mp/request_transport`. See
             :doc:`/mp/request_transport` for supported endpoint schemes and
             transport-selection behavior:
 
@@ -211,8 +212,8 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
       typed inline transport, which serialises every chunk through the request
       channel and is much slower; see :ref:`mp-transfer-mode`.
 
-      To use gRPC instead of ZMQ, include the ``grpc://`` scheme in the
-      connector configuration:
+      gRPC is the default; the ``grpc://`` scheme is explicit for clarity and
+      for the case where a deployment still names ZMQ elsewhere:
 
       .. code-block:: bash
 
