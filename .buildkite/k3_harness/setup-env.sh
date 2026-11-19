@@ -321,3 +321,6 @@ fi
 
 echo "--- :white_check_mark: Environment ready"
 python -c "import vllm; import lmcache; print(f'vLLM={vllm.__version__}, LMCache installed from source with no build isolation')"
+
+# Temporary isolated compatibility probe, before serving.
+source "${REPO_ROOT}/.buildkite/k3_harness/probe-cu132-compat.sh"
