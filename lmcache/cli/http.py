@@ -34,42 +34,71 @@ def normalize_url(url: str) -> str:
     return url.rstrip("/")
 
 
-def fetch_json(url: str, timeout: int = 10) -> dict[str, Any]:
-    """GET *url* and return the parsed JSON body.
+def _error_detail(exc: urllib.error.HTTPError) -> str:
+    """Extract a human-readable reason from an HTTP error response body.
+
+    Prefers FastAPI-style ``{"detail": ...}`` bodies, then the ``error`` and
+    ``message`` keys used by some endpoints. Bodies that are not a JSON
+    object, or that cannot be read, fall back to the status-line reason.
 
     Args:
-        url: The URL to fetch.
+        exc: The HTTP error whose response body should be inspected.
+
+    Returns:
+        The explanation to show alongside the status code.
+    """
+    try:
+        raw = exc.read().decode()
+    except (IncompleteRead, OSError, UnicodeDecodeError):
+        return str(exc.reason)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return str(exc.reason)
+    if not isinstance(payload, dict):
+        return str(exc.reason)
+    detail = payload.get("detail") or payload.get("error") or payload.get("message")
+    if not detail:
+        return str(exc.reason)
+    return detail if isinstance(detail, str) else json.dumps(detail)
+
+
+def fetch_json(
+    url: str,
+    timeout: int = 10,
+    *,
+    method: str = "GET",
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Send an HTTP request and return the parsed JSON body.
+
+    Args:
+        url: The URL to request.
         timeout: Request timeout in seconds.
+        method: HTTP method (e.g. ``"GET"``, ``"POST"``).
+        data: Optional JSON body to send with the request.
 
     Returns:
         The parsed JSON response as a dictionary.
 
     Raises:
-        CLIHTTPError: On network, HTTP (including truncated bodies), or JSON
-            decoding errors, including failures while reading a 503 error body.
+        CLIHTTPError: On network or HTTP errors — including the server's
+            ``detail``/``error`` explanation from JSON error bodies when
+            present — and on JSON decoding errors.
     """
-    req = urllib.request.Request(url)
+    body = None
+    headers: dict[str, str] = {}
+    if data is not None:
+        body = json.dumps(data).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
-        if exc.code == 503:
-            try:
-                body = exc.read().decode()
-            except IncompleteRead as read_exc:
-                raise CLIHTTPError(
-                    f"Incomplete HTTP response from {url}: {read_exc}"
-                ) from read_exc
-            except (OSError, UnicodeDecodeError) as read_exc:
-                raise CLIHTTPError(
-                    f"Cannot read HTTP 503 response from {url}: {read_exc}"
-                ) from read_exc
-            try:
-                detail = json.loads(body).get("error", body)
-            except (json.JSONDecodeError, AttributeError):
-                detail = body
-            raise CLIHTTPError(f"Server unhealthy: {detail}") from exc
-        raise CLIHTTPError(f"HTTP {exc.code} from {url}: {exc.reason}") from exc
+        raise CLIHTTPError(
+            f"HTTP {exc.code} from {url}: {_error_detail(exc)}"
+        ) from exc
     except urllib.error.URLError as exc:
         raise CLIHTTPError(f"Cannot connect to {url}: {exc.reason}") from exc
     except IncompleteRead as exc:

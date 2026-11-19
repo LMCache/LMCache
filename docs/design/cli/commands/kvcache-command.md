@@ -72,7 +72,7 @@ lmcache kvcache
 
 ```bash
 $ lmcache kvcache -h
-usage: lmcache kvcache [-h] [--format FORMAT] [--output PATH] [-q] {clear,list} ...
+usage: lmcache kvcache [-h] {clear,list} ...
 
 Manage KV cache state.
 
@@ -83,6 +83,9 @@ subcommands:
 # info, pin, compress will appear here once implemented
 ```
 
+Each sub-command owns the shared output options (`--format`, `--output`,
+`-q`), matching the `quota` shape: `lmcache kvcache list --format json`.
+
 ---
 
 ## Commands in Detail
@@ -90,7 +93,7 @@ subcommands:
 ### `list`
 
 ```bash
-lmcache kvcache --format json list --url http://localhost:8080 \
+lmcache kvcache list --format json --url http://localhost:8080 \
     --adapter fs --model-name org/model --page-size 100
 ```
 
@@ -103,23 +106,26 @@ the server; the CLI neither decodes cursors nor follows additional pages.
 The response is represented by the existing Metrics output system:
 
 - `metrics.adapter` and `metrics.shared` retain the server values.
-- `metrics.entries` retains the list of `{key, size_bytes}` objects, including
-  every wire-key field. Terminal output uses a key/byte-size table.
+- `metrics.entries` flattens each `{key, size_bytes}` object: every wire-key
+  field (`chunk_hash_hex`, `model_name`, `kv_rank`, `object_group_id`,
+  `cache_salt`, `tags`) becomes a JSON field next to `size_bytes`, and
+  terminal output splits them into one column per field.
 - `metrics.next_page_token` is copied unchanged, including `null` at the end.
   Callers pass a non-null token to the next invocation's `--page-token` with
   the same server, adapter and model filter. Empty pages remain successful.
 
-Output options belong to `kvcache` and precede `list`. `--quiet` suppresses
-stdout while `--output` still writes the report. HTTP/JSON failures exit 1
-and report to stderr; invalid arguments exit 2 before any HTTP request.
+Output options belong to the `list` leaf. `--quiet` suppresses stdout while
+`--output` still writes the report. HTTP/JSON failures exit 1 and report to
+stderr — including the server's `detail` explanation from JSON error bodies,
+via `fetch_json`; invalid arguments exit 2 before any HTTP request.
 The command reuses `lmcache.cli.http.fetch_json` and `normalize_url`, and
 `positive_int` for the lower page-size bound. No storage implementation or
 server API is imported by the CLI.
 
 `tests/cli/commands/test_kvcache.py` exercises the public CLI against a
 loopback HTTP fixture: pagination without auto-follow, exact query encoding,
-full key preservation, terminal/JSON/file output, invalid sizes, failures,
-and the existing L1 `clear` request.
+flattened key preservation, terminal/JSON/file output, invalid sizes,
+failures with surfaced error detail, and the existing L1 `clear` request.
 
 ### `info`
 
@@ -272,10 +278,14 @@ All CLI operations target the **MP HTTP server**
 
 ## Implementation
 
-- **Single `KVCacheCommand`** (`BaseCommand` subclass) with second-level
-  argparse subparsers. File: `lmcache/cli/commands/kvcache.py`.
-- **MP HTTP only:** `clear` uses `_http_request()`; `list` uses the shared
-  CLI `fetch_json()` helper. All requests target the MP HTTP server.
+- **`KVCacheCommand`** (`CompositeCommand` subclass) with auto-discovered
+  leaf commands, matching the `quota` shape. Package:
+  `lmcache/cli/commands/kvcache/` (`clear_command.py`, `list_command.py`).
+  Each leaf owns the shared output options (`--format`, `--output`, `-q`).
+- **MP HTTP only:** every leaf uses the shared CLI `fetch_json()` helper
+  (GET or POST with a JSON body), which surfaces the server's
+  `detail`/`error` explanation on HTTP failures. All requests target the
+  MP HTTP server.
 - **Indexing args** for future per-request sub-commands: positional
   `request_id` + optional `--start`/`--end`, added via a shared helper.
 - **Output:** `self.create_metrics()` — use `--format json | jq` for scripting.

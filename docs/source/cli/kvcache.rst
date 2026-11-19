@@ -6,27 +6,21 @@ server.
 
 .. code-block:: bash
 
-   lmcache kvcache [output-options] <sub-command> [options]
+   lmcache kvcache <sub-command> [options]
 
-Place the common ``--format``, ``--output``, and ``--quiet`` options before
-the sub-command.
+Like ``lmcache quota``, every sub-command accepts the shared output options
+(``--format``, ``--output``, ``-q`` / ``--quiet``) directly.
 
 .. code-block:: text
 
    $ lmcache kvcache -h
-   usage: lmcache kvcache [-h] [--format FORMAT] [--output PATH] [-q] {clear,list} ...
+   usage: lmcache kvcache [-h] {clear,list} ...
 
    Manage KV cache state.
 
    subcommands:
      clear          Clear all cached KV data in L1 (CPU)
      list           List one page of L2 cache objects
-
-   options:
-     -h, --help       show this help message and exit
-     --format FORMAT  Stdout output format (default: terminal). Available: terminal, json.
-     --output PATH    Save metrics to a file at PATH (format chosen by --format).
-     -q, --quiet      Suppress stdout output. Exit code only.
 
 list
 ----
@@ -54,17 +48,18 @@ token, not the number of entries, to determine whether more pages exist.
 
 .. code-block:: bash
 
-   lmcache kvcache --format json list --url http://localhost:8080 \
+   lmcache kvcache list --format json --url http://localhost:8080 \
        --adapter fs --page-size 100 > page.json
    TOKEN=$(jq -r '.metrics.next_page_token // empty' page.json)
    if [ -n "$TOKEN" ]; then
-       lmcache kvcache --format json list --url http://localhost:8080 \
+       lmcache kvcache list --format json --url http://localhost:8080 \
            --adapter fs --page-size 100 --page-token "$TOKEN"
    fi
 
 The JSON report preserves the server's ``adapter``, ``shared``, ``entries``
-and ``next_page_token`` fields under ``metrics``. Each entry retains its full
-wire key, including ``kv_rank``, ``object_group_id``, ``cache_salt`` and ``tags``:
+and ``next_page_token`` fields under ``metrics``. Each entry is the wire key
+flattened next to ``size_bytes``, so every key field — including ``kv_rank``,
+``object_group_id``, ``cache_salt`` and ``tags`` — is a JSON field:
 
 .. code-block:: json
 
@@ -76,14 +71,12 @@ wire key, including ``kv_rank``, ``object_group_id``, ``cache_salt`` and ``tags`
        "next_page_token": null,
        "entries": [
          {
-           "key": {
-             "chunk_hash_hex": "deadbeef",
-             "model_name": "org/model",
-             "kv_rank": 0,
-             "object_group_id": 0,
-             "cache_salt": "",
-             "tags": {}
-           },
+           "chunk_hash_hex": "deadbeef",
+           "model_name": "org/model",
+           "kv_rank": 0,
+           "object_group_id": 0,
+           "cache_salt": "",
+           "tags": {},
            "size_bytes": 4096
          }
        ]
@@ -91,13 +84,14 @@ wire key, including ``kv_rank``, ``object_group_id``, ``cache_salt`` and ``tags`
    }
 
 The default terminal report shows the adapter, sharing flag, continuation
-token, and a key/byte-size table. An empty page renders as ``(none)``.
-To save a JSON report without stdout output:
+token, and one row per object with the key fields split into columns
+(chunk hash, model, rank, group, salt, tags, bytes). An empty page renders as
+``(none)``. To save a JSON report without stdout output:
 
 .. code-block:: bash
 
-   lmcache kvcache --format json --quiet --output page.json \
-       list --url http://localhost:8080
+   lmcache kvcache list --format json --quiet --output page.json \
+       --url http://localhost:8080
 
 Listing Options
 ~~~~~~~~~~~~~~~
@@ -118,6 +112,12 @@ Listing Options
      - Maximum entries in this page, from 1 to 5000; default 500.
    * - ``--page-token``
      - Opaque token returned by the previous page.
+   * - ``--format``
+     - Output format: ``terminal`` (default) or ``json``.
+   * - ``--output``
+     - Save output to a file (uses the format chosen by ``--format``).
+   * - ``-q`` / ``--quiet``
+     - Suppress stdout. Useful in scripts where you only need the exit code.
 
 Listing Exit Codes
 ~~~~~~~~~~~~~~~~~~
@@ -125,7 +125,8 @@ Listing Exit Codes
 ``0`` means success, including an empty page; ``1`` means an HTTP, connection,
 or JSON decoding error; ``2`` means an argument parsing error. HTTP errors
 (such as an invalid cursor, unknown adapter, or unsupported listing) are
-reported on stderr even with ``--quiet``. Failed requests do not write a
+reported on stderr with the server's reason — the ``detail`` field of the
+error response — even with ``--quiet``. Failed requests do not write a
 success report.
 
 clear
@@ -141,7 +142,7 @@ Clear all cached KV data in **L1 (CPU memory)** on the target LMCache server.
 
 .. code-block:: bash
 
-   $ lmcache kvcache clear --url http://localhost:8000
+   $ lmcache kvcache clear --url http://localhost:8080
 
    ================ KV Cache Clear ================
    Status:                                       OK
@@ -151,7 +152,7 @@ Clear all cached KV data in **L1 (CPU memory)** on the target LMCache server.
 
 .. code-block:: bash
 
-   $ lmcache kvcache --format json clear --url http://localhost:8000
+   $ lmcache kvcache clear --format json --url http://localhost:8080
    {
      "title": "KV Cache Clear",
      "metrics": {
@@ -163,7 +164,7 @@ Clear all cached KV data in **L1 (CPU memory)** on the target LMCache server.
 
 .. code-block:: bash
 
-   $ lmcache kvcache -q clear --url http://localhost:8000
+   $ lmcache kvcache clear -q --url http://localhost:8080
    $ echo $?
    0
 
@@ -179,7 +180,7 @@ Options
      - Description
    * - ``--url``
      - Yes
-     - URL of the LMCache MP HTTP server (e.g. ``http://localhost:8000``).
+     - URL of the LMCache MP HTTP server (e.g. ``http://localhost:8080``).
    * - ``--format``
      - No
      - Output format: ``terminal`` (default) or ``json``.
@@ -202,7 +203,8 @@ Exit Codes
    * - ``0``
      - Success.
    * - ``1``
-     - Error (connection failure, server error, bad arguments).
+     - Error (connection failure, server error, bad arguments). The server's
+       reason is reported on stderr when the error response carries one.
 
 Common Patterns
 ---------------
@@ -215,7 +217,7 @@ to diagnose.
 
 .. code-block:: bash
 
-   if lmcache kvcache -q clear --url http://localhost:8000; then
+   if lmcache kvcache clear -q --url http://localhost:8080; then
        echo "Cache cleared"
    else
        echo "Clear failed — server temporarily unreachable, retrying later"
@@ -225,6 +227,6 @@ to diagnose.
 
 .. code-block:: bash
 
-   RESULT=$(lmcache kvcache --format json clear --url http://localhost:8000)
+   RESULT=$(lmcache kvcache clear --format json --url http://localhost:8080)
    STATUS=$(echo "$RESULT" | jq -r '.metrics.status')
    echo "Clear status: $STATUS"

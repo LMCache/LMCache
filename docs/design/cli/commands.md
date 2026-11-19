@@ -345,7 +345,10 @@ lmcache/cli/
 │   ├── coordinator.py   # lmcache coordinator
 │   ├── describe.py      # lmcache describe {kvcache}
 │   ├── ping.py          # lmcache ping {kvcache,engine}
-│   ├── kvcache.py       # lmcache kvcache {clear,list}
+│   ├── kvcache/         # lmcache kvcache (CompositeCommand)
+│   │   ├── __init__.py          # KVCacheCommand(CompositeCommand)
+│   │   ├── clear_command.py     # Auto-discovered: lmcache kvcache clear
+│   │   └── list_command.py      # Auto-discovered: lmcache kvcache list
 │   ├── query/           # lmcache query (CompositeCommand)
 │   │   ├── __init__.py          # QueryCommand(CompositeCommand)
 │   │   ├── engine_command.py    # Auto-discovered: lmcache query engine

@@ -39,6 +39,22 @@ PAGE: dict[str, object] = {
     ],
     "next_page_token": NEXT_PAGE_TOKEN,
 }
+FLAT_PAGE: dict[str, object] = {
+    "adapter": "fs",
+    "shared": True,
+    "entries": [
+        {
+            "chunk_hash_hex": "deadbeef",
+            "model_name": "org/model",
+            "kv_rank": 2,
+            "object_group_id": 3,
+            "cache_salt": "tenant-a",
+            "tags": {"version": "v2"},
+            "size_bytes": 4096,
+        }
+    ],
+    "next_page_token": NEXT_PAGE_TOKEN,
+}
 EMPTY_PAGE: dict[str, object] = {
     "adapter": "fs",
     "shared": False,
@@ -105,12 +121,12 @@ def cache_server() -> Iterator[CacheServer]:
 def test_list_one_page_and_resume(
     cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """One invocation preserves the wire page and never follows its cursor."""
+    """One invocation flattens the wire page and never follows its cursor."""
     cache_server.replies.put((200, PAGE))
-    tokens = ["kvcache", "--format", "json", "list", "--url", cache_server.url + "/"]
+    tokens = ["kvcache", "list", "--format", "json", "--url", cache_server.url + "/"]
     main(tokens)
     output = json.loads(capsys.readouterr().out)
-    assert output == {"title": "L2 Cache Objects", "metrics": PAGE}
+    assert output == {"title": "L2 Cache Objects", "metrics": FLAT_PAGE}
     method, target, body = cache_server.requests.get(timeout=5)
     assert (method, urlsplit(target).path, body) == ("GET", "/cache/objects", b"")
     assert parse_qs(urlsplit(target).query) == {"tier": ["l2"], "page_size": ["500"]}
@@ -136,8 +152,8 @@ def test_list_filters_and_page_size(cache_server: CacheServer, page_size: int) -
     main(
         [
             "kvcache",
-            "--quiet",
             "list",
+            "--quiet",
             "--url",
             cache_server.url.removeprefix("http://"),
             "--adapter",
@@ -167,12 +183,12 @@ def test_list_quiet_still_writes_output(
     main(
         [
             "kvcache",
+            "list",
             "--format",
             "json",
             "--quiet",
             "--output",
             str(output),
-            "list",
             "--url",
             cache_server.url,
         ]
@@ -180,7 +196,7 @@ def test_list_quiet_still_writes_output(
     assert capsys.readouterr().out == ""
     assert json.loads(output.read_text()) == {
         "title": "L2 Cache Objects",
-        "metrics": PAGE,
+        "metrics": FLAT_PAGE,
     }
 
 
@@ -190,7 +206,7 @@ def test_list_terminal_output(
     page: dict[str, object],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The default report identifies the adapter, cursor, and objects or empty page."""
+    """The default report splits each key field into its own column."""
     cache_server.replies.put((200, page))
     main(["kvcache", "list", "--url", cache_server.url])
     text = capsys.readouterr().out
@@ -198,7 +214,10 @@ def test_list_terminal_output(
     assert "Adapter:" in text and "fs" in text
     assert "Next page token:" in text
     if page["entries"]:
-        assert "deadbeef" in text and "4096" in text
+        for header in ("Chunk hash", "Model", "Rank", "Group", "Salt", "Bytes"):
+            assert header in text
+        assert "deadbeef" in text and "org/model" in text and "4096" in text
+        assert "{'chunk_hash_hex'" not in text
         assert NEXT_PAGE_TOKEN in text
     else:
         assert "(none)" in text
@@ -207,12 +226,19 @@ def test_list_terminal_output(
 @pytest.mark.parametrize(
     ("reply", "error"),
     [
-        ((400, {"detail": "malformed page token"}), "HTTP 400"),
-        ((404, {"detail": "no L2 adapter"}), "HTTP 404"),
+        ((400, {"detail": "malformed page token"}), "malformed page token"),
+        ((404, {"detail": "no L2 adapter"}), "no L2 adapter"),
         ((503, {"detail": "listing unsupported"}), "listing unsupported"),
+        ((503, {"error": "engine not initialized"}), "engine not initialized"),
         ((200, "not json"), "Invalid JSON response"),
     ],
-    ids=["bad-cursor", "unknown-adapter", "unsupported-listing", "invalid-json"],
+    ids=[
+        "bad-cursor",
+        "unknown-adapter",
+        "unsupported-listing",
+        "error-key",
+        "invalid-json",
+    ],
 )
 def test_list_request_errors(
     cache_server: CacheServer,
@@ -221,17 +247,17 @@ def test_list_request_errors(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """HTTP/JSON failures exit 1 with stderr diagnostics, even in quiet mode."""
+    """HTTP/JSON failures exit 1 with the server's reason on stderr."""
     cache_server.replies.put(reply)
     output = tmp_path / "failed.json"
     with pytest.raises(SystemExit) as exc:
         main(
             [
                 "kvcache",
+                "list",
                 "--quiet",
                 "--output",
                 str(output),
-                "list",
                 "--url",
                 cache_server.url,
             ]
@@ -253,12 +279,20 @@ def test_list_invalid_page_size(cache_server: CacheServer, page_size: str) -> No
     assert cache_server.requests.empty()
 
 
+def test_output_flags_belong_to_subcommands(cache_server: CacheServer) -> None:
+    """Parent-level output flags are rejected now that leaves own them."""
+    with pytest.raises(SystemExit) as exc:
+        main(["kvcache", "--format", "json", "list", "--url", cache_server.url])
+    assert exc.value.code == 2
+    assert cache_server.requests.empty()
+
+
 def test_clear_preserves_l1_post(
     cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Adding list keeps the existing clear operation and report unchanged."""
     cache_server.replies.put((200, {"ok": True}))
-    main(["kvcache", "--format", "json", "clear", "--url", cache_server.url])
+    main(["kvcache", "clear", "--format", "json", "--url", cache_server.url])
     method, target, body = cache_server.requests.get(timeout=5)
     assert (method, target, json.loads(body)) == (
         "POST",
@@ -269,3 +303,14 @@ def test_clear_preserves_l1_post(
         "title": "KV Cache Clear",
         "metrics": {"status": "OK"},
     }
+
+
+def test_clear_surfaces_error_detail(
+    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Clear failures exit 1 with the server's reason on stderr."""
+    cache_server.replies.put((503, {"detail": "server not initialized"}))
+    with pytest.raises(SystemExit) as exc:
+        main(["kvcache", "clear", "--quiet", "--url", cache_server.url])
+    assert exc.value.code == 1
+    assert "server not initialized" in capsys.readouterr().err
