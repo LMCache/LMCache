@@ -16,8 +16,6 @@ logged and retried, and it never takes the MP server down.
 from collections.abc import Callable, Sequence
 import asyncio
 import contextlib
-import threading
-import time
 
 # Third Party
 from pydantic import ValidationError
@@ -38,7 +36,6 @@ logger = init_logger(__name__)
 
 _DEFAULT_HEARTBEAT_INTERVAL = 5.0
 _DEFAULT_CHUNK_SIZE_BIND_TIMEOUT = 10.0
-_DEFAULT_CHUNK_SIZE_BIND_RETRY_INTERVAL = 5.0
 
 
 def bind_coordinator_chunk_size(
@@ -46,88 +43,50 @@ def bind_coordinator_chunk_size(
     chunk_size: int,
     timeout: float = _DEFAULT_CHUNK_SIZE_BIND_TIMEOUT,
     api_key_files: Sequence[str] = (),
-) -> int:
-    """Synchronously bind coordinator hashing to an MP server's final size."""
+) -> int | None:
+    """Synchronously bind coordinator hashing to an MP server's final size.
+
+    The coordinator only advises, so being unable to reach it must not fail
+    chunk-size negotiation (and with it the engine's startup): a transport
+    error is logged and :func:`keep_registered` delivers the size once the
+    coordinator is back.
+
+    Args:
+        base_url: Coordinator base URL.
+        chunk_size: The MP server's finalized chunk size.
+        timeout: Request timeout in seconds.
+        api_key_files: API key files for the coordinator request.
+
+    Returns:
+        The coordinator's bound chunk size, or ``None`` if it was unreachable.
+
+    Raises:
+        httpx.HTTPStatusError: If the coordinator answers with an error, e.g.
+            409 when it is already bound to a different chunk size.
+    """
     # First Party
     from lmcache.v1.transport.auth import (
         request_client_auth_headers,
     )
 
     body = ChunkSizeBindRequest(chunk_size=chunk_size)
-    response = httpx.put(
-        f"{base_url.rstrip('/')}/config/chunk-size",
-        json=body.model_dump(mode="json"),
-        headers=request_client_auth_headers(api_key_files),
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    return ChunkSizeBindResponse.model_validate(response.json()).chunk_size
-
-
-def bind_coordinator_chunk_size_or_retry(
-    base_url: str,
-    chunk_size: int,
-    retry_interval: float = _DEFAULT_CHUNK_SIZE_BIND_RETRY_INTERVAL,
-    api_key_files: Sequence[str] = (),
-) -> None:
-    """Bind the coordinator to ``chunk_size``, retrying in the background if
-    the coordinator cannot be reached.
-
-    The coordinator only advises, so an outage of it must not stop an engine
-    from starting: a transport failure is logged and the bind is retried on a
-    daemon thread until it lands. A response from the coordinator that
-    rejects the size (a fleet with mismatched chunk sizes) still raises, so
-    that misconfiguration fails the engine as before.
-
-    Args:
-        base_url: Coordinator base URL.
-        chunk_size: The MP server's finalized chunk size.
-        retry_interval: Seconds between background retries.
-        api_key_files: API key files for the coordinator request.
-
-    Raises:
-        httpx.HTTPStatusError: If the coordinator answers with an error.
-    """
     try:
-        bind_coordinator_chunk_size(base_url, chunk_size, api_key_files=api_key_files)
-        return
+        response = httpx.put(
+            f"{base_url.rstrip('/')}/config/chunk-size",
+            json=body.model_dump(mode="json"),
+            headers=request_client_auth_headers(api_key_files),
+            timeout=timeout,
+        )
     except httpx.TransportError as e:
         logger.warning(
             "Coordinator unreachable while binding chunk size %d (%s); "
-            "retrying every %.1f s in the background",
+            "the registration loop sends it once the coordinator is back",
             chunk_size,
             e,
-            retry_interval,
         )
-    threading.Thread(
-        target=_retry_chunk_size_bind,
-        args=(base_url, chunk_size, retry_interval, api_key_files),
-        name="coordinator-chunk-size-bind",
-        daemon=True,
-    ).start()
-
-
-def _retry_chunk_size_bind(
-    base_url: str,
-    chunk_size: int,
-    retry_interval: float,
-    api_key_files: Sequence[str],
-) -> None:
-    """Retry the chunk-size bind until the coordinator answers."""
-    while True:
-        time.sleep(retry_interval)
-        try:
-            bind_coordinator_chunk_size(
-                base_url, chunk_size, api_key_files=api_key_files
-            )
-        except httpx.TransportError:
-            continue
-        except httpx.HTTPStatusError:
-            # The engine is already serving; nothing to fail but to say so.
-            logger.exception("Coordinator rejected chunk size %d", chunk_size)
-            return
-        logger.info("Bound coordinator chunk size %d", chunk_size)
-        return
+        return None
+    response.raise_for_status()
+    return ChunkSizeBindResponse.model_validate(response.json()).chunk_size
 
 
 async def register(
@@ -200,6 +159,13 @@ async def keep_registered(
     an explicit ``404`` (the coordinator forgot us) or after a failed initial
     registration.
 
+    The finalized chunk size goes with every registration. If it is
+    finalized only after this server registered, the next tick binds it with
+    ``PUT /config/chunk-size``. A ``409`` on either request means the
+    coordinator is bound to a different chunk size: the loop logs an error,
+    deregisters and stops, so the server never stays in a coordinator that
+    hashes at another size. The MP server itself keeps serving.
+
     Args:
         client: The HTTP client to send with.
         coordinator_url: Coordinator base URL.
@@ -223,8 +189,13 @@ async def keep_registered(
     base_url = coordinator_url.rstrip("/")
     ip = advertise_ip or get_ip()
     assigned_id: str | None = None
+    # Chunk size the coordinator accepted from this loop; None until then.
+    bound_chunk_size: int | None = None
     try:
         while True:
+            chunk_size = (
+                chunk_size_provider() if chunk_size_provider is not None else None
+            )
             try:
                 if assigned_id is None:
                     assigned_id = await register(
@@ -235,12 +206,9 @@ async def keep_registered(
                         instance_id=instance_id,
                         p2p_advertised_url=p2p_advertised_url,
                         mq_port=mq_port,
-                        chunk_size=(
-                            chunk_size_provider()
-                            if chunk_size_provider is not None
-                            else None
-                        ),
+                        chunk_size=chunk_size,
                     )
+                    bound_chunk_size = chunk_size
                     logger.info("Registered with coordinator as %s", assigned_id)
                     on_registered()
                 else:
@@ -256,7 +224,28 @@ async def keep_registered(
                         assigned_id = None
                     else:
                         response.raise_for_status()
+                        if bound_chunk_size is None and chunk_size is not None:
+                            response = await client.put(
+                                f"{base_url}/config/chunk-size",
+                                json=ChunkSizeBindRequest(
+                                    chunk_size=chunk_size
+                                ).model_dump(mode="json"),
+                            )
+                            response.raise_for_status()
+                            bound_chunk_size = chunk_size
             except (httpx.HTTPError, ValueError, ValidationError) as e:
+                if (
+                    isinstance(e, httpx.HTTPStatusError)
+                    and e.response.status_code == 409
+                ):
+                    logger.error(
+                        "Coordinator rejected chunk size %s (%s); leaving it. "
+                        "MP servers with different chunk sizes need separate "
+                        "coordinators",
+                        chunk_size,
+                        e.response.text,
+                    )
+                    return
                 # Transient: keep the current id so the next tick retries and
                 # shutdown can still deregister. ValueError/ValidationError cover
                 # bad JSON or schema skew; CancelledError still propagates.

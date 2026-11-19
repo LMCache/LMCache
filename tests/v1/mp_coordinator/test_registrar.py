@@ -7,20 +7,17 @@ the coordinator is unreachable.
 """
 
 # Standard
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 import asyncio
 import contextlib
-import time
+import json
 
 # Third Party
 import httpx
-import pytest
 
 # First Party
-from lmcache.v1.mp_coordinator import registrar as registrar_module
 from lmcache.v1.mp_coordinator.registrar import (
     bind_coordinator_chunk_size,
-    bind_coordinator_chunk_size_or_retry,
     keep_registered,
     register,
 )
@@ -358,43 +355,103 @@ def test_on_registered_is_required():
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
 
 
-def _bind_response(status: int, chunk_size: int = 256) -> httpx.Response:
-    body: dict[str, object] = (
-        {"chunk_size": chunk_size} if status == 200 else {"detail": "no"}
-    )
-    return httpx.Response(
-        status,
-        json=body,
-        request=httpx.Request("PUT", "http://coord:9300/config/chunk-size"),
-    )
+def _chunk_size_handler(seen: dict, register_status: int = 200, bind_status: int = 200):
+    """Coordinator stub: records registrations, chunk-size binds and deletes."""
 
-
-def test_chunk_size_bind_retries_in_background_while_coordinator_is_down():
-    """An unreachable coordinator does not fail the bind: it returns at once
-    and the bind lands once the coordinator answers."""
-    with patch.object(
-        registrar_module.httpx,
-        "put",
-        side_effect=[httpx.ConnectError("refused"), _bind_response(200)],
-    ) as put:
-        bind_coordinator_chunk_size_or_retry(
-            "http://coord:9300", 256, retry_interval=0.01
-        )
-        deadline = time.monotonic() + 2.0
-        while put.call_count < 2 and time.monotonic() < deadline:
-            time.sleep(0.01)
-    assert put.call_count == 2
-
-
-def test_chunk_size_bind_rejected_by_coordinator_still_raises():
-    """A coordinator that answers and rejects the size (mismatched fleet)
-    still fails the bind, and nothing is retried."""
-    with patch.object(
-        registrar_module.httpx, "put", return_value=_bind_response(409)
-    ) as put:
-        with pytest.raises(httpx.HTTPStatusError):
-            bind_coordinator_chunk_size_or_retry(
-                "http://coord:9300", 256, retry_interval=0.01
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            seen["register"].append(json.loads(request.content)["chunk_size"])
+            return httpx.Response(
+                register_status, json={"instance_id": "i1", "re_registered": False}
             )
-        time.sleep(0.05)
-    assert put.call_count == 1
+        if request.url.path == "/config/chunk-size":
+            seen["bind"].append(json.loads(request.content)["chunk_size"])
+            return httpx.Response(bind_status, json={"chunk_size": 640})
+        if request.method == "PUT":
+            return httpx.Response(200, json={"instance_id": "i1"})
+        seen["delete"] = request.url.path
+        return httpx.Response(204)
+
+    return handler
+
+
+async def _run_loop_until_done(client: httpx.AsyncClient, **kwargs) -> bool:
+    """Run keep_registered for a few ticks; return whether it stopped itself."""
+    task = asyncio.create_task(
+        keep_registered(
+            client,
+            _BASE,
+            http_port=8080,
+            advertise_ip="127.0.0.1",
+            heartbeat_interval=0.03,
+            instance_id="i1",
+            on_registered=lambda: None,
+            **kwargs,
+        )
+    )
+    await asyncio.sleep(0.15)
+    stopped = task.done()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    return stopped
+
+
+def test_keep_registered_binds_chunk_size_finalized_after_registration():
+    """Registered before negotiation, e.g. the coordinator was down when the
+    size was finalized and came back with its state: the loop binds the size
+    once."""
+    seen: dict = {"register": [], "bind": [], "delete": None}
+    sizes = iter([None])
+
+    async def run() -> bool:
+        async with _client(_chunk_size_handler(seen)) as client:
+            return await _run_loop_until_done(
+                client, chunk_size_provider=lambda: next(sizes, 640)
+            )
+
+    assert not asyncio.run(run())
+    assert seen["register"] == [None]
+    assert seen["bind"] == [640]
+
+
+def test_keep_registered_does_not_rebind_size_sent_on_registration():
+    seen: dict = {"register": [], "bind": [], "delete": None}
+
+    async def run() -> bool:
+        async with _client(_chunk_size_handler(seen)) as client:
+            return await _run_loop_until_done(client, chunk_size_provider=lambda: 640)
+
+    assert not asyncio.run(run())
+    assert seen["register"] == [640]
+    assert seen["bind"] == []
+
+
+def test_keep_registered_leaves_coordinator_that_rejects_late_chunk_size():
+    """A coordinator bound to another size during an outage rejects the late
+    bind: the loop deregisters and stops instead of staying listed."""
+    seen: dict = {"register": [], "bind": [], "delete": None}
+    sizes = iter([None])
+
+    async def run() -> bool:
+        async with _client(_chunk_size_handler(seen, bind_status=409)) as client:
+            return await _run_loop_until_done(
+                client, chunk_size_provider=lambda: next(sizes, 640)
+            )
+
+    assert asyncio.run(run())
+    assert seen["bind"] == [640]
+    assert seen["delete"] == "/instances/i1"
+
+
+def test_keep_registered_stops_when_registration_rejects_chunk_size():
+    """A 409 on registration is not retried every tick."""
+    seen: dict = {"register": [], "bind": [], "delete": None}
+
+    async def run() -> bool:
+        async with _client(_chunk_size_handler(seen, register_status=409)) as client:
+            return await _run_loop_until_done(client, chunk_size_provider=lambda: 640)
+
+    assert asyncio.run(run())
+    assert seen["register"] == [640]
+    assert seen["delete"] is None

@@ -5,9 +5,11 @@
 from unittest.mock import MagicMock, patch
 
 # Third Party
+import httpx
 import pytest
 
 # First Party
+from lmcache.v1.mp_coordinator.registrar import bind_coordinator_chunk_size
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.server import MPCacheServer
@@ -192,6 +194,63 @@ def test_chunk_size_bind_listener_failure_is_retried() -> None:
         assert ctx.negotiate_chunk_size(640) == 640
         completed_listener.assert_called_once_with(640)
         assert retried_listener.call_count == 2
+
+
+def _coordinator_bind_context(put_side_effect: object) -> tuple:
+    """A context whose coordinator listener is wired as server.py wires it."""
+    ctx = _context(chunk_size=256)
+
+    def bind_chunk_size_to_coordinator(chunk_size: int) -> None:
+        bind_coordinator_chunk_size("http://coord:9300", chunk_size)
+
+    ctx.add_chunk_size_bind_listener(bind_chunk_size_to_coordinator)
+    put = patch(
+        "lmcache.v1.mp_coordinator.registrar.httpx.put", side_effect=put_side_effect
+    )
+    return ctx, put
+
+
+def test_get_chunk_size_replies_while_coordinator_is_down() -> None:
+    """An unreachable coordinator does not fail chunk-size negotiation; the
+    size is final and the registration loop, not the context, delivers it."""
+    with (
+        patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
+        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
+        patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
+        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
+    ):
+        ctx, put_patch = _coordinator_bind_context(
+            [httpx.ConnectError("refused"), httpx.ConnectError("refused")]
+        )
+        module = ManagementModule(ctx)
+        with put_patch as put:
+            assert module.get_chunk_size() == 256
+            assert module.get_chunk_size() == 256
+
+        assert ctx.finalized_chunk_size == 256
+        assert put.call_count == 1
+
+
+def test_get_chunk_size_fails_when_coordinator_rejects_size() -> None:
+    """A coordinator that answers and rejects the size (mismatched fleet)
+    still fails negotiation, so the engine does not start."""
+    rejected = httpx.Response(
+        409,
+        json={"detail": "bound to 512"},
+        request=httpx.Request("PUT", "http://coord:9300/config/chunk-size"),
+    )
+    with (
+        patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
+        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
+        patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
+        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
+    ):
+        ctx, put_patch = _coordinator_bind_context([rejected])
+        module = ManagementModule(ctx)
+        with put_patch, pytest.raises(httpx.HTTPStatusError):
+            module.get_chunk_size()
+
+        assert ctx.finalized_chunk_size is None
 
 
 def test_get_chunk_size_notifies_listener_before_finalizing() -> None:
