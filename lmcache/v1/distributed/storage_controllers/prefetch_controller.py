@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Prefetch Controller: asynchronously prefetches data from L2 adapters into L1.
+Prefetch Controller: plans L1/L2 hits and prefetches L2 objects into L1.
 
 A prefetch request names its objects as a grid: one row per key group (an
 object group on one kv rank) and one column per chunk. The controller locks
-what L1 already holds, asks every live L2 adapter what it holds, lets the
-prefetch policy decide which cells to serve from L1 and which to load from
-L2, reserves L1 staging buffers for the loads, and admits each adapter's
-loaded objects into L1 as its load task completes. The result is one bitmap
-per key group marking the cells resident in L1 when the request finished.
+what L1 already holds, queries the eligible L2 adapters, and lets the
+prefetch policy choose a source for each hit. Ordinary prefetch reserves
+L1 staging buffers and reports objects available in L1 at completion.
+A request with ``defer_l2_load`` queries L2 for L1 misses and reports planned
+L2 hits for the caller to load. Both paths return bitmaps over the same grid.
 
 Every lock the controller holds on behalf of a request is recorded in the
 request's key states, and every phase leaves those states consistent, so
@@ -539,7 +539,7 @@ class InFlightPrefetchRequest:
 
 class PrefetchController(StorageControllerInterface):
     """
-    Asynchronously prefetches data from L2 adapters into L1 memory.
+    Plans cache hits and asynchronously loads L2 objects for ordinary prefetch.
 
     The controller:
     1. Accepts prefetch requests via submit_prefetch_request (thread-safe).
@@ -558,6 +558,10 @@ class PrefetchController(StorageControllerInterface):
        adapter's L2 locks.
     7. Folds the L1 locked cells into the final hit, releases the rest, and
        publishes one bitmap per key group via query_prefetch_result.
+
+    With ``defer_l2_load``, step 2 queries only L1 misses and step 3 is followed
+    by completion. The result includes planned L2 hits, and the caller loads
+    them after the controller returns the L2 locks.
 
     Args:
         l1_managers: The L1 manager instances.
@@ -1386,13 +1390,11 @@ class PrefetchController(StorageControllerInterface):
     # Load phase
     # =========================================================================
     def _transition_to_load_phase(self, request: InFlightPrefetchRequest) -> None:
-        """Plan the loads, reserve their L1 buffers, and submit the load
-        tasks.
+        """Plan the loads and start ordinary prefetch I/O.
 
-        On return the locked maps equal the plan, the reserved map equals the
-        L2 plan, and one load task is in flight per adapter in it. With an
-        empty L2 plan no task is submitted and the request is ready to
-        finish.
+        With deferred loading, the locked maps hold the plan and the caller
+        will load its L2 objects. Ordinary prefetch reserves L1 staging
+        buffers and submits one task per adapter for the resulting L2 plan.
         """
         states = request.key_states
 
@@ -1709,15 +1711,16 @@ class PrefetchController(StorageControllerInterface):
     # =========================================================================
 
     def _finish_request(self, request: InFlightPrefetchRequest) -> None:
-        """Settle the request's L1 locks and publish its result.
+        """Settle the request's read locks and publish its result.
 
-        The prefetch policy plans once more on the L1 locks alone: the cells
-        it keeps are the hit, and the rest are released. Touch hit keys in
-        chunk order so eviction prioritizes earlier chunks across groups.
+        Ordinary prefetch replans on the final L1 locks after load completion.
+        Deferred loading includes the planned L2 hits and returns their L2
+        locks before publishing. Touch L1 hits in chunk order so eviction
+        prioritizes earlier chunks across groups.
 
         Args:
-            request: The request to finish. Its L2 locked map and reserved
-                map hold nothing at this point.
+            request: The request to finish. The L1 reservation map is empty.
+                For deferred loading, the L2 locked map holds planned hits.
 
         Note:
             Reads and writes only ``request.key_states`` and the result

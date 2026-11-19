@@ -541,7 +541,7 @@ class StorageManager:
         spec: PrefetchTaskSpec,
         external_request_id: str = "",
     ) -> PrefetchHandle:
-        """Prefetch objects into L1 asynchronously.
+        """Submit an asynchronous cache lookup and prefetch task.
 
         Args:
             spec: The request (see :class:`PrefetchTaskSpec`).
@@ -551,6 +551,9 @@ class StorageManager:
             PrefetchHandle to track the task.
 
         Note:
+            A spec with ``defer_l2_load`` reports planned L2 hits for the caller
+            to load. Ordinary prefetch loads L2 hits into L1.
+
             A spec that allows no L2 adapter (an empty
             ``allowed_l2_memory_tags``) is served from L1 only, and its result
             is available as soon as this returns.
