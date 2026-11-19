@@ -90,10 +90,9 @@ class StoreMixin:
                 extra["skip_chunks"] = [
                     i in covered for i in range(key.start // cs, key.end // cs)
                 ]
-        # Fingerprint a chunk once the groups a blend reads (attention + aux)
-        # hold it: under align-mode Mamba the recurrent group stores only the
-        # checkpoint chunk, and requiring it would fingerprint that one chunk.
-        # With no registered instance or blend read set, check every group.
+        # A blend reuses only the attention and aux groups, so check just those
+        # and skip the recurrent-state check. If the groups to check are
+        # unknown, check every group.
         try:
             entry = self._transfer_module.get_and_touch_context_entry(instance_id)
             if entry is not None:
