@@ -45,6 +45,7 @@ from lmcache.v1.common.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.distributed.p2p import P2PClient
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
 from lmcache.v1.multiprocess.modules.blend import BlendModule
@@ -912,6 +913,38 @@ def test_stalled_stream_subscriber_stops_server_reads(grpc_server_mode: str) -> 
     finally:
         client.close()
         server.close()
+
+
+@pytest.mark.parametrize(
+    "installed", [False, pytest.param(True, marks=requires_pygrpc_native)]
+)
+def test_auto_server_mode_follows_pygrpc_native(
+    monkeypatch: pytest.MonkeyPatch, installed: bool
+) -> None:
+    if not installed:
+        find_spec = grpc_server_builder.importlib.util.find_spec
+        monkeypatch.setattr(
+            grpc_server_builder.importlib.util,
+            "find_spec",
+            lambda name, *args: None if name == "pygrpc_native" else find_spec(name),
+        )
+    expected = (
+        grpc_server_builder.GrpcNativeMultiprocessServer
+        if installed
+        else grpc_server_builder.GrpcAioMultiprocessServer
+    )
+    config = MPServerConfig(transport="grpc", host="127.0.0.1", port=0)
+    assert config.grpc_server_mode == "auto"
+    worker = build_grpc_request_server([], config)
+    try:
+        p2p = build_grpc_request_server([], config, rpc_client=P2PClient)
+        try:
+            assert type(worker) is expected
+            assert type(p2p) is expected
+        finally:
+            p2p.close(wait=True)
+    finally:
+        worker.close(wait=True)
 
 
 @pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
