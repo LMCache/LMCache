@@ -77,6 +77,15 @@ def test_views_alias_the_region_and_reject_invalid_extents(
                 mapping.view(start, length, LAYOUT)
 
 
+def test_view_after_close_is_rejected(
+    region_config: tuple[L1MemoryManagerConfig, RegionContract],
+) -> None:
+    region = SharedDevDaxRegion(*region_config)
+    region.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        region.view(0, ALIGN, LAYOUT)
+
+
 @pytest.mark.parametrize("registration_succeeds", [False, True])
 def test_registration_failure_and_close_release_resources(
     region_config: tuple[L1MemoryManagerConfig, RegionContract],

@@ -86,9 +86,12 @@ class SharedDevDaxRegion:
             A memory object over ``[offset, offset + length)`` of the region.
 
         Raises:
+            RuntimeError: The region has been unregistered or closed.
             ValueError: The extent is negative, misaligned, outside the region,
                 or smaller than the layout's payload.
         """
+        if not self._registered:
+            raise RuntimeError("Shared Device-DAX region is closed")
         payload = get_size_bytes(layout.shapes, layout.dtypes)
         if (
             offset < 0
