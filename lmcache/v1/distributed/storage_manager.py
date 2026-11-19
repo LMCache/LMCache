@@ -101,7 +101,7 @@ logger = init_logger(__name__)
 _L1_WRITE_TAG = "storage_manager"
 
 # Owner/key groups of the deprecated read-completion API (see
-# ``prepare_read_completion``). No MemoryObj or device pointer crosses msgpack.
+# ``prepare_read_completion``). Holds no MemoryObj or device pointer.
 L1WriteCompletion = list[tuple[int, list[ObjectKey]]]
 
 _DEVDAX_L1_TAGS = MemoryTags(segment=MemorySegment.CXL, residency=MemoryResidency.LOCAL)
@@ -1384,7 +1384,7 @@ class StorageManager:
                 the owners by probing the L1s.
 
         Returns:
-            Serializable owner/key groups.
+            Owner/key groups.
 
         Raises:
             ValueError: ``l1_owners`` omits a key or names an unregistered

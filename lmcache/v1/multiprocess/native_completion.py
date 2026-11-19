@@ -56,7 +56,9 @@ logger = init_logger(__name__)
 DeviceHostFunc = Callable[[Any], None]
 
 # Payloads stay in this process; only an int handle crosses the native queue,
-# so the drain thread does not rebuild them under the GIL.
+# so the drain thread does not rebuild them under the GIL. Submitters and the
+# drain thread share these without a lock: next() on the counter and set/pop
+# of an int key are atomic under the GIL.
 _HANDLE = struct.Struct("<Q")
 _pending_payloads: dict[int, Any] = {}
 _next_handle = itertools.count()
@@ -123,12 +125,16 @@ class DeviceHostFuncDispatcher(PeriodicThread):
         with self._registry_lock:
             registry = dict(self._registry)
         for kind, encoded_handle in completions:
+            handle: Any = encoded_handle
             try:
-                payload = _pending_payloads.pop(_HANDLE.unpack(encoded_handle)[0])
-            except Exception:
-                logger.exception(
-                    "DeviceHostFuncDispatcher: unknown completion for kind=%r",
+                (handle,) = _HANDLE.unpack(encoded_handle)
+                payload = _pending_payloads.pop(handle)
+            except (KeyError, struct.error):
+                logger.error(
+                    "DeviceHostFuncDispatcher: unknown completion kind=%r "
+                    "handle=%r (dropped)",
                     kind,
+                    handle,
                 )
                 continue
             handler = registry.get(kind)
@@ -155,7 +161,11 @@ def submit_callback_to_stream(stream: Any, kind: str, payload: Any) -> None:
     """Schedule a stream-ordered host callback for *kind* with *payload*.
     Runs on the dispatcher worker registered for *kind*; never acquires the
     GIL on the driver thread. ``payload`` is delivered to the handler as a
-    single argument."""
+    single argument.
+
+    The handler gets this object itself and it stays alive until the
+    completion fires, so do not mutate it after submitting, and do not put a
+    ``MemoryObj`` or any device resource in it."""
     handle = next(_next_handle)
     _pending_payloads[handle] = payload
     try:

@@ -172,7 +172,7 @@ replays against a fresh manager and against a multi-L1 target alike.
 `test_multi_l1.py`, `test_write_policy.py`, `test_l1_owner.py`, and
 `test_l1_owner_completion.py` cover placement, invalid policy answers,
 owner-grouped completion, independent same-key copies, recycled
-ownership, and serialized completion.
+ownership, and completion payloads.
 
 ## Configured peer L1 serving
 

@@ -2,6 +2,8 @@
 
 #include "completion_recorder.h"
 
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 CompletionRecorder& CompletionRecorder::instance() {
@@ -39,12 +41,15 @@ void record_completion_on_stream(int64_t cuda_stream_ptr,
   auto stream = reinterpret_cast<lmcache_completion_stream_t>(
       static_cast<uintptr_t>(cuda_stream_ptr));
   // Pass ownership through the driver as a raw pointer; the host callback
-  // re-adopts it. Reclaim if the launch itself fails.
+  // re-adopts it. Reclaim and raise if the launch itself fails, so the
+  // caller can drop whatever it parked for this completion.
   PendingCompletion* raw = completion.release();
   auto err = LMCACHE_COMPLETION_LAUNCH_HOST_FUNC(stream,
                                                  completion_host_callback, raw);
   if (err != 0) {
     delete raw;
+    throw std::runtime_error("host func launch failed: " +
+                             std::to_string(static_cast<int>(err)));
   }
 }
 
