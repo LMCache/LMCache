@@ -48,8 +48,9 @@ As on GPUs, start an LMCache server and point vLLM-RBLN at it with
 
 .. code-block:: bash
 
-   lmcache server --port 6555 --l1-size-gb 32 --eviction-policy LRU \
-       --chunk-size N --supported-transfer-mode engine_driven
+   lmcache server --port 6555 --l1-size-gb 8 --eviction-policy LRU \
+       --chunk-size N --supported-transfer-mode engine_driven \
+       --shm-name lmcache-rbln --no-l1-use-lazy
 
    vllm serve <model> \
        --model-impl vllm \
@@ -64,7 +65,11 @@ As on GPUs, start an LMCache server and point vLLM-RBLN at it with
            }
        }'
 
-Three settings are specific to RBLN:
+Use named SHM for RBLN MP. Without ``--shm-name``, the server uses
+anonymous L1 and transfers chunks inline, which adds serialization and
+copies. Check for ``SHM pinned=True`` in the worker log after startup.
+
+These settings configure the server and worker for RBLN.
 
 * ``--supported-transfer-mode engine_driven`` on the server. The server
   defaults to ``lmcache_driven``, which does not register the engine-driven
@@ -91,11 +96,9 @@ without an error. With it, startup fails instead.
 Shared memory registration
 --------------------------
 
-For engine-driven MP transfers, the worker registers its mapping of the
-server's SHM pool with the local NPU. RBLN reports allocator-side pinning
-as unsupported, so the server uses eager SHM L1. The RBLN device ops
-allocate the server mapping without registration, preserving device
-registration capacity for the worker that performs the copies.
+With a named SHM pool, the worker registers its mapping with the local
+NPU. The server allocates eager L1 and leaves its own SHM mapping
+unregistered, preserving registration capacity for the worker.
 
 Registration requires the public ``host_register`` and ``host_unregister``
 APIs in torch-rbln main and v0.12.1a0 and later. Older builds can use SHM

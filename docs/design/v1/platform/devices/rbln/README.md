@@ -10,7 +10,7 @@ Rebellions NPUs. The engine is
 |---|---|---|
 | multiprocess, engine-driven | yes | `gather_paged_kv_to_cpu` / `scatter_cpu_to_paged_kv`, dispatching to `RblnDeviceOps.multi_layer_block_kv_transfer` |
 | multiprocess, LMCache-driven | **no** | refused up front |
-| in-process | not yet | `CreateGPUConnector` still raises for `rbln`; a follow-up adds the connector |
+| in-process | outside this repository | MP is the in-tree RBLN serving path |
 
 Multiprocess is the mode that matters first, and it is self-contained: the MP
 path builds no GPU connector at all, resolving layouts through
@@ -33,16 +33,15 @@ needs no special casing.
 
 ## Shared memory registration
 
-The LMCache server creates the SHM pool and advertises it to engine-driven
-workers. The RBLN worker registers its own mapping on its current device
-when opening the transfer context. Only the worker copies KV between the
-pool and the NPU. Registering host pools in the server would open a device
-context and spend the same registration budget without serving any copies.
-RblnDeviceSpec reports allocator-side pinning as unsupported. This keeps
-the server on eager SHM L1 and leaves Device-DAX arenas unregistered.
-RblnDeviceOps invokes the base SHM allocator with registration disabled
-on the allocating thread. The base free path closes and unlinks the pool.
-The worker registers its own mapping directly through the pin backend.
+With `--shm-name`, the server creates and advertises a named SHM pool to
+engine-driven workers. Without a name, the server uses anonymous L1 and
+transfers chunks inline. SHM is the recommended RBLN MP transport because
+inline transfer adds serialization and copies.
+
+RBLN uses eager L1 and leaves Device-DAX arenas unregistered. The server
+allocates the SHM pool without registering it on an NPU. The worker
+registers its own mapping on its local NPU when opening the transfer
+context. This leaves registration capacity for the process that moves KV.
 
 The backend uses the public `torch.rbln.host_register` and `host_unregister`
 APIs available on torch-rbln main and in v0.12.1a0 and later. Older builds
