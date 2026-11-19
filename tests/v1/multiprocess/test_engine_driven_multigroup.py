@@ -443,7 +443,9 @@ def test_submit_retrieve_multigroup_inline_scatters_group_major(
     ctx, pctx, _ = _inline_worker_ctx(monkeypatch)
     ctx._engine_type = "sentinel-engine"
     payload = [([0], [torch.ones(1)]), ([0], [torch.ones(1) * 2])]
-    monkeypatch.setattr(pctx, "prepare_retrieve_multigroup", lambda _k, _i, _e: payload)
+    monkeypatch.setattr(
+        pctx, "prepare_retrieve_multigroup", lambda _k, _i, _e, _f: payload
+    )
     order: list[str] = []
     scattered: list[dict] = []
 
@@ -482,7 +484,7 @@ def test_submit_retrieve_multigroup_inline_group_count_mismatch(
     monkeypatch.setattr(
         pctx,
         "prepare_retrieve_multigroup",
-        lambda _k, _i, _e: [([0], [torch.ones(1)])],
+        lambda _k, _i, _e, _f: [([0], [torch.ones(1)])],
     )
     kv = {name: torch.zeros(1) for name in ("layer_0", "layer_1", "layer_2")}
     future = ctx.submit_retrieve("req", MagicMock(), kv, [[1, 2], [3]], MagicMock(), 2)
@@ -1220,8 +1222,9 @@ def test_retrieve_multigroup_inline_serves_each_group_window(monkeypatch) -> Non
     requested: list[Any] = []
     a, b, c = torch.ones(1), torch.ones(1) * 2, torch.ones(1) * 3
 
-    def _prepare(_k, _i, expected):
+    def _prepare(_k, _i, expected, first_chunks):
         requested.append([count for _, _, count in expected])
+        assert first_chunks == [0, 2]
         return [([0, 1], [a, b]), ([2], [c])]
 
     monkeypatch.setattr(pctx, "prepare_retrieve_multigroup", _prepare)
@@ -1246,7 +1249,7 @@ def test_retrieve_multigroup_inline_rejects_chunks_outside_the_window(
     monkeypatch.setattr(
         pctx,
         "prepare_retrieve_multigroup",
-        lambda _k, _i, _e: [
+        lambda _k, _i, _e, _f: [
             ([0, 1], [torch.ones(1), torch.ones(1)]),
             ([1, 2], [torch.ones(1), torch.ones(1)]),
         ],

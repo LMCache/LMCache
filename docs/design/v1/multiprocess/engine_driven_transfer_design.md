@@ -285,6 +285,23 @@ and payloads from the previous untyped protocol are rejected without a fallback.
 This wire change is intentionally fail closed, so workers and servers must upgrade
 together.
 
+A transfer larger than 128 MiB of tensor data is sent as pages, because gRPC
+cannot carry a message over 2 GiB and ZMQ's MessagePack framing cannot carry
+bytes over 4 GiB. `commit_store` and `prepare_retrieve` take `chunk_start` and
+`chunk_count`, chunk positions within the key; `chunk_count = 0` means through
+the last chunk, so `0, 0` is the whole range and a transfer that fits in one
+page is a single request as before. The worker cuts the positions into
+consecutive pages of at most 128 MiB (or one chunk) and sends them in order.
+The server keeps no state between pages:
+
+- A store page reserves and writes only its chunks. A grouped page may carry
+  any subset of them but nothing outside its range. The store's observation
+  ends on the last page or on the first failed page, which also ends the
+  store; earlier pages stay stored.
+- A retrieve page computes each group's window over the whole key and returns
+  the part of it inside the page, all or nothing. The observation starts on
+  the first page and ends at `commit_retrieve`, or on a failed later page.
+
 ```text
 Store (inline tensor)
 Worker: prepare_store --> Server

@@ -1557,7 +1557,9 @@ class EngineDrivenTransferContext(TransferContext):
             (state.layout_desc.shapes[0], state.layout_desc.dtypes[0], num_chunks)
             for state, (_, num_chunks) in zip(self._group_states, windows, strict=True)
         ]
-        groups = ctx.prepare_retrieve_multigroup(key, self._instance_id, expected)
+        groups = ctx.prepare_retrieve_multigroup(
+            key, self._instance_id, expected, [first for first, _ in windows]
+        )
         if groups is not None and (
             len(groups) != len(self._group_states)
             or any(
