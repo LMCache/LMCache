@@ -756,20 +756,18 @@ def test_turboquant_fs_storage_manager_roundtrip(
 
 
 @pytest.mark.skipif(not torch_dev.is_available(), reason="Requires accelerator")
-@pytest.mark.parametrize("cuda_device", ["0", "cpu", "not-a-device"])
 @pytest.mark.parametrize("direction", ["serialize", "deserialize"])
-def test_factory_honors_staging_device(cuda_device: str, direction: str) -> None:
+def test_factory_honors_staging_device(direction: str) -> None:
     """An explicit device is honored in both directions for CPU-backed KV.
 
     Args:
-        cuda_device: A valid index, a CPU device, or an invalid device string.
         direction: Whether to submit an encode or decode task.
     """
     processor = create_serde_processor(
         SerdeConfig(
             type="turboquant",
             kwargs={
-                "cuda_device": cuda_device,
+                "cuda_device": "0",
                 "skip_first_layers": 4,
                 "skip_last_layers": 0,
             },
@@ -803,12 +801,16 @@ def test_factory_honors_staging_device(cuda_device: str, direction: str) -> None
         poll.register(fd, select.POLLIN)
         assert poll.poll(10000)
         consume_fd(fd)
-        result = query(task)
-        assert result is (cuda_device == "0")
-        if result:
-            assert torch.equal(dst, expected)
-        else:
-            untouched = dst.view(torch.uint8)
-            assert torch.equal(untouched, torch.full_like(untouched, marker))
+        assert query(task) is True
+        assert torch.equal(dst, expected)
     finally:
         processor.close()
+
+
+@pytest.mark.parametrize("cuda_device", ["cpu", "not-a-device", "99999", "cuda:256"])
+def test_factory_rejects_invalid_staging_device(cuda_device: str) -> None:
+    """Reject a non-accelerator, malformed, or unavailable GPU at startup."""
+    with pytest.raises(ValueError, match="TurboQuant cuda_device"):
+        create_serde_processor(
+            SerdeConfig(type="turboquant", kwargs={"cuda_device": cuda_device})
+        )

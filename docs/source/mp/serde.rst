@@ -123,7 +123,8 @@ Staging device selection
 Set ``"cuda_device": "cuda:0"`` (or ``"0"``) in the TurboQuant serde config to
 choose a fixed staging GPU for CPU-backed buffers. Leave the option empty for
 automatic selection based on free memory and GPU utilization. An explicit
-device must match any CUDA source or destination tensor.
+device is validated when the serde is constructed and must match any CUDA
+source or destination tensor encountered at runtime.
 
 A fixed GPU avoids a utilization query for each encoded or decoded object.
 
