@@ -11,6 +11,7 @@ name encodes all key fields so it can be reversed on startup.
 from __future__ import annotations
 
 # Standard
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 import asyncio
@@ -313,6 +314,11 @@ class FSL2Adapter(L2AdapterInterface):
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()
 
+        # Slow metadata walks must not occupy the executor used for data I/O.
+        self._lookup_pool = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="lmcache-fs-lookup"
+        )
+
         # Background asyncio event loop
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(target=self._run_event_loop, daemon=True)
@@ -483,6 +489,12 @@ class FSL2Adapter(L2AdapterInterface):
         return MemoryTags(MemorySegment.STORAGE, residency)
 
     def close(self) -> None:
+        """Cancel pending tasks, stop the loop, and release completion fds.
+
+        An in-flight metadata syscall may finish after this returns, but a
+        cancelled lookup batch does not start further filesystem checks.
+        """
+
         async def _stop_tasks():
             tasks = [
                 t
@@ -504,6 +516,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         self._loop_thread.join()
         self._loop.close()
+        self._lookup_pool.shutdown(wait=False, cancel_futures=True)
 
         self._store_efd.close()
         self._lookup_efd.close()
@@ -526,7 +539,7 @@ class FSL2Adapter(L2AdapterInterface):
     def _key_to_path(self, key: ObjectKey) -> Path:
         return self._base_path / _object_key_to_filename(key)
 
-    def _lookup_keys(self, keys: list[ObjectKey]) -> Bitmap:
+    def _lookup_keys(self, keys: list[ObjectKey], cancelled: threading.Event) -> Bitmap:
         """Check one batch against disk in an executor worker.
 
         Each lookup observes the filesystem directly so other nodes' writes
@@ -535,6 +548,8 @@ class FSL2Adapter(L2AdapterInterface):
         """
         bitmap = Bitmap(len(keys))
         for i, key in enumerate(keys):
+            if cancelled.is_set():
+                break
             if os.path.exists(self._key_to_path(key)):
                 bitmap.set(i)
         return bitmap
@@ -725,7 +740,14 @@ class FSL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         task_id: L2TaskId,
     ) -> None:
-        bitmap = await self._loop.run_in_executor(None, self._lookup_keys, keys)
+        cancelled = threading.Event()
+        try:
+            bitmap = await self._loop.run_in_executor(
+                self._lookup_pool, self._lookup_keys, keys, cancelled
+            )
+        finally:
+            # Cancelling an asyncio future cannot interrupt its worker thread.
+            cancelled.set()
 
         with self._lock:
             self._completed_lookup_tasks[task_id] = bitmap

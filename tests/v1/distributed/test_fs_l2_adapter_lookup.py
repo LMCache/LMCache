@@ -4,8 +4,8 @@
 # Standard
 from collections.abc import Iterator
 from pathlib import Path
-from threading import Event, Thread
-from typing import TYPE_CHECKING, Any
+from threading import Event, Lock, Thread
+from typing import TYPE_CHECKING, Any, cast
 import os
 import select
 import time
@@ -25,6 +25,7 @@ from lmcache.v1.platform import consume_fd
 if TYPE_CHECKING:
     # First Party
     from lmcache.lmcache_native import Bitmap
+    from lmcache.v1.memory_management import MemoryObj
 
 
 def make_key(index: int) -> ObjectKey:
@@ -133,7 +134,7 @@ def test_slow_filesystem_lookup_does_not_block_other_tasks(
 def test_close_discards_an_inflight_lookup_result(
     adapter: FSL2Adapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An executor may finish a metadata walk after the adapter closes."""
+    """A cancelled lookup stops before starting another metadata syscall."""
     keys = [make_key(i) for i in range(3)]
     paths = [tmp_path / encode_fs_filename(key) for key in keys]
     for path in paths:
@@ -162,10 +163,55 @@ def test_close_discards_an_inflight_lookup_result(
         closer.start()
         assert closed.wait(timeout=5)
         release.set()
-        assert extra_read.wait(timeout=5)
+        assert not extra_read.wait(timeout=0.2)
         assert adapter.query_lookup_and_lock_result(task) is None
     finally:
         release.set()
         if closer.ident is not None:
             closer.join(timeout=5)
             assert not closer.is_alive()
+
+
+def test_lookup_backlog_leaves_workers_for_buffered_load(
+    adapter: FSL2Adapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A saturated metadata queue must leave the data I/O executor available."""
+    key = make_key(0)
+    file_path = tmp_path / encode_fs_filename(key)
+    file_path.write_bytes(b"data")
+    blocked_path = tmp_path / encode_fs_filename(make_key(1))
+    release, workers_busy = Event(), Event()
+    lock = Lock()
+    started = 0
+    original_stat = os.stat
+
+    def slow_stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        nonlocal started
+        if path in (blocked_path, str(blocked_path)):
+            with lock:
+                started += 1
+                if started == 4:
+                    workers_busy.set()
+            assert release.wait(timeout=10)
+        return original_stat(path, *args, **kwargs)
+
+    class Buffer:
+        byte_array = memoryview(bytearray(4))
+
+    monkeypatch.setattr(os, "stat", slow_stat)
+    for _ in range(40):
+        adapter.submit_lookup_and_lock_task([make_key(1)], {})
+    try:
+        assert workers_busy.wait(timeout=5)
+        buffer = Buffer()
+        task_id = adapter.submit_load_task([key], [cast("MemoryObj", buffer)])
+        fd = adapter.get_load_event_fd()
+        poller = select.poll()
+        poller.register(fd, select.POLLIN)
+        assert poller.poll(2000), "metadata queue delayed buffered load"
+        result = adapter.query_load_result(task_id)
+        assert result is not None
+        assert result.get_indices_list() == [0]
+        assert bytes(buffer.byte_array) == b"data"
+    finally:
+        release.set()
