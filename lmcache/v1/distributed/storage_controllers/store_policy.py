@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 
 
@@ -23,7 +24,15 @@ class StorePolicy(ABC):
     1. Which adapter(s) to store each key to (select_store_targets).
     2. Which keys to delete from L1 after successful L2 store
        (select_l1_deletions).
+
+    Args:
+        l1_managers: Every L1 manager of the storage manager, in
+            write-placement order. A policy may read their memory tags,
+            memory usage or configuration to decide.
     """
+
+    def __init__(self, l1_managers: list[L1ManagerInterface]) -> None:
+        self._l1_managers = l1_managers
 
     @abstractmethod
     def select_store_targets(
@@ -49,12 +58,14 @@ class StorePolicy(ABC):
     def select_l1_deletions(
         self,
         keys: list[ObjectKey],
+        adapter: L2AdapterDescriptor,
     ) -> list[ObjectKey]:
         """
         Decide which keys to delete from L1 after successful L2 store.
 
         Args:
             keys: Keys that were successfully stored to L2.
+            adapter: Descriptor of the L2 adapter that stored them.
 
         Returns:
             Keys to delete from L1. Empty list means keep all.
@@ -91,12 +102,16 @@ def get_registered_store_policies() -> list[str]:
     return list(_STORE_POLICY_REGISTRY)
 
 
-def create_store_policy(name: str) -> StorePolicy:
+def create_store_policy(
+    name: str, l1_managers: list[L1ManagerInterface]
+) -> StorePolicy:
     """
     Create a store policy instance by name.
 
     Args:
         name: Registered policy name.
+        l1_managers: Every L1 manager of the storage manager, in
+            write-placement order.
 
     Returns:
         A new StorePolicy instance.
@@ -107,7 +122,7 @@ def create_store_policy(name: str) -> StorePolicy:
     if name not in _STORE_POLICY_REGISTRY:
         known = ", ".join(sorted(_STORE_POLICY_REGISTRY)) or "(none)"
         raise ValueError(f"Unknown store policy {name!r}. Known: {known}")
-    return _STORE_POLICY_REGISTRY[name]()
+    return _STORE_POLICY_REGISTRY[name](l1_managers)
 
 
 class DefaultStorePolicy(StorePolicy):
@@ -136,12 +151,14 @@ class DefaultStorePolicy(StorePolicy):
     def select_l1_deletions(
         self,
         keys: list[ObjectKey],
+        adapter: L2AdapterDescriptor,
     ) -> list[ObjectKey]:
         """
         Never delete from L1.
 
         Args:
             keys: Keys that were successfully stored to L2.
+            adapter: Descriptor of the L2 adapter that stored them.
 
         Returns:
             Empty list (keep all keys in L1).
@@ -165,12 +182,14 @@ class BufferOnlyStorePolicy(DefaultStorePolicy):
     def select_l1_deletions(
         self,
         keys: list[ObjectKey],
+        adapter: L2AdapterDescriptor,
     ) -> list[ObjectKey]:
         """
         Delete all keys from L1 after successful L2 store.
 
         Args:
             keys: Keys that were successfully stored to L2.
+            adapter: Descriptor of the L2 adapter that stored them.
 
         Returns:
             All keys (remove everything from L1).

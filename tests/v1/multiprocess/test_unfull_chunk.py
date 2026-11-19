@@ -17,11 +17,12 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
-    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     ipc_key_to_object_keys,
@@ -35,7 +36,6 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.multiprocess import object_group_transfer
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import (
     LayoutDescRegistry,
     MPCacheServerContext,
@@ -285,7 +285,7 @@ def test_unfull_chunk_round_trip_carries_the_window_lead_block(
     # The stub holds CPU tensors, which only the torch kernel accepts; a
     # native build binds the pointer-based kernel to ``device_ops``.
     monkeypatch.setattr(
-        object_group_transfer,
+        object_group_transfer.unfull_chunk,
         "device_ops",
         SimpleNamespace(
             multi_layer_block_kv_transfer=torch_ops.multi_layer_block_kv_transfer

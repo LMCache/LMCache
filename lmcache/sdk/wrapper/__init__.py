@@ -3,16 +3,10 @@
 
 # First Party
 from lmcache.sdk.wrapper.ring_mapping import RingMapping, RingStateError
-from lmcache.sdk.wrapper.ring_transfer import (
-    RingSDKTransferWrapper,
-    SDKKernelGroup,
-    SDKObjectGroup,
-)
+from lmcache.sdk.wrapper.ring_transfer import SDKObjectLayout
 
 __all__ = [
     "RingMapping",
-    "RingSDKTransferWrapper",
     "RingStateError",
-    "SDKKernelGroup",
-    "SDKObjectGroup",
+    "SDKObjectLayout",
 ]

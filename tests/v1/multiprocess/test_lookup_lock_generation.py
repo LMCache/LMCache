@@ -15,6 +15,7 @@ import torch
 
 # First Party
 from lmcache import device_ops
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.distributed.api import (
     AttnWindowDesc,
     MemoryLayoutDesc,
@@ -33,7 +34,6 @@ from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.mp_observability.event import Event as CacheEvent
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as transfer
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,

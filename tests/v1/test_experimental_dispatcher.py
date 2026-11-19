@@ -19,7 +19,7 @@ from lmcache.integration.vllm.experimental.dispatcher import (
     dispatch,
     init_dispatcher,
 )
-from lmcache.v1.multiprocess.custom_types import TRANSFER_QUERY
+from lmcache.v1.common.custom_types import TRANSFER_QUERY
 
 MODEL = "org/model"
 HOOKS = tuple(

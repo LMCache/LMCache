@@ -142,9 +142,8 @@ class ValkeyWorkerPool:
     thread has its own client, this yields true parallel I/O while the
     GIL is released across the glide FFI boundary.
 
-    The pool speaks only ``str`` keys and byte buffers — it has no
-    knowledge of ``ObjectKey`` / ``CacheEngineKey`` or any LMCache type,
-    so it can be shared by both the connector and the L2 adapter.
+    The pool speaks only ``str`` keys and byte buffers, so it can be shared
+    by both the connector and the L2 adapter.
 
     Args:
         addresses: One or more ``(host, port)`` seed nodes. In standalone

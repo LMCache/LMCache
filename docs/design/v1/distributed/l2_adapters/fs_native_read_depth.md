@@ -75,24 +75,16 @@ undersized one it is 68% at 32 ms. **1536 MiB is the default** as the value
 whose worst column is best. A single slow device is the case most worth
 pinning a smaller value for.
 
-Four properties bound what the budget can do:
+Three properties bound what the budget can do:
 
-1. **Dispatch is quantised in whole objects.** Four workers and 192 MiB
-   objects cannot dispatch less than 768 MiB.
+1. **Dispatch is quantised in whole objects.** A 192 MiB object is admitted
+   as one 192 MiB step.
 2. **The thread pool is a separate ceiling.** Bytes in flight never exceed
    `num_read_workers x object_size`, whatever the budget says.
 3. **Two reads are always admitted.** The budget never holds fewer than
    two objects in flight, so objects larger than half of it still overlap.
    With 1536 MiB, 1 GiB objects read 39.4 GB/s one at a time and 49.2 two
    at a time; a third adds 1 GB/s and doubles per-read latency.
-4. **A worker blocks on its own tile.** Objects are dispatched one at a
-   time as the budget has room, so a large tile keeps every reader busy, but
-   a batch smaller than the pool holds only its own objects in flight:
-   four workers and 16-object batches keep at most 64 objects in flight
-   however deep the pool is. Against `num_workers=64`, which streams
-   continuously, this measured between a tie and 12% behind on the same
-   array, depending on per-read latency at the time; batches of a few
-   hundred objects do not show it.
 
 ## Configuration
 
@@ -109,12 +101,16 @@ default. At `num_read_workers=64` the pool holds 384 MiB, the same as
 
 ## Where the fix lives
 
-`FSConnector` owns the reader threads, the queue and the budget. It
-overrides `do_batch_get()` to dispatch a tile's objects one at a time as the
-budget has room and wait for all of them, and `choose_num_tiles()` to keep a
-GET batch as one tile, the shape `MooncakeConnector` already uses; split
-across workers first, a 16-object batch on four workers would keep four
-reads in flight whatever the pool size. `ConnectorBase` is unchanged:
-the cost of a reader is backend-specific, a `redis` reader would be one more
-socket and that path needs pipelining instead, and `aerospike` shares one
-client with its own thread pool.
+`FSConnector` owns the reader threads, the queues and the budget. When the
+read pool is enabled, it overrides `submit_batch_get()` and
+`submit_batch_exists()` to enqueue batches directly onto the pool without
+going through `ConnectorBase`'s shared worker queue, and the reader finishing
+the last key of a batch emits its completion. Lookups run ahead of reads
+without consuming the read byte budget, and reads are popped one object at a
+time as the budget has room, so concurrent small batches stream across the
+entire pool and foreground lookups or reads no longer queue behind background
+writes or deletes on `num_workers`. `ConnectorBase` only exposes input
+validation and completion publishing to derived classes: the cost of a reader
+is backend-specific, a `redis` reader would be one more socket and that path
+needs pipelining instead, and `aerospike` shares one client with its own
+thread pool.
