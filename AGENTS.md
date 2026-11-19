@@ -161,6 +161,43 @@ it. Report both the failing run (step 5) and the passing run (step 6) in chat.
   wiring. Consolidate overlapping cases with parametrization or shared setup.
 - Ensure existing tests still pass before submitting changes.
 
+### CUDA nightly wheel provenance
+
+Buildkite's Kubernetes command phase uses `/bin/sh`. Wrap multiline canary
+commands that source Bash helpers in `bash -euo pipefail` (as the SGLang
+canary does), and test the uploaded command through a POSIX shell. A Bash
+shebang on a sourced helper does not change its caller's interpreter.
+
+Run vLLM-dependent unit fixtures against the installed nightly as well.
+At source `8700cc9ba`, the streaming-session helper reads `max_model_len`
+and `num_sampled_tokens_per_step`; a `Scheduler.__new__` fixture must set
+those constructor fields before exercising the real streaming update.
+
+vLLM's active nightly index is `cu132`; old tested pins can still point to
+`cu130`. Preserve the archive variant when consuming or promoting a pin.
+The vLLM archive variant and `torch.version.cuda` are independent: source
+`8700cc9ba` used a cu132 vLLM wheel with Torch 2.14.0+cu130 in CI. A successful
+CUDA-major compiler check therefore does not prove that the host driver can
+JIT the vLLM wheel's PTX. Record `nvidia-smi` driver output and run an actual
+FlashAttention kernel plus serving before advancing a CUDA pin.
+
+The CI RTX PRO 6000 Blackwell runner (SM 12.0, driver 580.105.08) reproduced
+unsupported cu132 PTX with driver API 13.0. The pinned container-only
+`cuda-compat-13-2` libraries enabled API 13.2, the same FA2 kernel, and real
+serving/cache retrieval. Keep the actual kernel check; compiler-version
+metadata alone missed this failure. Check NVIDIA's hardware restrictions
+before treating the CI result as a general deployment recommendation.
+
+Random-workload performance comparisons need identical block geometry:
+current vLLM uses block size 64 with the extensible cache, versus baseline
+size 16. Set `VLLM_BLOCK_SIZE` on both servers for `vllm_bench`; keep other
+workloads' model-specific geometry and the performance thresholds intact.
+
+The official vLLM image defaults to `vllm serve`; override its entrypoint with
+`bash` for build/debug commands. The Nov 8 cf5cea2da image has `python3` but no
+`python` alias or `git`. Use `python3` in portable diagnostic scripts, and
+install `git` and mark a mounted checkout safe before an editable build.
+
 ## Linting & Code Quality
 
 ```bash
