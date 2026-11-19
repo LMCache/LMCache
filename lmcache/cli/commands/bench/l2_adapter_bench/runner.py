@@ -284,11 +284,10 @@ def bench_load(
     objs_for_round: ObjProvider,
     log: LogFn,
 ) -> BenchResult:
-    """Benchmark loads into buffers reset before each round.
+    """Benchmark loads into caller-prepared buffers.
 
-    Buffers start with ``(key_index + 1) mod 256`` within each submit,
-    distinct from the default store pattern in ``make_memory_objects``.
-    This lets round-trip verification detect loads that leave data untouched.
+    The object provider runs before each round's timing starts. It must reset
+    reused buffers when verification needs to detect unwritten destinations.
 
     Args:
         adapter: L2 adapter receiving the load tasks.
@@ -297,7 +296,7 @@ def bench_load(
         data_size: Payload size per key, in bytes.
         rounds: Number of rounds to attempt.
         keys_for_round: Provider of per-submit key batches for each round.
-        objs_for_round: Provider of per-submit destination buffers.
+        objs_for_round: Provider that prepares per-submit destinations each round.
         log: Callback for progress messages.
 
     Returns:
@@ -315,11 +314,6 @@ def bench_load(
         obj_batches = objs_for_round(r)
         assert len(keys_batches) == in_flight
         assert len(obj_batches) == in_flight
-
-        # A no-op load must not match the stored pattern, even after warmup.
-        for objs in obj_batches:
-            for index, obj in enumerate(objs):
-                obj.raw_data.fill_((index + 1) & 0xFF)
 
         t0 = time.perf_counter()
         task_ids: list[int] = []

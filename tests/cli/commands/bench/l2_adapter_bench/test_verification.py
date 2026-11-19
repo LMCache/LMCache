@@ -18,7 +18,7 @@ from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.memory_management import MemoryObj
 
 
-@pytest.mark.parametrize("skipped_key", [None, 0, 256])
+@pytest.mark.parametrize("skipped_key", [None, 0, 1, 256])
 @pytest.mark.no_shared_allocator
 def test_verification_rejects_unwritten_load_buffers(
     monkeypatch: pytest.MonkeyPatch,
@@ -27,7 +27,7 @@ def test_verification_rejects_unwritten_load_buffers(
     skipped_key: int | None,
 ) -> None:
     """Detect no-op loads after a successful warmup, including byte-pattern wrap."""
-    num_keys = 257 if skipped_key == 256 else 1
+    num_keys = 1 if skipped_key is None else skipped_key + 1
     in_flight = 2
     stored: dict[ObjectKey, torch.Tensor] = {}
     store_ids = count()
