@@ -33,6 +33,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  PINNED_VLLM_VERSION: "0.34.1.dev202611190133"
+
 defaults:
   run:
     shell: bash
@@ -201,6 +204,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
+          ref: fc5c3c3493157b6ed3321aebedece240dcdff31a
           fetch-depth: 1
 
       - name: Setup Python 3.12
@@ -265,6 +269,19 @@ jobs:
                 && 'vllm-cpu-nightly'
                 || steps.resolve-vllm.outputs.VLLM_CPU_NIGHTLY_SPEC }}
         run: bash .github/scripts/install_vllm_cpu.sh
+
+      - name: Check selected public wheel provenance
+        run: |
+          python - <<'PY'
+          import importlib.metadata as md
+          import json
+
+          dist = md.distribution("vllm-cpu-nightly")
+          manifest = json.loads(dist.read_text("cpu-nightly.json"))
+          assert dist.version == "0.34.1.dev202611190133"
+          assert manifest["source_sha"] == "8700cc9ba0016bf14d8f2756f3b673e93fbcf2fd"
+          print("Verified source:", manifest["source_sha"], "built:", manifest["built_at"])
+          PY
 
       - name: Install lmcache (CPU-only, no vLLM)
         id: install-lmcache
