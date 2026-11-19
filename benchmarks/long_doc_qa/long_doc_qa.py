@@ -89,6 +89,7 @@ class RequestStats:
     ttft: float
     request_end: float
     successful: bool
+    missing_finish_reason: bool = False
 
 
 def get_url_from_args(args):
@@ -262,10 +263,13 @@ async def process_single_prompt(
             )
 
         responses = []
+        finished = False
         # Collect the response chunks
         async for chunk in response:
             if not chunk.choices:
                 continue
+
+            finished |= chunk.choices[0].finish_reason is not None
 
             # Handle content for chat completions
             if has_content(chunk, completions_mode):
@@ -278,14 +282,15 @@ async def process_single_prompt(
         final_response = "".join(responses)
         write_resp(f"\nResponse of request {prompt_index}: {final_response}\n")
 
-        # TTFT < 0 means not successful
+        # A stream can yield tokens and still end before its terminal choice.
         ttft = (first_token_time - start_time) if first_token_time is not None else -1
         return RequestStats(
             prompt_id=prompt_index,
             request_start=start_time,
             ttft=ttft,
             request_end=end_time,
-            successful=ttft > 0,
+            successful=ttft > 0 and finished,
+            missing_finish_reason=first_token_time is not None and not finished,
         )
 
 
@@ -548,10 +553,14 @@ async def main(args):
     )
     benchmark_end_time = time.time()
 
-    warmup_df = pd.DataFrame([stats.__dict__ for stats in warmup_request_stats])
+    warmup_df = pd.DataFrame([stats.__dict__ for stats in warmup_request_stats]).drop(
+        columns="missing_finish_reason"
+    )
     relative_time(warmup_df, warmup_start_time)
     warmup_df["is_miss"] = True
-    benchmark_df = pd.DataFrame([stats.__dict__ for stats in benchmark_request_stats])
+    benchmark_df = pd.DataFrame(
+        [stats.__dict__ for stats in benchmark_request_stats]
+    ).drop(columns="missing_finish_reason")
     benchmark_df["is_miss"] = miss_mask
     relative_time(benchmark_df, benchmark_start_time)
 
@@ -581,6 +590,18 @@ async def main(args):
     )
     print(f"{CSI}35mQuery round prompt count: {len(benchmark_df)}{RESET}")
     print(f"{CSI}34mQuery round successful prompt count: {query_success_count}{RESET}")
+
+    warmup_truncated = sum(
+        stats.missing_finish_reason for stats in warmup_request_stats
+    )
+    query_truncated = sum(
+        stats.missing_finish_reason for stats in benchmark_request_stats
+    )
+    if warmup_truncated or query_truncated:
+        raise RuntimeError(
+            "Stream ended after producing content without a finish reason: "
+            f"warmup={warmup_truncated}, query={query_truncated}"
+        )
 
     if visualize:
         visualize_results(warmup_df, benchmark_df)

@@ -75,10 +75,11 @@ run_long_doc_qa() {
         --json-output
     )
 
+    local benchmark_status=0
     (
-        cd "$phase_dir"
+        cd "$phase_dir" || exit "$?"
         "${benchmark_command[@]}" 2>>"$output_file" | tee "$result_file"
-    )
+    ) || benchmark_status=$?
 
     python3 "$COMMON_WORKLOAD_DIR/long_doc_qa_diagnostics.py" \
         --phase "$description" \
@@ -86,6 +87,11 @@ run_long_doc_qa() {
         --results-dir "$phase_dir" \
         --command "${benchmark_command[@]}" | tee "$phase_dir/diagnostics.txt"
 
+    if [ "$benchmark_status" -ne 0 ]; then
+        echo "$description benchmark failed (exit $benchmark_status); stderr tail:"
+        tail -n 5 "$output_file"
+        return "$benchmark_status"
+    fi
     echo "$description benchmark completed"
     echo ""
 }

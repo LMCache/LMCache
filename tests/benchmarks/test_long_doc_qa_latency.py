@@ -2,8 +2,10 @@
 """Check JSON latency reporting in the long-document QA benchmark."""
 
 # Standard
+from collections.abc import AsyncIterator
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
+import asyncio
 import importlib.util
 import json
 import sys
@@ -58,3 +60,51 @@ async def test_cli_summary_uses_successful_request_latency(
     assert summary["query_mean_request_latency"] == 2.0
     assert summary["warmup_mean_request_latency"] == 2.0
     assert (tmp_path / "query_round.csv").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completions_mode", [False, True])
+@pytest.mark.parametrize("finish_reason", [None, "length"])
+async def test_stream_completion_is_required_after_content(
+    long_doc_qa_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    completions_mode: bool,
+    finish_reason: str | None,
+) -> None:
+    """Usage-only frames do not mark a stream complete."""
+    monkeypatch.setattr(long_doc_qa_module, "completions_mode", completions_mode)
+
+    async def create(**kwargs: object) -> AsyncIterator[SimpleNamespace]:
+        async def stream() -> AsyncIterator[SimpleNamespace]:
+            yield SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason=None,
+                        text="token",
+                        delta=SimpleNamespace(content="token"),
+                    )
+                ]
+            )
+            if finish_reason is not None:
+                yield SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            finish_reason=finish_reason,
+                            text="",
+                            delta=SimpleNamespace(content=None),
+                        )
+                    ]
+                )
+            yield SimpleNamespace(choices=[])
+
+        return stream()
+
+    completions = SimpleNamespace(create=create)
+    client = SimpleNamespace(
+        completions=completions, chat=SimpleNamespace(completions=completions)
+    )
+    result = await long_doc_qa_module.process_single_prompt(
+        client, "test-model", "prompt", 0, 1, 1, asyncio.Semaphore(1)
+    )
+    assert result.successful == (finish_reason is not None)
+    assert result.missing_finish_reason == (finish_reason is None)

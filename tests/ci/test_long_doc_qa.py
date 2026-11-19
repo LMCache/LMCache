@@ -58,6 +58,7 @@ def _run_workload(
     query_ttft: float,
     query_round_time: float,
     path_style: Literal["absolute", "relative"],
+    failed_phase: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """Run the real wrapper with isolated files and deterministic benchmark data."""
     working_dir = tmp_path / "caller directory"
@@ -87,6 +88,7 @@ def _run_workload(
         "MAX_INFLIGHT_REQUESTS": "2",
         "MAX_TTFT_SLOWDOWN_PCT": "-60",
         "MAX_ROUND_TIME_SLOWDOWN_PCT": "-15",
+        "STUB_FAILED_PHASE": failed_phase,
         "STUB_QUERY_TTFT": str(query_ttft),
         "STUB_QUERY_ROUND_TIME": str(query_round_time),
     }
@@ -221,3 +223,17 @@ def test_preserves_both_phases_after_threshold_check(
         unrelated.parent.mkdir()
         unrelated.write_text("unrelated workload\n", encoding="utf-8")
     assert _collect_workload_artifacts(workspace) == expected_artifacts
+
+
+@pytest.mark.parametrize("phase", ["baseline", "lmcache"])
+def test_failed_benchmark_phase_reports_diagnostics(tmp_path: Path, phase: str) -> None:
+    """Keep failure details in the job log and the failing phase's artifacts."""
+    result, results_dir = _run_workload(tmp_path, 0.30, 0.80, "absolute", phase)
+    assert result.returncode == 17, result.stdout + result.stderr
+    assert f"{phase} benchmark failed (exit 17)" in result.stdout
+    assert "request ended before its terminal frame" in result.stdout
+    diagnostics = (results_dir / phase / "diagnostics.txt").read_text(encoding="utf-8")
+    assert diagnostics in result.stdout
+    assert "query: samples=4 successful=3 failed=1" in diagnostics
+    assert (results_dir / phase / "query_round.csv").is_file()
+    assert "Performance Summary" not in result.stdout
