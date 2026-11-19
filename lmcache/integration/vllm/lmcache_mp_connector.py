@@ -1566,6 +1566,21 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     tracker.pending_free_ranges.append((aligned, ret))
                     tracker.num_lmcache_hit_tokens = aligned
                 need_to_load = max(0, aligned - num_computed_tokens)
+            elif ret != full_chunk_tokens and any(
+                tokens_per_block > 0 and (ret - 1) % tokens_per_block == 0
+                for tokens_per_block in self._group_tokens_per_block
+            ):
+                # vLLM allocates blocks for ret - 1 tokens only. When the
+                # prompt's last token starts a new block in some group, that
+                # block is never allocated, so the unfull chunk ending at ret
+                # has no block to load its last token into. Load the full
+                # chunks only; vLLM recomputes the tail. ret stays in
+                # unfull_chunk_boundaries: LMCache already holds that tail.
+                # As in the replay branch above, the tail's lookup read lock
+                # is not freed by a range ending at ret; it expires with the
+                # read-lock TTL.
+                tracker.num_lmcache_hit_tokens = full_chunk_tokens
+                need_to_load = max(0, full_chunk_tokens - num_computed_tokens)
             else:
                 need_to_load = max(0, need_to_load - 1)
 
