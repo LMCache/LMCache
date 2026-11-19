@@ -414,6 +414,10 @@ print(json.dumps({
   if [ "${VLLM_TRUST_REMOTE_CODE:-0}" = "1" ]; then
     extra_serve_args+=(--trust-remote-code)
   fi
+  # The shared random-prefill bench uses chat requests; OPT has no template.
+  if [[ "$VLLM_MODEL_ID" == "facebook/opt-125m" ]]; then
+    extra_serve_args+=(--chat-template "{% for message in messages %}{{ message['content'] }}{% endfor %}")
+  fi
   echo "vLLM model: ${VLLM_MODEL_ID}"
   echo "vLLM extra args: ${extra_serve_args[*]:-<none>}"
   PYTHONFAULTHANDLER=1 vllm serve "${VLLM_MODEL_ID}" \
@@ -892,6 +896,9 @@ echo "✅ LMCache hit verified after repopulation (${READ_DELTA} chunks read)"
 
 # Restart vLLM
 echo "[Phase 3 / Step 8] Restarting vLLM (instance 2)"
+# Retain old IDs so recovery checks only the new engine's registrations.
+curl -fsS --max-time 10 "http://localhost:${LMCACHE_HTTP_PORT}/status" \
+  > "$ARTIFACT_DIR/registrations-before-vllm-restart.json"
 stop_vllm
 sleep 2
 start_vllm
@@ -955,13 +962,17 @@ if [[ "$VLLM_MODEL_ID" == "facebook/opt-125m" &&
   export MP_TEST_PID_FILE="$ARTIFACT_DIR/recovery-pids.txt"
   printf '%s\n%s\n' "$LMCACHE_PID" "$VLLM_PID" > "$MP_TEST_PID_FILE"
   export MP_TEST_LMCACHE_LAUNCH_SCRIPT
-  export MP_TEST_DEGRADED_LOG_OFFSET
-  MP_TEST_DEGRADED_LOG_OFFSET=$(wc -c < "$VLLM_LOG")
   export MODEL="$VLLM_MODEL_ID" BUILD_ID VLLM_PORT LMCACHE_MP_TRANSFER_MODE
   export LMCACHE_PORT="$LMCACHE_REQUEST_PORT" LMCACHE_HTTP_PORT
   export ENGINE_LOG_FILE="$VLLM_LOG"
   export LMCACHE_RESTART_LOG="$ARTIFACT_DIR/lmcache_restart.log"
   export RESULTS_DIR="$ARTIFACT_DIR/recovery"
+  export RR_NUM_REQUESTS=4 RR_REQUEST_LEN=512
+  # BF16 OPT-125m: 12 layers * K/V * 12 heads * 64 dimensions * 2 bytes.
+  # Offline vLLM registers its local model path instead of the served model ID.
+  export RR_TOKENS_PER_GB=$((1024 * 1024 * 1024 / 36864))
+  export RR_EXCLUDE_REGISTRATIONS="$ARTIFACT_DIR/registrations-before-vllm-restart.json"
+  RR_PREPARE_ONLY=1 bash "$MP_SCRIPTS/workloads/common/restart-recovery.sh"
   FT_REUSE_SERVICES=1 NUM_PROMPTS=16 RANDOM_INPUT_LEN=512 RANDOM_OUTPUT_LEN=32 \
     FT_REQUEST_RATE=2 FT_KILL_DELAY=1 \
     bash "$MP_SCRIPTS/workloads/vllm/fault-tolerance.sh"

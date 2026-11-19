@@ -15,9 +15,10 @@ a workload owns its requests and assertions.
   runs every check before exiting so a threshold failure still leaves the
   `/metrics` snapshot and a per-check summary in `RESULTS_DIR`, and it runs
   on CPU with stub inputs (`tests/tools/test_long_doc_qa_l2_verify.py`).
-- `restart-recovery.sh`: wait for an unhealthy transition, restart LMCache, then
-  verify the original workers re-register and complete store/hit/retrieve with
-  identical outputs. Fast restarts between successful heartbeats are not covered.
+- `restart-recovery.sh`: restart LMCache after a heartbeat-length outage, verify
+  the original workers re-register, and require the second random-prefill bench
+  to complete at least 80% of the first round's writes. Also verify store, retrieve,
+  engine-loaded chunks and identical output. Fast restarts are not covered.
 - `multi-chunk-size.sh`: two engines connected to one MP server register
   different model-scoped chunk sizes and independently complete an L1
   store/retrieve round trip.
@@ -72,10 +73,15 @@ allowlist. Transfer-mode and request-transport support is declared separately
 by the adapter, so a common pipeline matrix can safely include engines with
 different capabilities.
 
-CPU E2E reuses `vllm/fault-tolerance.sh` followed by `common/restart-recovery.sh`
-in its opt-125m / LMCache-driven / ZMQ leg. `FT_REUSE_SERVICES=1` preserves the
-already-running engine. Both workloads use `MP_TEST_PID_FILE` (server PID on
-line 1); `MP_TEST_LMCACHE_LAUNCH_SCRIPT` supplies the exact server launch command.
-`RR_SERVER_STOPPED=1` resumes after fault tolerance, using its registration
-snapshot and `MP_TEST_DEGRADED_LOG_OFFSET` in the engine log. Results and
-before/after registration snapshots are retained with the CPU E2E artifacts.
+CPU E2E reuses `common/restart-recovery.sh` and `vllm/fault-tolerance.sh`
+in its opt-125m / LMCache-driven / ZMQ leg. `RR_PREPARE_ONLY=1` captures the first
+benchmark (4 requests × 512 tokens) and current registrations before fault
+injection. `FT_REUSE_SERVICES=1` preserves the running engine;
+`RR_SERVER_STOPPED=1` then resumes recovery from that same outage.
+`RR_EXCLUDE_REGISTRATIONS` points to the status snapshot taken before the earlier
+vLLM restart, so retired Worker IDs are excluded from the expected recovery set.
+Both workloads use `MP_TEST_PID_FILE` (server PID on line 1);
+`MP_TEST_LMCACHE_LAUNCH_SCRIPT` supplies the exact server launch command.
+Recovery waits for an actual completed store before measuring the second bench:
+server-side registration can precede completion of the Worker's recovery callback.
+Benchmark summaries, counter deltas, outputs and registration snapshots are retained.
