@@ -592,7 +592,7 @@ def test_mixed_streaming_preserves_and_releases_an_unfull_l1_tail(
     assert _lookup(module, tokens, len(tokens), "r1") == len(tokens)
     session = module.context.session_manager.get("r1")
     assert session.is_current_streaming_range(0, len(tokens))
-    owners = session.streaming_range_owners(0, len(tokens))
+    owners = session.current_streaming_range_owners(0, len(tokens))
     assert owners is not None
     assert set(owners) == set(full_keys[:1] + tail_keys)
 

@@ -444,6 +444,9 @@ def _start_cache_server(
         separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,
         session_ttl_seconds=mp_config.session_ttl_seconds,
+        enable_fs_streaming=(
+            not is_blend and mp_config.supported_transfer_mode == "lmcache_driven"
+        ),
     )
 
     components = _build_server_components(ctx, mp_config, coordinator_config)

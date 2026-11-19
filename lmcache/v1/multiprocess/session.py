@@ -267,7 +267,7 @@ class Session:
     def abandoned_streaming_range_owners(
         self, start: int, end: int
     ) -> dict[ObjectKey, int] | None:
-        """Return owners of the oldest matching abandoned streaming lookup.
+        """Return owners of the oldest abandoned lookup with these boundaries.
 
         Args:
             start: First token in the abandoned range.
@@ -277,8 +277,10 @@ class Session:
             A copy of the retained L1 owners, or None if no range matches.
         """
         with self._lock:
-            lookup = self._find_streaming_lookup(self._abandoned_streaming, start, end)
-            return None if lookup is None else lookup.owners.copy()
+            for lookup in self._abandoned_streaming:
+                if (lookup.start, lookup.end) == (start, end):
+                    return lookup.owners.copy()
+            return None
 
     def finish_abandoned_streaming_range(self, start: int, end: int) -> None:
         """Forget the oldest abandoned lookup after its entire range is freed.
@@ -293,16 +295,24 @@ class Session:
                     self._abandoned_streaming.pop(index)
                     break
 
-    def streaming_range_owners(
+    def current_streaming_range_owners(
         self, start: int, end: int
     ) -> dict[ObjectKey, int] | None:
-        """Return L1 owners for a streaming range, or None for a regular lookup."""
+        """Snapshot the L1 owners if the current streaming lookup covers this range.
+
+        Args:
+            start: First token in the requested range.
+            end: Exclusive end of the requested range.
+
+        Returns:
+            The current lookup's owners, including an empty map for an FS-only
+            hit, or None if the range is outside the current streaming lookup.
+        """
         with self._lock:
-            ranges = list(reversed(self._abandoned_streaming))
-            if self._streaming_lookup is not None:
-                ranges.insert(0, self._streaming_lookup)
-            lookup = self._find_streaming_lookup(ranges, start, end)
-            return None if lookup is None else lookup.owners.copy()
+            current = self._streaming_lookup
+            if current is None or not current.contains(start, end):
+                return None
+            return current.owners.copy()
 
     def extend_current_streaming_range(
         self, end: int, l1_owners: dict[ObjectKey, int]
@@ -317,22 +327,11 @@ class Session:
             current.end = end
             current.owners.update(l1_owners)
 
-    def is_streaming_range(self, start: int, end: int) -> bool:
-        """Return whether a range belongs to an FS streaming lookup."""
-        return self.streaming_range_owners(start, end) is not None
-
     def is_current_streaming_range(self, start: int, end: int) -> bool:
         """Return whether the latest lookup serves this range from FS windows."""
         with self._lock:
             current = self._streaming_lookup
             return current is not None and current.contains(start, end)
-
-    @staticmethod
-    def _find_streaming_lookup(
-        lookups: list[_StreamingLookup], start: int, end: int
-    ) -> _StreamingLookup | None:
-        exact = next((x for x in lookups if (x.start, x.end) == (start, end)), None)
-        return exact or next((x for x in lookups if x.contains(start, end)), None)
 
 
 class SessionManager:

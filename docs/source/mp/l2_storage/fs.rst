@@ -38,20 +38,25 @@ object is stored as a raw ``.data`` file whose name encodes the full
     # Read cold FS objects through a 128 MiB pool
     --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "use_odirect": true, "streaming_buffer_size_bytes": 134217728}'
 
-MP lookup combines L1 hits with FS hits to find the longest available prefix.
-Retrieve copies resident L1 objects and reads FS objects through bounded batches
-of shared windows, returning them after device transfer completes. The engine
-recomputes the remaining tail. For example, ``--l1-size-gb 2`` with a 128 MiB
-streaming pool leaves 1.875 GiB for resident L1 objects. The streaming adapter is configured at
-server startup and cannot be removed while the server is running.
-When multiple L2 adapters are active, lookup uses ordinary prefetch across
-them; the configured streaming pool remains reserved from the DRAM budget.
+Reserved FS streaming windows are available in the default MP engine with
+``--supported-transfer-mode lmcache_driven``. The server uses ordinary prefetch
+and the full resident L1 budget in ``engine_driven``, ``auto``, and blend mode.
 
-Streaming lookup and load operations have a 30-second timeout. A timed-out
-lookup is reported as a miss. Windows belonging to an unfinished filesystem load
-remain reserved until that load completes, so they cannot be reused while a disk
-read is writing to them. Closing the reader waits for pending I/O and active
-device transfers up to its deadline; it reports an error if memory is still in use.
+The server carves the reservation out of its single DRAM L1 manager at
+startup. For example, ``--l1-size-gb 2`` with a 128 MiB reservation leaves
+1.875 GiB for resident objects. The configured streaming adapter stays attached
+until shutdown. When this unwrapped ``fs`` adapter is the sole active L2
+adapter and every object layout fits, lookup combines L1 and FS hits to find
+the longest available prefix. Retrieve reads FS objects through bounded
+windows and returns them after device transfer. The engine computes the
+remaining tail. With multiple active L2 adapters or an oversized object
+layout, lookup uses ordinary prefetch and the DRAM reservation stays in place.
+
+Lookup uses the standard MP prefetch status API. Waiting for the first free
+window and waiting for a batch of FS reads each use a 30-second timeout.
+Windows belonging to unfinished FS reads stay reserved until that I/O
+completes. Closing the reader waits for pending I/O and active device
+transfers up to its deadline and reports an error if memory is still in use.
 
 FS objects can disappear between lookup and load. In this case the connector
 reports the affected GPU blocks as failed. vLLM's ``kv_load_failure_policy``

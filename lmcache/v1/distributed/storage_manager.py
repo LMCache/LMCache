@@ -602,7 +602,7 @@ class StorageManager:
             elapsed_ms = (time.monotonic() - handle.submit_time) * 1000
             logger.info(
                 "Prefetch request completed (L1+L2): "
-                "%d/%d retained keys (%d L1, %d L2) in %.1f ms "
+                "%d/%d hit keys (%d L1, %d L2) in %.1f ms "
                 "(external_request_id=%s, prefetch_request_id=%d)",
                 total_hits,
                 handle.total_requested_keys,
@@ -697,19 +697,6 @@ class StorageManager:
             good_keys.append(key)
             good_objs.append(obj)
         return good_keys, good_objs
-
-    def has_l1_objects(self, keys: list[ObjectKey]) -> bool:
-        """Probe L1 under temporary read locks, without retaining objects."""
-        keys = list(dict.fromkeys(keys))
-        for manager in self._l1_managers:
-            result = manager.reserve_read(keys)
-            held = [
-                key for key, (error, _) in result.items() if error == L1Error.SUCCESS
-            ]
-            if held:
-                manager.finish_read(held)
-                return True
-        return False
 
     @property
     def quota_manager(self) -> QuotaManager:

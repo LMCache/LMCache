@@ -5,7 +5,8 @@ Tests for engine-driven multi-group (uniform coverage) transfers.
 
 # Standard
 from contextlib import contextmanager
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 from unittest.mock import MagicMock
 from uuid import uuid4
 import threading
@@ -17,6 +18,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.utils import get_size_bytes
 from lmcache.v1.client import worker_transfer
 from lmcache.v1.client.transfer_context.base import (
     EngineDrivenContextMetadata,
@@ -47,6 +49,10 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
+from lmcache.v1.distributed.key_codec import encode_fs_filename
+from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
+from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2AdapterConfig
+from lmcache.v1.mp_observability.config import ObservabilityConfig
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
@@ -57,6 +63,7 @@ from lmcache.v1.multiprocess.modules.server_transfer import (
     InlineTransferStrategy,
     ShmTransferStrategy,
 )
+from lmcache.v1.multiprocess.server import run_cache_server
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 
 
@@ -750,6 +757,79 @@ def test_single_compressed_group_worker_server_roundtrip(
         server.close()
         lookup.close()
         module.close()
+        engine.close()
+
+
+@pytest.mark.parametrize("mode", ["engine_driven", "auto"])
+def test_engine_driven_retrieves_fs_hits_with_streaming_configured(
+    mode: Literal["engine_driven", "auto"], tmp_path: Path, unused_tcp_port: int
+) -> None:
+    """The engine-driven client gets cold FS hits through ordinary prefetch."""
+    chunk_tokens = 512
+    l1_bytes = 8 * 1024 * 1024
+    config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=l1_bytes, use_lazy=False, shm_name=""
+            )
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+        l2_adapter_config=L2AdaptersConfig(
+            [FSL2AdapterConfig(str(tmp_path), streaming_buffer_size_bytes=4096)]
+        ),
+    )
+    running = run_cache_server(
+        MPServerConfig(
+            host="127.0.0.1",
+            port=unused_tcp_port,
+            chunk_size=chunk_tokens,
+            supported_transfer_mode=mode,
+        ),
+        config,
+        ObservabilityConfig(),
+        return_engine=True,
+        start_prometheus_http_server=False,
+    )
+    assert running is not None
+    server, engine = running
+    client = RequestClientFactory.create(f"tcp://127.0.0.1:{unused_tcp_port}")
+    worker = EngineDrivenTransferContext(1, client)
+    model = "engine-driven-fs"
+    destination = {"layer_0": torch.full((3, 2, 16), -1.0)}
+    key = IPCCacheServerKey.from_token_ids(
+        model, 1, 0, [1] * chunk_tokens, 0, chunk_tokens, request_id="cold-fs"
+    )
+    try:
+        worker.register(
+            destination,
+            model,
+            1,
+            2,
+            5.0,
+            engine_group_infos=[EngineGroupInfo(0, (0,), tokens_per_block=256)],
+            lmcache_chunk_tokens=chunk_tokens,
+        )
+        ctx = engine.context
+        (obj_key,) = ctx.resolve_obj_keys(key, [0])[0]
+        layouts = ctx.layout_desc_registry.find_group_layout_descs(model, 1)
+        assert layouts is not None
+        layout = layouts[0]
+        (tmp_path / encode_fs_filename(obj_key)).write_bytes(
+            bytes(get_size_bytes(layout.shapes, layout.dtypes))
+        )
+
+        client.lookup(key, 1).result(timeout=5)
+        assert client.wait_prefetch_status(key.request_id, 5).result(10) == chunk_tokens
+        assert worker.submit_retrieve(
+            key.request_id, key, destination, [[1, 2]], None, 2
+        ).result(timeout=5)
+        assert torch.equal(destination["layer_0"][1:], torch.zeros((2, 2, 16)))
+        (l1,) = ctx.storage_manager.l1_managers()
+        assert l1.get_capacity_bytes() == l1_bytes
+    finally:
+        worker.close()
+        client.close()
+        server.close()
         engine.close()
 
 

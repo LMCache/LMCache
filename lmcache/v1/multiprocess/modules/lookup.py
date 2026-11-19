@@ -490,10 +490,9 @@ class LookupModule(DiscoverableModule):
 
         Hashes are computed only for chunks in ``[start, end)`` to avoid
         unnecessary work on tokens outside that range.
-        ``start`` and ``end`` must be aligned to ``chunk_size``; it is the
-        caller's responsibility to align the boundaries as desired. An
-        unaligned ``end`` releases the full chunks below it, plus the unfull
-        chunk ending exactly there if the lookup locked it.
+        Align ``start`` to ``chunk_size``. An unaligned ``end`` releases
+        the full chunks below it, plus the unfull chunk ending exactly
+        there if the lookup locked it.
 
         Only the keys the prefetch actually read-locked are released: the
         key's range is floored to the current lookup's ``start``, and each
@@ -576,19 +575,29 @@ class LookupModule(DiscoverableModule):
             streaming_end = min(
                 key.end, max(effective_start, hit_chunks * self._ctx.chunk_size)
             )
-            current_streaming = session.is_current_streaming_range(
+            streaming_owners = session.current_streaming_range_owners(
                 effective_start, streaming_end
             )
-            if current_streaming:
-                owners = session.streaming_range_owners(effective_start, streaming_end)
-                assert owners is not None
+            if streaming_owners is not None:
+                owners = streaming_owners
                 obj_keys = [obj_key for obj_key in obj_keys if obj_key in owners]
             if obj_keys:
                 finish_lookup_read(self._ctx, key, obj_keys, owners)
-            if current_streaming:
+            if streaming_owners is not None:
                 session.finish_current_streaming_range(effective_start, key.end)
         for range_start, range_end in extra_ranges:
             if range_start >= range_end:
+                continue
+            abandoned_owners = session.abandoned_streaming_range_owners(
+                range_start, range_end
+            )
+            if abandoned_owners is not None:
+                # The recorded lock set includes any unfull L1 tail.
+                if abandoned_owners:
+                    finish_lookup_read(
+                        self._ctx, key, list(abandoned_owners), abandoned_owners
+                    )
+                session.finish_abandoned_streaming_range(range_start, range_end)
                 continue
             # An abandoned lookup's range ends at its hit boundary, so the
             # range is its own lock model: resolve with that hit, not the
@@ -599,21 +608,10 @@ class LookupModule(DiscoverableModule):
                 range_end // self._ctx.chunk_size,
                 session.prefetch_locked_gids,
             )
-            owners = self._ctx.get_read_owners(key.request_id)
-            abandoned_owners = session.abandoned_streaming_range_owners(
-                range_start, range_end
-            )
-            if abandoned_owners is not None:
-                owners = abandoned_owners
-                obj_keys = [obj_key for obj_key in obj_keys if obj_key in owners]
-            elif session.is_current_streaming_range(range_start, range_end) is True:
-                owners = session.streaming_range_owners(range_start, range_end)
-                assert owners is not None
-                obj_keys = [obj_key for obj_key in obj_keys if obj_key in owners]
             if obj_keys:
-                finish_lookup_read(self._ctx, key, obj_keys, owners)
-            if abandoned_owners is not None:
-                session.finish_abandoned_streaming_range(range_start, range_end)
+                finish_lookup_read(
+                    self._ctx, key, obj_keys, self._ctx.get_read_owners(key.request_id)
+                )
 
     @request_handler(HandlerType.BLOCKING)
     def end_session(self, request_id: str) -> None:

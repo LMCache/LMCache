@@ -20,9 +20,15 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
+from lmcache.v1.distributed.l1_manager.dram import DramL1Manager
+from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
+    FSL2Adapter,
+    FSL2AdapterConfig,
+)
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.session import SessionManager
+from lmcache.v1.multiprocess.streaming import FSStreamingReader
 
 logger = init_logger(__name__)
 
@@ -302,6 +308,9 @@ class MPCacheServerContext:
             True.
         null_block_id: Engine block ID that denotes absent KV data.
         session_ttl_seconds: Idle seconds before a request session is reaped.
+        enable_fs_streaming: Whether this server can serve deferred FS hits
+            through windowed retrieve. When false, FS uses ordinary prefetch
+            and the DRAM capacity remains available to L1.
     """
 
     def __init__(
@@ -313,6 +322,8 @@ class MPCacheServerContext:
         full_sw_kv: bool = False,
         null_block_id: int = 0,
         session_ttl_seconds: float = SessionManager.DEFAULT_SESSION_TTL,
+        *,
+        enable_fs_streaming: bool = False,
     ) -> None:
         self._configured_chunk_size = chunk_size
         self._chunk_size = chunk_size
@@ -331,47 +342,13 @@ class MPCacheServerContext:
             storage_manager_config
         )
         self._storage_manager = StorageManager(storage_manager_config)
-        # First Party
-        from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
-            FSL2Adapter,
-            FSL2AdapterConfig,
-        )
-        from lmcache.v1.multiprocess.streaming import FSStreamingReader
-
-        streaming_adapters = [
-            (descriptor.config, adapter)
-            for descriptor, adapter in self._storage_manager.l2_adapters()
-            if isinstance(descriptor.config, FSL2AdapterConfig)
-            and descriptor.config.streaming_buffer_size_bytes
-        ]
-        if len(streaming_adapters) > 1:
-            self._storage_manager.close()
-            raise ValueError("only one FS streaming adapter may be configured")
         self.streaming_reader: FSStreamingReader | None = None
-        if streaming_adapters:
-            fs_config, fs_adapter = streaming_adapters[0]
-            if not isinstance(fs_adapter, FSL2Adapter):
-                self._storage_manager.close()
-                raise ValueError("FS streaming requires an unwrapped FS adapter")
-            try:
-                # First Party
-                from lmcache.v1.distributed.l1_manager.dram import DramL1Manager
-
-                owners = [
-                    manager
-                    for manager in self._storage_manager.l1_managers()
-                    if isinstance(manager, DramL1Manager)
-                ]
-                if len(owners) != 1:
-                    raise ValueError("FS streaming requires one DRAM L1 manager")
-                self.streaming_reader = FSStreamingReader(
-                    fs_adapter,
-                    fs_config.streaming_buffer_size_bytes,
-                    shared_owner=owners[0],
-                )
-            except BaseException:
-                self._storage_manager.close()
-                raise
+        try:
+            if enable_fs_streaming:
+                self.streaming_reader = self._create_fs_streaming_reader()
+        except BaseException:
+            self._storage_manager.close()
+            raise
         self._token_hasher = TokenHasher(
             chunk_size=chunk_size, hash_algorithm=hash_algorithm
         )
@@ -619,6 +596,31 @@ class MPCacheServerContext:
                 ),
             )
         ]
+
+    def _create_fs_streaming_reader(self) -> FSStreamingReader | None:
+        configured = [
+            (descriptor.config, adapter)
+            for descriptor, adapter in self._storage_manager.l2_adapters()
+            if isinstance(descriptor.config, FSL2AdapterConfig)
+            and descriptor.config.streaming_buffer_size_bytes
+        ]
+        if len(configured) > 1:
+            raise ValueError("only one FS streaming adapter may be configured")
+        if not configured:
+            return None
+        fs_config, fs_adapter = configured[0]
+        if not isinstance(fs_adapter, FSL2Adapter):
+            raise ValueError("FS streaming requires an unwrapped FS adapter")
+        owners = [
+            manager
+            for manager in self._storage_manager.l1_managers()
+            if isinstance(manager, DramL1Manager)
+        ]
+        if len(owners) != 1:
+            raise ValueError("FS streaming requires one DRAM L1 manager")
+        return FSStreamingReader(
+            fs_adapter, fs_config.streaming_buffer_size_bytes, shared_owner=owners[0]
+        )
 
     @staticmethod
     def _compute_shm_pool_info(
