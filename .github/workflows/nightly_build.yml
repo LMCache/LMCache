@@ -641,6 +641,8 @@ jobs:
 
   nightly-pin-or-report-vllm:
     name: Pin or report vLLM
+    env:
+      PIN_VLLM_DRY_RUN: "1"
     needs: nightly-verify-cpu-vllm
     if: always() && !cancelled()
     concurrency:
@@ -660,6 +662,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
+          ref: 4f7d30f7f8193c94f02f65bfa937570e83697f12
           fetch-depth: 1
 
       - name: Setup Python 3.12

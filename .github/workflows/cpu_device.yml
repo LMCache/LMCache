@@ -202,6 +202,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
+          ref: 4f7d30f7f8193c94f02f65bfa937570e83697f12
           fetch-depth: 1
 
       - name: Setup Python 3.12
