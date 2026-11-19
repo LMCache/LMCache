@@ -3,11 +3,10 @@
 
 # Standard
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Coroutine, Iterable
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 import asyncio
-import inspect
 import queue
 import time
 
@@ -179,41 +178,13 @@ class BaseWorkload(ABC):
             self.on_request_finished(request_id, output)
 
     # ------------------------------------------------------------------
-    # Task management and bounded dispatch helpers
+    # Task management helpers
     # ------------------------------------------------------------------
 
-    def _track_task(
-        self,
-        task: asyncio.Task,
-        *,
-        semaphore: asyncio.Semaphore | None = None,
-        coro: Coroutine[Any, Any, Any] | None = None,
-    ) -> asyncio.Task:
-        """Track an asyncio Task and attach done callback.
-
-        Args:
-            task: The asyncio Task to track.
-            semaphore: Optional semaphore to release when the task finishes.
-            coro: Optional unstarted coroutine to close if the task is cancelled
-                before its first step.
-
-        Returns:
-            The tracked asyncio Task.
-        """
+    def _track_task(self, task: asyncio.Task) -> asyncio.Task:
+        """Track an asyncio Task and attach ``_on_task_done`` callback."""
         self._pending_tasks.add(task)
-
-        def _on_done(t: asyncio.Task) -> None:
-            if semaphore is not None:
-                semaphore.release()
-            if (
-                coro is not None
-                and inspect.iscoroutine(coro)
-                and inspect.getcoroutinestate(coro) == inspect.CORO_CREATED
-            ):
-                coro.close()
-            self._on_task_done(t)
-
-        task.add_done_callback(_on_done)
+        task.add_done_callback(self._on_task_done)
         return task
 
     def _create_tracked_task(
@@ -221,21 +192,19 @@ class BaseWorkload(ABC):
         coro: Coroutine[Any, Any, Any],
         *,
         name: str | None = None,
-        semaphore: asyncio.Semaphore | None = None,
     ) -> asyncio.Task:
         """Create an asyncio Task, track it in ``_pending_tasks``, and
-        attach done callback.
+        attach ``_on_task_done``.
 
         Args:
             coro: Coroutine to execute in the background.
             name: Optional human-readable name for the task.
-            semaphore: Optional semaphore to release when the task finishes.
 
         Returns:
             The created and tracked asyncio Task.
         """
         task = asyncio.create_task(coro, name=name)
-        return self._track_task(task, semaphore=semaphore, coro=coro)
+        return self._track_task(task)
 
     def _on_task_done(self, task: asyncio.Task) -> None:
         """Clean up completed tasks and log unexpected errors.
@@ -263,70 +232,3 @@ class BaseWorkload(ABC):
             )
             return 0.0
         return -1.0
-
-    async def _dispatch_task_with_semaphore(
-        self,
-        coro: Coroutine[Any, Any, Any],
-        semaphore: asyncio.Semaphore,
-        *,
-        name: str | None = None,
-    ) -> asyncio.Task:
-        """Acquire semaphore, execute coro releasing semaphore on completion,
-        and track task.
-
-        Args:
-            coro: Coroutine to execute under the semaphore.
-            semaphore: Concurrency-limiting semaphore.
-            name: Optional task name.
-
-        Returns:
-            The created and tracked asyncio Task.
-        """
-        try:
-            await semaphore.acquire()
-        except BaseException:
-            if (
-                inspect.iscoroutine(coro)
-                and inspect.getcoroutinestate(coro) == inspect.CORO_CREATED
-            ):
-                coro.close()
-            raise
-
-        try:
-            return self._create_tracked_task(coro, name=name, semaphore=semaphore)
-        except BaseException:
-            semaphore.release()
-            if (
-                inspect.iscoroutine(coro)
-                and inspect.getcoroutinestate(coro) == inspect.CORO_CREATED
-            ):
-                coro.close()
-            raise
-
-    async def dispatch_bounded(
-        self,
-        items: Iterable[Any],
-        send: Callable[[Any], Coroutine[Any, Any, Any]],
-        max_inflight: int,
-    ) -> None:
-        """Send ``items`` with at most ``max_inflight`` concurrent requests in flight.
-
-        Tracks all tasks in ``_pending_tasks`` and guarantees completion of all
-        dispatched items before returning.
-
-        Args:
-            items: Iterable of items to process.
-            send: Async callable taking one item and returning a coroutine.
-            max_inflight: Maximum number of concurrent tasks allowed.
-        """
-        semaphore = asyncio.Semaphore(max_inflight)
-        for item in items:
-            await semaphore.acquire()
-            try:
-                coro = send(item)
-            except BaseException:
-                semaphore.release()
-                raise
-            self._create_tracked_task(coro, semaphore=semaphore)
-        while self._pending_tasks:
-            await self._wait_for_pending_tasks()

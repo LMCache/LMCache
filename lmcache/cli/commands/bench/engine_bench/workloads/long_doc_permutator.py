@@ -375,7 +375,6 @@ class LongDocPermutatorWorkload(BaseWorkload):
 
             self._create_tracked_task(
                 self._dispatch(messages, perm_idx, req_idx),
-                semaphore=self._semaphore,
             )
             return 0.0
 
@@ -397,11 +396,14 @@ class LongDocPermutatorWorkload(BaseWorkload):
         request_id = f"perm{perm_idx}_req{req_idx}"
         self._progress_monitor.on_request_sent(request_id)
         self._progress_monitor.log_message(f"Dispatched permutation {perm_idx}")
-        await self._request_sender.send_request(
-            request_id,
-            messages,
-            max_tokens=self._config.max_output_length,
-        )
+        try:
+            await self._request_sender.send_request(
+                request_id,
+                messages,
+                max_tokens=self._config.max_output_length,
+            )
+        finally:
+            self._semaphore.release()
 
     def on_request_finished(self, request_id: str, output: str) -> None:
         """No-op — this workload is stateless."""

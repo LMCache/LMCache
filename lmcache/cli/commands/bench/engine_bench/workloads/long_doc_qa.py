@@ -242,7 +242,6 @@ class LongDocQAWorkload(BaseWorkload):
             self._schedule_index += 1
             self._create_tracked_task(
                 self._dispatch(doc_idx, q_idx),
-                semaphore=self._semaphore,
             )
             return 0.0  # immediate re-call
 
@@ -260,11 +259,14 @@ class LongDocQAWorkload(BaseWorkload):
         self._progress_monitor.log_message(
             f"Dispatched request {request_id} (doc {doc_index}, query {query_index})"
         )
-        await self._request_sender.send_request(
-            request_id,
-            messages,
-            max_tokens=self._config.max_output_length,
-        )
+        try:
+            await self._request_sender.send_request(
+                request_id,
+                messages,
+                max_tokens=self._config.max_output_length,
+            )
+        finally:
+            self._semaphore.release()
 
     def on_request_finished(self, request_id: str, output: str) -> None:
         """No-op — this workload is stateless."""

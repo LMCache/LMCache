@@ -857,7 +857,6 @@ class KVTierPressureWorkload(BaseWorkload):
 
             self._create_tracked_task(
                 self._dispatch(group, req_idx),
-                semaphore=self._semaphore,
             )
             return 0.0
 
@@ -872,11 +871,14 @@ class KVTierPressureWorkload(BaseWorkload):
         """
         request_id = f"sample{req_idx}"
         self._progress_monitor.on_request_sent(request_id)
-        await self._request_sender.send_request(
-            request_id,
-            self._build_messages(group),
-            max_tokens=self._config.max_output_length,
-        )
+        try:
+            await self._request_sender.send_request(
+                request_id,
+                self._build_messages(group),
+                max_tokens=self._config.max_output_length,
+            )
+        finally:
+            self._semaphore.release()
 
     def on_request_finished(self, request_id: str, output: str) -> None:
         """No-op -- this workload is stateless.
