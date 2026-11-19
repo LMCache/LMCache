@@ -13,12 +13,12 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_codec import TOKEN_STRIDE, num_packed_tokens
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L1ReadReservation
 from lmcache.v1.distributed.l1_manager import validate_read_locks
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     PeriodicThreadRegistry,

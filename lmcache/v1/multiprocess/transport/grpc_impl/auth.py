@@ -10,7 +10,7 @@ import grpc
 
 # First Party
 from lmcache.security.api_key import APIKeyVerifier
-from lmcache.security.http import bearer_token
+from lmcache.security.bearer import bearer_token
 from lmcache.v1.transport.grpc.endpoint import AUTHORIZATION_METADATA_KEY
 
 AUTHENTICATION_ERROR = "Invalid or missing API key"

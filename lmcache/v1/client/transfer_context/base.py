@@ -32,12 +32,12 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.native_block_transfer import transfer_with_address_kernel
+from lmcache.v1.transport.request_client import RequestClient
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
