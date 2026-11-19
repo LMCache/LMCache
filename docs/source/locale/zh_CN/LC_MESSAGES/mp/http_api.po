@@ -1953,10 +1953,10 @@ msgstr "``GET /periodic-threads``"
 #: ../../source/mp/http_api.rst:1437
 msgid ""
 "Returns a JSON snapshot of the "
-":class:`~lmcache.v1.periodic_thread.PeriodicThreadRegistry`: counts by "
+":class:`~lmcache.v1.common.periodic_thread.PeriodicThreadRegistry`: counts by "
 "level plus per-thread status (last run timestamp, latest summary, etc.)."
 msgstr ""
-"返回 :class:`~lmcache.v1.periodic_thread.PeriodicThreadRegistry` 的 JSON "
+"返回 :class:`~lmcache.v1.common.periodic_thread.PeriodicThreadRegistry` 的 JSON "
 "快照：按级别统计以及每个线程的状态（上次运行时间戳、最新摘要等）。"
 
 #: ../../source/mp/http_api.rst:1447
