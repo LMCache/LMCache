@@ -53,10 +53,11 @@ class Hf3fsStorageBackend(StorageBackendProfile):
         """Return whether ``BUILD_HF3FS=1`` requests the HF3FS extension.
 
         The extension is never built by default. When requested, the
-        3FS usrbio header and library are searched in
-        ``HF3FS_INCLUDE_DIR`` / ``HF3FS_LIB_DIR`` (``;``-separated) and
-        then the system paths; Abseil is searched in the system paths
-        only.
+        3FS usrbio and Abseil headers are searched in
+        ``HF3FS_INCLUDE_DIR`` (``;``-separated) and then the system
+        include paths, matching the compiler's include path; the 3FS
+        library is searched in ``HF3FS_LIB_DIR`` and then the system
+        library paths.
 
         Returns:
             ``True`` if ``BUILD_HF3FS=1`` and all dependencies are
@@ -129,13 +130,11 @@ class Hf3fsStorageBackend(StorageBackendProfile):
     def _missing_dependencies() -> list[str]:
         """Describe each missing build dependency, with where it was searched."""
         missing = []
-        system_dirs = list(SYSTEM_INCLUDE_DIRS)
-
-        hf3fs_include_dirs = _env_dirs("HF3FS_INCLUDE_DIR") + system_dirs
-        if not _has_file("hf3fs_usrbio.h", hf3fs_include_dirs):
+        include_dirs = _env_dirs("HF3FS_INCLUDE_DIR") + list(SYSTEM_INCLUDE_DIRS)
+        if not _has_file("hf3fs_usrbio.h", include_dirs):
             missing.append(
                 "3FS header hf3fs_usrbio.h not found in "
-                + ", ".join(hf3fs_include_dirs)
+                + ", ".join(include_dirs)
                 + " (set HF3FS_INCLUDE_DIR)"
             )
 
@@ -149,11 +148,13 @@ class Hf3fsStorageBackend(StorageBackendProfile):
                 " or the system library paths (set HF3FS_LIB_DIR)"
             )
 
+        # build() passes every HF3FS_INCLUDE_DIR entry to the compiler, so
+        # Abseil headers there are as usable as system ones.
         absl_header = os.path.join("absl", "container", "flat_hash_set.h")
-        if not _has_file(absl_header, system_dirs):
+        if not _has_file(absl_header, include_dirs):
             missing.append(
                 f"Abseil header {absl_header} not found in "
-                + ", ".join(system_dirs)
+                + ", ".join(include_dirs)
                 + " (install libabsl-dev)"
             )
         if not ctypes.util.find_library("absl_hash"):
