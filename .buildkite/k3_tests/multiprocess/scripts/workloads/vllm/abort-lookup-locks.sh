@@ -9,8 +9,10 @@
 #      wait for GPU blocks after their lookups hit (and read-lock the hit).
 #   4. Disconnects every client after ABORT_AFTER_SECONDS, which aborts all
 #      requests, WAITING ones included.
-#      It requires vllm:num_requests_waiting > 0 and read-locked objects at
-#      that moment, so a run that never aborts a WAITING hit fails.
+#      It waits until no LMCache prefetch is running, then requires
+#      vllm:num_requests_waiting > 0 and read-locked objects, so a run that
+#      never aborts a WAITING hit fails. A prefetch still running at the
+#      abort keeps its locks until the read TTL, a known gap.
 #   5. Asserts the L1 read_locked_count returns to 0 within
 #      LOCK_RELEASE_TIMEOUT seconds, far below the 300 s read-lock TTL that
 #      released the leaked locks before the fix.
@@ -76,11 +78,36 @@ def make_doc(index: int) -> str:
     )
 
 
-def read_locked_count() -> int:
+def lmcache_status() -> dict:
     with urllib.request.urlopen(STATUS_URL, timeout=10) as response:
-        status = json.load(response)
-    l1_managers = status["storage_manager"]["l1_managers"]
+        return json.load(response)
+
+
+def read_locked_count() -> int:
+    l1_managers = lmcache_status()["storage_manager"]["l1_managers"]
     return sum(l1["read_locked_count"] for l1 in l1_managers.values())
+
+
+def prefetch_state() -> dict:
+    """Prefetches still running, and finished lookups nobody consumed yet."""
+    status = lmcache_status()
+    controller = status["storage_manager"]["prefetch_controller"]
+    return {
+        "running": controller["submission_queue_size"]
+        + controller["pending_queue_size"]
+        + controller["in_flight_request_count"],
+        "unconsumed_jobs": status["active_prefetch_jobs"],
+    }
+
+
+def engine_alive() -> bool:
+    try:
+        with urllib.request.urlopen(
+            f"http://localhost:{VLLM_PORT}/health", timeout=10
+        ) as response:
+            return response.status == 200
+    except OSError:
+        return False
 
 
 def vllm_gauge(name: str) -> int:
@@ -182,6 +209,13 @@ deadline = time.monotonic() + ABORT_AFTER_SECONDS
 while time.monotonic() < deadline:
     peak = max(peak, read_locked_count())
     time.sleep(0.2)
+# A prefetch still running at END_SESSION keeps its locks until the read TTL
+# (a known gap, see mp_lookup_state.md), so abort only once every lookup
+# has finished.
+deadline = time.monotonic() + 30
+while prefetch_state()["running"] and time.monotonic() < deadline:
+    time.sleep(0.05)
+prefetch_at_abort = prefetch_state()
 # The precondition: requests still WAITING while lookup locks are held.
 waiting_at_abort = vllm_gauge("vllm:num_requests_waiting")
 running_at_abort = vllm_gauge("vllm:num_requests_running")
@@ -194,6 +228,7 @@ for thread in threads:
     thread.join(timeout=30)
 aborted_at = time.monotonic()
 print(f"read_locked_count: peak {peak}, at the abort {at_abort}")
+print(f"LMCache prefetches at the abort: {prefetch_at_abort}")
 print(f"vLLM at the abort: {waiting_at_abort} waiting, {running_at_abort} running")
 errors = [status for status in statuses if b" 200 " not in status]
 if errors:
@@ -207,6 +242,8 @@ while count != 0 and time.monotonic() - aborted_at < LOCK_RELEASE_TIMEOUT:
     count = read_locked_count()
     samples.append((round(time.monotonic() - aborted_at, 1), count))
 elapsed = time.monotonic() - aborted_at
+alive = engine_alive()
+prefetch_after = prefetch_state()
 
 with open(os.path.join(TEST_DIR, "result.json"), "w") as output:
     json.dump(
@@ -216,6 +253,9 @@ with open(os.path.join(TEST_DIR, "result.json"), "w") as output:
             "read_locked_count_at_abort": at_abort,
             "num_requests_waiting_at_abort": waiting_at_abort,
             "num_requests_running_at_abort": running_at_abort,
+            "prefetch_at_abort": prefetch_at_abort,
+            "prefetch_after": prefetch_after,
+            "engine_alive_after": alive,
             "final_read_locked_count": count,
             "seconds_after_abort": elapsed,
             "samples": samples,
@@ -224,6 +264,18 @@ with open(os.path.join(TEST_DIR, "result.json"), "w") as output:
         indent=2,
     )
 
+# A dead engine sends no END_SESSION or FREE, so its locks say nothing about
+# the abort path.
+if not alive:
+    sys.exit(
+        "INFRA FAILURE: vLLM engine died after the abort (see the vLLM log); "
+        "the lock count is not a result"
+    )
+if prefetch_at_abort["running"]:
+    sys.exit(
+        f"FAIL: precondition not met: {prefetch_at_abort['running']} prefetches "
+        "still running 30 s after the burst"
+    )
 # Without WAITING requests and held locks at the abort, no request was
 # aborted while waiting after a hit: the test would pass without exercising
 # the fix. Shrink NUM_GPU_BLOCKS_OVERRIDE or raise NUM_DOCS if this trips.
