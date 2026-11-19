@@ -26,6 +26,11 @@ prompt's token count and the server's chunk size: a store is complete when
 every full chunk of the prompt is written, and a hit covers exactly those
 chunks.
 
+In engine-driven transfer the server imports no GPU memory. It registers a
+shared-memory staging context per vLLM instance instead, which the same two
+connector hooks drop and re-create, so the steps are the same and the
+registration checks read that registration.
+
 A failed check does not stop the run, so one run shows every broken step. A
 request that vLLM rejects does stop it, because the later steps depend on it.
 """
@@ -58,6 +63,13 @@ MAX_TOKENS = 32
 EXTERNAL_HIT_TOKENS = "vllm:external_prefix_cache_hits_total"
 L1_WRITE_CHUNKS = "lmcache_mp_l1_write_chunks_total"
 L1_READ_CHUNKS = "lmcache_mp_l1_read_chunks_total"
+
+# Key of the LMCache server's /status that lists the registered instance ids,
+# per transfer mode. Only the module of the active mode reports its key.
+REGISTRATION_STATUS_KEYS = {
+    "lmcache_driven": "registered_gpu_ids",
+    "engine_driven": "registered_non_cuda_instance_ids",
+}
 
 # Level 1 sleep releases the KV cache and moves the weights to host memory, so
 # little more than the CUDA context stays on the device. A server that keeps
@@ -197,12 +209,18 @@ class Deployment:
     """The running vLLM server, LMCache server and the GPU they share."""
 
     def __init__(
-        self, engine_url: str, lmcache_url: str, model: str, gpu_index: int
+        self,
+        engine_url: str,
+        lmcache_url: str,
+        model: str,
+        gpu_index: int,
+        transfer_mode: str,
     ) -> None:
         self._engine_url = engine_url
         self._lmcache_url = lmcache_url
         self._model = model
         self._gpu_index = gpu_index
+        self._registration_key = REGISTRATION_STATUS_KEYS[transfer_mode]
 
     def extensible_kv_cache_enabled(self) -> bool:
         """Return whether vLLM reports its extensible KV cache as enabled."""
@@ -275,7 +293,7 @@ class Deployment:
     def registered_kv_caches(self) -> list[int]:
         """Return the instance ids whose KV cache the LMCache server holds."""
         status = json.loads(_http("GET", f"{self._lmcache_url}/status"))
-        return status["registered_gpu_ids"]
+        return status[self._registration_key]
 
     def gpu_used_mib(self) -> int:
         """Return the memory in use on the GPU, in MiB."""
@@ -482,8 +500,9 @@ def run_checks(deployment: Deployment, report: Report) -> None:
     )
     check_wake_up(deployment, report, "wake-up keeping LMCache", awake_mib)
 
-    # Sleep clears vLLM's own prefix cache, so this hit comes from the LMCache
-    # server writing into the memory committed at wake-up.
+    # Sleep clears vLLM's own prefix cache, so this hit is retrieved from
+    # LMCache into the memory committed at wake-up, through the registration
+    # made there.
     kept = run_prompt(deployment, chunk_size, hit_from_l1)
     report.check(
         "prompt hits LMCache after wake-up",
@@ -537,6 +556,12 @@ def main() -> int:
         "--gpu-index", required=True, type=int, help="nvidia-smi index of vLLM's GPU"
     )
     parser.add_argument(
+        "--transfer-mode",
+        required=True,
+        choices=sorted(REGISTRATION_STATUS_KEYS),
+        help="transfer mode the LMCache server was started with",
+    )
+    parser.add_argument(
         "--results-dir", required=True, type=Path, help="directory for checks.json"
     )
     args = parser.parse_args()
@@ -544,7 +569,13 @@ def main() -> int:
     report = Report()
     try:
         run_checks(
-            Deployment(args.engine_url, args.lmcache_url, args.model, args.gpu_index),
+            Deployment(
+                args.engine_url,
+                args.lmcache_url,
+                args.model,
+                args.gpu_index,
+                args.transfer_mode,
+            ),
             report,
         )
     finally:

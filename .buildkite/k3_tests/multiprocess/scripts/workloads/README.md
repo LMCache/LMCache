@@ -32,7 +32,8 @@ auto-start behavior and therefore remains under `vllm/` rather than `common/`.
 `sleep_mode.py`, which is not a workload: two sleep/wake-up cycles, during
 which the LMCache server must drop and re-create its KV cache registration,
 GPU memory must be released and come back, and the prompt must hit LMCache
-with the output from before sleep.
+with the output from before sleep. `LMCACHE_MP_TRANSFER_MODE` selects which
+registration of the server's `/status` the checks read.
 
 The harness converts a test name from underscores to hyphens and discovers the
 script automatically. For example, `long_doc_qa` resolves to

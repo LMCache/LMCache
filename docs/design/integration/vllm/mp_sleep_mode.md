@@ -106,8 +106,8 @@ one restore.
 - End to end: the `sleep_mode` workload of the k3 multiprocess CI
   (`.buildkite/k3_tests/multiprocess/scripts/workloads/vllm/sleep-mode.sh`,
   with the checks in `sleep_mode.py` next to it). It launches vLLM with
-  `--enable-sleep-mode` and the default extensible KV cache, in
-  LMCache-driven transfer, and runs two level 1 sleep/wake-up cycles:
+  `--enable-sleep-mode` and the default extensible KV cache, and runs two
+  level 1 sleep/wake-up cycles:
 
   ```
   prompt                     stored to LMCache
@@ -127,13 +127,20 @@ one restore.
   server, so the first prompt after wake-up stores through the new
   registration and the second one hits LMCache
   (`vllm:external_prefix_cache_hits_total`). The registration is read from
-  the server's `/status` (`registered_gpu_ids`) and the memory from
-  `nvidia-smi`: at most 25% of the level before sleep while asleep, at most
-  110% of it after wake-up. If the hooks do nothing, the server's import
-  keeps the KV cache alive during sleep, wake-up adds a second copy, and a
-  hit after wake-up returns different output. To run it outside CI, with vLLM
-  and LMCache installed and a free GPU:
+  the server's `/status` and the memory from `nvidia-smi`: at most 25% of
+  the level before sleep while asleep, at most 110% of it after wake-up.
+
+  CI runs it in LMCache-driven transfer (`registered_gpu_ids`). If the hooks
+  do nothing there, the server's import keeps the KV cache alive during
+  sleep, wake-up adds a second copy, and a hit after wake-up returns
+  different output. With `LMCACHE_MP_TRANSFER_MODE=engine_driven` the checks
+  read `registered_non_cuda_instance_ids` instead. The server imports no GPU
+  memory in that mode, so hooks that do nothing only leave the registration
+  in place during sleep, and the two checks on it are the ones that fail.
+  To run it outside CI, with vLLM and LMCache installed and a free GPU:
 
   ```bash
   .buildkite/k3_tests/multiprocess/scripts/run-single-test.sh sleep_mode
+  LMCACHE_MP_TRANSFER_MODE=engine_driven L1_USE_LAZY=false \
+      .buildkite/k3_tests/multiprocess/scripts/run-single-test.sh sleep_mode
   ```
