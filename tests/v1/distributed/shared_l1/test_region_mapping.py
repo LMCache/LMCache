@@ -5,6 +5,7 @@
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock
+import gc
 import mmap
 import os
 
@@ -52,6 +53,25 @@ def region_config(tmp_path: Path) -> tuple[L1MemoryManagerConfig, RegionContract
     return config, contract
 
 
+@pytest.fixture
+def opened_mappings(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, mmap.mmap]]:
+    """Observe handles returned by the public mapping primitive."""
+    opened: list[tuple[int, mmap.mmap]] = []
+    open_mapping = DevDaxMemoryAllocator.open_devdax_mapping
+
+    def record_mapping(
+        path: str, size: int, offset: int
+    ) -> tuple[int, mmap.mmap, object, torch.Tensor]:
+        result = open_mapping(path, size, offset)
+        opened.append((result[0], result[1]))
+        return result
+
+    monkeypatch.setattr(
+        DevDaxMemoryAllocator, "open_devdax_mapping", staticmethod(record_mapping)
+    )
+    return opened
+
+
 def test_views_alias_the_region_and_reject_invalid_extents(
     region_config: tuple[L1MemoryManagerConfig, RegionContract],
 ) -> None:
@@ -75,6 +95,7 @@ def test_views_alias_the_region_and_reject_invalid_extents(
         for start, length in [(-ALIGN, ALIGN), (1, ALIGN), (CAPACITY, ALIGN), (0, 512)]:
             with pytest.raises(ValueError, match="does not fit"):
                 mapping.view(start, length, LAYOUT)
+        del first, second
 
 
 def test_view_after_close_is_rejected(
@@ -86,27 +107,47 @@ def test_view_after_close_is_rejected(
         region.view(0, ALIGN, LAYOUT)
 
 
+def test_close_with_exported_tensor_can_be_retried(
+    region_config: tuple[L1MemoryManagerConfig, RegionContract],
+    opened_mappings: list[tuple[int, mmap.mmap]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, contract = region_config
+    unpin = Mock()
+    monkeypatch.setattr(current_device_spec, "unpin_memory", unpin)
+    region = SharedDevDaxRegion(config, contract)
+    view = region.view(0, ALIGN, LAYOUT)
+    assert view.raw_tensor is not None
+    tensor = view.raw_tensor.detach()
+    del view
+    fd, mapped = opened_mappings[0]
+    with pytest.raises(BufferError):
+        region.close()
+    assert not mapped.closed
+    os.fstat(fd)
+    assert config.devdax_path is not None
+    assert region.owns_range(config.devdax_path, OFFSET, ALIGN)
+    with pytest.raises(RuntimeError, match="closed"):
+        region.view(0, ALIGN, LAYOUT)
+    del tensor
+    gc.collect()
+    region.close()
+    region.close()
+    unpin.assert_called_once()
+    assert mapped.closed
+    with pytest.raises(OSError):
+        os.fstat(fd)
+
+
 @pytest.mark.parametrize("registration_succeeds", [False, True])
 def test_registration_failure_and_close_release_resources(
     region_config: tuple[L1MemoryManagerConfig, RegionContract],
     registration_succeeds: bool,
+    opened_mappings: list[tuple[int, mmap.mmap]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Failed registration and repeated close both release the opened handles."""
     config, contract = region_config
-    opened: list[tuple[int, mmap.mmap]] = []
-    open_mapping = DevDaxMemoryAllocator.open_devdax_mapping
-
-    def record_mapping(
-        path: str, size: int, offset: int
-    ) -> tuple[int, mmap.mmap, object, torch.Tensor]:
-        result = open_mapping(path, size, offset)
-        opened.append((result[0], result[1]))
-        return result
-
-    monkeypatch.setattr(
-        DevDaxMemoryAllocator, "open_devdax_mapping", staticmethod(record_mapping)
-    )
     monkeypatch.setattr(
         current_device_spec, "pin_memory", Mock(return_value=registration_succeeds)
     )
@@ -121,8 +162,8 @@ def test_registration_failure_and_close_release_resources(
         with pytest.raises(RuntimeError, match="must be GPU-registered"):
             SharedDevDaxRegion(config, contract)
         unpin.assert_not_called()
-    assert len(opened) == 1
-    fd, mapped = opened[0]
+    assert len(opened_mappings) == 1
+    fd, mapped = opened_mappings[0]
     assert mapped.closed
     with pytest.raises(OSError):
         os.fstat(fd)

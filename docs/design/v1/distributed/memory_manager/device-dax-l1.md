@@ -311,7 +311,10 @@ mapping with `view`, `owns_range` and `close`. It maps the orchestrator's region
 at the configured path/offset through `DevDaxMemoryAllocator.open_devdax_mapping`,
 requires GPU registration and returns parentless views of granted extents.
 Dropping a view frees nothing. The caller drains copies before closing the
-mapping. It has no allocation, accounting or arena API; `DevDaxL1MemoryManager`
+mapping. Unregistration ends view creation and GPU use. If exported tensors
+prevent unmapping, `close()` raises `BufferError` and keeps the mmap and file
+descriptor for retry after those tensors are released. It has no allocation,
+accounting or arena API; `DevDaxL1MemoryManager`
 remains the private allocator. The `shared` configuration is still rejected by
 `DevDaxL1Manager` until the coordination/serving follow-up.
 

@@ -8,7 +8,6 @@ import os
 import torch
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.utils import get_device_identity, get_size_bytes
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
@@ -20,8 +19,6 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.memory_orchestrator.api import RegionContract
 from lmcache.v1.platform import current_device_spec
-
-logger = init_logger(__name__)
 
 
 class SharedDevDaxRegion:
@@ -143,9 +140,14 @@ class SharedDevDaxRegion:
     def close(self) -> None:
         """Unregister and unmap once, after the caller's copies drain.
 
-        If exported views prevent unmapping, the region is left mapped.
+        Unregistration prevents new views and GPU copies, even if exported
+        tensors keep the mapping alive. Release those tensors and retry close.
         Repeated calls after a successful close do nothing. If unregistering
         raises, the mapping is retained so close can be retried.
+
+        Raises:
+            BufferError: Exported tensors prevent unmapping; the mapping and
+                file descriptor remain available for a later close attempt.
         """
         if self._fd < 0:
             return
@@ -154,12 +156,6 @@ class SharedDevDaxRegion:
             self._registered = False
         self._buffer = torch.empty(0, dtype=torch.uint8)
         self._mmap_buffer = None
-        try:
-            self._mmap.close()
-        except BufferError:
-            logger.warning(
-                "Shared Device-DAX region %s still has live views; leaving it mapped",
-                self._path,
-            )
+        self._mmap.close()
         os.close(self._fd)
         self._fd = -1
