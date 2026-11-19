@@ -1060,3 +1060,31 @@ def test_unsent_eager_lookup_is_not_recorded(mock_io: SimpleNamespace) -> None:
         assert scheduler.get_kv_connector_stats() is None
     finally:
         scheduler.shutdown()
+
+
+def test_sent_eager_lookup_is_recorded_once(mock_io: SimpleNamespace) -> None:
+    """An eager lookup the adapter did send is recorded by the first read of
+    its result, although the scheduler-time submit is a no-op."""
+    config = _config(
+        KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"lmcache.mp.eager_prefetch": True},
+        )
+    )
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    scheduler.bind_gpu_block_pool(mock_io.pool)
+    try:
+        request = _request()
+        request.resumable = False
+        mock_io.scheduler.maybe_submit_lookup_request.side_effect = [True, False, False]
+        mock_io.scheduler.check_lookup_result.return_value = 8
+        scheduler.on_new_request(request)
+        for _ in range(2):
+            assert scheduler.get_num_new_matched_tokens(request, 0) == (8, True)
+
+        stats = scheduler.get_kv_connector_stats()
+        assert stats is not None
+        assert stats.reduce()["LMCache MP lookup count"] == 1
+    finally:
+        scheduler.shutdown()
