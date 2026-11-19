@@ -104,7 +104,7 @@ def cache_server() -> Iterator[CacheServer]:
                 encoded = payload
             else:
                 encoded = (
-                    payload if isinstance(payload, str) else json.dumps(payload)
+                    payload if isinstance(payload, str) else json.dumps(dict(payload))
                 ).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
