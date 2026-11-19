@@ -216,3 +216,11 @@ def test_equal_length_matches_keep_the_leftmost_input_piece() -> None:
     served = _serve(incoming, [cached], keep_prefix=len(SYS))
     expected = SYS + shared + lead + left + shared + right + Q
     assert served == expected
+
+
+def test_mismatch_in_a_later_slice_keeps_the_longer_run() -> None:
+    """A later partial match must not beat the full run already at the front."""
+    shared = _doc(170, n=1050)
+    incoming = SYS + shared + _doc(171) + shared[:700] + _doc(172) + Q
+    cached = SYS + shared + [8] * br.LMIN
+    assert _serve(incoming, [cached], keep_prefix=len(SYS)) == incoming
