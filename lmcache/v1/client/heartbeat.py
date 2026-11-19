@@ -7,8 +7,8 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
+from lmcache.v1.transport.request_client import RequestClient
 
 logger = init_logger(__name__)
 

@@ -95,7 +95,7 @@ def _build_rpc_spec(operation: str, method: Callable[..., Any]) -> RpcSpec:
 def get_rpc_specs(rpc_client: type | None = None) -> Mapping[RpcOperation, RpcSpec]:
     """Discover marked RPC methods; default to the worker RequestClient."""
     # First Party
-    from lmcache.v1.multiprocess.transport.base import RequestClient
+    from lmcache.v1.transport.request_client import RequestClient
 
     rpc_client = rpc_client or RequestClient
     specs = {
