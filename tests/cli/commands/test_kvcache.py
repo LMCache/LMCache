@@ -17,7 +17,7 @@ import pytest
 # First Party
 from lmcache.cli.main import main
 
-Reply = tuple[int, dict[str, object] | str]
+Reply = tuple[int, dict[str, object] | str | bytes]
 Request = tuple[str, str, bytes, str]
 
 NEXT_PAGE_TOKEN = "opaque+/=?& %游标"
@@ -93,9 +93,12 @@ def cache_server() -> Iterator[CacheServer]:
                 status, payload = replies.get_nowait()
             except Empty:
                 status, payload = 500, {"detail": "unexpected extra request"}
-            encoded = (
-                payload if isinstance(payload, str) else json.dumps(payload)
-            ).encode()
+            if isinstance(payload, bytes):
+                encoded = payload
+            else:
+                encoded = (
+                    payload if isinstance(payload, str) else json.dumps(payload)
+                ).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(encoded)))
@@ -347,7 +350,7 @@ def test_list_rejects_missing_required_key_field(
     with pytest.raises(SystemExit) as exc:
         main(["kvcache", "list", "--quiet", "--url", cache_server.url])
     assert exc.value.code == 1
-    assert "missing required key field 'kv_rank'" in capsys.readouterr().err
+    assert "required key field 'kv_rank' must be int" in capsys.readouterr().err
 
 
 def test_clear_preserves_l1_post(
@@ -378,3 +381,109 @@ def test_clear_surfaces_error_detail(
         main(["kvcache", "clear", "--quiet", "--url", cache_server.url])
     assert exc.value.code == 1
     assert "server not initialized" in capsys.readouterr().err
+
+
+def _page_with(key: dict[str, object] | None, size_bytes: object) -> dict[str, object]:
+    """Build a one-entry page whose key and size are as given."""
+    return {
+        "adapter": "s3",
+        "shared": False,
+        "entries": [{"key": key, "size_bytes": size_bytes}],
+        "next_page_token": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("page", "error"),
+    [
+        (
+            _page_with(
+                {"chunk_hash_hex": "c0ffee", "model_name": "m", "kv_rank": None}, 1
+            ),
+            "required key field 'kv_rank' must be int",
+        ),
+        (
+            _page_with(
+                {"chunk_hash_hex": "c0ffee", "model_name": "m", "kv_rank": 0}, None
+            ),
+            "'size_bytes' must be an integer",
+        ),
+        (
+            _page_with(None, 1),
+            "'key' is not an object",
+        ),
+    ],
+    ids=["null-rank", "null-size", "null-key"],
+)
+def test_list_rejects_mistyped_entries(
+    cache_server: CacheServer,
+    page: dict[str, object],
+    error: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Null or mistyped entries fail with exit 1 instead of a success report."""
+    cache_server.replies.put((200, page))
+    output = tmp_path / "failed.json"
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "kvcache",
+                "list",
+                "--quiet",
+                "--output",
+                str(output),
+                "--url",
+                cache_server.url,
+            ]
+        )
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert error in captured.err
+    assert "Traceback" not in captured.err
+    assert not output.exists()
+
+
+def test_list_entries_must_be_a_list(
+    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A non-list entries field is a format error, not an empty page."""
+    page: dict[str, object] = {
+        "adapter": "s3",
+        "shared": False,
+        "entries": {},
+        "next_page_token": None,
+    }
+    cache_server.replies.put((200, page))
+    with pytest.raises(SystemExit) as exc:
+        main(["kvcache", "list", "--quiet", "--url", cache_server.url])
+    assert exc.value.code == 1
+    assert "'entries' is not a list" in capsys.readouterr().err
+
+
+def test_list_multibyte_char_across_body_bound(
+    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A multi-byte character split by the 4 KiB bound keeps the JSON detail."""
+    body = b'{"detail": "kaboom"}' + b" " * (4095 - 19) + "雪".encode()
+    cache_server.replies.put((400, body))
+    with pytest.raises(SystemExit) as exc:
+        main(["kvcache", "list", "--quiet", "--url", cache_server.url])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "kaboom" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_list_json_detail_beyond_whitespace_bound(
+    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A parseable detail survives legal padding past the 4 KiB bound."""
+    body = b'{"detail": "full-detail"}' + b" " * (4097 - 24)
+    cache_server.replies.put((503, body))
+    with pytest.raises(SystemExit) as exc:
+        main(["kvcache", "list", "--quiet", "--url", cache_server.url])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "Server unhealthy: full-detail" in captured.err
+    assert "[truncated]" not in captured.err

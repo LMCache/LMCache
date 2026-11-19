@@ -22,15 +22,34 @@ _KEY_COLUMNS: tuple[tuple[str, str], ...] = (
     ("tags", "Tags"),
 )
 
+# Required wire-key fields with their protocol types, and optional fields
+# (per the /cache/objects contract) with their default values.
+_REQUIRED_KEY_FIELDS: tuple[tuple[str, type], ...] = (
+    ("chunk_hash_hex", str),
+    ("model_name", str),
+    ("kv_rank", int),
+)
+_OPTIONAL_KEY_FIELDS: tuple[tuple[str, type, Any], ...] = (
+    ("object_group_id", int, 0),
+    ("cache_salt", str, ""),
+    ("tags", dict, {}),
+)
+
+
+def _invalid_entry(index: int, message: str) -> CLIHTTPError:
+    """Build the format error for the page entry at *index*."""
+    return CLIHTTPError(f"Invalid cache object at index {index}: {message}")
+
 
 def _flatten_entry(index: int, entry: dict[str, Any]) -> dict[str, Any]:
     """Flatten one ``{key, size_bytes}`` wire object into a table/JSON row.
 
     ``object_group_id`` (``0``), ``cache_salt`` (``""``), and ``tags``
     (``{}``) are optional on the wire for backward compatibility with
-    older servers and are filled with their protocol defaults. The other
-    key fields are required, and a missing one is reported as a format
-    error instead of being passed off as a default value.
+    older servers and are filled with their protocol defaults when absent
+    or ``null``. Every other field is required with its protocol type;
+    anything missing, ``null``, or wrongly typed is reported as a format
+    error instead of being passed off as a value.
 
     Args:
         index: Position of the entry in the page, for error messages.
@@ -40,28 +59,38 @@ def _flatten_entry(index: int, entry: dict[str, Any]) -> dict[str, Any]:
         The flattened row, ready for ``Section.add_row``.
 
     Raises:
-        CLIHTTPError: If a required key field or ``size_bytes`` is missing.
+        CLIHTTPError: If the entry, its key, a required field, or
+            ``size_bytes`` is missing or has the wrong type.
     """
-    key = entry.get("key", {})
-    for field in ("chunk_hash_hex", "model_name", "kv_rank"):
-        if field not in key:
-            raise CLIHTTPError(
-                f"Invalid cache object at index {index}: "
-                f"missing required key field {field!r}"
+    if not isinstance(entry, dict):
+        raise _invalid_entry(index, "entry is not an object")
+    key = entry.get("key")
+    if not isinstance(key, dict):
+        raise _invalid_entry(index, "'key' is not an object")
+
+    row: dict[str, Any] = {}
+    for field, expected in _REQUIRED_KEY_FIELDS:
+        value = key.get(field)
+        if not isinstance(value, expected):
+            raise _invalid_entry(
+                index, f"required key field {field!r} must be {expected.__name__}"
             )
-    if "size_bytes" not in entry:
-        raise CLIHTTPError(
-            f"Invalid cache object at index {index}: missing 'size_bytes'"
-        )
-    return {
-        "chunk_hash_hex": key["chunk_hash_hex"],
-        "model_name": key["model_name"],
-        "kv_rank": key["kv_rank"],
-        "object_group_id": key.get("object_group_id", 0),
-        "cache_salt": key.get("cache_salt", ""),
-        "tags": key.get("tags") or {},
-        "size_bytes": entry["size_bytes"],
-    }
+        row[field] = value
+    for field, expected, default in _OPTIONAL_KEY_FIELDS:
+        value = key.get(field)
+        if value is None:
+            # Fresh mutable default per row (only ``tags`` is a dict).
+            value = {} if field == "tags" else default
+        elif not isinstance(value, expected):
+            raise _invalid_entry(
+                index, f"optional key field {field!r} must be {expected.__name__}"
+            )
+        row[field] = value
+    size_bytes = entry.get("size_bytes")
+    if not isinstance(size_bytes, int):
+        raise _invalid_entry(index, "'size_bytes' must be an integer")
+    row["size_bytes"] = size_bytes
+    return row
 
 
 def _page_size(value: str) -> int:
@@ -132,7 +161,10 @@ class ListCommand(BaseCommand):
             entries = metrics.add_table(
                 "entries", "Objects", *_KEY_COLUMNS, ("size_bytes", "Bytes")
             )
-            for index, entry in enumerate(result["entries"]):
+            page_entries = result.get("entries")
+            if not isinstance(page_entries, list):
+                raise CLIHTTPError("Invalid response: 'entries' is not a list")
+            for index, entry in enumerate(page_entries):
                 entries.add_row(**_flatten_entry(index, entry))
             metrics.emit()
         except CLIHTTPError as exc:

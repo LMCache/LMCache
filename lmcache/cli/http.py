@@ -4,6 +4,7 @@
 # Standard
 from http.client import IncompleteRead
 from typing import Any
+import codecs
 import json
 import urllib.error
 import urllib.request
@@ -38,12 +39,15 @@ def normalize_url(url: str) -> str:
     return url.rstrip("/")
 
 
-def _error_body(url: str, exc: urllib.error.HTTPError) -> tuple[str, bool]:
+def _error_body(url: str, exc: urllib.error.HTTPError, method: str) -> tuple[str, bool]:
     """Read a bounded prefix of an HTTP error body for diagnostics.
 
     Args:
         url: The URL the failed request targeted (used in error messages).
         exc: The HTTP error whose response body should be read.
+        method: The request method. HEAD responses, like 204/304 statuses,
+            legitimately carry no body regardless of ``Content-Length``
+            (RFC 9110 section 8.6) and skip the short-body check.
 
     Returns:
         ``(body, truncated)`` — the decoded body text, cut at the last
@@ -69,27 +73,29 @@ def _error_body(url: str, exc: urllib.error.HTTPError) -> tuple[str, bool]:
 
         # A bounded read returns a short body instead of raising when the
         # server declares Content-Length and closes early; detect that.
-        declared = exc.headers.get("Content-Length")
+        bodyless = exc.code in (204, 304) or method.upper() == "HEAD"
+        declared = None if bodyless else exc.headers.get("Content-Length")
         try:
             expected = int(declared) if declared is not None else None
         except ValueError:
             expected = None
-        if expected is not None and len(raw) < min(expected, _MAX_ERROR_BODY_BYTES + 1):
-            incomplete = IncompleteRead(raw, expected)
+        if expected and len(raw) < min(expected, _MAX_ERROR_BODY_BYTES + 1):
+            incomplete = IncompleteRead(raw, expected - len(raw))
             raise CLIHTTPError(
                 f"Incomplete HTTP response from {url}: {incomplete}"
             ) from incomplete
 
         truncated = len(raw) > _MAX_ERROR_BODY_BYTES
         try:
-            return raw[:_MAX_ERROR_BODY_BYTES].decode(), truncated
+            # Incremental strict decode: a truncated tail character is
+            # tolerated, invalid bytes anywhere in the prefix are not.
+            decoder = codecs.getincrementaldecoder("utf-8")()
+            body = decoder.decode(raw[:_MAX_ERROR_BODY_BYTES], final=not truncated)
         except UnicodeDecodeError as read_exc:
-            if truncated:
-                # The bound split a multi-byte character, not the server.
-                return raw[:_MAX_ERROR_BODY_BYTES].decode("utf-8", "ignore"), True
             raise CLIHTTPError(
                 f"Cannot read HTTP {exc.code} response from {url}: {read_exc}"
             ) from read_exc
+        return body, truncated
     finally:
         exc.close()
 
@@ -153,7 +159,7 @@ def fetch_json(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
-        error_body, truncated = _error_body(url, exc)
+        error_body, truncated = _error_body(url, exc, method)
         detail = _detail_from_body(error_body)
         if exc.code == 503:
             # Legacy contract kept for existing consumers (see the
