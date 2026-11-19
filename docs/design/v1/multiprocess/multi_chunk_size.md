@@ -279,15 +279,57 @@ agree on the effective chunk size:
 - An integration in which one connector performs both responsibilities still
   resolves the value once and shares it consistently across all ranks.
 
+## Unfull-Chunk Compatibility
+
+`lmcache.mp.save_unfull_chunk` does not initially support multiple effective
+chunk sizes. When it is enabled, every registration must use the MP server's
+configured `--chunk-size`; the server rejects a registration that resolves to
+a different value. MP servers that share an L2 cache must also use the same
+configured chunk size.
+
+An unfull chunk's object key does not currently encode the chunk size. The same
+short token sequence can therefore produce the same key under two chunk sizes
+even though the corresponding object layouts differ. Restricting the feature
+to one chunk size prevents an object written with one layout from being read
+with another.
+
+For example, consider the following sequence for the same
+`(model_name, world_size)` registration key:
+
+1. Register with an effective chunk size of 512.
+2. Store a 256-token prompt as an unfull chunk.
+3. Unregister the final worker, then register again with a chunk size of 256.
+4. Look up the same 256-token prompt, which is now one full chunk.
+
+Both objects currently receive the same `ObjectKey`, although the first was
+allocated using the 512-token layout and the second registration expects the
+256-token layout. The lookup can therefore report a false hit and retrieve an
+object whose size and layout do not match the current registration.
+
+TODO(chunxiaozheng): Include the effective chunk size in the object-key or hash
+namespace, then allow `lmcache.mp.save_unfull_chunk` with multiple chunk sizes.
+
 ## Coordinator and CacheBlend
 
 Coordinator and CacheBlend still depend on one global chunk size and do not yet
 support model-specific effective chunk sizes. While either feature is enabled:
 
 - the MP server requires each registration's effective chunk size to equal its
-  configured `--chunk-size` and rejects mismatches; and
-- deployments must configure the MP server and Coordinator with one chunk size
+  configured `--chunk-size` and rejects mismatches;
+- an MP server registering with Coordinator continues to report its configured
+  `--chunk-size`. The existing `PUT /config/chunk-size` binding and the
+  `chunk_size` field in `POST /instances` remain part of the registration
+  protocol;
+- Coordinator returns HTTP 409 when a server reports a value different from
+  the fleet's finalized global chunk size, so the mismatched server is not
+  registered; and
+- deployments must configure the MP servers and Coordinator with one chunk size
   that satisfies every connected model.
+
+The per-server registration check is not sufficient by itself: it only binds an
+engine to its own MP server's global value. The Coordinator registration check
+must remain until Coordinator hashing, pinning, routing, and blend matching can
+select chunk-size metadata by registration key.
 
 A later extension can make Coordinator and CacheBlend select chunk-size
 metadata by `(model_name, world_size)` as well.
