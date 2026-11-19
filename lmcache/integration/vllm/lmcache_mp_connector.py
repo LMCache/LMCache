@@ -1691,6 +1691,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # None if the request was aborted before its first lookup.
             request_tracker = self.request_trackers.get(request.request_id)
             if request_tracker is None:
+                if request.status != RequestStatus.FINISHED_ABORTED:
+                    logger.warning(
+                        "No request tracker for finished request %s "
+                        "(status=%s); reporting zero cached_token_stats",
+                        request.request_id,
+                        request.status,
+                    )
                 num_vllm = num_lmcache = 0
             else:
                 num_vllm = request_tracker.num_vllm_hit_tokens
