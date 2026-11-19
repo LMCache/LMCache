@@ -706,6 +706,19 @@ def make_page_buffer_shape_desc(
 
     resolved_stride = int(block_stride_elems) if block_stride_elems else 0
     desc.block_stride_elems = resolved_stride
+
+    if lmcache_native.is_kv_second_tuple(engine_kv_format):
+        # fmt 16/17 (Ascend MLA/DSA plane tuples) need per-plane token-row and
+        # block-stride bytes plus the plane count; the Ascend NPU kernels
+        # consume these fields, other backends ignore them.
+        planes = kv_caches[layer_idx]  # type: ignore[index]
+        desc.num_planes = len(planes)
+        desc.plane_slot_bytes = tuple(
+            int(t.shape[2]) * int(t.shape[3]) * int(t.element_size()) for t in planes
+        )
+        desc.plane_block_stride_bytes = tuple(
+            int(t.stride(0)) * int(t.element_size()) for t in planes
+        )
     return desc
 
 

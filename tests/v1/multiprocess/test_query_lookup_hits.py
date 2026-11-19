@@ -61,7 +61,10 @@ def _captured_lookup_key_groups(
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1] * num_groups
     )
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    token_hasher = MagicMock()
+    token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    ctx.layout_desc_registry.get_chunk_size.return_value = 16
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
 
     module = LookupModule(ctx)
     module.lookup(_lookup_key(world_size=world_size), tp_size=1)
@@ -121,7 +124,10 @@ def test_lookup_hashing_stops_at_key_end() -> None:
     ctx.chunk_size = 16
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = MagicMock()
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
+    token_hasher = MagicMock()
+    token_hasher.compute_packed_chunk_hashes.return_value = []
+    ctx.layout_desc_registry.get_chunk_size.return_value = 16
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     key = IPCCacheServerKey(
         model_name="m",
         world_size=1,
@@ -134,6 +140,6 @@ def test_lookup_hashing_stops_at_key_end() -> None:
 
     LookupModule(ctx).lookup(key, tp_size=1)
 
-    ctx.token_hasher.compute_packed_chunk_hashes.assert_called_once_with(
+    token_hasher.compute_packed_chunk_hashes.assert_called_once_with(
         pack_token_ids(range(32)), end=16
     )
