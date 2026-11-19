@@ -209,7 +209,7 @@ class BlendModule(
         # it rather than to the drainer.
         self._fingerprint_queue: "Queue[FpJob]" = Queue()
         lmcache_driven_transfer.register_host_func(
-            CB_FINGERPRINTS_KIND, self._fingerprint_queue.put_nowait, FpJob
+            CB_FINGERPRINTS_KIND, self._fingerprint_queue.put_nowait
         )
         self._fingerprint_stop = threading.Event()
         self._fingerprint_worker = threading.Thread(

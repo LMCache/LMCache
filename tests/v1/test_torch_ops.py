@@ -1410,7 +1410,7 @@ def scenario_dispatcher_integration(ops: Any, device: str) -> dict[str, torch.Te
 
         dispatcher = DeviceHostFuncDispatcher(drain_interval_seconds=0.001)
         received: list[list[bytes]] = []
-        dispatcher.register("finish_write", received.append, payload_type=list[bytes])
+        dispatcher.register("finish_write", received.append)
         dispatcher.start()
         try:
             submit_callback_to_stream(_FakeStream(), "finish_write", [b"k0", b"k1"])

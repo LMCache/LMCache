@@ -44,7 +44,7 @@ class _FakeGPUContext:
 class _FakeDeviceHostFuncDispatcher:
     """No-op dispatcher to avoid starting native completion threads."""
 
-    def register(self, kind: str, handler: object, payload_type: object) -> None:
+    def register(self, kind: str, handler: object) -> None:
         """Record no native callback registration."""
 
     def start(self) -> None:

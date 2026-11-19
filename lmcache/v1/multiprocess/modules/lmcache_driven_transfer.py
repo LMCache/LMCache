@@ -27,7 +27,7 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     ShardReplicationDesc,
 )
-from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
+from lmcache.v1.distributed.storage_manager import l1_owners_of
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
@@ -268,22 +268,18 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._device_host_func_dispatcher.register(
             "finish_write",
             self._finish_write,
-            payload_type=dict[ObjectKey, int],
         )
         self._device_host_func_dispatcher.register(
             "finish_read_prefetched",
             self._ctx.storage_manager.finish_read_prefetched,
-            payload_type=list[ObjectKey],
         )
         self._device_host_func_dispatcher.register(
             "finish_read_by_owner",
             self._ctx.storage_manager.finish_read_by_owner,
-            payload_type=L1WriteCompletion,
         )
         self._device_host_func_dispatcher.register(
             "release_imported_event",
             self._release_imported_event,
-            payload_type=tuple[int, int],
         )
         self._device_host_func_dispatcher.start()
 
@@ -329,11 +325,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             list(l1_owners.keys()), l1_owners=l1_owners
         )
 
-    def register_host_func(self, kind: str, handler: Any, payload_type: Any) -> None:
+    def register_host_func(self, kind: str, handler: Any) -> None:
         """Register *handler* for *kind* on the per-process device host-func
         dispatcher (stream-ordered callbacks without a driver-thread GIL
         acquire); pair with ``submit_callback_to_stream``."""
-        self._device_host_func_dispatcher.register(kind, handler, payload_type)
+        self._device_host_func_dispatcher.register(kind, handler)
 
     @property
     def context(self) -> MPCacheServerContext:

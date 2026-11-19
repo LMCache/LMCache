@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 import inspect
 
 # Third Party
-import msgspec
 import pytest
 import torch
 
@@ -61,10 +60,8 @@ class _FakeEventBackend:
 class _NoopDispatcher:
     """Record registrations instead of starting native callback threads."""
 
-    payload_types: dict[str, object] = {}
-
-    def register(self, kind: str, handler: object, payload_type: object) -> None:
-        _NoopDispatcher.payload_types[kind] = payload_type
+    def register(self, kind: str, handler: object) -> None:
+        return None
 
     def start(self) -> None:
         return None
@@ -309,15 +306,14 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     assert waited_handles == [b"store-producer", b"retrieve-producer"]
 
     # Each import is held and its release is queued on the transfer stream
-    # right behind the wait; the callback payload decodes as registered.
+    # right behind the wait; the handler takes the callback payload as is.
     assert held == [("remote", handle) for handle in imported_handles]
     assert callbacks == [
         ("release_imported_event", (1, 0)),
         ("release_imported_event", (1, 1)),
     ]
     for kind, payload in callbacks:
-        decoder = msgspec.msgpack.Decoder(type=_NoopDispatcher.payload_types[kind])
-        module._release_imported_event(decoder.decode(msgspec.msgpack.encode(payload)))
+        module._release_imported_event(payload)
     assert released == [0, 1]
     assert sum(call[0] == "record" for call in backend.calls) == 2
     assert sum(call[0] == "export" for call in backend.calls) == 2

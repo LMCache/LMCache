@@ -102,7 +102,7 @@ class TestDispatcher:
 
     def test_dispatch_to_registered_handler(self, dispatcher, stream):
         seen: list[list[bytes]] = []
-        dispatcher.register("finish_write", seen.append, payload_type=list[bytes])
+        dispatcher.register("finish_write", seen.append)
 
         submit_callback_to_stream(stream, "finish_write", [b"k0", b"k1", b"k2"])
         stream.synchronize()
@@ -126,7 +126,7 @@ class TestDispatcher:
             if len(calls) == 1:
                 raise RuntimeError("boom")
 
-        dispatcher.register("finish_write", handler, payload_type=list[bytes])
+        dispatcher.register("finish_write", handler)
         submit_callback_to_stream(stream, "finish_write", [b"a"])
         submit_callback_to_stream(stream, "finish_write", [b"b"])
         stream.synchronize()
@@ -140,7 +140,7 @@ class TestDispatcher:
     def test_tuple_payload_for_multiple_arguments(self, dispatcher, stream):
         # Multi-arg handlers: wrap args in a tuple, register tuple decode type.
         seen: list[tuple[int, str]] = []
-        dispatcher.register("finish_multi", seen.append, payload_type=tuple[int, str])
+        dispatcher.register("finish_multi", seen.append)
 
         submit_callback_to_stream(stream, "finish_multi", (42, "hello"))
         stream.synchronize()
@@ -165,7 +165,7 @@ class TestDeadlockRegression:
             if len(received) >= 200:
                 ready.set()
 
-        dispatcher.register("finish_write", handler, payload_type=int)
+        dispatcher.register("finish_write", handler)
 
         for i in range(200):
             submit_callback_to_stream(stream, "finish_write", i)

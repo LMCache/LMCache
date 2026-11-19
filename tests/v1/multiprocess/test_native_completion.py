@@ -37,7 +37,7 @@ def test_dispatch_passes_payload_through(monkeypatch: pytest.MonkeyPatch) -> Non
     orphan_ref = weakref.ref(orphan)
 
     dispatcher = native_completion.DeviceHostFuncDispatcher()
-    dispatcher.register("finish_write", seen.append, dict[ObjectKey, int])
+    dispatcher.register("finish_write", seen.append)
     native_completion.submit_callback_to_stream(stream, "unregistered", orphan)
     native_completion.submit_callback_to_stream(stream, "finish_write", payload)
     dispatcher.stop()

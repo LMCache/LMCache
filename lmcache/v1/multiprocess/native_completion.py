@@ -80,9 +80,8 @@ class DeviceHostFuncDispatcher(PeriodicThread):
         self._exception_counts: dict[str, int] = {}
         PeriodicThreadRegistry.get_instance().register(self)
 
-    def register(self, kind: str, handler: DeviceHostFunc, payload_type: Any) -> None:
-        """Register *handler* for *kind*. ``payload_type`` is unused and kept
-        so existing callers keep working; payloads reach the handler as
+    def register(self, kind: str, handler: DeviceHostFunc) -> None:
+        """Register *handler* for *kind*. Payloads reach the handler as
         submitted."""
         with self._registry_lock:
             self._registry[kind] = handler
