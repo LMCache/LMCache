@@ -41,6 +41,8 @@ async def healthcheck(request: Request) -> Any:
     Checks:
         - HTTP server is alive (implicit: if you get a response)
         - Cache engine is alive
+        - No module reports the engine unhealthy (e.g. a device quarantined
+          behind a stuck context release)
     """
     engine = getattr(request.app.state, "engine", None)
     if engine is None:
@@ -52,6 +54,13 @@ async def healthcheck(request: Request) -> Any:
             },
         )
 
+    unhealthy_reasons = getattr(engine, "unhealthy_reasons", None)
+    reasons = unhealthy_reasons() if unhealthy_reasons is not None else []
+    if reasons:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "reason": "; ".join(reasons)},
+        )
     return {"status": "healthy"}
 
 

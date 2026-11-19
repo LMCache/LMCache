@@ -275,3 +275,110 @@ def test_blocked_release_does_not_stall_the_message_loop(
         management.close()
         module.close()
     assert contexts.closed[0] == 1
+
+
+# -- Quarantine of a device whose release is stuck ---------------------------
+
+
+class _Wrapper:
+    """KV wrapper stand-in that names its device the way IPC wrappers do."""
+
+    def __init__(self, index: int) -> None:
+        self.device_uuid = f"GPU-{index}"
+
+    @classmethod
+    def _get_device_index_from_uuid(cls, device_uuid: str) -> int:
+        return int(device_uuid.split("-")[1])
+
+
+def _kv(index: int) -> Any:
+    """KV cache list of one wrapper on device ``index``."""
+    return [_Wrapper(index)]
+
+
+def _dev(index: int) -> str:
+    return f"{gpu_mod.torch_device_type}:{index}"
+
+
+def _quarantined_module(contexts: _Contexts) -> LMCacheDrivenTransferModule:
+    """Module with a 0.2 s stuck timeout whose cuda:0 release is stuck."""
+    ctx = MagicMock(name="ctx")
+    ctx.chunk_size = 256
+    module = LMCacheDrivenTransferModule(ctx, release_stuck_timeout_s=0.2)
+    contexts.devices[1] = _dev(0)
+    module.register_kv_cache(1, _kv(0), "m", 1, EngineType.VLLM, {}, [])
+    _block(contexts, 1)
+    module.unregister_kv_cache(1)
+    deadline = time.monotonic() + _PROMPT_S
+    while not module.quarantined_devices() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return module
+
+
+def test_stuck_release_quarantines_its_device_until_it_finishes(contexts) -> None:
+    module = _quarantined_module(contexts)
+    try:
+        assert list(module.quarantined_devices()) == [_dev(0)]
+        assert module.quarantined_devices()[_dev(0)] > 0.2
+        assert list(module.report_status()["quarantined_devices"]) == [_dev(0)]
+        [reason] = module.unhealthy_reasons()
+        assert f"context release stuck on {_dev(0)}" in reason
+    finally:
+        contexts.blocked[1].set()
+    assert module.wait_for_releases(timeout=_PROMPT_S)
+    assert module.quarantined_devices() == {}
+    assert module.unhealthy_reasons() == []
+    module.close()
+
+
+def test_register_on_a_quarantined_device_fails_before_importing(contexts) -> None:
+    module = _quarantined_module(contexts)
+    try:
+        with pytest.raises(RuntimeError, match="quarantined"):
+            module.register_kv_cache(2, _kv(0), "m", 1, EngineType.VLLM, {}, [])
+        assert 2 not in contexts.by_instance
+        assert 2 not in module.context_entries_snapshot()
+
+        # Another device still registers.
+        contexts.devices[3] = _dev(1)
+        module.register_kv_cache(3, _kv(1), "m", 1, EngineType.VLLM, {}, [])
+        assert 3 in module.context_entries_snapshot()
+    finally:
+        contexts.blocked[1].set()
+    assert module.wait_for_releases(timeout=_PROMPT_S)
+    module.register_kv_cache(2, _kv(0), "m", 1, EngineType.VLLM, {}, [])
+    assert 2 in module.context_entries_snapshot()
+    module.close()
+
+
+def test_quarantine_is_off_when_the_timeout_is_zero(contexts) -> None:
+    module = _module()
+    _register(module, 1)
+    gate = _block(contexts, 1)
+    try:
+        module.unregister_kv_cache(1)
+        time.sleep(0.3)
+        assert module.quarantined_devices() == {}
+        assert module.unhealthy_reasons() == []
+    finally:
+        gate.set()
+    assert module.wait_for_releases(timeout=_PROMPT_S)
+    module.close()
+
+
+def test_server_collects_unhealthy_reasons_from_modules() -> None:
+    # First Party
+    from lmcache.v1.multiprocess.server import MPCacheServer
+
+    reporting = MagicMock()
+    reporting.unhealthy_reasons.return_value = ["stuck on cuda:0"]
+    silent = object()
+    server = MPCacheServer(MagicMock(), [reporting, silent])  # type: ignore[list-item]
+
+    assert server.unhealthy_reasons() == ["stuck on cuda:0"]
+
+
+@pytest.mark.parametrize("value", [-1.0, float("nan"), float("inf")])
+def test_config_rejects_bad_release_stuck_timeouts(value: float) -> None:
+    with pytest.raises(ValueError, match="release stuck timeout"):
+        MPServerConfig(release_stuck_timeout_seconds=value)

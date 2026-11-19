@@ -12,7 +12,7 @@ import time
 import torch
 
 # First Party
-from lmcache import torch_dev
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.utils import (
     EngineType,
@@ -248,6 +248,8 @@ class ContextReleaser:
         # Entries submitted and not yet released, per device.
         self._pending: dict[str, int] = {}
         self._threads: dict[str, threading.Thread] = {}
+        # Monotonic start of the batch each device's thread is releasing.
+        self._running_since: dict[str, float] = {}
         self._closed = False
 
     def submit(self, entries: list[ContextEntry]) -> None:
@@ -292,6 +294,7 @@ class ContextReleaser:
                 if not queue:
                     return
                 batch = queue.popleft()
+                self._running_since[device] = time.monotonic()
             count = len(batch)
             try:
                 self._release(batch)
@@ -300,6 +303,7 @@ class ContextReleaser:
             finally:
                 batch.clear()
                 with self._cond:
+                    del self._running_since[device]
                     self._pending[device] -= count
                     if not self._pending[device]:
                         del self._pending[device]
@@ -309,6 +313,23 @@ class ContextReleaser:
         """Return the number of entries not yet released, per device."""
         with self._cond:
             return dict(self._pending)
+
+    def stuck_devices(self, timeout: float) -> dict[str, float]:
+        """Return the devices whose current release exceeds ``timeout``.
+
+        Args:
+            timeout: Seconds a single batch may take to release.
+
+        Returns:
+            Device to seconds its current release has been running.
+        """
+        now = time.monotonic()
+        with self._cond:
+            return {
+                device: now - since
+                for device, since in self._running_since.items()
+                if now - since > timeout
+            }
 
     def wait_idle(self, timeout: float) -> bool:
         """Wait until every submitted entry has been released.
@@ -361,10 +382,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             fds), or ``""`` to disable the channel. Unsupported platforms
             skip it at INFO level; socket failures on supported platforms
             log ERROR. Registrations without fd handles do not need it.
+        release_stuck_timeout_s: Seconds a context release may run before its
+            device is quarantined (see :meth:`quarantined_devices`); 0
+            disables quarantine.
     """
 
     module_name = "lmcache_driven_transfer"
     _host_event_waiter: HostEventWaiter | None = None
+    _release_stuck_timeout_s: float = 0.0
 
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
@@ -375,13 +400,19 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         module = cls(
             build_ctx.engine_context,
             fd_socket_path=fd_channel_path(build_ctx.mp_config.port),
+            release_stuck_timeout_s=(build_ctx.mp_config.release_stuck_timeout_seconds),
         )
         module._host_event_waiter = create_host_event_waiter(
             build_ctx.mp_config.rocm_host_event_wait
         )
         return module
 
-    def __init__(self, ctx: MPCacheServerContext, fd_socket_path: str = "") -> None:
+    def __init__(
+        self,
+        ctx: MPCacheServerContext,
+        fd_socket_path: str = "",
+        release_stuck_timeout_s: float = 0.0,
+    ) -> None:
         self._ctx = ctx
         self._cache_contexts: dict[int, ContextEntry] = {}
         # Guards all reads/writes of _cache_contexts. The reaper mutates it
@@ -392,6 +423,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._lock = threading.Lock()
         # Detached contexts are released here, never on the caller's thread.
         self._releaser = ContextReleaser(self._release_entries)
+        # A device whose release runs longer than this is quarantined; 0
+        # disables quarantine.
+        self._release_stuck_timeout_s = release_stuck_timeout_s
+        self._reported_quarantine: set[str] = set()
 
         # Route finish_write / finish_read_prefetched through a C++ host
         # callback so the driver thread doesn't acquire the GIL.
@@ -608,6 +643,75 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         """
         return self._releaser.wait_idle(timeout)
 
+    def quarantined_devices(self) -> dict[str, float]:
+        """Return the devices whose context release is stuck.
+
+        A release that runs longer than the stuck timeout is waiting on a
+        stream that will not drain, typically one queued behind the event of
+        a worker that died. Nothing in the process can cancel that wait, so
+        the device keeps the context's mappings and its later releases queue
+        behind it. The device is quarantined: REGISTER on it is refused and
+        ``/healthcheck`` reports the server unhealthy, because restarting the
+        server is the only way to get that memory back. The quarantine lifts
+        if the release finishes after all.
+
+        Returns:
+            Device to seconds its release has been stuck; empty when
+            quarantine is disabled.
+        """
+        if self._release_stuck_timeout_s <= 0:
+            return {}
+        stuck = self._releaser.stuck_devices(self._release_stuck_timeout_s)
+        with self._lock:
+            for device in stuck.keys() - self._reported_quarantine:
+                logger.error(
+                    "Quarantining %s: a cache-context release has been stuck "
+                    "for %.0fs, so its device memory cannot be reclaimed. "
+                    "REGISTER on %s is refused; restart the server to reclaim it",
+                    device,
+                    stuck[device],
+                    device,
+                )
+            for device in self._reported_quarantine - stuck.keys():
+                logger.warning(
+                    "Lifting the quarantine of %s: its release finished", device
+                )
+            self._reported_quarantine = set(stuck)
+        return stuck
+
+    def unhealthy_reasons(self) -> list[str]:
+        """Return why this module makes the server unhealthy, if it does."""
+        return [
+            f"context release stuck on {device} for {seconds:.0f}s; restart the "
+            "server to reclaim its device memory"
+            for device, seconds in sorted(self.quarantined_devices().items())
+        ]
+
+    def _check_not_quarantined(self, kv_caches: KVCache) -> None:
+        """Refuse a registration whose KV cache lives on a quarantined device.
+
+        Runs before anything is imported: rolling back an import on that
+        device would unmap it, and an unmap waits for the stuck stream.
+
+        Raises:
+            RuntimeError: If a wrapper's device is quarantined.
+        """
+        quarantined = self.quarantined_devices()
+        if not quarantined:
+            return
+        for wrapper in kv_caches:
+            device_uuid = getattr(wrapper, "device_uuid", None)
+            if device_uuid is None:
+                continue
+            index = type(wrapper)._get_device_index_from_uuid(device_uuid)
+            device = f"{torch_device_type}:{index}"
+            if device in quarantined:
+                raise RuntimeError(
+                    f"Refusing to register on {device}: it is quarantined because "
+                    f"a cache-context release has been stuck for "
+                    f"{quarantined[device]:.0f}s"
+                )
+
     def _release_entries(self, entries: list[ContextEntry]) -> None:
         """Release a batch of entries and reclaim their device memory.
 
@@ -654,6 +758,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             "registered_gpu_ids": registered_gpu_ids,
             "cache_context_meta": cache_context_meta,
             "pending_releases": self._releaser.pending_by_device(),
+            "quarantined_devices": self.quarantined_devices(),
         }
         if self._host_event_waiter is not None:
             status["rocm_host_event_wait"] = self._host_event_waiter.stats()
@@ -717,6 +822,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 )
                 return
 
+        self._check_not_quarantined(kv_caches)
         # Build the context and layout descriptor outside the lock.
         cache_context = self._create_cache_context(
             kv_caches,

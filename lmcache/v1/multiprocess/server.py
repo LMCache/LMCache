@@ -139,6 +139,18 @@ class MPCacheServer:
             status.update(module.report_status())
         return status
 
+    def unhealthy_reasons(self) -> list[str]:
+        """Return why the server is unhealthy; empty when it is healthy.
+
+        Collected from every module that implements ``unhealthy_reasons``.
+        """
+        reasons: list[str] = []
+        for module in self._modules:
+            report = getattr(module, "unhealthy_reasons", None)
+            if report is not None:
+                reasons.extend(report())
+        return reasons
+
     def close(self) -> None:
         """Close modules in reverse build order, then release shared resources."""
         if self._p2p_server is not None:

@@ -330,6 +330,7 @@ def mock_engine(mock_gpu_ctx):
     """Create a mock engine with cache_contexts."""
     engine = MagicMock()
     engine.cache_contexts = {0: mock_gpu_ctx}
+    engine.unhealthy_reasons.return_value = []
     return engine
 
 
@@ -601,6 +602,18 @@ class TestHealthAndMiscEndpoints:
         resp = client_with_engine.get("/healthcheck")
         assert resp.status_code == 200
         assert resp.json()["status"] == "healthy"
+
+    def test_healthcheck_reports_unhealthy_engine(
+        self, client_with_engine, mock_engine
+    ):
+        """503 with the engine's reasons, e.g. a quarantined device."""
+        mock_engine.unhealthy_reasons.return_value = ["release stuck on cuda:0"]
+        resp = client_with_engine.get("/healthcheck")
+        assert resp.status_code == 503
+        assert resp.json() == {
+            "status": "unhealthy",
+            "reason": "release stuck on cuda:0",
+        }
 
     def test_clear_cache_no_engine(self, client_no_engine):
         """503 when engine/context is not set."""
