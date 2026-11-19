@@ -144,8 +144,8 @@ extra regions, and only for reads: `submit_write` always sends from L1.
    with the transport and binds its handshake server.
 2. **Connect / handshake.** The reader calls
    `get_transfer_channel_client(peer_url)`. If no client exists, the context
-   dials the peer's server and exchanges transport metadata (agent identity and
-   the serialized transfer-descriptor list covering the whole buffer).
+   dials the peer's server and exchanges transport metadata (agent identity,
+   which carries the registered memory, and the L1 base address).
 3. **Translate addresses.** Both sides express objects as `(offset, size)` pairs
    relative to their own L1 base. The reader converts its **local**
    (destination) addresses via `get_transfer_channel_address(...)`. **Remote**
@@ -157,11 +157,12 @@ extra regions, and only for reads: `submit_write` always sends from L1.
    `succeeded_mask` holds a per-object success flag aligned with the submitted
    addresses (all `True` on success, all `False` on error).
 
-> **Alignment contract.** Object offsets must be aligned to the registered
-> `align_bytes`, and the reader and the peer must use the **same** `align_bytes`,
-> because the page-index math used to address the remote buffer is computed
-> against the reader's alignment but indexes the peer's page-granular descriptor
-> list.
+> **Addressing.** A transfer addresses each object as base plus offset and moves
+> exactly its size, so object offsets need no particular alignment and the
+> reader and the peer may register L1 with different `align_bytes`. The
+> transport rejects, at submit, a remote address outside the memory the peer
+> registered before the handshake. Callers only read and write offsets the peer
+> handed out, which lie in its L1.
 
 ## How a write flows
 
@@ -185,23 +186,34 @@ discard them. The channel only moves the bytes.
 default). It self-registers under the type name `"nixl"` at import time. Notable
 points:
 
-- **One agent per context.** The context creates a single `nixl_agent`, registers
-  the whole L1 buffer once, and builds a page-granular transfer-descriptor list
-  over `[base, base+size)` using `align_bytes` as the page size.
+- **One agent per context.** The context creates a single `nixl_agent` and
+  registers the whole L1 buffer once.
 - **Handshake over ZMQ.** Metadata is exchanged over a ZMQ `REP`/`REQ` socket
   (not the LMCache MQ — that would be overkill and would leak transfer-channel
   functions into the global MQ). The messages are a small `msgspec` tagged union
-  (`InitReq`/`InitResp`, `MemRegReq`/`MemRegResp`).
+  (`InitReq`/`InitResp`, `MemRegReq`/`MemRegResp`, `ErrorResp`). `InitReq` and
+  `InitResp` carry a protocol version; a mismatch fails the first stage with an
+  error naming both versions. The server replies to every request, with
+  `ErrorResp` when it cannot handle one, because its `REP` socket accepts no
+  further request until it replies.
 - **Passive client creation.** When a peer dials this context's server and sends
-  its descriptor list, the server registers a reverse `NixlTransferChannelClient`
+  its L1 base address, the server registers a reverse `NixlTransferChannelClient`
   for that peer, so transfers can flow in either direction after a single
   handshake.
 - **One transfer path.** Reads and writes share the submit and poll code; the
   only difference is the `"READ"` / `"WRITE"` operation handed to
-  `make_prepped_xfer`. The Mooncake implementation does the same with
+  `initialize_xfer`. The Mooncake implementation does the same with
   `batch_transfer_async_read` / `batch_transfer_async_write`.
-- **Address → page indices.** `addresses_to_indices` turns `(offset, size)` into
-  the list of page indices `[offset/align, …]`, expanding multi-page objects.
+- **One descriptor per object.** Each submit builds one local and one remote
+  descriptor per object, as `base + offset` with the object's size, the way the
+  Mooncake implementation addresses objects. A list prepared up front would need
+  one descriptor per alignment page of the whole L1, so the handshake, the
+  memory held per peer, and the work of each submit would grow with bytes
+  instead of objects; KV objects are few and large (one per chunk and object
+  group). Submits resolve the remote agent on every call while the handshake
+  server may add agents, so the context serializes `initialize_xfer` and
+  `add_remote_agent` under one lock instead of relying on nixl's internal
+  locking, which is off by default.
 - **Handshake timeout.** The dialing side sets a `RCVTIMEO` of
   `_HANDSHAKE_TIMEOUT_MS` (60 s) on the handshake socket. A wrong/unreachable
   url or a blocked port therefore raises a clear `TimeoutError` instead of

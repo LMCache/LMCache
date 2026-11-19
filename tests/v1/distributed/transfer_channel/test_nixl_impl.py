@@ -22,16 +22,20 @@ an existing context's connected clients short of closing it.
 # Standard
 from unittest.mock import MagicMock
 import itertools
+import threading
 import time
 
 # Third Party
+import msgspec
 import pytest
 import torch
+import zmq
 
 nixl = pytest.importorskip("nixl")
 
 # First Party
 from lmcache import torch_dev, torch_device_type  # noqa: E402
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress  # noqa: E402
 from lmcache.v1.distributed.internal_api import L1MemoryDesc  # noqa: E402
 from lmcache.v1.distributed.transfer_channel.impl.nixl_impl import (  # noqa: E402
     NixlTransferChannelContext,
@@ -146,6 +150,81 @@ def test_read_into_offset_region(shared_contexts):
     result = _wait_finished(client, task_id)
     assert result.is_finished() is True
     assert torch.equal(buf_a[1024:1280], buf_b[0:256])
+
+
+def test_read_many_objects_lands_each_at_its_offset(shared_contexts):
+    ctx_a, buf_a, ctx_b, buf_b = shared_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+
+    # Scatter remote [0, 1024) in four 256-byte objects, reversed, into local
+    # [2048, 3072).
+    remote = ctx_b.get_transfer_channel_address([(i * 256, 256) for i in range(4)])
+    local = ctx_a.get_transfer_channel_address(
+        [(2048 + (3 - i) * 256, 256) for i in range(4)]
+    )
+    task_id = client.submit_read(local, remote)
+
+    result = _wait_finished(client, task_id)
+    assert result.succeeded_mask == [True] * 4
+    for i in range(4):
+        dst = 2048 + (3 - i) * 256
+        assert torch.equal(buf_a[dst : dst + 256], buf_b[i * 256 : (i + 1) * 256])
+
+
+def test_peers_with_different_alignments_can_read():
+    """The reader and the peer may register L1 with different alignments."""
+    buf_a = torch.zeros(_BUF_SIZE, dtype=torch.uint8)
+    buf_b = torch.arange(0, 256, dtype=torch.uint8).repeat(_BUF_SIZE // 256)
+    url_a, url_b = _next_url(), _next_url()
+    ctx_a = NixlTransferChannelContext(
+        L1MemoryDesc(ptr=buf_a.data_ptr(), size=_BUF_SIZE, align_bytes=_ALIGN),
+        listen_url=url_a,
+        advertise_url=url_a,
+    )
+    ctx_b = NixlTransferChannelContext(
+        L1MemoryDesc(ptr=buf_b.data_ptr(), size=_BUF_SIZE, align_bytes=2 * _ALIGN),
+        listen_url=url_b,
+        advertise_url=url_b,
+    )
+    try:
+        client = ctx_a.get_transfer_channel_client(url_b)
+        local = ctx_a.get_transfer_channel_address([(0, _ALIGN)])
+        remote = ctx_b.get_transfer_channel_address([(_ALIGN, _ALIGN)])
+        result = _wait_finished(client, client.submit_read(local, remote))
+        assert result.succeeded_mask == [True]
+        assert torch.equal(buf_a[:_ALIGN], buf_b[_ALIGN : 2 * _ALIGN])
+    finally:
+        ctx_a.close()
+        ctx_b.close()
+
+
+@pytest.mark.parametrize("offset", [_BUF_SIZE, _BUF_SIZE - _ALIGN // 2])
+def test_read_outside_the_peer_region_is_rejected(shared_contexts, offset):
+    """A remote address not inside the peer's registered L1 fails at submit."""
+    ctx_a, buf_a, ctx_b, _ = shared_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    before = buf_a.clone()
+    local = ctx_a.get_transfer_channel_address([(0, _ALIGN)])
+    remote = [TransferChannelAddress(offset=offset, size=_ALIGN)]
+    with pytest.raises(Exception, match="NIXL_ERR"):
+        client.submit_read(local, remote)
+    assert torch.equal(buf_a, before)
+
+
+def test_read_moves_exactly_the_object_size(shared_contexts):
+    """An object whose size is not a multiple of the alignment leaves the
+    local bytes after it untouched."""
+    ctx_a, buf_a, ctx_b, buf_b = shared_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    buf_a[3072:3584].fill_(0xEE)
+
+    local = ctx_a.get_transfer_channel_address([(3072, 100)])
+    remote = ctx_b.get_transfer_channel_address([(0, 100)])
+    result = _wait_finished(client, client.submit_read(local, remote))
+
+    assert result.succeeded_mask == [True]
+    assert torch.equal(buf_a[3072:3172], buf_b[0:100])
+    assert bool((buf_a[3172:3584] == 0xEE).all())
 
 
 def test_submit_read_mismatched_lengths_raises_value_error(shared_contexts):
@@ -324,6 +403,66 @@ def test_connecting_registers_clients_on_both_sides(fresh_contexts):
     assert ctx_b.get_num_connected_clients() == 1
 
 
+def test_submits_succeed_while_new_peers_handshake(fresh_contexts):
+    """Submits on several threads keep succeeding while peers dial the reader.
+
+    Each submit looks up the remote agent while the reader's handshake server
+    adds the joining peers' agents.
+    """
+    ctx_a, _, ctx_b, _ = fresh_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    half = _BUF_SIZE // 2
+    local = ctx_a.get_transfer_channel_address(
+        [(i, _ALIGN) for i in range(0, half, _ALIGN)]
+    )
+    remote = ctx_b.get_transfer_channel_address(
+        [(half + i, _ALIGN) for i in range(0, half, _ALIGN)]
+    )
+    stop = threading.Event()
+    errors: list[str] = []
+    completed = [0, 0, 0]
+
+    def submit_loop(slot: int, write: bool) -> None:
+        submit = client.submit_write if write else client.submit_read
+        while not stop.is_set():
+            try:
+                result = _wait_finished(client, submit(local, remote))
+                if result.succeeded_mask != [True] * len(local):
+                    errors.append(f"mask {result.succeeded_mask}")
+                completed[slot] += 1
+            except Exception as err:  # noqa: BLE001 - collected for the assert
+                errors.append(repr(err))
+
+    threads = [
+        threading.Thread(target=submit_loop, args=(slot, write))
+        for slot, write in enumerate([False, False, True])
+    ]
+    for thread in threads:
+        thread.start()
+    peers = []
+    try:
+        for _ in range(8):
+            buf = torch.zeros(_BUF_SIZE, dtype=torch.uint8)
+            url = _next_url()
+            peer = NixlTransferChannelContext(
+                L1MemoryDesc(ptr=buf.data_ptr(), size=_BUF_SIZE, align_bytes=_ALIGN),
+                listen_url=url,
+                advertise_url=url,
+            )
+            peers.append((peer, buf))
+            peer.get_transfer_channel_client(ctx_a.advertise_url)
+    finally:
+        stop.set()
+        for thread in threads:
+            thread.join(timeout=10)
+        for peer, _ in peers:
+            peer.close()
+
+    assert errors == []
+    assert all(count > 0 for count in completed)
+    assert ctx_a.get_num_connected_clients() == 1 + len(peers)
+
+
 def test_server_is_available_from_context(shared_contexts):
     ctx_a, _, _, _ = shared_contexts
     assert ctx_a.get_transfer_channel_server() is not None
@@ -407,3 +546,77 @@ def test_region_size_must_be_multiple_of_alignment(shared_contexts):
     ctx_a, buf_a, _, _ = shared_contexts
     with pytest.raises(ValueError):
         ctx_a.register_memory_region(buf_a.data_ptr(), _ALIGN + 1)
+
+
+# =========================================================
+# Handshake protocol
+# =========================================================
+
+
+def _raw_request(url: str, msg: bytes) -> bytes:
+    """Send one raw handshake request and return the raw reply."""
+    sock = zmq.Context.instance().socket(zmq.REQ)
+    sock.setsockopt(zmq.LINGER, 0)
+    sock.setsockopt(zmq.RCVTIMEO, 5000)
+    sock.connect(f"tcp://{url}")
+    try:
+        sock.send(msg)
+        return sock.recv()
+    finally:
+        sock.close(linger=0)
+
+
+@pytest.mark.parametrize(
+    "request_bytes",
+    [
+        # An InitReq from a peer that predates the protocol version.
+        msgspec.msgpack.encode(
+            {"type": "InitReq", "agent_name": "a", "agent_meta": b""}
+        ),
+        b"not a handshake message",
+    ],
+    ids=["unversioned-peer", "garbage"],
+)
+def test_rejected_request_is_answered_and_later_handshakes_work(
+    fresh_contexts, request_bytes
+):
+    """A request the server cannot handle gets an error reply, and the server
+    keeps answering later handshakes."""
+    ctx_a, _, ctx_b, _ = fresh_contexts
+
+    reply = msgspec.msgpack.decode(_raw_request(ctx_b.advertise_url, request_bytes))
+    assert reply["type"] == "ErrorResp"
+
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    local = ctx_a.get_transfer_channel_address([(0, _ALIGN)])
+    remote = ctx_b.get_transfer_channel_address([(0, _ALIGN)])
+    assert _wait_finished(client, client.submit_read(local, remote)).succeeded_mask == [
+        True
+    ]
+
+
+def test_dialing_a_peer_of_another_protocol_version_fails_fast(fresh_contexts):
+    """A server answering with an unversioned InitResp is rejected at once."""
+    ctx_a, _, _, _ = fresh_contexts
+    url = _next_url()
+    server = zmq.Context.instance().socket(zmq.REP)
+    server.setsockopt(zmq.LINGER, 0)
+    server.bind(f"tcp://{url}")
+    try:
+        reply = msgspec.msgpack.encode(
+            {"type": "InitResp", "agent_name": "old", "agent_meta": b""}
+        )
+
+        def answer_once() -> None:
+            server.recv()
+            server.send(reply)
+
+        responder = threading.Thread(target=answer_once, daemon=True)
+        responder.start()
+        start = time.monotonic()
+        with pytest.raises(RuntimeError, match="protocol mismatch"):
+            ctx_a.get_transfer_channel_client(url)
+        assert time.monotonic() - start < 5.0
+        responder.join(timeout=5.0)
+    finally:
+        server.close(linger=0)
