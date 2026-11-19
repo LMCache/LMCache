@@ -114,7 +114,7 @@ shared with those callbacks and guarded by a lock. Failures stay bounded:
 - the lookup deadline (`lookup_timeout_s`) still bounds the whole lookup;
 - a lookup acknowledgement that fails because the peer is down
   (`UNAVAILABLE` or `CANCELLED` at once) or past the ~3 s lookup deadline (a
-  frozen peer), or a result query still unanswered after ~3 s, marks the
+  frozen peer), or a single query RPC unanswered for ~3 s, marks the
   peer unresponsive; other ack errors are only a miss. A stalled query's
   late answer is still used by its lookup. While marked, lookups to the peer
   are a miss at once, without an RPC. Recovery is checked one step at a
@@ -124,7 +124,10 @@ shared with those callbacks and guarded by a lock. Failures stay bounded:
   only shows that the peer's RPC server is up, so the next lookup then goes
   out as a canary while the others still miss. The mark is cleared only when
   the canary completes; if its ack or query fails or stalls, the next lookup
-  probes again. A peer whose RPC server answers but whose lookups stall thus
+  probes again; a check that has not ended within `lookup_timeout_s` (for
+  example a canary whose request was dropped) is given up and the next
+  lookup probes again. Only a query sent after the mark was last cleared
+  can set it again. A peer whose RPC server answers but whose lookups stall thus
   costs one waiting request per check instead of every request. The
   trade-off: a peer that stalls past the deadline and recovers misses hits
   until a probe and a canary complete.
