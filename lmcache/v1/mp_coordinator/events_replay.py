@@ -31,7 +31,7 @@ import time
 import httpx
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.mp_coordinator.api import CACHE_EVENT_SCHEMA_VERSION
 from lmcache.v1.mp_coordinator.cache_events import (
     EVENTS_TRACE_BATCH,

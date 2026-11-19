@@ -15,7 +15,6 @@ import torch
 
 # First Party
 from lmcache import device_ops
-from lmcache.logging import init_logger
 from lmcache.utils import EngineType, lmcache_deprecate
 from lmcache.v1.common.kv_format import (
     concrete_shape,
@@ -26,6 +25,7 @@ from lmcache.v1.common.kv_format import (
     get_spec_class,
 )
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache, LayoutHints
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 

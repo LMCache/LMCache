@@ -34,8 +34,8 @@ import time
 
 # First Party
 from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
-from lmcache.logging import init_logger
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,

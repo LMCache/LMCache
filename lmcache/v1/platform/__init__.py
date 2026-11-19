@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, Any
 import os
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform._device_detect import (
     DEVICE_BACKEND_ENV_VAR,
     _build_backend_registry,

@@ -14,7 +14,7 @@ from google.protobuf.message import Message
 import grpc
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.memory_orchestrator import _codec as codec
 from lmcache.v1.memory_orchestrator._proto_gen import memory_orchestrator_pb2 as pb2
 from lmcache.v1.memory_orchestrator._proto_gen.memory_orchestrator_pb2_grpc import (

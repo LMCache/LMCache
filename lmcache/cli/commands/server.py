@@ -6,7 +6,7 @@ import argparse
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 

@@ -20,8 +20,8 @@ if TYPE_CHECKING:
     )
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_codec import TOKEN_STRIDE, unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.mp_observability.event import Event, EventType
