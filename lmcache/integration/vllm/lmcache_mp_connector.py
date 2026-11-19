@@ -605,6 +605,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     - lmcache.mp.port: the port of the LMCache server.
 
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
+    - lmcache.mp.chunk_size: optional client-side minimum chunk size.
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
     - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request
@@ -617,7 +618,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       False. A request whose ``kv_transfer_params`` set
       ``lmcache.temporary_unfull_chunk`` stores it read-once. Not yet
       supported for models with per-request ring state
-      (``CircularBufferSpec``). See
+      (``CircularBufferSpec``). The effective chunk size must equal the MP
+      server's configured chunk size. See
       ``docs/design/v1/multiprocess/unfull_chunk.md``.
     """
 

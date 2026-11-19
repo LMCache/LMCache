@@ -291,30 +291,73 @@ def _op(block_ids: list[list[int]]) -> LoadStoreOp:
     )
 
 
-def test_get_lmcache_chunk_size_uses_plain_query_without_alignment() -> None:
+@pytest.mark.parametrize(
+    ("server_minimum", "client_minimum", "alignment", "expected"),
+    [
+        (256, None, 16, 256),
+        (256, 128, 16, 256),
+        (256, 512, 16, 512),
+        (256, 500, 16, 512),
+        (256, 300, 80, 320),
+        (256, None, 80, 320),
+    ],
+)
+def test_get_lmcache_chunk_size_resolves_client_effective_size(
+    server_minimum: int,
+    client_minimum: int | None,
+    alignment: int,
+    expected: int,
+) -> None:
     client = MagicMock()
-    client.get_chunk_size.return_value.result.return_value = 256
-
-    assert get_lmcache_chunk_size(client) == 256
-
-    client.get_chunk_size.assert_called_once_with()
-    client.negotiate_chunk_size.assert_not_called()
-
-
-def test_get_lmcache_chunk_size_negotiates_with_alignment() -> None:
-    client = MagicMock()
-    client.negotiate_chunk_size.return_value.result.return_value = 640
+    client.get_chunk_size.return_value.result.return_value = server_minimum
 
     assert (
         get_lmcache_chunk_size(
             client,
-            required_chunk_alignment=640,
+            required_chunk_alignment=alignment,
+            client_minimum_chunk_size=client_minimum,
         )
-        == 640
+        == expected
     )
 
-    client.negotiate_chunk_size.assert_called_once_with(640)
-    client.get_chunk_size.assert_not_called()
+    client.get_chunk_size.assert_called_once_with()
+
+
+def test_get_lmcache_chunk_size_rejects_non_positive_client_minimum() -> None:
+    client = MagicMock()
+    client.get_chunk_size.return_value.result.return_value = 256
+
+    with pytest.raises(ValueError, match="client minimum chunk size"):
+        get_lmcache_chunk_size(
+            client,
+            required_chunk_alignment=16,
+            client_minimum_chunk_size=0,
+        )
+
+    client.get_chunk_size.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("client_minimum", "alignment"),
+    [(512, 16), (None, 384)],
+)
+def test_get_lmcache_chunk_size_rejects_multiple_sizes_for_unfull_chunks(
+    client_minimum: int | None,
+    alignment: int,
+) -> None:
+    """Unfull-chunk caching requires the server's global chunk size."""
+    client = MagicMock()
+    client.get_chunk_size.return_value.result.return_value = 256
+
+    with pytest.raises(ValueError, match="save_unfull_chunk.*server chunk size"):
+        get_lmcache_chunk_size(
+            client,
+            required_chunk_alignment=alignment,
+            client_minimum_chunk_size=client_minimum,
+            enforce_server_chunk_size_match=True,
+        )
+
+    client.get_chunk_size.assert_called_once_with()
 
 
 def _patch_transfer_context_factory(
@@ -615,6 +658,8 @@ def test_scheduler_recovery_keeps_mismatched_server_unhealthy(monkeypatch) -> No
         client,
         timeout=adapter._mq_timeout,
         required_chunk_alignment=32,
+        client_minimum_chunk_size=None,
+        enforce_server_chunk_size_match=False,
     )
 
 
