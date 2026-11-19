@@ -9,9 +9,9 @@ layout that comes out.
 
 RBLN stores heads before block tokens (HND), blocks-first
 (``[NB, 2, H, BS, D]``) or K/V-first (``[2, NB, H, BS, D]``), so writing a
-token-major chunk needs a head<->token transpose. HND stores run it on the
-host after copying contiguous paged blocks into host staging. HND restores
-use :mod:`hnd_ops` device staging and a compiled swap instead.
+token-major chunk needs a head<->token transpose. The HND gather helpers
+here perform that transpose on the host. The device ops dispatch both HND
+directions through :mod:`hnd_ops` and its compiled device swap.
 
 The MLA layout (``[NB, BS, HS]`` per layer, chunk ``[L, T, HS]``) has no
 transpose: the chunk is the blocks laid end to end. What costs there is the

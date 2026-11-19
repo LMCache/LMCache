@@ -1,17 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
-"""HND restores through sharded device staging and a compiled swap."""
+"""HND transfers through sharded device staging and a compiled swap."""
 
 # Future
 from __future__ import annotations
 
 # Standard
 from typing import Sequence
+import threading
 
 # Third Party
 import torch
 
 # First Party
 from lmcache.v1.platform.devices.rbln.staging import HndStaging, shard_bounds
+
+_SWAP_LOCK = threading.Lock()
 
 
 def _chunk_pairs(
@@ -49,20 +52,41 @@ def _chunk_pairs(
     )
 
 
-def restore_hnd(
+def _swap(staged: HndStaging, *, store: bool) -> None:
+    """Swap head and token axes while serializing device submissions.
+
+    Both directions can use the same compiled program even when their
+    transfers use independent staging buffers.
+
+    Args:
+        staged: The direction's staging buffers, held by its caller.
+        store: Swap from head-major to token-major when true.
+
+    Raises:
+        RuntimeError: If a compiled device copy fails.
+    """
+    with _SWAP_LOCK:
+        for head, tokens in zip(staged.head_major, staged.token_major, strict=True):
+            dst, src = (tokens, head) if store else (head, tokens)
+            dst.copy_(src.permute(0, 2, 1, 3))
+
+
+def transfer_hnd(
     layers: Sequence[torch.Tensor],
     block_ids: Sequence[int],
     chunks: Sequence[torch.Tensor],
     blocks_per_chunk: int,
     skip_prefix_n_blocks: int,
     staged: HndStaging,
+    *,
+    store: bool,
 ) -> None:
-    """Restore blocks from canonical chunks into K/V-first paged views.
+    """Move blocks between canonical chunks and K/V-first paged views.
 
     Called by ``RblnDeviceOps`` after checking the HND requirements and chunk
     geometry and reserving staging. Each layer is ``[2, NB, NH, BS, HS]``;
-    row ``r`` addresses ``layers[r % L][r // L][block]``. The shared set's
-    lock covers the whole call, including all compiled swaps. Restores run
+    row ``r`` addresses ``layers[r % L][r // L][block]``. The direction's staging
+    lock covers the whole call. A separate lock serializes swaps. Restores run
     serially on the model-driving thread's current stream.
 
     Args:
@@ -70,15 +94,16 @@ def restore_hnd(
         block_ids: Paged block IDs in chunk-token order.
         chunks: Canonical host chunks shaped ``[2, L, bpc*BS, NH*HS]``.
         blocks_per_chunk: Positive number of blocks per chunk.
-        skip_prefix_n_blocks: Leading blocks already present in the cache.
-        staged: Shared restore buffers reserved for this geometry.
+        skip_prefix_n_blocks: Leading blocks to skip during restore.
+        staged: Buffers reserved for this geometry and direction.
+        store: Copy from paged blocks to host chunks.
 
     Raises:
         RuntimeError: If a device copy or compiled swap fails.
     """
     num_layers = len(layers)
     block_size = layers[0].size(3)
-    start = max(skip_prefix_n_blocks, 0)
+    start = 0 if store else max(skip_prefix_n_blocks, 0)
     bounds = shard_bounds(2 * num_layers, len(staged.head_major))
     with staged.lock:
         for pos in range(start, len(block_ids)):
@@ -98,7 +123,11 @@ def restore_hnd(
                 )
                 regions.extend(host)
                 pieces.extend(device)
-            torch._foreach_copy_(pieces, regions)
-            for head, tokens in zip(staged.head_major, staged.token_major, strict=True):
-                head.copy_(tokens.permute(0, 2, 1, 3))
-            torch._foreach_copy_(blocks, slots)
+            if store:
+                torch._foreach_copy_(slots, blocks)
+                _swap(staged, store=True)
+                torch._foreach_copy_(regions, pieces)
+            else:
+                torch._foreach_copy_(pieces, regions)
+                _swap(staged, store=False)
+                torch._foreach_copy_(blocks, slots)

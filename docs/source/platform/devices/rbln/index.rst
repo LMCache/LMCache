@@ -108,10 +108,9 @@ Any other layout raises ``ValueError``.
 HND device staging
 ------------------
 
-HND restores stage KV on the device and swap heads and tokens with a
-compiled device copy. Stores retain per-thread host staging and a host
-transpose, so asynchronous commit workers do not compile or run swaps.
-Host chunks retain LMCache's canonical layout.
+HND restores and stores stage KV on the device and swap heads and tokens
+with a compiled device copy. Stores copy directly into canonical host
+chunks from device staging.
 
 Both directions require bf16 KV/chunks, a head size that is a multiple of 64,
 and ``torch_rbln::copy_strided_view`` registered for ``PrivateUse1``. Unsupported
@@ -121,20 +120,19 @@ torch-rbln 0.12.0 provides the compiled copy and
 ``get_device_properties(...).num_chiplet``.
 
 Builds providing ``torch.rbln.set_device_alloc`` and ``DevicePlacement``
-spread restore staging over chiplets; these placement APIs are not in a release
+spread staging over chiplets; these placement APIs are not in a release
 yet. If either is missing, one unplaced pair is reserved on chiplet 0, with a
 warning once per process naming the missing API.
 
-The single restore set is reserved on the first transfer in either direction.
-Total bf16 device staging is ``2 * 2L * NH * BS * HS * 2 bytes``, independent
-of worker count. Qwen3-1.7B (28 layers, 8 KV heads, block size 1024, head size 128)
-needs 234,881,024 bytes (about 235 MB or 224 MiB). Leave that memory free when
-sizing KV; without placement it must all fit on chiplet 0. The first cache hit
-pays the one-time device-swap compilation cost; allocation at the first store
-does not compile.
+Separate store and restore sets are reserved on the first HND transfer.
+Total bf16 device staging is ``2 * 2 * 2L * NH * BS * HS * 2 bytes``,
+independent of worker count. Qwen3-1.7B with 1024-token blocks needs
+448 MiB. Leave this memory free when sizing KV. Without placement it must
+all fit on chiplet 0.
 
-Issue restores serially from the model-driving thread using the loaded
-model's fixed KV geometry; stores may run on commit workers.
+Issue restores serially from the model-driving thread with a fixed KV
+geometry. Before dispatching asynchronous stores, warm the device swap
+programs on the model-driving thread.
 
 Capability limits
 -----------------
