@@ -634,6 +634,25 @@ class LMCacheMPRequestMetadata:
                 end_token_idx,
                 include_unfull_chunk=include_unfull_chunk,
             )
+            # The slice silently drops blocks vLLM never allocated. Loading a
+            # shorter list would write the KV into the wrong blocks, so fail.
+            for engine_group_idx, (tokens_per_block, group_block_ids) in enumerate(
+                zip(group_tokens_per_block, block_ids, strict=True)
+            ):
+                if tokens_per_block == 0:
+                    continue
+                expected_blocks = (
+                    -(-end_token_idx // tokens_per_block)
+                    - start_token_idx // tokens_per_block
+                )
+                if len(group_block_ids) < expected_blocks:
+                    raise ValueError(
+                        f"retrieve of tokens [{start_token_idx}, "
+                        f"{end_token_idx}) for request {tracker.request_id} "
+                        f"needs {expected_blocks} blocks in engine group "
+                        f"{engine_group_idx}, but only "
+                        f"{len(group_block_ids)} are allocated"
+                    )
             token_bytes = tracker.packed_token_ids()
 
             # Compute how many tokens at the start of the retrieve range

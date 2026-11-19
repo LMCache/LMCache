@@ -209,6 +209,61 @@ def test_retrieve_of_a_tail_vllm_partly_holds_skips_vllms_tokens():
     )
 
 
+@pytest.mark.parametrize(
+    ("prompt", "hit", "need"),
+    [
+        # The tail is the prompt's last token alone (P = 1 mod chunk).
+        (2 * CHUNK + 1, 2 * CHUNK, 2 * CHUNK),
+        # The last token starts a block inside the tail (P = 1 mod block).
+        (2 * CHUNK + GRID + 1, 2 * CHUNK, 2 * CHUNK),
+        # The last token shares a block with the one before: the tail loads.
+        (2 * CHUNK + 20, 2 * CHUNK + 20, 2 * CHUNK + 19),
+    ],
+)
+def test_full_prompt_tail_hit_retrieve_fits_the_blocks_vllm_allocates(
+    prompt: int, hit: int, need: int
+):
+    """vLLM recomputes the last prompt token and allocates blocks for the
+    tokens before it only. When that token starts a new block, the exact
+    tail a ``max_tokens=1`` request stored has no block for its last token:
+    the hit falls back to the full chunks (#6751)."""
+    connector, _ = _connector(lookup_hit=prompt)
+    connector._group_tokens_per_block = [GRID]
+    connector._prefix_replay_tokens = 0
+
+    assert connector.get_num_new_matched_tokens(
+        _request(prompt_tokens=prompt, max_tokens=1), 0
+    ) == (need, True)
+
+    tracker = connector.request_trackers["req-0"]
+    assert tracker.num_lmcache_hit_tokens == hit
+    assert tracker.num_stored_tokens == 2 * CHUNK
+    # LMCache holds the tail either way, so it is not stored again.
+    assert tracker.unfull_chunk_boundaries == {prompt}
+
+    # vLLM allocates blocks for the tokens it was told to load.
+    tracker.append_block_ids((list(range(-(-need // GRID))),))
+    tracker.state = LMCacheMPRequestState.WAITING_FOR_LOAD
+    meta = LMCacheMPRequestMetadata.GetRetrieveMetadata(tracker, CHUNK, [GRID])
+
+    assert meta is not None
+    assert (meta.op.start, meta.op.end) == (0, hit)
+    assert meta.op.block_ids == [list(range(-(-hit // GRID)))]
+
+
+def test_retrieve_past_the_allocated_blocks_fails_instead_of_truncating():
+    """A retrieve the allocated blocks cannot hold must not load a shorter
+    block list, which would write the tail's KV into the wrong blocks."""
+    prompt = 2 * CHUNK + GRID + 1
+    tracker = LMCacheMPRequestTracker(_request(prompt_tokens=prompt))
+    tracker.append_block_ids((list(range((prompt - 1) // GRID)),))
+    tracker.num_lmcache_hit_tokens = prompt
+    tracker.state = LMCacheMPRequestState.WAITING_FOR_LOAD
+
+    with pytest.raises(ValueError, match="needs 18 blocks"):
+        LMCacheMPRequestMetadata.GetRetrieveMetadata(tracker, CHUNK, [GRID])
+
+
 def test_boundary_state_block_is_pinned_until_the_request_is_sent():
     connector, _ = _connector(lookup_hit=0)
     pool = MagicMock()
