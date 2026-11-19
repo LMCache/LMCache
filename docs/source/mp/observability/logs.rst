@@ -22,9 +22,9 @@ Key log messages:
    * - Level
      - Message
    * - INFO
-     - ``Stored N tokens in X seconds``
+     - ``Stored N tokens in X ms``
    * - INFO
-     - ``Retrieved N tokens in X seconds``
+     - ``Retrieved N tokens in X ms``
    * - INFO
      - ``Prefetch request completed (L1+L2): N/M prefix hits``
    * - DEBUG
