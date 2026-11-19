@@ -18,6 +18,8 @@ import torch
 # First Party
 from lmcache import device_ops
 from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L1ReadReservation
 from lmcache.v1.distributed.storage_manager import (
@@ -26,11 +28,9 @@ from lmcache.v1.distributed.storage_manager import (
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess import native_completion
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
 from lmcache.v1.multiprocess.session import Session
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
+from lmcache.v1.transport.futures import DeviceMessagingFuture, MessagingFuture
 
 
 class _FakeEventBackend:
@@ -160,7 +160,7 @@ def test_worker_exports_events_through_platform_backend(
 ) -> None:
     """Store and retrieve send backend-exported handles and keep device context."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.client import worker_transfer
 
     backend = _FakeEventBackend()
     monkeypatch.setattr(
@@ -172,6 +172,11 @@ def test_worker_exports_events_through_platform_backend(
         worker_transfer,
         "wrap_kv_caches",
         lambda kv_caches: list(kv_caches.values()),
+    )
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
     )
 
     client = MagicMock()
@@ -291,12 +296,13 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     session = Session(
         key.request_id, TokenHasher(chunk_size=1, hash_algorithm="blake3")
     )
-    session.begin_lookup(key.no_worker_id_version(), (-1,))
+    session.begin_lookup(key.no_worker_id_version())
     session.record_prefetch_result(
         int(cached),
         (0,),
         {obj_key: 0} if cached else {},
         read_generations={obj_key: 7} if cached else {},
+        read_counts={obj_key: 1} if cached else {},
     )
     callbacks: list[tuple[str, object]] = []
     monkeypatch.setattr(
@@ -402,9 +408,9 @@ def test_server_store_and_retrieve_delegate_event_ordering(
 def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
     """The scoped multiprocess modules remain backend-neutral."""
     # First Party
-    from lmcache.v1.multiprocess import futures
+    from lmcache.v1.client import worker_transfer
     from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.transport import futures
 
     for module in (futures, lmcache_driven_transfer, worker_transfer):
         source = inspect.getsource(module)

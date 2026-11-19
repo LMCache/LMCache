@@ -7,8 +7,8 @@ adapters.
 
 Bypasses ``StorageManager.__init__`` (which requires CUDA, an
 BaseL1Manager, and a full controller stack) and instead instantiates the
-class via ``__new__`` with only the two attributes the method reads:
-``_l2_adapters`` and ``_adapter_descriptors``.
+class via ``__new__`` with only the attributes the method reads:
+``_l2_adapters``, ``_adapter_descriptors`` and ``_closing_adapters``.
 """
 
 # Standard
@@ -40,6 +40,7 @@ def _make_sm(adapters: list[_StubAdapter], names: list[str]) -> StorageManager:
     # the method under test actually reads. Cast through the real types
     # for mypy. Adapters/descriptors are keyed by stable adapter id.
     sm._adapters_lock = threading.Lock()
+    sm._closing_adapters = set()
     sm._l2_adapters = cast("dict[int, L2AdapterInterface]", dict(enumerate(adapters)))
     sm._adapter_descriptors = cast(
         "dict[int, L2AdapterDescriptor]",

@@ -11,8 +11,8 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.transfer_context import worker_transfer
-from lmcache.v1.multiprocess.transfer_context.async_engine_driven import (
+from lmcache.v1.client import worker_transfer
+from lmcache.v1.client.async_engine_driven import (
     AsyncEngineDrivenTransferContext,
 )
 from lmcache.v1.platform.devices.mlu import MluDeviceSpec

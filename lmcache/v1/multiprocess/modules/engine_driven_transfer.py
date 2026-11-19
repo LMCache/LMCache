@@ -13,19 +13,17 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
-    MemoryLayoutDesc,
-    ObjectKey,
-)
-from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.client.transfer_context.base import EngineDrivenContextMetadata
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import (
     IPCCacheServerKey,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
+from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
@@ -34,7 +32,6 @@ from lmcache.v1.multiprocess.engine_module import (
     ModuleBuildContext,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 from lmcache.v1.periodic_thread import (
     ThreadLevel,
     ThreadRunSummary,
@@ -43,6 +40,7 @@ from lmcache.v1.periodic_thread import (
 
 # Local
 from .server_transfer import (
+    TransferKey,
     TransferStrategy,
     create_transfer_strategy,
 )
@@ -106,12 +104,8 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # _pending_shm_lock.
         self._lock = threading.Lock()
         # Reserved keys of each pending SHM store, mapped to their L1 owner.
-        self._pending_shm_writes: dict[
-            tuple[int, IPCCacheServerKey], dict[ObjectKey, int]
-        ] = {}
-        self._pending_shm_reads: dict[
-            tuple[int, IPCCacheServerKey], list[ObjectKey]
-        ] = {}
+        self._pending_shm_writes: dict[TransferKey, dict[ObjectKey, int]] = {}
+        self._pending_shm_reads: dict[TransferKey, list[ObjectKey]] = {}
         self._pending_shm_lock = threading.Lock()
         self._shm_pool_info: ShmPoolInfo = self._ctx.shm_pool_info
         # Values retain the START event and monotonic preparation time.
@@ -294,10 +288,8 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
 
     @staticmethod
-    def _make_transfer_key(
-        key: IPCCacheServerKey, instance_id: int
-    ) -> tuple[int, IPCCacheServerKey]:
-        return (instance_id, key)
+    def _make_transfer_key(key: IPCCacheServerKey, instance_id: int) -> TransferKey:
+        return (instance_id, key, tuple(get_request_tags(key.request_configs).items()))
 
     def _resolve_single_group_obj_keys(self, key: IPCCacheServerKey) -> list[ObjectKey]:
         """Resolve object keys for the single object group used by

@@ -22,7 +22,7 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
+from lmcache.v1.common.errors import LMCacheTimeoutError
 from lmcache.v1.platform.event_notifier import EventNotifier
 
 if TYPE_CHECKING:

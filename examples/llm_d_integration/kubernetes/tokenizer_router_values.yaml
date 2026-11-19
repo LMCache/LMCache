@@ -1,0 +1,43 @@
+# Additions to router_values.yaml for the tokenizer sidecar of the
+# llm-d-router-standalone chart (v1.0.0). These values are optional. Give this
+# file to Helm after router_values.yaml:
+#   -f router_values.yaml -f tokenizer_router_values.yaml
+# Helm rejects this file when it is the only values file, because the chart
+# needs the `modelServers` values of router_values.yaml.
+# With router_values.yaml only, the EPP estimates the tokens from the bytes of
+# the request. With these additions, the `token-producer` plugin gets real
+# token IDs from the tokenizer sidecar.
+router:
+  tokenizer:
+    enabled: true
+    flavor: python
+    modelName: Qwen/Qwen3-0.6B       # the model of the decode pods
+    port: 8000                       # loopback port in the EPP pod
+    # `env: []` gives the sidecar no token. For a gated model, remove the line
+    # below. The chart then reads HF_TOKEN from the Secret `llm-d-hf-token`.
+    env: []
+    resources:
+      requests: { cpu: "1", memory: 2Gi }
+      limits: { memory: 4Gi }
+  epp:
+    pluginsConfigFile: lmcache-plugins.yaml
+    pluginsConfig:                   # the default plugins of the chart and the token-producer
+      apiVersion: llm-d.ai/v1
+      kind: EndpointPickerConfig
+      plugins:
+        - type: token-producer
+          parameters:
+            modelName: Qwen/Qwen3-0.6B
+            vllm: { url: http://localhost:8000, timeout: 10s }
+        - type: queue-scorer
+        - type: kv-cache-utilization-scorer
+        - type: prefix-cache-scorer
+        - type: metrics-data-source
+          parameters: { scheme: http, path: /metrics, insecureSkipVerify: true }
+        - type: core-metrics-extractor
+      schedulingProfiles:
+        - name: default
+          plugins:
+            - { pluginRef: queue-scorer, weight: 2 }
+            - { pluginRef: kv-cache-utilization-scorer, weight: 2 }
+            - { pluginRef: prefix-cache-scorer, weight: 3 }

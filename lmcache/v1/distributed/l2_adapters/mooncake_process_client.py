@@ -32,7 +32,7 @@ import traceback
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
+from lmcache.v1.common.errors import LMCacheTimeoutError
 
 logger = init_logger(__name__)
 MAX_FRAME = 16 << 20

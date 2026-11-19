@@ -243,10 +243,15 @@ def test_failed_submission_drains_other_adapters_before_freeing_buffers(
 
 
 @pytest.mark.parametrize(
-    "fetching_policy,expected", [("prefix", [0]), ("full", [0, 2])]
+    "fetching_policy,expected",
+    [
+        ("prefix", [[0], [0]]),
+        ("full", [[0, 1, 2], [0, 2]]),
+        ("whole_chunk", [[0, 2], [0, 2]]),
+    ],
 )
 def test_prefetch_reports_only_successfully_admitted_columns(
-    fetching_policy: FetchingPolicy, expected: list[int]
+    fetching_policy: FetchingPolicy, expected: list[list[int]]
 ) -> None:
     """L2 success does not imply the staging object was admitted and locked."""
     rows = [
@@ -264,8 +269,12 @@ def test_prefetch_reports_only_successfully_admitted_columns(
             make_spec(rows, fetching_policy=fetching_policy)
         )
         result = wait_for_result(controller, request)
-        assert [row_bits(result, i) for i in range(2)] == [expected, expected]
-        held = [row.keys[i] for row in rows for i in expected]
+        assert [row_bits(result, i) for i in range(2)] == expected
+        held = [
+            row.keys[i]
+            for row, indices in zip(rows, expected, strict=True)
+            for i in indices
+        ]
         assert_read_locked(manager, held)
         assert_absent(manager, [key for key in all_keys if key not in held])
         assert manager.get_staging_memory_usage() == 0

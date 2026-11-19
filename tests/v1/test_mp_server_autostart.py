@@ -126,9 +126,9 @@ def patch_mp_health_modules(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setitem(
         sys.modules,
-        "lmcache.v1.multiprocess.transport.factory",
+        "lmcache.v1.client.transport.factory",
         fake_module(
-            "lmcache.v1.multiprocess.transport.factory",
+            "lmcache.v1.client.transport.factory",
             {"RequestClientFactory": FakeRequestClientFactory},
         ),
     )

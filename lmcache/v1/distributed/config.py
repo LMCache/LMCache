@@ -15,7 +15,7 @@ import os
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import L1BackendType
+from lmcache.v1.distributed.api import L1BackendType, MemorySegment
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     L2AdaptersConfig,
@@ -592,6 +592,81 @@ class GDSL1ManagerConfig(L1ManagerConfig):
 
 
 @dataclass
+class ShadowL1ManagerConfig(L1ManagerConfig):
+    """A shadow L1: the index a borrowing L2 adapter keeps of a peer's bytes.
+
+    It owns no memory, so it needs no size and evicts nothing; configure one
+    per borrowed ``segment``, after the L1s that own memory, since the first
+    L1 receives the engine's writes.
+    """
+
+    memory_config: L1MemoryManagerConfig = field(
+        default_factory=lambda: L1MemoryManagerConfig(
+            size_in_bytes=0, use_lazy=False, shm_name=""
+        )
+    )
+
+    segment: MemorySegment = MemorySegment.DRAM
+    """The segment of the peer memory the views point into."""
+
+    @classmethod
+    def from_dict(
+        cls,
+        values: dict[str, object],
+        defaults: EvictionConfig | None,
+        read_ttl: int = 300,
+        write_ttl: int = 600,
+    ) -> "ShadowL1ManagerConfig":
+        """Parse a shadow L1: its tag, borrowed segment and lock TTLs.
+
+        Args:
+            values: JSON fields: ``tag``, ``segment`` and optional
+                ``read_ttl_seconds`` / ``write_ttl_seconds``.
+            defaults: Global eviction settings, kept for the status report.
+            read_ttl: Default read-lock lifetime in seconds.
+            write_ttl: Default write-lock lifetime in seconds.
+
+        Returns:
+            A validated ShadowL1ManagerConfig.
+
+        Raises:
+            ValueError: A field is unknown or malformed; ``size_gb`` and
+                ``eviction`` are unknown here.
+        """
+        unknown = set(values) - {
+            "type",
+            "tag",
+            "segment",
+            "read_ttl_seconds",
+            "write_ttl_seconds",
+        }
+        if unknown:
+            raise ValueError(f"Unknown shadow L1 fields: {sorted(unknown)}")
+        tag = values.get("tag")
+        if not isinstance(tag, str) or not tag.strip() or tag == "_default":
+            raise ValueError("tag must be a non-empty string other than _default")
+        segment = values.get("segment")
+        if not isinstance(segment, str):
+            raise ValueError("segment must be a string")
+        ttls = []
+        for name, default in (
+            ("read_ttl_seconds", read_ttl),
+            ("write_ttl_seconds", write_ttl),
+        ):
+            value = values.get(name, default)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+            ttls.append(value)
+        return cls(
+            tag=tag,
+            segment=MemorySegment(segment),
+            read_ttl_seconds=ttls[0],
+            write_ttl_seconds=ttls[1],
+            eviction=defaults,
+        )
+
+
+@dataclass
 class StorageManagerConfig:
     """
     The configuration for the distributed storage manager.
@@ -637,6 +712,10 @@ class StorageManagerConfig:
             raise ValueError("L1 tags must be non-empty strings")
         if len(set(tags)) != len(tags):
             raise ValueError("L1 tags must be unique")
+        if isinstance(self.l1_manager_configs[0], ShadowL1ManagerConfig):
+            raise ValueError(
+                "The first L1 receives engine writes: a shadow cannot be first"
+            )
         if sum(c.gds_l1_config is not None for c in self.l1_manager_configs) > 1:
             raise ValueError("Only one GDS L1 slab is supported per process")
         for c in self.l1_manager_configs:
@@ -648,6 +727,26 @@ class StorageManagerConfig:
                 f"{self.prefetch_inflight_watermark}"
             )
         validate_storage_manager_config(self)
+        if self.prefetch_policy == "retain":
+            logger.warning(
+                "Prefetch policy 'retain' is deprecated; use 'default', which "
+                "also keeps loaded keys in L1"
+            )
+        # Only the built-in prefetch policies are known to keep loaded keys.
+        if (
+            self.store_policy == "skip_l1"
+            and self.prefetch_policy in ("default", "retain")
+            and any(
+                (c.eviction or self.eviction_config).eviction_policy == "noop"
+                for c in self.l1_manager_configs
+            )
+        ):
+            logger.warning(
+                "Prefetch policy %r keeps loaded keys in L1, and the noop "
+                "eviction policy never frees them; use prefetch policy "
+                "'skip_l1' with store policy 'skip_l1'",
+                self.prefetch_policy,
+            )
 
 
 def validate_storage_manager_config(config: StorageManagerConfig) -> None:
@@ -936,8 +1035,10 @@ def add_storage_manager_args(
         choices=get_registered_prefetch_policies(),
         default="default",
         help="L2 prefetch policy. Determines which adapter loads each key "
-        "when multiple adapters have it. "
-        "Default is 'default' (pick the first adapter by index).",
+        "when multiple adapters have it, and whether loaded keys stay in L1. "
+        "Default is 'default' (pick the first adapter by index, keep loaded "
+        "keys in L1). 'skip_l1' deletes them after the read. 'retain' is a "
+        "deprecated alias of 'default'.",
     )
     policy_group.add_argument(
         "--l2-prefetch-inflight-watermark",
@@ -1026,11 +1127,13 @@ def parse_args_to_config(
             str,
             type[DRAML1ManagerConfig]
             | type[DevDaxL1ManagerConfig]
-            | type[GDSL1ManagerConfig],
+            | type[GDSL1ManagerConfig]
+            | type[ShadowL1ManagerConfig],
         ] = {
             "DRAM": DRAML1ManagerConfig,
             "DEVDAX": DevDaxL1ManagerConfig,
             "GDS": GDSL1ManagerConfig,
+            "SHADOW": ShadowL1ManagerConfig,
         }
         l1_configs: list[L1ManagerConfig] = []
         for raw in raw_configs:
@@ -1040,7 +1143,9 @@ def parse_args_to_config(
                 or not isinstance(values.get("type"), str)
                 or values["type"] not in classes
             ):
-                raise ValueError("--l1-manager requires type DRAM, DEVDAX or GDS")
+                raise ValueError(
+                    "--l1-manager requires type DRAM, DEVDAX, GDS or SHADOW"
+                )
             l1_configs.append(
                 classes[values["type"]].from_dict(
                     values,

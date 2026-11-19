@@ -27,7 +27,7 @@ import uuid
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
+from lmcache.v1.common.errors import LMCacheTimeoutError
 
 if TYPE_CHECKING:
     # First Party

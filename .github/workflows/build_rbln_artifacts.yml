@@ -33,6 +33,7 @@ on:
     # Release and nightly runs only build after merge, so validate changes to
     # the RBLN build itself before they land.
     pull_request:
+        types: [opened, synchronize, reopened, ready_for_review]
         branches:
             - dev
             - "release-**"
@@ -62,6 +63,7 @@ permissions:
 
 jobs:
     build-rbln-artifacts:
+        if: github.event.pull_request.draft != true
         name: Build RBLN wheel
         runs-on: ubuntu-24.04
         outputs:

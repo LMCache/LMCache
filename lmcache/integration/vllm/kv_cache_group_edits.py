@@ -40,24 +40,34 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Mapping
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 # Third Party
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    KVCacheSpec,
-    KVCacheSpecKind,
-    get_kv_cache_spec_kind,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, KVCacheSpecKind
 import torch
 
+try:
+    # Third Party
+    from vllm.v1.kv_cache_interface import get_kv_cache_spec_kind
+except ImportError:  # vLLM with vllm-project/vllm#61452
+    get_kv_cache_spec_kind = None  # type: ignore[assignment]
+    # Third Party
+    from vllm.v1.core.single_type_kv_cache_manager import (  # type: ignore[attr-defined]
+        get_kv_cache_kind,
+    )
+
 # First Party
+from lmcache.integration.vllm.kv_cache_groups import (
+    group_layer_specs,
+    group_mamba_cache_mode,
+    group_specs,
+)
 from lmcache.logging import init_logger
-from lmcache.v1.gpu_connector.kv_format.contiguity import (
+from lmcache.v1.common.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
-from lmcache.v1.gpu_connector.kv_format.types import KV_LAYOUT_NAMES
-from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.common.kv_format.types import KV_LAYOUT_NAMES
+from lmcache.v1.common.utils import LayoutHints
 
 logger = init_logger(__name__)
 
@@ -122,12 +132,22 @@ def _mla_states_dim(kv_cache: torch.Tensor) -> int:
     return kv_cache.ndim - 2
 
 
-def _leaf_specs(spec: KVCacheSpec) -> list[KVCacheSpec]:
-    """Return a group spec's leaf specs, unwrapping ``UniformTypeKVCacheSpecs``."""
-    inner = getattr(spec, "kv_cache_specs", None)
-    if isinstance(inner, dict):
-        return list(inner.values())
-    return [spec]
+def _layer_kind(group: Any, spec: KVCacheSpec) -> KVCacheSpecKind:
+    """Return the kind of one layer in a vLLM KV cache group.
+
+    The kind comes from the group's manager config on vLLM with
+    vllm-project/vllm#61452, and from the spec class before it.
+    """
+    if get_kv_cache_spec_kind is None:
+        return get_kv_cache_kind(group.manager_config, [spec])
+    return get_kv_cache_spec_kind(spec)
+
+
+def _spec_kind(spec: KVCacheSpec, kind: KVCacheSpecKind | None) -> KVCacheSpecKind:
+    if kind is not None:
+        return kind
+    assert get_kv_cache_spec_kind is not None, "pass the layer kind on this vLLM"
+    return get_kv_cache_spec_kind(spec)
 
 
 def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
@@ -156,16 +176,18 @@ def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
         return
     unsupported: list[str] = []
     for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
-        for spec in _leaf_specs(group.kv_cache_spec):
-            kind = get_kv_cache_spec_kind(spec)
+        for spec in group_specs(group):
+            kind = _layer_kind(group, spec)
+            mamba_cache_mode = group_mamba_cache_mode(group, spec)
             if kind == KVCacheSpecKind.CROSS_ATTENTION:
                 unsupported.append(f"group {group_idx}: CrossAttentionSpec")
-            elif kind == KVCacheSpecKind.MAMBA and getattr(
-                spec, "mamba_cache_mode", "none"
-            ) not in ("align", "all"):
+            elif kind == KVCacheSpecKind.MAMBA and mamba_cache_mode not in (
+                "align",
+                "all",
+            ):
                 unsupported.append(
                     f"group {group_idx}: MambaSpec with mamba_cache_mode="
-                    f"'{getattr(spec, 'mamba_cache_mode', 'none')}' "
+                    f"'{mamba_cache_mode}' "
                     f"(only 'align' and 'all' keep reusable state snapshots)"
                 )
     if unsupported:
@@ -236,13 +258,20 @@ class KVCacheGroupEdit(ABC):
     name: str
 
     @abstractmethod
-    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+    def matches(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        kind: KVCacheSpecKind | None = None,
+    ) -> bool:
         """Return whether this rule applies to the layer's registered cache.
 
         Args:
             spec: The layer's vLLM KV cache spec (from its group).
             kv_cache: The layer's registered cache value -- a tensor, or a
                 list of tensors for Mamba layers.
+            kind: The layer's kind; read from the spec when omitted, which
+                needs vLLM before vllm-project/vllm#61452.
         """
 
     @abstractmethod
@@ -283,11 +312,16 @@ class _MambaPageViewEdit(KVCacheGroupEdit):
 
     name = "mamba-page-view"
 
-    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+    def matches(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        kind: KVCacheSpecKind | None = None,
+    ) -> bool:
         # Conv's per-block stride must be the full page. A slice-sized stride
         # passes through; apply re-strides only the packed layout.
         return (
-            get_kv_cache_spec_kind(spec) == KVCacheSpecKind.MAMBA
+            _spec_kind(spec, kind) == KVCacheSpecKind.MAMBA
             and isinstance(kv_cache, list)
             and bool(kv_cache)
             and kv_cache[0].stride(0) * kv_cache[0].element_size()
@@ -374,9 +408,14 @@ class _MambaSlicePlaneEdit(KVCacheGroupEdit):
             storage_offset=base,
         )
 
-    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+    def matches(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        kind: KVCacheSpecKind | None = None,
+    ) -> bool:
         if (
-            get_kv_cache_spec_kind(spec) != KVCacheSpecKind.MAMBA
+            _spec_kind(spec, kind) != KVCacheSpecKind.MAMBA
             or not isinstance(kv_cache, list)
             or not kv_cache
             or not all(isinstance(state, torch.Tensor) for state in kv_cache)
@@ -456,11 +495,16 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
 
     name = "subpaged-attention-view"
 
-    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+    def matches(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        kind: KVCacheSpecKind | None = None,
+    ) -> bool:
         return (
             # Standard-paged attention only; MLA layouts and declared slot
             # compression (DeepSeek) belong to other transfer paths.
-            get_kv_cache_spec_kind(spec) in _SUBPAGEABLE_ATTENTION_KINDS
+            _spec_kind(spec, kind) in _SUBPAGEABLE_ATTENTION_KINDS
             and not _declares_slot_compression(spec)
             # A rank-5 or rank-4 layout whose block dim disagrees with the
             # scheduler block-id unit, i.e. the backend re-paged the tensor at
@@ -587,12 +631,17 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
 
     name = "mamba-unified-view"
 
-    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+    def matches(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        kind: KVCacheSpecKind | None = None,
+    ) -> bool:
         """
         Matches the mamba kv cache with unified layout.
         """
         return (
-            get_kv_cache_spec_kind(spec) == KVCacheSpecKind.MAMBA
+            _spec_kind(spec, kind) == KVCacheSpecKind.MAMBA
             and isinstance(kv_cache, torch.Tensor)
             and kv_cache.ndim == 4
         )
@@ -621,6 +670,19 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         vector alignment, and block_size * head_size may exceed the row
         by at most this layer's own page padding
         (spec.page_size_bytes), never reaching sibling bytes.
+
+        When no aligned head_size fits the page (the row's bytes per token
+        are odd or fractional and vLLM left no padding, e.g. Kimi K3.1's
+        2^13 x 795-byte KDA state under a power-of-two block), block_size
+        in the output is replaced by the largest slot count that divides
+        both block_size and the row at an aligned width. The server then
+        treats the group as slot-compressed (tokens_per_block from the spec,
+        slots_per_block from this view), which is lossless because a
+        recurrent-state block is always stored and loaded whole.
+
+        Raises:
+            ValueError: If kv_layout is unsupported, or no slot count tiles
+                the row at an aligned width.
         """
         assert isinstance(kv_cache, torch.Tensor), (
             "single-layer KV cache must be a torch.Tensor"
@@ -651,20 +713,55 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
             if candidate * block_size * elem <= page_bytes:
                 head_size = candidate
                 break
+        num_slots = block_size
         if head_size == 0:
-            raise ValueError(
-                f"cannot tile a {row}-element state row into {block_size} "
-                f"aligned tokens within the {page_bytes}-byte page"
+            num_slots, head_size = self._compressed_slots(
+                row, block_size, elem, block_step
             )
         # BLNHC is blocks-first NHD (tokens before heads), BLHNC blocks-first HND.
         if kv_layout in ("NHD", "BLNHC"):
-            inner = (block_size, 1, head_size)
+            inner = (num_slots, 1, head_size)
             inner_strides = (head_size, head_size, 1)
         else:
-            inner = (1, block_size, head_size)
-            inner_strides = (block_size * head_size, head_size, 1)
+            inner = (1, num_slots, head_size)
+            inner_strides = (num_slots * head_size, head_size, 1)
         return kv_cache.as_strided(
             (num_blocks, *inner), (kv_cache.stride(0), *inner_strides)
+        )
+
+    @staticmethod
+    def _compressed_slots(
+        row: int, block_size: int, elem: int, block_step: int
+    ) -> tuple[int, int]:
+        """Pick fewer, wider slots that tile ``row`` exactly at an aligned width.
+
+        Args:
+            row: Elements in this layer's state row.
+            block_size: Tokens per block (spec.block_size).
+            elem: Bytes per element.
+            block_step: stride(0) of the registered cache, in elements.
+
+        Returns:
+            ``(num_slots, head_size)`` with ``num_slots * head_size == row``,
+            ``block_size % num_slots == 0`` and the widest vector alignment
+            possible, preferring more slots within one alignment.
+
+        Raises:
+            ValueError: If no slot count tiles the row at an aligned width.
+        """
+        for align_bytes in (16, 8, 4, 2):
+            if align_bytes % elem != 0 or (block_step * elem) % align_bytes != 0:
+                continue
+            step = align_bytes // elem
+            for ratio in range(2, block_size + 1):
+                if block_size % ratio != 0:
+                    continue
+                num_slots = block_size // ratio
+                if row % num_slots == 0 and (row // num_slots) % step == 0:
+                    return num_slots, row // num_slots
+        raise ValueError(
+            f"cannot tile a {row}-element state row into {block_size} "
+            "tokens or any divisor of it at an aligned width"
         )
 
 
@@ -683,9 +780,14 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
 
     name = "subpaged-mla-attention-view"
 
-    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+    def matches(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        kind: KVCacheSpecKind | None = None,
+    ) -> bool:
         return (
-            get_kv_cache_spec_kind(spec) == KVCacheSpecKind.MLA_ATTENTION
+            _spec_kind(spec, kind) == KVCacheSpecKind.MLA_ATTENTION
             and isinstance(kv_cache, torch.Tensor)
             and kv_cache.ndim in (3, 4)
             and kv_cache.shape[_mla_states_dim(kv_cache)] != _num_states(spec)
@@ -777,6 +879,7 @@ def _subpaged_plane_pair_ratio(
     spec: KVCacheSpec,
     k_plane: torch.Tensor,
     v_plane: torch.Tensor,
+    kind: KVCacheSpecKind | None = None,
 ) -> int | None:
     """Return the logical/kernel block ratio for a sub-paged rank-4 pair.
 
@@ -784,8 +887,8 @@ def _subpaged_plane_pair_ratio(
     kernel block evenly divides the scheduler block, or K/V differ in dtype
     or device.
     """
-    if get_kv_cache_spec_kind(
-        spec
+    if _spec_kind(
+        spec, kind
     ) not in _SUBPAGEABLE_ATTENTION_KINDS or _declares_slot_compression(spec):
         return None
     if k_plane.ndim != 4 or v_plane.ndim != 4 or k_plane.shape != v_plane.shape:
@@ -876,12 +979,17 @@ class _SubpagedAttentionInterleavedPlaneViewEdit(KVCacheGroupEdit):
 
     name = "subpaged-attention-interleaved-plane-view"
 
-    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+    def matches(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        kind: KVCacheSpecKind | None = None,
+    ) -> bool:
         planes = _attention_kv_plane_pair(kv_cache)
         if planes is None:
             return False
         k_plane, v_plane = planes
-        ratio = _subpaged_plane_pair_ratio(spec, k_plane, v_plane)
+        ratio = _subpaged_plane_pair_ratio(spec, k_plane, v_plane, kind)
         if ratio is None:
             return False
         return _is_interleaved_kernel_kv_pair(
@@ -960,12 +1068,17 @@ class _SubpagedAttentionContiguousPlaneViewEdit(KVCacheGroupEdit):
 
     name = "subpaged-attention-contiguous-plane-view"
 
-    def matches(self, spec: KVCacheSpec, kv_cache: RegisteredKVCache) -> bool:
+    def matches(
+        self,
+        spec: KVCacheSpec,
+        kv_cache: RegisteredKVCache,
+        kind: KVCacheSpecKind | None = None,
+    ) -> bool:
         planes = _attention_kv_plane_pair(kv_cache)
         if planes is None:
             return False
         k_plane, v_plane = planes
-        ratio = _subpaged_plane_pair_ratio(spec, k_plane, v_plane)
+        ratio = _subpaged_plane_pair_ratio(spec, k_plane, v_plane, kind)
         if ratio is None:
             return False
         if not (k_plane.is_contiguous() and v_plane.is_contiguous()):
@@ -1068,11 +1181,10 @@ def apply_kv_cache_group_edits(
     edited = dict(kv_caches)
     counts: Counter[str] = Counter()
     for group in kv_cache_config.kv_cache_groups:
-        per_layer_specs = getattr(group.kv_cache_spec, "kv_cache_specs", None)
-        for name in group.layer_names:
-            spec = per_layer_specs[name] if per_layer_specs else group.kv_cache_spec
+        for name, spec in group_layer_specs(group).items():
+            kind = _layer_kind(group, spec)
             for edit in _EDITS:
-                if edit.matches(spec, kv_caches[name]):
+                if edit.matches(spec, kv_caches[name], kind):
                     edited[name] = edit.apply(spec, kv_caches[name], layout_hints)
                     counts[edit.name] += 1
                     break

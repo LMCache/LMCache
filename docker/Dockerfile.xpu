@@ -108,17 +108,4 @@ ENTRYPOINT ["vllm", "serve"]
 #   --build-arg no_proxy=localhost,127.0.0.1 \
 #   .
 
-# Run:
-# docker run --device /dev/dri  \
-#  --ipc=host \
-#  --shm-size=16g \
-#   -p 8001:8000 \
-#   -e ZE_AFFINITY_MASK=1 \
-#   -e HF_ENDPOINT=https://hf-mirror.com \
-#   -e HF_TOKEN=<hf-token > \
-#   -e http_proxy=<proxy> \
-#   -e https_proxy=<proxy> \
-#   lmcache-xpu:latest \
-#   Qwen/Qwen3-0.6B \
-#   --kv-transfer-config \
-#   '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+# Run this image as the vLLM side of an LMCache MP deployment. See docker/README.md.

@@ -13,12 +13,12 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.token_codec import TOKEN_STRIDE, num_packed_tokens
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L1ReadReservation
 from lmcache.v1.distributed.l1_manager import validate_read_locks
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE, num_packed_tokens
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     PeriodicThreadRegistry,
@@ -35,7 +35,7 @@ class Session:
     """Tracks accumulated token IDs and computed chunk hashes for a request.
 
     Tokens are held in the packed form of
-    :mod:`lmcache.v1.multiprocess.token_codec`, the layout that arrives on
+    :mod:`lmcache.v1.common.token_codec`, the layout that arrives on
     the wire and that blake3 hashes; only callers needing ints unpack.
 
     Thread-safe: all public methods are protected by an internal lock
@@ -53,10 +53,8 @@ class Session:
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
     prefetch_read_generations: dict[ObjectKey, int] = field(default_factory=dict)
-    prefetch_group_windows: tuple[int, ...] = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
-    _lookup_generation: int = field(default=0, repr=False)
     _unclaimed_reads: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
     _claimed_worker_reads: set[tuple[int, int, ObjectKey]] = field(
         default_factory=set, repr=False
@@ -129,6 +127,55 @@ class Session:
             self._compute_hash(end_chunk)
             return self.chunk_hashes[start_chunk:end_chunk]
 
+    def get_unfull_chunk_hash(self, boundary: int) -> Any:
+        """Return the hash of the unfull chunk with boundary ``boundary``.
+
+        A boundary is a token count: the unfull chunk covers the tokens from
+        the last chunk boundary at or below it up to it,
+        ``[floor(boundary / chunk_size) * chunk_size, boundary)``. It is
+        hashed like a full chunk, chaining from the rolling hash of the full
+        chunks before it. It has fewer than chunk_size tokens, so its hash
+        differs from every full chunk's.
+
+        Args:
+            boundary: Token count the unfull chunk reaches; must not be a
+                multiple of chunk_size.
+
+        Returns:
+            The unfull chunk's hash value.
+
+        Raises:
+            ValueError: If ``boundary`` is chunk-aligned or exceeds the current
+                tokens.
+        """
+        chunk_size = self.hasher.chunk_size
+        if boundary % chunk_size == 0:
+            raise ValueError(
+                f"unfull chunk boundary ({boundary}) must not be a multiple of "
+                f"chunk_size ({chunk_size})"
+            )
+        with self._lock:
+            num_tokens = num_packed_tokens(self.tokens)
+            if boundary > num_tokens:
+                raise ValueError(
+                    f"unfull chunk boundary ({boundary}) exceeds the session's "
+                    f"{num_tokens} token(s)"
+                )
+            num_full_chunks = boundary // chunk_size
+            self._compute_hash(num_full_chunks)
+            prefix = (
+                self.chunk_hashes[num_full_chunks - 1]
+                if num_full_chunks > 0
+                else self.hasher.none_hash
+            )
+            return self.hasher.hash_packed_chunk(
+                memoryview(self.tokens)[
+                    num_full_chunks * chunk_size * TOKEN_STRIDE : boundary
+                    * TOKEN_STRIDE
+                ],
+                prefix,
+            )
+
     def _compute_hash(self, end_chunk: int) -> None:
         """Compute rolling hashes up to end_chunk.
 
@@ -155,19 +202,13 @@ class Session:
             self.chunk_hashes.append(h)
             self.num_chunks_processed += 1
 
-    def begin_lookup(
-        self,
-        key: IPCCacheServerKey,
-        group_windows: tuple[int, ...],
-    ) -> None:
-        """Record a new lookup and reset its per-lookup release state."""
+    def begin_lookup(self, key: IPCCacheServerKey) -> None:
+        """Record a new lookup and reset the previous lookup's result."""
         with self._lock:
             self.lookup_ipc_key = key
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
             self.prefetch_read_generations = {}
-            self.prefetch_group_windows = group_windows
-            self._lookup_generation += 1
             self._unclaimed_reads.clear()
             self._claimed_worker_reads.clear()
             self._prefetch_owners.clear()
@@ -179,20 +220,30 @@ class Session:
         l1_owners: dict[ObjectKey, int] | None = None,
         *,
         read_generations: dict[ObjectKey, int] | None = None,
+        read_counts: dict[ObjectKey, int],
     ) -> None:
-        """Record the lookup's retained L1 owners and acquired lock generations."""
+        """Record the lookup's original owners, generations and read shares.
+
+        Args:
+            hit_chunks: Absolute hit boundary reported by the prefetch.
+            locked_gids: Object groups whose hit cells retain read locks.
+            l1_owners: Original L1 manager ID for each retained object.
+            read_generations: Original lock generation for each retained object.
+            read_counts: Read shares acquired for those objects. Counts may differ
+                across groups when TP replicas share one stored object.
+
+        Raises:
+            ValueError: A reader count is outside the L1 lock-count domain.
+            KeyError: A retained generation has no corresponding reader count.
+        """
         with self._lock:
             self.prefetch_hit_chunks = hit_chunks
             self.prefetch_locked_gids = locked_gids
             self._prefetch_owners = dict(l1_owners) if l1_owners is not None else {}
             self.prefetch_read_generations = read_generations or {}
-            count = (
-                validate_read_locks(self.lookup_ipc_key.require_num_kv_readers())
-                if self.lookup_ipc_key is not None
-                else 0
-            )
             self._unclaimed_reads = {
-                key: count for key in self.prefetch_read_generations
+                key: validate_read_locks(read_counts[key])
+                for key in self.prefetch_read_generations
             }
 
     def get_read_generations(self, keys: list[ObjectKey]) -> dict[ObjectKey, int]:
@@ -209,45 +260,11 @@ class Session:
         with self._lock:
             return self._prefetch_owners.copy()
 
-    def prepare_failed_retrieve_release(
-        self,
-        key: IPCCacheServerKey,
-    ) -> tuple[int, tuple[int, ...], tuple[int, ...], int] | None:
-        """Return a stable snapshot for a failed worker's lock release."""
-        if key.worker_id is None:
-            return None
-
-        with self._lock:
-            lookup_key = self.lookup_ipc_key
-            hit_chunks = self.prefetch_hit_chunks
-            if lookup_key is None or hit_chunks < 0:
-                return None
-
-            same_lookup = (
-                key.model_name == lookup_key.model_name
-                and key.world_size == lookup_key.world_size
-                and key.token_bytes == lookup_key.token_bytes
-                and key.cache_salt == lookup_key.cache_salt
-                and key.start >= lookup_key.start
-                and key.end <= lookup_key.end
-            )
-            if not same_lookup:
-                return None
-
-            return (
-                hit_chunks,
-                self.prefetch_locked_gids,
-                self.prefetch_group_windows,
-                self._lookup_generation,
-            )
-
     def claim_worker_read(
         self,
         key: IPCCacheServerKey,
         instance_id: int,
         keys: list[ObjectKey],
-        *,
-        lookup_generation: int | None = None,
     ) -> tuple[L1ReadReservation, ...] | None:
         """Transfer one share per key to a worker, excluding subsequent FREE.
 
@@ -259,7 +276,6 @@ class Session:
             key: Worker request matching this lookup's model and token identity.
             instance_id: Worker incarnation carried by the RETRIEVE protocol.
             keys: Exact retained objects this worker will consume or abandon.
-            lookup_generation: Optional epoch captured before key resolution.
 
         Returns:
             Immutable original reservations, or None if any share is unavailable.
@@ -270,10 +286,6 @@ class Session:
                 not self._matches_lookup(key)
                 or key.worker_id is None
                 or not 0 <= key.worker_id < key.world_size
-                or (
-                    lookup_generation is not None
-                    and lookup_generation != self._lookup_generation
-                )
             ):
                 return None
             unique_keys = list(dict.fromkeys(keys))

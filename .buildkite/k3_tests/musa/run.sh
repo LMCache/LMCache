@@ -239,18 +239,10 @@ allowlist = (
     "tests/test_*.py",
     "tests/cli/**/test_*.py",
     "tests/v1/**/test_*.py",
-    "tests/inprocess/**/test_*.py",
 )
 excluded = {
     # These modules import optional CUDA/Triton/vLLM components during
     # collection and are covered by their platform-specific jobs.
-    "tests/v1/compute/attention/test_triton_kernels.py",
-    "tests/v1/test_pos_kernels.py",
-    # These lanes require CUDA/NIXL-specific host services.
-    "tests/v1/test_device_id_race.py",
-    "tests/v1/test_nixl_batched_contains.py",
-    "tests/v1/test_nixl_multipath.py",
-    "tests/inprocess/v1/storage_backend/test_eic.py",
 }
 
 selected: set[str] = set()
@@ -284,12 +276,9 @@ fi
 log "Running focused MUSA connector and transfer tests"
 run_pytest "${PYTEST_ARGS[@]}" \
     tests/v1/test_musa_support.py \
-    tests/inprocess/v1/test_gpu_connector_factory.py \
-    tests/inprocess/v1/test_musa_connector.py \
     tests/v1/test_musa_native.py \
     tests/v1/platform/devices/musa/test_musa_pin_memory.py \
     tests/v1/platform/devices/musa/test_musa_staging_copy.py \
-    tests/inprocess/v1/platform/devices/musa/test_musa_staging_copy.py \
     tests/v1/platform/devices/musa/test_musa_mp_block_transfer.py::test_musa_block_transfer_device_non_mla_d2h_and_h2d \
     tests/v1/platform/devices/musa/test_musa_mp_block_transfer.py::test_musa_block_transfer_device_mla_d2h_and_h2d \
     tests/v1/multiprocess/test_engine_driven_transfer.py::test_musa_data_context_keeps_layout_validation_device_agnostic \

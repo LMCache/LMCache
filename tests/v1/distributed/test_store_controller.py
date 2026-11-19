@@ -27,9 +27,7 @@ from lmcache import torch_dev
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.eviction_policy.noop import (
-    NoOpEvictionPolicy,
-)
+from lmcache.v1.distributed.eviction_policy.noop import NoOpEvictionPolicy
 from lmcache.v1.distributed.internal_api import L1OperationResult, L2StoreResult
 from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2TaskId
@@ -133,8 +131,10 @@ def write_keys_to_l1(
 
 
 @pytest.fixture
-def l1_manager(monkeypatch: pytest.MonkeyPatch) -> Iterator[DramL1Manager]:
-    """Create an DramL1Manager with a reasonable memory config."""
+def l1_manager(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> Iterator[DramL1Manager]:
+    """Create a DramL1Manager with a reasonable memory config."""
     if not torch_dev.is_available():
         monkeypatch.setattr(
             memory_management,
@@ -153,7 +153,7 @@ def l1_manager(monkeypatch: pytest.MonkeyPatch) -> Iterator[DramL1Manager]:
             shm_name="",
         ),
         write_ttl_seconds=600,
-        read_ttl_seconds=300,
+        read_ttl_seconds=getattr(request, "param", 300),
     )
     mgr = DramL1Manager(config)
     yield mgr
@@ -200,24 +200,24 @@ class GatedStoreAdapter(MockL2Adapter):
         return results
 
 
+@pytest.mark.parametrize("l1_manager", [1], indirect=True)
 @pytest.mark.parametrize("failed", [False, True])
 def test_store_pins_survive_read_expiry(
-    l1_manager: DramL1Manager, monkeypatch: pytest.MonkeyPatch, failed: bool
+    l1_manager: DramL1Manager, failed: bool
 ) -> None:
     """TTL expiry cannot recycle a source before success or failure completion."""
-    clock = [0.0]
-    monkeypatch.setattr(l1_manager_module, "monotonic", lambda: clock[0])
     adapter = GatedStoreAdapter()
     adapter.fail_completion = failed
     ctrl = StoreController(
-        l1_manager, [adapter], [make_descriptor(0)], DefaultStorePolicy()
+        l1_manager, [adapter], [make_descriptor(0)], DefaultStorePolicy([l1_manager])
     )
     ctrl.start()
     keys = [make_object_key(0)]
     try:
         write_keys_to_l1(l1_manager, keys, make_layout())
         assert adapter.started.wait(5)
-        clock[0] += 1000
+        # Both the native TTL and the transfer pin see a real expired lease.
+        time.sleep(1.1)
         assert l1_manager.delete(keys)[keys[0]] == L1Error.KEY_IS_LOCKED
         generations: dict[ObjectKey, int] = {}
         assert l1_manager.reserve_read(keys, read_generations=generations)[keys[0]][
@@ -244,7 +244,7 @@ def test_stop_drains_store_and_ignores_later_l1_writes(
     adapter = GatedStoreAdapter()
     adapter.fail_completion = failed
     ctrl = StoreController(
-        l1_manager, [adapter], [make_descriptor(0)], DefaultStorePolicy()
+        l1_manager, [adapter], [make_descriptor(0)], DefaultStorePolicy([l1_manager])
     )
     ctrl.start()
     key = make_object_key(0)
@@ -283,7 +283,7 @@ def test_each_adapter_retains_its_own_store_pin(
     clock = [0.0]
     monkeypatch.setattr(l1_manager_module, "monotonic", lambda: clock[0])
     adapters = [GatedStoreAdapter(), GatedStoreAdapter()]
-    policy = DefaultStorePolicy()
+    policy = DefaultStorePolicy([l1_manager])
     monkeypatch.setattr(
         policy,
         "select_store_targets",
@@ -338,7 +338,7 @@ def test_rejected_replica_does_not_release_admitted_store(
         l1_manager,
         [admitted, rejected],
         [make_descriptor(i) for i in range(2)],
-        DefaultStorePolicy(),
+        DefaultStorePolicy([l1_manager]),
     )
     ctrl.start()
     keys = [make_object_key(0)]
@@ -387,7 +387,7 @@ def test_expired_pin_claim_preserves_newer_reader(
     monkeypatch.setattr(l1_manager, "finish_read", observe_finish)
     adapter = make_adapter()
     ctrl = StoreController(
-        l1_manager, [adapter], [make_descriptor(0)], DefaultStorePolicy()
+        l1_manager, [adapter], [make_descriptor(0)], DefaultStorePolicy([l1_manager])
     )
     ctrl.start()
     keys = [make_object_key(0)]
@@ -418,7 +418,7 @@ def test_stop_finishes_adapter_operations_accepted_before_shutdown(
         return original_fd()
 
     monkeypatch.setattr(adapter, "get_store_event_fd", delayed_fd)
-    ctrl = StoreController(l1_manager, [], [], DefaultStorePolicy())
+    ctrl = StoreController(l1_manager, [], [], DefaultStorePolicy([l1_manager]))
     ctrl.start()
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -524,7 +524,7 @@ class TestStoreControllerLifecycle:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
         ctrl.stop()
@@ -536,7 +536,7 @@ class TestStoreControllerLifecycle:
             l1_manager=l1_manager,
             l2_adapters=[],
             adapter_descriptors=[],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
         ctrl.stop()
@@ -552,7 +552,7 @@ class TestStoreControllerSingleAdapter:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -591,7 +591,7 @@ class TestStoreControllerSingleAdapter:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -616,7 +616,7 @@ class TestStoreControllerSingleAdapter:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -642,7 +642,7 @@ class TestStoreControllerSingleAdapter:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -668,7 +668,7 @@ class TestStoreControllerSingleAdapter:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -685,7 +685,7 @@ class TestStoreControllerSingleAdapter:
 
         # Verify read lock is released: the key should be evictable
         ok = wait_for_condition(
-            lambda: (l1_manager.is_key_evictable(keys[0])),
+            lambda: l1_manager.is_key_evictable(keys[0]),
             timeout=5.0,
         )
         assert ok, "Key should be evictable after store controller releases read lock"
@@ -705,7 +705,7 @@ class TestStoreControllerSingleAdapter:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -746,7 +746,7 @@ class TestStoreControllerMultipleAdapters:
             l1_manager=l1_manager,
             l2_adapters=adapters,
             adapter_descriptors=descriptors,
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -774,7 +774,7 @@ class TestStoreControllerMultipleAdapters:
             l1_manager=l1_manager,
             l2_adapters=adapters,
             adapter_descriptors=descriptors,
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -790,7 +790,7 @@ class TestStoreControllerMultipleAdapters:
         assert ok
 
         ok = wait_for_condition(
-            lambda: (l1_manager.is_key_evictable(keys[0])),
+            lambda: l1_manager.is_key_evictable(keys[0]),
             timeout=5.0,
         )
         assert ok, "Key should be evictable after all adapter stores complete"
@@ -809,7 +809,7 @@ class TestStoreControllerNoAdapters:
             l1_manager=l1_manager,
             l2_adapters=[],
             adapter_descriptors=[],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -838,7 +838,7 @@ class TestStoreControllerCustomPolicy:
             def select_store_targets(self, keys, adapters):
                 return {}
 
-            def select_l1_deletions(self, keys):
+            def select_l1_deletions(self, keys, adapter):
                 return []
 
         adapter = make_adapter()
@@ -846,7 +846,7 @@ class TestStoreControllerCustomPolicy:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=SkipAllPolicy(),
+            policy=SkipAllPolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -873,7 +873,7 @@ class TestStoreControllerCustomPolicy:
             def select_store_targets(self, keys, adapters):
                 return {ad.index: list(keys) for ad in adapters}
 
-            def select_l1_deletions(self, keys):
+            def select_l1_deletions(self, keys, adapter):
                 return list(keys)
 
         adapter = make_adapter()
@@ -881,7 +881,7 @@ class TestStoreControllerCustomPolicy:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DeleteAfterStorePolicy(),
+            policy=DeleteAfterStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -913,6 +913,51 @@ class TestStoreControllerCustomPolicy:
         ctrl.stop()
         adapter.close()
 
+    def test_l1_deletion_decision_is_told_which_adapter_stored(self, l1_manager):
+        """The policy sees the adapter that finished, so it can decide per
+        adapter whether the L1 copy goes away."""
+        consulted: list[int] = []
+
+        class DeleteAfterSecondAdapterPolicy(StorePolicy):
+            def select_store_targets(self, keys, adapters):
+                return {ad.index: list(keys) for ad in adapters}
+
+            def select_l1_deletions(self, keys, adapter):
+                consulted.append(adapter.index)
+                return list(keys) if adapter.index == 1 else []
+
+        adapters = [make_adapter(), make_adapter()]
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=adapters,
+            adapter_descriptors=[make_descriptor(0), make_descriptor(1)],
+            policy=DeleteAfterSecondAdapterPolicy([l1_manager]),
+        )
+        ctrl.start()
+
+        layout = make_layout()
+        keys = [make_object_key(0)]
+        write_keys_to_l1(l1_manager, keys, layout)
+
+        ok = wait_for_condition(lambda: sorted(consulted) == [0, 1], timeout=5.0)
+        assert ok, "The policy should be consulted once per finished adapter"
+        ok = wait_for_condition(
+            lambda: (
+                l1_manager.reserve_write(
+                    keys=keys,
+                    is_temporary=[False],
+                    layout_desc=layout,
+                )[keys[0]][1]
+                is not None
+            ),
+            timeout=5.0,
+        )
+        assert ok, "The second adapter's store should delete the key from L1"
+
+        ctrl.stop()
+        for adapter in adapters:
+            adapter.close()
+
     def test_policy_selects_subset_of_adapters(self, l1_manager):
         """A policy that targets only some adapters should skip others."""
 
@@ -925,7 +970,7 @@ class TestStoreControllerCustomPolicy:
                         return {0: list(keys)}
                 return {}
 
-            def select_l1_deletions(self, keys):
+            def select_l1_deletions(self, keys, adapter):
                 return []
 
         adapters = [make_adapter(), make_adapter()]
@@ -935,7 +980,7 @@ class TestStoreControllerCustomPolicy:
             l1_manager=l1_manager,
             l2_adapters=adapters,
             adapter_descriptors=descriptors,
-            policy=FirstAdapterOnlyPolicy(),
+            policy=FirstAdapterOnlyPolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -971,7 +1016,7 @@ class TestBufferOnlyMode:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=BufferOnlyStorePolicy(),
+            policy=BufferOnlyStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -1019,7 +1064,7 @@ class TestBufferOnlyMode:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=BufferOnlyStorePolicy(),
+            policy=BufferOnlyStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -1055,7 +1100,7 @@ class TestBufferOnlyMode:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=BufferOnlyStorePolicy(),
+            policy=BufferOnlyStorePolicy([l1_manager]),
         )
         ctrl.start()
 

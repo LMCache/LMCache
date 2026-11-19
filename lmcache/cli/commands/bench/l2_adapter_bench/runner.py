@@ -176,6 +176,7 @@ def bench_store(
             if completed.get(tid, L2StoreResult(False, 0)).is_successful()
         )
 
+        result.round_timed_out.append(timed_out)
         if timed_out:
             log(
                 f"  [Store] Round {r + 1}: TIMEOUT "
@@ -246,6 +247,7 @@ def bench_lookup(
 
         total_found = sum(_bitmap_count(results.get(tid)) for tid in task_ids)
 
+        result.round_timed_out.append(timed_out)
         if timed_out:
             log(
                 f"  [Lookup] Round {r + 1}: TIMEOUT "
@@ -312,6 +314,7 @@ def bench_load(
 
         total_loaded = sum(_bitmap_count(results.get(tid)) for tid in task_ids)
 
+        result.round_timed_out.append(timed_out)
         if timed_out:
             log(
                 f"  [Load] Round {r + 1}: TIMEOUT "

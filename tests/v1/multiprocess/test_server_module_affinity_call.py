@@ -12,23 +12,23 @@ import pytest
 import zmq
 
 # First Party
+from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleRouter,
     build_server_module_router,
     server_module_handler,
 )
-from lmcache.v1.multiprocess.protocols.server_module import (
-    ServerModuleCallRequest,
-    ServerModuleCallResponse,
-)
 from lmcache.v1.multiprocess.request_handler import (
     HandlerType,
     get_request_handler_options,
     request_handler,
 )
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
+from lmcache.v1.transport.server_module import (
+    ServerModuleCallRequest,
+    ServerModuleCallResponse,
+)
 
 
 def _ok(payload: bytes) -> ServerModuleCallResponse:
@@ -137,7 +137,7 @@ def test_router_status_lists_affinity_methods() -> None:
 
 
 @pytest.mark.parametrize("transport", ["zmq", "grpc"])
-def test_affinity_call_runs_in_order_over_real_transport(
+def test_affinity_call_holds_back_later_affinity_requests(
     transport: Literal["zmq", "grpc"],
 ) -> None:
     """The call runs on the client's affinity thread, can report progress

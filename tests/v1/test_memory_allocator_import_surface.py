@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from pathlib import Path
 import subprocess
 import sys
 import textwrap
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+# First Party
+from tests.import_utils import lmcache_path, lmcache_subprocess_env
 
 
 def _run_import_script(script: str) -> None:
@@ -20,7 +20,8 @@ def _run_import_script(script: str) -> None:
     """
     result = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(script)],
-        cwd=_REPO_ROOT,
+        cwd=lmcache_path().parent,
+        env=lmcache_subprocess_env(),
         text=True,
         capture_output=True,
         check=False,
@@ -57,8 +58,6 @@ def test_allocator_submodule_first_import_keeps_core_surface() -> None:
     """Importing concrete allocator modules first does not create a cycle."""
     _run_import_script(
         """
-        import sys
-
         from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
             PagedAddressManager,
             PagedTensorMemoryAllocator,
@@ -76,7 +75,6 @@ def test_allocator_submodule_first_import_keeps_core_surface() -> None:
         assert TensorMemoryAllocator.__name__ == "TensorMemoryAllocator"
         assert MemoryAllocatorInterface.__name__ == "MemoryAllocatorInterface"
         assert MemoryFormat.KV_2LTD.name == "KV_2LTD"
-        assert not any(name.startswith("lmcache.inprocess") for name in sys.modules)
         """
     )
 
