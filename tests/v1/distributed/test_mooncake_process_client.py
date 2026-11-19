@@ -31,11 +31,18 @@ import pytest
 
 # The adapter package imports compiled Bitmap. Load this component directly so
 # the process/SHM tests exercise its real code without requiring native builds.
-_source = (
-    Path(__file__).resolve().parents[3]
-    / "lmcache/v1/distributed/l2_adapters/mooncake_process_client.py"
-)
-sys.path.insert(0, str(_source.parents[4]))
+_component = "v1/distributed/l2_adapters/mooncake_process_client.py"
+if __name__ == "__main__":
+    # A standalone fake worker can run without the checkout's tests package.
+    # First Party
+    import lmcache
+
+    _source = Path(lmcache.__file__).resolve().parent / _component
+else:
+    # First Party
+    from tests.import_utils import lmcache_path
+
+    _source = lmcache_path(_component)
 _spec = importlib.util.spec_from_file_location("mooncake_process_client", _source)
 assert _spec is not None and _spec.loader is not None
 _module = importlib.util.module_from_spec(_spec)
@@ -507,7 +514,9 @@ def test_child_imports_parent_source_when_launched_outside_checkout(
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("PYTHONPATH", raising=False)
     script = (
-        "import lmcache, runpy, sys; "
+        "import lmcache, runpy, sys; from pathlib import Path; "
+        "assert Path(lmcache.__file__).resolve() == "
+        f"Path({str(lmcache_path('__init__.py'))!r}); "
         f"sys.argv = [{str(Path(__file__).resolve())!r}, "
         "'--fake-worker', sys.argv[1]]; "
         "runpy.run_path(sys.argv[0], run_name='__main__')"

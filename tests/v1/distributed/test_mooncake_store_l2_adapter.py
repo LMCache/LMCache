@@ -145,7 +145,9 @@ def test_process_factory_and_transfers_use_the_same_named_l1(
         keys = [ObjectKey(ObjectKey.IntHash2Bytes(17), "affinity", 0)]
         layout = MemoryLayoutDesc([torch.Size([1024])], [torch.float32])
         objects = store.reserve_write(keys, layout)
-        objects[keys[0]].tensor.fill_(3.5)
+        tensor = objects[keys[0]].tensor
+        assert tensor is not None
+        tensor.fill_(3.5)
         store.finish_write(keys, l1_owners_of(objects))
         deadline = time.monotonic() + 5
         while "store" not in transfers or not first.is_key_evictable(keys[0]):

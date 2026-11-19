@@ -24,6 +24,7 @@ import pytest
 # First Party
 from lmcache.v1.common.errors import LMCacheTimeoutError
 from lmcache.v1.platform.event_notifier import EventNotifier
+from tests.import_utils import lmcache_path
 
 if TYPE_CHECKING:
     # First Party
@@ -38,10 +39,7 @@ if TYPE_CHECKING:
 else:
     # The adapter package initializer imports native extensions; this component
     # itself is independent of them and is loaded unchanged from its real file.
-    component_path = (
-        Path(__file__).resolve().parents[3]
-        / "lmcache/v1/distributed/l2_adapters/mooncake_resilience.py"
-    )
+    component_path = lmcache_path("v1/distributed/l2_adapters/mooncake_resilience.py")
     specification = importlib.util.spec_from_file_location(
         "lmcache_test_mooncake_resilience", component_path
     )
