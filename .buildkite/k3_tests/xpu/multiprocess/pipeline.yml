@@ -323,6 +323,7 @@ steps:
           MAX_NUM_BATCHED_TOKENS: ""
           CHUNK_SIZE: "256"
           # Engine-driven status lacks KV sizes; BF16 Qwen3-8B uses 147456 B/token.
+          RR_TOKENS_PER_GB: "7281"
           MAX_WAIT_SECONDS: "600"
         timeout_in_minutes: 30
         retry: *flaky-retry
