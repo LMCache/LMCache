@@ -157,6 +157,9 @@ Status codes follow grpcio: a missing handler is `UNIMPLEMENTED`, a handler
 exception is `UNKNOWN` (`Exception calling application: ...`), an undecodable
 request is `INTERNAL`, and calls still running at shutdown get `UNAVAILABLE`.
 A cancelled server-streaming call closes the handler's `MessagingStream`.
+An error while reading a server-streaming handler's stream ends the stream
+normally on all three servers, as on ZMQ, so the KV event subscriber
+resubscribes.
 Like grpcio servers it accepts gzip requests, answers uncompressed, and ends
 a call with `DEADLINE_EXCEEDED` once its `grpc-timeout` passes.
 
