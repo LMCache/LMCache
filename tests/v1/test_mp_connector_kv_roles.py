@@ -29,7 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (  # noqa: E402
     MultiConnector,
 )
-from vllm.v1 import kv_cache_interface as kv_cache_api  # noqa: E402
+from vllm.v1 import kv_cache_interface  # noqa: E402
 from vllm.v1.core.sched.output import SchedulerOutput  # noqa: E402
 from vllm.v1.kv_cache_interface import KVCacheConfig  # noqa: E402
 from vllm.v1.outputs import KVConnectorOutput  # noqa: E402
@@ -487,23 +487,27 @@ def test_receive_failure_reporting(
             kv_connector_extra_config={"lmcache.mp.lazy_offload": lazy_offload},
         )
     )
-    # vLLM main moved allocation policy from FullAttentionSpec into the group.
-    spec_type = getattr(kv_cache_api, "FullAttentionSpec", kv_cache_api.AttentionSpec)
+    spec_type = getattr(
+        kv_cache_interface, "FullAttentionSpec", kv_cache_interface.AttentionSpec
+    )
     spec = spec_type(block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float32)
-    if hasattr(kv_cache_api, "KVCacheGroupSpec"):
-        groups = [
-            kv_cache_api.KVCacheGroupSpec([f"layer{i}"], spec)
-            for i in range(num_groups)
-        ]
-    else:
+    if hasattr(kv_cache_interface, "KVCacheGroup"):
         # Third Party
         from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 
-        manager = kv_cache_api.ManagerConfig(
-            FullAttentionManager, FullAttentionManager.Params()
-        )
         groups = [
-            kv_cache_api.KVCacheGroup({f"layer{i}": spec}, manager, spec.block_size)
+            kv_cache_interface.KVCacheGroup(
+                kv_cache_specs={f"layer{i}": spec},
+                manager_config=kv_cache_interface.ManagerConfig(
+                    FullAttentionManager, FullAttentionManager.Params()
+                ),
+                block_size=spec.block_size,
+            )
+            for i in range(num_groups)
+        ]
+    else:
+        groups = [
+            kv_cache_interface.KVCacheGroupSpec([f"layer{i}"], spec)
             for i in range(num_groups)
         ]
     cache_config = KVCacheConfig(

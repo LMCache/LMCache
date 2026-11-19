@@ -90,6 +90,7 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
         max_gpu_workers: int,
         grpc_server_workers: int,
         authentication: APIKeyVerifier | None = None,
+        rpc_client: type | None = None,
     ) -> None:
         super().__init__(
             bind_url,
@@ -97,6 +98,7 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
             max_gpu_workers,
             grpc_server_workers,
             authentication,
+            rpc_client,
         )
         # The loop must not block, so normal handlers need their own threads
         # here instead of the sync server's semaphore.
