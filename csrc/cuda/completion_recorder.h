@@ -26,7 +26,7 @@ using lmcache_completion_stream_t = cudaStream_t;
 
 struct PendingCompletion {
   std::string kind;     // dispatch key, e.g. "finish_write"
-  std::string payload;  // opaque encoded bytes (e.g. msgpack)
+  std::string payload;  // opaque bytes (a payload handle)
 };
 
 class CompletionRecorder {
