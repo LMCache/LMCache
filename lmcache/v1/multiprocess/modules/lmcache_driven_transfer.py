@@ -857,7 +857,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             model_name,
             world_size,
             layout_desc,
-            attn_desc,
+            self._ctx.chunk_size,
+            self._ctx.hash_algorithm_name,
+            attn_desc=attn_desc,
             group_layout_descs=group_layout_descs,
             group_unfull_chunk_layout_descs=group_unfull_chunk_layout_descs,
             shard_replication_desc=_fold_shard_replication_desc(
