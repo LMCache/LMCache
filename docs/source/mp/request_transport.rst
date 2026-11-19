@@ -6,6 +6,15 @@ This transport carries control and cache-operation requests; it is separate
 from ``--supported-transfer-mode``, which controls how KV data moves between
 the engine worker and the LMCache server.
 
+.. note::
+
+   gRPC is the default request transport. ``lmcache server`` serves gRPC unless
+   told otherwise, and a client URL without a scheme is read as ``grpc://``.
+   ZMQ still works and still speaks the same protocol, but it is **deprecated**:
+   the server warns when it is selected, and the ZMQ client and server
+   implementations are removed in the release after this one. See
+   :ref:`mp-migrating-from-zmq`.
+
 Transport schemes
 -----------------
 
@@ -16,16 +25,17 @@ Transport schemes
    * - Endpoint
      - Transport
      - Status
-   * - ``host:port`` or ``tcp://host:port``
-     - ZMQ over TCP
-     - Supported. A URL without a scheme defaults to ``tcp://``.
-   * - ``ipc://path`` or ``inproc://name``
-     - ZMQ IPC or in-process
-     - Recognized by the client factory; the standard LMCache server currently
-       binds ZMQ over TCP.
    * - ``grpc://host:port`` or ``grpc+unix:///path``
      - gRPC
-     - Supported.
+     - **Default.** A URL without a scheme is read as gRPC.
+   * - ``host:port`` or ``tcp://host:port``
+     - ZMQ over TCP
+     - Deprecated. Accepted during the transition; the server warns when it is
+       selected.
+   * - ``ipc://path`` or ``inproc://name``
+     - ZMQ IPC or in-process
+     - Deprecated together with ZMQ. Recognized by the client factory, and the
+       standard LMCache server binds ZMQ over TCP only.
 
 gRPC implementation and schema development
 ------------------------------------------
@@ -138,3 +148,58 @@ engine-driven tensor-data path uses a separate typed inline codec that shares
 the descriptor dtype allowlist. API-key authentication is optional and does
 not replace transport encryption; keep unauthenticated or insecure endpoints
 restricted to trusted networks.
+
+.. _mp-migrating-from-zmq:
+
+Migrating from ZMQ
+------------------
+
+Nothing breaks on upgrade: a `--transport zmq` server keeps serving ZMQ, and a
+``tcp://`` client URL keeps reaching it. The default is what changes, so a
+deployment that relied on the default on one side and named the transport on the
+other ends up on two different transports -- which fails at the first request,
+not silently. Migrate in this order:
+
+1. **Pick the transport the server should serve** and name it instead of relying
+   on the default:
+
+   .. code-block:: bash
+
+      lmcache server --transport grpc --host 0.0.0.0 --port 5555
+
+   The same applies to every other path that starts a server: the vLLM
+   autostart derives the transport from the connector URL, and the operator and
+   the test harnesses name theirs explicitly.
+
+2. **Point clients at that transport.** Set the scheme in the connector URL, or
+   rely on the scheme-less default, which is now gRPC:
+
+   .. code-block:: json
+
+      {"lmcache.mp.host": "grpc://coordinator-host", "lmcache.mp.port": 5555}
+
+   ``bench server --rpc-url`` and the SGLang ``mp_host`` setting take the same
+   scheme. A ``tcp://`` URL keeps working until the removal release.
+
+3. **Watch the logs.** Selecting ZMQ emits a deprecation warning naming the
+   release it will be removed in. A deployment that logs no warning is already
+   on gRPC.
+
+4. **Remove the ZMQ settings** before the removal release. After it, a
+   ``tcp://``, ``ipc://`` or ``inproc://`` request URL and a
+   `--transport zmq` server fail with an error that points at this section
+   rather than at a stack trace.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Release
+     - Behaviour
+   * - The release with the switch
+     - gRPC is the default; ZMQ works and warns. Mixed fleets are fine as long
+       as each client and its server agree.
+   * - The release after it
+     - ZMQ client and server request transports are removed. HTTP APIs, the
+       coordinator, KV transfer modes and the NIXL/Mooncake handshakes are
+       unaffected -- those still use ``pyzmq``.

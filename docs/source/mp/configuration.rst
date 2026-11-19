@@ -68,8 +68,10 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Default
      - Description
    * - ``--transport``
-     - ``zmq``
-     - Request transport exposed by the server. Choices: ``zmq`` or ``grpc``.
+     - ``grpc``
+     - Request transport exposed by the server. Choices: ``grpc`` or ``zmq``.
+       ``zmq`` is deprecated and removed in the next release; see
+       :ref:`mp-migrating-from-zmq`.
    * - ``--instance-id``
      - *(unset, default UUID v4)*
      - Stable identity of this MP server. Used as the coordinator
@@ -877,9 +879,9 @@ vLLM Client Configuration
 
 On the vLLM side, specify the LMCache server host and port via the
 ``kv_connector_extra_config`` parameter. The URL scheme selects the request
-transport: use ``tcp://`` for ZMQ or ``grpc://`` for gRPC, matching the
-server's ``--transport`` setting. A bare host is accepted and normalized to
-``tcp://`` for backward compatibility:
+transport: use ``grpc://`` for gRPC (the default) or ``tcp://`` for ZMQ,
+matching the server's ``--transport`` setting. A bare host is accepted and
+normalized to ``grpc://``; ``tcp://`` keeps working until ZMQ is removed:
 
 .. code-block:: bash
 
@@ -1062,7 +1064,7 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        ``<transport>://<host>:<port>`` URLs, e.g.
        ``"tcp://host1:6667,tcp://host2:6667"``. The transport prefix
        may be omitted -- bare ``host:port`` entries such as
-       ``"host1:6667,host2:6667"`` are normalized to ``tcp://`` by the
+       ``"host1:6667,host2:6667"`` are normalized to ``grpc://`` by the
        connector. When set, takes precedence over ``lmcache.mp.host`` /
        ``lmcache.mp.port``; the vLLM world size must be divisible by the
        number of servers, and each worker connects to its
@@ -1070,8 +1072,8 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.host``
      - ``tcp://localhost``
      - Single-server deployment: request transport and host of the LMCache MP
-       server. Use ``tcp://`` for ZMQ or ``grpc://`` for gRPC. A bare
-       ``localhost`` / ``127.0.0.1`` is normalized to ``tcp://`` by the
+       server. Use ``grpc://`` for gRPC (default) or ``tcp://`` for ZMQ. A
+       bare ``localhost`` / ``127.0.0.1`` is normalized to ``grpc://`` by the
        connector. Ignored when ``lmcache.mp.server_urls`` is set.
    * - ``lmcache.mp.port``
      - ``5555``
