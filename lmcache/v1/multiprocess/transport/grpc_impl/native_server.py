@@ -450,10 +450,10 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
                     break
             else:
                 front.stream_end(call_id)
-        except Exception:
+        except Exception as exc:
             if front.stream_open(call_id):
                 logger.exception("Error in streaming handler %s", registered.operation)
-                front.stream_end(call_id)
+                front.fail(call_id, _INTERNAL, str(exc))
         finally:
             self._close_stream(call_id)
             stream.close()

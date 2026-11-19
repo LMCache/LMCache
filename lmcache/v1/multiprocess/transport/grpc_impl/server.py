@@ -71,11 +71,13 @@ class _GeneratedServicer:
                     try:
                         for response in stream:
                             send(handler.response_encoder(response))
-                    except Exception:
+                    except Exception as exc:
                         if context.is_active():
                             logger.exception(
                                 "Error in streaming handler %s", handler.operation
                             )
+                            context.set_code(grpc.StatusCode.INTERNAL)
+                            context.set_details(str(exc))
                     finally:
                         stream.close()
                         send(None)
