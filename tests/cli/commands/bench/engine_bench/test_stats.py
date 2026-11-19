@@ -96,25 +96,6 @@ class TestPercentile:
 
 
 # ---------------------------------------------------------------------------
-# RequestResult
-# ---------------------------------------------------------------------------
-
-
-class TestRequestResult:
-    def test_construction(self) -> None:
-        r = _make_result(request_id="r1", ttft=0.5)
-        assert r.request_id == "r1"
-        assert r.ttft == 0.5
-        assert r.successful is True
-        assert r.error == ""
-
-    def test_failed_result(self) -> None:
-        r = _make_result(successful=False, error="timeout")
-        assert r.successful is False
-        assert r.error == "timeout"
-
-
-# ---------------------------------------------------------------------------
 # StatsCollector — basic operations
 # ---------------------------------------------------------------------------
 

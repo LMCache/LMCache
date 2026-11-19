@@ -13,7 +13,7 @@ whose block zero is real data can select another sentinel. ATOM native-state
 transfer uses:
 
 ```bash
-lmcache server --null-block-id -1 --separate-object-groups
+lmcache server --null-block-id -1
 ```
 
 The setting is server-wide rather than part of `EngineGroupInfo`, so it does
@@ -38,7 +38,7 @@ sentinel value here; the configuration is always an integer.
 PAGE and STATE must be separate object groups. Object presence is the lookup
 signal, so putting dense PAGE data and sparse STATE data in one object would
 make a PAGE hit incorrectly imply that STATE is present too. ATOM therefore
-uses `--separate-object-groups` explicitly.
+relies on object-group separation, which is enabled by default.
 
 ## Store and retrieve behavior
 

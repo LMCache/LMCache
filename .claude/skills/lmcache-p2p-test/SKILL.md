@@ -1,6 +1,7 @@
 ---
 name: lmcache-p2p-test
-description: Test a running LMCache P2P deployment: cross-node correctness (basic_test), stress ladder (concurrency, long documents, sustained mixed load), the standard lmcache bench long-doc-qa across nodes, and live Prometheus monitoring with a results summary. Use when asked to verify, stress, benchmark or monitor P2P KV sharing or to produce a P2P test report.
+description: >-
+  Test a running LMCache P2P deployment: cross-node correctness (basic_test), stress ladder (concurrency, long documents, sustained mixed load), the standard lmcache bench long-doc-qa across nodes, and live Prometheus monitoring with a results summary. Use when asked to verify, stress, benchmark or monitor P2P KV sharing or to produce a P2P test report.
 allowed-tools: Bash, Read, Grep, Glob, Write
 argument-hint: "[basic | stress | bench | monitor | all] [--concurrency N] [--tag NAME]"
 ---
@@ -45,7 +46,7 @@ Pass = 0 errors and hit ratio at the chunk-aligned maximum (about 0.98 for 7k-to
 Give each run `--tag` so its JSON/CSV and Prometheus export are identifiable. A hit ratio
 below the maximum with 0 errors is a graceful fallback; read the reason in
 `lmcache_mp_l2_prefetch_failure_chunks_total{reason=...}` (`l1_oom`: grow `L1_GB`;
-`l1_contended`: the same document fetched concurrently on one node, expected at a few %).
+`l1_contended`: a key resident in an affinity L1 the request may not read; expected to be 0 without memory-tag filtering).
 
 ## 3. Standard benchmark (`scripts/bench_ldqa.sh`)
 

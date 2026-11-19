@@ -30,7 +30,7 @@ source .buildkite/k3_harness/setup-lmcache-only-env.sh
 uv pip install -r requirements/test.txt
 # Generated gRPC bindings are intentionally not tracked. Generate them only
 # after the test dependencies have installed grpcio-tools.
-python lmcache/v1/multiprocess/transport/grpc_impl/_proto_gen/_generate.py
+python lmcache/v1/transport/grpc/_proto_gen/_generate.py
 
 # ── Run unit tests with coverage ─────────────────────────────
 RUN_DEVDAX_L1_INTEGRATION=1 RUN_DAX_L2_INTEGRATION=1 \

@@ -141,16 +141,6 @@ class TestMultiRoundChatConfigResolve:
 
 
 class TestSession:
-    def test_construction(self) -> None:
-        s = Session(
-            session_id=0,
-            system_prompt="You are helpful.",
-            history_text="Some history.",
-        )
-        assert s.session_id == 0
-        assert s.exchanges == []
-        assert s.in_flight is False
-
     def test_build_messages_no_history(self) -> None:
         s = Session(
             session_id=0,

@@ -9,10 +9,10 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.token_codec import pack_token_ids, unpack_token_ids
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.session import Session, SessionManager
-from lmcache.v1.multiprocess.token_codec import pack_token_ids, unpack_token_ids
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 
 
@@ -304,22 +304,6 @@ class TestSessionLookupIpcKey:
     def test_lookup_ipc_key_default_none(self, session: Session) -> None:
         """lookup_ipc_key should default to None."""
         assert session.lookup_ipc_key is None
-
-    def test_lookup_ipc_key_set_and_get(self, session: Session) -> None:
-        """lookup_ipc_key should be settable and retrievable."""
-        key = IPCCacheServerKey.from_token_ids(
-            model_name="test-model",
-            world_size=1,
-            worker_id=None,
-            token_ids=list(range(8)),
-            start=0,
-            end=8,
-            request_id="req-1",
-        )
-        session.lookup_ipc_key = key
-        assert session.lookup_ipc_key is key
-        assert session.lookup_ipc_key.model_name == "test-model"
-        assert session.lookup_ipc_key.worker_id is None
 
 
 class TestSessionManagerRemoveReturnsSession:

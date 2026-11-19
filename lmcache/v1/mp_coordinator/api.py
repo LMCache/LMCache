@@ -11,11 +11,17 @@ hex validity) belong to the HTTP envelopes in :mod:`schemas`.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey, ObjectKey, Tier
+from lmcache.v1.distributed.api import (
+    EncodedObjectKey,
+    ObjectKey,
+    ObjectKeyIdentity,
+    Tier,
+)
 
 # ``token_offset`` value meaning "the emitter did not report a position".
 # Distinct from 0, which is a real position (a chunk at the start of its
@@ -52,19 +58,42 @@ class BlendNamespace:
     """The retrieval namespace a chunk hash is reachable in.
 
     A blend match is usable only by a requester whose key expansion lands
-    in the same namespace. ``object_group_id`` is excluded: blend servers
-    must not enable ``--separate-object-groups``.
+    in the same namespace. ``object_group_id`` is excluded because object
+    groups partition a server-local layout; the Blend read set selects the
+    relevant groups when expanding a matched chunk.
 
     Attributes:
         model_name: Model the KV belongs to.
         cache_salt: Per-tenant isolation salt applied to the keys.
         world_size: Parallel world size (TP x PP) selecting the rank
             fan-out.
+        tags: Opaque matching tags, snapshotted in canonical order.
     """
 
     model_name: str
     cache_salt: str = ""
     world_size: int = 1
+    tags: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        identity = ObjectKeyIdentity(
+            chunk_hash=b"",
+            kv_rank=0,
+            model_name=self.model_name,
+            cache_salt=self.cache_salt,
+            tags=self.tags,
+        )
+        object.__setattr__(self, "tags", identity.tags)
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.model_name,
+                self.cache_salt,
+                self.world_size,
+                tuple(self.tags.items()),
+            )
+        )
 
     @classmethod
     def from_object_key(cls, key: "ObjectKey") -> "BlendNamespace":
@@ -80,6 +109,7 @@ class BlendNamespace:
             model_name=key.model_name,
             cache_salt=key.cache_salt,
             world_size=ObjectKey.WorldSizeFromKVRank(key.kv_rank),
+            tags=key.identity.tags,
         )
 
 

@@ -1,9 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+import subprocess
+import sys
+import textwrap
+
 # Third Party
 import msgspec
+import pytest
 
 # First Party
-from lmcache.v1.multiprocess.group_view import (
+from lmcache.v1.common import group_view
+from lmcache.v1.common.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
     get_engine_group_indices,
@@ -12,6 +19,7 @@ from lmcache.v1.multiprocess.group_view import (
     num_engine_groups,
     slice_block_ids_per_group,
 )
+from lmcache.v1.multiprocess import group_view as engine_plugin_path
 
 
 def test_engine_group_infos_default_to_one_engine_group():
@@ -78,7 +86,7 @@ def test_engine_group_infos_exclude_uncovered_layers():
     grouping skips them rather than treating partial coverage as an error.
     """
     # First Party
-    from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
+    from lmcache.v1.common.group_view import EXCLUDED_ENGINE_GROUP
 
     groups = [
         EngineGroupInfo(0, (0,)),
@@ -195,6 +203,30 @@ def test_slice_block_ids_scratch_group_yields_empty():
     assert sliced == [[0, 1], []]
 
 
+def test_slice_block_ids_unfull_chunk_takes_the_block_of_the_last_token():
+    """An unaligned end ends with the block holding its last token."""
+    allocated = {0: list(range(32)), 1: list(range(4))}
+    sliced = slice_block_ids_per_group(
+        allocated,
+        group_tokens_per_block=[16, 128],
+        start_token_idx=128,
+        end_token_idx=300,
+        include_unfull_chunk=True,
+    )
+    assert sliced == [list(range(8, 19)), [1, 2]]
+
+
+def test_slice_block_ids_unaligned_end_needs_unfull_chunk():
+    allocated = {0: list(range(32))}
+    with pytest.raises(ValueError, match="does not align"):
+        slice_block_ids_per_group(
+            allocated,
+            group_tokens_per_block=[16],
+            start_token_idx=0,
+            end_token_idx=300,
+        )
+
+
 def test_is_kv_writer_keys_first_rank_of_each_shard():
     """A replicated group is written by the first rank holding each token
     shard among every ``tp_replicas`` consecutive ranks; a sharded group by
@@ -206,3 +238,42 @@ def test_is_kv_writer_keys_first_rank_of_each_shard():
     assert [w for w in range(8) if is_kv_writer([kda], w)] == list(range(8))
     assert [w for w in range(8) if is_kv_writer([mla, kda], w)] == list(range(8))
     assert is_kv_writer([], 5)
+
+
+def test_engine_plugin_path_exports_the_same_objects():
+    for name in (
+        "EngineGroupInfo",
+        "engine_group_layer_indices",
+        "expand_engine_block_ids",
+        "get_engine_group_indices",
+        "is_kv_writer",
+        "num_engine_group_infos",
+        "num_engine_groups",
+        "slice_block_ids_per_group",
+    ):
+        assert getattr(engine_plugin_path, name) is getattr(group_view, name), name
+
+
+def test_common_group_view_and_attn_window_load_no_endpoint_modules():
+    script = textwrap.dedent(
+        """
+        import sys
+
+        from lmcache.v1.common import group_view
+        from lmcache.v1.common.attn_window import AttnWindowDesc
+
+        info = group_view.EngineGroupInfo(0, (0,))
+        group_view.get_engine_group_indices([info], 2)
+        AttnWindowDesc(num_chunks_in_sw=[-1, 2], group_kinds=("attention", "aux"))
+        endpoints = (
+            "lmcache.integration",
+            "lmcache.v1.client",
+            "lmcache.v1.distributed",
+            "lmcache.v1.kv_layer_groups",
+            "lmcache.v1.multiprocess",
+        )
+        loaded = sorted(name for name in sys.modules if name.startswith(endpoints))
+        assert loaded == [], loaded
+        """
+    )
+    subprocess.run([sys.executable, "-c", script], check=True)

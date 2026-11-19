@@ -1215,9 +1215,10 @@ CPU mode (no GPU)
 ``--mode cpu`` runs the same end-to-end path without a GPU. The server
 runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates regular
 CPU KV tensors and exercises the full RPC path through ``TransferContext``.
-The engine-driven context uses server-owned SHM staging when available and
-falls back to typed inline tensor transport. In ``lmcache_driven`` mode, the CPU wrapper
-migrates the tensors to POSIX SHM during registration.
+The engine-driven context uses server-owned SHM staging when available (server
+started with ``--shm-name <name> --no-l1-use-lazy``) and otherwise falls back
+to the much slower typed inline tensor transport. In ``lmcache_driven`` mode,
+the CPU wrapper migrates the tensors to POSIX SHM during registration.
 
 By default ``--mode cpu`` uses the engine-driven gather/scatter path
 (``auto`` → ``cpu→engine_driven``); that path requires the server to
@@ -1287,7 +1288,7 @@ The bench also allocates each per-layer client tensor as rank-3
 ``(NB, BS, num_heads * head_size)`` (rather than the classical rank-5
 ``(2, NB, BS, NH, HS)``), which is what the server's vLLM detector
 recognises as MLA -- see ``NL_X_NB_BS_HS`` in
-``lmcache/v1/gpu_connector/kv_format/detectors/vllm.py``.
+``lmcache/v1/common/kv_format/detectors/vllm.py``.
 
 Pure MLA example (DeepSeek-V2-style, 61 layers, single latent head):
 

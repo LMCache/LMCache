@@ -24,12 +24,12 @@ import torch
 
 # First Party
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format.detectors import vllm as vllm_detector
-from lmcache.v1.gpu_connector.kv_format.types import (
+from lmcache.v1.common.kv_format.detectors import vllm as vllm_detector
+from lmcache.v1.common.kv_format.types import (
     DiscoverableKVCache,
     LayoutHints,
 )
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.utils import (
     get_block_size,
     get_head_size,
     get_num_heads,

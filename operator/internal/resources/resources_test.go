@@ -550,14 +550,14 @@ func TestBuildContainerArgs_L2CustomPolicies(t *testing.T) {
 				Port: 6379,
 			},
 			StorePolicy:         ptr("skip_l1"),
-			PrefetchPolicy:      ptr("default"),
+			PrefetchPolicy:      ptr("skip_l1"),
 			PrefetchMaxInFlight: ptr(int32(16)),
 		},
 	}
 	args := BuildContainerArgs(spec)
 
 	assertArg(t, args, "--l2-store-policy", "skip_l1")
-	assertArg(t, args, "--l2-prefetch-policy", "default")
+	assertArg(t, args, "--l2-prefetch-policy", "skip_l1")
 	assertArg(t, args, "--l2-prefetch-max-in-flight", "16")
 }
 

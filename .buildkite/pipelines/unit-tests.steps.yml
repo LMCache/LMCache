@@ -30,7 +30,6 @@ steps:
       pytest --maxfail=1 --cov=lmcache \
         --cov-report term --cov-report=html:coverage-test \
         --cov-report=xml:coverage-test.xml --html=durations/test.html \
-        --ignore=tests/disagg \
         --ignore=tests/skipped
 
       cat << EOF | buildkite-agent annotate --style "info"

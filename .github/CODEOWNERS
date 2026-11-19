@@ -72,7 +72,6 @@
 /docs/source/getting_started/          @sammshen @deng451e
 /docs/source/developer_guide/          @sammshen @deng451e
 /docs/source/production/               @maobaolong @chunxiaozheng
-/docs/source/production/kv_cache_events.rst  @hickeyma
 /docs/                                 @sammshen @ApostaC @deng451e @zhengfeihe
 
 # Examples

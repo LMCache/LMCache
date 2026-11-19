@@ -11,6 +11,9 @@ server moves the bytes itself with the valkey-large-object module's
 
 One registration per worker is forced by glide's API: an ``RdmaRegion`` is
 bound to the client that registered it and carries one transfer at a time.
+On a host with several fabric cards, ``rdma_interface`` may list them and the
+workers are spread across the cards round-robin, so the transfers in flight
+are not all funnelled through one card.
 The window is derived from the ``memoryview`` the adapter already passes, so
 the submit API is unchanged. A buffer outside the arena fails its key.
 
@@ -26,7 +29,8 @@ machine; both are checked when the first worker builds its client.
 from __future__ import annotations
 
 # Standard
-from typing import Any, Callable, Optional, TypeVar
+from collections.abc import Sequence
+from typing import Any, Callable, Optional, TypeVar, Union
 import ctypes
 import threading
 
@@ -48,6 +52,36 @@ RDMA_MIN_GLIDE_VERSION: str = "2.6.0"
 T = TypeVar("T")
 
 
+def normalize_rdma_interfaces(
+    rdma_interface: Optional[Union[str, Sequence[str]]],
+) -> tuple[str, ...]:
+    """Turn ``rdma_interface`` into the tuple of fabric domains to use.
+
+    Args:
+        rdma_interface: ``None`` to let the provider choose, one domain name,
+            or a sequence of domain names to spread the workers across.
+
+    Returns:
+        The domains in order; empty when the provider chooses.
+
+    Raises:
+        ValueError: If a name is empty or not a string.
+    """
+    if rdma_interface is None:
+        return ()
+    names = (
+        [rdma_interface] if isinstance(rdma_interface, str) else list(rdma_interface)
+    )
+    if not names:
+        raise ValueError("rdma_interface must name at least one domain if set")
+    for name in names:
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                f"rdma_interface entries must be non-empty strings, got {name!r}"
+            )
+    return tuple(names)
+
+
 class ValkeyRdmaWorkerPool(ValkeyWorkerPool):
     """``ValkeyWorkerPool`` whose SET and GET move bytes over RDMA.
 
@@ -61,7 +95,7 @@ class ValkeyRdmaWorkerPool(ValkeyWorkerPool):
         l1_base: int,
         l1_size: int,
         rdma_provider: str = "efa-direct",
-        rdma_interface: Optional[str] = None,
+        rdma_interface: Optional[Union[str, Sequence[str]]] = None,
         **pool_kwargs: Any,
     ) -> None:
         """Validate the RDMA settings, then build and warm up the pool.
@@ -74,8 +108,9 @@ class ValkeyRdmaWorkerPool(ValkeyWorkerPool):
             l1_size: Size of the L1 arena in bytes (> 0).
             rdma_provider: ``"efa-direct"`` for EFA hardware, or ``"tcp"``
                 for libfabric's software provider (development and tests).
-            rdma_interface: Fabric domain to pin to on a multi-card host;
-                ``None`` lets the provider choose.
+            rdma_interface: Fabric domain, or domains, to open on a multi-card
+                host; workers take them round-robin. ``None`` lets the provider
+                choose.
             **pool_kwargs: Forwarded to ``ValkeyWorkerPool``.
 
         Raises:
@@ -91,13 +126,15 @@ class ValkeyRdmaWorkerPool(ValkeyWorkerPool):
             raise ValueError(
                 f"rdma_provider must be one of {RDMA_PROVIDERS}, got {rdma_provider!r}"
             )
-        if rdma_interface is not None and not rdma_interface:
-            raise ValueError("rdma_interface must not be empty if set")
+        interfaces = normalize_rdma_interfaces(rdma_interface)
 
         self._l1_base: int = l1_base
         self._l1_size: int = l1_size
         self._rdma_provider: str = rdma_provider
-        self._rdma_interface: Optional[str] = rdma_interface
+        self._rdma_interfaces: tuple[str, ...] = interfaces
+        # Workers take an interface in client-creation order.
+        self._next_client_index: int = 0
+        self._client_index_lock = threading.Lock()
         # A buffer-protocol view of the arena for registration; the L1 manager
         # owns the memory.
         self._l1_memory = (ctypes.c_ubyte * l1_size).from_address(l1_base)
@@ -105,10 +142,10 @@ class ValkeyRdmaWorkerPool(ValkeyWorkerPool):
         super().__init__(**pool_kwargs)
 
         logger.info(
-            "ValkeyRdmaWorkerPool: provider=%s interface=%s l1_arena=[%#x, %#x) "
+            "ValkeyRdmaWorkerPool: provider=%s interfaces=%s l1_arena=[%#x, %#x) "
             "(%d bytes) on %d workers",
             rdma_provider,
-            rdma_interface,
+            interfaces or "(provider's choice)",
             l1_base,
             l1_base + l1_size,
             l1_size,
@@ -121,9 +158,9 @@ class ValkeyRdmaWorkerPool(ValkeyWorkerPool):
         return self._rdma_provider
 
     @property
-    def rdma_interface(self) -> Optional[str]:
-        """The fabric domain each client was pinned to, if any."""
-        return self._rdma_interface
+    def rdma_interfaces(self) -> tuple[str, ...]:
+        """The fabric domains the clients are spread across; empty if unpinned."""
+        return self._rdma_interfaces
 
     @property
     def l1_arena_bytes(self) -> int:
@@ -159,16 +196,36 @@ class ValkeyRdmaWorkerPool(ValkeyWorkerPool):
         return client
 
     def _client_config_extras(self, glide_sync: Any) -> dict[str, Any]:
-        """Add the ``RdmaConfiguration`` for the chosen provider."""
+        """Add the ``RdmaConfiguration`` for the chosen provider and this
+        worker's interface."""
         if self._rdma_provider == "tcp":
             provider = glide_sync.RdmaProvider.Tcp()
         else:
             provider = glide_sync.RdmaProvider.EfaDirect()
         return {
             "rdma": glide_sync.RdmaConfiguration(
-                provider=provider, interface=self._rdma_interface
+                provider=provider, interface=self._interface_for_this_worker()
             )
         }
+
+    def _interface_for_this_worker(self) -> Optional[str]:
+        """The fabric domain this worker's client opens: the interfaces taken
+        round-robin in client-creation order, or ``None`` if unpinned."""
+        if not self._rdma_interfaces:
+            return None
+        index = getattr(self._local, "client_index", None)
+        if index is None:
+            with self._client_index_lock:
+                index = self._next_client_index
+                self._next_client_index += 1
+            self._local.client_index = index
+        interface = self._rdma_interfaces[index % len(self._rdma_interfaces)]
+        logger.debug(
+            "Valkey RDMA worker %s opens interface %s",
+            threading.current_thread().name,
+            interface,
+        )
+        return interface
 
     def _close_local_client(self, barrier: threading.Barrier) -> None:
         """Close the thread's client, then deregister its region.
