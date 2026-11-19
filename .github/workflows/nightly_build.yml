@@ -642,7 +642,7 @@ jobs:
   nightly-pin-or-report-vllm:
     name: Pin or report vLLM
     env:
-      PIN_VLLM_DRY_RUN: "1"
+      DRY_RUN: "1"
     needs: nightly-verify-cpu-vllm
     if: always() && !cancelled()
     concurrency:
