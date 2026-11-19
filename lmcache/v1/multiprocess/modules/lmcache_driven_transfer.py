@@ -692,10 +692,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 (and report False in the returned mask).
             mask_object_groups: Object groups the returned mask checks; None
                 checks every object group. A caller that reads only some
-                groups (blend reads attention + aux, never recurrent state)
-                passes those, so a chunk whose other groups were skipped as
-                all-null (align-mode Mamba state outside the checkpoint chunk)
-                still reports True.
+                groups passes those.
 
         Returns:
             A tuple where the first element is the IPC handle of the event
