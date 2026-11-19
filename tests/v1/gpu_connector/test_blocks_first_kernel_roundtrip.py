@@ -15,7 +15,7 @@ import torch
 # First Party
 from lmcache import device_ops, torch_dev, torch_device_type
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format import detect_format
+from lmcache.v1.common.kv_format import detect_format
 import lmcache.lmcache_native as lmcache_native
 
 cuda_only = pytest.mark.skipif(

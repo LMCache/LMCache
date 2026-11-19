@@ -71,11 +71,10 @@ Commonly used flags include:
    * - ``--grpc-server-mode {sync,aio,native}``
      - gRPC server implementation (used only with ``--transport grpc``).
        Default is ``sync``. ``native`` needs the ``pygrpc-native``
-       package.
+       package and does not support request authentication.
    * - ``--api-key-file PATH``
-     - Read a key accepted by the HTTP API and gRPC request transport. Repeat
-       during rotation. With ZMQ, only HTTP is protected and startup warns
-       that ZMQ requests remain unauthenticated. See
+     - Read a key accepted by the HTTP API and the request transport. Repeat
+       during key rotation. Both ZMQ and gRPC enforce it; see
        :doc:`/mp/request_transport`.
    * - ``--coordinator-url URL``
      - Register with an MP coordinator at this base URL (e.g.
@@ -114,6 +113,11 @@ Commonly used flags include:
      - Address the transfer-channel server binds to. Defaults to
        ``--p2p-advertise-url``. Set it when the advertised address differs from
        the bind address (e.g. bind ``0.0.0.0`` while advertising a routable IP).
+   * - ``--p2p-rpc-port PORT``
+     - Independent P2P gRPC control port, bound on ``--host`` (default ``0``:
+       OS-assigned). Pin and allow this port when a firewall, Docker port
+       mapping, or NetworkPolicy restricts reachable ports; allowing only
+       the worker ``--port`` is insufficient.
    * - ``--p2p-lookup-timeout SECONDS``
      - Deadline for a peer lookup before it counts as a miss (default ``30``).
    * - ``--p2p-load-timeout SECONDS``

@@ -24,7 +24,7 @@ engine connector                           server: LookupModule.lookup
                                                  no  → register empty job,
                                                        early_exit_reason=
                                                        "load_policy_recompute"
-  ◄── QUERY_PREFETCH_STATUS → hit chunks ──────  0 when declined
+  ◄── QUERY_PREFETCH_STATUS → hit tokens ──────  0 when declined
   └─ 0 hits → engine prefills the prompt
 ```
 

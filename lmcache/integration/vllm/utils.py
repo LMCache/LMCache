@@ -18,11 +18,11 @@ import torch
 from lmcache import torch_device_type
 from lmcache.logging import init_logger
 from lmcache.utils import get_size_bytes as get_size_bytes
-from lmcache.v1.gpu_connector.kv_format.types import KVLayoutName
+from lmcache.v1.common.kv_format.types import KVLayoutName
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.gpu_connector.utils import LayoutHints
+    from lmcache.v1.common.utils import LayoutHints
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"

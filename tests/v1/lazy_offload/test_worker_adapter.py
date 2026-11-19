@@ -28,8 +28,8 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (  # noqa: E402
     LMCacheMPWorkerAdapter,
     LoadStoreOp,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo  # noqa: E402
-from lmcache.v1.multiprocess.token_codec import (  # noqa: E402
+from lmcache.v1.common.group_view import EngineGroupInfo  # noqa: E402
+from lmcache.v1.common.token_codec import (  # noqa: E402
     pack_token_ids,
 )
 
@@ -59,7 +59,6 @@ def _make_worker_adapter(
     adapter.retrieve_events = {}
     adapter._dropped_retrieves = set()
     adapter.error_block_ids = set()
-    adapter._pending_store_kv_events = {}
     adapter._completed_store_requests = {}
     adapter._failed_store_requests = set()
     return adapter
