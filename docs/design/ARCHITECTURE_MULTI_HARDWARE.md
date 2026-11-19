@@ -174,7 +174,7 @@ Override: LMCACHE_MP_TRANSFER_MODE env var or the mode argument to create_transf
 
 ## Cache Context Dispatch
 
-The `create_cache_context` factory in `lmcache.v1.platform.cache_context`
+The `create_cache_context` factory in `lmcache.v1.multiprocess.cache_context.factory`
 delegates to the `DeviceSpec` registry:
 
 ```

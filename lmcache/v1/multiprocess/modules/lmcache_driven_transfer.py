@@ -31,6 +31,8 @@ from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
+from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
+from lmcache.v1.multiprocess.cache_context.factory import create_cache_context
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
@@ -56,13 +58,11 @@ from lmcache.v1.multiprocess.rocm_host_event_wait import (
     create_host_event_waiter,
     current_run_entry,
 )
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
 )
 from lmcache.v1.platform.base.ipc_wrapper import KVCache, set_fd_resolver
-from lmcache.v1.platform.cache_context import create_cache_context
 from lmcache.v1.platform.fd_channel import (
     FdChannelServer,
     fd_channel_path,

@@ -15,7 +15,7 @@ from lmcache.v1.platform.ipc_policy import get_ipc_policy
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.platform.base.cache_context import BaseCacheContext
+    from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
     from lmcache.v1.platform.base.device_ops import DeviceOps
     from lmcache.v1.platform.base.event_ipc import EventIPCBackend
     from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
@@ -164,6 +164,6 @@ class CudaDeviceSpec(DeviceSpec):
 
     def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
         # First Party
-        from lmcache.v1.platform.devices.cuda.cache_context import GPUCacheContext
+        from lmcache.v1.multiprocess.cache_context.cuda import GPUCacheContext
 
         return GPUCacheContext(*args, **kwargs)

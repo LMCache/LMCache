@@ -38,7 +38,7 @@ from lmcache.v1.platform.transfer_mode import MPTransferMode
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.platform.base.cache_context import BaseCacheContext
+    from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
     from lmcache.v1.platform.base.device_ops import DeviceOps
     from lmcache.v1.platform.base.event_ipc import EventIPCBackend
     from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
@@ -298,7 +298,7 @@ class DeviceSpec:
         ``cpu``) must override this hook: perform a lazy import of the
         concrete subclass and forward ``*args`` / ``**kwargs`` verbatim
         so the call site in
-        :func:`lmcache.v1.platform.cache_context.create_cache_context`
+        :func:`lmcache.v1.multiprocess.cache_context.factory.create_cache_context`
         stays backend-agnostic.
 
         The default implementation raises :class:`NotImplementedError`

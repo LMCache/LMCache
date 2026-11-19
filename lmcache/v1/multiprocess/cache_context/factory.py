@@ -3,9 +3,9 @@
 
 The concrete implementations live in their respective sub-packages:
 
-* :class:`~lmcache.v1.platform.devices.cuda.cache_context.GPUCacheContext` --
+* :class:`~lmcache.v1.multiprocess.cache_context.cuda.GPUCacheContext` --
   CUDA-backed.
-* :class:`~lmcache.v1.platform.devices.cpu.cache_context.CPUCacheContext` --
+* :class:`~lmcache.v1.multiprocess.cache_context.cpu.CPUCacheContext` --
   CPU-only fallback (POSIX-SHM-backed KV tensors).
 
 :func:`create_cache_context` keeps the dispatch out of the call site
@@ -14,7 +14,7 @@ and delegated to the :class:`~lmcache.v1.platform.base.device_spec.
 DeviceSpec` registry maintained by :mod:`lmcache.v1.platform`: each built-in
 backend sub-package or external device plugin ships a ``DeviceSpec`` whose
 ``create_cache_context`` hook lazy-imports and instantiates the
-matching :class:`~lmcache.v1.platform.base.cache_context.
+matching :class:`~lmcache.v1.multiprocess.cache_context.base.
 BaseCacheContext`. Adding a new accelerator therefore requires
 *zero* edits to this module -- implement the hook in the built-in backend or
 external plugin.
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.common.group_view import EngineGroupInfo
     from lmcache.v1.common.utils import LayoutHints
-    from lmcache.v1.platform.base.cache_context import BaseCacheContext
+    from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
     from lmcache.v1.platform.base.ipc_wrapper import KVCache
 
 

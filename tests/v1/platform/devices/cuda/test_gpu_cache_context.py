@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests for the temp-GPU-buffer machinery in
-``lmcache.v1.platform.devices.cuda.cache_context``.
+``lmcache.v1.multiprocess.cache_context.cuda``.
 
 Two layers are exercised:
 
@@ -35,7 +35,7 @@ from lmcache.v1.kv_layer_groups import KVLayerGroupsManager  # noqa: E402
 pytest.importorskip("cupy", reason="GPU cache context tests require cupy")
 
 # First Party
-from lmcache.v1.platform.devices.cuda.cache_context import (  # noqa: E402
+from lmcache.v1.multiprocess.cache_context.cuda import (  # noqa: E402
     GPUCacheContext,
     _TempGPUBuffer,
 )

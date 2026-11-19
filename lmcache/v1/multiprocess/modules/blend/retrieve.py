@@ -31,6 +31,7 @@ from lmcache.v1.common.custom_types import (
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
 from lmcache.v1.multiprocess.engine_context import finish_lookup_read
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _BlendReadGroups,
@@ -45,7 +46,6 @@ from lmcache.v1.multiprocess.modules.blend.rope import (
 )
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
 

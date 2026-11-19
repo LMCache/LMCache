@@ -35,6 +35,7 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.multiprocess import object_group_transfer
+from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
 from lmcache.v1.multiprocess.engine_context import (
     LayoutDescRegistry,
     MPCacheServerContext,
@@ -49,7 +50,6 @@ from lmcache.v1.multiprocess.object_group_transfer import (
 )
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.platform import torch_ops
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
 
 CHUNK_SIZE = 16

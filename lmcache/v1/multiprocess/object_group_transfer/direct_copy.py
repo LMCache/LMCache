@@ -14,8 +14,8 @@ from lmcache.logging import init_logger
 from lmcache.v1.common.attn_window import recalculate_blocks_to_skip
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
+from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
 from lmcache.v1.multiprocess.object_group_transfer.planning import resolve_chunk_range
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
