@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Experimental local KV policy / 本地 KV 策略</title>
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:980px;margin:32px auto;padding:0 20px;color:#222;background:white;overflow-wrap:anywhere}pre{overflow:auto;background:#f2f4f5;padding:16px}table{border-collapse:collapse;display:block;max-width:100%;overflow-x:auto}td,th{border:1px solid #aaa;padding:8px}button{padding:8px 16px;cursor:pointer}[hidden]{display:none}h1{font-size:28px}h2{font-size:22px}</style>
+<button type="button" onclick="switchLanguage()">English / 中文</button>
+<main id="en">
+<h1>Experimental Local Profiling-Driven KV Policy</h1>
+<p>Source binding: upstream base <code>86934a7e01e8a764762cfa0d11326144890e38da</code>; reviewed implementation <code>e254b51c7ca923b534f77c3b8a552fb347ad838a</code>. The explainer-only descendant does not change this implementation. Links below are immutable, and the essential evidence and limitations are embedded here so this file remains readable when downloaded alone.</p>
+<p>Validation draft, not merge-ready. This PR adds opt-in policy decisions, not a new cache or transfer engine. It ports the previously measured prototype onto dev while keeping the upstream L1 factory and write-placement APIs.</p>
+<h2>1. Ownership And Call Chain</h2>
+<pre>MP lookup, including misses
+       | model / layout / namespace checks
+       v
+bounded demand history: decayed frequency + distinct-key reuse distance
+       |                        |
+       v                        v
+StorePolicy target selection    eligible L1 victim ordering
+       |                        |
+native StoreController          native L1EvictionController
+       |                        |
+native L2 completion callback    native deletion acknowledgement</pre>
+<p><code>StorageManager</code> constructs one shared policy, injects it into the L1 controller and store controller, and registers its event subscription only when construction commits. Allocation, locks, transfers, deletion and error handling remain native. L2 completion callbacks maintain advisory backing knowledge, not a second residency authority.</p>
+<pre># StorageManager: policies are created with defer_subscription=True.
+# Only after controllers/adapters have initialized successfully:
+for policy in eviction_policies:
+    if isinstance(policy, EventSubscriber):
+        self._event_bus.register_subscriber(policy)
+cleanup.pop_all()</pre>
+<p>This prevents both Profiled and ProfiledValue from leaving a callback attached to an incompletely constructed owner. See <a href="https://github.com/realAaronWu/LMCache/blob/e254b51c7ca923b534f77c3b8a552fb347ad838a/lmcache/v1/distributed/storage_manager.py#L319">transactional registration</a> and <a href="https://github.com/realAaronWu/LMCache/blob/e254b51c7ca923b534f77c3b8a552fb347ad838a/lmcache/v1/distributed/eviction_policy/factory.py">policy factory</a>.</p>
+<h2>2. Decision Economics</h2>
+<pre>No disk copy:       gain = N * (recompute - disk fetch) - disk write
+DRAM + disk copy:   value = N * (disk fetch - host fetch)
+DRAM only:         value = N * (recompute - host fetch)</pre>
+<p><code>LocalValueConfig</code> prices non-overlapping prefix increments from cumulative arrays. <code>LocalValuePolicy.select_store_targets</code> rejects known nonpositive writes and requires the full ancestor chain. <code>get_eviction_actions</code> retains native eligibility checks and returns actions rather than deleting buffers. Prediction uses past demand only, not workload family labels or future requests.</p>
+<pre># The emitter uses the same tag canonicalization as native ObjectKeys:
+"tags": dict(get_request_tags(key.request_configs))
+# LocalValue ignores unsupported nonempty tags, salt or TP != 1.
+# Missing identity fields invalidate the snapshot rather than imply success.</pre>
+<p>Without this boundary, requests from a tagged tenant could inflate an untagged key's reuse estimate. See <a href="https://github.com/realAaronWu/LMCache/blob/e254b51c7ca923b534f77c3b8a552fb347ad838a/lmcache/v1/multiprocess/modules/lookup.py#L274">actual event emitter</a>, <a href="https://github.com/realAaronWu/LMCache/blob/e254b51c7ca923b534f77c3b8a552fb347ad838a/lmcache/v1/distributed/eviction_policy/local_value.py#L353">scope validation</a> and <a href="https://github.com/realAaronWu/LMCache/blob/e254b51c7ca923b534f77c3b8a552fb347ad838a/lmcache/v1/distributed/eviction_policy/local_value.py#L169">marginal cost arithmetic</a>.</p>
+<h2>3. Why This Synthetic Workload Benefits</h2>
+<pre>Two reused long prefixes + one-pass scan documents
+            |
+   +--------+------------------+
+   |                           |
+LRU keeps recent scans     Local policy protects observed reuse
+   |                           |
+hot prefix partly evicted  more hot-prefix DRAM hits
+   |                           |
+disk fetch / recompute     less fetch / recompute work before token 1</pre>
+<table><tr><th>Restart pair</th><th>LRU mean ms</th><th>Local mean ms</th><th>Reduction</th></tr><tr><td>0</td><td>60.1554</td><td>51.8740</td><td>13.77%</td></tr><tr><td>1</td><td>65.3301</td><td>51.8821</td><td>20.58%</td></tr><tr><td>2</td><td>64.2716</td><td>52.3367</td><td>18.57%</td></tr><tr><td>Combined</td><td>63.2524</td><td>52.0310</td><td>17.74%</td></tr></table>
+<p>Historical pinned-base observation: policy a101de47, base d0a86807, producer a20056de. All 360 requests completed; 288 evaluation observations (144 per role, excluding 12 warmup requests per arm); 180 matching paired generated-token outputs including warmup. This is not current-dev GPU performance. Hot-request mean: 52.93 to 33.74ms; scan mean: 73.58 to 70.32ms. L1-hit tokens: 91392 to 156672; L2-hit tokens: 47360 to 0; completed L2-store chunks: 342 to 0. Counters support the mechanism, not individual-signal causal attribution.</p>
+<p>Equal conditions: RTX5060Ti 16GB, Qwen3 architecture (28 layers, hidden 1024), BF16, TP1/C1, APC off, eager TRITON_ATTN, 384MiB GPU KV, 0.5GiB L1 and 4GiB filesystem L2. Two 1536-token hot prefixes alternate with unique scans at an equal 1.1s offered schedule. No artificial storage delay. Fixed illustrative cumulative costs for i=1..8 chunks: R=12i, F1=3i, F2=7i, W=i ms. These are not measured calibration. Synthetic prompts ask for a fixed sentence; paired output equality is not a tensor or context-quality oracle.</p>
+<p>Earlier cost calibration had unresolved output drift. Allocation and CUDA IPC teardown warnings remain; one baseline had a post-shutdown output-handler error. Owners exited unforced, but full cleanup is unqualified. Earlier fast-paced development observed about 1.56% arithmetic improvement and failed its policy-name health check; it is excluded from this separately frozen experiment. No Dell/customer performance claim is made. See immutable <a href="https://github.com/realAaronWu/LMCache/blob/e254b51c7ca923b534f77c3b8a552fb347ad838a/benchmarks/profiling_ttft_local/RESULTS.md">complete result notes</a> and <a href="https://github.com/realAaronWu/LMCache/blob/e254b51c7ca923b534f77c3b8a552fb347ad838a/benchmarks/profiling_ttft_local/results.json">sanitized per-request data</a>.</p>
+<h2>4. Failure Boundaries And Tests</h2>
+<p>Tests cover negative gain, copy double-counting, ancestor reachability, decay and distance, stale/missing costs, model-byte binding, namespace/layout fallback, constructor subscription lifetime, eligibility, and HTTP409 for runtime topology changes. Unsupported resident identities fall back to native ordering. The current-dev port also adapts immutable ObjectKey identities without discarding tags. Native CUDA execution and measured GPU speedups belong to separately versioned evidence.</p>
+<p>Not implemented: capacity-aware L2 opportunity pricing, pre-D2H admission, selective load-versus-recompute routing, fleet coordination or per-signal causal attribution. Formal eight-pair qualification, representative controls and complete IPC cleanup remain unqualified. The disposable experimental runner is not shipped as a reusable benchmark tool.</p>
+<p>Current implementation checks: focused policy/HTTP suite 73 PASS, 1 CUDA SKIP; existing regressions 117 PASS; ruff and mypy PASS. New-head GPU TTFT, clean native build, full suite, Sphinx and public CI are NOT RUN/pending. <a href="https://github.com/realAaronWu/LMCache/blob/e254b51c7ca923b534f77c3b8a552fb347ad838a/tests/v1/distributed/test_local_value_policy.py">Regression source</a> includes the actual lookup emitter (tagged rejection and untagged acceptance) and actual failed StorageManager construction; all three first failed on the old candidate and passed after the fix.</p>
+</main>
+<main id="zh" hidden>
+<h1>实验性本地 KV 缓存策略</h1>
+<p>版本绑定：上游基础版本为 <code>86934a7e01e8a764762cfa0d11326144890e38da</code>，本说明对应的实现为 <code>e254b51c7ca923b534f77c3b8a552fb347ad838a</code>。后续仅更新说明的提交不改变此实现。下面使用固定版本链接，关键数据和限制也直接写在本文件中，单独下载仍可阅读。</p>
+<p>这是验证草稿，不是可直接合并的生产方案。改动负责决定哪些 KV 值得写磁盘、哪些应优先保留在内存；缓存本体、数据拷贝和锁仍由 LMCache 原有组件负责。此次提交适配最新 dev，但不会把旧版本的实测结果冒充为新版本结果。</p>
+<h2>1. 调用链和所有权</h2>
+<pre>请求查询，包括未命中
+       | 检查模型、布局和命名空间
+       v
+有界历史：衰减访问频率 + 间隔内不同缓存块数量
+       |                          |
+       v                          v
+选择是否写入 L2                调整可淘汰对象的顺序
+       |                          |
+原生 StoreController          原生 L1EvictionController
+       |                          |
+原生存储完成回调               原生删除确认</pre>
+<p>StorageManager 只构造一个共享策略，注入存储和淘汰控制器；构造成功后才订阅事件，失败不留下观察者。策略记录的磁盘备份信息只来自实际完成回调，不自行分配、删除缓存或释放锁。</p>
+<pre># 先以 defer_subscription=True 创建策略，全部控制器初始化成功后才执行：
+for policy in eviction_policies:
+    if isinstance(policy, EventSubscriber):
+        self._event_bus.register_subscriber(policy)
+cleanup.pop_all()</pre>
+<p>因此 Profiled 和 ProfiledValue 两个入口都不会在构造失败后留下回调。对应源码：<a href="https://github.com/realAaronWu/LMCache/blob/e254b51c7ca923b534f77c3b8a552fb347ad838a/lmcache/v1/distributed/storage_manager.py#L319">订阅提交点</a>、<a href="https://github.com/realAaronWu/LMCache/blob/e254b51c7ca923b534f77c3b8a552fb347ad838a/lmcache/v1/distributed/eviction_policy/factory.py">策略工厂</a>。</p>
+<h2>2. 如何判断值不值得保留</h2>
+<pre>首次写磁盘：预计复用次数 ×（重算耗时 - 磁盘读取耗时）- 写入代价
+已有磁盘副本时保留内存：预计复用次数 ×（磁盘读取耗时 - 内存读取耗时）
+没有磁盘副本时保留内存：预计复用次数 ×（重算耗时 - 内存读取耗时）</pre>
+<p>不能把一整段前缀的重算收益重复算给每一块，也不能给内存和磁盘两份副本同时算一遍避免重算的收益。代码用累计成本的差分表达不同前缀区间；后面的缓存块依赖前面的块，准入时检查完整祖先链。预测只看过去的访问，不读取负载中的 hot/scan 标签。</p>
+<pre># 和原生 ObjectKey 使用同一个标签解析函数：
+"tags": dict(get_request_tags(key.request_configs))
+# LocalValue 不学习带标签、带盐或 TP 非 1 的请求。
+# 身份字段缺失时，使快照失效，不默认视为兼容。</pre>
+<p>否则另一个租户的请求可能错误地提高无标签缓存的热度。对应源码：<a href="https://github.com/realAaronWu/LMCache/blob/e254b51c7ca923b534f77c3b8a552fb347ad838a/lmcache/v1/multiprocess/modules/lookup.py#L274">真实查询事件</a>、<a href="https://github.com/realAaronWu/LMCache/blob/e254b51c7ca923b534f77c3b8a552fb347ad838a/lmcache/v1/distributed/eviction_policy/local_value.py#L353">身份检查</a>、<a href="https://github.com/realAaronWu/LMCache/blob/e254b51c7ca923b534f77c3b8a552fb347ad838a/lmcache/v1/distributed/eviction_policy/local_value.py#L169">边际成本公式</a>。</p>
+<h2>3. 为什么本次负载收益明显</h2>
+<pre>两个重复访问的长前缀 + 一次性扫描文档
+          |
+    +-----+-------------------+
+    |                         |
+LRU 容易留下最近的扫描数据    新策略优先留下已观察到的热点
+    |                         |
+热点部分被挤走               更多热点在 DRAM 命中
+    |                         |
+再次读磁盘或重算             首 token 前少做这些工作</pre>
+<p>三对独立重启的平均 TTFT 分别降低 13.77%、20.58%、18.57%；合并后由 63.25ms 降到 52.03ms，下降 17.74%。360 个请求完成，剔除每臂 12 个预热后共 288 个测量值，每种策略 144 个；含预热的 180 组对应生成 token 一致。热点请求 52.93→33.74ms，扫描请求 73.58→70.32ms；L1 命中 token 91392→156672，L2 命中 token 47360→0，完成的 L2 写入块 342→0。这些支持整体机制，不是各信号的因果拆分。</p>
+<p>两边条件相同：RTX5060Ti 16GB、Qwen3 架构（28 层、隐藏维度 1024）、BF16、TP1/C1、关闭 APC、eager TRITON_ATTN、384MiB GPU KV、0.5GiB L1、4GiB 文件系统 L2。两个 1536-token 热点前缀交替混入一次性扫描，请求间隔均为 1.1 秒，没有人工存储延迟。i=1..8 块的固定累计示例成本为 R=12i、F1=3i、F2=7i、W=i 毫秒，不是合格的实测成本表。提示词要求输出固定句子，输出一致并不证明 KV 张量或上下文任务质量完全正确。</p>
+<p>数据来自旧的固定版本：策略 a101de47、基础 d0a86807、采集程序 a20056de，不代表新 dev 上的 GPU 结果。此前成本校准仍有输出差异；分配和 CUDA IPC 退出告警未消除，一组基线在发起退出后有输出处理错误。进程自行退出不等于完整资源清理验证通过。更早的快节奏开发实验约 1.56% 且策略名称检查失败，没有并入本次三对实验。不能据此宣称 Dell 客户结果。固定版本的<a href="https://github.com/realAaronWu/LMCache/blob/e254b51c7ca923b534f77c3b8a552fb347ad838a/benchmarks/profiling_ttft_local/RESULTS.md">完整结果说明</a>及<a href="https://github.com/realAaronWu/LMCache/blob/e254b51c7ca923b534f77c3b8a552fb347ad838a/benchmarks/profiling_ttft_local/results.json">逐请求数据</a>可进一步核算。</p>
+<h2>4. 失败路径和测试目的</h2>
+<p>测试覆盖负收益拒绝、重复计价、前缀依赖、频率衰减和复用间隔、过期成本、模型文件变化、布局和命名空间不匹配、构造失败后的订阅清理、不能淘汰的对象，以及运行中更换 L2 返回明确的 HTTP409。未知对象走原生回退；新 dev 的 ObjectKey 身份和标签也要保留。</p>
+<p>尚未实现：按 L2 容量计算机会成本、GPU 到主机拷贝前的准入、按成本选择加载或重算、集群全局调度。八对正式实验、代表性对照、完整 IPC 清理和各信号贡献仍未验证。本次没有把存在超时清理缺口的一次性实验脚本包装成可复用工具。</p>
+<p>当前实现的检查：策略及 HTTP 测试 73 PASS、1 CUDA SKIP；原有回归 117 PASS；ruff 和 mypy PASS。新版本 GPU TTFT、干净环境原生编译、完整测试、Sphinx 和公开 CI 均未运行或待完成。<a href="https://github.com/realAaronWu/LMCache/blob/e254b51c7ca923b534f77c3b8a552fb347ad838a/tests/v1/distributed/test_local_value_policy.py">回归源码</a>通过真实查询入口验证带标签拒绝、无标签接受，并通过真实 StorageManager 入口注入构造失败；三个新增用例都先复现失败，再验证修复。</p>
+</main>
+<script>function switchLanguage(){const zh=document.getElementById('zh'),en=document.getElementById('en');zh.hidden=!zh.hidden;en.hidden=!en.hidden;document.documentElement.lang=zh.hidden?'en':'zh'}</script>
+</html>

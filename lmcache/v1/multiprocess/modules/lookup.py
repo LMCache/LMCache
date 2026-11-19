@@ -17,6 +17,7 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     PrefetchHandle,
     PrefetchTaskSpec,
+    get_request_tags,
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
 )
@@ -268,6 +269,9 @@ class LookupModule(DiscoverableModule):
                         "chunk_hashes": chunk_hashes,
                         "model_name": model_name,
                         "chunk_size": self._ctx.chunk_size,
+                        "cache_salt": key.cache_salt,
+                        "world_size": world_size,
+                        "tags": dict(get_request_tags(key.request_configs)),
                         "seq_len": key.num_tokens,
                         "dtypes": [str(d) for d in layout_desc.dtypes],
                         "shapes": [list(s) for s in layout_desc.shapes],

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 # Standard
 from typing import TYPE_CHECKING, Optional
+import math
+import os
 
 if TYPE_CHECKING:
     from lmcache.v1.distributed.internal_api import (
@@ -80,6 +82,11 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
       the adapter spec also carries an ``eviction`` block, e.g.
       ``{"eviction": {"eviction_policy": "LRU"}}``. Without one,
       files accumulate past the declared capacity.
+    - require_empty: reject an occupied base_path before creating the native
+      client (default False). Together with shared=False, a finite positive
+      capacity and use_odirect=False, asserts cold, exclusive-write ownership
+      for value capacity. All writes/deletes must go through this adapter;
+      external writers and reopening populated storage are not supported.
     """
 
     def __init__(
@@ -92,19 +99,33 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         max_capacity_gb: float = 0,
         num_read_workers: int = DEFAULT_NUM_READ_WORKERS,
         read_max_bytes_in_flight: int = 0,
+        require_empty: bool = False,
     ):
         """Build the config; see the class docstring for each field.
 
         Raises:
             ValueError: If ``num_read_workers`` or
-                ``read_max_bytes_in_flight`` is not a non-negative integer.
+                ``read_max_bytes_in_flight`` is not a non-negative integer,
+                or ``require_empty`` is not a bool, or ``max_capacity_gb`` is
+                not a finite non-negative number representable in bytes.
         """
         self.base_path = base_path
         self.num_workers = num_workers
         self.relative_tmp_dir = relative_tmp_dir
         self.use_odirect = use_odirect
         self.read_ahead_size = read_ahead_size
+        if (
+            isinstance(max_capacity_gb, bool)
+            or not isinstance(max_capacity_gb, (int, float))
+            or not math.isfinite(max_capacity_gb)
+            or max_capacity_gb < 0
+            or not math.isfinite(max_capacity_gb * (1024**3))
+        ):
+            raise ValueError("max_capacity_gb must be a finite non-negative number")
         self.max_capacity_gb = max_capacity_gb
+        if not isinstance(require_empty, bool):
+            raise ValueError("require_empty must be a boolean")
+        self.require_empty = require_empty
         self.num_read_workers = _validate_non_negative_int(
             "num_read_workers", num_read_workers
         )
@@ -142,8 +163,17 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
                 raise ValueError("read_ahead_size must be a positive integer")
 
         max_capacity_gb = d.get("max_capacity_gb", 0)
-        if not isinstance(max_capacity_gb, (int, float)) or max_capacity_gb < 0:
-            raise ValueError("max_capacity_gb must be a non-negative number")
+        config = cls(
+            base_path=base_path,
+            num_workers=num_workers,
+            relative_tmp_dir=str(relative_tmp_dir),
+            use_odirect=use_odirect,
+            read_ahead_size=read_ahead_size,
+            max_capacity_gb=max_capacity_gb,
+            num_read_workers=d.get("num_read_workers", DEFAULT_NUM_READ_WORKERS),
+            read_max_bytes_in_flight=d.get("read_max_bytes_in_flight", 0),
+            require_empty=d.get("require_empty", False),
+        )
         if max_capacity_gb > 0 and d.get("eviction") is None:
             logger.warning(
                 "fs_native: max_capacity_gb=%s is declared for %s but no "
@@ -155,16 +185,7 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
                 base_path,
             )
 
-        return cls(
-            base_path=base_path,
-            num_workers=num_workers,
-            relative_tmp_dir=str(relative_tmp_dir),
-            use_odirect=use_odirect,
-            read_ahead_size=read_ahead_size,
-            max_capacity_gb=float(max_capacity_gb),
-            num_read_workers=d.get("num_read_workers", DEFAULT_NUM_READ_WORKERS),
-            read_max_bytes_in_flight=d.get("read_max_bytes_in_flight", 0),
-        )
+        return config
 
     @classmethod
     def help(cls) -> str:
@@ -190,7 +211,11 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             "- max_capacity_gb (float): declared L2 capacity in GB "
             "for usage accounting (default 0 = disabled). Does not "
             "bound disk usage by itself; add an 'eviction' block "
-            "to enforce it"
+            "to enforce it\n"
+            "- require_empty (bool): require cold empty base_path before client "
+            "creation (default false). Value capacity requires exclusive writes "
+            "through this adapter, shared=false, finite positive capacity and "
+            "use_odirect=false; populated restarts are unsupported."
         )
 
 
@@ -218,6 +243,17 @@ def _create_fs_native_l2_adapter(
     )
 
     assert isinstance(config, FSNativeL2AdapterConfig)
+    if config.require_empty and os.path.exists(config.base_path):
+        with os.scandir(config.base_path) as entries:
+            if next(entries, None) is not None:
+                raise ValueError("require_empty requires an empty base_path")
+    value_capacity = (
+        config.require_empty
+        and not config.shared
+        and not config.use_odirect
+        and config.max_capacity_gb > 0
+        and int(config.max_capacity_gb * (1024**3)) > 0
+    )
     native_client = LMCacheFSClient(
         config.base_path,
         config.num_workers,
@@ -247,6 +283,7 @@ def _create_fs_native_l2_adapter(
         max_capacity_gb=config.max_capacity_gb,
         type_name="FSNativeL2Adapter",
         pad_buffers_to_alignment=config.use_odirect,
+        value_capacity=value_capacity,
         extra_status={
             "base_path": config.base_path,
             "use_odirect": config.use_odirect,

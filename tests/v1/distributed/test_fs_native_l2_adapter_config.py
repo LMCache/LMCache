@@ -8,16 +8,20 @@ longer be silently ignored.
 """
 
 # Standard
+from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
+import sys
 
 # Third Party
 import pytest
 
 # First Party
-from lmcache.v1.distributed.l2_adapters import fs_native_l2_adapter
+from lmcache.v1.distributed.l2_adapters import create_l2_adapter, fs_native_l2_adapter
 from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
     FSNativeL2AdapterConfig,
 )
+from tests.v1.distributed.test_native_value_capacity import ControlledConnector
 
 BASE = {"type": "fs_native", "base_path": "/data/lmcache"}
 
@@ -99,3 +103,76 @@ class TestFSNativeReadPoolValidation:
     def test_constructor_rejects(self, field):
         with pytest.raises(ValueError, match=field):
             FSNativeL2AdapterConfig(base_path="/data", **{field: -1})
+
+
+@pytest.mark.parametrize("bad", [1, 0, "true", None])
+def test_require_empty_is_strict_bool(bad: object) -> None:
+    with pytest.raises(ValueError, match="require_empty"):
+        FSNativeL2AdapterConfig.from_dict({**BASE, "require_empty": bad})
+    with pytest.raises(ValueError, match="require_empty"):
+        FSNativeL2AdapterConfig(base_path="/data", require_empty=bad)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "extra,qualified",
+    [
+        ({}, True),
+        ({"require_empty": False}, False),
+        ({"shared": True}, False),
+        ({"max_capacity_gb": 0}, False),
+        ({"max_capacity_gb": 1e-20}, False),
+        ({"use_odirect": True}, False),
+    ],
+)
+def test_factory_only_qualifies_cold_local_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: dict, qualified: bool
+) -> None:
+    class Client(ControlledConnector):
+        def __init__(self, *args: object) -> None:
+            super().__init__()
+
+        def read_budget_bytes(self) -> int:
+            return 0
+
+    module = ModuleType("lmcache.lmcache_fs")
+    monkeypatch.setattr(module, "LMCacheFSClient", Client, raising=False)
+    monkeypatch.setitem(sys.modules, "lmcache.lmcache_fs", module)
+    config = FSNativeL2AdapterConfig.from_dict(
+        {
+            **BASE,
+            "base_path": str(tmp_path),
+            "require_empty": True,
+            "max_capacity_gb": 1,
+            **extra,
+        }
+    )
+    config.shared = extra.get("shared", False)
+    adapter = create_l2_adapter(config)
+    try:
+        assert adapter.supports_value_capacity is qualified
+    finally:
+        adapter.close()
+
+
+def test_occupied_cold_directory_rejected_before_client_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    occupied = tmp_path / "existing"
+    occupied.write_bytes(b"preserve")
+    config = FSNativeL2AdapterConfig(base_path=str(tmp_path), require_empty=True)
+    module = ModuleType("lmcache.lmcache_fs")
+    with patch.object(module, "LMCacheFSClient", create=True) as client:
+        monkeypatch.setitem(sys.modules, "lmcache.lmcache_fs", module)
+        with pytest.raises(ValueError, match="empty"):
+            create_l2_adapter(config)
+        client.assert_not_called()
+    assert list(tmp_path.iterdir()) == [occupied]
+    assert occupied.read_bytes() == b"preserve"
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), True, -1, 1e308])
+def test_invalid_capacity_rejected_before_factory(bad: float) -> None:
+    with pytest.raises(ValueError, match="max_capacity_gb"):
+        FSNativeL2AdapterConfig.from_dict({**BASE, "max_capacity_gb": bad})
+    with pytest.raises(ValueError, match="max_capacity_gb"):
+        FSNativeL2AdapterConfig(base_path="/data", max_capacity_gb=bad)

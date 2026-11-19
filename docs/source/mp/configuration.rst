@@ -676,7 +676,8 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--eviction-policy``
      - *required*
      - Eviction policy.
-       Choices: ``LRU``, ``ARC``, ``IsolatedLRU``, ``noop``.
+       Choices: ``LRU``, ``ARC``, ``IsolatedLRU``, ``noop``,
+       ``Profiled``, ``ProfiledValue``.
        ``ARC`` adaptively balances recently created keys and frequently
        accessed keys. It keeps key-only ghost history for completed policy
        evictions; no KV data is retained in the ghost lists.
@@ -695,6 +696,53 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--eviction-ratio``
      - ``0.2``
      - Fraction of allocated memory to evict when triggered (0.0--1.0).
+   * - ``--profiling-config``
+     - Not set
+     - JSON cost snapshot required by the experimental profiling policies.
+   * - ``--profiling-store-config``
+     - Not set
+     - Independent profiling admission snapshot, for example with ARC L1.
+
+``ProfiledValue`` shares demand history between L1 victim ordering and L2 write
+admission. It requires an enabled event bus, one L1, one fixed L2 and the default
+store policy. Its schema2 snapshot binds a local ``model_name`` directory,
+``model_revision`` inventory SHA256, ``chunk_size``, ``dtypes`` and ``shapes`` to
+equal-length cumulative millisecond arrays: ``prefix_recompute_ms``,
+``prefix_fetch_l1_ms``, ``prefix_fetch_l2_ms`` and ``prefix_write_l2_ms``.
+
+Optional snapshot fields ``value_model`` and ``recompute_fraction`` default to
+``"expected_reuses"`` and ``0`` respectively. Set ``value_model`` to
+``"reuse_probability"`` to estimate the probability of at least one future reuse
+in ``horizon_s`` (default60 seconds), using a decayed Poisson rate with a
+distinct-key-distance penalty. This estimate is not empirically calibrated.
+``recompute_fraction`` must be finite and in [0,1]; it discounts recompute savings
+in the cost model, without enabling partial recomputation in the engine.
+The count-domain ``no-cost`` control is not accepted with probability mode.
+
+Optional ``l2_capacity_policy`` defaults to ``"native"``. Set it to ``"value"``
+in full mode to compare incoming net value against the lowest-value eligible
+resident block when capacity is full. Incoming writes pay write time; completed
+resident writes are sunk costs. Locked/pending blocks and required ancestors are
+not victims. The controller confirms actual deletion before re-planning a write;
+the native adapter's pending ledger accounts for in-flight writes. Competing
+periodic L2 eviction is disabled in this mode.
+
+Value capacity requires one initially empty, exclusively owned local FS adapter
+with ``require_empty=true``, ``shared=false``, finite positive capacity, no direct
+I/O padding and uniform block sizes. This bounds managed KV payload, not total
+filesystem footprint. Preexisting/shared data and external writers are unsupported.
+Unknown identities, incompatible layouts or stale costs reject value-mode writes;
+the default native mode keeps its existing fallback.
+
+Use ``--eviction-policy ARC --profiling-store-config costs.json`` to retain ARC
+replacement with independent profiling admission. Do not combine this option
+with ``ProfiledValue`` L1 selection. The same one-L1/one-L2 topology restrictions
+apply. The independent observer receives both demand and L1 lifecycle events.
+
+The policy operates after GPU-to-host copying. Runtime L2 mutations require
+restarting with a new snapshot. Configured costs alone do not establish measured
+calibration or TTFT improvement; neither probability calibration nor atomic prefix
+write/eviction rollback is provided.
 
 L2 Policies
 -----------

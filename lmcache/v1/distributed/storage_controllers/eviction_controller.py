@@ -14,7 +14,11 @@ import time
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
-from lmcache.v1.distributed.eviction import L1EvictionPolicy, L2EvictionPolicy
+from lmcache.v1.distributed.eviction import (
+    EvictionPolicy,
+    L1EvictionPolicy,
+    L2EvictionPolicy,
+)
 from lmcache.v1.distributed.eviction_policy import CreateEvictionPolicy
 from lmcache.v1.distributed.internal_api import (
     EvictionAction,
@@ -98,10 +102,15 @@ class L1EvictionController(EvictionController):
         self,
         l1_manager: L1ManagerInterface,
         eviction_config: EvictionConfig,
+        *,
+        policy: EvictionPolicy | None = None,
     ):
+        """Bind native ownership to an optional shared policy; None uses the factory."""
         super().__init__()
         self._eviction_config = eviction_config
-        self._eviction_policy = CreateEvictionPolicy(eviction_config)
+        self._eviction_policy = (
+            CreateEvictionPolicy(eviction_config) if policy is None else policy
+        )
         self._l1_manager = l1_manager
         self._listener = L1EvictionPolicy(self._eviction_policy)
         self._l1_manager.register_listener(self._listener)
