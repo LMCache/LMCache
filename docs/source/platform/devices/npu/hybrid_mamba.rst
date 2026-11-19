@@ -13,7 +13,8 @@ Flags that match the LMCache recipe are not repeated here. Follow the
 
 * ``--mamba-cache-mode align`` (required; ``all`` is not supported)
 * ``--enable-prefix-caching``
-* ``--separate-object-groups`` on ``lmcache server``
+* object-group separation on ``lmcache server`` (enabled by default; keep it
+  enabled)
 * ``--chunk-size`` equal to the attention block size ``N`` defined below
 * ``--max-num-batched-tokens`` at least ``N``, with ``2N - 1`` as the default
 * ``LMCacheMPConnector`` with ``kv_role: kv_both``
@@ -85,7 +86,6 @@ the version you run.
 
    lmcache server \
        --chunk-size 896 \
-       --separate-object-groups \
        --eviction-policy LRU
 
 .. code-block:: bash

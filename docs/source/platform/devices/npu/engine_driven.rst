@@ -18,13 +18,15 @@ are not supported in this mode.** Use :doc:`lmcache_driven` and
 .. warning::
 
    ``--shm-name`` and ``--no-l1-use-lazy`` are mandatory for this mode.
-   Without a named shared-memory pool the server hands back ordinary
-   (non-pinned) host memory, and every retrieve pays a dynamic pinning and
-   extra copy on the worker, which degrades warm-hit performance severely.
-   Always pair ``--shm-name`` with ``--no-l1-use-lazy`` so the pool is
-   allocated eagerly at startup. A shared-memory pool of ``--l1-size-gb`` size
-   is created under ``/dev/shm``, so the container must be started with a
-   matching ``--shm-size``.
+   Without a named shared-memory pool the worker falls back to the inline
+   engine-driven transport, which serialises every KV chunk into the request
+   message and copies it through the ZMQ/gRPC request channel; warm hits then
+   take seconds instead of milliseconds. The server accepts ``--shm-name``
+   with the default lazy L1 allocation but ignores it and logs a warning, so
+   pass both flags together. The pool is a ``--l1-size-gb`` segment named
+   ``lmcache_l1_pool_<name>`` under ``/dev/shm``, so the container must be
+   started with a matching ``--shm-size``. See :ref:`mp-transfer-mode` for
+   the server-side transport details.
 
 1. Environment Preparation
 --------------------------
@@ -237,20 +239,26 @@ Example: Qwen3-32B, TP8 on 8 NPUs.
        }'
 
 The connector reaches the server at ``localhost:5555`` by default; only the
-transfer mode needs to be set explicitly. A successful start shows, for every
-worker:
+transfer mode needs to be set explicitly. A successful start shows these
+lines across the server and worker logs:
 
 .. code-block:: text
 
    LMCache INFO: Creating transfer context (device_type=npu, mode=engine_driven)
-   LMCache INFO: Engine KV Format: EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS
-   LMCache INFO: Registered non-GPU context for instance ... (world_size=8)
-   LMCache INFO: Using shm non-GPU transfer strategy
-   LMCache INFO: Creating EngineDrivenContextShm (shm_name=...)
+   LMCache INFO: Engine KV Format: EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS ...
+   LMCache INFO: Registered non-GPU context for instance ... (model=..., world_size=8)
+   LMCache INFO: Using shm engine-driven transfer strategy
+   LMCache INFO: Creating EngineDrivenContextShm (shm_name=lmcache_l1_pool_lmcache-mp-e2e, pool_size=...)
+   LMCache INFO: Worker engine-driven context registered (instance_id=..., mode=SHM, groups=1)
 
 ``Creating EngineDrivenContextShm`` confirms the workers attached the
-shared-memory pool; if this line is absent, re-check the server's
-``--shm-name`` / ``--no-l1-use-lazy`` flags.
+shared-memory pool. If the worker instead logs
+``Creating EngineDrivenContextInline`` (possibly preceded by
+``Failed to initialize SHM context ...``), it fell back to the inline
+transport: re-check the server's ``--shm-name`` / ``--no-l1-use-lazy`` flags
+and the ``/dev/shm`` capacity. The later
+``Worker engine-driven context registered (...)`` line reports the mode the
+server advertised (``SHM`` or ``inline``), not whether attachment succeeded.
 
 .. note::
 

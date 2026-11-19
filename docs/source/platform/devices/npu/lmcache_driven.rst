@@ -27,10 +27,10 @@ This section lists the configuration constraints for each model. Refer to
   matches the vLLM block size).
 * **Hybrid Mamba models (for example Qwen3.5, Qwen3.6, and Qwen3.8).** Served
   in this mode. Use the :doc:`../../../recipes/qwen3_5` recipe for
-  ``--mamba-cache-mode align``, ``--enable-prefix-caching``,
-  ``--separate-object-groups``, and ``LMCacheMPConnector`` with
-  ``kv_role: kv_both``. CacheBlend and CacheGen stay unsupported.
-  ``--mamba-cache-mode all`` is not supported.
+  ``--mamba-cache-mode align``, ``--enable-prefix-caching``, object-group
+  separation (enabled by default; keep it enabled), and
+  ``LMCacheMPConnector`` with ``kv_role: kv_both``. CacheBlend and CacheGen
+  stay unsupported. ``--mamba-cache-mode all`` is not supported.
 
   * Leave ``--block-size`` unset. Set ``--chunk-size`` and
     ``--max-num-batched-tokens`` from the table in :doc:`hybrid_mamba` for
@@ -305,7 +305,6 @@ Expected evidence:
 * The connector reports lookup/load progress asynchronously: requests waiting
   for an external load appear as ``Deferred`` in the vLLM engine log line
   instead of blocking the engine.
-* Do not resize or delete the shared-memory pool while any engine is attached.
 * **To reveal LMCache advantages under load:** increase request concurrency,
   or keep ``--no-enable-prefix-caching`` to test LMCache IO efficiency in
   isolation.

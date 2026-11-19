@@ -26,7 +26,8 @@ is required for multi-plane MLA/DSA models such as DeepSeek-V4.
 Prerequisites
 -------------
 
-Validated on Atlas A2/A3 (Ascend 910B). Atlas 300I Duo is not supported.
+Validated on Atlas A2/A3 (Ascend 910B). Atlas A5 is planned but not yet
+supported, and Atlas 300I Duo is not supported.
 
 - CANN Toolkit >= 8.5.0 and Ascend driver >= 25.5.
 - Python >= 3.10 (LMCache-Ascend supports 3.10-3.12).
@@ -151,7 +152,10 @@ On the worker, override the transfer mode in the connector configuration:
      "lmcache.mp.mp_transfer_mode": "engine_driven"
    }
 
-``--shm-name`` creates a pool under ``/dev/shm``, so the container's
+``--shm-name`` and ``--no-l1-use-lazy`` must be passed together: with the
+default lazy L1 allocation the server ignores the name and logs a warning,
+and the workers fall back to the slow inline transport. The pool is created
+under ``/dev/shm`` as ``lmcache_l1_pool_<name>``, so the container's
 ``--shm-size`` must be at least ``--l1-size-gb``. Keep
 ``--gpu-memory-utilization`` at or below 0.8 because the retrieve path
 allocates transient device buffers on top of vLLM's profiled budget.
