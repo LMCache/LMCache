@@ -97,3 +97,33 @@ class LMCachePendingStore:
     operation: LMCacheStoreOperation
     node_id: "NodeId"
     lock_params: "DecLockRefParams"
+
+
+@dataclass
+class LMCacheLinkerQueuedLoad:
+    lookup: Any
+    group_indices: list[torch.Tensor]
+    local_hit_tokens: int
+    owned_device_indices: torch.Tensor
+
+
+@dataclass
+class LMCacheLinkerStartedLoadBatch:
+    rids: list[str]
+    operations: list[Any]
+    submitted: bool
+
+
+@dataclass
+class LMCacheLinkerPendingStore:
+    request_id: str
+    operation: Any
+
+
+@dataclass(frozen=True)
+class LMCacheLinkerCollectedPrefix:
+    token_ids: list[int]
+    node_start: int
+    extra_key: Optional[str]
+    cache_salt: Optional[str]
+    terminal_hash: str
