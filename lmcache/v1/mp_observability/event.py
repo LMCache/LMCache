@@ -69,6 +69,7 @@ class EventType(Enum):
     # MP Server request-level events (start/end pairs)
     MP_STORE_START = "mp.store.start"
     MP_STORE_END = "mp.store.end"
+    MP_STORE_BINDINGS_RELEASED = "mp.store.bindings_released"
     # Gather/DMA phase timings popped from the native plan executor by
     # TransferPhaseSampler on MP_*_END. Metadata: ``samples`` (list[tuple])
     # and ``ended_transfer_key`` (str, the ending transfer's key -- its

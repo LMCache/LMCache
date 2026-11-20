@@ -73,8 +73,7 @@ registration and liveness refresh:
 
 The profile lives on `ContextEntry` until unregister, reap or shutdown.
 Rejected registrations leave existing contexts, layouts and liveness untouched.
-STORE bindings and the first engine caller that sends and checks a profile
-belong to later PRs in [#5932](https://github.com/LMCache/LMCache/issues/5932).
+The first engine caller that sends and checks a profile belongs to a later PR in [#5932](https://github.com/LMCache/LMCache/issues/5932).
 The two `None` callers do not compare the response because it cannot differ.
 
 ### Typed rejection and version behavior
@@ -325,3 +324,17 @@ bus and vLLM KV events, and match hash algorithms and chunk sizes. The scheduler
 subscribes automatically when vLLM events are enabled. See
 `docs/source/mp/configuration.rst` for the server's log-size/disable control.
 L2 events, access events and salted hash interoperability are outside scope.
+
+### STORE identity metadata
+
+A profiled client can attach `event_bindings` to the STORE key. Each binding
+uses the original engine hash representation (bytes, signed 64-bit integer,
+or unsigned 64-bit integer), the first parent and its registration profile.
+gRPC represents each hash with a protobuf oneof. ZMQ uses MessagePack.
+An unbound gRPC key omits the repeated field. A ZMQ dataclass key gains an
+empty MessagePack array by default; its RPC frame count stays the same.
+Converting a STORE key to a lookup key drops the bindings. Key equality and
+storage hashes exclude the binding fields. With the event channel enabled,
+a conflicting descriptor is rejected with the existing unary error envelope.
+Peers that predate this field can ignore it. Use matched versions when sending
+bindings. No production engine sends bindings yet.

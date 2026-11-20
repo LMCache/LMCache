@@ -6,7 +6,7 @@ from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
 from collections.abc import Iterable as _Iterable, Mapping as _Mapping
-from typing import ClassVar as _ClassVar, Optional as _Optional
+from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -17,6 +17,26 @@ class KVEventProfile(_message.Message):
     profile_id: str
     block_size: int
     def __init__(self, profile_id: _Optional[str] = ..., block_size: _Optional[int] = ...) -> None: ...
+
+class NativeBlockHash(_message.Message):
+    __slots__ = ("raw", "signed_value", "unsigned_value")
+    RAW_FIELD_NUMBER: _ClassVar[int]
+    SIGNED_VALUE_FIELD_NUMBER: _ClassVar[int]
+    UNSIGNED_VALUE_FIELD_NUMBER: _ClassVar[int]
+    raw: bytes
+    signed_value: int
+    unsigned_value: int
+    def __init__(self, raw: _Optional[bytes] = ..., signed_value: _Optional[int] = ..., unsigned_value: _Optional[int] = ...) -> None: ...
+
+class EventBinding(_message.Message):
+    __slots__ = ("profile", "block_hashes", "parent_block_hash")
+    PROFILE_FIELD_NUMBER: _ClassVar[int]
+    BLOCK_HASHES_FIELD_NUMBER: _ClassVar[int]
+    PARENT_BLOCK_HASH_FIELD_NUMBER: _ClassVar[int]
+    profile: KVEventProfile
+    block_hashes: _containers.RepeatedCompositeFieldContainer[NativeBlockHash]
+    parent_block_hash: NativeBlockHash
+    def __init__(self, profile: _Optional[_Union[KVEventProfile, _Mapping]] = ..., block_hashes: _Optional[_Iterable[_Union[NativeBlockHash, _Mapping]]] = ..., parent_block_hash: _Optional[_Union[NativeBlockHash, _Mapping]] = ...) -> None: ...
 
 class ObjectKeyIdentity(_message.Message):
     __slots__ = ("chunk_hash", "kv_rank", "model_name", "object_group_id", "cache_salt", "tags")
@@ -42,7 +62,7 @@ class ObjectKeyIdentity(_message.Message):
     def __init__(self, chunk_hash: _Optional[bytes] = ..., kv_rank: _Optional[int] = ..., model_name: _Optional[str] = ..., object_group_id: _Optional[int] = ..., cache_salt: _Optional[str] = ..., tags: _Optional[_Mapping[str, str]] = ...) -> None: ...
 
 class IpcCacheServerKey(_message.Message):
-    __slots__ = ("model_name", "world_size", "worker_id", "token_bytes", "start", "end", "request_id", "cache_salt", "encoded_request_configs")
+    __slots__ = ("model_name", "world_size", "worker_id", "token_bytes", "start", "end", "request_id", "cache_salt", "encoded_request_configs", "event_bindings")
     MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
     WORLD_SIZE_FIELD_NUMBER: _ClassVar[int]
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
@@ -52,6 +72,7 @@ class IpcCacheServerKey(_message.Message):
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     CACHE_SALT_FIELD_NUMBER: _ClassVar[int]
     ENCODED_REQUEST_CONFIGS_FIELD_NUMBER: _ClassVar[int]
+    EVENT_BINDINGS_FIELD_NUMBER: _ClassVar[int]
     model_name: str
     world_size: int
     worker_id: int
@@ -61,7 +82,8 @@ class IpcCacheServerKey(_message.Message):
     request_id: str
     cache_salt: str
     encoded_request_configs: bytes
-    def __init__(self, model_name: _Optional[str] = ..., world_size: _Optional[int] = ..., worker_id: _Optional[int] = ..., token_bytes: _Optional[bytes] = ..., start: _Optional[int] = ..., end: _Optional[int] = ..., request_id: _Optional[str] = ..., cache_salt: _Optional[str] = ..., encoded_request_configs: _Optional[bytes] = ...) -> None: ...
+    event_bindings: _containers.RepeatedCompositeFieldContainer[EventBinding]
+    def __init__(self, model_name: _Optional[str] = ..., world_size: _Optional[int] = ..., worker_id: _Optional[int] = ..., token_bytes: _Optional[bytes] = ..., start: _Optional[int] = ..., end: _Optional[int] = ..., request_id: _Optional[str] = ..., cache_salt: _Optional[str] = ..., encoded_request_configs: _Optional[bytes] = ..., event_bindings: _Optional[_Iterable[_Union[EventBinding, _Mapping]]] = ...) -> None: ...
 
 class EventIpcHandleResult(_message.Message):
     __slots__ = ("event_ipc_handle", "success")

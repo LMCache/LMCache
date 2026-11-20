@@ -2,6 +2,8 @@
 """LMCache-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
+from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any, Sequence
 import threading
@@ -26,6 +28,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     ShardReplicationDesc,
+    ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
@@ -240,6 +243,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
     module_name = "lmcache_driven_transfer"
     _host_event_waiter: HostEventWaiter | None = None
+    bind_store_events: (
+        Callable[
+            [IPCCacheServerKey, Sequence[ObjectKey], KVEventProfile | None, int, str],
+            None,
+        ]
+        | None
+    ) = None
 
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
@@ -289,6 +299,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             self._release_imported_event,
             payload_type=tuple[int, int],
         )
+        self.register_host_func(
+            "finish_bound_write",
+            self._finish_bound_write,
+            tuple[dict[ObjectKey, int], str],
+        )
         self._device_host_func_dispatcher.start()
 
         # None when no path is configured, the platform is unsupported, or
@@ -332,6 +347,22 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._ctx.storage_manager.finish_write(
             list(l1_owners.keys()), l1_owners=l1_owners
         )
+
+    def _release_store_bindings(self, transfer: str) -> None:
+        # L1 ownership notifications and releases must be consumed in FIFO order.
+        self._ctx.event_bus.publish(
+            Event(
+                event_type=EventType.MP_STORE_BINDINGS_RELEASED,
+                metadata={"transfer_key": transfer},
+            )
+        )
+
+    def _finish_bound_write(self, payload: tuple[dict[ObjectKey, int], str]) -> None:
+        owners, transfer = payload
+        try:
+            self._finish_write(owners)
+        finally:
+            self._release_store_bindings(transfer)
 
     def register_host_func(self, kind: str, handler: Any, payload_type: Any) -> None:
         """Register *handler* for *kind* on the per-process device host-func
@@ -717,9 +748,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         """
         waiter = self._host_event_waiter
         if waiter is not None and not waiter.in_run():
+            if self.bind_store_events is not None and key.event_bindings:
+                with self._lock:
+                    entry = self._cache_contexts.get(instance_id)
+            else:
+                entry = self.get_and_touch_context_entry(instance_id)
             return waiter.submit_after_event(
                 instance_id,
-                self.get_and_touch_context_entry(instance_id),
+                entry,
                 event_ipc_handle,
                 lambda: self.store(key, instance_id, gpu_block_ids, event_ipc_handle),
                 lambda: (b"", False),
@@ -779,6 +815,68 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             stores that chunk in the same transaction; its block IDs follow
             the full chunks' in every group, and its mask entry comes last.
         """
+        transfer = next_transfer_key(key.request_id)
+        if self.bind_store_events is None or not key.event_bindings:
+            return self._store_chunks(
+                key,
+                instance_id,
+                gpu_block_ids,
+                event_ipc_handle,
+                skip_chunks,
+                mask_object_groups,
+                transfer,
+            )
+
+        # Admission must not touch a live session, refresh liveness, or reserve L1.
+        with self._lock:
+            entry = self._cache_contexts.get(instance_id)
+        if entry is None:
+            return b"", False, []
+        if (key.model_name, key.world_size) != (
+            entry.model_name,
+            entry.world_size,
+        ) or key.worker_id is None:
+            raise InvalidRequestError(
+                "native STORE context does not match registration"
+            )
+        layouts = self._ctx.layout_desc_registry
+        hasher = layouts.get_token_hasher(key.model_name, key.world_size)
+        hashes = hasher.compute_packed_chunk_hashes(
+            key.token_bytes, start=key.start, end=key.end
+        )
+        replication = layouts.find_shard_replication_desc(
+            key.model_name, key.world_size
+        )
+        objects = ipc_key_to_object_keys(key, hashes, [0], replication)[0]
+        self.bind_store_events(
+            key, objects, entry.event_profile, hasher.chunk_size, transfer
+        )
+        with ExitStack() as release:
+            release.callback(self._release_store_bindings, transfer)
+            return self._store_chunks(
+                key,
+                instance_id,
+                gpu_block_ids,
+                event_ipc_handle,
+                skip_chunks,
+                mask_object_groups,
+                transfer,
+                entry,
+                release,
+            )
+
+    def _store_chunks(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+        skip_chunks: list[bool] | None,
+        mask_object_groups: Sequence[int] | None,
+        transfer_key: str,
+        expected_entry: ContextEntry | None = None,
+        binding_release: ExitStack | None = None,
+    ) -> tuple[bytes, bool, list[bool]]:
         st = time.perf_counter()
 
         entry = self.get_and_touch_context_entry(instance_id)
@@ -793,6 +891,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 "Rejecting STORE for unregistered GPU instance ID %d",
                 instance_id,
             )
+            return b"", False, []
+        if expected_entry is not None and entry is not expected_entry:
             return b"", False, []
         cache_context = entry.cache_context
         model_name = entry.model_name
@@ -906,7 +1006,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ):
                 self._publish_token_bindings(key, obj_keys_per_obj_group[0])
 
-            transfer_key = next_transfer_key(key.request_id)
             self._ctx.event_bus.publish_on_stream(
                 cache_context.cupy_stream,
                 Event(
@@ -989,11 +1088,18 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 # copied successfully; otherwise the whole store is skipped.
                 stored_count = len(all_dict) if store_succeeded else 0
                 if stored_count:
-                    submit_callback_to_stream(
-                        cache_context.cupy_stream,
-                        "finish_write",
-                        l1_owners,
-                    )
+                    if binding_release is None:
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream, "finish_write", l1_owners
+                        )
+                    else:
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream,
+                            "finish_bound_write",
+                            (l1_owners, transfer_key),
+                        )
+                        # Host completion owns the release from here on.
+                        binding_release.pop_all()
                 else:
                     total_bytes = 0
                 # Report only chunks that actually stored, plus the unfull
