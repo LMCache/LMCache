@@ -597,13 +597,11 @@ in-flight L2 store / prefetch-load queues.  These metrics are useful for
 capacity planning, sizing L1, watching L2 fullness, and spotting
 backpressure on individual L2 adapters.
 
-All five metrics are OTel `ObservableGauge` instruments registered via the
-shared `register_gauge` helper.  At scrape time, OTel invokes the
-registered callback, which iterates the controller's live state and
-returns one observation per adapter (for `l2_usage_bytes`, one per
-configured adapter; for the in-flight gauges, only adapters with work).
-Adapters with no in-flight work emit no datapoint for the three
-in-flight gauges.
+These metrics are OTel `ObservableGauge` instruments registered via the
+shared `register_gauge` helper. At scrape time, each L1 gauge returns one
+observation per live manager, labeled by `l1_tag` and `backend`.
+`l2_usage_bytes` returns one observation per configured adapter. The three
+in-flight gauges report only adapters with work.
 
 `lmcache_mp.l2_usage_bytes` carries a single `l2_name` attribute — the
 adapter's registered type name (e.g. `"fs"`, `"mock"`,
@@ -640,22 +638,28 @@ that never returns to zero means abandoned reservations waiting for their
 write TTL to expire. See `../distributed/l1_manager/staging-and-write-tags.md`.
 
 **What `l1_largest_free_block_bytes` / `l1_free_block_count` answer:** How
-fragmented is the L1 free space? A failed allocation alone is not proof:
-estimate the free bytes from `/status` as `memory_total_bytes −
-memory_used_bytes` — the current heap, not the configured capacity, which
-the lazy tier only grows into — or take the `F bytes free` straight from
-the OOM log line. Free bytes below the aligned demand
-(`batch_size × aligned_size` for a batched request) is plain exhaustion,
-and a largest block that covers all free bytes means the free space is
-contiguous. Free bytes at or above the demand while the largest block is
-below it is external fragmentation; on a failed batch `short by N blocks`
-counts the allocatable slots the free blocks are still short of in total —
-the largest block can hold one object while the batch as a whole still
-fails. Each gauge samples the manager independently, so the two series
-need not come from the same instant; one `get_fragmentation_stats()` call
-is atomic. Paged allocators cannot fragment externally (every hole is
-page-sized) and report page-granular counts; tiers whose allocator has no
-address space (a shadow L1) report zeros by convention.
+much of the free L1 space can serve an allocation?
+
+1. Read `F bytes free` from the allocation failure log or estimate free
+   bytes from `/status` as `memory_total_bytes − memory_used_bytes`. On a
+   lazy tier, `memory_total_bytes` is the current heap, which grows toward
+   the configured capacity.
+2. Compare free bytes with the aligned request size, or with
+   `batch_size × aligned_size` for a batch. Fewer free bytes indicate
+   exhaustion. If one block holds all the free bytes, the space is contiguous.
+3. With enough total free bytes, a single first-fit allocation fails from
+   external fragmentation when the largest block is smaller than the aligned
+   object. A batch can use several blocks. Each free block contributes
+   `floor(block_size / aligned_size)` whole objects. On failure,
+   `short by N blocks` gives the batch size minus the sum of those slots.
+   Even if the largest block fits one object, the batch can still fall short.
+
+The gauges sample independently, so their values can come from different
+instants. One `AddressManager.get_fragmentation_stats()` call returns both
+values from the same locked snapshot. Paged allocators report the page size
+and the free-page count while pages are available. Every free page can serve
+one object, so external fragmentation cannot occur. Exhausted tiers and tiers
+without address-space stats (such as a shadow L1) both report `(0, 0)`.
 
 **What `l2_usage_bytes` answers:** How full is each L2 backend? Lets
 operators query how much each L2 tier currently holds, decide whether

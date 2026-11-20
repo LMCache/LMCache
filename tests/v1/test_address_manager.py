@@ -1290,6 +1290,53 @@ def _no_overlap(allocations: List[Tuple[int, int]]) -> bool:
 class TestFragmentationSignal:
     """The external-fragmentation signal from issue #6724."""
 
+    def test_fragmentation_stats_waits_for_allocator_lock(self) -> None:
+        """A reader waits for the allocator lock before returning its snapshot."""
+        manager = AddressManager(4096)
+        started = threading.Event()
+        returned = threading.Event()
+        stats: tuple[int, int] | None = None
+
+        def read_stats() -> None:
+            nonlocal stats
+            started.set()
+            stats = manager.get_fragmentation_stats()
+            returned.set()
+
+        worker = threading.Thread(target=read_stats, daemon=True)
+        with manager._lock:
+            worker.start()
+            assert started.wait(timeout=5), "reader did not start"
+            assert not returned.wait(timeout=0.2), "reader returned with the lock held"
+
+        worker.join(timeout=5)
+        assert not worker.is_alive(), "reader did not finish after lock release"
+        assert stats == (4096, 1)
+
+    @pytest.mark.parametrize(
+        "batched", [False, True], ids=["allocate", "batched_allocate"]
+    )
+    def test_allocation_failure_hint_does_not_deadlock(self, batched: bool) -> None:
+        """Both allocation paths can report free space while holding the lock."""
+        manager = AddressManager(4096)
+        message = ""
+
+        def attempt_allocation() -> None:
+            nonlocal message
+            try:
+                if batched:
+                    manager.batched_allocate(4096, 2)
+                else:
+                    manager.allocate(8192)
+            except RuntimeError as exc:
+                message = str(exc)
+
+        worker = threading.Thread(target=attempt_allocation, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive(), "allocation deadlocked while reporting free space"
+        assert "4096 bytes free" in message
+
     def test_fresh_address_space_is_one_free_block(self):
         """A pristine space reports one block spanning the whole arena."""
         manager = AddressManager(4096 * 10)

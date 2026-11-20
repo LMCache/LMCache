@@ -730,33 +730,16 @@ Adapters with no in-flight work emit no datapoint for that scrape.
        eviction loop is below or above its trigger threshold.
    * - ``lmcache_mp.l1_largest_free_block_bytes``
      - ObservableGauge
-     - Largest contiguous free block in the L1 address space, sampled at
-       scrape time from ``BaseL1Manager.get_fragmentation_stats()``.  A
-       failed allocation alone is not proof of fragmentation: estimate
-       the free bytes from ``/status`` as ``memory_total_bytes`` minus
-       ``memory_used_bytes`` — the current heap, not the configured
-       capacity, which the lazy tier only grows into — or take the
-       ``F bytes free`` straight from the OOM log line.  Free bytes
-       below the aligned demand (``batch_size × aligned_size`` for a
-       batched request) is plain exhaustion, and a largest block that
-       covers all free bytes means the free space is contiguous.  Free
-       bytes at or above the demand while the largest block is below it
-       is external fragmentation; on a failed batch the log's ``short
-       by N blocks`` counts the allocatable slots the free blocks are
-       still short of in total, and the largest block can hold one
-       object while the batch as a whole still fails.  Each gauge
-       samples the manager independently, so the two series need not
-       come from the same instant; a single
-       ``get_fragmentation_stats()`` call is atomic.  ``0`` also means
-       the tier's allocator has no address-space stats (e.g. a shadow
-       L1).
+     - Largest contiguous free L1 block, in bytes. If an aligned object fits
+       in the total free bytes but exceeds this size, fragmentation prevents
+       a first-fit allocation. Tiers without address-space stats report
+       ``0``. See the design doc ``METRICS.md``.
    * - ``lmcache_mp.l1_free_block_count``
      - ObservableGauge
-     - Number of free blocks in the L1 address space, sampled
-       independently of the largest-block gauge.  A high count next to a
-       small ``l1_largest_free_block_bytes`` is the same fragmentation
-       signal seen from the hole-count side; paged allocators report
-       page-granular counts and cannot fragment externally.
+     - Number of free L1 blocks (free pages on paged tiers). For the same
+       total free bytes, a higher count means smaller blocks on average.
+       Tiers without address-space stats report ``0``. See the design doc
+       ``METRICS.md``.
    * - ``lmcache_mp.l2_usage_bytes``
      - ObservableGauge (attr: ``l2_name``)
      - Bytes currently held in each L2 adapter, sampled at scrape time
