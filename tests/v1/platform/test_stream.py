@@ -13,6 +13,7 @@ import pytest
 from lmcache.v1.platform import stream
 from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
 from lmcache.v1.platform.devices.musa import MusaDeviceSpec
+from lmcache.v1.platform.devices.npu import NpuDeviceSpec
 
 
 @pytest.fixture(autouse=True)
@@ -142,3 +143,6 @@ def test_accelerator_specs_own_native_stream_handle_layouts() -> None:
     """The generic stream facade does not need accelerator-specific fields."""
     assert CudaDeviceSpec().get_stream_handle(SimpleNamespace(cuda_stream=17)) == 17
     assert MusaDeviceSpec().get_stream_handle(SimpleNamespace(musa_stream=23)) == 23
+    assert NpuDeviceSpec().get_stream_handle(SimpleNamespace(npu_stream=29)) == 29
+    with pytest.raises(RuntimeError, match="npu_stream"):
+        NpuDeviceSpec().get_stream_handle(SimpleNamespace(npu_stream=0))
