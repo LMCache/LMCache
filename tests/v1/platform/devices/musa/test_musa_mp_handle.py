@@ -333,6 +333,50 @@ def test_musa_ipc_wrapper_rejects_non_musa_tensor() -> None:
         MusaIPCWrapper(torch.empty(4))
 
 
+def test_musa_ipc_wrapper_exports_padded_view_with_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MUSA IPC preserves block padding and a nonzero storage offset."""
+    # First Party
+    from lmcache.v1.platform.devices.musa import ipc_wrapper
+
+    class _FakeMusaTensor(torch.Tensor):
+        @property
+        def device(self) -> object:
+            return SimpleNamespace(type="musa", index=0)
+
+    tensor = (
+        torch.arange(64, dtype=torch.float32)
+        .as_strided((3, 2, 4), (16, 4, 1), 3)
+        .as_subclass(_FakeMusaTensor)
+    )
+    exported: list[torch.Tensor] = []
+
+    def export_tensor(value: torch.Tensor) -> object:
+        exported.append(value)
+        return object()
+
+    monkeypatch.setattr(
+        ipc_wrapper,
+        "_torch_musa_ipc_module_if_ready",
+        lambda: SimpleNamespace(export_tensor=export_tensor),
+    )
+    monkeypatch.setattr(
+        ipc_wrapper.MusaIPCWrapper,
+        "_get_device_uuid",
+        classmethod(lambda _cls, _device_index: "musa:0"),
+    )
+
+    wrapper = ipc_wrapper.MusaIPCWrapper(tensor)
+
+    assert len(exported) == 1
+    assert exported[0].data_ptr() == tensor.data_ptr()
+    assert not exported[0].is_contiguous()
+    assert wrapper.shape == tuple(tensor.shape)
+    assert wrapper.stride == tuple(tensor.stride())
+    assert wrapper.storage_offset == tensor.storage_offset()
+
+
 def test_musa_ipc_wrapper_uses_device_agnostic_wire_base() -> None:
     """MUSA handles use the device-agnostic KVCache wire base."""
     # First Party

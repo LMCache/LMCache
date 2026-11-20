@@ -62,10 +62,13 @@ def test_pointer_operands_are_reconstructed_inside_musa_adapter(
     shape_desc.nb = 3
     shape_desc.bs = 4
     shape_desc.nh = 1
-    shape_desc.hs = 8
-    shape_desc.element_size = 2
-    shape_desc.dtype = torch.bfloat16
-    shape_desc.block_stride_elems = 40
+    width = 8
+    dtype = torch.bfloat16
+    stride = 4 * width + 8
+    shape_desc.hs = width
+    shape_desc.element_size = torch.empty((), dtype=dtype).element_size()
+    shape_desc.dtype = dtype
+    shape_desc.block_stride_elems = stride
 
     device_ops.MusaDeviceOps().multi_layer_block_kv_transfer(
         torch.tensor([101, 202], dtype=torch.int64),
@@ -80,9 +83,9 @@ def test_pointer_operands_are_reconstructed_inside_musa_adapter(
     )
 
     assert calls == [
-        (101, (3, 4, 8), torch.bfloat16, (40, 8, 1)),
-        (202, (3, 4, 8), torch.bfloat16, (40, 8, 1)),
-        (303, (2, 4, 8), torch.bfloat16, None),
+        (101, (3, 4, width), dtype, (stride, width, 1)),
+        (202, (3, 4, width), dtype, (stride, width, 1)),
+        (303, (2, 4, width), dtype, None),
     ]
     assert format_spec_lookups == 1
 
