@@ -4,6 +4,8 @@
 # Standard
 from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
+import hashlib
+import json
 import math
 import time
 
@@ -11,15 +13,12 @@ import time
 import pytest
 
 # First Party
+from lmcache.cli.commands.bench.engine_bench.config import WarmupPolicy
 from lmcache.cli.commands.bench.engine_bench.stats import RequestResult
-from lmcache.cli.commands.bench.engine_bench.tokenizers import build_single_token_pool
-from lmcache.cli.commands.bench.engine_bench.workloads import long_doc_permutator as ldp
+from lmcache.cli.commands.bench.engine_bench.workloads import kv_tier_pressure as ktp
 from lmcache.cli.commands.bench.engine_bench.workloads.long_doc_permutator import (
     LongDocPermutatorConfig,
     LongDocPermutatorWorkload,
-    _enumerate_permutations,
-    _generate_contexts,
-    _generate_system_prompt,
 )
 
 # Local
@@ -132,91 +131,11 @@ class TestLongDocPermutatorConfigResolve:
 
 
 # ---------------------------------------------------------------------------
-# Module-level helpers
-# ---------------------------------------------------------------------------
-
-
-class TestGenerateSystemPrompt:
-    def test_empty_for_zero_length(self, fake_tokenizer: FakeTokenizer) -> None:
-        pool = build_single_token_pool(fake_tokenizer, 100)
-        assert _generate_system_prompt(0, pool) == ""
-
-    def test_exact_token_length(self, fake_tokenizer: FakeTokenizer) -> None:
-        pool = build_single_token_pool(fake_tokenizer, 100)
-        prompt = _generate_system_prompt(50, pool)
-        assert len(fake_tokenizer.encode(prompt)) == 50
-
-    def test_deterministic(self, fake_tokenizer: FakeTokenizer) -> None:
-        pool = build_single_token_pool(fake_tokenizer, 100)
-        assert _generate_system_prompt(30, pool, seed=42) == (
-            _generate_system_prompt(30, pool, seed=42)
-        )
-
-    def test_different_seeds_differ(self, fake_tokenizer: FakeTokenizer) -> None:
-        pool = build_single_token_pool(fake_tokenizer, 100)
-        assert _generate_system_prompt(30, pool, seed=1) != (
-            _generate_system_prompt(30, pool, seed=2)
-        )
-
-
-class TestGenerateContexts:
-    def test_correct_count(self, fake_tokenizer: FakeTokenizer) -> None:
-        pool = build_single_token_pool(fake_tokenizer, 200)
-        contexts = _generate_contexts(4, 50, pool)
-        assert len(contexts) == 4
-
-    def test_exact_token_length(self, fake_tokenizer: FakeTokenizer) -> None:
-        pool = build_single_token_pool(fake_tokenizer, 200)
-        for ctx in _generate_contexts(3, 100, pool):
-            assert len(fake_tokenizer.encode(ctx)) == 100
-
-    def test_contexts_are_unique(self, fake_tokenizer: FakeTokenizer) -> None:
-        pool = build_single_token_pool(fake_tokenizer, 250)
-        contexts = _generate_contexts(5, 200, pool)
-        assert len(set(contexts)) == 5
-
-    def test_deterministic(self, fake_tokenizer: FakeTokenizer) -> None:
-        pool = build_single_token_pool(fake_tokenizer, 200)
-        assert _generate_contexts(3, 50, pool, seed=10) == (
-            _generate_contexts(3, 50, pool, seed=10)
-        )
-
-
-class TestEnumeratePermutations:
-    def test_all_permutations_when_small(self) -> None:
-        # 3! = 6 <= num_permutations
-        perms = _enumerate_permutations(3, 100)
-        assert len(perms) == math.factorial(3)
-
-    def test_capped_at_requested(self) -> None:
-        perms = _enumerate_permutations(5, 4)
-        assert len(perms) == 4
-
-    def test_all_are_valid_permutations(self) -> None:
-        perms = _enumerate_permutations(4, 10)
-        for perm in perms:
-            assert sorted(perm) == list(range(4))
-
-    def test_no_duplicates(self) -> None:
-        perms = _enumerate_permutations(4, 20)
-        assert len(set(perms)) == len(perms)
-
-    def test_deterministic(self) -> None:
-        p1 = _enumerate_permutations(5, 8, seed=0)
-        p2 = _enumerate_permutations(5, 8, seed=0)
-        assert p1 == p2
-
-    def test_single_context_single_permutation(self) -> None:
-        perms = _enumerate_permutations(1, 5)
-        assert perms == [(0,)]
-
-
-# ---------------------------------------------------------------------------
 # Shared test fixtures
 # ---------------------------------------------------------------------------
 
 
-def _make_config(**overrides) -> LongDocPermutatorConfig:
+def _make_config(**overrides: int) -> LongDocPermutatorConfig:
     defaults = dict(
         num_contexts=3,
         context_length=20,
@@ -226,7 +145,7 @@ def _make_config(**overrides) -> LongDocPermutatorConfig:
         num_inflight_requests=1,
     )
     defaults.update(overrides)
-    return LongDocPermutatorConfig(**defaults)  # type: ignore[arg-type]
+    return LongDocPermutatorConfig(**defaults)
 
 
 def _make_mock_result(request_id: str = "req_0") -> RequestResult:
@@ -266,7 +185,7 @@ def _make_workload(
     sender = _make_mock_sender()
     collector = MagicMock()
     monitor = MagicMock()
-    with patch.object(ldp, "try_load_tokenizer", return_value=tokenizer):
+    with patch.object(ktp, "try_load_tokenizer", return_value=tokenizer):
         workload = LongDocPermutatorWorkload(
             config,
             sender,
@@ -284,103 +203,88 @@ def _make_workload(
 
 
 class TestLongDocPermutatorWorkloadInit:
-    def test_system_prompt_built(self) -> None:
-        cfg = _make_config(system_prompt_length=20)
-        tokenizer = make_fake_tokenizer()
-        w, *_ = _make_workload(cfg, tokenizer=tokenizer)
-        assert len(tokenizer.encode(w._system_prompt)) == 20
-
-    def test_contexts_have_exact_token_length(self) -> None:
-        cfg = _make_config(num_contexts=3, context_length=25)
-        tokenizer = make_fake_tokenizer()
-        w, *_ = _make_workload(cfg, tokenizer=tokenizer)
-        for ctx in w._contexts:
-            assert len(tokenizer.encode(ctx)) == 25
-
     def test_raises_without_tokenizer(self) -> None:
-        """A tokenizer is required: the length flags are token counts."""
-        with patch.object(ldp, "try_load_tokenizer", return_value=None):
+        with patch.object(ktp, "try_load_tokenizer", return_value=None):
             with pytest.raises(ValueError, match="needs a tokenizer"):
                 LongDocPermutatorWorkload(
-                    _make_config(),
-                    _make_mock_sender(),
-                    MagicMock(),
-                    MagicMock(),
-                    model_name=None,
+                    _make_config(), _make_mock_sender(), MagicMock(), MagicMock()
                 )
 
-    def test_system_prompt_empty_when_zero(self) -> None:
-        cfg = _make_config(system_prompt_length=0)
-        w, *_ = _make_workload(cfg)
-        assert w._system_prompt == ""
+    @pytest.mark.parametrize(
+        "contexts,requested,actual",
+        [
+            (1, 100, 1),
+            (2, 100, 2),
+            (3, 4, 4),
+            (3, 100, 6),
+            (5, 100, 100),
+            (5, 8, 8),
+            (16, 20, 20),
+        ],
+    )
+    def test_distinct_requests_capped_at_factorial(
+        self, contexts: int, requested: int, actual: int
+    ) -> None:
+        workload, sender, _, _ = _make_workload(
+            _make_config(num_contexts=contexts, num_permutations=requested)
+        )
+        assert workload.num_requests == actual
+        workload.run()
+        bodies = [
+            call.args[1][-1]["content"] for call in sender.send_request.call_args_list
+        ]
+        assert len(bodies) == actual
+        assert len(set(bodies)) == actual
 
-    def test_contexts_count(self) -> None:
-        cfg = _make_config(num_contexts=4)
-        w, *_ = _make_workload(cfg)
-        assert len(w._contexts) == 4
+    @pytest.mark.parametrize("system_length", [0, 10])
+    def test_prompts_have_exact_token_lengths_and_all_documents(
+        self, system_length: int
+    ) -> None:
+        tokenizer = make_fake_tokenizer()
+        workload, sender, _, _ = _make_workload(
+            _make_config(
+                num_contexts=3, context_length=25, system_prompt_length=system_length
+            ),
+            tokenizer=tokenizer,
+        )
+        workload.run()
+        prompts = [call.args[1] for call in sender.send_request.call_args_list]
+        corpus = sorted(prompts[0][-1]["content"].split("\n\n"))
+        assert len(corpus) == 3
+        for messages in prompts:
+            assert [m["role"] for m in messages] == (
+                ["system", "user"] if system_length else ["user"]
+            )
+            assert sorted(messages[-1]["content"].split("\n\n")) == corpus
+            assert all(len(tokenizer.encode(doc)) == 25 for doc in corpus)
+            if system_length:
+                assert len(tokenizer.encode(messages[0]["content"])) == system_length
+            assert (
+                sum(len(tokenizer.encode(m["content"])) for m in messages)
+                == workload.tokens_per_request
+            )
 
-    def test_permutations_capped(self) -> None:
-        # 3! = 6; requesting 4 should yield 4
-        cfg = _make_config(num_contexts=3, num_permutations=4)
-        w, *_ = _make_workload(cfg)
-        assert len(w._permutations) == 4
+    def test_different_seeds_produce_different_prompts(self) -> None:
+        first, first_sender, _, _ = _make_workload(seed=7)
+        second, second_sender, _, _ = _make_workload(seed=8)
+        first.run()
+        second.run()
+        assert (
+            first_sender.send_request.call_args_list
+            != second_sender.send_request.call_args_list
+        )
 
-    def test_permutations_all_when_small(self) -> None:
-        cfg = _make_config(num_contexts=2, num_permutations=100)
-        w, *_ = _make_workload(cfg)
-        assert len(w._permutations) == math.factorial(2)
-
-    def test_request_list_length_matches_permutations(self) -> None:
-        cfg = _make_config(num_contexts=3, num_permutations=4)
-        w, *_ = _make_workload(cfg)
-        assert len(w._request_list) == len(w._permutations)
-
-    def test_request_index_starts_at_zero(self) -> None:
-        w, *_ = _make_workload()
-        assert w._request_index == 0
-
-
-# ---------------------------------------------------------------------------
-# LongDocPermutatorWorkload — request list building
-# ---------------------------------------------------------------------------
-
-
-class TestBuildRequestList:
-    def test_each_entry_is_tuple_messages_and_perm_idx(self) -> None:
-        cfg = _make_config(num_contexts=2, num_permutations=2)
-        w, *_ = _make_workload(cfg)
-        for messages, perm_idx in w._request_list:
-            assert isinstance(messages, list)
-            assert isinstance(perm_idx, int)
-
-    def test_system_prompt_prepended_when_present(self) -> None:
-        cfg = _make_config(system_prompt_length=10)
-        w, *_ = _make_workload(cfg)
-        messages, _ = w._request_list[0]
-        assert messages[0]["role"] == "system"
-        assert messages[1]["role"] == "user"
-
-    def test_no_system_message_when_empty(self) -> None:
-        cfg = _make_config(system_prompt_length=0)
-        w, *_ = _make_workload(cfg)
-        messages, _ = w._request_list[0]
-        assert len(messages) == 1
-        assert messages[0]["role"] == "user"
-
-    def test_user_message_contains_all_contexts(self) -> None:
-        cfg = _make_config(num_contexts=3, num_permutations=1)
-        w, *_ = _make_workload(cfg)
-        messages, perm_idx = w._request_list[0]
-        user_content = messages[-1]["content"]
-        perm = w._permutations[perm_idx]
-        for idx in perm:
-            assert w._contexts[idx] in user_content
-
-    def test_perm_idx_matches_permutations_list(self) -> None:
-        cfg = _make_config(num_contexts=3, num_permutations=4)
-        w, *_ = _make_workload(cfg)
-        for _, perm_idx in w._request_list:
-            assert 0 <= perm_idx < len(w._permutations)
+    def test_legacy_report_has_no_tier_pressure_section(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        workload, _, _, _ = _make_workload(
+            _make_config(num_contexts=2, num_permutations=100)
+        )
+        workload.log_config()
+        output = capsys.readouterr().out
+        assert "long-doc-permutator" in output
+        assert workload.num_requests == 2
+        assert workload.extra_metric_sections() == []
 
 
 # ---------------------------------------------------------------------------
@@ -447,82 +351,74 @@ class TestLongDocPermutatorWarmup:
 # ---------------------------------------------------------------------------
 
 
+async def _drive_steps(workload: LongDocPermutatorWorkload) -> None:
+    """Drive the public step interface until all requests finish."""
+    while await workload.step(0.0) >= 0:
+        await asyncio.sleep(0)
+
+
 class TestLongDocPermutatorStep:
     def test_first_step_dispatches_one_and_returns_zero(self) -> None:
-        async def _run() -> None:
-            cfg = _make_config(num_contexts=2, num_permutations=3)
-            w, _, _, _ = _make_workload(cfg)
-            result = await w.step(0.0)
-            assert result == 0.0
-            assert w._request_index == 1
+        async def run() -> None:
+            workload, sender, _, _ = _make_workload(_make_config(num_permutations=1))
+            assert await workload.step(0.0) == 0.0
+            await asyncio.wait_for(_drive_steps(workload), timeout=2.0)
+            assert sender.send_request.await_count == 1
+            assert sender.send_request.await_args.args[0] == "perm0_req0"
 
-        asyncio.run(_run())
-
-    def test_step_returns_negative_when_all_done(self) -> None:
-        async def _run() -> None:
-            cfg = _make_config(num_contexts=2, num_permutations=2)
-            w, _, _, _ = _make_workload(cfg)
-
-            while True:
-                r = await w.step(0.0)
-                if w._pending_tasks:
-                    await asyncio.gather(*w._pending_tasks)
-                if r == -1.0:
-                    break
-
-            assert w._request_index == len(w._request_list)
-
-        asyncio.run(_run())
-
-    def test_step_calls_send_request(self) -> None:
-        async def _run() -> None:
-            cfg = _make_config(num_contexts=2, num_permutations=1)
-            w, sender, _, _ = _make_workload(cfg)
-
-            await w.step(0.0)
-            if w._pending_tasks:
-                await asyncio.gather(*w._pending_tasks)
-
-            assert sender.send_request.call_count == 1
-
-        asyncio.run(_run())
+        asyncio.run(run())
 
     def test_step_passes_configured_max_output_length(self) -> None:
-        """The configured output length reaches the sender, not its default."""
+        workload, sender, _, _ = _make_workload(_make_config(max_output_length=1))
+        asyncio.run(_drive_steps(workload))
+        assert all(
+            call.kwargs["max_tokens"] == 1
+            for call in sender.send_request.await_args_list
+        )
 
-        async def _run() -> None:
-            cfg = _make_config(
-                num_contexts=2,
-                num_permutations=1,
-                max_output_length=1,
+    @pytest.mark.parametrize(
+        "failure", [None, RuntimeError("connection lost"), asyncio.CancelledError()]
+    )
+    def test_concurrency_and_completion_after_failed_or_cancelled_request(
+        self, failure: BaseException | None
+    ) -> None:
+        async def run() -> None:
+            workload, sender, _, monitor = _make_workload(
+                _make_config(
+                    num_contexts=3, num_permutations=6, num_inflight_requests=2
+                )
             )
-            w, sender, _, _ = _make_workload(cfg)
+            active = 0
+            peak = 0
+            completed = 0
 
-            await w.step(0.0)
-            if w._pending_tasks:
-                await asyncio.gather(*w._pending_tasks)
+            async def send(
+                request_id: str, messages: list[dict[str, str]], max_tokens: int
+            ) -> RequestResult:
+                nonlocal active, peak, completed
+                active += 1
+                peak = max(peak, active)
+                try:
+                    await asyncio.sleep(0.001)
+                    if request_id == "perm0_req0" and failure is not None:
+                        raise failure
+                    return _make_mock_result(request_id)
+                finally:
+                    active -= 1
+                    completed += 1
 
-            assert sender.send_request.await_args.kwargs["max_tokens"] == 1
+            sender.send_request.side_effect = send
+            await asyncio.wait_for(_drive_steps(workload), timeout=2.0)
+            assert sender.send_request.await_count == completed == 6
+            assert active == 0
+            assert peak == 2
+            if isinstance(failure, RuntimeError):
+                assert any(
+                    "Dispatch task failed" in call.args[0]
+                    for call in monitor.log_message.call_args_list
+                )
 
-        asyncio.run(_run())
-
-    def test_step_waits_when_pending_and_no_new_requests(self) -> None:
-        async def _run() -> None:
-            cfg = _make_config(
-                num_contexts=2,
-                num_permutations=2,
-                num_inflight_requests=1,
-            )
-            w, _, _, _ = _make_workload(cfg)
-
-            await w.step(0.0)
-            await asyncio.gather(*list(w._pending_tasks))
-            await w.step(0.0)
-            await asyncio.gather(*list(w._pending_tasks))
-            result = await w.step(0.0)
-            assert result == -1.0
-
-        asyncio.run(_run())
+        asyncio.run(run())
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +438,78 @@ class TestLongDocPermutatorOnRequestFinished:
 
 
 class TestLongDocPermutatorFullRun:
+    def test_no_warmup_keeps_measured_requests_and_closes_sender(self) -> None:
+        workload, sender, collector, _ = _make_workload()
+        workload.run(WarmupPolicy.SKIP)
+        sender.send_warmup_request.assert_not_awaited()
+        assert sender.send_request.await_count == workload.num_requests
+        sender.close.assert_awaited_once()
+        collector.reset.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "contexts,requests,system_length,seed,expected",
+        [
+            (
+                5,
+                100,
+                10,
+                42,
+                "31a7001f23803f9efa4cad4cd894f1e8200446e639049cea86a475670345929a",
+            ),
+            (
+                3,
+                100,
+                0,
+                7,
+                "c774aa724684f29bd179bc0bf48bc7b6fb358befa382445661de5411b42695e1",
+            ),
+            (
+                1,
+                5,
+                10,
+                42,
+                "33ada7c4a0b98d71f2691002ea3f02e1a7579f5e0eb84994a83fd0c44f7b8eb1",
+            ),
+            (
+                5,
+                8,
+                10,
+                7,
+                "a2dfebef3975d887b0f4a538b199129351bc56bef911067ce62c2fe9e72131c1",
+            ),
+            (
+                16,
+                20,
+                10,
+                42,
+                "5209e0b0479bd68ab282a8c43d916bd564d9a9533c367862d1db50d9e6e24fcf",
+            ),
+        ],
+    )
+    def test_preserves_seeded_request_stream(
+        self, contexts: int, requests: int, system_length: int, seed: int, expected: str
+    ) -> None:
+        """Pin IDs, payloads, order and output limits before consolidation."""
+        cfg = _make_config(
+            num_contexts=contexts,
+            num_permutations=requests,
+            system_prompt_length=system_length,
+        )
+        workload, sender, _, _ = _make_workload(cfg, seed=seed)
+        workload.run()
+        records = [
+            (phase, call.args, call.kwargs)
+            for phase, calls in [
+                ("warmup", sender.send_warmup_request.call_args_list),
+                ("measured", sender.send_request.call_args_list),
+            ]
+            for call in calls
+        ]
+        assert (
+            hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
+            == expected
+        )
+
     def test_full_run_sends_all_permutations(self) -> None:
         cfg = _make_config(num_contexts=2, num_permutations=2)
         w, sender, collector, _ = _make_workload(cfg)
@@ -549,7 +517,7 @@ class TestLongDocPermutatorFullRun:
         w.run()
 
         assert sender.send_warmup_request.call_count == 1
-        assert sender.send_request.call_count == len(w._permutations)
+        assert sender.send_request.call_count == w.num_requests
         collector.reset.assert_called_once()
 
     def test_full_run_with_all_permutations(self) -> None:
