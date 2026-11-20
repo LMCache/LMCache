@@ -6,10 +6,10 @@ LMCache resolves ``torch.npu`` as an accelerator instead of falling back
 to the CPU stub.  ``torch.npu`` is contributed by the ``torch_npu``
 package, so it is visible on a bare ``import torch``.
 
-Scope: the compiled ops backend (``lmcache_ascend.c_ops``) and all
-NPU-specific transfer optimisation live in the external ``lmcache_ascend``
-plugin; this package only wires device detection and backend selection,
-so ``import lmcache`` loads the plugin's ``c_ops`` on an NPU host.
+Scope: the MP native core is built with LMCache as ``lmcache.npu_ops``.  The
+out-of-tree ``lmcache_ascend`` plugin remains an optional activation hook for
+hardware-specific patches; this package wires device detection, backend
+selection, and the in-tree ops binding.
 """
 
 # Future
