@@ -54,6 +54,13 @@ Each action has its own flags. Run the built-in help for the full list:
    lmcache tool cache-simulator sweep --help
    lmcache tool cache-simulator gen-dataset --help
 
+Both ``simulate`` and ``sweep`` model a cache with one fixed byte size per
+chunk. Automatic sizing checks every lookup selected by ``--model`` and
+``--max-samples``. If a selected lookup has missing size information or a
+different byte footprint, the command exits with an error before producing a
+plot. Use ``--model`` to select a uniform trace, or set
+``--kv-bytes-per-chunk BYTES`` to model an explicit fixed-size assumption.
+
 
 transfer-channel-benchmark
 --------------------------

@@ -67,7 +67,9 @@ _GIB = 2**30
 # ---------------------------------------------------------------------------
 
 
-def compute_kv_bytes_per_chunk(event: dict[str, Any]) -> int:
+def compute_kv_bytes_per_chunk(
+    event: dict[str, Any], *, require_complete: bool = False
+) -> int:
     """
     Compute the number of KV-cache bytes that one chunk occupies.
 
@@ -77,10 +79,14 @@ def compute_kv_bytes_per_chunk(event: dict[str, Any]) -> int:
     summed.
 
     Returns 0 if ``shapes`` or ``dtypes`` is empty (caller must handle this).
+    With ``require_complete=True``, unpaired shapes/dtypes and unknown dtypes
+    also return 0. The default retains the subtotal for recognized pairs.
     """
     shapes = event.get("shapes", [])
     dtypes = event.get("dtypes", [])
     if not shapes or not dtypes:
+        return 0
+    if require_complete and len(shapes) != len(dtypes):
         return 0
     total = 0
     for shape, dt in zip(shapes, dtypes, strict=False):
@@ -91,8 +97,52 @@ def compute_kv_bytes_per_chunk(event: dict[str, Any]) -> int:
                 UserWarning,
                 stacklevel=2,
             )
+            if require_complete:
+                return 0
         total += math.prod(shape) * elem_bytes
     return total
+
+
+def resolve_kv_bytes_per_chunk(
+    events: list[dict[str, Any]], override: int | None
+) -> int:
+    """Choose the fixed slot size for a CLI replay.
+
+    Args:
+        events: Nonempty lookup events after model and sample selection.
+        override: Explicit bytes per chunk, which bypasses trace metadata.
+
+    Returns:
+        The override or the common byte footprint of every selected event.
+
+    Raises:
+        SystemExit: With status 1 if automatic sizing is ambiguous.
+    """
+    if override is not None:
+        return override
+
+    expected = 0
+    for index, event in enumerate(events, start=1):
+        size = compute_kv_bytes_per_chunk(event, require_complete=True)
+        if size <= 0:
+            problem = f"cannot determine KV bytes per chunk for selected event {index}"
+        elif expected and size != expected:
+            problem = (
+                f"selected event {index} has {size} bytes per chunk "
+                f"but event 1 has {expected} bytes"
+            )
+        else:
+            expected = size
+            continue
+        print(
+            f"Error: {problem}. Select events with a common footprint using "
+            "--model or pass --kv-bytes-per-chunk for an explicit fixed size.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    print(f"Auto-detected kv_bytes_per_chunk = {expected:,} bytes")
+    return expected
 
 
 def load_lookup_events(
@@ -719,7 +769,7 @@ def add_simulate_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="BYTES",
         help=(
             "Bytes consumed by one cached chunk.  "
-            "Auto-computed from the first event's shapes/dtypes if omitted."
+            "By default all selected events must have the same inferred byte size."
         ),
     )
     parser.add_argument(
@@ -757,17 +807,7 @@ def run_simulate(args: argparse.Namespace) -> None:
         print("No events to process.")
         sys.exit(0)
 
-    kv_bpc = args.kv_bytes_per_chunk
-    if kv_bpc is None:
-        kv_bpc = compute_kv_bytes_per_chunk(events[0])
-        if kv_bpc == 0:
-            print(
-                "Error: could not determine kv_bytes_per_chunk from the first event "
-                "(shapes/dtypes are empty).  Pass --kv-bytes-per-chunk explicitly.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        print(f"Auto-detected kv_bytes_per_chunk = {kv_bpc:,} bytes")
+    kv_bpc = resolve_kv_bytes_per_chunk(events, args.kv_bytes_per_chunk)
 
     capacity_bytes = int(args.cache_capacity_gib * _GIB)
 

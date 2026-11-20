@@ -127,7 +127,7 @@ lmcache tool cache-simulator simulate \
     -o stats.png
 ```
 
-This prints a full text report to the terminal **and** saves a 7-panel statistics chart to `stats.png`. The `kv_bytes_per_chunk` value is auto-detected from the `shapes` and `dtypes` fields of the first event. You can override it:
+This prints a full text report to the terminal **and** saves a 7-panel statistics chart to `stats.png`. Automatic sizing compares the byte footprints from the shapes and dtypes of every selected event. Different tensor layouts can yield the same byte total. When the totals differ or a footprint cannot be determined, both `simulate` and `sweep` exit before replay. Apply `--model` to select a uniform trace, or supply a fixed byte size explicitly for an approximation:
 
 ```bash
 lmcache tool cache-simulator simulate \
@@ -260,7 +260,7 @@ lmcache tool cache-simulator simulate [OPTIONS]
 | `-o / --output FILE` | `cache_stats.png` | Output image path |
 | `-n / --max-samples N` | all | Truncate to N events after sorting by timestamp |
 | `--model NAME` | all | Filter by `model_name` (exact match) |
-| `--kv-bytes-per-chunk BYTES` | auto | KV bytes per chunk; auto-computed from first event if omitted |
+| `--kv-bytes-per-chunk BYTES` | auto | Fixed KV bytes per chunk. By default all selected events must agree |
 
 ### `sweep` — capacity sweep and plot
 
@@ -278,7 +278,7 @@ lmcache tool cache-simulator sweep [OPTIONS]
 | `-o / --output FILE` | `hit_rate_vs_capacity.png` | Output image path |
 | `-n / --max-samples N` | all | Truncate events |
 | `--model NAME` | all | Filter by model name |
-| `--kv-bytes-per-chunk BYTES` | auto | KV bytes per chunk |
+| `--kv-bytes-per-chunk BYTES` | auto | Fixed KV bytes per chunk. By default all selected events must agree |
 
 ### `gen-dataset` — generate vllm bench serve dataset
 
