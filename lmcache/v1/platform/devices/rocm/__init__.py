@@ -26,6 +26,19 @@ class RocmDeviceSpec(CudaDeviceSpec):
         return "rocm"
 
     @property
+    def ipc_event_max_records(self) -> int | None:
+        """Records one interprocess event may take while importers track it.
+
+        HIP keeps 32 signal slots per interprocess event, and the stream wait
+        on an imported event indexes them without wrapping (ROCm 7.2), so an
+        event that a peer stream may wait on is recorded at most 31 times.
+        Each interprocess event gets a shared-memory name of its own (process
+        ID and a per-process counter), so a handle never stands for another
+        event later.
+        """
+        return 31
+
+    @property
     def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper] | None:
         """Return the KV-cache IPC wrapper class; the VMM one is ROCm-specific."""
         if get_ipc_policy().use_vmm_api:

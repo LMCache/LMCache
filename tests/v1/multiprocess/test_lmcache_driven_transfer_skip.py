@@ -152,8 +152,11 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     cache_context.max_batch_size = 8
 
     event_backend = MagicMock()
-    entry = SimpleNamespace(
-        cache_context=cache_context, model_name="m", event_backend=event_backend
+    entry = mod.ContextEntry(
+        cache_context=cache_context,
+        model_name="m",
+        world_size=1,
+        event_backend=event_backend,
     )
     module.get_and_touch_context_entry = MagicMock(return_value=entry)
 

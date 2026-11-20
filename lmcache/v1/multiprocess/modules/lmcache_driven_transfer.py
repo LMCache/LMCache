@@ -58,7 +58,9 @@ from lmcache.v1.multiprocess.rocm_host_event_wait import (
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
+    CachedImportEventBackend,
     EventIPCBackend,
+    EventRecordPool,
     get_event_ipc_backend,
 )
 from lmcache.v1.platform.base.ipc_wrapper import KVCache, set_fd_resolver
@@ -212,6 +214,8 @@ class ContextEntry:
         event_backend: Cached event backend selected for this context's device.
         event_profile: Native identity contract retained until unregister, reap
             or shutdown. None retains current event behavior.
+        completion_events: Completion events of this instance's transfers,
+            recorded on its stream (created from ``event_backend``).
     """
 
     cache_context: BaseCacheContext
@@ -221,6 +225,24 @@ class ContextEntry:
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
     event_profile: KVEventProfile | None = None
+    completion_events: EventRecordPool | None = None
+
+    def __post_init__(self) -> None:
+        if self.completion_events is None and self.event_backend is not None:
+            self.completion_events = EventRecordPool(
+                self.event_backend,
+                self.cache_context.device,
+                _COMPLETION_EVENT_SLOTS,
+            )
+
+
+# Completion events per instance. One is recorded again after this many later
+# transfers of the instance; a worker still waiting on the earlier one then
+# waits for the later transfer on the same stream.
+_COMPLETION_EVENT_SLOTS = 512
+# Producer-event imports kept per instance: a worker that reuses its events
+# sends far fewer distinct handles than this.
+_PRODUCER_IMPORT_CACHE = 64
 
 
 class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
@@ -635,8 +657,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         )
         kv_groups_manager = cache_context.kv_layer_groups_manager
         num_object_groups = kv_groups_manager.num_object_groups
-        event_backend = get_event_ipc_backend(cache_context.device)
+        event_backend: EventIPCBackend = get_event_ipc_backend(cache_context.device)
         event_backend.check_event_support(cache_context.device)
+        event_backend = CachedImportEventBackend(event_backend, _PRODUCER_IMPORT_CACHE)
         if self._host_event_waiter is not None:
             event_backend = self._host_event_waiter.wrap(event_backend)
         layout_desc = get_layout_desc(
@@ -810,7 +833,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend
-        if event_backend is None:
+        completions = entry.completion_events
+        if event_backend is None or completions is None:
             raise RuntimeError("Registered cache context has no event backend")
 
         num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
@@ -841,7 +865,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
-            event = event_backend.create_event(cache_context.device)
+            event = completions.acquire(cache_context.stream)
 
             # Fail closed: every LMCache group must have block IDs covering all
             # chunks. A short list (e.g. a caller/protocol bug) would otherwise
@@ -865,11 +889,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     blocks_per_chunk,
                 )
                 event_backend.record_event(event, cache_context.stream)
-                return (
-                    event_backend.export_event(event, cache_context.device),
-                    False,
-                    [],
-                )
+                return completions.export(event), False, []
 
             # Chunks whose block ids are all the null block (e.g. align-mode
             # Mamba chunks holding no real state) carry no valid KV and must not
@@ -1078,7 +1098,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 and all(unfull_obj_keys[g] in all_dict for g in mask_gids)
             )
         return (
-            event_backend.export_event(event, cache_context.device),
+            completions.export(event),
             store_succeeded,
             stored_mask,
         )
@@ -1184,7 +1204,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend
-        if event_backend is None:
+        completions = entry.completion_events
+        if event_backend is None or completions is None:
             raise RuntimeError("Registered cache context has no event backend")
 
         num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
@@ -1238,7 +1259,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
-            event = event_backend.create_event(cache_context.device)
+            event = completions.acquire(cache_context.stream)
 
             # Fail closed: a short block-id list would drive the transfer
             # kernel to write out-of-bounds GPU memory. Checked on the raw
@@ -1260,7 +1281,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     blocks_per_chunk,
                 )
                 event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
+                return completions.export(event), False
 
             # Cut and stage all block_ids to GPU once before the transfer
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
@@ -1406,7 +1427,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             )
 
         return (
-            event_backend.export_event(event, cache_context.device),
+            completions.export(event),
             retrieve_succeeded,
         )
 

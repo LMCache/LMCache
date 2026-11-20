@@ -10,7 +10,7 @@ transport and device-event futures stay under :mod:`lmcache.v1.multiprocess`.
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 import threading
 import uuid
 
@@ -321,6 +321,22 @@ class AtomMPWorkerAdapter:
         except Exception:
             self.shutdown()
             raise
+
+    def create_recorded_event(self) -> _IpcEvent | None:
+        """Record the ordering event for the next submit on the current stream.
+
+        The transfer context may hand out an event it recorded before on the
+        same stream instead of creating one per operation.
+
+        Returns:
+            The recorded event, or ``None`` while the adapter is unhealthy,
+            when the submit methods drop requests anyway.
+        """
+        with self._state_lock:
+            if self._closed or not self._health_event.is_set():
+                return None
+            context = self._require_transfer_context_locked()
+            return cast(_IpcEvent, context.create_recorded_event())
 
     def submit_store_request(
         self,

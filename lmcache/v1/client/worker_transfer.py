@@ -46,7 +46,9 @@ from lmcache.v1.platform import (
     synchronize_device,
 )
 from lmcache.v1.platform.base.event_ipc import (
+    CachedImportEventBackend,
     EventIPCBackend,
+    EventRecordPool,
     get_event_ipc_backend,
 )
 from lmcache.v1.platform.kv_wrap import kv_wrapper_fds_delivered, wrap_kv_caches
@@ -63,6 +65,12 @@ logger = init_logger(__name__)
 # ``lmcache_driven``); ``auto`` defers to the device spec's declared
 # default (:meth:`DeviceSpec.default_mp_transfer_mode`).
 ENV_MP_TRANSFER_MODE = "LMCACHE_MP_TRANSFER_MODE"
+
+# Producer events per stream that LMCacheDrivenTransferContext records in turn.
+_PRODUCER_EVENT_SLOTS = 16
+# Completion events kept imported per context: more than the server records
+# in turn per instance, so their handles stay imported.
+_COMPLETION_IMPORT_CACHE = 1024
 
 
 # Helper functions
@@ -547,6 +555,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._fd_channel_path = fd_channel_path
         self._device: torch.device | None = None
         self._event_backend: EventIPCBackend | None = None
+        self._producer_events: EventRecordPool | None = None
         self._mq_timeout: float = 0.0
         self._inflight_stores: list[MessagingFuture] = []
         self._inflight_lock = threading.Lock()
@@ -627,11 +636,19 @@ class LMCacheDrivenTransferContext(TransferContext):
         if self._is_closed():
             return
         self._device = device
-        self._event_backend = event_backend
+        self._event_backend = CachedImportEventBackend(
+            event_backend, _COMPLETION_IMPORT_CACHE
+        )
+        self._producer_events = EventRecordPool(
+            event_backend, device, _PRODUCER_EVENT_SLOTS
+        )
         self._mq_timeout = mq_timeout
 
     def create_recorded_event(self) -> IPCEvent:
-        """Create and record an exportable event for handle-based transfer.
+        """Record an exportable event for handle-based transfer.
+
+        The event may be one recorded before on the same stream (see
+        :class:`~lmcache.v1.platform.base.event_ipc.EventRecordPool`).
 
         Returns:
             An interprocess-capable event recorded on the current stream.
@@ -639,13 +656,14 @@ class LMCacheDrivenTransferContext(TransferContext):
         Raises:
             RuntimeError: If :meth:`register` has not completed.
         """
-        if self._device is None or self._event_backend is None:
+        if self._producer_events is None or self._event_backend is None:
             raise RuntimeError(
                 "LMCache-driven transfer context is not registered. "
                 "Call register() before creating transfer events."
             )
-        event = self._event_backend.create_event(self._device)
-        self._event_backend.record_event(event, torch_dev.current_stream())
+        stream = torch_dev.current_stream()
+        event = self._producer_events.acquire(stream)
+        self._event_backend.record_event(event, stream)
         return cast(IPCEvent, event)
 
     def unregister(self) -> MessagingFuture[Any] | None:
@@ -716,7 +734,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             )
         if event is None:
             raise RuntimeError("LMCache-driven transfer requires an IPC event.")
-        event_ipc_handle = self._event_backend.export_event(event, self._device)
+        event_ipc_handle = self._export(event)
         future = self._req_client.store(
             key, self._instance_id, block_ids, event_ipc_handle
         ).to_device_future(
@@ -744,7 +762,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                 "LMCache-driven transfer context is not registered. "
                 "Call register() before submit_q_store()."
             )
-        event_ipc_handle = self._event_backend.export_event(event, self._device)
+        event_ipc_handle = self._export(event)
         return self._req_client.store_q(
             key, self._instance_id, block_ids, event_ipc_handle
         ).to_device_future(
@@ -788,7 +806,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             )
         if event is None:
             raise RuntimeError("LMCache-driven transfer requires an IPC event.")
-        event_ipc_handle = self._event_backend.export_event(event, self._device)
+        event_ipc_handle = self._export(event)
         return self._req_client.retrieve(
             key,
             self._instance_id,
@@ -800,11 +818,17 @@ class LMCacheDrivenTransferContext(TransferContext):
             event_backend=self._event_backend,
         )
 
+    def _export(self, event: object) -> bytes:
+        """Return the IPC handle of a producer event."""
+        assert self._producer_events is not None
+        return self._producer_events.export(event)
+
     def close(self) -> None:
         """Release the message queue and cached event-backend state."""
         self._mark_closed()
         self._device = None
         self._event_backend = None
+        self._producer_events = None
 
     def flush_inflight_stores(self) -> None:
         """Block until the server has finished reading the engine KV blocks.

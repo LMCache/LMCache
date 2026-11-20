@@ -170,7 +170,9 @@ class CudaDeviceSpec(DeviceSpec):
     def event_ipc_backend(self) -> EventIPCBackend:
         # TimelineSemaphoreEventIPCBackend when isolated IPC is enabled
         # (the default), else DefaultEventIPCBackend(event_module=torch.cuda)
-        return _select_event_ipc_backend(self.device_type)
+        return _select_event_ipc_backend(
+            self.device_type, self.ipc_event_max_records
+        )
 
 class MusaDeviceSpec(DeviceSpec):
     @property
@@ -221,6 +223,33 @@ The following generic modules use only the platform API:
 - `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py`
 - `lmcache/v1/transport/futures.py`
 - `lmcache/v1/client/worker_transfer.py`
+
+### Event reuse
+
+Creating, exporting, importing and destroying an interprocess event per
+operation costs device-runtime calls in both processes, and destroying an
+imported event can block the destroying thread. A backend whose exported
+handles keep tracking later records of the event declares how many records
+one event may take in `max_event_records` (`1`, the default, keeps one event
+per operation; `None` means no limit). Two helpers in `event_ipc.py` act on
+it and pass everything through when it is `1`:
+
+- `EventRecordPool` hands out events round-robin per stream and exports each
+  one once. Recording an event again only moves it later on the same stream,
+  so a peer that waits on an older record waits longer, never less. An event
+  is replaced after `max_event_records` records.
+- `CachedImportEventBackend` imports each handle once and keeps a bounded
+  number of imports; an evicted import is released on a background thread.
+  A peer that creates an event per operation sends only new handles, so it
+  keeps working against a caching importer.
+
+`LMCacheDrivenTransferContext.create_recorded_event` (every engine's producer
+event) and the server's completion events use a pool; the server's producer
+imports and the worker futures' completion imports use the cache. No message
+field announces reuse: an old worker or server simply creates an event per
+operation as before. `DefaultEventIPCBackend` takes `max_event_records` from
+its device spec (`RocmDeviceSpec`: 31; `CudaDeviceSpec`: 1, see its
+docstring); the timeline-semaphore backend exports snapshots and stays at 1.
 
 `DeviceMessagingFuture` is the device-neutral implementation. The old
 `CUDAMessagingFuture` name remains an alias, and `to_cuda_future()` remains an
