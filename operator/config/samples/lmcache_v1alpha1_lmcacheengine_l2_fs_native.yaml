@@ -1,0 +1,54 @@
+# fs_native L2 on a local NVMe PersistentVolumeClaim.
+#
+# fs_native stores one file per KV object under base_path. Backing it with a
+# PVC keeps the cache across engine pod restarts; delete the PVC to drop it.
+# The storage class must bind on the GPU node that runs the engine pod
+# (a node-local class with WaitForFirstConsumer binding does this).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lmcache-l2
+  namespace: default
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 400Gi
+---
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: my-cache-with-fs-native
+  namespace: default
+spec:
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+
+  l1:
+    sizeGB: 50
+
+  eviction:
+    triggerWatermark: 0.8
+    evictionRatio: 0.2
+
+  l2Backend:
+    raw:
+      type: fs_native
+      config:
+        base_path: /l2
+        num_workers: 16
+        use_odirect: true           # bypass the page cache on a real disk
+        max_capacity_gb: 400        # must match the PVC size for eviction to work
+        eviction:
+          eviction_policy: LRU
+          trigger_watermark: 0.95
+          eviction_ratio: 0.2
+
+  volumes:
+    - name: l2
+      persistentVolumeClaim:
+        claimName: lmcache-l2
+  volumeMounts:
+    - name: l2
+      mountPath: /l2
