@@ -52,6 +52,28 @@ The simulator enforces the same prefix rule as LMCache: a chunk is only counted 
 
 ## Quick Start
 
+### Historical Admission Experiment
+
+For pinned Mooncake FAST25 traces (a different schema from lookup logs), an
+offline work-only screen compares write-all LRU with bounded historical,
+prefix-closed admission:
+
+```bash
+python -m lmcache.tools.cache_simulator.admission conversation_trace.jsonl \
+    --expected-sha256 <digest-from-pinned-input-manifest> \
+    --capacity-chunks 4096 --history-keys 100000 \
+    --max-request-gap 1000 --evaluation-start 1000
+```
+
+Use complete 512-token blocks. The history gap counts intervening requests,
+not distinct-key reuse distance. Malformed, empty or digest-mismatched traces
+exit nonzero. The JSON report measures token work and inserted blocks only;
+its unlimited-capacity ceiling is not a finite-capacity or goodput oracle.
+Current lazy scheduling, GPU APC, asynchronous transfer and recompute cost
+are not modeled. `PASS` means valid replay, not demonstrated policy benefit.
+
+### Lookup Log Replay
+
 ```bash
 # 1. Collect logs from a live server (see Step 1 below)
 lmcache server --lookup-hash-log-dir /data/lmcache/lookup_hashes ...
