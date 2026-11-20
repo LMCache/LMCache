@@ -1467,19 +1467,36 @@ class PrefetchController(StorageControllerInterface):
 
         Records the reserved bytes per adapter and publishes one
         ``L2_LOAD_TASK_SUBMITTED`` event per adapter plus one
-        ``L2_PREFETCH_LOAD_SUBMITTED`` event for the batch.
+        ``L2_PREFETCH_LOAD_SUBMITTED`` event for the batch. An adapter whose
+        submit raises loads nothing for this request; the other adapters and
+        the L1 hits are unaffected.
 
         Args:
             request: The in-flight request being loaded.
             reserved_objs: The L1 staging buffer of every planned key.
         """
         plan_keys: list[ObjectKey] = []
+        failed_adapters: list[int] = []
         for l2_idx, cells in request.key_states.l2_locked_keys.items():
             keys = _gather_keys(request.key_groups, cells)
             if not keys:
                 continue
             objects = [reserved_objs[key] for key in keys]
-            task_id = self._l2_adapters[l2_idx].submit_load_task(keys, objects)
+            # Adapters are pluggable and the interface declares no error type,
+            # so this is the prefetch loop's catch-all narrowed to one adapter:
+            # the failure costs that adapter's keys, not the whole request.
+            try:
+                task_id = self._l2_adapters[l2_idx].submit_load_task(keys, objects)
+            except Exception:
+                logger.exception(
+                    "L2 adapter %d failed to submit the load of prefetch request "
+                    "%d; treating its %d keys as not loaded",
+                    l2_idx,
+                    request.request_id,
+                    len(keys),
+                )
+                failed_adapters.append(l2_idx)
+                continue
             request.inflight_load_tasks[l2_idx] = task_id
             plan_keys.extend(keys)
 
@@ -1499,6 +1516,11 @@ class PrefetchController(StorageControllerInterface):
                     },
                 )
             )
+
+        # Settled after the loop because settling removes the adapter from
+        # l2_locked_keys, which the loop iterates.
+        for l2_idx in failed_adapters:
+            self._settle_load(request, l2_idx, result=None, task_id=None)
 
         if not plan_keys:
             return
@@ -1605,70 +1627,138 @@ class PrefetchController(StorageControllerInterface):
         - Successfully loaded objects: become read-locked.
         - Failed objects: delete the staging buffers.
 
+        An adapter whose result query raises is treated as having loaded
+        nothing; the other adapters and the L1 hits are unaffected.
+
         Args:
             request: The in-flight prefetch request to poll.
             signaled_adapters: Set of adapter indices that have signaled
                 completion of load tasks.
         """
-        states = request.key_states
-        tag = _get_prefetch_write_tag(request.request_id)
         for adapter_idx in list(request.inflight_load_tasks):
             if adapter_idx not in signaled_adapters:
                 continue
             task_id = request.inflight_load_tasks[adapter_idx]
-            result = self._l2_adapters[adapter_idx].query_load_result(task_id)
+            # Same containment as in _submit_load_tasks.
+            try:
+                result = self._l2_adapters[adapter_idx].query_load_result(task_id)
+            except Exception:
+                logger.exception(
+                    "L2 adapter %d failed to report load task %d of prefetch "
+                    "request %d; treating the load as failed",
+                    adapter_idx,
+                    task_id,
+                    request.request_id,
+                )
+                self._settle_load(request, adapter_idx, result=None, task_id=task_id)
+                continue
             if result is None:
                 continue
+            self._settle_load(request, adapter_idx, result=result, task_id=task_id)
 
-            # The load task was submitted with the keys of ``planned`` in
-            # row-major order, so ``result`` is a flat bitmap over them.
-            planned = states.l2_locked_keys[adapter_idx]
+    def _settle_load(
+        self,
+        request: InFlightPrefetchRequest,
+        adapter_idx: int,
+        result: Bitmap | None,
+        task_id: L2TaskId | None,
+    ) -> None:
+        """Admit what one adapter loaded and drop the adapter from the request.
+
+        Loaded keys become read-locked in the adapter's affinity L1 manager
+        and join ``l1_locked_keys``; the staging buffers of the other planned
+        keys are deleted. The adapter's L2 locks are returned and it leaves
+        the request's locked, reserved and in-flight maps.
+
+        Args:
+            request: The request the load belongs to.
+            adapter_idx: The adapter whose load is settled.
+            result: The adapter's load bitmap, one bit per planned key in
+                row-major order, or None when the adapter raised, which loads
+                nothing.
+            task_id: The load task, or None when submitting it raised; the
+                task events are published only for a submitted task.
+
+        Note:
+            An adapter that raised is not polled again, so its staging
+            buffers are deleted without knowing the state of its task, as
+            ``_abort_request`` does.
+        """
+        states = request.key_states
+        tag = _get_prefetch_write_tag(request.request_id)
+
+        # The load task was submitted with the keys of ``planned`` in
+        # row-major order, so ``result`` is a flat bitmap over them.
+        planned = states.l2_locked_keys[adapter_idx]
+        if result is None:
+            loaded = planned.zeros_like()
+        else:
             loaded = _scatter_bitmaps(planned, result)
-            failed = planned - loaded
-            l1_idx = self._get_l2_affinity_manager(adapter_idx)
-            l1_manager = self._l1_managers[l1_idx]
+        # What the adapter did not load, before L1 has its say below.
+        unloaded_keys = _gather_keys(request.key_groups, planned - loaded)
+        l1_idx = self._get_l2_affinity_manager(adapter_idx)
+        l1_manager = self._l1_managers[l1_idx]
 
-            loaded_keys = _gather_keys(request.key_groups, loaded)
-            failed_keys = _gather_keys(request.key_groups, failed)
-
-            # Update L1 key status
-            for row, keys in _gather_keys_by_row(request.key_groups, loaded):
-                if keys:
-                    l1_manager.finish_write_and_reserve_read(
-                        keys, read_locks=row.num_kv_readers, tag=tag
-                    )
-            if failed_keys:
-                l1_manager.finish_write_and_delete(failed_keys, tag=tag)
-
-            # Unlock L2
-            self._l2_adapters[adapter_idx].submit_unlock(
-                _gather_keys(request.key_groups, planned)
-            )
-
-            # Update the key states and the inflight load tasks
-            if l1_idx in states.l1_locked_keys:
-                states.l1_locked_keys[l1_idx] += loaded
-            else:
-                states.l1_locked_keys[l1_idx] = loaded
-            if len(request.l2_loaded_cells) == 0:
-                request.l2_loaded_cells = loaded.copy()
-            else:
-                request.l2_loaded_cells += loaded
-            states.l1_reserved_keys[l1_idx] -= planned
-            del states.l2_locked_keys[adapter_idx]
-            del request.inflight_load_tasks[adapter_idx]
-            request.load_bytes_by_adapter.pop(adapter_idx, None)
-
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.L2_LOAD_TASK_COMPLETED,
-                    metadata={
-                        "request_id": request.request_id,
-                        "adapter_index": adapter_idx,
-                        "task_id": task_id,
-                        "l2_name": self._adapter_descriptors[adapter_idx].type_name,
-                    },
+        # Update L1 key status. A loaded key that L1 does not admit, because
+        # its write reservation expired meanwhile, is not a hit either.
+        rejected: set[ObjectKey] = set()
+        for row, keys in _gather_keys_by_row(request.key_groups, loaded):
+            if keys:
+                outcomes = l1_manager.finish_write_and_reserve_read(
+                    keys, read_locks=row.num_kv_readers, tag=tag
                 )
+                rejected.update(
+                    key
+                    for key, (error, _obj) in outcomes.items()
+                    if error != L1Error.SUCCESS
+                )
+        if rejected:
+            assert result is not None
+            planned_keys = _gather_keys(request.key_groups, planned)
+            admitted = Bitmap(len(planned_keys))
+            for i, key in enumerate(planned_keys):
+                if result.test(i) and key not in rejected:
+                    admitted.set(i)
+            loaded = _scatter_bitmaps(planned, admitted)
+        failed = planned - loaded
+
+        loaded_keys = _gather_keys(request.key_groups, loaded)
+        failed_keys = _gather_keys(request.key_groups, failed)
+        if unloaded_keys:
+            l1_manager.finish_write_and_delete(unloaded_keys, tag=tag)
+
+        # Unlock L2
+        self._l2_adapters[adapter_idx].submit_unlock(
+            _gather_keys(request.key_groups, planned)
+        )
+
+        # Update the key states and the inflight load tasks
+        if l1_idx in states.l1_locked_keys:
+            states.l1_locked_keys[l1_idx] += loaded
+        else:
+            states.l1_locked_keys[l1_idx] = loaded
+        if len(request.l2_loaded_cells) == 0:
+            request.l2_loaded_cells = loaded.copy()
+        else:
+            request.l2_loaded_cells += loaded
+        states.l1_reserved_keys[l1_idx] -= planned
+        del states.l2_locked_keys[adapter_idx]
+        request.inflight_load_tasks.pop(adapter_idx, None)
+        request.load_bytes_by_adapter.pop(adapter_idx, None)
+
+        if task_id is not None:
+            completed = {
+                "request_id": request.request_id,
+                "adapter_index": adapter_idx,
+                "task_id": task_id,
+                "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+            }
+            if not loaded_keys:
+                # Nothing was admitted (the adapter raised, or every key
+                # failed), so the task stays out of the load throughput.
+                completed["bytes_transferred"] = 0
+            self._event_bus.publish(
+                Event(event_type=EventType.L2_LOAD_TASK_COMPLETED, metadata=completed)
             )
             self._event_bus.publish(
                 Event(
@@ -1683,16 +1773,20 @@ class PrefetchController(StorageControllerInterface):
                     },
                 )
             )
-            if failed_keys:
-                # Reserved in L1 for this adapter but absent from its load
-                # result. Serde failures will get their own reason once
-                # adapters can report them.
-                self._event_bus.publish(
-                    Event(
-                        event_type=EventType.L2_PREFETCH_FAILED,
-                        metadata={"reason": "not_found", "keys": failed_keys},
-                    )
+        if unloaded_keys:
+            # Reserved in L1 for this adapter but absent from its load
+            # result, or the adapter raised. A key the adapter did load that
+            # L1 then refused is not reported here: it is no failure of the
+            # adapter's, and the L1 manager logs it and leaves the staging
+            # object to eviction. Serde failures will get their own reason
+            # once adapters can report them.
+            reason = "not_found" if result is not None else "load_error"
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_FAILED,
+                    metadata={"reason": reason, "keys": unloaded_keys},
                 )
+            )
 
     # =========================================================================
     # Completion and cleanup

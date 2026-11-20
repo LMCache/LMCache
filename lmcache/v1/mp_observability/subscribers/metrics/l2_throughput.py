@@ -114,11 +114,14 @@ class L2ThroughputSubscriber(EventSubscriber):
         key = self._load_key(event)
         if key is None:
             return
+        # Set (to 0) only for a load that admitted nothing.
+        bytes_transferred = event.metadata.get("bytes_transferred")
         self._record(
             event=event,
             correlation_key=key,
             pending=self._pending_load,
             hist=self._load_hist,
+            real_bytes_transferred=bytes_transferred,
         )
 
     # -- Correlation-key helpers ------------------------------------------

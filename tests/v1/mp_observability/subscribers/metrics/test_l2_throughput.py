@@ -106,18 +106,22 @@ def _load_completed(
     adapter_index: int = 0,
     l2_name: str = "fs",
     task_id: int = 0,
+    bytes_transferred: int | None = None,
 ) -> Event:
     # L2_LOAD_TASK_COMPLETED does not carry total_bytes; bytes are
     # looked up from the subscriber's SUBMITTED-time cache.
+    metadata = {
+        "request_id": request_id,
+        "adapter_index": adapter_index,
+        "task_id": task_id,
+        "l2_name": l2_name,
+    }
+    if bytes_transferred is not None:
+        metadata["bytes_transferred"] = bytes_transferred
     return Event(
         event_type=EventType.L2_LOAD_TASK_COMPLETED,
         timestamp=t,
-        metadata={
-            "request_id": request_id,
-            "adapter_index": adapter_index,
-            "task_id": task_id,
-            "l2_name": l2_name,
-        },
+        metadata=metadata,
     )
 
 
@@ -248,6 +252,17 @@ class TestLoadThroughput:
 
         attrs = _attrs_of_nonzero_dps(_LOAD_METRIC)
         assert any(a.get("l2_name") == "mooncake_store" for a in attrs)
+
+    def test_a_load_that_admitted_nothing_drops_its_sample(self, subscriber):
+        count_before = _total_count(_LOAD_METRIC)
+        subscriber._on_load_submitted(
+            _load_submitted(request_id=43, t=0.0, total_bytes=500_000_000)
+        )
+        subscriber._on_load_completed(
+            _load_completed(request_id=43, t=0.05, bytes_transferred=0)
+        )
+        assert _total_count(_LOAD_METRIC) == count_before
+        assert (43, 0) not in subscriber._pending_load
 
 
 # ---------------------------------------------------------------------------

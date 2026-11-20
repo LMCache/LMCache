@@ -304,11 +304,11 @@ sum(rate(lmcache_mp_lookup_early_exit_requests_total[5m])) by (reason)
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation | Tags |
 |---|---|---|---|---|---|
-| `lmcache_mp.l2_prefetch_failure` | `lmcache_mp_l2_prefetch_failure_chunks_total` | Counter | `L2_PREFETCH_FAILED` | `+count` per `(reason, model_name)` bucket | `reason` ∈ {`l1_oom`, `not_found`}, `model_name` |
+| `lmcache_mp.l2_prefetch_failure` | `lmcache_mp_l2_prefetch_failure_chunks_total` | Counter | `L2_PREFETCH_FAILED` | `+count` per `(reason, model_name)` bucket | `reason` ∈ {`l1_oom`, `l1_contended`, `not_found`, `load_error`}, `model_name` |
 
-**What it answers:** For keys L2 reported present at lookup but failed to land in L1: was L1 full (`l1_oom`), or did the adapter fail to produce the data (`not_found`)?
+**What it answers:** For keys L2 reported present at lookup but failed to land in L1: was L1 full (`l1_oom`), was the key held in an L1 the request may not read (`l1_contended`), did the adapter fail to produce the data (`not_found`), or did the adapter's load raise (`load_error`)? A rising `load_error` count means some adapter's loads keep raising; its log names the adapter.
 
-> **Serde failures**: a third `reason=serde_failure` value will be added as an additive, non-breaking extension once the serde PR lands and L2 adapters distinguish deserialization errors from missing objects. No dashboard migration needed when that happens.
+> **Serde failures**: a `reason=serde_failure` value will be added as an additive, non-breaking extension once the serde PR lands and L2 adapters distinguish deserialization errors from missing objects. No dashboard migration needed when that happens.
 
 > **TTL lock expiration**: `lmcache_mp.l1_ttl_lock_expire` from the ticket is deferred to a follow-up because the current `TTLLock` primitive (native) has no expiration callback; lazy detection requires a C++/Rust-side change.
 
@@ -527,7 +527,7 @@ entirely. The load path continues to use the submitted `total_bytes`.
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.l2_store_throughput` | `lmcache_mp_l2_store_throughput_GBs` | Histogram | `L2_STORE_SUBMITTED` → `L2_STORE_COMPLETED` | `bytes_transferred / (completed_ts - submitted_ts) / 1e9` per task. `bytes_transferred` is read from the `L2_STORE_COMPLETED` event (populated from the `L2StoreResult` returned by `pop_completed_store_tasks()`); samples where `bytes_transferred <= 0` (e.g. duplicate-key fast paths that skip the write) are dropped, so the histogram reflects real work, not submitted-but-skipped bytes. |
-| `lmcache_mp.l2_load_throughput` | `lmcache_mp_l2_load_throughput_GBs` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per (request, adapter) pair. The load path still uses submitted `total_bytes`; per-task real-bytes accounting only applies to the store path. |
+| `lmcache_mp.l2_load_throughput` | `lmcache_mp_l2_load_throughput_GBs` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per (request, adapter) pair. The load path still uses submitted `total_bytes`; per-task real-bytes accounting only applies to the store path. A load that admitted nothing (its adapter raised from `query_load_result`, or every key failed) carries `bytes_transferred = 0` and is dropped. |
 
 **What it answers:** What end-to-end throughput is each L2 adapter
 delivering? Which backends are keeping up with demand, and which are
