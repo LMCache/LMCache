@@ -22,7 +22,7 @@ set -euo pipefail
 ALL_PYTHON='["3.11","3.12","3.13","3.14"]'
 ALL_CPU_OS='["ubuntu-22.04","macos-latest"]'
 
-checked=$(printf '%s\n' "${PR_BODY}" | tr -d '\r' \
+checked=$(printf '%s\n' "${PR_BODY:-}" | tr -d '\r' \
   | sed -nE 's/^[[:space:]]*[-*] \[[xX]\] `(py3\.1[1-4]|ubuntu-22\.04|macos-latest|rust|cuda|rocm|xpu|musa|rbln|full)`.*/\1/p' \
   | sort -u)
 

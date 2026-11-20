@@ -130,6 +130,12 @@ _path_filter_should_skip_for_pipeline() {
             ;;
         blend)
             case "$changed_file" in
+                tests/v1/platform/devices/musa/*|tests/v1/platform/devices/rbln/*|tests/v1/platform/devices/xpu/*|tests/v1/platform/devices/rocm/*)
+                    return 0
+                    ;;
+                lmcache/v1/platform/devices/musa/*|lmcache/v1/platform/devices/rbln/*|lmcache/v1/platform/devices/xpu/*|lmcache/v1/platform/devices/rocm/*)
+                    return 0
+                    ;;
                 .buildkite/k3_harness/setup-blend-env.sh|.buildkite/k3_tests/blend/*)
                     return 1
                     ;;
@@ -186,7 +192,7 @@ _path_filter_should_skip_for_pipeline() {
 _path_filter_pipeline_kind() {
     case "$1" in
         *k3_tests/unit/pipeline.yml) echo unit ;;
-        *k3_tests/multiprocess/pipeline.yml) echo multiprocess ;;
+        *k3_tests/multiprocess/pipeline.yml|*k3_tests/multiprocess/smoke-pipeline.yml) echo multiprocess ;;
         *k3_tests/blend/pipeline.yml) echo blend ;;
         *k3_tests/xpu/*/pipeline.yml) echo xpu ;;
         *k3_tests/musa/pipeline.yml) echo musa ;;
