@@ -22,6 +22,7 @@ an existing context's connected clients short of closing it.
 # Standard
 from unittest.mock import MagicMock
 import itertools
+import threading
 import time
 
 # Third Party
@@ -407,3 +408,194 @@ def test_region_size_must_be_multiple_of_alignment(shared_contexts):
     ctx_a, buf_a, _, _ = shared_contexts
     with pytest.raises(ValueError):
         ctx_a.register_memory_region(buf_a.data_ptr(), _ALIGN + 1)
+
+
+# =========================================================
+# Transfer failures
+# =========================================================
+@pytest.mark.parametrize("operation", ["read", "write"])
+def test_transfer_to_an_invalidated_peer_is_reported_failed(fresh_contexts, operation):
+    """nixl refusing a transfer is a failed result, reported once, not an error.
+
+    Removing the peer's agent puts the client in the state nixl leaves it in
+    after some peer failures: every new transfer fails with NIXL_ERR_NOT_FOUND.
+    """
+    ctx_a, _, ctx_b, _ = fresh_contexts
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    ctx_a.agent.remove_remote_agent(ctx_b.agent_name)
+    local = ctx_a.get_transfer_channel_address([(0, 256), (256, 256)])
+    remote = ctx_b.get_transfer_channel_address([(0, 256), (256, 256)])
+    submit = client.submit_read if operation == "read" else client.submit_write
+
+    task_id = submit(local, remote)
+
+    result = client.query_status(task_id)
+    assert result.is_finished() is True
+    assert result.succeeded_mask == [False, False]
+    with pytest.raises(KeyError):
+        client.query_status(task_id)
+
+
+def test_failed_transfer_stays_unfinished_until_nixl_releases_it(
+    fresh_contexts, monkeypatch
+):
+    """A transfer whose status check raises is not reported finished while nixl
+    refuses to release it, since nixl may still write the local buffer."""
+    ctx_a, _, ctx_b, _ = fresh_contexts
+    bindings = pytest.importorskip(f"{nixl.__name__}._bindings")
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    task_id = client.submit_read(
+        ctx_a.get_transfer_channel_address([(0, 256)]),
+        ctx_b.get_transfer_channel_address([(0, 256)]),
+    )
+
+    # A lost connection cannot be produced on demand over loopback, so the
+    # agent reports one: a failed status check, then one refused release, as
+    # nixl with ai-dynamo/nixl#2540 refuses while UCX may still write.
+    def check_xfer_state(handle):
+        raise bindings.nixlRemoteDisconnectError("NIXL_ERR_REMOTE_DISCONNECT")
+
+    release_xfer_handle = ctx_a.agent.release_xfer_handle
+    refusals = [bindings.nixlRepostActiveError("NIXL_ERR_REPOST_ACTIVE")]
+    released: list[object] = []
+
+    def release_once_refused(handle):
+        if refusals:
+            raise refusals.pop()
+        release_xfer_handle(handle)
+        released.append(handle)
+
+    monkeypatch.setattr(ctx_a.agent, "check_xfer_state", check_xfer_state)
+    monkeypatch.setattr(ctx_a.agent, "release_xfer_handle", release_once_refused)
+
+    assert client.query_status(task_id).is_finished() is False
+    assert not refusals
+    # The real release may also refuse while the loopback read is in flight.
+    result = _wait_finished(client, task_id)
+    assert result.is_finished() is True
+    assert result.succeeded_mask == [False]
+    assert len(released) == 1
+    with pytest.raises(KeyError):
+        client.query_status(task_id)
+
+
+def test_a_transfer_that_fails_to_start_is_reported_failed_and_released(
+    fresh_contexts, monkeypatch
+):
+    """nixl created the transfer but could not post it: the handle exists, so
+    it is released before the transfer is reported failed."""
+    ctx_a, _, ctx_b, _ = fresh_contexts
+    bindings = pytest.importorskip(f"{nixl.__name__}._bindings")
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+
+    def transfer(handle, *args, **kwargs):
+        raise bindings.nixlRemoteDisconnectError("NIXL_ERR_REMOTE_DISCONNECT")
+
+    release_xfer_handle = ctx_a.agent.release_xfer_handle
+    released: list[object] = []
+
+    def recording_release(handle):
+        release_xfer_handle(handle)
+        released.append(handle)
+
+    monkeypatch.setattr(ctx_a.agent, "transfer", transfer)
+    monkeypatch.setattr(ctx_a.agent, "release_xfer_handle", recording_release)
+
+    task_id = client.submit_read(
+        ctx_a.get_transfer_channel_address([(0, 256)]),
+        ctx_b.get_transfer_channel_address([(0, 256)]),
+    )
+
+    result = client.query_status(task_id)
+    assert result.is_finished() is True
+    assert result.succeeded_mask == [False]
+    assert len(released) == 1
+    with pytest.raises(KeyError):
+        client.query_status(task_id)
+
+
+def test_a_finished_transfer_is_reported_once_nixl_releases_it(
+    fresh_contexts, monkeypatch
+):
+    """With ai-dynamo/nixl#2540 nixl may refuse to release a transfer that
+    finished; it is then reported, with its result, after a later release."""
+    ctx_a, buf_a, ctx_b, buf_b = fresh_contexts
+    bindings = pytest.importorskip(f"{nixl.__name__}._bindings")
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    release_xfer_handle = ctx_a.agent.release_xfer_handle
+    refusals = [bindings.nixlRepostActiveError("NIXL_ERR_REPOST_ACTIVE")]
+    released: list[object] = []
+
+    def release_once_refused(handle):
+        if refusals:
+            raise refusals.pop()
+        release_xfer_handle(handle)
+        released.append(handle)
+
+    monkeypatch.setattr(ctx_a.agent, "release_xfer_handle", release_once_refused)
+    task_id = client.submit_read(
+        ctx_a.get_transfer_channel_address([(0, 512)]),
+        ctx_b.get_transfer_channel_address([(0, 512)]),
+    )
+
+    result = _wait_finished(client, task_id)
+    assert not refusals
+    assert len(released) == 1
+    assert result.is_finished() is True
+    assert result.succeeded_mask == [True]
+    assert torch.equal(buf_a[:512], buf_b[:512])
+    with pytest.raises(KeyError):
+        client.query_status(task_id)
+
+
+def test_concurrent_queries_report_a_failed_transfer_once(fresh_contexts, monkeypatch):
+    """Two threads querying one task: only one sees it finished."""
+    ctx_a, _, ctx_b, _ = fresh_contexts
+    bindings = pytest.importorskip(f"{nixl.__name__}._bindings")
+    client = ctx_a.get_transfer_channel_client(ctx_b.advertise_url)
+    task_id = client.submit_read(
+        ctx_a.get_transfer_channel_address([(0, 256)]),
+        ctx_b.get_transfer_channel_address([(0, 256)]),
+    )
+    # Without one query at a time, both threads would be inside the status
+    # check together and both report the failure.
+    both_checking = threading.Barrier(2)
+    checks: list[object] = []
+
+    def check_xfer_state(handle):
+        checks.append(handle)
+        try:
+            both_checking.wait(timeout=0.5)
+        except threading.BrokenBarrierError:
+            pass
+        raise bindings.nixlRemoteDisconnectError("NIXL_ERR_REMOTE_DISCONNECT")
+
+    monkeypatch.setattr(ctx_a.agent, "check_xfer_state", check_xfer_state)
+    outcomes: list[object] = []
+
+    def query():
+        # Polls past an unfinished result: the real release may refuse while
+        # the loopback read is in flight.
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                result = client.query_status(task_id)
+            except KeyError as err:
+                outcomes.append(err)
+                return
+            if result.is_finished() or time.monotonic() >= deadline:
+                outcomes.append(result)
+                return
+            time.sleep(0.01)
+
+    threads = [threading.Thread(target=query) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(checks) == 1
+    finished = [o for o in outcomes if not isinstance(o, KeyError)]
+    assert len(finished) == 1
+    assert finished[0].succeeded_mask == [False]
+    assert sum(isinstance(o, KeyError) for o in outcomes) == 1
