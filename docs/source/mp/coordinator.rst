@@ -1270,12 +1270,20 @@ verbatim with its code.
     curl -s http://localhost:9300/cache/prefetches/server-1/abc123
     # -> {"status": "completed", "found_keys": 12, "total_keys": 12}
 
-**Pin/unpin (protecting cache from eviction).** Pin a token sequence's cache so
-it is not evicted from L2 until unpinned. The coordinator resolves the token
-sequence to its object keys **locally** (no MP-server round-trip) and records
-them in its L2 eviction plan (``POST``) or releases them (``DELETE``), excluding
-pinned keys from quota-based eviction. L2 pins are fleet-wide (per
-``cache_salt``), so no target instance is named.
+**Pin/unpin (protecting cache from eviction).** Pin cache so it is not evicted
+from L2 until unpinned. The coordinator records the keys in its L2 eviction plan
+(``POST``) or releases them (``DELETE``), excluding pinned keys from quota-based
+eviction, with no MP-server round-trip. L2 pins are fleet-wide (per
+``cache_salt``), so no target instance is named. One endpoint, two forms --
+supply exactly one:
+
+* **tokens form** -- ``{"token_ids": [...], "model_name": ..., "world_size":
+  ..., "cache_salt": ..., "tags": ...}``: the coordinator resolves the token
+  sequence to the keys of its complete chunks **locally**. Chunk hashes are
+  prefix-chained, so this always covers every chunk from position 0.
+* **keys form** -- ``{"keys": [...]}``: pin exactly these keys, in the same
+  wire form ``GET /directory/keys`` and ``POST /directory/lookup`` return. Use
+  it to pin a chunk in the middle of a prompt without its prefix chunks.
 
 Local resolution requires the coordinator's ``chunk_size`` and
 ``hash_algorithm`` (see `Configuration`_) to match the MP servers' ``--chunk-size``
@@ -1288,7 +1296,7 @@ per chunk and rank rather than per group.
 ``POST /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Pin a token sequence's keys in the L2 eviction plan.
+Pin keys in the L2 eviction plan.
 
 **Request body:**
 
@@ -1299,23 +1307,30 @@ Pin a token sequence's keys in the L2 eviction plan.
    * - Field
      - Type
      - Description
-   * - ``model_name``
-     - string
-     - Model whose rank fan-out to use when resolving keys.
-   * - ``world_size``
-     - int
-     - World size (``>= 1``) selecting the per-rank fan-out.
+   * - ``keys``
+     - list[object]
+     - Keys form. The keys to pin, each ``{"chunk_hash_hex", "model_name",
+       "kv_rank", "object_group_id", "cache_salt", "tags"}``. The other fields
+       below are ignored.
    * - ``token_ids``
      - list[int]
-     - Prompt tokens whose complete chunks are pinned; must match what was
-       stored. A sub-chunk sequence pins nothing (``affected`` 0).
+     - Tokens form. Prompt tokens whose complete chunks are pinned; must match
+       what was stored. A sub-chunk sequence pins nothing (``affected`` 0).
+   * - ``model_name``
+     - string
+     - Tokens form, required. Model whose rank fan-out to use when resolving
+       keys.
+   * - ``world_size``
+     - int
+     - Tokens form. Optional (default ``1``). World size (``>= 1``) selecting
+       the per-rank fan-out.
    * - ``cache_salt``
      - string
-     - Optional (default ``""``). Per-tenant isolation salt.
+     - Tokens form. Optional (default ``""``). Per-tenant isolation salt.
    * - ``tags``
      - map[string, string]
-     - Optional (default ``{}``). Matching tags used when the content was
-       stored, without the ``lmcache.tag.`` prefix.
+     - Tokens form. Optional (default ``{}``). Matching tags used when the
+       content was stored, without the ``lmcache.tag.`` prefix.
 
 **Response** (``200 OK``):
 
@@ -1323,15 +1338,18 @@ Pin a token sequence's keys in the L2 eviction plan.
 
     {"requested": 12, "affected": 12, "status": "pinned"}
 
-``requested`` is the number of whole chunks resolved; ``affected`` is the number
-of L2 keys pinned (chunks times the per-rank fan-out).
+``requested`` is the number of whole chunks resolved (keys form: the number of
+keys given); ``affected`` is the number of L2 keys pinned (tokens form: chunks
+times the per-rank fan-out).
 
 **HTTP status codes:**
 
 - ``200``: pinned.
 - ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt`` violates
   its invariants.
-- ``422``: request body fails field-level validation.
+- ``422``: request body fails field-level validation, supplies both or neither
+  of ``keys`` / ``token_ids``, omits ``model_name`` in the tokens form, or has
+  an undecodable key.
 - ``503``: the metadata file (``--metadata-path``) could not be written; the
   change was undone, so retry once the storage is fixed.
 
@@ -1350,6 +1368,21 @@ of L2 keys pinned (chunks times the per-rank fan-out).
         }'
     # -> {"requested": 12, "affected": 12, "status": "pinned"}
 
+    # Keys form: pin one mid-prompt chunk found via /directory/lookup.
+    curl -s -X POST http://localhost:9300/cache/pins \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "keys": [{
+                "chunk_hash_hex": "aa12...",
+                "model_name": "Qwen/Qwen3-8B",
+                "kv_rank": 0,
+                "object_group_id": 0,
+                "cache_salt": "user-a",
+                "tags": {"adapter_revision": "abc123"}
+            }]
+        }'
+    # -> {"requested": 1, "affected": 1, "status": "pinned"}
+
 .. note::
 
    **Requires event reporting.** The coordinator can only exclude keys from
@@ -1359,7 +1392,7 @@ of L2 keys pinned (chunks times the per-rank fan-out).
 ``DELETE /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Unpin a token sequence's keys from the L2 eviction plan. Same request body as
+Unpin keys from the L2 eviction plan. Same request body (either form) as
 ``POST /cache/pins``. The response mirrors the pin (``affected`` is the number
 of keys unpinned), with ``status`` ``"unpinned"``. Pins are reference-counted: a
 chunk pinned *N* times needs *N* unpins before it can be evicted.

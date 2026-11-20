@@ -51,7 +51,7 @@ from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.events_replay import EventsTrace
 from lmcache.v1.mp_coordinator.schemas import CacheEventsRequest
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
-from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.transport.request_client import RequestClient
 
 CHUNK_SIZE = 4
 """Tokens per chunk, on the coordinator and every server alike."""
