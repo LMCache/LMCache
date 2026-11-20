@@ -58,3 +58,25 @@ for a shared model; separate ownership scopes prevent mixed-shard completeness
 but do not solve
 router identity collisions. The supported routing profile uses one unsalted,
 uniformly tagged parallel setup per model and full-attention object groups.
+
+## Native binding lifetime
+
+An LMCache-driven STORE can carry one immutable `EventBinding` per complete
+chunk. Each descriptor supplies the registered profile, ordered native block
+hashes and the first block's parent. Its token payload is the corresponding
+slice of the request's packed token bytes. Registration admits a single
+full-attention address space. The first engine sender and native event output
+are later steps in #5932.
+
+A salted request can continue storing KV with empty bindings. A STORE that
+supplies native bindings must be unsalted. The server checks the whole batch against the worker registration and retained
+descriptors before reserving L1, touching the session or copying KV. The same
+descriptor can be submitted by overlapping transfers. A descriptor lives while
+any STORE still references it or any rank/group has a readable L1 owner in
+that model, world, salt and tag scope. An unsuccessful or duplicate STORE also
+releases its own pending reference. For a submitted write, its host completion callback releases the binding
+after `finish_write` has queued the L1 notifications on the same event bus. A GPU timing marker cannot establish
+that ordering. Replay still uses the existing chunk records. Event loss drops
+pending and retained bindings together with the residency projection.
+Admission rejects supplied bindings while loss recovery is discarding queued
+events, since a release could otherwise be discarded without its reservation.

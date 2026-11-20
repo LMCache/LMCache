@@ -24,6 +24,59 @@ Key Types:
 """
 
 
+@dataclass(frozen=True)
+class KVEventProfile:
+    """Native event identity contract supplied at KV-cache registration.
+
+    Args:
+        profile_id: Opaque engine/hash/seed/representation version identifier.
+            The server compares this identity; it never reconstructs hashes.
+        block_size: Number of tokens per engine event block.
+
+    Raises:
+        ValueError: If the identity is empty or the block size is not positive.
+    """
+
+    profile_id: str
+    block_size: int
+
+    def __post_init__(self) -> None:
+        if not self.profile_id or self.block_size <= 0:
+            raise ValueError("KV event profile requires an ID and positive block size")
+
+
+@dataclass(frozen=True)
+class EventBinding:
+    """Engine-native identities for one complete full-attention chunk.
+
+    The first hash follows parent_block_hash. The STORE already carries the
+    corresponding tokens in packed form; the server retains just that slice.
+    The profile's block size is measured in tokens.
+    """
+
+    profile: KVEventProfile
+    block_hashes: tuple[bytes | int, ...]
+    parent_block_hash: bytes | int | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.block_hashes, tuple) or not self.block_hashes:
+            raise ValueError(
+                "native event binding requires an immutable, nonempty hash tuple"
+            )
+        kind = type(self.block_hashes[0])
+        hashes = (
+            self.block_hashes
+            if self.parent_block_hash is None
+            else (*self.block_hashes, self.parent_block_hash)
+        )
+        if kind not in (bytes, int) or any(type(h) is not kind for h in hashes):
+            raise ValueError(
+                "native block hashes must use one bytes or integer representation"
+            )
+        if any(isinstance(h, int) and not -(1 << 63) <= h < 1 << 64 for h in hashes):
+            raise ValueError("native integer hash is outside the 64-bit wire range")
+
+
 @dataclass(order=True, frozen=True)
 class IPCCacheServerKey:
     """Cache key for the IPC (multiprocess) protocol.
@@ -69,6 +122,8 @@ class IPCCacheServerKey:
     # Request-scoped LMCache configuration passed across the IPC boundary.
     # It is metadata, not part of cache identity.
     request_configs: dict[str, Any] | None = field(default=None, compare=False)
+    # STORE-only metadata, independent of object identity and lookup keys.
+    event_bindings: tuple[EventBinding, ...] = field(default=(), compare=False)
 
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
@@ -76,6 +131,8 @@ class IPCCacheServerKey:
     _SALT_MAX_LEN = 128
 
     def __post_init__(self) -> None:
+        if not isinstance(self.event_bindings, tuple):
+            raise ValueError("event_bindings must be an immutable tuple")
         if len(self.token_bytes) % TOKEN_STRIDE:
             raise ValueError(
                 f"token_bytes of {len(self.token_bytes)} byte(s) is not a "

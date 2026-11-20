@@ -4,6 +4,7 @@
 # Standard
 from collections import OrderedDict, deque
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from itertools import islice
 import threading
 import time
@@ -13,9 +14,13 @@ from lmcache.v1.common.custom_types import (
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
     KV_EVENT_MEDIUM_CPU,
+    EventBinding,
+    IPCCacheServerKey,
     KVEventBatch,
+    KVEventProfile,
     KVEventRecord,
 )
+from lmcache.v1.common.token_codec import TOKEN_STRIDE
 from lmcache.v1.distributed.api import ObjectKey, get_kv_worker_ids
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
@@ -37,6 +42,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.transport.errors import InvalidRequestError
 from lmcache.v1.transport.futures import MessagingStream
 
 _KIND_LOST = "lost"
@@ -55,6 +61,13 @@ def _chunk_key(key: ObjectKey) -> _ChunkKey:
     )
 
 
+@dataclass
+class _BoundChunk:
+    binding: EventBinding
+    token_bytes: bytes
+    pending: set[str] = field(default_factory=set)
+
+
 class CommittedKVResidency:
     """Project committed L1 copies onto complete chunks.
 
@@ -68,7 +81,7 @@ class CommittedKVResidency:
 
     def __init__(self, layouts: LayoutDescRegistry) -> None:
         self._layouts = layouts
-        self._owners: dict[ObjectKey, set[str]] = {}
+        self._owners: dict[_ChunkKey, dict[ObjectKey, set[str]]] = {}
 
     def commit(self, key: ObjectKey, l1_tag: str) -> None:
         """Record a completed readable copy; duplicate notifications are idempotent.
@@ -77,7 +90,8 @@ class CommittedKVResidency:
             key: The committed object, including rank, group, salt and identity tags.
             l1_tag: The L1 manager that completed the write.
         """
-        self._owners.setdefault(key, set()).add(l1_tag)
+        objects = self._owners.setdefault(_chunk_key(key), {})
+        objects.setdefault(key, set()).add(l1_tag)
 
     def evict(self, key: ObjectKey, l1_tag: str) -> None:
         """Forget one L1 copy, removing owner state when its final copy is gone.
@@ -86,11 +100,21 @@ class CommittedKVResidency:
             key: The object removed from L1.
             l1_tag: The L1 manager that removed it. Unknown copies are ignored.
         """
-        owners = self._owners.get(key)
+        chunk = _chunk_key(key)
+        objects = self._owners.get(chunk)
+        if objects is None:
+            return
+        owners = objects.get(key)
         if owners is not None:
             owners.discard(l1_tag)
             if not owners:
-                del self._owners[key]
+                del objects[key]
+                if not objects:
+                    del self._owners[chunk]
+
+    def has_objects(self, chunk: _ChunkKey) -> bool:
+        """Return whether any rank/group of this chunk still has an L1 owner."""
+        return chunk in self._owners
 
     def is_committed(self, key: ObjectKey) -> bool:
         """Return whether every distinct registered group shard has an L1 copy.
@@ -107,6 +131,9 @@ class CommittedKVResidency:
         geometry = self._layouts.find_group_shard_geometry(key.model_name, world_size)
         if not world_size or geometry is None:
             return False
+        objects = self._owners.get(_chunk_key(key))
+        if not objects:
+            return False
         groups, replication = geometry
         return all(
             ObjectKey(
@@ -114,7 +141,7 @@ class CommittedKVResidency:
                 kv_rank=ObjectKey.ComputeKVRank(world_size, rank, world_size, rank),
                 object_group_id=group,
             )
-            in self._owners
+            in objects
             for group in groups
             for rank in get_kv_worker_ids(
                 world_size,
@@ -153,10 +180,15 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
         """Build the event channel; a disabled channel still serves subscribers."""
-        return cls(
+        module = cls(
             build_ctx.engine_context,
             kv_event_log_size=build_ctx.mp_config.kv_event_log_size,
         )
+        if module.enabled:
+            for dependency in build_ctx.built:
+                if isinstance(dependency, LMCacheDrivenTransferModule):
+                    dependency.bind_store_events = module.bind_store
+        return module
 
     def __init__(
         self,
@@ -186,11 +218,14 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
         ] = OrderedDict()
         self._residency = CommittedKVResidency(ctx.layout_desc_registry)
         self._announced: dict[_ChunkKey, int] = {}
+        self._bound: dict[_ChunkKey, _BoundChunk] = {}
+        self._pending_stores: dict[str, tuple[_ChunkKey, ...]] = {}
         if not self._kv_events_enabled:
             return
         self._ctx.event_bus.subscribe_drops(self._record_kv_event_loss)
         for event_type in (
             EventType.MP_TOKENS,
+            EventType.MP_STORE_BINDINGS_RELEASED,
             EventType.L1_WRITE_FINISHED,
             EventType.L1_WRITE_FINISHED_AND_READ_RESERVED,
             EventType.L1_KEYS_EVICTED,
@@ -232,6 +267,8 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
     def close(self) -> None:
         """Close all subscriptions and wake their readers."""
         with self._kv_event_lock:
+            self._pending_stores.clear()
+            self._bound.clear()
             for stream, _ in list(self._kv_event_streams.values()):
                 stream.close()
 
@@ -347,6 +384,102 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
                 events=records,
             )
 
+    def bind_store(
+        self,
+        key: IPCCacheServerKey,
+        objects: Sequence[ObjectKey],
+        profile: KVEventProfile | None,
+        chunk_size: int,
+        transfer: str,
+    ) -> None:
+        """Reserve a descriptor per complete chunk until host completion.
+
+        Args:
+            key: STORE range, packed tokens and engine-native block identities.
+            objects: Keys for the first object group, in STORE order.
+            profile: Profile accepted for the worker's registered context.
+            chunk_size: Number of tokens per complete storage chunk.
+            transfer: Process-unique STORE key from next_transfer_key().
+
+        Raises:
+            InvalidRequestError: The profile, range, chain or descriptors disagree.
+                No binding is changed if any chunk is rejected.
+        """
+        if key.cache_salt:
+            raise InvalidRequestError("native STORE bindings require an unsalted key")
+        if (
+            not key.event_bindings
+            or profile is None
+            or key.start % chunk_size
+            or key.end > key.num_tokens
+            or not 0 <= key.start < key.end
+            or len(objects) != len(key.event_bindings)
+            or len(objects) != (key.end - key.start) // chunk_size
+        ):
+            raise InvalidRequestError(
+                "native STORE binding profile or chunk range mismatch"
+            )
+        prepared: dict[_ChunkKey, tuple[EventBinding, bytes]] = {}
+        parent = key.event_bindings[0].parent_block_hash
+        if (key.start == 0) != (parent is None):
+            raise InvalidRequestError(
+                "native STORE binding has an invalid first parent"
+            )
+        for i, (obj, binding) in enumerate(
+            zip(objects, key.event_bindings, strict=True)
+        ):
+            if (
+                binding.profile != profile
+                or binding.parent_block_hash != parent
+                or len(binding.block_hashes) * profile.block_size != chunk_size
+            ):
+                raise InvalidRequestError(
+                    "native STORE binding profile, block geometry or parent mismatch"
+                )
+            start = (key.start + i * chunk_size) * TOKEN_STRIDE
+            packed = key.token_bytes[start : start + chunk_size * TOKEN_STRIDE]
+            chunk = _chunk_key(obj)
+            if chunk in prepared and prepared[chunk] != (binding, packed):
+                raise InvalidRequestError(
+                    "conflicting native STORE binding within request"
+                )
+            prepared[chunk] = binding, packed
+            parent = binding.block_hashes[-1]
+        with self._kv_event_lock:
+            if (
+                self._discard_until_empty
+                or self._ctx.event_bus.dropped_events_count() > self._kv_event_dropped
+            ):
+                raise InvalidRequestError(
+                    "native STORE binding unavailable during event loss recovery"
+                )
+            for chunk, (binding, packed) in prepared.items():
+                old = self._bound.get(chunk)
+                if old is not None and (
+                    old.binding != binding or old.token_bytes != packed
+                ):
+                    raise InvalidRequestError("conflicting native STORE binding")
+            for chunk, (binding, packed) in prepared.items():
+                self._bound.setdefault(chunk, _BoundChunk(binding, packed)).pending.add(
+                    transfer
+                )
+            self._pending_stores[transfer] = tuple(prepared)
+
+    def get_store_binding(self, key: ObjectKey) -> tuple[EventBinding, bytes] | None:
+        """Return the retained descriptor and packed chunk tokens, or None."""
+        with self._kv_event_lock:
+            state = self._bound.get(_chunk_key(key))
+            return (state.binding, state.token_bytes) if state is not None else None
+
+    def _collect_binding(self, chunk: _ChunkKey) -> None:
+        state = self._bound.get(chunk)
+        if (
+            state is not None
+            and not state.pending
+            and not self._residency.has_objects(chunk)
+        ):
+            del self._bound[chunk]
+
     def _append_kv_event(
         self,
         kind: str,
@@ -378,6 +511,8 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
                 self._kv_event_dropped = dropped
                 self._kv_event_lost_markers += 1
                 self._residency.clear()
+                self._bound.clear()
+                self._pending_stores.clear()
                 self._announced.clear()
                 self._append_kv_event(_KIND_LOST, "", [])
             # Read the drop count before the queue: later overflow stays detectable.
@@ -391,6 +526,12 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
                 or self._ctx.event_bus.dropped_events_count() > self._kv_event_dropped
             ):
                 self._record_kv_event_loss()
+                return
+            if event.event_type == EventType.MP_STORE_BINDINGS_RELEASED:
+                transfer = event.metadata["transfer_key"]
+                for chunk in self._pending_stores.pop(transfer, ()):
+                    self._bound[chunk].pending.discard(transfer)
+                    self._collect_binding(chunk)
                 return
             if event.event_type == EventType.MP_TOKENS:
                 for chunk_hash, tokens, parent in zip(
@@ -416,6 +557,8 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
                     self._residency.commit(key, l1_tag)
                 chunks[_chunk_key(key)] = key
             for chunk, key in chunks.items():
+                if evicted and self._bound:
+                    self._collect_binding(chunk)
                 announced = self._announced.get(chunk)
                 if not self._residency.is_committed(key):
                     if announced is not None:
