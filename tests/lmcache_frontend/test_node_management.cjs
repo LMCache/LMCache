@@ -137,3 +137,25 @@ test('Edit loads a child and renames it using its original identity and parent',
     });
 });
 
+test('Discovery markup remains literal in child cells and action identifiers', async () => {
+    const name = '<img src=x onerror="alert(1)">';
+    const host = '<svg onload="alert(1)">';
+    const port = '<b>8085</b>';
+    const parent = 'parent" & <tag>';
+    const ui = dashboard(() => Response.json({nodes: [{
+        name: 'proxy', children: [{name, host, port, is_proxy: false, proxy_id: parent}],
+    }]}));
+    await ui.run('loadNodeListForManagement()');
+    const row = ui.document.getElementById('nodeListBody').children[1];
+    assert.deepEqual(row.children.slice(0, 5).map(cell => cell.textContent),
+        [name, host, port, 'No', parent]);
+    const buttons = row.children[5].children;
+    assert.equal(buttons.length, 2);
+    assert.deepEqual(buttons.map(button => button.dataset.name), [name, name]);
+    buttons[0].listeners.click({target: buttons[0]});
+    assert.equal(ui.document.getElementById('nodeName').value, name);
+    assert.equal(ui.document.getElementById('nodeName').dataset.originalName, name);
+    ui.run('deleteNode = name => { window.deletedName = name; }');
+    buttons[1].listeners.click({target: buttons[1]});
+    assert.equal(ui.window.deletedName, name);
+});
