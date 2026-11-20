@@ -114,6 +114,10 @@ class GDSL1MemoryManager:
         total_size = self._address_manager.get_heap_size()
         return total_size - free_size, total_size
 
+    def get_fragmentation_stats(self) -> tuple[int, int]:
+        """Return the slab address space's fragmentation stats."""
+        return self._address_manager.get_fragmentation_stats()
+
     def get_l1_memory_desc(self) -> Optional[L1MemoryDesc]:
         """Return ``None``: the GDS L1 medium is the slab file, not a buffer.
 

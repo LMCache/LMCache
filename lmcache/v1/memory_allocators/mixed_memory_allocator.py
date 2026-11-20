@@ -63,7 +63,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
         self._unregistered = False
 
-        self.pin_allocator: MemoryAllocatorInterface
+        self.pin_allocator: TensorMemoryAllocator | PagedTensorMemoryAllocator
         if use_paging:
             assert "shapes" in kwargs, (
                 "shapes must be specified for paged memory allocator"

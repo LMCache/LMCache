@@ -728,6 +728,20 @@ Adapters with no in-flight work emit no datapoint for that scrape.
        the callback never raises during a scrape. Compare against the
        eviction watermark (default ``0.8``) to read whether the
        eviction loop is below or above its trigger threshold.
+   * - ``lmcache_mp.l1_largest_free_block_bytes``
+     - ObservableGauge
+     - Largest contiguous free block in the L1 address space, sampled at
+       scrape time from ``BaseL1Manager.get_fragmentation_stats()``.  An
+       allocation failing while ``l1_memory_usage_bytes`` is still below
+       capacity means external fragmentation, not exhaustion: free bytes
+       exist but no contiguous block is large enough.  Tiers whose
+       allocator has no address space (e.g. a shadow L1) report ``0``.
+   * - ``lmcache_mp.l1_free_block_count``
+     - ObservableGauge
+     - Number of free blocks in the L1 address space, from the same
+       snapshot.  A high count next to a small
+       ``l1_largest_free_block_bytes`` is the same fragmentation signal
+       seen from the hole-count side.
    * - ``lmcache_mp.l2_usage_bytes``
      - ObservableGauge (attr: ``l2_name``)
      - Bytes currently held in each L2 adapter, sampled at scrape time

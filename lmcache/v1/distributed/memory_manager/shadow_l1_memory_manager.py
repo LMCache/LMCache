@@ -66,6 +66,10 @@ class ShadowL1MemoryManager:
         """Return ``(0, 0)``: borrowed bytes are not local memory."""
         return 0, 0
 
+    def get_fragmentation_stats(self) -> tuple[int, int]:
+        """A shadow L1 owns no bytes; report zeros by convention."""
+        return (0, 0)
+
     def get_l1_memory_desc(self) -> L1MemoryDesc | None:
         """Return None; there is no local buffer to register."""
         return None

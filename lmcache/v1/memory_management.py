@@ -1868,20 +1868,27 @@ class AddressManager:
         """
         return self._size - self.total_allocated_size
 
-    def _free_space_snapshot(self) -> tuple[int, int, int]:
-        """Snapshot the free list atomically for diagnostics.
+    def _free_space_snapshot_locked(self) -> tuple[int, int, int]:
+        """Compute the free-list snapshot; the caller must hold ``_lock``.
 
         Returns:
             ``(free_bytes, largest_free_block_bytes, free_block_count)``
-            taken under the lock, so the three values describe the same
-            free-list state.
+            describing one free-list state. Zero-length placeholder blocks
+            are ignored, so an empty or exhausted space reports ``(0, 0)``.
         """
-        with self._lock:
-            blocks = list(self._explicit_list)
+        largest = 0
+        count = 0
+        for block in self._explicit_list:
+            if block.size <= 0:
+                continue
+            if block.size > largest:
+                largest = block.size
+            count += 1
         free_bytes = self._size - self.total_allocated_size
-        largest = max((block.size for block in blocks), default=0)
-        return free_bytes, largest, len(blocks)
+        return free_bytes, largest, count
 
+    @_lmcache_nvtx_annotate
+    @synchronized("_lock")
     def get_fragmentation_stats(self) -> tuple[int, int]:
         """
         Get the external-fragmentation signal for this address space.
@@ -1894,12 +1901,16 @@ class AddressManager:
             A tuple containing the largest free block in bytes and the
             number of free blocks.
         """
-        _, largest, count = self._free_space_snapshot()
+        _, largest, count = self._free_space_snapshot_locked()
         return largest, count
 
     def _free_space_hint(self) -> str:
-        """Render the free-list snapshot for OOM diagnostics."""
-        free_bytes, largest, count = self._free_space_snapshot()
+        """Render the free-list snapshot for OOM diagnostics.
+
+        The caller must already hold ``_lock``: the allocation failure
+        paths invoke this from inside their critical section.
+        """
+        free_bytes, largest, count = self._free_space_snapshot_locked()
         return (
             f"{largest} bytes in the largest of {count} free blocks "
             f"({free_bytes} bytes free)"

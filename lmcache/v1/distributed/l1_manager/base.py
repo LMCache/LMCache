@@ -137,23 +137,17 @@ def _l1_staging_bytes_or_zero(target: "BaseL1Manager | None") -> int:
 
 
 def _l1_largest_free_block_or_zero(target: "BaseL1Manager | None") -> int:
-    """Return the largest free L1 block in bytes, or 0 when unreportable."""
+    """Return the largest free L1 block in bytes, or 0 without a target."""
     if target is None:
         return 0
-    try:
-        return target.get_fragmentation_stats()[0]
-    except NotImplementedError:
-        return 0
+    return target.get_fragmentation_stats()[0]
 
 
 def _l1_free_block_count_or_zero(target: "BaseL1Manager | None") -> int:
-    """Return the L1 free-block count, or 0 when unreportable."""
+    """Return the L1 free-block count, or 0 without a target."""
     if target is None:
         return 0
-    try:
-        return target.get_fragmentation_stats()[1]
-    except NotImplementedError:
-        return 0
+    return target.get_fragmentation_stats()[1]
 
 
 # Main classes
@@ -1115,10 +1109,7 @@ class BaseL1Manager(L1ManagerInterface):
                 if staged.is_temporary:
                     temporary += 1
         used, total = self._memory_manager.get_memory_usage()
-        try:
-            largest_free, free_count = self._memory_manager.get_fragmentation_stats()
-        except NotImplementedError:
-            largest_free, free_count = 0, 0
+        largest_free, free_count = self.get_fragmentation_stats()
         # ``memory_total_bytes`` is what the allocator currently backs (the
         # grown heap on the lazy tier). ``memory_configured_bytes`` is the
         # current declared capacity.
@@ -1140,6 +1131,20 @@ class BaseL1Manager(L1ManagerInterface):
             "write_ttl_seconds": self._write_ttl_seconds,
             "read_ttl_seconds": self._read_ttl_seconds,
         }
+
+    def get_fragmentation_stats(self) -> tuple[int, int]:
+        """Return the L1 external-fragmentation signal.
+
+        Delegates to the medium's memory manager and reports ``(0, 0)``
+        for tiers whose allocator has no address-space stats.
+
+        Returns:
+            ``(largest_free_block_bytes, free_block_count)``.
+        """
+        try:
+            return self._memory_manager.get_fragmentation_stats()
+        except NotImplementedError:
+            return (0, 0)
 
     # Debugging APIs
     @l1_mgr_synchronized

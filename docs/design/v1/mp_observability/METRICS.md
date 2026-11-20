@@ -622,6 +622,8 @@ the same backend type — same shape as the existing
 |---|---|---|---|---|
 | `lmcache_mp.l1_memory_usage_bytes` | `lmcache_mp_l1_memory_usage_bytes` | ObservableGauge | `BaseL1Manager.get_memory_usage()` | Bytes currently held in L1 at scrape time |
 | `lmcache_mp.l1_staging_bytes` | `lmcache_mp_l1_staging_bytes` | ObservableGauge | `BaseL1Manager.get_staging_memory_usage()` | Bytes held by L1 staging objects (write-reserved, not yet admitted: in-flight stores and L2 prefetch loads) at scrape time; a subset of `l1_memory_usage_bytes` |
+| `lmcache_mp.l1_largest_free_block_bytes` | `lmcache_mp_l1_largest_free_block_bytes` | ObservableGauge | `BaseL1Manager.get_fragmentation_stats()[0]` | Largest contiguous free block in the L1 address space at scrape time; the ceiling on a single first-fit allocation. Tiers without an address space report `0` |
+| `lmcache_mp.l1_free_block_count` | `lmcache_mp_l1_free_block_count` | ObservableGauge | `BaseL1Manager.get_fragmentation_stats()[1]` | Number of free blocks in the L1 address space at scrape time; paged allocators report page-granular counts |
 | `lmcache_mp.l2_usage_bytes` | `lmcache_mp_l2_usage_bytes` | ObservableGauge (attr: `l2_name`) | `StorageManager.get_l2_usages()` (calls `L2AdapterInterface.get_usage().total_bytes_used`) | Per-adapter bytes currently held in L2 at scrape time; one observation per configured adapter.  Adapters whose `get_usage()` raises are skipped silently. |
 | `lmcache_mp.num_inflight_l2_stores` | `lmcache_mp_num_inflight_l2_stores` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `StoreController.get_inflight_count_by_adapter()` | Snapshot of in-flight L2 store tasks grouped by adapter |
 | `lmcache_mp.num_inflight_l2_loads` | `lmcache_mp_num_inflight_l2_loads` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `PrefetchController.get_inflight_load_state_by_adapter()` | Per-adapter count from the same snapshot |
@@ -636,6 +638,16 @@ that have not landed yet? A high or climbing value means many concurrent
 stores / prefetch loads (input for in-flight prefetch planning); a value
 that never returns to zero means abandoned reservations waiting for their
 write TTL to expire. See `../distributed/l1_manager/staging-and-write-tags.md`.
+
+**What `l1_largest_free_block_bytes` / `l1_free_block_count` answer:** How
+fragmented is the L1 free space? An allocation-sized request failing while
+`l1_memory_usage_bytes` sits below capacity is external fragmentation —
+plenty of free bytes, but no contiguous block large enough. The largest
+free block is the exact ceiling on a single first-fit allocation; the
+free-block count shows the same signal from the hole-count side. Paged
+allocators have no external fragmentation by construction (every hole is
+page-sized) and report page-granular counts; tiers whose allocator has no
+address space (a shadow L1) report zeros.
 
 **What `l2_usage_bytes` answers:** How full is each L2 backend? Lets
 operators query how much each L2 tier currently holds, decide whether
