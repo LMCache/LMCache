@@ -28,8 +28,8 @@ The ``lmcache`` CLI ships in two packages:
    * - ``lmcache``
      - ``pip install lmcache``
      - Full install: server, CLI, and CUDA extensions. Required for
-       ``server``, ``bench server``, ``bench l2``, and ``trace``.
-       Linux + GPU.
+       ``server``, ``memory``, ``bench server``, ``bench l2``, and
+       ``trace``. Linux + GPU.
    * - ``lmcache-cli``
      - ``pip install lmcache-cli``
      - CLI only: ``ping``, ``query``, ``describe``, ``kvcache``,
@@ -55,6 +55,12 @@ Available Commands
        install.
    * - :doc:`coordinator`
      - Launch the LMCache MP coordinator (HTTP instance registry).
+   * - ``memory``
+     - Launch the memory orchestrator: the allocation and readiness
+       authority for one shared memory region (Device-DAX / CXL or a
+       file several servers map). Requires the full install. Design
+       and flags: ``lmcache memory --help`` and
+       ``docs/design/v1/memory_orchestrator/memory_orchestrator.md``.
    * - :doc:`describe`
      - Show detailed status of a running LMCache service.
    * - :doc:`ping`
