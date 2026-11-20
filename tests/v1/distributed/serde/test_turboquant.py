@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import cast
 import select
 import shutil
+import subprocess
 import tempfile
 import time
 
@@ -757,17 +758,29 @@ def test_turboquant_fs_storage_manager_roundtrip(
 
 @pytest.mark.skipif(not torch_dev.is_available(), reason="Requires accelerator")
 @pytest.mark.parametrize("direction", ["serialize", "deserialize"])
-def test_factory_honors_staging_device(direction: str) -> None:
+@pytest.mark.parametrize("cuda_device", ["0", ""])
+def test_factory_honors_staging_device(
+    direction: str, cuda_device: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """An explicit device is honored in both directions for CPU-backed KV.
 
     Args:
         direction: Whether to submit an encode or decode task.
+        cuda_device: Explicit staging device or an empty string for automatic placement.
+        monkeypatch: Replaces the utilization subprocess with a counting stub.
     """
+    utilization_queries: list[list[str]] = []
+
+    def fake_check_output(command: list[str], **kwargs: object) -> str:
+        utilization_queries.append(command)
+        return "0\n"
+
+    monkeypatch.setattr(subprocess, "check_output", fake_check_output)
     processor = create_serde_processor(
         SerdeConfig(
             type="turboquant",
             kwargs={
-                "cuda_device": "0",
+                "cuda_device": cuda_device,
                 "skip_first_layers": 4,
                 "skip_last_layers": 0,
             },
@@ -803,11 +816,21 @@ def test_factory_honors_staging_device(direction: str) -> None:
         consume_fd(fd)
         assert query(task) is True
         assert torch.equal(dst, expected)
+        if cuda_device:
+            assert not utilization_queries
+        else:
+            assert utilization_queries
+            assert all(
+                "--query-gpu=utilization.gpu" in cmd for cmd in utilization_queries
+            )
     finally:
         processor.close()
 
 
-@pytest.mark.parametrize("cuda_device", ["cpu", "not-a-device", "99999", "cuda:256"])
+@pytest.mark.parametrize(
+    "cuda_device",
+    ["cpu", "not-a-device", "99999", "cuda:256", str(torch_dev.device_count())],
+)
 def test_factory_rejects_invalid_staging_device(cuda_device: str) -> None:
     """Reject a non-accelerator, malformed, or unavailable GPU at startup."""
     with pytest.raises(ValueError, match="TurboQuant cuda_device"):
