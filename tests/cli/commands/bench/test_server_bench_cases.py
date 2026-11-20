@@ -16,6 +16,7 @@ from lmcache.cli.commands.bench.server_bench import client as client_module
 from lmcache.cli.commands.bench.server_bench.allocator import GroupBlocks, RequestBlocks
 from lmcache.cli.commands.bench.server_bench.buffers import KVCacheBuffers
 from lmcache.cli.commands.bench.server_bench.cases.base import BenchResult
+from lmcache.cli.commands.bench.server_bench.cases import baseline as baseline_module
 from lmcache.cli.commands.bench.server_bench.cases.baseline import (
     BaselineBenchCase,
 )
@@ -307,6 +308,66 @@ def test_baseline_case_preserves_cold_warm_flow() -> None:
     }
     assert "  [seq 0] CHECKSUM MATCH OK" in messages
     assert messages[-1] == ""
+
+
+def test_baseline_warm_lookup_retries_until_cold_store_is_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(baseline_module, "_VISIBILITY_RETRY_INTERVAL_S", 0.0)
+    client = _client("same", "same")
+    client.lookup.side_effect = [
+        LookupResult(0, 1, 1.0),
+        LookupResult(0, 1, 1.0),
+        LookupResult(0, 1, 1.0),
+        LookupResult(1, 1, 1.5),
+    ]
+    messages: list[str] = []
+
+    result = BaselineBenchCase(sequence_count=1, interval_seconds=0, num_tokens=1).run(
+        client,
+        messages.append,
+    )
+
+    assert client.lookup.call_count == 4
+    assert result.checks["warm_full_hit"] == [True]
+    assert result.checks["checksum_match"] == [True]
+    assert any("retried 2 time(s)" in message for message in messages)
+
+
+def test_baseline_warm_lookup_still_reports_a_real_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(baseline_module, "_VISIBILITY_RETRY_INTERVAL_S", 0.0)
+    monkeypatch.setattr(baseline_module, "_VISIBILITY_RETRY_BUDGET_S", 0.0)
+    client = _client("same", "same")
+    client.lookup.side_effect = [LookupResult(0, 1, 1.0)] * 3
+    client.retrieve.side_effect = [None, None]
+    client.store.side_effect = [_transfer("store"), _transfer("store")]
+
+    result = BaselineBenchCase(sequence_count=1, interval_seconds=0, num_tokens=1).run(
+        client,
+        lambda _message: None,
+    )
+
+    assert result.checks["warm_full_hit"] == [False]
+    assert "checksum_match" not in result.checks
+
+
+def test_baseline_warm_lookup_is_not_retried_after_a_failed_cold_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(baseline_module, "_VISIBILITY_RETRY_INTERVAL_S", 0.0)
+    client = _client("same", "same")
+    client.lookup.side_effect = [LookupResult(0, 1, 1.0), LookupResult(0, 1, 1.0)]
+    client.retrieve.side_effect = [None, None]
+    client.store.side_effect = [None, None]
+
+    BaselineBenchCase(sequence_count=1, interval_seconds=0, num_tokens=1).run(
+        client,
+        lambda _message: None,
+    )
+
+    assert client.lookup.call_count == 2
 
 
 def test_baseline_case_records_checksum_mismatch() -> None:
