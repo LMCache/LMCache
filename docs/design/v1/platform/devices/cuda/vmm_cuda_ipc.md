@@ -96,6 +96,15 @@ exclusive process-global switches consulted in
 | `isolated_ipc` | `RawCudaIPCWrapper` (raw legacy IPC handles) |
 | `use_vmm_api` (`lmcache.v1.platform.ipc_policy`) | `VmmCudaIPCWrapper` |
 
+On ROCm, `RocmDeviceSpec.ipc_wrapper_cls` returns `VmmRocmIPCWrapper`
+(`lmcache/v1/platform/devices/rocm/ipc_wrapper.py`) when `use_vmm_api` is
+on; it is a `VmmCudaIPCWrapper` subclass that routes the same driver calls
+through `rocm.bindings` (see `lmcache/v1/platform/devices/rocm/vmm_bindings.py`
+for the per-binding differences it absorbs). `hipMemExportToShareableHandle`
+supports POSIX fd only — a FABRIC export returns `hipErrorNotSupported` — so
+every HIP VMM allocation under `isolated_ipc` is rejected at registration by
+the same POSIX-fd rule described below.
+
 The vLLM connector derives `use_vmm_api` from the resolved engine config:
 the extensible KV cache and `enable_cumem_allocator` select the VMM wrapper.
 An explicit `lmcache.mp.use_vmm_api` value overrides detection. Before vLLM
