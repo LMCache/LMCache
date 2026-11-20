@@ -23,6 +23,34 @@ _METRIC_NAMES = {
 }
 
 
+class _EndpointUnsupportedError(RuntimeError):
+    """The server answered HTTP 404/405/501: the endpoint is unavailable.
+
+    404/405 mean the route is missing; vLLM answers 501 when the served model
+    has no handler for the endpoint (e.g. a chat-only model on completions).
+    Kept as a distinct type so fallback can key on the HTTP status rather than
+    on message text, which an OpenAI-style JSON error body would replace.
+    """
+
+
+class _EmptyCompletionError(RuntimeError):
+    """The stream ended with neither completion text nor usage.
+
+    Raised only when this client detects the empty stream itself, so fallback
+    never keys on server-controlled error text that merely looks similar.
+    """
+
+
+class _ChatTemplateMissingError(RuntimeError):
+    """Chat completions answered HTTP 400 because the model has no chat template.
+
+    vLLM renders the chat template before it starts streaming and reports a
+    missing one as HTTP 400. Fallback keys on this type so that other failures
+    whose text mentions a template, or errors sent mid-stream after a token,
+    are reported instead of retried.
+    """
+
+
 def _clip(text: str, limit: int = _MAX_ERR) -> str:
     return (
         text
@@ -63,16 +91,40 @@ def _raise_openai_error(obj: dict[str, Any]) -> None:
         raise RuntimeError(_clip(msg))
 
 
-def _raise_json_blob_error(blob: str) -> None:
+def _json_object(blob: str) -> Optional[dict[str, Any]]:
     s = blob.strip()
     if not s.startswith("{"):
-        return
+        return None
     try:
         obj = json.loads(s)
     except json.JSONDecodeError:
-        return
-    if isinstance(obj, dict):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _raise_json_blob_error(blob: str) -> None:
+    obj = _json_object(blob)
+    if obj is not None:
         _raise_openai_error(obj)
+
+
+def _error_message(body: str) -> str:
+    """Return only the human-readable error text of an HTTP error body.
+
+    For a JSON object this is the ``message``/``detail`` of its ``error`` (or of
+    the object itself), so field names such as ``chat_template_kwargs`` never
+    count as message text. Any other body is returned unchanged.
+    """
+    obj = _json_object(body)
+    if obj is None:
+        return body
+    err = obj.get("error")
+    if isinstance(err, str):
+        return err
+    fields = err if isinstance(err, dict) else obj
+    return "\n".join(
+        v for v in (fields.get("message"), fields.get("detail")) if isinstance(v, str)
+    )
 
 
 def _api_url(base: str, path: str) -> str:
@@ -144,8 +196,12 @@ def _stream(
         A reported completion count of zero is preserved.
 
     Raises:
-        RuntimeError: If the HTTP request fails, the server reports an error,
-            or the stream contains neither text nor usage.
+        _EndpointUnsupportedError: If the server answers HTTP 404, 405 or 501.
+        _ChatTemplateMissingError: If a chat request answers HTTP 400 for a
+            missing chat template.
+        _EmptyCompletionError: If the stream contains neither text nor usage.
+        RuntimeError: If the HTTP request fails otherwise or the server
+            reports an error.
     """
     payload = {
         **body,
@@ -195,6 +251,14 @@ def _stream(
             t1 = time.time()
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
+        if e.code in (404, 405, 501):
+            raise _EndpointUnsupportedError(
+                _clip(f"POST {url} failed (HTTP {e.code}):\n{_clip(err_body)}")
+            ) from e
+        if chat and e.code == 400 and _missing_chat_template(_error_message(err_body)):
+            raise _ChatTemplateMissingError(
+                _clip(f"POST {url} failed (HTTP {e.code}):\n{_clip(err_body)}")
+            ) from e
         _raise_json_blob_error(err_body)
         raise RuntimeError(
             _clip(f"POST {url} failed (HTTP {e.code}):\n{_clip(err_body)}")
@@ -206,7 +270,7 @@ def _stream(
     _raise_json_blob_error(misc_text)
     joined = "".join(pieces)
     if not joined and usage is None:
-        raise RuntimeError(
+        raise _EmptyCompletionError(
             _clip(f"No completion output from engine. Captured response:\n{misc_text}")
             if misc_text
             else "Empty response from engine (no SSE chunks parsed)."
@@ -239,29 +303,18 @@ def _stream(
     }
 
 
-def _missing_chat_template(exc: BaseException) -> bool:
-    msg = str(exc).lower()
+def _missing_chat_template(text: str) -> bool:
+    # Only phrases that say no template exists: a configured template that
+    # rejects the request also mentions "chat template" but must not fall back.
+    msg = text.lower()
     return any(
         s in msg
         for s in (
-            "chat template",
-            "chat_template",
-            "chattemplate",
-            "template resolution",
-            "must provide a chat template",
+            "must provide a chat template",  # vLLM, transformers >= 4.44
             "default chat template is no longer allowed",
-        )
-    )
-
-
-def _weak_completions_error(msg: str) -> bool:
-    msg = msg.lower()
-    return any(
-        s in msg
-        for s in (
-            "empty response from engine",
-            "no completion output from engine",
-            "no sse chunks parsed",
+            "chat_template is not set",  # transformers apply_chat_template
+            "no chat template",
+            "template resolution",
         )
     )
 
@@ -340,18 +393,26 @@ class Request:
             return self._query(request_data, chat=request_data["chat_first"])
         except RuntimeError as first_err:
             if request_data["chat_first"]:
-                if not _missing_chat_template(first_err):
+                # Other chat failures would hide the real error behind a
+                # successful retry, which can also duplicate started work.
+                if not isinstance(first_err, _ChatTemplateMissingError):
                     raise
                 _info(
                     "chat API failed (no chat template); retrying with /v1/completions"
                 )
                 return self._query(request_data, chat=False)
+            # Auth, rate-limit, server, and transport failures would fail the
+            # same way on chat, and a retry can duplicate work already started.
+            if not isinstance(
+                first_err, (_EndpointUnsupportedError, _EmptyCompletionError)
+            ):
+                raise
             _info("/v1/completions failed; retrying with /v1/chat/completions")
             try:
                 return self._query(request_data, chat=True)
             except RuntimeError as second_err:
-                if _weak_completions_error(str(first_err)) and _missing_chat_template(
-                    second_err
+                if isinstance(first_err, _EmptyCompletionError) and isinstance(
+                    second_err, _ChatTemplateMissingError
                 ):
                     _info(
                         "base / completion-only models: try `--completions` or "

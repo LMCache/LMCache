@@ -11,8 +11,8 @@ Configuration
 
 Repeat ``--l1-manager`` in write-placement order. Each JSON object requires
 ``type``, a unique non-empty ``tag``, and ``size_gb`` (GiB). The types are
-``DRAM``, ``DEVDAX``, and ``GDS``. The ``_default`` tag is reserved for DRAM
-in this interface.
+``DRAM``, ``DEVDAX``, ``GDS``, and ``SHADOW``, which takes no ``size_gb``.
+The ``_default`` tag is reserved for DRAM in this interface.
 
 For example, use a dedicated Device-DAX device and a GDS-capable directory:
 
@@ -78,6 +78,13 @@ TTLs must be positive integers. Unknown fields are rejected.
    * - ``GDS``
      - Required ``path``; ``backend`` (``auto``), ``direct_io`` (true).
        See :doc:`configuration` for backend requirements and location semantics.
+   * - ``SHADOW``
+     - Required ``segment`` (``dram``, ``cxl`` or ``gds``): an index of a
+       peer's KV bytes served in place by a borrowing L2 adapter, such as
+       GPU-direct P2P (see :doc:`p2p`). It owns no memory, so it takes no
+       ``size_gb`` or ``eviction``, costs nothing while no borrower is
+       attached, and cannot be the first manager, which receives the
+       engine's writes.
 
 The global eviction flags supply defaults. Override them per manager with,
 for example, ``"eviction":{"eviction_policy":"LRU","trigger_watermark":0.9,
@@ -87,8 +94,9 @@ manager may free space before a later write would otherwise fail.
 
 Legacy single-L1 flags, including ``--l1-size-gb``, remain supported. Do not
 combine ``--l1-manager`` with legacy capacity or backend-selection flags.
-Python callers can use ``DRAML1ManagerConfig``, ``DevDaxL1ManagerConfig``, and
-``GDSL1ManagerConfig``; their ``from_dict`` methods implement the JSON schema.
+Python callers can use ``DRAML1ManagerConfig``, ``DevDaxL1ManagerConfig``,
+``GDSL1ManagerConfig`` and ``ShadowL1ManagerConfig``; their ``from_dict``
+methods implement the JSON schema.
 
 Placement, affinity, and reads
 ------------------------------

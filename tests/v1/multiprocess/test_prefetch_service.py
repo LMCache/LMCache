@@ -17,14 +17,15 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc, Tier
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.token_hasher import TokenHasher
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ShardReplicationDesc, Tier
 from lmcache.v1.multiprocess.cache_control import key_resolver
 from lmcache.v1.multiprocess.cache_control.errors import (
     InvalidRequest,
     Unavailable,
 )
 from lmcache.v1.multiprocess.cache_control.prefetch_service import PrefetchService
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 CHUNK_SIZE = 4
 CHUNKS = 2
@@ -54,6 +55,7 @@ class _Registry:
         self._layouts = layouts
         self._windows = windows
         self._attn_raises = attn_raises
+        self._token_hasher = TokenHasher(chunk_size=CHUNK_SIZE, hash_algorithm="blake3")
 
     def find_group_layout_descs(self, model_name, world_size):
         return self._layouts
@@ -63,11 +65,16 @@ class _Registry:
             raise ValueError("no attention-window descriptor registered")
         return self._windows
 
+    def find_shard_replication_desc(self, model_name, world_size):
+        return ShardReplicationDesc()
+
+    def get_token_hasher(self, model_name, world_size):
+        return self._token_hasher
+
 
 @dataclass
 class _Context:
     layout_desc_registry: _Registry
-    token_hasher: TokenHasher
 
 
 @dataclass
@@ -82,8 +89,7 @@ def _layout(width: int) -> MemoryLayoutDesc:
 
 def _service(registry: _Registry) -> tuple[PrefetchService, _StorageManager]:
     storage = _StorageManager()
-    hasher = TokenHasher(chunk_size=CHUNK_SIZE, hash_algorithm="blake3")
-    engine = _Engine(context=_Context(registry, hasher), storage_manager=storage)
+    engine = _Engine(context=_Context(registry), storage_manager=storage)
     return PrefetchService(engine), storage
 
 

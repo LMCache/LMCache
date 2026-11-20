@@ -144,7 +144,8 @@ process-global isolated-IPC switch is on (see
 integrations listed below migrate), and `DefaultEventIPCBackend`
 otherwise. The switch is set at process initialization — before the first
 backend resolution, which caches the choice — from `lmcache.mp.isolated_ipc`
-(vLLM connector extra_config) and `--isolated-ipc` (MP server CLI). Both
+(vLLM connector extra_config), `--isolated-ipc` (MP server CLI) and
+`lmcache bench server --isolated-ipc`. Both
 processes must select the same backend: the wire carries no backend
 negotiation, and the handle formats are mutually unparsable (64 vs 81
 bytes), so a mismatch fails loudly at `import_event` on whichever side

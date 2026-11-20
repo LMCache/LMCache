@@ -189,7 +189,7 @@ void free_hugepage_pinned_numa_ptr(uintptr_t ptr, size_t size) {
 
 namespace {
 // ptr -> advisory liveness-lock fd held for the SHM segment's lifetime.
-// Mirrors lmcache/v1/multiprocess/posix_shm.py (shm_acquire_liveness_lock):
+// Mirrors lmcache/v1/platform/posix_shm.py (shm_acquire_liveness_lock):
 // the stale-segment probe distinguishes a live pool from a crashed one by
 // this lock; the kernel releases it when the process dies.
 std::mutex _shm_guard_mu;

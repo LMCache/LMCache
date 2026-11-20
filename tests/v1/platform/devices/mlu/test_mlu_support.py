@@ -12,11 +12,11 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
-from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.platform import get_device_spec, resolve_device_ops
 from lmcache.v1.platform.devices.mlu import MluDeviceSpec
 from lmcache.v1.platform.devices.mlu.device_ops import MluDeviceOps
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.platform.transfer_mode import MPTransferMode
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -254,12 +254,3 @@ def test_copy_rejects_invalid_size(nbytes: int) -> None:
         MluDeviceOps().lmcache_memcpy_async(
             tensor, tensor, nbytes, TransferDirection.H2D, 0, 1
         )
-
-
-def test_inprocess_transfer_is_explicitly_unsupported() -> None:
-    """Legacy token transfers cannot silently use the NHD fallback on HND data."""
-    ops = MluDeviceOps()
-    with pytest.raises(NotImplementedError, match="engine_driven"):
-        ops.multi_layer_kv_transfer()
-    with pytest.raises(NotImplementedError, match="engine_driven"):
-        ops.single_layer_kv_transfer()

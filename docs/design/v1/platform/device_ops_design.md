@@ -335,6 +335,7 @@ the `lmcache` / `lmcache.v1.platform` import cycle.
 # platform/__init__.py
 _FALLBACK_CPU_SPEC: DeviceSpec = DeviceSpec()
 
+@lru_cache(maxsize=None)
 def _resolve_device_spec(device_type: str) -> DeviceSpec:
     spec = _DEVICE_REGISTRY.get(device_type)
     if spec is not None:
@@ -354,6 +355,12 @@ Resolution is **fail-fast for accelerators**: if `"cuda"` / `"xpu"` / `"musa"` /
 `"hpu"` has no registered `DeviceSpec`, it raises instead of silently falling
 back. The CPU path resolves through `CpuDeviceSpec -> CpuDeviceOps`; only `""`
 (and a deliberately cleared CPU registry in tests) uses the bare fallback.
+
+`_resolve_device_spec` is `lru_cache`d per `device_type`. It runs on every
+transfer and once per layer during KV-cache registration. When several backends
+share a `device_type` (CUDA and ROCm both use `"cuda"`), an uncached lookup
+re-probes `is_available()` and re-logs the auto-selection on each call, which
+prints TP × num_layers lines at registration. Failures raise and are not cached.
 
 ### 5.3 Import cycle: `_device_detect.py`
 

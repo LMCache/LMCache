@@ -9,7 +9,7 @@ every request. On hosts without a GPU (or on the CPU SHM transfer path),
 physical pages and only exchange a segment **name** plus tensor layout
 metadata on the wire.
 
-Low-level syscalls live in `lmcache/v1/multiprocess/posix_shm.py`; this
+Low-level syscalls live in `lmcache/v1/platform/posix_shm.py`; this
 module owns the KV-specific wrapper, migration factory, and per-process
 segment registry.
 

@@ -11,11 +11,11 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.posix_shm import shm_acquire_liveness_lock
 from lmcache.v1.platform._device_detect import (
     current_device_spec,
     get_torch_device,
 )
+from lmcache.v1.platform.posix_shm import shm_acquire_liveness_lock
 
 # Store the tensor objects in memory so that they can be accessed
 # outside the scope of this file

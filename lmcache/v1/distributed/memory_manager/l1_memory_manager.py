@@ -22,7 +22,7 @@ from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryObj,
 )
-from lmcache.v1.multiprocess.posix_shm import (
+from lmcache.v1.platform.posix_shm import (
     is_shm_name_collision,
     shm_segment_is_live,
     shm_unlink,

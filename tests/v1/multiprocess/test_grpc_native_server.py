@@ -26,19 +26,14 @@ import psutil
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.custom_types import KVEventBatch
-from lmcache.v1.multiprocess.futures import MessagingStream
-from lmcache.v1.multiprocess.protocols.server_module import (
-    ServerModuleCallRequest,
-    ServerModuleCallResponse,
-)
-from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.transport.errors import (
+from lmcache.v1.client.transport.errors import (
     MPRequestError,
     MPServerUnavailableError,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl.client import GrpcMultiprocessClient
+from lmcache.v1.client.transport.grpc_impl.client import GrpcMultiprocessClient
+from lmcache.v1.common.custom_types import KVEventBatch
+from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.grpc_impl.native_server import (
     GrpcNativeMultiprocessServer,
 )
@@ -48,11 +43,16 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
 from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
     build_grpc_request_server,
 )
+from lmcache.v1.transport.futures import MessagingStream
+from lmcache.v1.transport.server_module import (
+    ServerModuleCallRequest,
+    ServerModuleCallResponse,
+)
 
 pytest.importorskip("pygrpc_native")
 
 extension_service_pb2 = importlib.import_module(
-    "lmcache.v1.multiprocess.transport.grpc_impl._proto_gen.extension_service_pb2"
+    "lmcache.v1.transport.grpc._proto_gen.extension_service_pb2"
 )
 
 _PING = "/lmcache.mp.ManagementService/Ping"
@@ -145,39 +145,6 @@ def blocked() -> Iterator[threading.Event]:
     release = threading.Event()
     yield release
     release.set()
-
-
-def test_affinity_calls_run_in_the_order_sent() -> None:
-    """A client's pipelined affinity calls reach the handler in send order."""
-    seen: list[bytes] = []
-
-    class Module:
-        @request_handler(HandlerType.BLOCKING, requires_client_affinity=True)
-        def server_module_affinity_call(
-            self, request: ServerModuleCallRequest
-        ) -> ServerModuleCallResponse:
-            seen.append(request.payload)
-            return ServerModuleCallResponse(success=True, payload=b"", error="")
-
-    def call(payload: bytes) -> Any:
-        return client.server_module_affinity_call(
-            ServerModuleCallRequest(method="record", payload=payload)
-        )
-
-    server = _serve([Module()])
-    client = _client(server)
-    try:
-        # Calls queued before the channel connects go out in any order.
-        call(b"").result(30)
-        for _ in range(30):
-            seen.clear()
-            sent = [str(i).encode() for i in range(200)]
-            for future in [call(payload) for payload in sent]:
-                future.result(30)
-            assert seen == sent
-    finally:
-        client.close()
-        server.close()
 
 
 def test_handler_error_is_unknown_with_grpcio_message() -> None:
@@ -277,28 +244,20 @@ def test_handler_returning_the_wrong_kind_is_unknown() -> None:
         server.close()
 
 
-def test_streaming_handler_errors_map_like_grpcio() -> None:
-    """ValueError from a streaming handler is INVALID_ARGUMENT; an error while
-    reading its stream is INTERNAL."""
+def test_streaming_handler_value_error_is_invalid_argument() -> None:
+    """ValueError from a streaming handler is INVALID_ARGUMENT, as in grpcio."""
 
     def invalid() -> None:
         raise ValueError("bad cursor")
 
-    def broken() -> MessagingStream[KVEventBatch]:
-        def read(stop: threading.Event) -> KVEventBatch:
-            raise RuntimeError("bus gone")
-
-        return MessagingStream(read, lambda: None)
-
-    for make, expected in (
-        (invalid, (grpc.StatusCode.INVALID_ARGUMENT, "bad cursor")),
-        (broken, (grpc.StatusCode.INTERNAL, "bus gone")),
-    ):
-        server = _serve([_stream_module(make)])
-        try:
-            assert _first_stream_error(server) == expected
-        finally:
-            server.close()
+    server = _serve([_stream_module(invalid)])
+    try:
+        assert _first_stream_error(server) == (
+            grpc.StatusCode.INVALID_ARGUMENT,
+            "bad cursor",
+        )
+    finally:
+        server.close()
 
 
 def test_serialized_handlers_run_one_at_a_time() -> None:

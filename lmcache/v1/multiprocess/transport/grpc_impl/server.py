@@ -10,10 +10,12 @@ import grpc
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.security.api_key import APIKeyVerifier
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
-from lmcache.v1.multiprocess.futures import MessagingStream
 from lmcache.v1.multiprocess.request_handler import HandlerType
-from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import ServiceBinding
+from lmcache.v1.multiprocess.transport.grpc_impl.auth import (
+    GrpcAuthenticationInterceptor,
+)
 from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
     GrpcMultiprocessServerBase,
 )
@@ -22,6 +24,8 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     GrpcRequestHandler,
     client_affinity_key,
 )
+from lmcache.v1.transport.futures import MessagingStream
+from lmcache.v1.transport.grpc.descriptors import ServiceBinding
 
 logger = init_logger(__name__)
 
@@ -67,13 +71,11 @@ class _GeneratedServicer:
                     try:
                         for response in stream:
                             send(handler.response_encoder(response))
-                    except Exception as exc:
+                    except Exception:
                         if context.is_active():
                             logger.exception(
                                 "Error in streaming handler %s", handler.operation
                             )
-                            context.set_code(grpc.StatusCode.INTERNAL)
-                            context.set_details(str(exc))
                     finally:
                         stream.close()
                         send(None)
@@ -151,16 +153,27 @@ class GrpcMultiprocessServer(GrpcMultiprocessServerBase):
         max_cpu_workers: int,
         max_gpu_workers: int,
         grpc_server_workers: int,
+        authentication: APIKeyVerifier | None = None,
+        rpc_client: type | None = None,
     ) -> None:
         super().__init__(
-            bind_url, max_cpu_workers, max_gpu_workers, grpc_server_workers
+            bind_url,
+            max_cpu_workers,
+            max_gpu_workers,
+            grpc_server_workers,
+            authentication,
+            rpc_client,
         )
         self._normal_slots = threading.BoundedSemaphore(max_cpu_workers)
         self._affinity_submit_lock = threading.Lock()
         # HandlerType.SERIALIZED is a transport-neutral single-main-loop contract.
         self._serialized_handler_lock = threading.Lock()
         try:
-            self._server = grpc.server(self._executor, options=GRPC_SERVER_OPTIONS)
+            self._server = grpc.server(
+                self._executor,
+                options=GRPC_SERVER_OPTIONS,
+                interceptors=(GrpcAuthenticationInterceptor(self._authentication),),
+            )
             self._bind(self._server)
         except BaseException:
             self._release_threads(wait=True)

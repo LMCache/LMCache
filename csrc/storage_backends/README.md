@@ -196,28 +196,7 @@ cpp_extension.CppExtension(
 
 Then rebuild: `pip install -e .`
 
-### Step 4: Python client — non-MP mode integration
-
-Inherit from `ConnectorClientBase` which provides asyncio event loop
-integration, future management, and both sync and async methods.
-
-```python
-# lmcache/inprocess/v1/storage_backend/native_clients/mybackend_client.py
-from .connector_client_base import ConnectorClientBase
-from lmcache.lmcache_mybackend import LMCacheMyBackendClient
-
-class MyBackendClient(ConnectorClientBase[LMCacheMyBackendClient]):
-    def __init__(self, host: str, port: int, num_workers: int, loop=None):
-        native = LMCacheMyBackendClient(host, port, num_workers)
-        super().__init__(native, loop)
-```
-
-This gives you `async get/set/exists`, `batch_get/batch_set/batch_exists`,
-and sync variants, all with automatic eventfd-driven completion handling.
-
-**Reference:** `lmcache/inprocess/v1/storage_backend/native_clients/resp_client.py`
-
-### Step 5: MP mode integration — L2 adapter config + factory
+### Step 4: MP mode integration — L2 adapter config + factory
 
 To use your connector as an L2 adapter in MP mode, add a config class and
 register it in the factory. The `NativeConnectorL2Adapter` bridge handles

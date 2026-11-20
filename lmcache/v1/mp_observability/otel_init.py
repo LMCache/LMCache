@@ -341,6 +341,19 @@ def init_grpc_otel_metrics(meter_provider: "MeterProvider") -> None:
     logger.info("gRPC OpenTelemetry runtime metrics are enabled")
 
 
+def shutdown_grpc_otel_metrics() -> None:
+    """Deregister the plugin from :func:`init_grpc_otel_metrics`.
+
+    Its export thread is not a daemon, so the process can't exit while the
+    plugin is registered. Safe to call when nothing is registered.
+    """
+    global _GRPC_OTEL_PLUGIN  # pylint: disable=global-statement # noqa: PLW0603
+
+    plugin, _GRPC_OTEL_PLUGIN = _GRPC_OTEL_PLUGIN, None
+    if plugin is not None:
+        plugin.deregister_global()  # type: ignore[attr-defined]
+
+
 def init_otel_tracing(
     otlp_endpoint: str | None = None,
     resource_attributes: dict[str, str] | None = None,

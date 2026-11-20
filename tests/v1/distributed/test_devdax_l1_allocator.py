@@ -585,6 +585,39 @@ def test_storage_manager_rejects_l1_add_of_l2_dax_device_alias(
         storage_manager.close()
 
 
+def test_close_failed_l2_dax_adapter_still_owns_its_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An L2 adapter whose close failed still maps its range, so L1 cannot
+    take that range until a retried delete closes it."""
+    primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")
+    l2_device = _make_mmap_file(tmp_path, size=4096, name="l2-device.bin")
+    storage_manager = _pure_devdax_storage_manager(primary, [_dax_l2_config(l2_device)])
+    try:
+        ((_descriptor, adapter),) = storage_manager.l2_adapters()
+        original_close = adapter.close
+        failures = [RuntimeError("teardown refused")]
+
+        def flaky_close() -> None:
+            if failures:
+                raise failures.pop()
+            original_close()
+
+        monkeypatch.setattr(adapter, "close", flaky_close)
+        with pytest.raises(RuntimeError, match="teardown refused"):
+            storage_manager.delete_l2_adapter(0)
+        assert storage_manager.l2_adapters() == []
+
+        with pytest.raises(L1ReconfigureError, match="already mapped by L2"):
+            storage_manager.add_l1_devdax_device(l2_device, 4096)
+
+        storage_manager.delete_l2_adapter(0)
+        added = storage_manager.add_l1_devdax_device(l2_device, 4096)
+        assert added.device_path == l2_device
+    finally:
+        storage_manager.close()
+
+
 def test_storage_manager_rejects_l2_resize_into_l1_range(tmp_path: Path) -> None:
     """A growing L2 resize is checked against L1 like an add."""
     primary = _make_mmap_file(tmp_path, size=4096, name="primary.bin")

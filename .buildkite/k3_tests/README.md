@@ -82,12 +82,16 @@ sees `force-ci` it runs the full pipeline regardless of which files changed.
 
 ### Trigger strategy
 
-Not all tests should run on every push. The general pattern:
+Not all tests should run on every PR. The general pattern:
 
 | Test weight | When to trigger | Example filter condition |
 |-------------|----------------|------------------------|
-| Lightweight (1 GPU, <20 min) | Every push / every PR | *(no filter)* |
-| Heavy (multi-GPU, >30 min) | PR label or main branch only | `build.pull_request.labels includes "full" \|\| build.branch == 'dev'` |
+| Lightweight (1 GPU, <20 min) | Every PR | `build.pull_request.id != null` |
+| Heavy (multi-GPU, >30 min) | Labeled PRs only | `build.pull_request.labels includes "full"` |
+
+Post-merge `dev` builds are intentionally excluded. PR jobs merge the latest
+target branch before expanding their test pipelines, so running the same
+Buildkite workload again after merge provides no additional coverage.
 
 Set **"Rebuild on PR label change"** to `Yes` for label-triggered pipelines so adding a label to an existing PR kicks off the build.
 

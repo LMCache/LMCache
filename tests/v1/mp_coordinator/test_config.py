@@ -14,6 +14,7 @@ from lmcache.v1.mp_coordinator.config import (
 
 def test_defaults_are_valid() -> None:
     config = MPCoordinatorConfig()
+    assert config.host == "127.0.0.1"
     assert config.instance_timeout > 0
     assert config.metrics_enabled is True
     assert config.otlp_endpoint is None

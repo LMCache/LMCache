@@ -185,7 +185,7 @@ class TestResolveVllmKVLayout:
     @pytest.fixture
     def resolve(self):
         detectors_vllm = pytest.importorskip(
-            "lmcache.v1.gpu_connector.kv_format.detectors.vllm"
+            "lmcache.v1.common.kv_format.detectors.vllm"
         )
         return detectors_vllm.resolve_vllm_kv_layout
 

@@ -5,6 +5,7 @@
 # Standard
 from collections.abc import Callable
 from typing import Any, ClassVar
+import time
 
 # First Party
 from lmcache.v1.distributed.api import (
@@ -72,17 +73,48 @@ def should_use_lazy_alloc() -> bool:
     return current_device_spec.is_pin_supported
 
 
+def wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
+    """Poll ``predicate`` until it is true or ``timeout`` seconds pass.
+
+    Use it when an adapter signals completion before the condition the test
+    checks becomes true, e.g. a listener callback that runs after the eventfd
+    fires.
+
+    Args:
+        predicate: Condition to check.
+        timeout: Maximum number of seconds to wait.
+
+    Returns:
+        True if ``predicate`` became true before the timeout.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
 def single_row_spec(
-    keys: list[ObjectKey], layout_desc: MemoryLayoutDesc, **spec_kwargs: Any
+    keys: list[ObjectKey],
+    layout_desc: MemoryLayoutDesc,
+    num_kv_readers: int = 1,
+    **spec_kwargs: Any,
 ) -> PrefetchTaskSpec:
     """A prefetch spec with one key row: object group 0, a single kv rank.
 
-    ``spec_kwargs`` are forwarded to :class:`PrefetchTaskSpec` (e.g.
-    ``num_kv_readers``, ``fetching_policy``, ``lock_mode``).
+    ``num_kv_readers`` is the row's read-lock count; ``spec_kwargs`` are
+    forwarded to :class:`PrefetchTaskSpec` (e.g. ``fetching_policy``,
+    ``lock_mode``).
     """
     return PrefetchTaskSpec(
         key_groups=[
-            GroupedObjectKeys(keys=keys, object_group_id=0, layout_desc=layout_desc)
+            GroupedObjectKeys(
+                keys=keys,
+                object_group_id=0,
+                layout_desc=layout_desc,
+                num_kv_readers=num_kv_readers,
+            )
         ],
         **spec_kwargs,
     )

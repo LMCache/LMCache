@@ -25,7 +25,7 @@ from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_allocators.mixed_memory_allocator import (
     MixedMemoryAllocator,
 )
-from lmcache.v1.multiprocess.posix_shm import POSIX_SHM_MAX_NAME_LEN
+from lmcache.v1.platform.posix_shm import POSIX_SHM_MAX_NAME_LEN
 
 _NAME_PATTERN = re.compile(
     r"lmcache_l1_pool_[0-9a-f]{%d}\Z" % L1_POOL_SHM_NAME_TOKEN_HEX_LEN
@@ -290,7 +290,7 @@ def test_stale_pinned_segment_is_reclaimed():
     and creation under the same pinned name succeeds.
     """
     # First Party
-    from lmcache.v1.multiprocess.posix_shm import (
+    from lmcache.v1.platform.posix_shm import (
         shm_create_readwrite,
         shm_munmap,
     )

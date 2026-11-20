@@ -4,7 +4,7 @@ import torch
 
 # dtype <-> integer id maps shared across the codebase. The RemoteMetadata
 # struct and its (de)serialization helpers moved to
-# ``lmcache.inprocess.v1.protocol``.
+# ``lmcache.inprocess.v1.protocol`` in the external LMCache_inprocess package.
 
 DTYPE_TO_INT = {
     None: 0,

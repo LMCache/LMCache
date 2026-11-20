@@ -17,7 +17,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.posix_shm import POSIX_SHM_MAX_NAME_LEN, shm_unlink
 from lmcache.v1.platform.devices.cpu.shm import (
     SHM_KV_NAME_TOKEN_HEX_LEN,
     SHM_SEGMENT_NAME_ATTEMPTS,
@@ -25,6 +24,7 @@ from lmcache.v1.platform.devices.cpu.shm import (
     migrate_to_shm_and_wrap,
     shm_create_readwrite,
 )
+from lmcache.v1.platform.posix_shm import POSIX_SHM_MAX_NAME_LEN, shm_unlink
 
 # Legacy pid+counter names collided across host-global POSIX SHM namespaces.
 _LEGACY_PID_COUNTER_SHM_NAME = re.compile(r"/lmcache_kv_\d+_\d+\Z")
