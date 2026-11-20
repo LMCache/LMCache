@@ -43,14 +43,15 @@ run them anyway.
 
 - [ ] `rust` — Rust unit tests and raw-block temp-file tests
 
-GPU tests (**Layer 3**), target devices (leave unticked to auto-detect from changed files):
+GPU tests (**Layer 3**), target devices (leave unticked to auto-detect from changed files;
+shared/common changes still run CUDA, and label-gated vendor lanes still need their PR label):
 
 - [ ] `cuda`
 - [ ] `rocm`
 - [ ] `xpu`
 - [ ] `musa`
 - [ ] `rbln`
-- [ ] `full` — run all GPU device pipelines (use when changing shared/common code)
+- [ ] `full` — do not skip any triggered GPU device pipeline on non-trivial changes
 
 <details>
 <summary>Before marking ready for review</summary>
