@@ -18,22 +18,19 @@ from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.transport.zmq_impl.mq_client import MessageQueueClient
 from lmcache.v1.common.api import MemoryLayoutDesc
 from lmcache.v1.common.attn_window import AttnWindowDesc
-from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.common.custom_types import KVEventProfile
-from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as transfer
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
-from lmcache.v1.transport.zmq.codec import msgspec_encode
 from lmcache.v1.transport.errors import InvalidRequestError
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
-from lmcache.v1.transport.grpc._proto_gen import (
-    lmcache_driven_service_pb2,
-)
 from lmcache.v1.transport.grpc.method_registry import (
     get_method_codec_registry,
 )
+from lmcache.v1.transport.zmq.codec import msgspec_encode
 from lmcache.v1.transport.zmq.wire import (
     ZMQ_ERROR_OPERATION,
     decode_error_response,
@@ -41,6 +38,7 @@ from lmcache.v1.transport.zmq.wire import (
     encode_operation,
 )
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
+import lmcache.v1.transport.grpc._proto_gen.lmcache_driven_service_pb2 as transfer_pb2
 
 PROFILE = KVEventProfile("engine:sha256:bytes:v1", 16)
 GROUP = EngineGroupInfo(0, (0,), tokens_per_block=16)
@@ -68,6 +66,7 @@ def registration(
     """Stub device boundaries; retain actual registration/layout state."""
     context = MagicMock()
     context.chunk_size = 256
+    context.hash_algorithm_name = "blake3"
     context.layout_desc_registry = LayoutDescRegistry()
     created: list[MagicMock] = []
 
@@ -288,7 +287,7 @@ def test_none_profile_preserves_protobuf_request_and_success_bytes() -> None:
     codec = get_method_codec_registry().by_full_name[
         "lmcache.mp.LMCacheDrivenService.RegisterKvCache"
     ]
-    old = lmcache_driven_service_pb2.RegisterKvCacheRequest(
+    old = transfer_pb2.RegisterKvCacheRequest(
         instance_id=1,
         model_name="model",
         world_size=2,
@@ -300,9 +299,7 @@ def test_none_profile_preserves_protobuf_request_and_success_bytes() -> None:
     assert codec.request_decoder(request) == payload
     assert codec.response_encoder(None).SerializeToString() == b""
     assert (
-        codec.response_decoder(
-            lmcache_driven_service_pb2.RegisterKvCacheResponse.FromString(b"")
-        )
+        codec.response_decoder(transfer_pb2.RegisterKvCacheResponse.FromString(b""))
         is None
     )
     assert codec.response_decoder(codec.response_encoder(PROFILE)) == PROFILE
