@@ -174,14 +174,17 @@ def _skip_unless_gds_registrable(directory: Path) -> None:
 def gds_slab_dir(tmp_path: Path) -> Iterator[Path]:
     """Directory holding the GDS slab file for the real-DMA roundtrip tests.
 
-    On NVIDIA and Ascend NPU the directory must be named explicitly via the
+    On NVIDIA the directory must be named explicitly via the
     ``LMCACHE_GDS_TEST_DIR`` environment variable, pointing at a GDS-capable
     filesystem (e.g. ext4 on a directly attached NVMe device); otherwise the
     roundtrip tests are skipped. pytest's ``tmp_path`` is deliberately not
     used as a fallback: it lives on the OS disk rather than a data disk set
-    up for GDS, where LVM/device-mapper volumes fail NVIDIA registration (or,
-    with compat mode enabled, silently fall back to POSIX IO) and where Ascend
-    NDS would open the OS block device directly.
+    up for GDS, and OS disks commonly use LVM/device-mapper volumes that
+    nvidia-fs cannot register, where cuFile either fails with error 5008 or,
+    with compat mode enabled, silently falls back to POSIX IO, so a passing
+    test would not have exercised the DMA path it claims to. On Ascend NPU
+    the same variable is required: NDS opens the block device behind the
+    file, so ``tmp_path`` on the OS disk would DMA that disk directly.
 
     On AMD ROCm ``tmp_path`` is used when the variable is unset: per
     :func:`_gds_available`, library loadability is a sufficient gate for
