@@ -139,6 +139,7 @@ class TestVerdict:
             requested_tokens=100.0,
             non_prefix_hit_tokens=60.0,
             segmented_prefix_hit_tokens=20.0,
+            scatter_tokens=80.0,
         )
         monkeypatch.setattr(
             run_stage, "PrometheusBlendCounters", lambda url: SteppingCounters(step)
@@ -151,7 +152,10 @@ class TestVerdict:
         engagement = summary(out)["engagement"]
         assert engagement["segmented_prefix_hit_tokens"] > 0
         assert engagement["blend_share"] == pytest.approx(0.6)
-        assert "segmented-prefix tokens:" in capsys.readouterr().out
+        assert engagement["scatter_tokens"] > 0
+        output = capsys.readouterr().out
+        assert "segmented-prefix tokens:" in output
+        assert "CacheBlend transferred tokens:" in output
 
     def test_results_are_strict_json(self, dataset, engines, tmp_path) -> None:
         """One question leaves the standard error undefined: null, not Infinity."""

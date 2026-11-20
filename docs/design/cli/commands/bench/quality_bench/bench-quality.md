@@ -306,7 +306,8 @@ before and after each of the candidate's measured questions:
 |---|---|
 | `lmcache_blend_lookup_requested_tokens_total` | prompt tokens looked up |
 | `lmcache_blend_lookup_prefix_hit_tokens_total` | served as an exact prefix |
-| `lmcache_blend_lookup_non_prefix_hit_tokens_total` | served by blending at a new position |
+| `lmcache_blend_lookup_non_prefix_hit_tokens_total` | matched for blending at a new position; may still be recomputed |
+| `lmcache_blend_scatter_tokens_total` | KV tokens transferred to the engine by CacheBlend |
 | `lmcache_blend_lookup_segmented_prefix_hit_tokens_total` | prefix chunks past an L2 load gap, loaded at their original positions (`--enable-segmented-prefix` only) |
 | `lmcache_blend_lookup_stale_chunks_total` | fingerprint matched, KV gone |
 | `lmcache_blend_fingerprints_registered_total` | chunks indexed (cap 2^20 per server lifetime) |
@@ -315,8 +316,12 @@ before and after each of the candidate's measured questions:
 `INVALID` if the run-wide share, or the share in any window of 10 consecutive
 questions, is below `--min-blend-share` (default 0.3). The windowed check
 catches a run that blended early and then stopped (e.g. the fingerprint table
-filled). Without a metrics URL, engagement is reported as unmeasured and
-cannot make the verdict `INVALID`.
+filled). The blend-share gate also requires a positive scatter-token count
+for the pass and every complete question window: lookup hits without transfers
+can mean the engine fell back to dense recomputation. Saved runs without this
+counter must be collected again. Transfers do not prove that the model skipped
+any computation; that requires engine-side evidence. Without a metrics URL,
+engagement is reported as unmeasured and cannot make the verdict `INVALID`.
 
 **Reuse gate (`concatenated`).** The blend share is the wrong gate for
 `concatenated`. Its expected reuse can legitimately arrive as a prefix (see

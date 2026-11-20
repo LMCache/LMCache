@@ -206,6 +206,10 @@ def format_summary(
             f"stale chunks: {engagement.stale_chunks:.0f}, "
             f"fingerprints registered: {engagement.fingerprints_registered:.0f}"
         )
+        lines.append(
+            f"CacheBlend transferred tokens: {engagement.scatter_tokens:.0f} "
+            f"(min window {engagement.min_window_scatter_tokens:.0f})"
+        )
         if engagement.segmented_prefix_hit_tokens:
             lines.append(
                 f"segmented-prefix tokens: "
