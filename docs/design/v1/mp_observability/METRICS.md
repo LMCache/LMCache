@@ -524,10 +524,22 @@ throughput subscriber records `bytes_transferred / dt`; when
 `bytes_transferred <= 0` (every key fast-pathed) the sample is dropped
 entirely. The load path continues to use the submitted `total_bytes`.
 
+**Successful-load accounting.** `lmcache_mp.l2_load_successful_throughput`
+uses `successful_bytes` from `L2_LOAD_TASK_COMPLETED`: the sum of each
+successfully loaded object's logical layout size, before prefix folding.
+It excludes failed objects, allocator padding, compression/transport overhead,
+and retries; it is neither physical wire traffic nor inference-consumed bytes.
+For example, submitting 1 GB but successfully loading 0.25 GB in 0.5 s records
+2 GB/s in the existing submitted-load histogram and 0.5 GB/s in the successful
+one. Missing or zero `successful_bytes` produces no successful-load sample;
+use the existing failure counters to track all-failed tasks. Existing metric
+names and their submitted-byte semantics are unchanged.
+
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.l2_store_throughput` | `lmcache_mp_l2_store_throughput_GBs` | Histogram | `L2_STORE_SUBMITTED` → `L2_STORE_COMPLETED` | `bytes_transferred / (completed_ts - submitted_ts) / 1e9` per task. `bytes_transferred` is read from the `L2_STORE_COMPLETED` event (populated from the `L2StoreResult` returned by `pop_completed_store_tasks()`); samples where `bytes_transferred <= 0` (e.g. duplicate-key fast paths that skip the write) are dropped, so the histogram reflects real work, not submitted-but-skipped bytes. |
 | `lmcache_mp.l2_load_throughput` | `lmcache_mp_l2_load_throughput_GBs` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per (request, adapter) pair. The load path still uses submitted `total_bytes`; per-task real-bytes accounting only applies to the store path. |
+| `lmcache_mp.l2_load_successful_throughput` | `lmcache_mp_l2_load_successful_throughput_GB_per_second` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `successful_bytes / (completed_ts - submitted_ts) / 1e9` per (request, adapter) pair with positive successful bytes. |
 
 **What it answers:** What end-to-end throughput is each L2 adapter
 delivering? Which backends are keeping up with demand, and which are

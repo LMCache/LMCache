@@ -2,10 +2,11 @@
 
 """L1↔L2 throughput metrics subscriber.
 
-Emits two OTel histograms in GB/s, labeled by ``l2_name`` (the registered
+Emits three OTel histograms in GB/s, labeled by ``l2_name`` (the registered
 adapter type, e.g. ``"fs"``, ``"nixl_store"``):
   - ``lmcache_mp.l2_store_throughput``  — L1→L2 store
   - ``lmcache_mp.l2_load_throughput``   — L2→L1 load
+  - ``lmcache_mp.l2_load_successful_throughput`` — successful L2→L1 payload
 
 Implementation:
   - Store path correlates ``L2_STORE_SUBMITTED`` → ``L2_STORE_COMPLETED``
@@ -18,6 +19,9 @@ Implementation:
     subscriber's pending dict alongside the start timestamp, so the
     COMPLETED event does not need to carry it.  This keeps the byte
     accounting out of the controllers' in-flight task state.
+  - The successful-load histogram uses ``successful_bytes`` from COMPLETED.
+    This is logical payload before prefix folding, not physical I/O traffic.
+    Missing or zero successful bytes produce no successful-load sample.
   - ``(end_ts - start_ts)`` spans submit -> complete and therefore
     includes adapter queue, network, and disk time — not just transfer.
     The histogram is "bytes / end-to-end latency", not raw transfer rate.
@@ -67,6 +71,15 @@ class L2ThroughputSubscriber(EventSubscriber):
             ),
             unit="GB/s",
         )
+        self._successful_load_hist = meter.create_histogram(
+            "lmcache_mp.l2_load_successful_throughput",
+            description=(
+                "Successfully loaded logical payload bytes / submit-to-complete "
+                "latency in GB/s per (request, adapter), before prefix folding. "
+                "Excludes failed objects; not physical I/O throughput."
+            ),
+            unit="GB/s",
+        )
 
     # -- EventSubscriber interface -----------------------------------------
 
@@ -96,8 +109,7 @@ class L2ThroughputSubscriber(EventSubscriber):
         bytes_transferred = event.metadata.get("bytes_transferred")
         self._record(
             event=event,
-            correlation_key=key,
-            pending=self._pending_store,
+            pending_entry=self._pending_store.pop(key, None),
             hist=self._store_hist,
             real_bytes_transferred=bytes_transferred,
         )
@@ -111,15 +123,24 @@ class L2ThroughputSubscriber(EventSubscriber):
             self._pending_load[key] = (event.timestamp, total_bytes)
 
     def _on_load_completed(self, event: Event) -> None:
+        """Record submitted and successful payload throughput for one load."""
         key = self._load_key(event)
         if key is None:
             return
+        pending_entry = self._pending_load.pop(key, None)
         self._record(
             event=event,
-            correlation_key=key,
-            pending=self._pending_load,
+            pending_entry=pending_entry,
             hist=self._load_hist,
         )
+        successful_bytes = event.metadata.get("successful_bytes")
+        if successful_bytes is not None:
+            self._record(
+                event=event,
+                pending_entry=pending_entry,
+                hist=self._successful_load_hist,
+                real_bytes_transferred=successful_bytes,
+            )
 
     # -- Correlation-key helpers ------------------------------------------
 
@@ -152,8 +173,7 @@ class L2ThroughputSubscriber(EventSubscriber):
     @staticmethod
     def _record(
         event: Event,
-        correlation_key: tuple[int, int],
-        pending: dict[tuple[int, int], tuple[float, int]],
+        pending_entry: tuple[float, int] | None,
         hist: Any,
         real_bytes_transferred: int | None = None,
     ) -> None:
@@ -162,13 +182,12 @@ class L2ThroughputSubscriber(EventSubscriber):
 
         Args:
             event: The COMPLETED event, used for timestamp and metadata.
-            correlation_key: The key to look up the matching SUBMITTED event.
-            pending: The dict mapping correlation keys to (t_start, total_bytes).
+            pending_entry: The matching (start timestamp, submitted bytes),
+                or None if no submission was recorded.
             hist: The OTel histogram to record into.
             real_bytes_transferred: If set, use this instead of the submitted
-                totay_bytes, When it's 0, drop the sample.
+                total_bytes. When it is 0, drop the sample.
         """
-        pending_entry = pending.pop(correlation_key, None)
         if pending_entry is None:
             return  # no matching SUBMITTED event;
         t_start, total_bytes = pending_entry
