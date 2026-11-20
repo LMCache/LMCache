@@ -26,7 +26,7 @@ so they behave the same whether or not vLLM is installed.
 # Standard
 from dataclasses import dataclass
 from enum import Enum
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import TypeAlias
 from unittest.mock import patch
 import importlib
@@ -936,3 +936,28 @@ def test_subpaged_plane_rules_are_ordered_and_exclusive(edits):
         ]
         expected = contiguous if contiguous_layout else interleaved
         assert matches == [expected]
+
+
+@pytest.mark.parametrize("prefix_caching", [True, False], ids=["on", "off"])
+def test_validate_accepts_mamba_group_by_prefix_caching(edits, prefix_caching):
+    """Without ``mamba_cache_mode`` (vllm-project/vllm#63830), a Mamba group
+    is served exactly when its manager has prefix caching on."""
+    group = SimpleNamespace(
+        kv_cache_spec=_Spec(
+            kind=_SpecKind.MAMBA,
+            block_size=LOGICAL_BLOCK_SIZE,
+            page_size_bytes=1024,
+            mamba_cache_mode="none",
+        ),
+        manager_config=SimpleNamespace(
+            manager_cls=object,
+            params=SimpleNamespace(enable_prefix_caching=prefix_caching),
+        ),
+    )
+    config = _Config(kv_cache_groups=[group])
+
+    if prefix_caching:
+        edits.validate_kv_cache_groups(config)
+    else:
+        with pytest.raises(ValueError, match="mamba_cache_mode='none'"):
+            edits.validate_kv_cache_groups(config)
