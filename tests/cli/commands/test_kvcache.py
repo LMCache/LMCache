@@ -408,6 +408,8 @@ def test_list_chunked_body_cut_reports_incomplete(
     """A chunked error body cut mid-transfer is an incomplete response."""
 
     class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
         def do_GET(self) -> None:
             self.send_response(status)
             self.send_header("Transfer-Encoding", "chunked")
@@ -420,16 +422,23 @@ def test_list_chunked_body_cut_reports_incomplete(
             """Suppress HTTP access logs in successful tests."""
 
     with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
-        with pytest.raises(SystemExit) as exc:
-            main(
-                [
-                    "kvcache",
-                    "list",
-                    "--quiet",
-                    "--url",
-                    f"http://127.0.0.1:{server.server_port}",
-                ]
-            )
+        thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+        thread.start()
+        try:
+            with pytest.raises(SystemExit) as exc:
+                main(
+                    [
+                        "kvcache",
+                        "list",
+                        "--quiet",
+                        "--url",
+                        f"http://127.0.0.1:{server.server_port}",
+                    ]
+                )
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
     assert exc.value.code == 1
     captured = capsys.readouterr()
     assert "Incomplete HTTP response" in captured.err
@@ -467,7 +476,7 @@ def test_list_oversized_multibyte_error_body_decodes_prefix(
     cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A large Chinese error body yields a readable truncated prefix."""
-    body = json.dumps({"detail": "诊断" * 800}).encode()
+    body = json.dumps({"detail": "诊断" * 800}, ensure_ascii=False).encode()
     cache_server.replies.put((503, body))
     with pytest.raises(SystemExit) as exc:
         main(["kvcache", "list", "--quiet", "--url", cache_server.url])
