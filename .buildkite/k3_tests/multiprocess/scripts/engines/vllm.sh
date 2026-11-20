@@ -91,7 +91,9 @@ PY
         echo "Disabling vLLM prefix caching via --no-enable-prefix-caching"
         VLLM_PREFIX_ARGS=(--no-enable-prefix-caching)
     elif [[ -n "${MAMBA_CACHE_MODE:-}" ]]; then
-        VLLM_MAMBA_ARGS=(--mamba-cache-mode "$MAMBA_CACHE_MODE")
+        if vllm_supports_mamba_cache_mode; then
+            VLLM_MAMBA_ARGS=(--mamba-cache-mode "$MAMBA_CACHE_MODE")
+        fi
         VLLM_PREFIX_ARGS=(--enable-prefix-caching)
     fi
 
