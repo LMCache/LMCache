@@ -4,7 +4,10 @@ Unit tests for TurboQuant serde skeleton.
 """
 
 # Standard
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 import shutil
 import tempfile
@@ -38,9 +41,10 @@ from lmcache.v1.distributed.serde import (
 from lmcache.v1.distributed.serde.turboquant import (
     TurboQuantSerdeConfig,
     TurboQuantSerializer,
+    turboquant,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import MemoryObj, MemoryObjMetadata, TensorMemoryObj
 from lmcache.v1.platform import current_device_spec
 
 # Test helpers
@@ -242,6 +246,104 @@ def test_estimate_serialized_size_rejects_bad_head_dim() -> None:
 
     with pytest.raises(ValueError, match="must be divisible"):
         serializer.estimate_serialized_size(layout)
+
+
+@pytest.mark.parametrize(
+    ("free_offsets", "utilizations", "expected_device", "expected_util_queries"),
+    [
+        pytest.param((0,), (99,), 0, (), id="single-at-capacity"),
+        pytest.param((-1,), (0,), None, (), id="single-insufficient-capacity"),
+        pytest.param((2048, 0), (80, 5), 1, (0, 1), id="lowest-utilization"),
+        pytest.param((-1, 0), (0, 90), 1, (1,), id="capacity-before-utilization"),
+        pytest.param((0, 2048), (5, 5), 1, (0, 1), id="most-free-memory-tie"),
+        pytest.param((0, 0), (5, 5), 0, (0, 1), id="lowest-index-tie"),
+    ],
+)
+def test_serialize_cpu_buffers_selects_cuda_device(
+    monkeypatch: pytest.MonkeyPatch,
+    free_offsets: tuple[int, ...],
+    utilizations: tuple[int, ...],
+    expected_device: int | None,
+    expected_util_queries: tuple[int, ...],
+) -> None:
+    """Select by capacity/ranking, without querying a sole GPU's utilization."""
+    serializer = TurboQuantSerializer(
+        TurboQuantSerdeConfig(skip_first_layers=0, skip_last_layers=0)
+    )
+    source = torch.zeros((2, 1, 16, 128), dtype=torch.bfloat16, device="cpu")
+    layout = MemoryLayoutDesc(shapes=[source.shape], dtypes=[source.dtype])
+    encoded_bytes = serializer.estimate_serialized_size(layout)
+    required_bytes = source.numel() * source.element_size() + 2 * encoded_bytes
+
+    def memory_obj(tensor: torch.Tensor) -> TensorMemoryObj:
+        raw = tensor.view(torch.uint8).flatten()
+        return TensorMemoryObj(
+            raw,
+            MemoryObjMetadata(
+                shape=tensor.shape,
+                dtype=tensor.dtype,
+                address=raw.data_ptr(),
+                phy_size=raw.numel(),
+                ref_count=1,
+            ),
+            parent_allocator=None,
+        )
+
+    src = memory_obj(source)
+    dst = memory_obj(torch.empty(encoded_bytes, dtype=torch.uint8, device="cpu"))
+    memory_queries: list[int] = []
+    utilization_queries: list[int] = []
+    selected_devices: list[int] = []
+
+    @contextmanager
+    def device_context(index: int) -> Iterator[None]:
+        memory_queries.append(index)
+        yield
+
+    def utilization(index: int) -> int:
+        utilization_queries.append(index)
+        return utilizations[index]
+
+    monkeypatch.setattr(
+        turboquant,
+        "torch_dev",
+        SimpleNamespace(
+            is_available=lambda: True,
+            device_count=lambda: len(free_offsets),
+            device=device_context,
+            mem_get_info=lambda: (
+                required_bytes + free_offsets[memory_queries[-1]],
+                required_bytes * 4,
+            ),
+            set_device=selected_devices.append,
+        ),
+    )
+    monkeypatch.setattr(turboquant, "torch_device_type", "cuda")
+    monkeypatch.setattr(turboquant, "_cuda_utilization", utilization)
+
+    class StagingReached(Exception):
+        pass
+
+    def stop_before_cuda_copy(
+        tensor: torch.Tensor, *, device: torch.device
+    ) -> torch.Tensor:
+        assert tensor.device.type == "cpu"
+        assert device.type == "cuda"
+        assert device.index == expected_device
+        raise StagingReached
+
+    # Exercise the public serializer, stopping before allocation or GPU kernels.
+    monkeypatch.setattr(torch.Tensor, "to", stop_before_cuda_copy)
+    if expected_device is None:
+        with pytest.raises(RuntimeError, match="No CUDA device has enough free memory"):
+            serializer.serialize(src, dst, _make_turboquant_object_key(0))
+    else:
+        with pytest.raises(StagingReached):
+            serializer.serialize(src, dst, _make_turboquant_object_key(0))
+
+    assert memory_queries == list(range(len(free_offsets)))
+    assert utilization_queries == list(expected_util_queries)
+    assert selected_devices == ([] if expected_device is None else [expected_device])
 
 
 # =============================================================================
