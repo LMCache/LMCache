@@ -106,34 +106,8 @@ validate_warm_hit() {
     local cold_file="$1"
     local warm_file="$2"
 
-    python3 -c "
-import json, sys
-
-with open('$cold_file') as f:
-    cold = json.load(f)
-with open('$warm_file') as f:
-    warm = json.load(f)
-
-cold_stats = cold['kv_transfer_params']['cached_token_stats']
-warm_stats = warm['kv_transfer_params']['cached_token_stats']
-
-cold_lmcache = cold_stats['num_lmcache_cached_tokens']
-warm_lmcache = warm_stats['num_lmcache_cached_tokens']
-
-print(f'Cold request — num_lmcache_cached_tokens: {cold_lmcache}')
-print(f'Warm request — num_lmcache_cached_tokens: {warm_lmcache}')
-
-if warm_lmcache <= cold_lmcache:
-    print(f'FAIL: warm request should have more LMCache hits than cold request')
-    print(f'  cold={cold_lmcache}, warm={warm_lmcache}')
-    sys.exit(1)
-
-if warm_lmcache == 0:
-    print('FAIL: warm request has 0 LMCache cached tokens (cache not populated?)')
-    sys.exit(1)
-
-print(f'PASS: warm request has more LMCache hits ({warm_lmcache} > {cold_lmcache})')
-"
+    python3 "$REPO_ROOT/.buildkite/scripts/check-vllm-cache-hit.py" \
+        "$cold_file" "$warm_file"
 }
 
 # ── Step 1: Cold request (populates LMCache) ──────────────────
