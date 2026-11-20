@@ -2,12 +2,14 @@
 """Blend per-leg read sets over a registration's object groups (pure)."""
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 # First Party
 from lmcache.v1.common.attn_window import GroupKind
 from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
     ShardReplicationDesc,
     ipc_key_to_object_keys,
 )
@@ -96,6 +98,7 @@ def _cb_chunk_major_object_keys(
     chunk_hashes: list[bytes],
     gids: tuple[int, ...],
     shard_replication_desc: ShardReplicationDesc,
+    group_layout_descs: Mapping[int, MemoryLayoutDesc],
 ) -> list:
     """Expand chunk hashes to object keys, chunk-major.
 
@@ -103,7 +106,11 @@ def _cb_chunk_major_object_keys(
     stay leading-ones-aligned. Returns the flattened key list.
     """
     per_group = ipc_key_to_object_keys(
-        key, chunk_hashes, list(gids), shard_replication_desc
+        key,
+        chunk_hashes,
+        list(gids),
+        shard_replication_desc,
+        group_layout_descs=group_layout_descs,
     )
     n_hashes = len(chunk_hashes)
     expansion = len(per_group[0]) // n_hashes if n_hashes else 0

@@ -127,7 +127,13 @@ def resolve_object_keys(
     # The coordinator holds no KV registration, so this resolves the
     # per-rank layout of object group 0 only.
     obj_keys = ipc_key_to_object_keys(
-        ipc_key, chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
+        ipc_key,
+        chunk_hashes,
+        [0],
+        DEFAULT_SHARD_REPLICATION_DESC,
+        # A coordinator view holds no registration, so it cannot derive a
+        # dtype; the caller supplies it through ``tags`` when it matters.
+        group_layout_descs={},
     )[0]
     return obj_keys, len(chunk_hashes)
 

@@ -10,6 +10,7 @@ wire.
 """
 
 # Third Party
+import pytest
 import torch
 
 # First Party
@@ -52,18 +53,22 @@ def _key(salt: str = "", configs: dict[str, object] | None = None) -> IPCCacheSe
 
 
 class TestLayoutTag:
-    def test_single_dtype_is_named_without_the_torch_prefix(self) -> None:
-        assert layout_dtype_tags(_layout(torch.bfloat16)) == {
-            KV_DTYPE_TAG_NAME: "bfloat16"
-        }
+    def test_single_dtype_uses_its_short_code(self) -> None:
+        assert layout_dtype_tags(_layout(torch.bfloat16)) == {KV_DTYPE_TAG_NAME: "bf16"}
 
     def test_mixed_precision_folds_into_one_sorted_token(self) -> None:
         assert layout_dtype_tags(
             _layout(torch.float16, torch.bfloat16, torch.float16)
-        ) == {KV_DTYPE_TAG_NAME: "bfloat16,float16"}
+        ) == {KV_DTYPE_TAG_NAME: "bf16,f16"}
 
-    def test_no_layout_means_no_tag(self) -> None:
-        assert layout_dtype_tags(None) == {}
+    def test_an_unknown_dtype_keeps_its_name(self) -> None:
+        """Two unknown dtypes must still not collide."""
+        assert layout_dtype_tags(_layout(torch.complex64)) == {
+            KV_DTYPE_TAG_NAME: "complex64"
+        }
+
+    def test_a_layout_without_dtypes_adds_nothing(self) -> None:
+        assert layout_dtype_tags(MemoryLayoutDesc(shapes=[], dtypes=[])) == {}
 
 
 class TestKeysCarryTheTag:
@@ -76,15 +81,15 @@ class TestKeysCarryTheTag:
             group_layout_descs={0: _layout(torch.float16), 1: _layout(torch.bfloat16)},
         )
 
-        assert keys[0][0].identity.tags[KV_DTYPE_TAG_NAME] == "float16"
-        assert keys[1][0].identity.tags[KV_DTYPE_TAG_NAME] == "bfloat16"
+        assert keys[0][0].identity.tags[KV_DTYPE_TAG_NAME] == "f16"
+        assert keys[1][0].identity.tags[KV_DTYPE_TAG_NAME] == "bf16"
 
-    def test_flat_helper_without_layouts_stays_untagged(self) -> None:
-        keys = ipc_key_to_object_keys(
-            _key(), [_HASH], [0], DEFAULT_SHARD_REPLICATION_DESC
-        )
-
-        assert KV_DTYPE_TAG_NAME not in keys[0][0].identity.tags
+    def test_the_flat_helper_requires_layouts(self) -> None:
+        """A caller that forgets them must fail, not build untagged names."""
+        with pytest.raises(TypeError):
+            ipc_key_to_object_keys(  # type: ignore[call-arg]
+                _key(), [_HASH], [0], DEFAULT_SHARD_REPLICATION_DESC
+            )
 
     def test_grouped_helper_tags_the_rows(self) -> None:
         rows = ipc_key_to_grouped_object_keys(
@@ -96,7 +101,7 @@ class TestKeysCarryTheTag:
             DEFAULT_SHARD_REPLICATION_DESC,
         )
 
-        assert rows[0].keys[0].identity.tags[KV_DTYPE_TAG_NAME] == "bfloat16"
+        assert rows[0].keys[0].identity.tags[KV_DTYPE_TAG_NAME] == "bf16"
 
     def test_request_tags_are_preserved(self) -> None:
         rows = ipc_key_to_grouped_object_keys(
@@ -110,7 +115,7 @@ class TestKeysCarryTheTag:
 
         tags = rows[0].keys[0].identity.tags
         assert tags["revision"] == "abc"
-        assert tags[KV_DTYPE_TAG_NAME] == "float16"
+        assert tags[KV_DTYPE_TAG_NAME] == "f16"
 
 
 class TestIdentityEffect:

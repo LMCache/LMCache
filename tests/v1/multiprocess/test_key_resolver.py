@@ -60,7 +60,7 @@ def test_prefetch_rows_cover_every_group_with_its_own_layout_and_window():
         assert len(row.keys) == CHUNKS
         assert {key.object_group_id for key in row.keys} == {row.object_group_id}
         # The server adds the storage dtype to every identity tag set.
-        expected = {**tags, "kv_dtype": "float16"}
+        expected = {**tags, "kv_dtype": "f16"}
         assert all(dict(key.identity.tags) == expected for key in row.keys)
 
 

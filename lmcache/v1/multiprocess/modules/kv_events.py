@@ -16,7 +16,7 @@ from lmcache.v1.common.custom_types import (
     KVEventBatch,
     KVEventRecord,
 )
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import ObjectKey, layout_dtype_tags
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -112,6 +112,7 @@ class CommittedKVResidency:
                 ObjectKey.ComputeKVRank(world_size, rank, world_size, rank),
                 group,
                 key.cache_salt,
+                tags=layout_dtype_tags(groups[group]),
             )
             in self._owners
             for rank in range(world_size)

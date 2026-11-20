@@ -1020,10 +1020,11 @@ the other engine's allocation exactly. Without the tag, an L2 reload hands the
 reader the other dtype's bytes and the engine produces garbage rather than an
 error.
 
-Because the server derives the tag, it covers every connector (vLLM, SGLang,
-ATOM) without each one sending anything new, and it cannot drift from what is
-actually stored: a mixed-precision group gets one tag naming all of its dtypes
-(``bfloat16,float8_e4m3fn``).
+A mixed-precision group gets one tag naming all of its dtypes, written as short
+codes so the tag stays small: ``bf16,f8e4m3`` rather than
+``bfloat16,float8_e4m3fn``. The tag is part of the object name, and names are
+limited to 255 bytes on most file systems, so a long model path benefits from
+every byte saved.
 
 **Upgrading renames every cache object once.** Objects written before this tag
 existed keep their untagged names, so a tagged reader misses them; they stay

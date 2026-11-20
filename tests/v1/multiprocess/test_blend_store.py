@@ -587,6 +587,20 @@ def test_classify_read_groups_multi_attention_with_recurrent_and_aux():
     assert read.recurrent_gids == (1,)
 
 
+def _layouts() -> dict:
+    """Layouts of the test's object groups, carrying the storage dtypes."""
+    # Third Party
+    import torch
+
+    # First Party
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
+
+    return {
+        gid: MemoryLayoutDesc(shapes=[torch.Size([2, 2])], dtypes=[torch.float16])
+        for gid in (0, 2)
+    }
+
+
 def test_chunk_major_object_keys_ordering():
     """Keys come out chunk-major: for each hash, every read group's key(s)
     are contiguous, groups ascending — the invariant behind every per-chunk
@@ -599,7 +613,7 @@ def test_chunk_major_object_keys_ordering():
     )
     hashes = [b"\x01" * 8, b"\x02" * 8]
     keys = _cb_chunk_major_object_keys(
-        key, hashes, (0, 2), DEFAULT_SHARD_REPLICATION_DESC
+        key, hashes, (0, 2), DEFAULT_SHARD_REPLICATION_DESC, _layouts()
     )
     # 2 hashes x 2 groups x world_size 2.
     assert len(keys) == 8
@@ -612,7 +626,7 @@ def test_chunk_major_object_keys_ordering():
         model_name="m", world_size=2, worker_id=1, token_ids=[1, 2, 3]
     )
     wkeys = _cb_chunk_major_object_keys(
-        wkey, hashes, (0, 2), DEFAULT_SHARD_REPLICATION_DESC
+        wkey, hashes, (0, 2), DEFAULT_SHARD_REPLICATION_DESC, _layouts()
     )
     assert len(wkeys) == 4
     assert [k.object_group_id for k in wkeys] == [0, 2, 0, 2]
