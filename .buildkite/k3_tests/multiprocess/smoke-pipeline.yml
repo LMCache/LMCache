@@ -1,0 +1,132 @@
+# PR-smoke multiprocess tier (LM-1131):
+# Independent, fast 0/1-GPU representative checks that report PR status
+# without waiting on heavy 2/4-GPU jobs.
+
+x-flaky-retry: &flaky-retry
+  automatic:
+    - exit_status: -1
+      limit: 2
+    - exit_status: "*"
+      limit: 2
+
+x-pod-1gpu: &pod-1gpu
+  containers:
+    - name: container-0
+      image: lmcache/ci-base:latest
+      imagePullPolicy: Never
+      resources: { limits: { "nvidia.com/gpu": "1" } }
+      volumeMounts:
+        - { name: hf-cache, mountPath: /root/.cache/huggingface }
+        - { name: dshm, mountPath: /dev/shm }
+  volumes:
+    - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
+
+x-pod-1gpu-dshm: &pod-1gpu-dshm
+  containers:
+    - name: container-0
+      image: lmcache/ci-base:latest
+      imagePullPolicy: Never
+      resources: { limits: { "nvidia.com/gpu": "1" } }
+      volumeMounts:
+        - { name: hf-cache, mountPath: /root/.cache/huggingface }
+        - { name: dshm, mountPath: /dev/shm }
+  volumes:
+    - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+    - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 128Gi } }
+
+steps:
+  - group: ":zap: Multiprocess PR-Smoke (1-GPU)"
+    steps:
+      - label: ":zap: vllm / lm_eval_lmcache_driven / zmq"
+        command: .buildkite/k3_tests/multiprocess/run.sh lm_eval
+        env:
+          INFERENCE_ENGINE: "vllm"
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+        timeout_in_minutes: 30
+        retry: *flaky-retry
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu-dshm } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":zap: vllm / restart_recovery / zmq"
+        command: .buildkite/k3_tests/multiprocess/run.sh restart_recovery
+        env:
+          INFERENCE_ENGINE: "vllm"
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":zap: vllm / cache_stats / zmq"
+        command: .buildkite/k3_tests/multiprocess/run.sh cache_stats
+        env:
+          INFERENCE_ENGINE: "vllm"
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":zap: vllm / lazy_offload / zmq"
+        command: .buildkite/k3_tests/multiprocess/run.sh lazy_offload
+        env:
+          INFERENCE_ENGINE: "vllm"
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":zap: vllm / http_api / zmq"
+        command: .buildkite/k3_tests/multiprocess/run.sh http_api
+        env:
+          INFERENCE_ENGINE: "vllm"
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+  - group: ":zap: Multiprocess PR-Smoke (CPU-only)"
+    steps:
+      - label: ":zap: cpu_e2e_validation ({{matrix.mode}} / {{matrix.request_transport}})"
+        command: |
+          case "{{matrix.mode}}" in
+            shm) ;;
+            inline) export LMCACHE_SHM_NAME="" ;;
+            server_copy) export LMCACHE_MP_TRANSFER_MODE="lmcache_driven" ;;
+          esac
+          bash .github/scripts/run-cpu-e2e-validation.sh
+        matrix:
+          setup:
+            mode:
+              - "shm"
+              - "inline"
+              - "server_copy"
+            request_transport:
+              - "zmq"
+        env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources:
+                      requests:
+                        cpu: "8"
+                        memory: "256Gi"
+                      limits:
+                        cpu: "8"
+                        memory: "256Gi"
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }

@@ -1,0 +1,146 @@
+# Minimal split manifest for LM-1131:
+# Separates k3-multiprocess workloads into an independent PR-smoke tier and a
+# Heavy (scheduled dev / nightly / force-ci) tier.
+# Scope: strictly scoped to .buildkite/k3_tests/multiprocess/.
+
+schema_version: 1
+
+tiers:
+  pr-smoke:
+    pipeline: .buildkite/k3_tests/multiprocess/smoke-pipeline.yml
+    description: Independent 0/1-GPU representative smoke checks reporting commit status without waiting for heavy 2/4-GPU jobs.
+  heavy:
+    pipeline: .buildkite/k3_tests/multiprocess/pipeline.yml
+    description: Multi-GPU, Kimi, DSV4, full engine/transport matrices, and nightly canary pin jobs.
+
+workloads:
+  - workload: cpu_e2e_validation
+    gpu_requirement: 0-GPU
+    tier: pr-smoke
+    trigger: pr (lmcache/** or shared CI deps)
+    coverage_objective: CPU-only multiprocess E2E across shm, inline, and server_copy transfer modes.
+    acceptance_check: All 3 modes pass on ZMQ in smoke-pipeline.yml.
+
+  - workload: cache_stats
+    gpu_requirement: 1-GPU
+    tier: pr-smoke
+    trigger: pr (lmcache/** or shared CI deps)
+    coverage_objective: Verify cache hit/miss stats reporting on 1-GPU vLLM + ZMQ.
+    acceptance_check: vllm / cache_stats / zmq passes in smoke-pipeline.yml.
+
+  - workload: lazy_offload
+    gpu_requirement: 1-GPU
+    tier: pr-smoke
+    trigger: pr (lmcache/** or shared CI deps)
+    coverage_objective: Verify FIFO lazy offload queue drain behavior on 1-GPU vLLM + ZMQ.
+    acceptance_check: vllm / lazy_offload / zmq passes in smoke-pipeline.yml.
+
+  - workload: http_api
+    gpu_requirement: 1-GPU
+    tier: pr-smoke
+    trigger: pr (lmcache/** or shared CI deps)
+    coverage_objective: Verify multiprocess HTTP API endpoints on representative vLLM + ZMQ (SGLang variant stays in heavy).
+    acceptance_check: vllm / http_api / zmq passes in smoke-pipeline.yml.
+
+  - workload: restart_recovery
+    gpu_requirement: 1-GPU
+    tier: pr-smoke
+    trigger: pr (lmcache/** or shared CI deps)
+    coverage_objective: Verify server restart recovery on representative vLLM + ZMQ.
+    acceptance_check: vllm / restart_recovery / zmq passes in smoke-pipeline.yml.
+
+  - workload: lm_eval
+    gpu_requirement: 1-GPU
+    tier: pr-smoke
+    trigger: pr (lmcache/** or shared CI deps)
+    coverage_objective: Verify representative 1-GPU accuracy smoke (vllm / lmcache_driven / zmq); full engine/mode matrix stays in heavy.
+    acceptance_check: vllm / lm_eval_lmcache_driven / zmq passes in smoke-pipeline.yml.
+
+  - workload: hma_dsv4_correctness
+    gpu_requirement: 1-GPU (DSV4 dummy weights)
+    tier: heavy
+    trigger: dev | schedule | PR with force-ci/mp-full | shared CI deps
+    coverage_objective: Validate uncompressed, 4x, and 128x HMA KV paths on DeepSeek-V4-Flash.
+    acceptance_check: vllm & sglang hma_dsv4_correctness pass in pipeline.yml.
+
+  - workload: preemption_correctness
+    gpu_requirement: 2-GPU
+    tier: heavy
+    trigger: dev | schedule | PR with force-ci/mp-full | shared CI deps
+    coverage_objective: Differential ShareGPT correctness under forced KV preemption (async=0/1).
+    acceptance_check: Both async rungs match reference answers in pipeline.yml.
+
+  - workload: kimi_linear_tp
+    gpu_requirement: 2-GPU
+    tier: heavy
+    trigger: dev | schedule | PR with force-ci/mp-full | shared CI deps
+    coverage_objective: Cross-TP-rank KV correctness for hybrid MLA + linear-attention Kimi-Linear.
+    acceptance_check: vllm & sglang kimi_linear_tp pass in pipeline.yml.
+
+  - workload: long_doc_qa
+    gpu_requirement: 2-GPU
+    tier: heavy
+    trigger: dev | schedule | PR with force-ci/mp-full | shared CI deps
+    coverage_objective: Long-document QA correctness across vLLM and SGLang.
+    acceptance_check: vllm & sglang long_doc_qa pass in pipeline.yml.
+
+  - workload: long_doc_qa_l2
+    gpu_requirement: 2-GPU
+    tier: heavy
+    trigger: dev | schedule | PR with force-ci/mp-full | shared CI deps
+    coverage_objective: L2 cache long-document QA correctness on vLLM (SGLang noop_skip pruned).
+    acceptance_check: vllm / long_doc_qa_l2 / zmq passes in pipeline.yml.
+
+  - workload: vllm_bench
+    gpu_requirement: 2-GPU
+    tier: heavy
+    trigger: dev | schedule | PR with force-ci/mp-full | shared CI deps
+    coverage_objective: Throughput regression benchmark across ZMQ and gRPC.
+    acceptance_check: vllm_bench passes on both transports in pipeline.yml.
+
+  - workload: deadlock
+    gpu_requirement: 2-GPU
+    tier: heavy
+    trigger: dev | schedule | PR with force-ci/mp-full | shared CI deps
+    coverage_objective: Multi-request deadlock stress on vLLM (SGLang noop_skip pruned).
+    acceptance_check: vllm / deadlock / zmq passes in pipeline.yml.
+
+  - workload: mp_autostart_tp2
+    gpu_requirement: 2-GPU
+    tier: heavy
+    trigger: dev | schedule | PR with force-ci/mp-full | shared CI deps
+    coverage_objective: TP=2 multiprocess autostart lifecycle on vLLM.
+    acceptance_check: vllm / mp_autostart_tp2 / zmq passes in pipeline.yml.
+
+  - workload: p2p
+    gpu_requirement: 2-GPU
+    tier: heavy
+    trigger: dev | schedule | PR with force-ci/mp-full | shared CI deps
+    coverage_objective: Peer-to-peer KV transfer between two LMCache+vLLM instances.
+    acceptance_check: vllm / p2p / zmq passes in pipeline.yml.
+
+  - workload: lm_eval_preemption
+    gpu_requirement: 1-GPU
+    tier: heavy
+    trigger: dev | schedule | PR with force-ci/mp-full | shared CI deps
+    coverage_objective: Preemption accuracy under concurrent lm_eval load on vLLM (SGLang noop_skip pruned).
+    acceptance_check: vllm lm_eval_preemption passes in pipeline.yml.
+
+  - workload: fault_tolerance
+    gpu_requirement: 1-GPU
+    tier: heavy
+    trigger: dev | schedule | PR with force-ci/mp-full | shared CI deps
+    coverage_objective: Fault tolerance under simulated worker failures on vLLM.
+    acceptance_check: vllm / fault_tolerance / zmq passes in pipeline.yml.
+
+  - workload: gds_smoke
+    gpu_requirement: 1-GPU
+    tier: heavy
+    trigger: dev | schedule | PR with force-ci/mp-full | shared CI deps
+    coverage_objective: GPUDirect Storage (cuFile) multiprocess smoke on NVMe scratch.
+    acceptance_check: vllm / gds_smoke / zmq passes in pipeline.yml.
+
+noop_skip_pruned:
+  - "sglang / deadlock / zmq"
+  - "sglang / long_doc_qa_l2 / zmq"
+  - "sglang / lm_eval_preemption"
