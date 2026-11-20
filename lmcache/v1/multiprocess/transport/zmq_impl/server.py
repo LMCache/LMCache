@@ -46,7 +46,7 @@ class HandlerSpec:
     @property
     def pool(self) -> ThreadPoolType:
         """Return the ZMQ worker pool implied by common handler metadata."""
-        if self.handler_type is HandlerType.SERIALIZED:
+        if self.handler_type in (HandlerType.SERIALIZED, HandlerType.NON_BLOCKING):
             return ThreadPoolType.SYNC
         if self.requires_client_affinity:
             return ThreadPoolType.AFFINITY

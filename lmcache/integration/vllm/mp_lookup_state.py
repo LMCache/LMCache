@@ -21,6 +21,10 @@ logger = init_logger(__name__)
 _QueryPrefetchStatusFuture = MessagingFuture[int | None]
 _RpcFuture = MessagingFuture[None] | _QueryPrefetchStatusFuture
 
+# Longest the server holds a WAIT_PREFETCH_STATUS before answering None. It
+# does not delay the hit, which is answered as soon as the prefetch finishes.
+_WAIT_PREFETCH_STATUS_TIMEOUT = 1.0
+
 
 class _Phase(enum.Enum):
     """Where one server is in the LOOKUP -> QUERY_PREFETCH_STATUS exchange."""
@@ -84,10 +88,13 @@ class LookupState:
     Note:
         - A QUERY_PREFETCH_STATUS is sent to a server **only after** that
           server's LOOKUP completed, and at most one is in flight per server.
+        - Without ``blocking_lookup`` the status query is a
+          WAIT_PREFETCH_STATUS, which the server answers once the prefetch
+          finishes, so the hit is seen at the next scheduler check.
         - After a None or failed reply, the query is re-sent from the reply
           callback only if a scheduler check ran since it was sent; otherwise
           the next check re-sends it. So each server gets **at most one** new
-          QUERY_PREFETCH_STATUS per scheduler check.
+          status query per scheduler check.
         - An RPC's deadline counts from when it is sent, so time spent waiting
           for a scheduler check to re-send a query never counts against the
           server.
@@ -116,7 +123,8 @@ class LookupState:
             timeout: Seconds each RPC may stay unanswered.
             blocking_lookup: Whether ``on_scheduler_check`` waits for the
                 QUERY_PREFETCH_STATUS replies in flight. LOOKUP replies are
-                never waited for.
+                never waited for. Without it, the status is queried with
+                WAIT_PREFETCH_STATUS.
         """
         self._key = key
         self._tp_size = tp_size
@@ -355,8 +363,15 @@ class LookupState:
     def _send_query_prefetch_status(
         self, url: str, server: _Server
     ) -> tuple[str, _QueryPrefetchStatusFuture]:
-        """Send QUERY_PREFETCH_STATUS to one server; caller holds the lock."""
-        future = server.client.query_prefetch_status(self._key.request_id)
+        """Send the status query to one server; caller holds the lock."""
+        if self._blocking_lookup:
+            future = server.client.query_prefetch_status(self._key.request_id)
+        else:
+            # Half the deadline at most, so the timeout reply always beats it.
+            future = server.client.wait_prefetch_status(
+                self._key.request_id,
+                min(_WAIT_PREFETCH_STATUS_TIMEOUT, self._timeout / 2),
+            )
         server.phase = _Phase.QUERY_PREFETCH_STATUS_IN_FLIGHT
         server.future = future
         server.deadline = time.monotonic() + self._timeout
