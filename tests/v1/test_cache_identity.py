@@ -90,7 +90,11 @@ def test_request_tags_reach_expanded_object_keys() -> None:
     )
 
     groups = ipc_key_to_object_keys(
-        ipc_key, [b"1234"], [0, 1], DEFAULT_SHARD_REPLICATION_DESC
+        ipc_key,
+        [b"1234"],
+        [0, 1],
+        DEFAULT_SHARD_REPLICATION_DESC,
+        group_layout_descs={},
     )
 
     assert get_request_tags(ipc_key.request_configs) == {

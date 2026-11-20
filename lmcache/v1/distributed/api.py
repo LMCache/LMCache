@@ -204,6 +204,11 @@ _DTYPE_CODES = {
 }
 
 
+def _layout_tag(layout_desc: "MemoryLayoutDesc | None") -> dict[str, str]:
+    """Return the dtype tag of a layout, or nothing when the group has none."""
+    return layout_dtype_tags(layout_desc) if layout_desc is not None else {}
+
+
 def layout_dtype_tags(layout_desc: "MemoryLayoutDesc") -> dict[str, str]:
     """Describe the storage dtypes of one object group as an identity tag.
 
@@ -964,7 +969,7 @@ def ipc_key_to_object_keys(
                 extra_attributes=extra_attributes,
                 tags={
                     **request_tags,
-                    **layout_dtype_tags(group_layout_descs[object_group_id]),
+                    **_layout_tag(group_layout_descs.get(object_group_id)),
                 },
             )
             for chunk_hash in chunk_hashes

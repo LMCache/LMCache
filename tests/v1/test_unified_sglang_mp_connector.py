@@ -749,18 +749,21 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
             chunk_hashes,
             [0],
             DEFAULT_SHARD_REPLICATION_DESC,
+            group_layout_descs={},
         )
         objects_b = ipc_key_to_object_keys(
             self._ipc_key_for_salt("tenant-b"),
             chunk_hashes,
             [0],
             DEFAULT_SHARD_REPLICATION_DESC,
+            group_layout_descs={},
         )
         objects_a2 = ipc_key_to_object_keys(
             self._ipc_key_for_salt("tenant-a"),
             chunk_hashes,
             [0],
             DEFAULT_SHARD_REPLICATION_DESC,
+            group_layout_descs={},
         )
 
         self.assertNotEqual(objects_a, objects_b)

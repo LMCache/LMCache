@@ -16,7 +16,7 @@ from lmcache.v1.common.custom_types import (
     KVEventBatch,
     KVEventRecord,
 )
-from lmcache.v1.distributed.api import ObjectKey, layout_dtype_tags
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -54,6 +54,20 @@ def _chunk_key(key: ObjectKey) -> _ChunkKey:
     )
 
 
+_ResidencyKey = tuple[bytes, int, str, int, str]
+
+
+def _residency_key(key: ObjectKey) -> _ResidencyKey:
+    """Fields that decide whether one L1 copy of a chunk exists."""
+    return (
+        key.chunk_hash,
+        key.kv_rank,
+        key.model_name,
+        key.object_group_id,
+        key.cache_salt,
+    )
+
+
 class CommittedKVResidency:
     """Project committed L1 copies onto complete chunks.
 
@@ -67,7 +81,7 @@ class CommittedKVResidency:
 
     def __init__(self, layouts: LayoutDescRegistry) -> None:
         self._layouts = layouts
-        self._owners: dict[ObjectKey, set[str]] = {}
+        self._owners: dict[_ResidencyKey, set[str]] = {}
 
     def commit(self, key: ObjectKey, l1_tag: str) -> None:
         """Record a completed readable copy; duplicate notifications are idempotent.
@@ -76,7 +90,7 @@ class CommittedKVResidency:
             key: The committed object, including rank, group, and cache salt.
             l1_tag: The L1 manager that completed the write.
         """
-        self._owners.setdefault(key, set()).add(l1_tag)
+        self._owners.setdefault(_residency_key(key), set()).add(l1_tag)
 
     def evict(self, key: ObjectKey, l1_tag: str) -> None:
         """Forget one L1 copy, removing owner state when its final copy is gone.
@@ -85,11 +99,11 @@ class CommittedKVResidency:
             key: The object removed from L1.
             l1_tag: The L1 manager that removed it. Unknown copies are ignored.
         """
-        owners = self._owners.get(key)
+        owners = self._owners.get(_residency_key(key))
         if owners is not None:
             owners.discard(l1_tag)
             if not owners:
-                del self._owners[key]
+                del self._owners[_residency_key(key)]
 
     def is_committed(self, key: ObjectKey) -> bool:
         """Return whether every required rank/group has a readable L1 copy.
@@ -106,13 +120,12 @@ class CommittedKVResidency:
         if not world_size or not groups:
             return False
         return all(
-            ObjectKey(
+            (
                 key.chunk_hash,
-                key.model_name,
                 ObjectKey.ComputeKVRank(world_size, rank, world_size, rank),
+                key.model_name,
                 group,
                 key.cache_salt,
-                tags=layout_dtype_tags(groups[group]),
             )
             in self._owners
             for rank in range(world_size)
