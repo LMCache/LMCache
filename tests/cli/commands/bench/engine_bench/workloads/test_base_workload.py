@@ -193,22 +193,6 @@ class TestBaseWorkloadWarmupPolicy:
 
 class TestBaseWorkloadTaskTracking:
     @pytest.mark.asyncio
-    async def test_track_task_and_on_task_done(self) -> None:
-        w = _make_stub()
-
-        async def _sample() -> str:
-            await asyncio.sleep(0.01)
-            return "done"
-
-        task = asyncio.create_task(_sample())
-        w._track_task(task)
-        assert task in w._pending_tasks
-
-        await task
-        # Done callback removes task from _pending_tasks
-        assert task not in w._pending_tasks
-
-    @pytest.mark.asyncio
     async def test_create_tracked_task(self) -> None:
         w = _make_stub()
 
@@ -216,11 +200,11 @@ class TestBaseWorkloadTaskTracking:
             await asyncio.sleep(0.01)
             return "done"
 
-        task = w._create_tracked_task(_sample(), name="sample-task")
+        task = w._create_tracked_task(_sample())
         assert task in w._pending_tasks
-        assert task.get_name() == "sample-task"
 
         await task
+        # Done callback removes task from _pending_tasks
         assert task not in w._pending_tasks
 
     @pytest.mark.asyncio

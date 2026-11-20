@@ -181,30 +181,17 @@ class BaseWorkload(ABC):
     # Task management helpers
     # ------------------------------------------------------------------
 
-    def _track_task(self, task: asyncio.Task) -> asyncio.Task:
-        """Track an asyncio Task and attach ``_on_task_done`` callback."""
-        self._pending_tasks.add(task)
-        task.add_done_callback(self._on_task_done)
-        return task
-
     def _create_tracked_task(
         self,
         coro: Coroutine[Any, Any, Any],
-        *,
-        name: str | None = None,
     ) -> asyncio.Task:
-        """Create an asyncio Task, track it in ``_pending_tasks``, and
-        attach ``_on_task_done``.
-
-        Args:
-            coro: Coroutine to execute in the background.
-            name: Optional human-readable name for the task.
-
-        Returns:
-            The created and tracked asyncio Task.
+        """Create an asyncio Task, track it in ``_pending_tasks``,
+        and attach ``_on_task_done``.
         """
-        task = asyncio.create_task(coro, name=name)
-        return self._track_task(task)
+        task = asyncio.create_task(coro)
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._on_task_done)
+        return task
 
     def _on_task_done(self, task: asyncio.Task) -> None:
         """Clean up completed tasks and log unexpected errors.
