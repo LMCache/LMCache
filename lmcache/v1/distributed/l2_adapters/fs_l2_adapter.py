@@ -314,10 +314,9 @@ class FSL2Adapter(L2AdapterInterface):
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()
 
-        # Slow metadata walks must not occupy the executor used for data I/O.
-        self._lookup_pool = ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="lmcache-fs-lookup"
-        )
+        # Isolate metadata walks from data I/O while keeping the default
+        # executor's sizing for concurrent lookups.
+        self._lookup_pool = ThreadPoolExecutor(thread_name_prefix="lmcache-fs-lookup")
 
         # Background asyncio event loop
         self._loop = asyncio.new_event_loop()

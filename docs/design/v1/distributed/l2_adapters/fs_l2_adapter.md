@@ -27,13 +27,14 @@ available while a worker waits for storage, so unrelated lookups and I/O tasks
 can progress.
 
 A batch occupies one executor worker until its metadata walk finishes. Separate
-batches can run on separate workers in the existing bounded default pool. On a
-slow filesystem, a large batch holds its worker longer; there is no new pool or
-concurrency setting. Store and load scheduling are unchanged.
+batches use a dedicated pool with the same Python default worker sizing as the
+event loop's executor. Store and load tasks keep using the event loop's
+executor, so slow metadata calls cannot occupy their workers.
 
-Closing the adapter cancels the coroutine that publishes the result. The
-executor can finish its read-only metadata walk, which owns only the keys and
-its result bitmap.
+Closing the adapter cancels the coroutine that publishes the result. An
+in-progress metadata syscall may return after cancellation, but the worker
+checks cancellation before starting another key. The adapter discards the
+cancelled batch's result.
 
 ## Results and races
 

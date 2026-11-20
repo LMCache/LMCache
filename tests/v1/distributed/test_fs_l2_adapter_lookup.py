@@ -131,6 +131,42 @@ def test_slow_filesystem_lookup_does_not_block_other_tasks(
     assert wait_for_lookup(adapter, slow).get_indices_list() == [0]
 
 
+def test_four_slow_batches_leave_capacity_for_another_lookup(
+    adapter: FSL2Adapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lookup pool retains at least Python's minimum default concurrency."""
+    slow_keys = [make_key(i) for i in range(4)]
+    slow_paths = {str(tmp_path / encode_fs_filename(key)) for key in slow_keys}
+    fast = make_key(4)
+    (tmp_path / encode_fs_filename(fast)).write_bytes(b"data")
+    entered, release = Event(), Event()
+    lock = Lock()
+    started: set[str] = set()
+    original_stat = os.stat
+
+    def stat_with_slow_paths(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if isinstance(path, (str, Path)) and str(path) in slow_paths:
+            with lock:
+                started.add(str(path))
+                if started == slow_paths:
+                    entered.set()
+            if not release.wait(timeout=10):
+                raise RuntimeError("test did not release the slow filesystem reads")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat_with_slow_paths)
+    tasks = [adapter.submit_lookup_and_lock_task([key], {}) for key in slow_keys]
+    try:
+        assert entered.wait(timeout=5)
+        task = adapter.submit_lookup_and_lock_task([fast], {})
+        assert wait_for_lookup(adapter, task).get_indices_list() == [0]
+    finally:
+        release.set()
+
+    for task in tasks:
+        assert wait_for_lookup(adapter, task).get_indices_list() == []
+
+
 def test_close_discards_an_inflight_lookup_result(
     adapter: FSL2Adapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
