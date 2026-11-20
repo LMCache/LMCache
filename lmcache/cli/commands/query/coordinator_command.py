@@ -30,6 +30,11 @@ class CoordinatorQueryCommand(BaseCommand):
         return "Query the MP coordinator's read-only HTTP APIs."
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        """Register coordinator API selection, pagination, and filter options.
+
+        Args:
+            parser: Subcommand parser receiving the coordinator options.
+        """
         parser.add_argument(
             "--api",
             required=True,
@@ -46,8 +51,8 @@ class CoordinatorQueryCommand(BaseCommand):
         parser.add_argument(
             "--instance",
             default=None,
-            help="Instance id. Narrows --api usage to one server; required "
-            "by --api prefetch.",
+            help="Instance id. Narrows --api usage and --api keys to one server; "
+            "required by --api prefetch.",
         )
         parser.add_argument(
             "--cache-salt",
@@ -65,6 +70,23 @@ class CoordinatorQueryCommand(BaseCommand):
             type=int,
             default=20,
             help="Rows to request for --api keys (default: 20).",
+        )
+        parser.add_argument(
+            "--offset",
+            type=int,
+            default=0,
+            help="Matching keys to skip for --api keys (default: 0).",
+        )
+        parser.add_argument(
+            "--tier",
+            choices=("all", "l1", "l2"),
+            default="all",
+            help="Keep placements on this tier for --api keys (default: all).",
+        )
+        parser.add_argument(
+            "--backend",
+            default="",
+            help="Keep placements on this backend for --api keys (default: all).",
         )
 
     def execute(self, args: argparse.Namespace) -> None:

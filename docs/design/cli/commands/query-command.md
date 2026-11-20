@@ -105,6 +105,22 @@ Throughput (tokens/s):                   1100.64
 `output_tokens` uses the server's `completion_tokens` when present, including
 zero. The request's `max_tokens` is used only when the count is absent.
 
+### `query coordinator --api keys`
+
+The read-only coordinator target sends one `GET /directory/keys` request.
+`--limit` (default 20), `--offset` (default 0), `--tier` (`all`, `l1`, or `l2`),
+`--instance`, and `--backend` map to the endpoint's query parameters; `--instance`
+uses the wire name `instance_id`. The CLI uses `urllib.parse.urlencode` so
+special characters in instance and backend names remain part of their values.
+No server-side modules or accelerator dependencies are imported for these flags.
+
+The coordinator owns placement filtering, page selection, the matching total,
+and offset/limit range validation. The CLI renders the returned page through
+its existing metrics formatter. It neither fetches subsequent pages automatically
+nor promises a stable snapshot: changes to the directory may skip or repeat keys
+between requests. For example, `--tier l2 --backend fs --limit 20 --offset 20`
+requests the second page of keys with matching L2 filesystem placements.
+
 ### `query kvcache`
 
 Two modes under one command:
