@@ -16,6 +16,10 @@
 #   5. Asserts the L1 read_locked_count returns to 0 within
 #      LOCK_RELEASE_TIMEOUT seconds, far below the 300 s read-lock TTL that
 #      released the leaked locks before the fix.
+#
+# Exit status: 0 pass; 75 (EX_TEMPFAIL) only when vLLM died after the abort
+# with the known scheduler assert in ENGINE_LOG_FILE (vllm-project/vllm#37859),
+# which the pipeline retries; 1 for every other failure, a lock leak included.
 set -euo pipefail
 
 VLLM_PORT="${VLLM_PORT:-8000}"
@@ -28,6 +32,7 @@ NUM_DOCS="${NUM_DOCS:-32}"
 DOC_WORDS="${DOC_WORDS:-2000}"
 ABORT_AFTER_SECONDS="${ABORT_AFTER_SECONDS:-5}"
 LOCK_RELEASE_TIMEOUT="${LOCK_RELEASE_TIMEOUT:-30}"
+ENGINE_LOG_FILE="${ENGINE_LOG_FILE:-}"
 
 mkdir -p "${TEST_DIR}"
 
@@ -45,6 +50,7 @@ NUM_DOCS="${NUM_DOCS}" \
 DOC_WORDS="${DOC_WORDS}" \
 ABORT_AFTER_SECONDS="${ABORT_AFTER_SECONDS}" \
 LOCK_RELEASE_TIMEOUT="${LOCK_RELEASE_TIMEOUT}" \
+ENGINE_LOG_FILE="${ENGINE_LOG_FILE}" \
     python3 - <<'PY'
 import json
 import os
@@ -63,6 +69,9 @@ NUM_DOCS = int(os.environ["NUM_DOCS"])
 DOC_WORDS = int(os.environ["DOC_WORDS"])
 ABORT_AFTER_SECONDS = float(os.environ["ABORT_AFTER_SECONDS"])
 LOCK_RELEASE_TIMEOUT = float(os.environ["LOCK_RELEASE_TIMEOUT"])
+ENGINE_LOG_FILE = os.environ["ENGINE_LOG_FILE"]
+# Retried by the pipeline step, so only the known vLLM crash may use it.
+KNOWN_ENGINE_CRASH_EXIT = 75
 
 WORDS = (
     "cache memory tensor layer token prefix block chunk server engine "
@@ -108,6 +117,29 @@ def engine_alive() -> bool:
             return response.status == 200
     except OSError:
         return False
+
+
+def known_engine_crash() -> bool:
+    """Whether the vLLM log shows the scheduler assert of vllm#37859.
+
+    vLLM asserts ``req_id in self.requests`` in the finished_recving and
+    finished_sending loops of ``_update_from_kv_xfer_finished`` when a
+    transfer completes for a request it already freed. A missing log or a
+    changed assert text returns False, so the failure is not retried.
+    """
+    try:
+        with open(ENGINE_LOG_FILE) as log:
+            lines = log.read().splitlines()
+    except OSError:
+        return False
+    # The assert line follows its frame line; allow a few interleaved lines.
+    return any(
+        "in _update_from_kv_xfer_finished" in line
+        and any(
+            "assert req_id in self.requests" in after for after in lines[i + 1 : i + 4]
+        )
+        for i, line in enumerate(lines)
+    )
 
 
 def vllm_gauge(name: str) -> int:
@@ -267,9 +299,16 @@ with open(os.path.join(TEST_DIR, "result.json"), "w") as output:
 # A dead engine sends no END_SESSION or FREE, so its locks say nothing about
 # the abort path.
 if not alive:
+    if known_engine_crash():
+        print(
+            "INFRA FAILURE: vLLM engine died after the abort on the known "
+            "_update_from_kv_xfer_finished assert (vllm#37859); the lock count "
+            "is not a result"
+        )
+        sys.exit(KNOWN_ENGINE_CRASH_EXIT)
     sys.exit(
-        "INFRA FAILURE: vLLM engine died after the abort (see the vLLM log); "
-        "the lock count is not a result"
+        "FAIL: vLLM engine died after the abort without the known "
+        f"vllm#37859 assert in {ENGINE_LOG_FILE or 'ENGINE_LOG_FILE (unset)'}"
     )
 if prefetch_at_abort["running"]:
     sys.exit(

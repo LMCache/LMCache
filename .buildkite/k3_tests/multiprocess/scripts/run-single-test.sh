@@ -221,10 +221,13 @@ echo "============================================"
 echo "=== Running test: ${TEST_NAME} ==="
 echo "============================================"
 
-if ! "$exec_script"; then
-    echo "${TEST_NAME} test failed"
-    exit 1
-fi
+# Pass the workload's exit status through: a pipeline step may retry only
+# specific codes (abort_lookup_locks exits 75 for a known vLLM engine crash).
+"$exec_script" || {
+    status=$?
+    echo "${TEST_NAME} test failed (exit ${status})"
+    exit "$status"
+}
 
 echo ""
 echo "============================================"
