@@ -216,11 +216,70 @@ class TestErrorMessage:
     def test_error_field_is_accepted(self) -> None:
         assert self._message({"error": "no L2 adapter"}) == "no L2 adapter"
 
-    def test_structured_detail_falls_back_to_the_default(self) -> None:
-        assert self._message({"detail": [{"loc": ["body"]}]}) == "HTTP Error 422"
+    def test_structured_detail_is_serialized(self) -> None:
+        """FastAPI's 422 carries a list; the reason is in it."""
+        assert json.loads(self._message({"detail": [{"loc": ["body"]}]})) == [
+            {"loc": ["body"]}
+        ]
 
     def test_an_empty_body_falls_back_to_the_default(self) -> None:
         assert self._message({}) == "HTTP Error 422"
+
+
+class TestTheReasonIsReported:
+    """The CLI has to log what the helper picked, not just pick it."""
+
+    @staticmethod
+    def _logged(caplog_handler: list[str]) -> str:
+        return "\n".join(caplog_handler)
+
+    @pytest.fixture
+    def records(self):
+        # Standard
+        import logging
+
+        # First Party
+        from lmcache.cli.commands import kvcache
+
+        collected: list[str] = []
+
+        class _Collect(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                collected.append(record.getMessage())
+
+        handler = _Collect()
+        kvcache.logger.addHandler(handler)
+        try:
+            yield collected
+        finally:
+            kvcache.logger.removeHandler(handler)
+
+    def test_a_string_detail_reaches_the_output(self, server, records) -> None:
+        url, recorder = server
+        recorder.response = (422, {"detail": "chunk_hash_hex is not hex"})
+
+        with pytest.raises(SystemExit):
+            _run(["kvcache", "delete", "--url", url, "--key", json.dumps(_KEY)])
+
+        assert "chunk_hash_hex is not hex" in self._logged(records)
+
+    def test_a_structured_detail_reaches_the_output(self, server, records) -> None:
+        url, recorder = server
+        recorder.response = (
+            422,
+            {
+                "detail": [
+                    {"loc": ["body", "key", "chunk_hash_hex"], "msg": "Field required"}
+                ]
+            },
+        )
+
+        with pytest.raises(SystemExit):
+            _run(["kvcache", "delete", "--url", url, "--key", json.dumps(_KEY)])
+
+        logged = self._logged(records)
+        assert "chunk_hash_hex" in logged
+        assert "Field required" in logged
 
 
 class TestDocumentedInvocations:

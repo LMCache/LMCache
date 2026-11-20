@@ -40,6 +40,10 @@ def _error_message(body: dict[str, Any], default: str) -> str:
         value = body.get(key)
         if isinstance(value, str) and value:
             return value
+        if isinstance(value, (list, dict)) and value:
+            # FastAPI answers a validation failure with a list of loc/msg
+            # entries; the reason is in there and only the shape differs.
+            return json.dumps(value)
     return default
 
 
