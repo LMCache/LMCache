@@ -206,6 +206,20 @@ check_gpu_health() {
     return 0
 }
 
+# Succeed when the installed vLLM still has --mamba-cache-mode. vLLM after
+# vllm-project/vllm#63830 removed it: Mamba align mode follows
+# --enable-prefix-caching there.
+# Usage: vllm_supports_mamba_cache_mode && args+=(--mamba-cache-mode align)
+vllm_supports_mamba_cache_mode() {
+    python3 - <<'PY'
+try:
+    from vllm.config.cache import CacheConfig
+except ImportError:
+    raise SystemExit(0)
+raise SystemExit(0 if "mamba_cache_mode" in CacheConfig.__dataclass_fields__ else 1)
+PY
+}
+
 # Find an available TCP port starting from a given port number.
 # Usage: find_free_port [start_port]
 find_free_port() {

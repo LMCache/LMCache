@@ -40,11 +40,15 @@ def _mamba_config(spec: MambaSpec) -> KVCacheConfig:
         # Third Party
         from vllm.v1.core.single_type_kv_cache_manager import MambaManager
 
+        # vllm-project/vllm#63830 replaced mamba_cache_mode with
+        # enable_prefix_caching.
+        if "mamba_cache_mode" in MambaManager.Params.__dataclass_fields__:
+            params = MambaManager.Params(mamba_cache_mode="align")
+        else:
+            params = MambaManager.Params(enable_prefix_caching=True)
         group = kv_cache_interface.KVCacheGroup(
             kv_cache_specs={"layer.0": spec},
-            manager_config=kv_cache_interface.ManagerConfig(
-                MambaManager, MambaManager.Params(mamba_cache_mode="align")
-            ),
+            manager_config=kv_cache_interface.ManagerConfig(MambaManager, params),
             block_size=spec.block_size,
         )
     else:

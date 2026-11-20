@@ -157,8 +157,8 @@ def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
 
     - ``CrossAttentionSpec`` (encoder-decoder caches).
     - Mamba groups with ``mamba_cache_mode`` other than ``"align"`` or
-      ``"all"``: the remaining mode (``"none"``) keeps no reusable per-block
-      state snapshots.
+      ``"all"``: the remaining mode (``"none"``, which is vLLM prefix caching
+      off) keeps no reusable per-block state snapshots.
 
     Specs declaring slot compression (``compress_ratio > 1`` /
     ``tq_slot_size > 0``, e.g. DeepSeek-V4) are NOT rejected: they are served
@@ -188,7 +188,8 @@ def validate_kv_cache_groups(kv_cache_config: KVCacheConfig | None) -> None:
                 unsupported.append(
                     f"group {group_idx}: MambaSpec with mamba_cache_mode="
                     f"'{mamba_cache_mode}' "
-                    f"(only 'align' and 'all' keep reusable state snapshots)"
+                    f"(only 'align' and 'all' keep reusable state snapshots; "
+                    f"enable vLLM prefix caching)"
                 )
     if unsupported:
         raise ValueError(
