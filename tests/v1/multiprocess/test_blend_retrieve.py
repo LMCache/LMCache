@@ -571,6 +571,19 @@ def test_release_applied_read_locks_selects_by_identity():
     assert cb.call_args.args[2] == [keys[1]]
 
 
+def test_release_applied_read_locks_releases_a_shared_key_once():
+    """Matches of a repeated chunk share keys: each is released once, and only
+    after every match reading it was applied."""
+    a, b, c = _release_match(0), _release_match(1), _release_match(0)
+    keys = ["k0", "k1", "k0"]
+    release = BlendModule._release_applied_read_locks
+    with patch.object(retrieve_mod, "submit_callback_to_stream") as cb:
+        assert release(MagicMock(), [a, b, c], [a, b, c], keys, 1, None) == 2
+        assert cb.call_args.args[2] == ["k0", "k1"]
+        assert release(MagicMock(), [a, b, c], [a, b], keys, 1, None) == 1
+        assert cb.call_args.args[2] == ["k1"]
+
+
 # ---------------------------------------------------------------------------
 # L2: sparse-prefetch read-lock release when the request never retrieves
 # ---------------------------------------------------------------------------
@@ -1002,4 +1015,18 @@ def test_sparse_classify_unstaged_but_found_chunk_takes_no_strike():
     # "unstaged" exists -> skipped without a strike or a release.
     eng._ctx.storage_manager.finish_read_prefetched.assert_not_called()
     # "gone" is absent from every tier -> the stale path, unchanged.
+    assert eng._stale_strike == {b"gone": 1}
+
+
+def test_sparse_classify_repeated_missing_chunk_takes_one_strike():
+    """A missing chunk matched at two positions is struck once per lookup."""
+    # First Party
+    from lmcache.lmcache_native import Bitmap
+
+    eng = _classify_engine()
+    matches = [_classify_match(0, b"gone"), _classify_match(2, b"gone")]
+    eng._sparse_classify(
+        _classify_key(), matches, [Bitmap(1)], {b"gone": [_Key("k")]}, {b"gone": 0}
+    )
+
     assert eng._stale_strike == {b"gone": 1}
