@@ -228,8 +228,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         use_mla: Whether the worker KV format is MLA.
         chunk_size: Effective logical tokens per LMCache chunk.
         num_physical_slots: Number of physical KV slots gathered into one
-            LMCache chunk. ``None`` accepts the legacy protocol, where the
-            server assumed one physical slot per logical token.
+            LMCache chunk.
         group_layouts: Per-group layouts for multi-group (hybrid-KV) workers,
             in protocol group order. Empty means legacy single-group; the
             top-level ``num_layers``/``hidden_dim_size``/``dtype_str`` then
@@ -245,7 +244,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     dtype_str: str
     use_mla: bool
     chunk_size: int
-    num_physical_slots: int | None = None
+    num_physical_slots: int
     group_layouts: list[GroupLayout] = []
 
 
