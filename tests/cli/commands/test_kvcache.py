@@ -19,6 +19,7 @@ from lmcache.cli.main import main
 
 ReplyPayload = Mapping[str, object] | str | bytes
 Reply = tuple[int, ReplyPayload]
+ReplyWithLength = tuple[int, ReplyPayload, int]
 Request = tuple[str, str, bytes, str]
 
 NEXT_PAGE_TOKEN = "opaque+/=?& %游标"
@@ -69,7 +70,7 @@ class CacheServer:
     """HTTP boundary with queued replies and captured requests."""
 
     url: str
-    replies: Queue[Reply]
+    replies: Queue[Reply | ReplyWithLength]
     requests: Queue[Request]
 
 
@@ -94,7 +95,11 @@ def cache_server() -> Iterator[CacheServer]:
                 reply = replies.get_nowait()
             except Empty:
                 reply = (500, {"detail": "unexpected extra request"})
-            status, payload = reply
+            if len(reply) == 3:
+                status, payload, declared = reply
+            else:
+                status, payload = reply
+                declared = None
             if isinstance(payload, bytes):
                 encoded = payload
             else:
@@ -103,7 +108,13 @@ def cache_server() -> Iterator[CacheServer]:
                 ).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(encoded)))
+            if declared is not None and declared > len(encoded):
+                self.close_connection = True
+                self.send_header("Connection", "close")
+            self.send_header(
+                "Content-Length",
+                str(declared if declared is not None else len(encoded)),
+            )
             self.end_headers()
             self.wfile.write(encoded)
 
@@ -377,14 +388,27 @@ def test_list_json_detail_beyond_whitespace_bound(
     assert "[truncated]" not in captured.err
 
 
-def test_list_invalid_utf8_in_error_body_is_lenient(
+def test_list_short_body_reports_remaining_bytes(
     cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Undecodable bytes in an error body become replacement characters."""
+    """A body cut short of its Content-Length reports the remaining count."""
+    cache_server.replies.put((400, b'{"ok":', 100))
+    with pytest.raises(SystemExit) as exc:
+        main(["kvcache", "list", "--quiet", "--url", cache_server.url])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "Incomplete HTTP response" in captured.err
+    assert "94 more expected" in captured.err
+
+
+def test_list_invalid_utf8_in_error_body(
+    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Undecodable bytes in an error body stay a read error, not a detail."""
     cache_server.replies.put((400, b'{"detail": "a\xffb"}'))
     with pytest.raises(SystemExit) as exc:
         main(["kvcache", "list", "--quiet", "--url", cache_server.url])
     assert exc.value.code == 1
     captured = capsys.readouterr()
-    assert "a\ufffdb" in captured.err
+    assert "Cannot read HTTP 400 response" in captured.err
     assert "Traceback" not in captured.err

@@ -41,33 +41,57 @@ def normalize_url(url: str) -> str:
 def _error_body(url: str, exc: urllib.error.HTTPError) -> tuple[str, bool]:
     """Read a bounded prefix of an HTTP error body for diagnostics.
 
-    The body is only a diagnostic, so it is decoded leniently: undecodable
-    or bound-split characters become replacement characters rather than
-    failing the error report. An ``IncompleteRead`` escapes to
-    :func:`fetch_json`, which reports it as an incomplete response.
+    Preserves the diagnostics ``describe`` already guarantees: a body that
+    ends before its declared ``Content-Length`` is reported as an
+    incomplete response, and undecodable bytes (including a multi-byte
+    character split by the bound) as a read failure.
 
     Args:
         url: The URL the failed request targeted (used in error messages).
         exc: The HTTP error whose response body should be read.
 
     Returns:
-        ``(body, truncated)`` — the body text and whether the bound
-        truncated the body at all.
+        ``(body, truncated)`` — the decoded body text and whether the
+        bound truncated the body at all.
 
     Raises:
-        CLIHTTPError: When the body cannot be read; the original failure
-            is chained as the cause.
+        CLIHTTPError: When the body cannot be read or decoded; the
+            original failure is chained as the cause.
     """
     try:
         raw = exc.read(_MAX_ERROR_BODY_BYTES + 1)
+    except IncompleteRead as read_exc:
+        raise CLIHTTPError(
+            f"Incomplete HTTP response from {url}: {read_exc}"
+        ) from read_exc
     except OSError as read_exc:
         raise CLIHTTPError(
             f"Cannot read HTTP {exc.code} response from {url}: {read_exc}"
         ) from read_exc
     finally:
         exc.close()
+
+    # A bounded read returns a short body instead of raising when the
+    # server declares Content-Length and closes early; detect that.
+    declared = exc.headers.get("Content-Length")
+    try:
+        expected = int(declared) if declared is not None else None
+    except ValueError:
+        expected = None
+    if expected and len(raw) < min(expected, _MAX_ERROR_BODY_BYTES + 1):
+        incomplete = IncompleteRead(raw, expected - len(raw))
+        raise CLIHTTPError(
+            f"Incomplete HTTP response from {url}: {incomplete}"
+        ) from incomplete
+
     truncated = len(raw) > _MAX_ERROR_BODY_BYTES
-    return raw[:_MAX_ERROR_BODY_BYTES].decode(errors="replace"), truncated
+    try:
+        body = raw[:_MAX_ERROR_BODY_BYTES].decode()
+    except UnicodeDecodeError as read_exc:
+        raise CLIHTTPError(
+            f"Cannot read HTTP {exc.code} response from {url}: {read_exc}"
+        ) from read_exc
+    return body, truncated
 
 
 def _detail_from_body(body: str) -> str | None:
