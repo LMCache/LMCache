@@ -541,12 +541,13 @@ class RetrieveMixin:
             The number of object keys whose release was enqueued.
         """
         applied_ids = {id(r) for r in applied}
-        release_keys = [
-            all_obj_keys[i * n_read + g]
-            for i, r in enumerate(cb_match_result)
-            if id(r) in applied_ids
-            for g in range(n_read)
-        ]
+        # Repeated chunks share keys: release a key once, when every match
+        # reading it was applied.
+        done: dict[ObjectKey, bool] = {}
+        for i, r in enumerate(cb_match_result):
+            for k in all_obj_keys[i * n_read : (i + 1) * n_read]:
+                done[k] = done.get(k, True) and id(r) in applied_ids
+        release_keys = [k for k, ok in done.items() if ok]
         if release_keys:
             if l1_owners is None:
                 submit_callback_to_stream(
@@ -895,8 +896,10 @@ class RetrieveMixin:
             # cb.scatter opens mid-try; track it so a failure closes the span.
             scatter_open = False
             try:
+                # Repeated chunks share keys: read each once, expand per match.
+                unique_keys = list(dict.fromkeys(all_obj_keys))
                 with self._ctx.storage_manager.read_prefetched_results(
-                    all_obj_keys, l1_owners=l1_owners
+                    unique_keys, l1_owners=l1_owners
                 ) as memory_objs:
                     _stage_ms["fetch"] = (time.perf_counter() - _stage_t) * 1000
                     if memory_objs is None:
@@ -928,6 +931,8 @@ class RetrieveMixin:
                             False,
                         )
 
+                    obj_of = dict(zip(unique_keys, memory_objs, strict=True))
+                    memory_objs = [obj_of[k] for k in all_obj_keys]
                     # Per-token scatter handles any cur_st. Each match owns n_read
                     # consecutive memory objects (chunk-major).
                     if len(memory_objs) != len(cb_match_result) * n_read:
