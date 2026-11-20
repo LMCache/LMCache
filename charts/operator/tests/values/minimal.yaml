@@ -1,0 +1,10 @@
+# Minimal deployment - only the operator controller, no webhook, no metrics,
+# no cert-manager, no CRD roles.  Tests that conditional templates are omitted.
+webhook:
+  enabled: false
+certManager:
+  enabled: false
+metrics:
+  enabled: false
+crdRoles:
+  enabled: false

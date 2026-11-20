@@ -1,0 +1,16 @@
+{{- if .Values.webhook.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-webhook-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+spec:
+  ports:
+  - port: 443
+    protocol: TCP
+    targetPort: webhook-server
+  selector:
+    {{- include "lmcache-operator.selectorLabels" . | nindent 4 }}
+{{- end }}

@@ -1,0 +1,11 @@
+# Extra volumes and volumeMounts added to the operator pod (no webhook).
+# Tests that extra volumes coexist with webhook volumes when webhook is on.
+webhook:
+  enabled: true
+volumes:
+  - name: config
+    emptyDir: {}
+volumeMounts:
+  - name: config
+    mountPath: /etc/custom-config
+    readOnly: true

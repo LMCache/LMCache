@@ -1,0 +1,201 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-test-resources
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lmcache-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": "before-hook-creation,hook-succeeded"
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ .Release.Name }}-test
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: test
+    image: alpine/k8s:1.31.0
+    imagePullPolicy: IfNotPresent
+    securityContext:
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+    env:
+    - name: NAMESPACE
+      value: {{ .Release.Namespace }}
+    - name: RELEASE_NAME
+      value: {{ .Release.Name | quote }}
+    {{- if .Values.webhook.enabled }}
+    - name: WEBHOOK_ENABLED
+      value: "true"
+    {{- end }}
+    {{- if .Values.metrics.enabled }}
+    - name: METRICS_ENABLED
+      value: "true"
+    {{- end }}
+    {{- if .Values.certManager.enabled }}
+    - name: CERTMANAGER_ENABLED
+      value: "true"
+    {{- end }}
+    {{- if .Values.crdRoles.enabled }}
+    - name: CRD_ROLES_ENABLED
+      value: "true"
+    {{- end }}
+    command:
+    - /bin/sh
+    - -ec
+    - |
+      set -euo pipefail
+
+      echo "=== Test 1: Deployment exists ==="
+      kubectl -n "$NAMESPACE" get deployment "$RELEASE_NAME-controller-manager" -o jsonpath='{.metadata.name}' >/dev/null
+      echo "  Deployment found: $RELEASE_NAME-controller-manager"
+
+      echo "=== Test 2: ServiceAccount exists ==="
+      kubectl -n "$NAMESPACE" get sa controller-manager -o jsonpath='{.metadata.name}' >/dev/null
+      echo "  ServiceAccount found: controller-manager"
+
+      echo "=== Test 3: ClusterRole and ClusterRoleBinding exist ==="
+      kubectl get clusterrole "$RELEASE_NAME-manager-role" -o jsonpath='{.metadata.name}' >/dev/null
+      kubectl get clusterrolebinding "$RELEASE_NAME-manager-rolebinding" -o jsonpath='{.metadata.name}' >/dev/null
+      echo "  ClusterRole + ClusterRoleBinding found"
+
+      echo "=== Test 4: Leader election Role and RoleBinding exist ==="
+      kubectl -n "$NAMESPACE" get role "$RELEASE_NAME-leader-election-role" -o jsonpath='{.metadata.name}' >/dev/null
+      kubectl -n "$NAMESPACE" get rolebinding "$RELEASE_NAME-leader-election-rolebinding" -o jsonpath='{.metadata.name}' >/dev/null
+      echo "  Role + RoleBinding found"
+
+      {{- if .Values.crdInstall }}
+      echo "=== Test 5: CRDs are installed ==="
+      kubectl get crd lmcacheengines.lmcache.lmcache.ai -o jsonpath='{.spec.names.kind}' | grep -q "LMCacheEngine"
+      kubectl get crd cacheblendengines.lmcache.lmcache.ai -o jsonpath='{.spec.names.kind}' | grep -q "CacheBlendEngine"
+      kubectl get crd lmcachecoordinators.lmcache.lmcache.ai -o jsonpath='{.spec.names.kind}' | grep -q "LMCacheCoordinator"
+      echo "  All 3 CRDs found"
+      {{- else }}
+      echo "=== Test 5: CRDs skipped (crdInstall=false) ==="
+      {{- end }}
+
+      echo "=== Test 6: Deployment has correct image ==="
+      ACTUAL_IMAGE=$(kubectl -n "$NAMESPACE" get deployment "$RELEASE_NAME-controller-manager" -o jsonpath='{.spec.template.spec.containers[0].image}')
+      EXPECTED_IMAGE="{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+      if [ "$ACTUAL_IMAGE" != "$EXPECTED_IMAGE" ]; then
+        echo "  FAIL: expected image $EXPECTED_IMAGE, got $ACTUAL_IMAGE"
+        exit 1
+      fi
+      echo "  Image correct: $ACTUAL_IMAGE"
+
+      echo "=== Test 7: Deployment has correct replica count ==="
+      ACTUAL_REPLICAS=$(kubectl -n "$NAMESPACE" get deployment "$RELEASE_NAME-controller-manager" -o jsonpath='{.spec.replicas}')
+      EXPECTED_REPLICAS="{{ .Values.replicas }}"
+      if [ "$ACTUAL_REPLICAS" != "$EXPECTED_REPLICAS" ]; then
+        echo "  FAIL: expected replicas $EXPECTED_REPLICAS, got $ACTUAL_REPLICAS"
+        exit 1
+      fi
+      echo "  Replicas correct: $ACTUAL_REPLICAS"
+
+      echo "=== Test 8: ServiceAccount name in deployment spec ==="
+      SA=$(kubectl -n "$NAMESPACE" get deployment "$RELEASE_NAME-controller-manager" -o jsonpath='{.spec.template.spec.serviceAccountName}')
+      if [ "$SA" != "controller-manager" ]; then
+        echo "  FAIL: expected serviceAccountName controller-manager, got $SA"
+        exit 1
+      fi
+      echo "  ServiceAccountName correct: $SA"
+
+      echo "=== Test 9: Deployment args contain health-probe-bind-address ==="
+      ARGS=$(kubectl -n "$NAMESPACE" get deployment "$RELEASE_NAME-controller-manager" -o jsonpath='{.spec.template.spec.containers[0].args}' | tr -d '[]')
+      echo "$ARGS" | grep -q "health-probe-bind-address=:8081"
+      echo "  --health-probe-bind-address=:8081 present"
+
+      {{- if .Values.leaderElection.enabled }}
+      echo "=== Test 10: Leader election arg present ==="
+      echo "$ARGS" | grep -q "leader-elect"
+      echo "  --leader-elect present"
+      {{- else }}
+      echo "=== Test 10: Leader election arg absent ==="
+      if echo "$ARGS" | grep -q "leader-elect"; then
+        echo "  FAIL: --leader-elect should be absent"
+        exit 1
+      fi
+      echo "  --leader-elect correctly absent"
+      {{- end }}
+
+      {{- if .Values.webhook.enabled }}
+      echo "=== Test 11: MutatingWebhookConfiguration exists ==="
+      kubectl get mutatingwebhookconfiguration "$RELEASE_NAME-mutating-webhook-configuration" -o jsonpath='{.metadata.name}' >/dev/null
+      echo "  MutatingWebhookConfiguration found"
+
+      echo "=== Test 12: Webhook Service exists ==="
+      kubectl -n "$NAMESPACE" get service "$RELEASE_NAME-webhook-service" -o jsonpath='{.metadata.name}' >/dev/null
+      echo "  Webhook Service found"
+
+      echo "=== Test 13: Webhook cert path arg present ==="
+      echo "$ARGS" | grep -q "webhook-cert-path=/tmp/k8s-webhook-server/serving-certs"
+      echo "  --webhook-cert-path present"
+
+      echo "=== Test 14: Both webhook entries present ==="
+      HOOK_COUNT=$(kubectl get mutatingwebhookconfiguration "$RELEASE_NAME-mutating-webhook-configuration" -o jsonpath='{.webhooks[*].name}' | tr ' ' '\n' | wc -l)
+      if [ "$HOOK_COUNT" -ne 2 ]; then
+        echo "  FAIL: expected 2 webhooks, got $HOOK_COUNT"
+        exit 1
+      fi
+      echo "  2 webhooks found (cacheblend + lmcache)"
+
+      {{- if .Values.certManager.enabled }}
+      echo "=== Test 15: cert-manager Issuer exists ==="
+      kubectl -n "$NAMESPACE" get issuer "$RELEASE_NAME-selfsigned-issuer" -o jsonpath='{.metadata.name}' >/dev/null
+      echo "  Issuer found"
+
+      echo "=== Test 16: cert-manager Certificate exists ==="
+      kubectl -n "$NAMESPACE" get certificate "$RELEASE_NAME-serving-cert" -o jsonpath='{.metadata.name}' >/dev/null
+      echo "  Certificate found"
+
+      echo "=== Test 17: MutatingWebhookConfiguration has CA injection annotation ==="
+      kubectl get mutatingwebhookconfiguration "$RELEASE_NAME-mutating-webhook-configuration" -o jsonpath='{.metadata.annotations.cert-manager\.io/inject-ca-from}' | grep -q "$NAMESPACE/$RELEASE_NAME-serving-cert"
+      echo "  CA injection annotation correct"
+      {{- else }}
+      echo "=== Test 15: cert-manager disabled — skipping Issuer/Certificate checks ==="
+      {{- end }}
+      {{- else }}
+      echo "=== Test 11: Webhook disabled — skipping webhook checks ==="
+      {{- end }}
+
+      {{- if .Values.metrics.enabled }}
+      echo "=== Test 18: Metrics Service exists ==="
+      kubectl -n "$NAMESPACE" get service "$RELEASE_NAME-metrics-service" -o jsonpath='{.metadata.name}' >/dev/null
+      echo "  Metrics Service found"
+
+      echo "=== Test 19: Metrics bind address arg present ==="
+      echo "$ARGS" | grep -q "metrics-bind-address"
+      echo "  --metrics-bind-address present"
+
+      echo "=== Test 20: Metrics auth ClusterRole exists ==="
+      kubectl get clusterrole "$RELEASE_NAME-metrics-auth-role" -o jsonpath='{.metadata.name}' >/dev/null
+      echo "  Metrics auth ClusterRole found"
+
+      echo "=== Test 21: Metrics reader ClusterRole exists ==="
+      kubectl get clusterrole "$RELEASE_NAME-metrics-reader" -o jsonpath='{.metadata.name}' >/dev/null
+      echo "  Metrics reader ClusterRole found"
+      {{- else }}
+      echo "=== Test 18: Metrics disabled — skipping metrics checks ==="
+      {{- end }}
+
+      {{- if .Values.crdRoles.enabled }}
+      echo "=== Test 22: CRD admin/editor/viewer roles exist ==="
+      kubectl get clusterrole "$RELEASE_NAME-lmcacheengine-admin-role" -o jsonpath='{.metadata.name}' >/dev/null
+      kubectl get clusterrole "$RELEASE_NAME-lmcacheengine-editor-role" -o jsonpath='{.metadata.name}' >/dev/null
+      kubectl get clusterrole "$RELEASE_NAME-lmcacheengine-viewer-role" -o jsonpath='{.metadata.name}' >/dev/null
+      echo "  All 3 CRD roles found"
+      {{- else }}
+      echo "=== Test 22: CRD roles disabled — skipping ==="
+      {{- end }}
+
+      echo ""
+      echo "========================================="
+      echo "  All live-cluster tests passed!"
+      echo "========================================="
