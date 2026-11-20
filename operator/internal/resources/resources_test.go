@@ -257,7 +257,7 @@ func TestBuildContainerArgs_Defaults(t *testing.T) {
 	assertArg(t, args, "--eviction-trigger-watermark", "0.80")
 	assertArg(t, args, "--eviction-ratio", "0.20")
 	assertArg(t, args, "--prometheus-port", "9090")
-	assertNoArg(t, args, "--disable-prometheus")
+	assertNoArg(t, args, "--disable-metrics")
 }
 
 func TestBuildContainerArgs_CustomServer(t *testing.T) {
@@ -303,7 +303,7 @@ func TestBuildContainerArgs_PrometheusDisabled(t *testing.T) {
 	}
 	args := BuildContainerArgs(spec)
 
-	assertHasArg(t, args, "--disable-prometheus")
+	assertHasArg(t, args, "--disable-metrics")
 	assertNoArg(t, args, "--prometheus-port")
 }
 

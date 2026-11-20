@@ -86,7 +86,7 @@ func BuildContainerArgs(spec *lmcachev1alpha1.LMCacheEngineSpec) []string {
 		promEnabled = derefBool(spec.Prometheus.Enabled, true)
 	}
 	if !promEnabled {
-		args = append(args, "--disable-prometheus")
+		args = append(args, "--disable-metrics")
 	} else {
 		promPort := int32(9090)
 		if spec.Prometheus != nil {
