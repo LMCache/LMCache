@@ -141,7 +141,7 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Which worker → server transfer paths the server loads.
        ``lmcache_driven`` (default) enables only the server-driven
        transfer path (STORE/RETRIEVE, supports both CUDA IPC and CPU
-       SHM); ``engine_driven`` enables only the non-GPU
+       SHM); ``engine_driven`` enables only the engine-driven
        (PREPARE/COMMIT) transfer path; ``auto`` loads both
        so workers of either device type can connect without manual
        configuration.
