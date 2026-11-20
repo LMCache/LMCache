@@ -27,6 +27,39 @@ operation whose blocks come under eviction pressure.
   request's ops in token order.
 - **`EvictionAwareStoreQueue`** -- the policy object, one per connector.
 
+## Lazy offload covers the blocks vLLM retains
+
+Lazy offload stores a block at the latest moment before vLLM reuses it.
+vLLM frees hash-less blocks to the head of the free queue, reused first,
+and hashed blocks to the tail in LRU order (`BlockPool.free_blocks`,
+vLLM `v1/core/block_pool.py:777-806`); an allocation takes blocks from the
+head (`get_new_blocks`, `:684`), and a touch removes a block from the queue
+(`touch`, `:766-767`).
+
+- A **hashed block has slack**: it is reused only after the blocks ahead of
+  it, so the policy tracks it as it moves toward the head and stores it
+  before reuse.
+- A **hash-less block has none**: the next allocation takes it. Pinning it
+  to store it later would make vLLM take the next free block instead,
+  evicting a hashed, still reusable block early: a reusable block traded
+  for one vLLM does not intend to reuse. So lazy offload covers only hashed
+  blocks, and the manager replaces a hash-less block by the null block when
+  it buffers an op (`add_store_candidate`). It never enters a hash snapshot
+  and never breaks a request's chain, which is defined over hashed blocks.
+  The server does not store a chunk whose blocks in an object group are
+  all the null block (`all_null_chunk_masks`).
+- The **hashed blocks are exactly those vLLM retains** past the step: it
+  decides and hashes them in `allocate_slots` (`kv_cache_manager.py:607-616`)
+  before the connector builds its metadata. Under sparse retention
+  (`--prefix-cache-retention-interval 0`) the hash-less non-null blocks in
+  a store op are the align-mode recurrent states it does not keep
+  (`single_type_kv_cache_manager.py:1572-1630`); `remove_skipped_blocks`
+  frees each two schedules after the step that wrote it (`:1653-1681`,
+  called from `allocate_slots`, `kv_cache_manager.py:555`), in the same
+  call that then allocates. Full attention blocks in an op are always
+  hashed: an op covers whole computed blocks, and lazy offload requires
+  prefix caching. Sliding-window blocks out of the window are already null.
+
 ## Per-step protocol (policy-caller obligations)
 
 `LazyOffloadManager` is the production caller; the connector only forwards
@@ -34,16 +67,13 @@ lifecycle events to it.
 
 1. Route each `GetStoreMetadata` result to `add(meta, block_hashes)`
    instead of the step metadata. The queue takes custody or drops the
-   operation itself. Two are dropped here and logged:
-   - A **hash-less covered block**. Its later eviction is undetectable
-     (evicted-and-reallocated also reads `None`), so storing it risks filing
-     wrong bytes under a content-addressed key. Hybrid-attention models
-     (sliding window, mamba) put hash-less null blocks into block tables when
-     vLLM's own prefix cache serves a prefix whose out-of-window positions
-     hold no KV. The tracker has already advanced past the skipped range, so
-     the queue blacklists the request and drops its later chunks too.
-   - A **broken prefix**: an earlier chunk of the request was dropped, so
-     this one would be unreachable on retrieval.
+   operation itself. `block_hashes` holds only hashed blocks: the manager
+   has replaced each hash-less block by the null block (see "Lazy offload
+   covers the blocks vLLM retains"), and the null block, which hybrid
+   models put at positions that hold no data, is never recycled. One case
+   is dropped here and logged: a **broken prefix**, where an earlier chunk
+   of the request was dropped, so this one would be unreachable on
+   retrieval.
 2. Once per step call `drain(signals)` with that step's `DrainSignals`.
    Pending ops of finished requests wait out their eviction clock -- that is
    the point of lazy offload. Every drain revalidates every pending request's
@@ -169,8 +199,8 @@ Two log hooks:
               + dropped_id_reuse
   ```
 
-  `rejected_unhashed` and `rejected_prefix_broken` stay out (those ops are
-  turned away before `admitted`), and `emitted_overdue` is a weight beside
+  `rejected_prefix_broken` stays out (those ops are turned away before
+  `admitted`), and `emitted_overdue` is a weight beside
   the equation, not a term of it. `emitted` means handed to the manager, not
   submitted: the manager re-reads the hashes before pinning and can still
   drop an op there. That drop is a WARNING line and no counter, and for this

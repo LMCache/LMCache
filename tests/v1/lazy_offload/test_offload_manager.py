@@ -264,6 +264,82 @@ class TestRealBlockPool:
         assert real_free_block_ids(pool) == [stored.block_id]
         pool.free_blocks(spare)  # leave the pool balanced
 
+    def test_null_blocks_do_not_block_the_store(self) -> None:
+        """A Mamba group's null blocks (align mode) leave the store to its live
+        blocks: the op is buffered and stored with the null block in place.
+        """
+        pool = make_real_pool()
+        manager = LazyOffloadManager(
+            {POLICY_CONFIG_KEY: LazyOffloadMode.EVICTION_AWARE.value},
+            [TOKENS_PER_BLOCK, TOKENS_PER_BLOCK],
+            _FakeCompletionTracker(),
+        )
+        manager.bind_block_pool(pool)
+        blocks = pool.get_new_blocks(pool.get_num_free_blocks())
+        attention, state, spare = blocks[:2], blocks[2], blocks[3:]
+        for i, block in enumerate([*attention, state]):
+            give_real_hash(block, bytes([i + 1]) * 32)
+        attention_ids = [block.block_id for block in attention]
+        null = pool.null_block.block_id
+
+        manager.add_store_candidate(
+            _make_store_metadata(
+                "req", [attention_ids, [null, state.block_id]], 0, 2 * TOKENS_PER_BLOCK
+            )
+        )
+        pool.free_blocks([*attention, state])
+        stores = manager.on_scheduler_step(
+            _make_scheduler_output(2 * TOKENS_PER_BLOCK)  # type: ignore[arg-type]
+        ).stores_to_submit
+
+        assert len(stores) == 1
+        assert stores[0].request_id == "req"
+        assert stores[0].op.block_ids == [attention_ids, [null, state.block_id]]
+        pool.free_blocks(spare)  # leave the pool balanced
+
+    def test_hash_less_block_is_not_protected_and_keeps_the_chain(self) -> None:
+        """A block without a prefix-cache hash is never a vLLM victim.
+
+        It is stored as the null block, and the request's later ops are still
+        buffered and stored: the hash-less block does not break the chain.
+        """
+        pool = make_real_pool()
+        manager = LazyOffloadManager(
+            {POLICY_CONFIG_KEY: LazyOffloadMode.EVICTION_AWARE.value},
+            [TOKENS_PER_BLOCK, TOKENS_PER_BLOCK],
+            _FakeCompletionTracker(),
+        )
+        manager.bind_block_pool(pool)
+        blocks = pool.get_new_blocks(pool.get_num_free_blocks())
+        # A step-end recurrent state vLLM does not keep: allocated, never hashed.
+        attention, dropped_state, spare = blocks[:2], blocks[2], blocks[3:]
+        for i, block in enumerate(attention):
+            give_real_hash(block, bytes([i + 1]) * 32)
+        attention_ids = [block.block_id for block in attention]
+        null = pool.null_block.block_id
+        first = _make_store_metadata(
+            "req", [attention_ids[:1], [dropped_state.block_id]], 0, TOKENS_PER_BLOCK
+        )
+        second = _make_store_metadata(
+            "req", [attention_ids[1:], [null]], TOKENS_PER_BLOCK, 2 * TOKENS_PER_BLOCK
+        )
+        offered = [list(group) for group in first.op.block_ids]
+
+        manager.add_store_candidate(first)
+        manager.add_store_candidate(second)
+        pool.free_blocks(attention)
+        stores = manager.on_scheduler_step(
+            _make_scheduler_output(2 * TOKENS_PER_BLOCK)  # type: ignore[arg-type]
+        ).stores_to_submit
+
+        assert len(stores) == 1
+        assert stores[0].op.start == 0
+        assert stores[0].op.end == 2 * TOKENS_PER_BLOCK
+        assert stores[0].op.block_ids == [attention_ids, [null, null]]
+        # The caller's op is left as the tracker built it.
+        assert first.op.block_ids == offered
+        pool.free_blocks([dropped_state, *spare])  # leave the pool balanced
+
     def test_rank_walk_rejects_a_queue_missing_its_tail_sentinel(self) -> None:
         """A head with no successor is not a shape vLLM maintains: the drain must fail
         loudly instead of reporting an empty queue over a structure that changed.
@@ -1179,23 +1255,6 @@ class TestFIFODrain:
 
         assert len(drained) == 0
         assert harness.pool.freed == [[1, 2]]
-        assert harness.ended_sessions == ["req"]
-
-    def test_fifo_drain_drops_op_with_unhashed_block(self) -> None:
-        """A block with no hash at buffering time cannot prove at drain time that its
-        content survived: None == None must fail validation, not pass it (an evicted-
-        and-reallocated block also reads None).
-        """
-        harness = _make_fifo_harness()
-        # Bypass the hash-seeding helper: blocks 1-2 keep block_hash=None.
-        harness.manager.add_store_candidate(
-            _make_store_metadata("req", [[1, 2]], 0, 32)
-        )
-        _finish_request(harness, "req")
-
-        drained = _drain(harness)
-
-        assert len(drained) == 0
         assert harness.ended_sessions == ["req"]
 
     def test_fifo_drain_coalesces_ops_into_one_store(self) -> None:
