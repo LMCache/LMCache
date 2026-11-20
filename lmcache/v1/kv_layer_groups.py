@@ -221,6 +221,10 @@ class KernelGroupInfo:
     rather than per-token attention KV. The window reflects restore
     semantics, so ``full_sw_kv`` forcing must not widen it."""
 
+    rope_num_layers: int | None = None
+    """Leading rotary-key entries in ``layer_indices``, or ``None`` when
+    unspecified. Staging and scatter still cover every entry."""
+
     def __repr__(self) -> str:
         if not self.layer_indices:
             indices_repr = "[]"
@@ -430,6 +434,13 @@ class KVLayerGroupsManager:
                     f"layers {indices}"
                 )
 
+            rope_num_layers = info.rope_num_layers if info is not None else None
+            if rope_num_layers is not None and not 0 <= rope_num_layers <= len(indices):
+                raise ValueError(
+                    f"group {group_idx}: rope_num_layers={rope_num_layers} "
+                    f"must be in [0, {len(indices)}]"
+                )
+
             # tokens_per_block comes from the engine's KV cache spec; when
             # absent, fall back to the physical slot count so the group is
             # treated as non-compressed (compress_ratio == 1).
@@ -463,6 +474,7 @@ class KVLayerGroupsManager:
                     recurrent_state=(
                         info.recurrent_state if info is not None else False
                     ),
+                    rope_num_layers=rope_num_layers,
                 )
             )
 
