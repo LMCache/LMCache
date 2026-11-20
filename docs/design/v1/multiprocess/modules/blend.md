@@ -210,6 +210,11 @@ mappings; work encoded as numpy int64 tables) enqueued in a single
 the retrieve fails cleanly and the client degrades that request to full
 recompute.
 
+A chunk matched at several positions is staged from host once per step:
+the planner groups its copies, and later copies in a step are
+device-to-device staging rows (`host_offset = -1`) from the first copy's
+slot, run before re-RoPE rewrites it.
+
 The scatter is **all-or-nothing** — never partial. Zero-work returns are
 reported with a fixed reason code on `CB_RETRIEVE_NOOP`:
 
