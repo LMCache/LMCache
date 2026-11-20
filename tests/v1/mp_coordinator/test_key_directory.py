@@ -5,7 +5,9 @@ Stream admission itself (seq dedup, gap detection, incarnation
 comparison) is the gate's job -- see ``test_event_gate.py``."""
 
 # Standard
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
+from typing import Any
 
 # Third Party
 import numpy as np
@@ -763,6 +765,80 @@ def test_failed_restore_keeps_existing_placement_aggregates() -> None:
     assert after.l1_size_bytes == before.l1_size_bytes
     assert after.l2_count == before.l2_count
     assert after.l2_size_bytes == before.l2_size_bytes
+
+
+def _set_last_placement_field(state: dict[str, Any], index: int, value: object) -> None:
+    encoded_key, last_access, access_count, placements = state["keys"][-1]
+    placement = list(placements[0])
+    placement[index] = value
+    state["keys"][-1] = (encoded_key, last_access, access_count, [tuple(placement)])
+
+
+def _cite_missing_key_position(state: dict[str, Any]) -> None:
+    state["l1_keys_by_instance"] = {"node-a": [0], "node-b": [len(state["keys"])]}
+
+
+def _set_last_tier_to_all(state: dict[str, Any]) -> None:
+    _set_last_placement_field(state, 2, Tier.ALL.value)
+
+
+def _set_last_size_to_str(state: dict[str, Any]) -> None:
+    _set_last_placement_field(state, 4, "big")
+
+
+def _set_last_rank_to_str(state: dict[str, Any]) -> None:
+    encoded_key, last_access, access_count, placements = state["keys"][-1]
+    encoded_key = list(encoded_key)
+    encoded_key[2] = "0"
+    state["keys"][-1] = (encoded_key, last_access, access_count, placements)
+
+
+def _truncate_token_bytes(state: dict[str, Any]) -> None:
+    state["bindings"] = [
+        (chunk_hash, token_offset, raw_tokens[:-1])
+        for chunk_hash, token_offset, raw_tokens in state["bindings"]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("corrupt", "error", "match"),
+    [
+        (_cite_missing_key_position, ValueError, "cites key position"),
+        (_set_last_tier_to_all, ValueError, "tier l1 or l2"),
+        (_set_last_size_to_str, TypeError, "unsupported operand"),
+        (_set_last_rank_to_str, TypeError, "unsupported operand"),
+        (_truncate_token_bytes, ValueError, "multiple of element size"),
+    ],
+)
+def test_failed_restore_leaves_the_directory_empty(
+    corrupt: Callable[[dict[str, Any]], None],
+    error: type[Exception],
+    match: str,
+) -> None:
+    """A section the loader ignores must not leave keys behind: nothing
+    would fence them, so they would be served as hints indefinitely."""
+    live = KeyDirectory()
+    live.consume(_batch(keys=[_key(1), _key(2)], token_ids=[1, 2]))
+    state = dict(live.capture())
+    corrupt(state)
+
+    restarted = KeyDirectory()
+    restarted.enable_blend_lookup(chunk_size=2, probe_stride=1)
+    with pytest.raises(error, match=match):
+        restarted.restore(state)
+
+    assert restarted.lookup([_key(1), _key(2)]) == [[], []]
+    assert restarted.get_token_ids([_key(1).chunk_hash, _key(2).chunk_hash]) == [(), ()]
+    stats = restarted.stats()
+    assert stats.num_keys == 0
+    assert stats.l1_count == 0
+    assert stats.l1_size_bytes == 0
+    assert stats.l1_keys_by_instance == {}
+    assert restarted.blend_stats().num_claims == 0
+    # Still empty, so a later valid capture can be restored.
+    restarted.restore(live.capture())
+    assert restarted.lookup([_key(1)])[0]
+    assert restarted.blend_match(np.asarray([1, 2], dtype=np.uint64), NS)
 
 
 # -- Shared locations ----------------------------------------------------------
