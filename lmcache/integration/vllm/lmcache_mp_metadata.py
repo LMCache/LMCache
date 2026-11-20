@@ -31,6 +31,7 @@ from lmcache.integration.vllm.utils import (
     extract_request_configs_from_request,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
+from lmcache.utils import init_logger
 from lmcache.v1.common.group_view import slice_block_ids_per_group
 from lmcache.v1.common.token_codec import (
     TOKEN_STRIDE,
@@ -41,6 +42,8 @@ from lmcache.v1.common.token_codec import (
 if TYPE_CHECKING:
     # Third Party
     from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 def _make_token_ids_tensor(token_ids: Sequence[int]) -> torch.Tensor:
@@ -343,6 +346,10 @@ class LMCacheMPRequestMetadata:
     op: LoadStoreOp
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
+    # RETRIEVE only: the blocks vLLM allocated cannot hold the range, so the
+    # worker reports the load as failed (vLLM's kv_load_failure_policy then
+    # fails or recomputes the request) instead of loading it.
+    fail_load: bool = False
 
     @staticmethod
     def GetStoreMetadata(
@@ -606,6 +613,9 @@ class LMCacheMPRequestMetadata:
         Note:
             A hit that does not end on a chunk boundary ends with the unfull
             chunk the lookup found; it is retrieved with the full chunks.
+            When the blocks vLLM allocated cannot hold the range, the
+            metadata has ``fail_load`` set and the worker reports the load as
+            failed instead of loading it.
         """
         if not tracker.is_ready_for_retrieving():
             return None
@@ -635,7 +645,11 @@ class LMCacheMPRequestMetadata:
                 include_unfull_chunk=include_unfull_chunk,
             )
             # The slice silently drops blocks vLLM never allocated. Loading a
-            # shorter list would write the KV into the wrong blocks, so fail.
+            # shorter list would write the KV into the wrong blocks, and
+            # loading less than vLLM counts as computed would leave tokens
+            # without KV, so the load is reported as failed for this request
+            # only. Raising here would kill the engine core.
+            fail_load = False
             for engine_group_idx, (tokens_per_block, group_block_ids) in enumerate(
                 zip(group_tokens_per_block, block_ids, strict=True)
             ):
@@ -646,13 +660,19 @@ class LMCacheMPRequestMetadata:
                     - start_token_idx // tokens_per_block
                 )
                 if len(group_block_ids) < expected_blocks:
-                    raise ValueError(
-                        f"retrieve of tokens [{start_token_idx}, "
-                        f"{end_token_idx}) for request {tracker.request_id} "
-                        f"needs {expected_blocks} blocks in engine group "
-                        f"{engine_group_idx}, but only "
-                        f"{len(group_block_ids)} are allocated"
+                    logger.error(
+                        "Retrieve of tokens [%d, %d) for request %s needs %d "
+                        "blocks in engine group %d, but only %d are allocated; "
+                        "reporting the load as failed.",
+                        start_token_idx,
+                        end_token_idx,
+                        tracker.request_id,
+                        expected_blocks,
+                        engine_group_idx,
+                        len(group_block_ids),
                     )
+                    fail_load = True
+                    break
             token_bytes = tracker.packed_token_ids()
 
             # Compute how many tokens at the start of the retrieve range
@@ -676,6 +696,7 @@ class LMCacheMPRequestMetadata:
                 op=op,
                 cache_salt=tracker.cache_salt,
                 request_configs=tracker.request_configs,
+                fail_load=fail_load,
             )
             return ret
 

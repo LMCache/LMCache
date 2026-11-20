@@ -1101,6 +1101,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         for meta in metadata.requests:
             if meta.direction != "RETRIEVE":
                 continue
+            if meta.fail_load:
+                self.worker_adapter.fail_retrieve_request(meta.request_id, meta.op)
+                continue
             request_ids.append(meta.request_id)
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
