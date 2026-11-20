@@ -298,3 +298,7 @@ class TensorMemoryAllocator(MemoryAllocatorInterface):
     def __str__(self) -> str:
         """Return the allocator name."""
         return "TensorMemoryAllocator"
+
+    def get_fragmentation_stats(self) -> tuple[int, int]:
+        """Return the largest free block in bytes and the free-block count."""
+        return self.address_manager.get_fragmentation_stats()

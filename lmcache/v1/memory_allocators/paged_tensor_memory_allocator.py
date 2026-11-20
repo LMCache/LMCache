@@ -36,6 +36,17 @@ class PagedAddressManager:
         """Get the total free size in bytes."""
         return len(self._allocator.free_blocks) * self._allocator.align_bytes
 
+    def get_fragmentation_stats(self) -> tuple[int, int]:
+        """Return the fragmentation signal for the paged tier.
+
+        Pages are all one chunk-sized unit, so external fragmentation
+        cannot occur: while any page is free it is allocatable, making
+        the page size the largest usable free block.
+        """
+        free_pages = len(self._allocator.free_blocks)
+        page_size = self._allocator.align_bytes
+        return (page_size if free_pages else 0, free_pages)
+
 
 class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     """
@@ -332,3 +343,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     def __del__(self) -> None:
         # FIXME: NIXL-related memory leak should be handled somewhere (else).
         del self.buffer
+
+    def get_fragmentation_stats(self) -> tuple[int, int]:
+        """Return the largest free block in bytes and the free-block count."""
+        return self.address_manager.get_fragmentation_stats()

@@ -44,6 +44,19 @@ def _unlink_stale_shm(shm_name: str) -> None:
         )
 
 
+def _resolve_address_manager(allocator: MemoryAllocatorInterface):
+    """Return the allocator's address manager for usage/fragmentation reads."""
+    if isinstance(allocator, MixedMemoryAllocator) and hasattr(
+        allocator.pin_allocator, "address_manager"
+    ):
+        return allocator.pin_allocator.address_manager
+    if isinstance(allocator, LazyMemoryAllocator):
+        return allocator.get_address_manager()
+    raise NotImplementedError(
+        "no address manager is available for this allocator type."
+    )
+
+
 def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInterface:
     """
     Create a memory allocator based on the provided configuration.
@@ -172,22 +185,34 @@ class L1MemoryManager:
         if hasattr(self._allocator, "get_memory_usage"):
             return self._allocator.get_memory_usage()
 
-        def get_address_manager(allocator: MemoryAllocatorInterface):
-            if isinstance(allocator, MixedMemoryAllocator) and hasattr(
-                allocator.pin_allocator, "address_manager"
-            ):
-                return allocator.pin_allocator.address_manager
-            if isinstance(allocator, LazyMemoryAllocator):
-                return allocator.get_address_manager()
-            raise NotImplementedError(
-                "get_memory_usage is not implemented for this allocator type."
-            )
-
-        address_manager = get_address_manager(self._allocator)
+        address_manager = _resolve_address_manager(self._allocator)
         free_size = address_manager.get_free_size()
         total_size = address_manager.get_heap_size()
         used_size = total_size - free_size
         return used_size, total_size
+
+    def get_fragmentation_stats(self) -> tuple[int, int]:
+        """
+        Get the L1 external-fragmentation signal.
+
+        Returns:
+            tuple[int, int]: The largest free block in bytes and the
+            number of free blocks. Together with ``get_memory_usage``
+            this separates a byte deficit from a fragmented free list.
+
+        Raises:
+            NotImplementedError: If the allocator type does not support
+                this operation.
+        """
+        if hasattr(self._allocator, "get_fragmentation_stats"):
+            return self._allocator.get_fragmentation_stats()
+
+        address_manager = _resolve_address_manager(self._allocator)
+        if hasattr(address_manager, "get_fragmentation_stats"):
+            return address_manager.get_fragmentation_stats()
+        raise NotImplementedError(
+            "get_fragmentation_stats is not implemented for this allocator type."
+        )
 
     def get_l1_memory_desc(self) -> L1MemoryDesc:
         """
