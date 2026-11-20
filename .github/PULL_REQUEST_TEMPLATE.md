@@ -43,6 +43,15 @@ run them anyway.
 
 - [ ] `rust` — Rust unit tests and raw-block temp-file tests
 
+GPU tests (**Layer 3**), target devices (leave unticked to auto-detect from changed files):
+
+- [ ] `cuda`
+- [ ] `rocm`
+- [ ] `xpu`
+- [ ] `musa`
+- [ ] `rbln`
+- [ ] `full` — run all GPU device pipelines (use when changing shared/common code)
+
 <details>
 <summary>Before marking ready for review</summary>
 
