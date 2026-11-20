@@ -46,11 +46,6 @@ def bind_coordinator_chunk_size(
 ) -> int | None:
     """Synchronously bind coordinator hashing to an MP server's final size.
 
-    The coordinator only advises, so being unable to reach it must not fail
-    chunk-size negotiation (and with it the engine's startup): a transport
-    error is logged and :func:`keep_registered` delivers the size once the
-    coordinator is back.
-
     Args:
         base_url: Coordinator base URL.
         chunk_size: The MP server's finalized chunk size.
@@ -159,12 +154,9 @@ async def keep_registered(
     an explicit ``404`` (the coordinator forgot us) or after a failed initial
     registration.
 
-    The finalized chunk size goes with every registration. If it is
-    finalized only after this server registered, the next tick binds it with
-    ``PUT /config/chunk-size``. A ``409`` on either request means the
-    coordinator is bound to a different chunk size: the loop logs an error,
-    deregisters and stops, so the server never stays in a coordinator that
-    hashes at another size. The MP server itself keeps serving.
+    The finalized chunk size goes with every registration; one finalized
+    after registering is bound on the next tick. A ``409`` on either request
+    deregisters and stops the loop.
 
     Args:
         client: The HTTP client to send with.

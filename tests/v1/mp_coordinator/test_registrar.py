@@ -345,6 +345,32 @@ def test_keep_registered_refreshes_chunk_size_on_reregistration():
     assert seen[:2] == [None, 640]
 
 
+def test_keep_registered_resends_bound_chunk_size_on_reregistration():
+    """A restarted coordinator 404s the heartbeat and has lost its in-memory
+    binding, so the re-registration must carry the size again."""
+    seen: list[int | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            seen.append(json.loads(request.content)["chunk_size"])
+            return httpx.Response(
+                200, json={"instance_id": "i1", "re_registered": False}
+            )
+        if request.method == "PUT":
+            return httpx.Response(404, json={"error": "unknown"})
+        return httpx.Response(204)
+
+    async def run():
+        async with _client(handler) as client:
+            await _run_loop_briefly(
+                client, instance_id="i1", chunk_size_provider=lambda: 640
+            )
+
+    asyncio.run(run())
+    assert len(seen) >= 2
+    assert set(seen) == {640}
+
+
 def test_on_registered_is_required():
     """No default hook: a caller that republishes nothing says so."""
     # Standard
@@ -455,3 +481,25 @@ def test_keep_registered_stops_when_registration_rejects_chunk_size():
     assert asyncio.run(run())
     assert seen["register"] == [640]
     assert seen["delete"] is None
+
+
+def test_keep_registered_keeps_heartbeating_through_error_status():
+    """Only a 409 ends the loop; a 5xx is retried on the next tick."""
+    heartbeats = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                200, json={"instance_id": "i1", "re_registered": False}
+            )
+        if request.method == "PUT":
+            heartbeats.append(request.url.path)
+            return httpx.Response(500, json={"error": "transient"})
+        return httpx.Response(204)
+
+    async def run() -> bool:
+        async with _client(handler) as client:
+            return await _run_loop_until_done(client)
+
+    assert not asyncio.run(run())
+    assert len(heartbeats) > 1
