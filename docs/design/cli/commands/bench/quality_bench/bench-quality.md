@@ -68,11 +68,12 @@ model's tokenizer.
 
 The reference runs `--reference-repeats` times (default 2). Its disagreement
 with itself is the **flip rate**, the noise floor below which no arm can be
-told apart. The optional `control` arm should match the reference; with
-vLLM prefix caching as the control it should match exactly, since prefix
-caching reuses KV only at its original positions. A gap there points at the
-harness or the engine, not at the candidate. It is reported, and does not set
-the verdict.
+told apart. The optional `control` arm should match the reference closely.
+With vLLM prefix caching as the control, KV is reused only at its original
+positions, but a cache hit and a full recompute can still produce slightly
+different logits, so some answers may differ even with greedy decoding. A
+score gap larger than `--tolerance` points at the harness or the engine, not
+at the candidate. It is reported, and does not set the verdict.
 
 Within a `run`, arms run one after another (all reference passes, then
 `control`, then `candidate`) and questions run sequentially, so per-question
