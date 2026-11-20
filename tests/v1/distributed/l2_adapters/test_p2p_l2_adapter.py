@@ -412,6 +412,16 @@ def test_event_fds_are_distinct_and_registered(write_enabled: bool):
         assert (store_fd in unregistered) is write_enabled
 
 
+def test_close_after_notifier_shutdown_leaves_the_freed_notifier_alone():
+    """StorageManager.close shuts the process-wide notifier down before it
+    closes its L2 adapters; closing then must not call into the instance the
+    adapter registered with, which is freed by then."""
+    with _adapter() as (adapter, _mq, _tc_ctx, _tc, notifier):
+        p2p_mod.PeriodicEventNotifier.get.return_value = None
+        adapter.close()
+        notifier.unregister_fd.assert_not_called()
+
+
 def test_memory_tags_are_remote_dram():
     with _adapter() as (adapter, _mq, _tc_ctx, _tc, _notifier):
         assert adapter.get_memory_tags() == MemoryTags(

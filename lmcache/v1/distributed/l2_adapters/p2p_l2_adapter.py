@@ -64,6 +64,22 @@ _LOOKUP_RPC_TIMEOUT_S = 3.0
 _PERIODIC_NOTIFIER_INTERVAL_MS = 5
 
 
+def _unregister_polled_fd(fd: int) -> None:
+    """Stop the periodic notifier from pulsing ``fd``.
+
+    The notifier is a process-wide singleton that ``StorageManager.close``
+    shuts down before it closes the L2 adapters, so the instance is looked up
+    again here instead of holding the one seen at registration, which may
+    already be freed.
+
+    Args:
+        fd: Event fd registered with the notifier.
+    """
+    notifier = PeriodicEventNotifier.get()
+    if notifier is not None:
+        notifier.unregister_fd(fd)
+
+
 @dataclass
 class _LookupTask:
     keys: list[ObjectKey]
@@ -266,7 +282,7 @@ class PeerL2AdapterBase(L2AdapterInterface):
                 polled_events.append(self._store_efd)
             for event in polled_events:
                 notifier.register_fd(event.fileno())
-                resources.callback(notifier.unregister_fd, event.fileno())
+                resources.callback(_unregister_polled_fd, event.fileno())
             self._register_peer_region()
             self._resources = resources.pop_all()
 
