@@ -71,6 +71,14 @@ class TestEngineBenchConfig:
         assert cfg.workload == "long-doc-qa"
         assert cfg.tokens_per_gb_kvcache == 50000
 
+    def test_max_retries_defaults_to_zero(self) -> None:
+        assert self._make_config().max_retries == 0
+        assert self._make_config(max_retries=2).max_retries == 2
+
+    def test_negative_max_retries(self) -> None:
+        with pytest.raises(ValueError, match="max_retries must be non-negative"):
+            self._make_config(max_retries=-1)
+
     def test_ignore_eos_defaults_false_and_overridable(self) -> None:
         assert self._make_config().ignore_eos is False
         assert self._make_config(ignore_eos=True).ignore_eos is True
