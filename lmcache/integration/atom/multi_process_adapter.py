@@ -20,6 +20,7 @@ import zmq
 
 # First Party
 from lmcache.utils import EngineType, init_logger
+from lmcache.v1.client.chunk_hashes import ChunkHashCache
 from lmcache.v1.client.heartbeat import HeartbeatThread
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import TransferContext, create_transfer_context
@@ -81,6 +82,7 @@ class AtomMPSchedulerAdapter:
         parallel_config: AtomMPParallelConfig,
         *,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
+        client_chunk_hashes: bool = False,
     ) -> None:
         client = RequestClientFactory.create(server_url, context=context)
         self._model_name = model_name
@@ -106,6 +108,13 @@ class AtomMPSchedulerAdapter:
         self._closed = False
         self._pending_lookups: set[str] = set()
         self._lookup_results: dict[str, int] = {}
+        # With client_chunk_hashes, keys carry blake3 chunk hashes instead of
+        # the token prefix (the server must hash with blake3).
+        self._hash_cache = (
+            ChunkHashCache(self.lmcache_tokens_per_chunk)
+            if client_chunk_hashes
+            else None
+        )
 
     def maybe_submit_lookup_request(
         self,
@@ -179,6 +188,8 @@ class AtomMPSchedulerAdapter:
 
     def end_session(self, request_id: str) -> None:
         """Ask the LMCache server to release request-scoped state."""
+        if self._hash_cache is not None:
+            self._hash_cache.drop(request_id)
         self._client.end_session(request_id)
 
     def shutdown(self) -> None:
@@ -199,6 +210,16 @@ class AtomMPSchedulerAdapter:
         request_id: str,
         worker_id: int | None,
     ) -> IPCCacheServerKey:
+        if self._hash_cache is not None:
+            return IPCCacheServerKey.from_chunk_hashes(
+                model_name=self._model_name,
+                world_size=self._parallel.world_size,
+                worker_id=worker_id,
+                chunk_hashes=self._hash_cache.hashes(request_id, token_ids, end),
+                start=start,
+                end=end,
+                request_id=request_id,
+            )
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._parallel.world_size,
@@ -224,6 +245,7 @@ class AtomMPWorkerAdapter:
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         transfer_mode: str | None = None,
+        client_chunk_hashes: bool = False,
     ) -> None:
         client = RequestClientFactory.create(server_url, context=context)
         self._model_name = model_name
@@ -251,6 +273,13 @@ class AtomMPWorkerAdapter:
             raise
         self._client = client
         self.blocks_in_chunk = self.lmcache_tokens_per_chunk // block_size
+        # See AtomMPSchedulerAdapter; workers get no end_session, so cached
+        # requests age out.
+        self._hash_cache = (
+            ChunkHashCache(self.lmcache_tokens_per_chunk)
+            if client_chunk_hashes
+            else None
+        )
         self._kv_caches: dict[str, torch.Tensor] = {}
         self._engine_group_infos: list[EngineGroupInfo] = []
         self._transfer_context: TransferContext | None = None
@@ -719,6 +748,18 @@ class AtomMPWorkerAdapter:
         request_id: str,
         spec: AtomMPTransferSpec,
     ) -> IPCCacheServerKey:
+        if self._hash_cache is not None:
+            return IPCCacheServerKey.from_chunk_hashes(
+                model_name=self._model_name,
+                world_size=self._parallel.world_size,
+                worker_id=self._parallel.worker_id,
+                chunk_hashes=self._hash_cache.hashes(
+                    request_id, spec.token_ids, spec.end
+                ),
+                start=spec.start,
+                end=spec.end,
+                request_id=request_id,
+            )
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._parallel.world_size,
