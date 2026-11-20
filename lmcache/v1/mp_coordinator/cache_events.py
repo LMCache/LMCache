@@ -728,7 +728,10 @@ class CacheEventSubscriber(EventSubscriber):
 
     def _record_l1_placements(self, event_type: CacheEventType, event: Event) -> None:
         """Record one ``event_type`` batch per medium found in the
-        event's ``meta`` list (parallel to ``keys``)."""
+        event's ``meta`` list (parallel to ``keys``); skip shared placements,
+        which the region rather than this server holds."""
+        if event.metadata.get("shared", False):
+            return
         keys: list[ObjectKey] = event.metadata["keys"]
         metadata: list[L1ObjectMeta] = event.metadata["meta"]
         by_backend: dict[L1BackendType, list[CacheEventEntry]] = {}

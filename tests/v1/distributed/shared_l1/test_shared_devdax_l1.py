@@ -175,6 +175,61 @@ def test_concurrent_writers_and_overlapping_reads(
     assert (usage().allocated_bytes, usage().read_leases) == (4096, 0)
 
 
+@pytest.mark.parametrize("force", [False, True])
+def test_delete_hides_the_object_everywhere_without_reclaiming(
+    make_manager: Factory, usage: Usage, force: bool
+) -> None:
+    writer, reader = make_manager("writer"), make_manager("reader")
+    store(writer)
+    leased = reader.reserve_read([key(1)])[key(1)][1]
+    assert leased is not None and leased.tensor is not None
+    writer.reserve_write([key(2)], [False], LAYOUT)
+    assert writer.delete([key(1), key(2), key(3)], force=force) == {
+        key(1): L1Error.SUCCESS,
+        key(2): L1Error.KEY_IS_LOCKED,  # still being written
+        key(3): L1Error.KEY_NOT_EXIST,
+    }
+    assert not writer.is_key_evictable(key(1))
+    assert reader.reserve_read([key(1)])[key(1)] == (L1Error.KEY_NOT_EXIST, None)
+    # A lease taken before the delete keeps its bytes until it is released.
+    assert reader.unsafe_read([key(1)])[key(1)] == (L1Error.SUCCESS, leased)
+    assert torch.all(leased.tensor == 7)
+    assert reader.finish_read([key(1)])[key(1)] is L1Error.SUCCESS
+    # Nothing was reclaimed: storing the key again takes a new extent.
+    assert usage().allocated_bytes == 2 * 4096
+    store(reader, value=9)
+    assert usage().allocated_bytes == 3 * 4096
+    writer.finish_write_and_delete([key(2)])
+
+
+def test_clear_deletes_only_what_this_server_wrote(
+    make_manager: Factory, usage: Usage
+) -> None:
+    writer, peer = make_manager("writer"), make_manager("peer")
+    store(writer, index=1)
+    store(peer, index=2)
+    writer.clear(force=True)
+    assert peer.reserve_read([key(1)])[key(1)] == (L1Error.KEY_NOT_EXIST, None)
+    assert writer.reserve_read([key(2)])[key(2)][0] is L1Error.SUCCESS
+    writer.finish_read([key(2)])
+    assert (usage().valid, usage().allocated_bytes) == (1, 2 * 4096)
+
+
+def test_delete_while_unreachable_is_reported_locked(
+    make_manager: Factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writer, reader = make_manager("writer"), make_manager("reader")
+    store(writer)
+    offline = Mock(side_effect=OrchestratorUnavailableError("offline"))
+    monkeypatch.setattr(MemoryOrchestratorClient, "delete_objects", offline)
+    monkeypatch.setattr(MemoryOrchestratorClient, "delete_published", offline)
+    assert writer.delete([key(1)]) == {key(1): L1Error.KEY_IS_LOCKED}
+    writer.clear()
+    monkeypatch.undo()
+    assert reader.reserve_read([key(1)])[key(1)][0] is L1Error.SUCCESS
+    reader.finish_read([key(1)])
+
+
 @pytest.mark.parametrize("failure", ["abort", "publish", "grant"])
 def test_failed_write_is_writable_again_but_bytes_stay_consumed(
     make_manager: Factory, usage: Usage, monkeypatch: pytest.MonkeyPatch, failure: str

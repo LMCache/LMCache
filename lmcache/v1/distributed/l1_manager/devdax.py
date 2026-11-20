@@ -350,11 +350,21 @@ class DevDaxL1Manager(BaseL1Manager):
     def delete(
         self, keys: list[ObjectKey], force: bool = False
     ) -> dict[ObjectKey, L1Error]:
-        """Delete objects; a shared region reports its keys as locked for now."""
+        """Delete objects; a shared region hides them from every server.
+
+        The bytes of a shared object stay consumed until a region reset, even
+        if ``force`` is set; ``KEY_IS_LOCKED`` means the object is still
+        being written or the orchestrator cannot be used.
+        """
         if self._shared is None:
             return super().delete(keys, force)
-        # Deleting through the orchestrator arrives with the integration change.
-        return dict.fromkeys(keys, L1Error.KEY_IS_LOCKED)
+        ret = self._shared.delete(keys)
+        deleted = [key for key, err in ret.items() if err == L1Error.SUCCESS]
+        if deleted:
+            for listener in self._listeners():
+                listener.on_l1_keys_deleted_by_manager(deleted)
+            self._publish_shared(EventType.L1_KEYS_EVICTED, {"keys": deleted})
+        return ret
 
     def finish_write_and_delete(
         self, keys: list[ObjectKey], tag: str = ""
@@ -369,12 +379,21 @@ class DevDaxL1Manager(BaseL1Manager):
         return ret
 
     def clear(self, force: bool = False) -> None:
-        """Clear objects; a shared region leaves its objects in place for now."""
+        """Clear objects; a shared region deletes only what this server wrote."""
         if self._shared is None:
             return super().clear(force)
-        logger.warning(
-            "DevDaxL1Manager: clear() leaves the objects of shared Device-DAX L1 "
-            "%r in place",
+        deleted = self._shared.delete_published()
+        if deleted is None:
+            logger.warning(
+                "DevDaxL1Manager: clear() could not reach the memory orchestrator; "
+                "the objects of shared Device-DAX L1 %r stay readable",
+                self.config.tag,
+            )
+            return
+        logger.info(
+            "DevDaxL1Manager: cleared %d objects this server wrote to shared "
+            "Device-DAX L1 %r",
+            deleted,
             self.config.tag,
         )
 

@@ -315,8 +315,8 @@ mapping. Unregistration ends view creation and GPU use. If exported tensors
 prevent unmapping, `close()` raises `BufferError` and keeps the mmap and file
 descriptor for retry after those tensors are released. It has no allocation,
 accounting or arena API; `DevDaxL1MemoryManager`
-remains the private allocator. The `shared` configuration is still rejected by
-`DevDaxL1Manager` until the coordination/serving follow-up.
+remains the private allocator. In shared mode the orchestrator owns allocation,
+publication and read leases.
 
 A CXL [Shadow L1](../l1_manager/l1-manager-types.md#shadow-l1) uses the tensorless
 `BorrowedMemoryObj` in `memory_management.py`: a borrowing adapter binds its
@@ -325,3 +325,6 @@ Device-DAX adapter would need to acquire the orchestrator lease, apply the
 region's acquire fence, and keep the mapping GPU-registered until reads finish.
 Its release callback must follow the nonblocking `Lease` contract. The shadow
 option alone supplies neither that adapter nor shared Device-DAX serving.
+
+The manager coordinates the mapped objects as described in
+[the L1 manager design](../l1_manager/l1-manager-types.md#orchestrator-owned-device-dax-regions).

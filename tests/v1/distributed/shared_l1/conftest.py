@@ -12,7 +12,14 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
 from lmcache.v1.distributed.l1_manager import DevDaxL1Manager
+from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_orchestrator.api import RegionUsage
 from lmcache.v1.platform import current_device_spec
 from tests.v1.distributed.shared_l1.utils import (
@@ -88,3 +95,26 @@ def usage(orchestrator: Orchestrator) -> Iterator[Callable[[], RegionUsage]]:
     """Read the region's counters through a separate probe client."""
     with region_usage(orchestrator.endpoint) as read:
         yield read
+
+
+@pytest.fixture
+def make_store(
+    orchestrator: Orchestrator, region: Path
+) -> Iterator[Callable[[str], StorageManager]]:
+    """Build StorageManagers with the shared L1 first and private DRAM next."""
+    with ExitStack() as stack:
+
+        def create(client_id: str, policy: str = "default") -> StorageManager:
+            shared = shared_config(region, orchestrator.endpoint, client_id)
+            private = L1ManagerConfig(
+                L1MemoryManagerConfig(8192, use_lazy=False, shm_name=""), tag="private"
+            )
+            config = StorageManagerConfig(
+                shared,
+                EvictionConfig("noop"),
+                l1_manager_configs=[shared, private],
+                write_policy=policy,
+            )
+            return stack.enter_context(closing(StorageManager(config)))
+
+        yield create

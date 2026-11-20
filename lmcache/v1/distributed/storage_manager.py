@@ -145,15 +145,6 @@ class StorageManager:
         with ExitStack() as cleanup:
             self._event_bus = get_event_bus()
 
-            if any(
-                isinstance(c, DevDaxL1ManagerConfig) and c.shared is not None
-                for c in config.l1_manager_configs
-            ):
-                # The integration change that follows serves it.
-                raise ValueError(
-                    "StorageManager does not run a shared Device-DAX L1 yet"
-                )
-
             # L1 Managers:
             self._l1_managers: list[L1ManagerInterface] = create_l1_managers(
                 config.l1_manager_configs
@@ -1610,9 +1601,19 @@ class StorageManager:
             instance, and ``descriptor`` is its descriptor carrying that id.
 
         Raises:
-            ValueError: If no L1 has the memory tags the adapter wants.
+            ValueError: If no L1 has the memory tags the adapter wants, or the
+                adapter would bind to a shared Device-DAX L1.
         """
         manager = self._l1_by_tag[resolve_l1_affinity(config, self._l1_by_tag)]
+        if (
+            isinstance(manager.config, DevDaxL1ManagerConfig)
+            and manager.config.shared is not None
+        ):
+            raise ValueError(
+                f"L2 adapter {get_type_name_for_config(config)!r} resolves to "
+                f"shared Device-DAX L1 {manager.config.tag!r}; L2 adapters can "
+                "bind only to private L1s"
+            )
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1
         adapter: L2AdapterInterface = create_l2_adapter(

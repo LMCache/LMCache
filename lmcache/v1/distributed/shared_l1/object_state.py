@@ -26,6 +26,7 @@ from lmcache.v1.distributed.shared_l1.visibility import Visibility
 from lmcache.v1.memory_management import TensorMemoryObj
 from lmcache.v1.memory_orchestrator.api import (
     DEFAULT_LAYOUT_FINGERPRINT,
+    DeleteStatus,
     ExtentHandle,
     OrchestratorError,
     ReadGrantResult,
@@ -113,13 +114,14 @@ class OrchestratedObjectState:
         call: Callable[[Sequence[_Item]], list[_Result]],
         entries: Sequence[_Item],
     ) -> list[_Result] | None:
-        if not entries:
-            return []
+        return self._rpc(name, lambda: call(entries)) if entries else []
+
+    def _rpc(self, name: str, call: Callable[[], _Result]) -> _Result | None:
         with self._lock:
             if self._disabled_reason is not None:
                 return None
         try:
-            reply = call(entries)
+            reply = call()
         except OrchestratorError as exc:
             if name == "ReserveWrite" and isinstance(exc, RequestRejectedError):
                 raise  # A conflicting layout is not capacity pressure.
@@ -351,6 +353,22 @@ class OrchestratedObjectState:
             if status is not TokenStatus.OK:
                 ret[key] = L1Error.KEY_IN_WRONG_STATE
         return ret
+
+    def delete(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
+        """Hide committed objects globally while preserving active read leases."""
+        statuses = self._request("DeleteObjects", self._client.delete_objects, keys)
+        if statuses is None:
+            return dict.fromkeys(keys, L1Error.KEY_IS_LOCKED)
+        errors = {
+            DeleteStatus.DELETED: L1Error.SUCCESS,
+            DeleteStatus.MISS: L1Error.KEY_NOT_EXIST,
+            DeleteStatus.BUSY_WRITING: L1Error.KEY_IS_LOCKED,
+        }
+        return {key: errors[status] for key, status in zip(keys, statuses, strict=True)}
+
+    def delete_published(self) -> int | None:
+        """Hide all committed objects written under this client ID."""
+        return self._rpc("DeletePublished", self._client.delete_published)
 
     def get_staging_memory_usage(self) -> int:
         """Return this client's outstanding write payload bytes."""
