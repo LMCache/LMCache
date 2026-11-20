@@ -247,9 +247,8 @@ the original node identity, so changing **Node Name** renames that entry.
 The **Config** tab reads MP server configuration from ``GET /config``.
 A configuration key selects a top-level MP configuration section; an unknown
 section returns an empty object. HTTP errors, including 404, appear as failures.
-Servers predating the removal of the in-process API are not supported by this
-read path. Configuration writes still use the legacy API and are not supported
-on MP servers; this PR changes reads only.
+Configuration writes still use the legacy API and are not supported
+on MP servers.
 
 
 - **Node tree view** — shows all proxies and their child nodes in a

@@ -17,7 +17,7 @@ test('Config loads MP configuration and Get selects a top-level section through 
     ]);
 });
 
-for (const key of ['', 'missing', 'toString']) {
+for (const key of ['', 'missing', 'toString', '__proto__']) {
     test(`Get Config handles ${key || 'an empty key'} without treating inherited properties as sections`, async () => {
         const config = {mp: {chunk_size: 256}};
         const ui = dashboard(() => Response.json(config));
