@@ -22,6 +22,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
     FULL_ATTENTION_WINDOW_CHUNKS,
     FetchingPolicy,
@@ -792,6 +793,42 @@ class TestQueryResult:
         l1_manager.finish_read(keys)
         ctrl.stop()
         adapter.close()
+
+    def test_discard_during_l2_load(self, l1_manager: DramL1Manager) -> None:
+        """Abandoning an active load releases its eventual multi-reader locks."""
+        adapter = make_adapter()
+        keys = [make_object_key(i) for i in range(2)]
+        store_keys_in_l2(adapter, keys, make_layout())
+        ctrl = make_controller(l1_manager, [adapter])
+        entered, resume = Event(), Event()
+        query_load = adapter.query_load_result
+
+        def blocked_load(task_id: L2TaskId) -> Bitmap | None:
+            entered.set()
+            assert resume.wait(10)
+            return query_load(task_id)
+
+        ctrl.start()
+        try:
+            with patch.object(adapter, "query_load_result", side_effect=blocked_load):
+                req_id = ctrl.submit_prefetch_request(
+                    single_row_spec(keys, num_kv_readers=3)
+                )
+                assert entered.wait(5)
+                ctrl.discard_prefetch_result(req_id)
+                resume.set()
+                assert wait_for_condition(
+                    lambda: ctrl.report_status()["in_flight_request_count"] == 0
+                )
+            assert ctrl.query_prefetch_result(req_id) is None
+            assert ctrl.report_status()["completed_results_count"] == 0
+            assert_absent(l1_manager, keys)
+            assert l1_manager.get_staging_memory_usage() == 0
+            assert_l2_unlocked(adapter)
+        finally:
+            resume.set()
+            ctrl.stop()
+            adapter.close()
 
     def test_unknown_request_returns_none(self, l1_manager):
         """Querying an id that was never submitted returns None."""
