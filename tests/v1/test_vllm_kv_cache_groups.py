@@ -12,6 +12,7 @@ from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
     get_tokens_per_block,
     is_scratch_spec,
+    vllm_mamba_cache_mode,
 )
 from lmcache.v1.common.group_view import (
     EXCLUDED_ENGINE_GROUP,
@@ -580,6 +581,94 @@ def test_conversion_reads_kv_cache_group_manager_config() -> None:
     assert [g.sw_size_tokens for g in spec] == [-1, 64, 16]
     assert [g.tokens_per_block for g in spec] == [32, 32, 16]
     assert [g.recurrent_state for g in spec] == [False, False, True]
+
+
+@pytest.mark.parametrize("prefix_caching", [True, False], ids=["on", "off"])
+def test_conversion_reads_mamba_prefix_caching_without_cache_mode(
+    prefix_caching: bool,
+) -> None:
+    """vLLM after vllm-project/vllm#63830 has no ``mamba_cache_mode``; a Mamba
+    group snapshots its state exactly when prefix caching is on."""
+    groups = [
+        KVCacheGroup({"layer.0": AttentionSpec(16)}, FullAttentionManager, 16),
+        KVCacheGroup(
+            {"layer.1": MambaSpec(16, mamba_cache_mode="none")},
+            MambaManager,
+            16,
+            SimpleNamespace(enable_prefix_caching=prefix_caching),
+            dcp_sharded=False,
+        ),
+    ]
+
+    spec = create_engine_group_infos_from_vllm(
+        SimpleNamespace(kv_cache_groups=groups),
+        _same_shape_caches(["layer.0", "layer.1"]),
+    )
+
+    assert [g.recurrent_state for g in spec] == [False, prefix_caching]
+    assert spec[1].sw_size_tokens == (16 if prefix_caching else -1)
+
+
+_ATTENTION_ONLY = SimpleNamespace(
+    kv_cache_groups=[
+        KVCacheGroup({"layer.0": AttentionSpec(16)}, FullAttentionManager, 16)
+    ]
+)
+_WITH_MAMBA = SimpleNamespace(
+    kv_cache_groups=[
+        KVCacheGroup({"layer.0": AttentionSpec(16)}, FullAttentionManager, 16),
+        KVCacheGroup({"layer.1": MambaSpec(16)}, MambaManager, 16),
+    ]
+)
+
+
+@pytest.mark.parametrize(
+    "cache_config,kv_cache_config,expected",
+    [
+        pytest.param(
+            SimpleNamespace(mamba_cache_mode="align", enable_prefix_caching=False),
+            _WITH_MAMBA,
+            "align",
+            id="legacy-field-wins",
+        ),
+        pytest.param(
+            SimpleNamespace(mamba_cache_mode="none", enable_prefix_caching=True),
+            _WITH_MAMBA,
+            "none",
+            id="legacy-none",
+        ),
+        pytest.param(
+            SimpleNamespace(enable_prefix_caching=True),
+            _WITH_MAMBA,
+            "align",
+            id="mamba-on",
+        ),
+        pytest.param(
+            SimpleNamespace(enable_prefix_caching=False),
+            _WITH_MAMBA,
+            "none",
+            id="mamba-off",
+        ),
+        pytest.param(
+            SimpleNamespace(enable_prefix_caching=True),
+            _ATTENTION_ONLY,
+            "none",
+            id="attention-only-on",
+        ),
+        pytest.param(
+            SimpleNamespace(enable_prefix_caching=True), None, "none", id="no-groups"
+        ),
+    ],
+)
+def test_vllm_mamba_cache_mode(
+    cache_config: SimpleNamespace, kv_cache_config: object, expected: str
+) -> None:
+    """Older vLLM reports the mode; newer vLLM implies align from prefix
+    caching when a KV cache group holds Mamba layers, and ``"none"``
+    otherwise."""
+    vllm_config = SimpleNamespace(cache_config=cache_config)
+
+    assert vllm_mamba_cache_mode(vllm_config, kv_cache_config) == expected
 
 
 @dataclass
