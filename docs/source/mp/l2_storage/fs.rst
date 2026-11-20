@@ -17,6 +17,10 @@ object is stored as a raw ``.data`` file whose name encodes the full
   bytes first (positive integer, optional).
 - ``use_odirect``: ``true`` or ``false`` (default ``false``) -- bypass the
   page cache via ``O_DIRECT``.
+- ``max_capacity_gb``: declared capacity in GiB (default ``0`` = unbounded).
+  Used for usage accounting; disk usage is bounded only when the adapter spec
+  also carries an ``"eviction"`` block (see :doc:`index`). A capacity without
+  an ``"eviction"`` block logs a warning at startup.
 
 **Configuration examples:**
 
@@ -30,3 +34,6 @@ object is stored as a raw ``.data`` file whose name encodes the full
 
     # With O_DIRECT for bypassing page cache
     --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "use_odirect": true}'
+
+    # Bounded to 3840 GiB with LRU eviction
+    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "max_capacity_gb": 3840, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.95, "eviction_ratio": 0.01}}'
