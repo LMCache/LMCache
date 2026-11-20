@@ -21,4 +21,9 @@ yourself or edit the script for a deployment that also has an L2.
 P2P flags with their meaning are listed in `docs/source/mp/p2p.rst`; the coordinator flags in
 `docs/source/mp/coordinator.rst`. Multiple servers on one host must differ in **every** port.
 
+Headless peers (`docs/source/mp/p2p_deployment.rst`, scenario B): a headless peer is
+`launch_lmcache.sh` alone, without `launch_vllm.sh`. On the main node append the write flags,
+e.g. `launch_lmcache.sh --enable-p2p-write --p2p-write-l1-usage-threshold 0.7`. Only the main
+node gets `--enable-p2p-write`.
+
 `lmcache kvcache clear --url http://<node>:7700` empties a node's L1 between experiments.
