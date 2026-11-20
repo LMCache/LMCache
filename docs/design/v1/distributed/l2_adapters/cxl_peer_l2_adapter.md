@@ -122,6 +122,20 @@ sequenceDiagram
     PC  ->> CXL: submit_unlock(keys) for hits it did not borrow
 ```
 
+## Lifetime and failures
+
+| Event | Behavior |
+|---|---|
+| Lookup hit in another slab, or the owner restarted | Reported as a miss. The owner lock is returned at once, unless the owner restarted (it no longer holds the lock). |
+| Hit the prefetch controller does not load | `submit_unlock` returns its reservation. |
+| Address outside the mapped slab, or size differing from the layout | The load reports a miss for the key; `submit_unlock` returns the reservation. |
+| Lease expired (`lookup start + read TTL - margin`) | The view is invalid: `unsafe_read` answers `KEY_NOT_READABLE` and the key is a miss. No unlock is sent; the owner's TTL reclaims the lock. |
+| Owner closes or restarts its slab | The header no longer matches, so every view of that incarnation is invalid at once. A GPU copy already queued keeps reading the mapped bytes. |
+| Last local reader finishes | The shadow L1 frees the view; the lease ends and one unlock RPC is fired without waiting for the answer. |
+| Owner unreachable for unlocks | The unlock is lost; the owner's TTL reclaims the lock. |
+| Peer removed with a live lease, or a tensor of a view still referenced | `close()` raises (`RuntimeError`, `BufferError`) and the slab stays mapped; the P2P controller retries each discovery cycle. |
+| Server shutdown | `StorageManager.close` closes the shadow L1s (after synchronizing the GPU devices) before the L2 adapters, so every lease has ended when the adapter unmaps. |
+
 ## Deployment
 
 Reserve `alignment + payload_size` bytes per slab: two 2 GiB payloads with
@@ -143,3 +157,22 @@ User guide: [P2P](../../../../source/mp/p2p.rst).
   bytes; nothing checks TTL equality (shared with GDR).
 - Cross-host CXL coherency, DMA performance and failure recovery still need
   hardware validation.
+
+## Tests
+
+- `tests/v1/distributed/l2_adapters/test_cxl_peer_l2_adapter.py`: two storage
+  managers on disjoint slabs of one file-backed pool, the owner's real
+  `P2PController` answering in process. Covers binding and release, a full
+  borrower slab, independent borrows of one key, unborrowed and refused hits,
+  expiry, owner restart, refused and retried close, and identity validation.
+- `tests/v1/distributed/test_shadow_l1_manager.py`: `BorrowedMemoryObj` bound
+  to a local view.
+- `tests/v1/multiprocess/test_cxl_peer_discovery.py`: pool filtering, a
+  restarted peer, and the CLI flags.
+- `tests/v1/multiprocess/test_transfer_engines.py`: a locally mapped borrowed
+  object selects GPU DMA.
+- `tests/v1/distributed/transfer_channel/test_api.py`: the arena travels with
+  an address over msgpack and protobuf.
+
+Not covered: the GPU copy from a view (the tests stop at the host tensor),
+the ZMQ and gRPC transports end to end, and real Device-DAX hardware.
