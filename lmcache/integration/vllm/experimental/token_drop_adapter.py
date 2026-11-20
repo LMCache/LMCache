@@ -6,6 +6,7 @@ from __future__ import annotations
 
 # Standard
 from functools import wraps
+from typing import Any
 
 # First Party
 from lmcache.integration.vllm.experimental.token_drop_scheduler import (
@@ -147,3 +148,70 @@ def install_token_drop_prefix_caching_publication_guard() -> None:
     # Prevent wrapping the prefix-cache publication method more than once.
     setattr(cache_full_blocks_with_publication_guard, guard_marker, True)
     BlockPool.cache_full_blocks = cache_full_blocks_with_publication_guard
+
+
+def install_token_drop_query_hooks(worker, no_compile_layers: dict[str, Any]) -> None:
+    """Capture post-RoPE queries without changing attention forward outputs."""
+    _check_vllm_version()
+    if worker._original_attention_forwards:
+        return
+
+    original_forwards = {}
+    for layer_name in worker._kv_caches:
+        impl = no_compile_layers[layer_name].impl
+        original_forwards[layer_name] = (
+            impl,
+            impl.forward,
+            "forward" in vars(impl),
+        )
+
+    worker._original_attention_forwards = original_forwards
+    for impl, original_forward, _ in original_forwards.values():
+
+        def forward_with_query_capture(
+            attn_layer,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            *args,
+            _original_forward=original_forward,
+            **kwargs,
+        ):
+            if attn_metadata is not None:
+                worker.capture_query(
+                    attn_layer.layer_name, query[: attn_metadata.num_actual_tokens]
+                )
+            return _original_forward(
+                attn_layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                *args,
+                **kwargs,
+            )
+
+        try:
+            impl.forward = forward_with_query_capture
+        except Exception:
+            # Roll back earlier hooks if a later layer rejects installation.
+            remove_token_drop_query_hooks(worker)
+            raise
+
+
+def remove_token_drop_query_hooks(worker) -> None:
+    """Restore original attention forwards after query capture."""
+    for (
+        impl,
+        original_forward,
+        had_instance_forward,
+    ) in worker._original_attention_forwards.values():
+        if had_instance_forward:
+            impl.forward = original_forward
+        elif "forward" in vars(impl):
+            # Remove the instance override to restore the original class method.
+            delattr(impl, "forward")
+    worker._original_attention_forwards.clear()
