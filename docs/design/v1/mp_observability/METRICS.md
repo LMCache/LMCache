@@ -641,18 +641,21 @@ write TTL to expire. See `../distributed/l1_manager/staging-and-write-tags.md`.
 
 **What `l1_largest_free_block_bytes` / `l1_free_block_count` answer:** How
 fragmented is the L1 free space? A failed allocation alone is not proof:
-compare the total free bytes (`total − used`) with the aligned request
-size first — free bytes below the demand is plain exhaustion, and a
-largest block that covers all free bytes means the free space is
+estimate the free bytes from `/status` as `memory_total_bytes −
+memory_used_bytes` — the current heap, not the configured capacity, which
+the lazy tier only grows into — or take the `F bytes free` straight from
+the OOM log line. Free bytes below the aligned demand
+(`batch_size × aligned_size` for a batched request) is plain exhaustion,
+and a largest block that covers all free bytes means the free space is
 contiguous. Free bytes at or above the demand while the largest block is
-below it is external fragmentation; the allocator's OOM error prints the
-same snapshot (`N bytes in the largest of M free blocks (F bytes free)`)
-as the authoritative single-shot readout. Each gauge samples the manager
-independently, so the two series need not come from the same instant; one
-`get_fragmentation_stats()` call is atomic. Paged allocators cannot
-fragment externally (every hole is page-sized) and report page-granular
-counts; tiers whose allocator has no address space (a shadow L1) report
-zeros by convention.
+below it is external fragmentation; on a failed batch `short by N blocks`
+counts the allocatable slots the free blocks are still short of in total —
+the largest block can hold one object while the batch as a whole still
+fails. Each gauge samples the manager independently, so the two series
+need not come from the same instant; one `get_fragmentation_stats()` call
+is atomic. Paged allocators cannot fragment externally (every hole is
+page-sized) and report page-granular counts; tiers whose allocator has no
+address space (a shadow L1) report zeros by convention.
 
 **What `l2_usage_bytes` answers:** How full is each L2 backend? Lets
 operators query how much each L2 tier currently holds, decide whether

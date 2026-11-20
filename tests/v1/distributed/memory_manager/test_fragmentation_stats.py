@@ -38,6 +38,8 @@ from lmcache.v1.memory_management import (
     MemoryObj,
 )
 import lmcache.v1.distributed.memory_manager.l1_memory_manager as l1_memory_manager
+from lmcache.v1 import memory_management
+from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 
 # Importing this sets the process-wide MeterProvider with an
 # InMemoryMetricReader; the L1 gauges bind their instruments to it.
@@ -294,12 +296,24 @@ def test_gauges_report_manager_stats_with_l1_labels() -> None:
         manager.close()
 
 
-def test_gauges_track_a_real_arena() -> None:
-    """End to end: interleaved frees on a real arena show up in the gauges."""
+def test_gauges_track_a_real_arena(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End to end: a real Mixed allocator's arena reaches the gauges.
+
+    Plain CPU storage stands in for the pinned arena; every layer above
+    the buffer (Mixed allocator, memory manager, L1 manager, gauges) is
+    real, and the usage gauges are asserted from the same scrape.
+    """
     unit = _ALIGN
-    allocator = TensorMemoryAllocator(
-        torch.empty(6 * unit, dtype=torch.uint8), align_bytes=unit
+    arena = 6 * unit
+    monkeypatch.setattr(
+        memory_management,
+        "_allocate_cpu_memory",
+        lambda *args, **kwargs: torch.empty(arena, dtype=torch.uint8),
     )
+    monkeypatch.setattr(
+        memory_management, "_free_cpu_memory", lambda *args, **kwargs: None
+    )
+    allocator = MixedMemoryAllocator(arena, align_bytes=unit)
     manager = _dram_l1(allocator)
     try:
         objects = [
@@ -309,6 +323,8 @@ def test_gauges_track_a_real_arena() -> None:
         for odd_object in objects[1::2]:
             assert odd_object is not None
             allocator.free(odd_object)
+        assert _value_for("lmcache_mp.l1_memory_usage_bytes", _DRAM_ATTRS) == 3 * unit
+        assert _value_for("lmcache_mp.l1_usage_ratio", _DRAM_ATTRS) == 0.5
         assert _value_for("lmcache_mp.l1_largest_free_block_bytes", _DRAM_ATTRS) == unit
         assert _value_for("lmcache_mp.l1_free_block_count", _DRAM_ATTRS) == 3
         for even_object in objects[0::2]:

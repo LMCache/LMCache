@@ -732,19 +732,24 @@ Adapters with no in-flight work emit no datapoint for that scrape.
      - ObservableGauge
      - Largest contiguous free block in the L1 address space, sampled at
        scrape time from ``BaseL1Manager.get_fragmentation_stats()``.  A
-       failed allocation alone is not proof of fragmentation: first
-       compare the total free bytes (configured size minus
-       ``l1_memory_usage_bytes``) with the aligned request size — free
-       bytes below the demand is plain exhaustion, and a largest block
-       that covers all free bytes means the free space is contiguous.
-       Free bytes at or above the demand while the largest block is
-       below it is external fragmentation; the allocator's OOM error
-       prints the same snapshot (``N bytes in the largest of M free
-       blocks (F bytes free)``).  Each gauge samples the manager
-       independently, so the two series need not come from the same
-       instant; a single ``get_fragmentation_stats()`` call is atomic.
-       ``0`` also means the tier's allocator has no address-space stats
-       (e.g. a shadow L1).
+       failed allocation alone is not proof of fragmentation: estimate
+       the free bytes from ``/status`` as ``memory_total_bytes`` minus
+       ``memory_used_bytes`` — the current heap, not the configured
+       capacity, which the lazy tier only grows into — or take the
+       ``F bytes free`` straight from the OOM log line.  Free bytes
+       below the aligned demand (``batch_size × aligned_size`` for a
+       batched request) is plain exhaustion, and a largest block that
+       covers all free bytes means the free space is contiguous.  Free
+       bytes at or above the demand while the largest block is below it
+       is external fragmentation; on a failed batch the log's ``short
+       by N blocks`` counts the allocatable slots the free blocks are
+       still short of in total, and the largest block can hold one
+       object while the batch as a whole still fails.  Each gauge
+       samples the manager independently, so the two series need not
+       come from the same instant; a single
+       ``get_fragmentation_stats()`` call is atomic.  ``0`` also means
+       the tier's allocator has no address-space stats (e.g. a shadow
+       L1).
    * - ``lmcache_mp.l1_free_block_count``
      - ObservableGauge
      - Number of free blocks in the L1 address space, sampled
