@@ -6,19 +6,24 @@ wave slotting, and the fallback gates (non-lazy objects, compressed groups).
 Moved from test_blend_load_store_opts.py in the blend package split."""
 
 # Standard
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+import time
 
 # Third Party
 import pytest
 
 # First Party
 from lmcache import device_ops  # noqa: F401
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     ShardReplicationDesc,
 )
+from lmcache.v1.mp_coordinator.api import BlendNamespace
+from lmcache.v1.mp_coordinator.blend_client import PENDING, BlendCoordinatorClient
 from lmcache.v1.multiprocess.modules.blend import retrieve as retrieve_mod
 from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
@@ -719,6 +724,64 @@ def _run_unretrieved_lookup(blend, request_id: str, tp_replicas: int = 1):
     assert result.prefix_coverage_tokens == 0
     assert len(result.non_prefix_segments) == _UNRETRIEVED_N_CHUNKS
     return key
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_ended_session_clears_coordinator_match(completed: bool) -> None:
+    """Explicit removal and TTL expiry retire pending or unconsumed matches."""
+    entered, resume = Event(), Event()
+
+    def request(
+        method: str, path: str, payload: dict[str, object]
+    ) -> dict[str, object]:
+        entered.set()
+        assert resume.wait(5)
+        return {"matches": []}
+
+    coordinator = BlendCoordinatorClient(request_fn=request, match_concurrency=1)
+    ctx = _unretrieved_ctx(
+        _LockCountingStorageManager(),
+        ttl=0.0 if completed else _UNRETRIEVED_TTL_NEVER,
+    )
+    blend = BlendModule(ctx, MagicMock(), coordinator=coordinator)
+    key = IPCCacheServerKey.from_token_ids(
+        model_name="m",
+        world_size=1,
+        worker_id=None,
+        token_ids=list(range(_UNRETRIEVED_CHUNK)),
+        start=0,
+        end=_UNRETRIEVED_CHUNK,
+        request_id="cancel-coordinator",
+    )
+    try:
+        assert blend.cb_unified_lookup(key, 1) is None
+        assert entered.wait(5)
+        if completed:
+            resume.set()
+            deadline = time.monotonic() + 5
+            while coordinator.poll_match(key.request_id) is PENDING:
+                assert time.monotonic() < deadline
+                time.sleep(0.001)
+            assert coordinator.poll_match(key.request_id) == []
+            assert ctx.session_manager.cleanup_expired() == 1
+        else:
+            ctx.session_manager.remove(key.request_id)
+        assert coordinator.poll_match(key.request_id) is None
+
+        resume.set()
+        coordinator.submit_match("barrier", [0], BlendNamespace(model_name="m"))
+        deadline = time.monotonic() + 5
+        while coordinator.poll_match("barrier") is PENDING:
+            assert time.monotonic() < deadline
+            time.sleep(0.001)
+        # The single worker has finished the abandoned response before this one.
+        assert coordinator.poll_match("barrier") == []
+        assert coordinator.poll_match(key.request_id) is None
+        coordinator.take_match("barrier")
+    finally:
+        resume.set()
+        blend.close()
+        ctx.session_manager.close()
 
 
 def test_session_end_releases_unretrieved_sparse_locks():
