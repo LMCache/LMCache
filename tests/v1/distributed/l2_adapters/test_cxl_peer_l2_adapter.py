@@ -347,9 +347,9 @@ def test_view_ends_before_the_owners_ttl(
 ) -> None:
     """A view stops being valid once less than the read window is left
     before the owner's read lock can lapse (TTL minus a margin), so a GPU
-    copy queued from it has that long to finish. No unlock is sent for it
-    afterwards: the owner's TTL covers it, and a late unlock could release a
-    newer borrow."""
+    copy queued from it has that long to finish. Released after the lapse,
+    it sends no unlock: the owner's TTL covers it, and a late unlock could
+    release a newer borrow."""
     _store(peers.owner)
     # The lock may lapse at 30 - 1 s margin; a copy needs 5 s of it left.
     adapter = _adapter(peers, read_ttl_s=30)
@@ -359,6 +359,7 @@ def test_view_ends_before_the_owners_ttl(
     assert obj.is_valid()
     monkeypatch.setattr(time, "monotonic", lambda: now + 24.5)
     assert not obj.is_valid()
+    monkeypatch.setattr(time, "monotonic", lambda: now + 29.5)
     obj.release()
     assert peers.client.unlocked == []
     adapter.close()
