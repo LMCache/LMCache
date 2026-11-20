@@ -17,6 +17,7 @@ from __future__ import annotations
 
 # Standard
 from collections import deque
+from threading import Lock
 from typing import Protocol, runtime_checkable
 import inspect
 
@@ -190,6 +191,7 @@ class DefaultEventIPCBackend(EventIPCBackend):
         self._event_module = event_module if event_module is not None else torch_dev
         self.device_type = device_type if device_type is not None else torch_device_type
         self._exported_events: deque[object] = deque(maxlen=_EXPORTED_EVENT_RING_SIZE)
+        self._exported_events_lock = Lock()
 
     def check_event_support(self, device: object) -> None:
         """Raise ``RuntimeError`` if interprocess events are unsupported.
@@ -223,7 +225,7 @@ class DefaultEventIPCBackend(EventIPCBackend):
         return self._event_module.Event(interprocess=True)  # type: ignore[union-attr]
 
     def export_event(self, event: object, device: object) -> bytes:
-        """Serialize ``event`` into a process-portable IPC handle.
+        """Serialize and retain ``event`` in the bounded IPC liveness window.
 
         Args:
             event: The interprocess-capable event to export.
@@ -232,9 +234,18 @@ class DefaultEventIPCBackend(EventIPCBackend):
 
         Returns:
             The IPC handle bytes for ``event``.
+
+        Raises:
+            RuntimeError: If the backend cannot settle the oldest event before
+                eviction. In that case the retained events are unchanged.
         """
         handle = event.ipc_handle()  # type: ignore[attr-defined]
-        self._exported_events.append(event)
+        with self._exported_events_lock:
+            if len(self._exported_events) == _EXPORTED_EVENT_RING_SIZE:
+                oldest_event = self._exported_events[0]
+                self._on_event_evicted(oldest_event)
+                self._exported_events.popleft()
+            self._exported_events.append(event)
         return handle
 
     def import_event(self, handle: bytes, device: object) -> object:
@@ -258,6 +269,10 @@ class DefaultEventIPCBackend(EventIPCBackend):
     def synchronize_event(self, event: object, device: object) -> None:
         """Block the host until ``event`` completes."""
         event.synchronize()  # type: ignore[attr-defined]
+
+    def _on_event_evicted(self, event: object) -> None:
+        """Handle an aged-out source event before releasing its reference."""
+        pass
 
 
 def get_event_ipc_backend(device: object) -> EventIPCBackend:

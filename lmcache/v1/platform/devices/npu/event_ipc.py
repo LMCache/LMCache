@@ -97,3 +97,7 @@ class NpuEventIPCBackend(DefaultEventIPCBackend):
                 exc,
             )
             raise
+
+    def _on_event_evicted(self, event: object) -> None:
+        """Wait for an aged-out NPU event before releasing driver resources."""
+        event.synchronize()  # type: ignore[attr-defined]
