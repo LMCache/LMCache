@@ -58,7 +58,6 @@ import torch
 import zmq
 
 # First Party
-from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.kv_cache_group_edits import (
     apply_kv_cache_group_edits,
@@ -94,6 +93,7 @@ from lmcache.integration.vllm.utils import (
 from lmcache.utils import CacheRemoveEvent
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.client.worker_transfer import LMCacheDrivenTransferContext
+from lmcache.v1.common.banner import print_banner_once
 
 try:
     # First Party
