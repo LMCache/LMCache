@@ -239,6 +239,14 @@ def _stream(
                     continue
                 if not isinstance(obj, dict):
                     continue
+                error_message = _openai_error(obj)
+                if (
+                    error_message
+                    and chat
+                    and not pieces
+                    and _missing_chat_template(error_message)
+                ):
+                    raise _ChatTemplateMissingError(_clip(error_message))
                 _raise_openai_error(obj)
                 piece = _sse_piece(obj, chat)
                 if piece:
@@ -259,7 +267,10 @@ def _stream(
             raise _ChatTemplateMissingError(
                 _clip(f"POST {url} failed (HTTP {e.code}):\n{_clip(err_body)}")
             ) from e
-        _raise_json_blob_error(err_body)
+        try:
+            _raise_json_blob_error(err_body)
+        except RuntimeError as json_error:
+            err_body = str(json_error)
         raise RuntimeError(
             _clip(f"POST {url} failed (HTTP {e.code}):\n{_clip(err_body)}")
         ) from e
@@ -310,6 +321,7 @@ def _missing_chat_template(text: str) -> bool:
     return any(
         s in msg
         for s in (
+            "missing chat template",
             "must provide a chat template",  # vLLM, transformers >= 4.44
             "default chat template is no longer allowed",
             "chat_template is not set",  # transformers apply_chat_template

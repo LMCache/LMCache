@@ -303,18 +303,14 @@ def _make_scheduler_adapter_for_heartbeat_test(
             model_name="test-model",
             vllm_block_size=16,
             parallel_strategy=ParallelStrategy(
-                mla_only=False,
-                vllm_world_size=2,
-                vllm_worker_id=0,
-                tp_size=2,
-                pp_size=1,
-                n_servers=2,
+                vllm_world_size=2, vllm_worker_id=0, tp_size=2, pp_size=1, n_servers=2
             ),
             mq_timeout=5.0,
             heartbeat_interval=heartbeat_interval,
         ),
         clients,
     )
+
 
 def _make_scheduler_adapter(
     servers: list[str],
