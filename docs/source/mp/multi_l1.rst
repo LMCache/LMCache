@@ -11,7 +11,8 @@ Configuration
 
 Repeat ``--l1-manager`` in write-placement order. Each JSON object requires
 ``type``, a unique non-empty ``tag``, and ``size_gb`` (GiB). The types are
-``DRAM``, ``DEVDAX``, ``GDS``, and ``SHADOW``, which takes no ``size_gb``.
+``DRAM``, ``DEVDAX``, ``GDS``, ``PLUGIN``, and ``SHADOW``, which takes no
+``size_gb``.
 The ``_default`` tag is reserved for DRAM in this interface.
 
 For example, use a dedicated Device-DAX device and a GDS-capable directory:
@@ -78,6 +79,13 @@ TTLs must be positive integers. Unknown fields are rejected.
    * - ``GDS``
      - Required ``path``; ``backend`` (``auto``), ``direct_io`` (true).
        See :doc:`configuration` for backend requirements and location semantics.
+   * - ``PLUGIN``
+     - Required ``module_path`` and ``class_name``: a ``BaseL1Manager``
+       subclass in an importable module, constructed with the parsed
+       configuration. Optional ``params`` (``{}``) is passed to it untouched
+       and validated by the plugin. LMCache keeps the index, locks and
+       eviction; the plugin supplies the memory manager and its memory tags,
+       which decide the L2 adapters it can serve (see below).
    * - ``SHADOW``
      - Required ``segment`` (``dram``, ``cxl`` or ``gds``): an index of a
        peer's KV bytes served in place by a borrowing L2 adapter, such as
@@ -95,8 +103,9 @@ manager may free space before a later write would otherwise fail.
 Legacy single-L1 flags, including ``--l1-size-gb``, remain supported. Do not
 combine ``--l1-manager`` with legacy capacity or backend-selection flags.
 Python callers can use ``DRAML1ManagerConfig``, ``DevDaxL1ManagerConfig``,
-``GDSL1ManagerConfig`` and ``ShadowL1ManagerConfig``; their ``from_dict``
-methods implement the JSON schema.
+``GDSL1ManagerConfig``, ``PluginL1ManagerConfig`` and
+``ShadowL1ManagerConfig``; their ``from_dict`` methods implement the JSON
+schema.
 
 Placement, affinity, and reads
 ------------------------------
@@ -112,8 +121,9 @@ Each L2 adapter stores from and reloads into one L1, chosen at startup:
 the first ``DRAM`` manager in argument order, or the first ``DEVDAX`` manager
 when there is no ``DRAM`` manager. An adapter sees completed stores from that
 manager only, so objects a write policy places in Device-DAX are not
-archived to ``fs``. A server whose only L1 is ``GDS`` cannot use the
-existing L2 adapters and fails at startup. Runtime adapter additions follow
+archived to ``fs``. A server whose only L1 is ``GDS``, or a plugin whose
+memory tags no adapter wants, cannot use the existing L2 adapters and fails
+at startup. Runtime adapter additions follow
 the same rule. The ``affinity_tag`` field of earlier releases is rejected; each
 adapter's chosen L1 is logged at startup.
 
