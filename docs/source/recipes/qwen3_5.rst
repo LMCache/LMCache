@@ -33,7 +33,12 @@ Validated models
       cache mode, prefix caching, and object-group separation on the LMCache
       server (enabled by default). The chunk size is negotiated from vLLM's
       *unified block size*, which is model-specific — vLLM logs
-      ``Setting attention block size to N tokens`` at startup:
+      ``Setting attention block size to N tokens`` at startup. The values below
+      are for vLLM 0.34.0 and later (default ``--block-size 64``). On vLLM
+      0.33 and earlier, or with a 16-token block size, ``N`` is 784 for the
+      27B models and 544 for Qwen3.5-0.8B; use the logged ``N`` as
+      ``--chunk-size``, since a larger value rounds up to a multiple of ``N``.
+      See :ref:`mamba-block-size`:
 
       .. list-table::
          :header-rows: 1
@@ -43,20 +48,20 @@ Validated models
            - Unified block size ``N``
            - GPUs
          * - ``Qwen/Qwen3.8-27B``
-           - 784
+           - 832
            - 1
          * - ``Qwen/Qwen3.6-27B``
-           - 784
+           - 832
            - 1
          * - ``Qwen/Qwen3.5-0.8B``
-           - 544
+           - 576
            - 1
 
-      **Qwen3.6-27B** (1 GPU, ``N = 784``):
+      **Qwen3.6-27B** (1 GPU, ``N = 832``):
 
       .. code-block:: bash
 
-         lmcache server --chunk-size 784 \
+         lmcache server --chunk-size 832 \
              --l1-size-gb 100 --eviction-policy LRU
 
       .. code-block:: bash
@@ -69,15 +74,15 @@ Validated models
 
       |
 
-      **Qwen3.8-27B** (1 GPU, ``N = 784``): same block size as
+      **Qwen3.8-27B** (1 GPU, ``N = 832``): same block size as
       Qwen3.6-27B, so the commands above apply unchanged apart from the model
       id.
 
       |
 
-      **Qwen3.5-0.8B** (1 GPU, ``N = 544``): identical to the above, with
-      ``--chunk-size 544``. A lower configured chunk-size minimum, including
-      the default 256, negotiates to 544; see
+      **Qwen3.5-0.8B** (1 GPU, ``N = 576``): identical to the above, with
+      ``--chunk-size 576``. A lower configured chunk-size minimum, including
+      the default 256, negotiates to 576; see
       :doc:`/mp/chunk_size_negotiation`.
 
       ``--mamba-cache-mode align`` is required (GDN does not support the
