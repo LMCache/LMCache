@@ -2,6 +2,7 @@
 
 #include "connector.h"
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
@@ -79,6 +80,22 @@ static size_t effective_read_budget(int num_read_workers, size_t budget) {
     return 0;
   }
   return budget == 0 ? kDefaultReadMaxBytesInFlight : budget;
+}
+
+// Unique per-write staging suffix. The PID keeps concurrent processes
+// sharing the directory apart; the in-process counter and clock ticks
+// keep worker threads apart. The O_EXCL create below is the actual
+// authority, so on the (practically impossible) collision we just retry.
+static std::string unique_staging_suffix() {
+  static const pid_t pid = ::getpid();
+  static std::atomic<uint64_t> seq{0};
+  uint64_t s = seq.fetch_add(1, std::memory_order_relaxed);
+  uint64_t ticks = static_cast<uint64_t>(
+      std::chrono::steady_clock::now().time_since_epoch().count());
+  char buf[48];
+  std::snprintf(buf, sizeof(buf), "%lx-%llx", static_cast<unsigned long>(pid),
+                static_cast<unsigned long long>(ticks ^ s * 0x9E3779B97F4A7C15ULL));
+  return buf;
 }
 
 FSConnector::FSConnector(std::string base_path, int num_workers,
@@ -197,24 +214,35 @@ void FSConnector::do_single_set(WorkerFSConn& conn, const std::string& key,
     return;
   }
 
-  // Determine temp file path
-  std::filesystem::path tmp_path;
-  if (!conn.tmp_dir.empty()) {
-    tmp_path = conn.tmp_dir / filename;
-  } else {
-    tmp_path = file_path;
-    tmp_path.replace_extension(TMP_EXT);
-  }
+  // Determine temp file path: final name + ".tmp.<pid>-<n>", unique per
+  // write. A shared staging name let a concurrent same-key store
+  // O_TRUNC the middle of another store, and the rename then published
+  // a truncated final .data even though the other store reported success.
+  std::string staging_prefix = filename + TMP_EXT + ".";
+  std::filesystem::path staging_dir =
+      !conn.tmp_dir.empty() ? conn.tmp_dir : conn.base_path;
 
-  int flags = O_CREAT | O_WRONLY | O_TRUNC;
+  int flags = O_CREAT | O_WRONLY | O_EXCL;
   if (conn.use_odirect) {
     try_enable_odirect(flags, buf, len, conn.disk_block_size);
   }
 
-  int fd = ::open(tmp_path.c_str(), flags, 0644);
+  std::filesystem::path tmp_path;
+  int fd = -1;
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    tmp_path = staging_dir / (staging_prefix + unique_staging_suffix());
+    fd = ::open(tmp_path.c_str(), flags, 0644);
+    if (fd >= 0) {
+      break;
+    }
+    if (errno != EEXIST) {
+      throw std::runtime_error("open for write failed: " + tmp_path.string() +
+                               ": " + strerror(errno));
+    }
+  }
   if (fd < 0) {
-    throw std::runtime_error("open for write failed: " + tmp_path.string() +
-                             ": " + strerror(errno));
+    throw std::runtime_error(
+        "could not create a unique staging file for: " + file_path.string());
   }
 
   try {
