@@ -817,6 +817,25 @@ def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
     return True
 
 
+def _non_negative_float(value: str) -> float:
+    """Parse a float that must not be negative.
+
+    A negative size otherwise reaches the allocator and fails with a bare
+    ``RuntimeError: Trying to create tensor with negative dimension``, which
+    says nothing about the option that produced it.
+
+    Raises:
+        argparse.ArgumentTypeError: If the value is not a number >= 0.
+    """
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {parsed}")
+    return parsed
+
+
 def add_storage_manager_args(
     parser: argparse.ArgumentParser,
 ) -> argparse.ArgumentParser:
@@ -861,7 +880,7 @@ def add_storage_manager_args(
     )
     memory_group.add_argument(
         "--l1-size-gb",
-        type=float,
+        type=_non_negative_float,
         default=None,
         help="The size of L1 memory in GB.",
     )
