@@ -391,11 +391,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             )
 
         num_physical_slots = payload.num_physical_slots
-        if num_physical_slots is None:
-            # Compatibility with clients from before the physical-slot field
-            # was added. Those clients require one slot per logical token.
-            num_physical_slots = payload.chunk_size
-        elif num_physical_slots <= 0:
+        if num_physical_slots <= 0:
             raise ValueError(
                 f"num_physical_slots must be positive, got {num_physical_slots}"
             )
