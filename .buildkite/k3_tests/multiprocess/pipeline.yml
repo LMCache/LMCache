@@ -299,6 +299,9 @@ steps:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
+        # A vLLM finished_sending assert can kill the engine after the batch
+        # abort (on dev as well); the step reports it as an infrastructure failure.
+        retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log", "ci_results_*/abort_lookup_locks/*.json"]
