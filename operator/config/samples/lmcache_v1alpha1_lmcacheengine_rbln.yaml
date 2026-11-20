@@ -1,0 +1,10 @@
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: rbln-cache
+spec:
+  # See https://docs.lmcache.ai/platform/devices/rbln/index.html for
+  # server.chunkSize, spec.image, and the vLLM-RBLN pod settings.
+  gpuVendor: rbln
+  l1:
+    sizeGB: 60
