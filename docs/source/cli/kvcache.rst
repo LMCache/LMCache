@@ -58,9 +58,9 @@ token, not the number of entries, to determine whether more pages exist.
    fi
 
 The JSON report preserves the server's ``adapter``, ``shared``, ``entries``
-and ``next_page_token`` fields under ``metrics``. Each entry is the wire key
-flattened next to ``size_bytes``, so every key field — including ``kv_rank``,
-``object_group_id``, ``cache_salt`` and ``tags`` — is a JSON field:
+and ``next_page_token`` fields under ``metrics``. Each entry contains the wire
+key fields alongside ``size_bytes``, including the full ``chunk_hash_hex`` and
+the original ``tags`` object.
 
 .. code-block:: json
 
@@ -72,22 +72,39 @@ flattened next to ``size_bytes``, so every key field — including ``kv_rank``,
        "next_page_token": null,
        "entries": [
          {
-           "chunk_hash_hex": "deadbeef",
+           "chunk_hash_hex": "0123456789abcdef",
            "model_name": "org/model",
            "kv_rank": 0,
            "object_group_id": 0,
            "cache_salt": "",
-           "tags": {},
+           "tags": {
+             "version": "v2",
+             "env": "prod"
+           },
            "size_bytes": 4096
          }
        ]
      }
    }
 
-The default terminal report shows the adapter, sharing flag, continuation
-token, and one row per object with the key fields split into columns
-(chunk hash, model, rank, group, salt, tags, bytes). An empty page renders as
-``(none)``. To save a JSON report without stdout output:
+The default terminal report shows the first 12 hex characters followed by
+``…`` for longer hashes. Tags appear as comma-separated ``key=value`` pairs
+sorted by key, or ``-`` for empty tags. A file saved with
+``--format terminal --output page.txt`` uses the same shortened hashes.
+
+.. code-block:: text
+
+   =============== L2 Cache Objects ===============
+   Adapter:                                      s3
+   Shared:                                    False
+   Next page token:                             N/A
+   Chunk hash     Model      Rank  Group  Salt  Tags                 Bytes
+   -----------------------------------------------------------------------
+   0123456789ab…  org/model     0      0        env=prod,version=v2   4096
+   ================================================
+
+An empty page displays ``(none)``. Use ``--quiet`` with ``--output`` to save
+the JSON report without printing it.
 
 .. code-block:: bash
 
@@ -123,12 +140,11 @@ Listing Options
 Listing Exit Codes
 ~~~~~~~~~~~~~~~~~~
 
-``0`` means success, including an empty page; ``1`` means an HTTP, connection,
-or JSON decoding error; ``2`` means an argument parsing error. HTTP errors
-(such as an invalid cursor, unknown adapter, or unsupported listing) are
-reported on stderr with the server's reason — the ``detail`` field of the
-error response — even with ``--quiet``. Failed requests do not write a
-success report.
+A successful page, including an empty one, exits 0. HTTP, connection, and
+JSON decoding errors exit 1 and are reported on stderr even with ``--quiet``.
+HTTP errors include the server's ``detail`` when available. If the adapter
+does not support listing, the message is ``HTTP 503 from <url>: <detail>``.
+Failed requests produce no report. Invalid arguments exit 2.
 
 clear
 -----

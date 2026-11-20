@@ -104,6 +104,14 @@ class ListCommand(BaseCommand):
         )
 
     def execute(self, args: argparse.Namespace) -> None:
+        """List a page with full JSON keys or compact terminal rows.
+
+        Args:
+            args: Parsed listing and output options.
+
+        Raises:
+            SystemExit: With exit code 1 if fetching the page fails.
+        """
         params: dict[str, str] = {"tier": "l2", "page_size": str(args.page_size)}
         for name in ("adapter", "model_name", "page_token"):
             value = getattr(args, name)
@@ -113,7 +121,7 @@ class ListCommand(BaseCommand):
             f"{normalize_url(args.url)}/cache/objects?{urllib.parse.urlencode(params)}"
         )
         try:
-            result = fetch_json(url)
+            result = fetch_json(url, report_503_as_unhealthy=False)
             metrics = self.create_metrics("L2 Cache Objects", args)
             metrics.add("adapter", "Adapter", result.get("adapter"))
             metrics.add("shared", "Shared", result.get("shared"))
@@ -123,8 +131,16 @@ class ListCommand(BaseCommand):
             entries = metrics.add_table(
                 "entries", "Objects", *_KEY_COLUMNS, ("size_bytes", "Bytes")
             )
+            output_format = getattr(args, "format", None) or "terminal"
             for entry in result.get("entries") or []:
-                entries.add_row(**_flatten_entry(entry))
+                row = _flatten_entry(entry)
+                if output_format == "terminal":
+                    chunk_hash = row["chunk_hash_hex"]
+                    if chunk_hash and len(chunk_hash) > 12:
+                        row["chunk_hash_hex"] = f"{chunk_hash[:12]}…"
+                    tags = sorted(row["tags"].items())
+                    row["tags"] = ",".join(f"{k}={v}" for k, v in tags) or "-"
+                entries.add_row(**row)
             metrics.emit()
         except CLIHTTPError as exc:
             print(str(exc), file=sys.stderr)

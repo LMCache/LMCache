@@ -23,18 +23,20 @@ ReplyWithLength = tuple[int, ReplyPayload, int]
 Request = tuple[str, str, bytes, str]
 
 NEXT_PAGE_TOKEN = "opaque+/=?& %游标"
+CHUNK_HASH = "0123456789abcdef"
+UNSUPPORTED_LISTING = "L2 adapter 'disk' does not support listing: unavailable"
 PAGE: dict[str, object] = {
     "adapter": "s3",
     "shared": True,
     "entries": [
         {
             "key": {
-                "chunk_hash_hex": "deadbeef",
+                "chunk_hash_hex": CHUNK_HASH,
                 "model_name": "org/model",
                 "kv_rank": 2,
                 "object_group_id": 3,
                 "cache_salt": "tenant-a",
-                "tags": {"version": "v2"},
+                "tags": {"version": "v2", "env": "prod"},
             },
             "size_bytes": 4096,
         }
@@ -44,18 +46,18 @@ PAGE: dict[str, object] = {
 FLAT_PAGE: dict[str, object] = {
     "adapter": "s3",
     "shared": True,
+    "next_page_token": NEXT_PAGE_TOKEN,
     "entries": [
         {
-            "chunk_hash_hex": "deadbeef",
+            "chunk_hash_hex": CHUNK_HASH,
             "model_name": "org/model",
             "kv_rank": 2,
             "object_group_id": 3,
             "cache_salt": "tenant-a",
-            "tags": {"version": "v2"},
+            "tags": {"version": "v2", "env": "prod"},
             "size_bytes": 4096,
         }
     ],
-    "next_page_token": NEXT_PAGE_TOKEN,
 }
 EMPTY_PAGE: dict[str, object] = {
     "adapter": "s3",
@@ -195,7 +197,7 @@ def test_list_filters_and_page_size(cache_server: CacheServer, page_size: int) -
 def test_list_quiet_still_writes_output(
     cache_server: CacheServer, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Quiet suppresses stdout while retaining the complete JSON file report."""
+    """Quiet saves the full hash and the original tag order in the JSON report."""
     cache_server.replies.put((200, PAGE))
     output = tmp_path / "page.json"
     main(
@@ -212,33 +214,60 @@ def test_list_quiet_still_writes_output(
         ]
     )
     assert capsys.readouterr().out == ""
-    assert json.loads(output.read_text()) == {
-        "title": "L2 Cache Objects",
-        "metrics": FLAT_PAGE,
-    }
+    expected = {"title": "L2 Cache Objects", "metrics": FLAT_PAGE}
+    assert output.read_bytes() == (json.dumps(expected, indent=2) + "\n").encode()
 
 
 @pytest.mark.parametrize("page", [PAGE, EMPTY_PAGE], ids=["objects", "empty"])
 def test_list_terminal_output(
     cache_server: CacheServer,
     page: dict[str, object],
+    tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The default report splits each key field into its own column."""
+    """The default terminal report uses compact rows on stdout and in a file."""
     cache_server.replies.put((200, page))
-    main(["kvcache", "list", "--url", cache_server.url])
+    output = tmp_path / "page.txt"
+    main(["kvcache", "list", "--url", cache_server.url, "--output", str(output)])
     text = capsys.readouterr().out
+    assert output.read_text() == text
     assert "L2 Cache Objects" in text
     assert "Adapter:" in text and "s3" in text
     assert "Next page token:" in text
     if page["entries"]:
-        for header in ("Chunk hash", "Model", "Rank", "Group", "Salt", "Bytes"):
+        for header in ("Chunk hash", "Model", "Rank", "Group", "Salt", "Tags", "Bytes"):
             assert header in text
-        assert "deadbeef" in text and "org/model" in text and "4096" in text
-        assert "{'chunk_hash_hex'" not in text
+        row = next(line for line in text.splitlines() if "org/model" in line)
+        assert row.split() == [
+            "0123456789ab…",
+            "org/model",
+            "2",
+            "3",
+            "tenant-a",
+            "env=prod,version=v2",
+            "4096",
+        ]
         assert NEXT_PAGE_TOKEN in text
     else:
         assert "(none)" in text
+
+
+@pytest.mark.parametrize("chunk_hash", ["deadbeef", "0123456789ab"])
+def test_list_terminal_short_hash_and_empty_tags(
+    cache_server: CacheServer, chunk_hash: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Hashes up to 12 characters are printed in full and empty tags use a dash."""
+    key = {
+        "chunk_hash_hex": chunk_hash,
+        "model_name": "org/model",
+        "kv_rank": 0,
+        "tags": {},
+    }
+    page = {**EMPTY_PAGE, "entries": [{"key": key, "size_bytes": 4096}]}
+    cache_server.replies.put((200, page))
+    main(["kvcache", "list", "--format", "terminal", "--url", cache_server.url])
+    rows = [line.split() for line in capsys.readouterr().out.splitlines()]
+    assert [chunk_hash, "org/model", "0", "0", "-", "4096"] in rows
 
 
 @pytest.mark.parametrize(
@@ -246,7 +275,7 @@ def test_list_terminal_output(
     [
         ((400, {"detail": "malformed page token"}), "malformed page token"),
         ((404, {"detail": "no L2 adapter"}), "no L2 adapter"),
-        ((503, {"detail": "listing unsupported"}), "listing unsupported"),
+        ((503, {"detail": UNSUPPORTED_LISTING}), UNSUPPORTED_LISTING),
         ((503, {"error": "engine not initialized"}), "engine not initialized"),
         ((400, {"message": "disk full"}), "disk full"),
         ((200, "not json"), "Invalid JSON response"),
@@ -267,7 +296,7 @@ def test_list_request_errors(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """HTTP/JSON failures exit 1 with the server's reason on stderr."""
+    """HTTP errors report the status, URL, and reason, including unsupported listing."""
     cache_server.replies.put(reply)
     output = tmp_path / "failed.json"
     with pytest.raises(SystemExit) as exc:
@@ -285,7 +314,11 @@ def test_list_request_errors(
     assert exc.value.code == 1
     captured = capsys.readouterr()
     assert captured.out == ""
+    if reply[0] != 200:
+        _, target, _, _ = cache_server.requests.get_nowait()
+        error = f"HTTP {reply[0]} from {cache_server.url}{target}: {error}"
     assert error in captured.err
+    assert "Server unhealthy" not in captured.err
     assert "Traceback" not in captured.err
     assert not output.exists()
 
@@ -363,15 +396,20 @@ def test_clear_preserves_l1_post(
     }
 
 
-def test_clear_surfaces_error_detail(
-    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    "command",
+    [["kvcache", "clear"], ["describe", "kvcache"]],
+    ids=["clear", "describe"],
+)
+def test_legacy_503_wording(
+    cache_server: CacheServer, command: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Clear failures exit 1 with the server's reason on stderr."""
+    """Clear and describe retain the health diagnostic and server reason for a 503."""
     cache_server.replies.put((503, {"detail": "server not initialized"}))
     with pytest.raises(SystemExit) as exc:
-        main(["kvcache", "clear", "--quiet", "--url", cache_server.url])
+        main([*command, "--quiet", "--url", cache_server.url])
     assert exc.value.code == 1
-    assert "server not initialized" in capsys.readouterr().err
+    assert "Server unhealthy: server not initialized" in capsys.readouterr().err
 
 
 def test_list_json_detail_beyond_whitespace_bound(
@@ -384,7 +422,7 @@ def test_list_json_detail_beyond_whitespace_bound(
         main(["kvcache", "list", "--quiet", "--url", cache_server.url])
     assert exc.value.code == 1
     captured = capsys.readouterr()
-    assert "Server unhealthy: full-detail" in captured.err
+    assert ": full-detail" in captured.err
     assert "[truncated]" not in captured.err
 
 
@@ -482,7 +520,7 @@ def test_list_oversized_multibyte_error_body_decodes_prefix(
         main(["kvcache", "list", "--quiet", "--url", cache_server.url])
     assert exc.value.code == 1
     captured = capsys.readouterr()
-    assert "Server unhealthy" in captured.err
+    assert f"HTTP 503 from {cache_server.url}/cache/objects?" in captured.err
     assert "诊断" in captured.err
     assert "[truncated]" in captured.err
     assert "Traceback" not in captured.err

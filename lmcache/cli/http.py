@@ -132,6 +132,7 @@ def fetch_json(
     *,
     method: str = "GET",
     data: dict[str, Any] | None = None,
+    report_503_as_unhealthy: bool = True,
 ) -> dict[str, Any]:
     """Send an HTTP request and return the parsed JSON body.
 
@@ -140,6 +141,8 @@ def fetch_json(
         timeout: Request timeout in seconds.
         method: HTTP method (e.g. ``"GET"``, ``"POST"``).
         data: Optional JSON body to send with the request.
+        report_503_as_unhealthy: Use the legacy ``Server unhealthy`` prefix for
+            HTTP 503. If false, include the HTTP status and URL.
 
     Returns:
         The parsed JSON response as a dictionary.
@@ -147,8 +150,7 @@ def fetch_json(
     Raises:
         CLIHTTPError: On network or HTTP errors — including the server's
             ``detail``/``error``/``message`` explanation from JSON error
-            bodies when present — and on JSON decoding errors. HTTP 503
-            keeps the legacy ``Server unhealthy: ...`` wording.
+            bodies when present — and on JSON decoding errors.
     """
     body = None
     headers: dict[str, str] = {}
@@ -163,13 +165,14 @@ def fetch_json(
         error_body, truncated = _error_body(url, exc)
         detail = _detail_from_body(error_body)
         if exc.code == 503:
-            # Legacy contract kept for existing consumers (see the
-            # describe design doc); non-JSON bodies are shown verbatim.
+            # A 503 can carry its diagnostic in the raw response body.
             reason = detail if detail is not None else error_body
             if truncated and detail is None:
                 reason += " [truncated]"
-            raise CLIHTTPError(f"Server unhealthy: {reason}") from exc
-        reason = detail if detail is not None else str(exc.reason)
+            if report_503_as_unhealthy:
+                raise CLIHTTPError(f"Server unhealthy: {reason}") from exc
+        else:
+            reason = detail if detail is not None else str(exc.reason)
         raise CLIHTTPError(f"HTTP {exc.code} from {url}: {reason}") from exc
     except urllib.error.URLError as exc:
         raise CLIHTTPError(f"Cannot connect to {url}: {exc.reason}") from exc

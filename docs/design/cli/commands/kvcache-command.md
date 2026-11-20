@@ -108,16 +108,28 @@ The response is represented by the existing Metrics output system:
 - `metrics.adapter` and `metrics.shared` retain the server values.
 - `metrics.entries` flattens each `{key, size_bytes}` object: every wire-key
   field (`chunk_hash_hex`, `model_name`, `kv_rank`, `object_group_id`,
-  `cache_salt`, `tags`) becomes a JSON field next to `size_bytes`, and
-  terminal output splits them into one column per field.
+  `cache_salt`, `tags`) becomes a JSON field next to `size_bytes`.
+  `--format json` preserves the full hash and the original tags object.
 - `metrics.next_page_token` is copied unchanged, including `null` at the end.
   Callers pass a non-null token to the next invocation's `--page-token` with
   the same server, adapter and model filter. Empty pages remain successful.
 
+Terminal rows shorten hashes longer than 12 hex characters to the first 12
+followed by `…`. Tags appear as comma-separated `key=value` pairs sorted by
+key, or `-` for empty tags. Files saved with `--format terminal` use the same
+shortened hashes.
+
+```text
+Chunk hash     Model      Rank  Group  Salt  Tags                 Bytes
+-----------------------------------------------------------------------
+0123456789ab…  org/model     0      0        env=prod,version=v2   4096
+```
+
 Output options belong to the `list` leaf. `--quiet` suppresses stdout while
 `--output` still writes the report. HTTP/JSON failures exit 1 and report to
-stderr — including the server's `detail` explanation from JSON error bodies,
-via `fetch_json`; invalid arguments exit 2 before any HTTP request.
+stderr with the server's `detail` when available. An adapter that does not
+support listing produces `HTTP 503 from <url>: <detail>`. Invalid arguments
+exit 2 before any HTTP request.
 The command reuses `lmcache.cli.http.fetch_json` and `normalize_url`, and
 `positive_int` for the lower page-size bound. No storage implementation or
 server API is imported by the CLI.
