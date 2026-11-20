@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import asyncio
+import csv
 import importlib.util
 import json
 import sys
@@ -68,6 +69,40 @@ async def test_cli_summary_uses_successful_request_latency(
     assert summary["query_mean_request_latency"] == 2.0
     assert summary["warmup_mean_request_latency"] == 2.0
     assert (tmp_path / "query_round.csv").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("truncated_phase", ["warmup", "query"])
+async def test_main_keeps_csvs_when_a_stream_is_truncated(
+    long_doc_qa_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    truncated_phase: str,
+) -> None:
+    """A truncated stream fails the run after both CSVs have been written."""
+    monkeypatch.chdir(tmp_path)
+    args = long_doc_qa_module.create_argument_parser().parse_args(
+        ["--model", "test-model", "--num-documents", "1", "--repeat-count", "1"]
+    )
+    phases = iter(("prewarmup", "warmup", "query"))
+
+    async def requests(**kwargs: object) -> list[object]:
+        truncated = next(phases) == truncated_phase
+        return [
+            long_doc_qa_module.RequestStats(
+                0, 10.0, 0.2, 12.0, not truncated, missing_finish_reason=truncated
+            )
+        ]
+
+    monkeypatch.setattr(long_doc_qa_module, "test_long_document_qa", requests)
+    counts = "warmup=1, query=0" if truncated_phase == "warmup" else "warmup=0, query=1"
+    with pytest.raises(RuntimeError, match=counts):
+        await long_doc_qa_module.main(args)
+
+    for phase in ("warmup", "query"):
+        with (tmp_path / f"{phase}_round.csv").open(newline="") as result:
+            rows = list(csv.DictReader(result))
+        assert [row["successful"] for row in rows] == [str(phase != truncated_phase)]
 
 
 @pytest.mark.asyncio

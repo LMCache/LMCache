@@ -166,3 +166,6 @@ With ``--json-output``, the long-document benchmark reports
 Both average ``request_end - request_start`` across successful requests in
 their respective rounds and honor ``--trim-fraction``. The endpoint includes
 stream completion, including trailing finish and usage frames.
+
+If a warmup or query stream ends after returning content without a finish
+reason, the benchmark writes both round CSVs and exits with a non-zero status.
