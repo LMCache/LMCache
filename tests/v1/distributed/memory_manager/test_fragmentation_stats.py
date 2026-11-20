@@ -27,6 +27,9 @@ from lmcache.v1.distributed.memory_manager import (
     ShadowL1MemoryManager,
 )
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
+from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
+    PagedTensorMemoryAllocator,
+)
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.memory_management import (
     AddressManager,
@@ -99,6 +102,21 @@ class _StatsOnlyAllocator(_NonAllocatingAllocator):
     def get_fragmentation_stats(self) -> tuple[int, int]:
         return (123456, 7)
 
+    def get_memory_usage(self) -> tuple[int, int]:
+        # Keeps the usage gauges' callbacks working during a scrape.
+        return (0, _ARENA)
+
+    def batched_free(
+        self,
+        memory_objs: list[MemoryObj],
+        allocator_type: str | None = None,
+        update_stats: bool = True,
+    ) -> None:
+        # BaseL1Manager.close() frees an empty batch through the manager;
+        # freeing anything real would mean the test leaked an object.
+        if memory_objs:
+            raise AssertionError("batched_free is not exercised by these tests")
+
 
 # =============================================================================
 # AddressManager / allocator semantics
@@ -115,6 +133,29 @@ def test_empty_tensor_allocator_reports_no_blocks() -> None:
         torch.empty(0, dtype=torch.uint8), align_bytes=_ALIGN
     )
     assert allocator.get_fragmentation_stats() == (0, 0)
+
+
+def test_empty_paged_allocator_reports_no_blocks() -> None:
+    """torch.split leaves one empty slice for an empty buffer; it is not a page."""
+    shapes, dtypes = [torch.Size([_ALIGN])], [torch.uint8]
+    allocator = PagedTensorMemoryAllocator(
+        torch.empty(0, dtype=torch.uint8), shapes, dtypes
+    )
+    assert allocator.get_fragmentation_stats() == (0, 0)
+    assert allocator.address_manager.get_free_size() == 0
+
+
+def test_paged_allocator_reports_page_granular_stats() -> None:
+    """Same-size pages cannot fragment; free pages are one page each."""
+    shapes, dtypes = [torch.Size([_ALIGN])], [torch.uint8]
+    allocator = PagedTensorMemoryAllocator(
+        torch.empty(3 * _ALIGN, dtype=torch.uint8), shapes, dtypes
+    )
+    assert allocator.get_fragmentation_stats() == (_ALIGN, 3)
+
+    obj = allocator.allocate(shapes[0], dtypes[0])
+    assert obj is not None
+    assert allocator.get_fragmentation_stats() == (_ALIGN, 2)
 
 
 def test_tensor_allocator_reports_real_fragmentation() -> None:
@@ -209,11 +250,13 @@ def _value_for(metric: str, attrs: dict | None = None) -> float:
     for resource_metrics in data.resource_metrics:
         for scope_metrics in resource_metrics.scope_metrics:
             for metric_data in scope_metrics.metrics:
+                if metric_data.name != metric:
+                    continue
                 for dp in metric_data.data.data_points:
-                    if (
-                        metric_data.name == metric
-                        and tuple(sorted(dict(dp.attributes).items())) == key
-                    ):
+                    # Skip non-numeric (e.g. histogram) data points.
+                    if not hasattr(dp, "value"):
+                        continue
+                    if tuple(sorted(dict(dp.attributes or {}).items())) == key:
                         return dp.value
     return 0
 

@@ -731,17 +731,27 @@ Adapters with no in-flight work emit no datapoint for that scrape.
    * - ``lmcache_mp.l1_largest_free_block_bytes``
      - ObservableGauge
      - Largest contiguous free block in the L1 address space, sampled at
-       scrape time from ``BaseL1Manager.get_fragmentation_stats()``.  An
-       allocation failing while ``l1_memory_usage_bytes`` is still below
-       capacity means external fragmentation, not exhaustion: free bytes
-       exist but no contiguous block is large enough.  Tiers whose
-       allocator has no address space (e.g. a shadow L1) report ``0``.
+       scrape time from ``BaseL1Manager.get_fragmentation_stats()``.  A
+       failed allocation alone is not proof of fragmentation: first
+       compare the total free bytes (configured size minus
+       ``l1_memory_usage_bytes``) with the aligned request size — free
+       bytes below the demand is plain exhaustion, and a largest block
+       that covers all free bytes means the free space is contiguous.
+       Free bytes at or above the demand while the largest block is
+       below it is external fragmentation; the allocator's OOM error
+       prints the same snapshot (``N bytes in the largest of M free
+       blocks (F bytes free)``).  Each gauge samples the manager
+       independently, so the two series need not come from the same
+       instant; a single ``get_fragmentation_stats()`` call is atomic.
+       ``0`` also means the tier's allocator has no address-space stats
+       (e.g. a shadow L1).
    * - ``lmcache_mp.l1_free_block_count``
      - ObservableGauge
-     - Number of free blocks in the L1 address space, from the same
-       snapshot.  A high count next to a small
-       ``l1_largest_free_block_bytes`` is the same fragmentation signal
-       seen from the hole-count side.
+     - Number of free blocks in the L1 address space, sampled
+       independently of the largest-block gauge.  A high count next to a
+       small ``l1_largest_free_block_bytes`` is the same fragmentation
+       signal seen from the hole-count side; paged allocators report
+       page-granular counts and cannot fragment externally.
    * - ``lmcache_mp.l2_usage_bytes``
      - ObservableGauge (attr: ``l2_name``)
      - Bytes currently held in each L2 adapter, sampled at scrape time
