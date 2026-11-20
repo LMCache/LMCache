@@ -130,8 +130,23 @@ def _stream(
     chat: bool,
     max_tokens: int,
 ) -> dict[str, Any]:
-    """POST with ``stream: true``; parse SSE; return the completion text plus
-    TTFT/TPOT and token metrics."""
+    """POST with ``stream: true`` and collect text and token/latency metrics.
+
+    Args:
+        url: Endpoint URL for the streaming request.
+        body: OpenAI-compatible request payload.
+        timeout: HTTP request timeout in seconds.
+        chat: Whether the endpoint uses chat completion chunks.
+        max_tokens: Output-token estimate when the server omits its count.
+
+    Returns:
+        Completion text, server token counts, and measured latency metrics.
+        A reported completion count of zero is preserved.
+
+    Raises:
+        RuntimeError: If the HTTP request fails, the server reports an error,
+            or the stream contains neither text nor usage.
+    """
     payload = {
         **body,
         "stream": True,
@@ -180,7 +195,10 @@ def _stream(
             t1 = time.time()
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
-        _raise_json_blob_error(err_body)
+        try:
+            _raise_json_blob_error(err_body)
+        except RuntimeError as json_err:
+            err_body = str(json_err)
         raise RuntimeError(
             _clip(f"POST {url} failed (HTTP {e.code}):\n{_clip(err_body)}")
         ) from e
@@ -191,7 +209,7 @@ def _stream(
     _raise_json_blob_error(misc_text)
     joined = "".join(pieces)
     if not joined and usage is None:
-        raise RuntimeError(
+        raise _EmptyCompletionError(
             _clip(f"No completion output from engine. Captured response:\n{misc_text}")
             if misc_text
             else "Empty response from engine (no SSE chunks parsed)."
@@ -199,9 +217,8 @@ def _stream(
 
     u = usage or {}
     prompt_tokens = int(u.get("prompt_tokens") or 0)
-    num_completion = int(u.get("completion_tokens") or 0)
-    # Match V2RequestSender: server count if present, else max_tokens cap.
-    num_generated = num_completion if num_completion > 0 else max_tokens
+    num_completion = u.get("completion_tokens")
+    num_generated = int(num_completion) if num_completion is not None else max_tokens
     if first_token_t is None:
         # Use total round-trip as a conservative TTFT approximation.
         ttft_s = t1 - t0
@@ -240,16 +257,14 @@ def _missing_chat_template(exc: BaseException) -> bool:
     )
 
 
-def _weak_completions_error(msg: str) -> bool:
-    msg = msg.lower()
-    return any(
-        s in msg
-        for s in (
-            "empty response from engine",
-            "no completion output from engine",
-            "no sse chunks parsed",
-        )
-    )
+def _missing_completions_endpoint(exc: BaseException) -> bool:
+    """Check the original HTTP status, never server-provided message text."""
+    cause = exc.__cause__
+    return isinstance(cause, urllib.error.HTTPError) and cause.code in (404, 405)
+
+
+class _EmptyCompletionError(RuntimeError):
+    """The stream ended without completion text or usage."""
 
 
 class Request:
@@ -294,7 +309,9 @@ class Request:
         Returns:
             A ``(answer, metrics)`` tuple where ``answer`` is the model's
             completion text and ``metrics`` is a :data:`MetricMap` of token
-            and latency stats keyed by metric id.
+            and latency stats keyed by metric id. Output tokens use the
+            server's completion count, including zero, or ``max_tokens``
+            when the count is absent.
         """
         request_data = self.build_request(prompt)
         result = self._query_with_fallback(request_data)
@@ -317,7 +334,10 @@ class Request:
         return str(first["id"])
 
     def _query_with_fallback(self, request_data: dict[str, Any]) -> dict[str, Any]:
-        """Send one query and fallback between completions/chat endpoints."""
+        """Retry chat only for HTTP 404/405 or an empty completion stream.
+
+        Chat-first requests retain the missing-chat-template fallback.
+        """
         if request_data["completions_only"]:
             return self._query(request_data, chat=False)
         try:
@@ -330,13 +350,18 @@ class Request:
                     "chat API failed (no chat template); retrying with /v1/completions"
                 )
                 return self._query(request_data, chat=False)
+            if not (
+                isinstance(first_err, _EmptyCompletionError)
+                or _missing_completions_endpoint(first_err)
+            ):
+                raise
             _info("/v1/completions failed; retrying with /v1/chat/completions")
             try:
                 return self._query(request_data, chat=True)
             except RuntimeError as second_err:
-                if _weak_completions_error(str(first_err)) and _missing_chat_template(
-                    second_err
-                ):
+                if isinstance(
+                    first_err, _EmptyCompletionError
+                ) and _missing_chat_template(second_err):
                     _info(
                         "base / completion-only models: try `--completions` or "
                         "an instruct model with a chat template."

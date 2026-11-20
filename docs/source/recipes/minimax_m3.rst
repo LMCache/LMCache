@@ -114,6 +114,7 @@ Caveats
   128``; vLLM cannot reconcile the default block size (16) or 64 across the
   full-attention and sparse kernels and aborts KV-cache init with
   ``No common block size``. Use 128.
-- **LMCache chunk size must be a multiple of the block size.** The default
-  chunk size (256) already satisfies 128, so no extra flag is needed; if you
-  pass ``--chunk-size`` to the server, keep it a multiple of 128.
+- **LMCache negotiates a multiple of the block size.** The default minimum
+  chunk size (256) already satisfies 128, so no extra flag is needed. Other
+  configured minima are rounded up automatically; see
+  :doc:`/mp/chunk_size_negotiation`.

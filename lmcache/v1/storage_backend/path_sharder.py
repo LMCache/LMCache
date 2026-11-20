@@ -34,7 +34,7 @@ def _resolve_device_id(dst_device: str) -> int:
         try:
             return int(dst_device.split(":", 1)[1])
         except ValueError:
-            logger.warning(f"Invalid device index in '{dst_device}', falling back.")
+            logger.warning("Invalid device index in '%s', falling back.", dst_device)
     if torch_dev.is_available() and dst_device != "cpu":
         return torch_dev.current_device()
     return 0

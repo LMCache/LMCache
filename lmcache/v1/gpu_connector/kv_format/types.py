@@ -50,12 +50,15 @@ class LayoutHints(TypedDict, total=False):
             identifies a flat registration containing equal K and V layer
             halves; combined with ``tokens_per_block``, it triggers
             daemon-side un-flattening and 3-D to 4-D reshaping even when
-            tensor parallelism leaves one KV head per rank.
+            tensor parallelism leaves one KV head per rank. ``"unified"``
+            identifies canonical per-component zero-copy views, where tensor
+            rank distinguishes MLA ``[NB, BS, HS]`` from independent
+            components ``[NB, BS, NH, HS]``.
         head_dim: Per-head dimension. Used by TRT-LLM (same).
     """
 
     kv_layout: KVLayoutName
     num_kv_heads: int
     tokens_per_block: int
-    kv_list_layout: Literal["k_v"]
+    kv_list_layout: Literal["k_v", "unified"]
     head_dim: int

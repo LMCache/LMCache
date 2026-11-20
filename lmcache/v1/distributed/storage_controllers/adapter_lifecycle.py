@@ -15,7 +15,7 @@ import threading
 
 # First Party
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
-from lmcache.v1.distributed.storage_controllers.store_policy import AdapterDescriptor
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 
 
 @dataclass
@@ -28,7 +28,7 @@ class AddAdapterOp:
 
     adapter_id: int
     adapter: L2AdapterInterface
-    descriptor: AdapterDescriptor
+    descriptor: L2AdapterDescriptor
     done: threading.Event
 
 

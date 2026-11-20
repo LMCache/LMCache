@@ -189,8 +189,21 @@ class EngineDrivenContextShm(EngineDrivenContext):
             return False
 
     def prepare_retrieve(
-        self, key: IPCCacheServerKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int, expected_count: int
     ) -> list[torch.Tensor] | None:
+        """Prepare and validate SHM views for a retrieve operation.
+
+        Args:
+            key: Cache key to retrieve.
+            instance_id: Worker instance identifier.
+            expected_count: Required number of LMCache chunk views.
+
+        Returns:
+            SHM-backed tensors on a hit, or ``None`` on a miss/timeout.
+
+        Raises:
+            ValueError: If the server returns a different number of slots.
+        """
         future = self.req_client.prepare_retrieve(key, instance_id)
         try:
             response = future.result(timeout=self.mq_timeout)
@@ -199,6 +212,11 @@ class EngineDrivenContextShm(EngineDrivenContext):
         if not response.success:
             return None
         slots = response.context.get("slots", [])
+        if len(slots) != expected_count:
+            raise ValueError(
+                "SHM retrieve slot count mismatch: "
+                f"expected {expected_count}, got {len(slots)}"
+            )
         return self._build_slot_tensors(slots) if slots else None
 
     def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:

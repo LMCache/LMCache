@@ -3,10 +3,18 @@
 
 # Standard
 from unittest.mock import MagicMock, call
+import threading
+
+# Third Party
+import pytest
 
 # First Party
+from lmcache.cli.commands.bench.server_bench.cases.base import BenchResult
 from lmcache.cli.commands.bench.server_bench.cases.baseline import (
     BaselineBenchCase,
+)
+from lmcache.cli.commands.bench.server_bench.cases.concurrent import (
+    run_concurrently,
 )
 from lmcache.cli.commands.bench.server_bench.client import (
     LookupResult,
@@ -140,3 +148,119 @@ def test_baseline_case_preserves_results_when_interrupted() -> None:
     assert result.interrupted
     assert result.completed_runs == 1
     assert result.checks["checksum_match"] == [True]
+
+
+def test_baseline_case_steps_sequence_ids_by_stride() -> None:
+    client = MagicMock()
+    client.create_request.return_value = None
+
+    BaselineBenchCase(
+        sequence_count=3,
+        interval_seconds=0,
+        sequence_id_offset=1,
+        sequence_id_stride=4,
+    ).run(client, lambda _message: None)
+
+    assert [c.args[0] for c in client.create_request.call_args_list] == [
+        1,
+        1,
+        5,
+        5,
+        9,
+        9,
+    ]
+
+
+def test_baseline_case_stops_before_next_sequence_when_stop_is_set() -> None:
+    stop = threading.Event()
+    stop.set()
+    client = MagicMock()
+
+    result = BaselineBenchCase(
+        sequence_count=None,
+        interval_seconds=0,
+        stop=stop,
+    ).run(client, lambda _message: None)
+
+    assert result.interrupted
+    assert result.completed_runs == 0
+    client.create_request.assert_not_called()
+
+
+class _FixedCase:
+    name = "baseline"
+
+    def __init__(self, result: BenchResult) -> None:
+        self._result = result
+
+    def run(self, client: object, log: object) -> BenchResult:
+        return self._result
+
+
+def test_run_concurrently_merges_every_case_result() -> None:
+    results = [
+        BenchResult(
+            case_name="baseline",
+            completed_runs=2,
+            checks={"checksum_match": [True, True]},
+            latencies_ms={"cold.lookup": [1.0, 2.0]},
+        ),
+        BenchResult(
+            case_name="baseline",
+            completed_runs=1,
+            checks={"checksum_match": [False]},
+            latencies_ms={"cold.lookup": [3.0]},
+        ),
+    ]
+
+    merged = run_concurrently(
+        [MagicMock(), MagicMock()],
+        [_FixedCase(result) for result in results],
+        threading.Event(),
+        lambda _message: None,
+    )
+
+    assert merged.completed_runs == 3
+    assert merged.passed_count("checksum_match") == 2
+    assert merged.failed_count("checksum_match") == 1
+    assert sorted(merged.latencies_ms["cold.lookup"]) == [1.0, 2.0, 3.0]
+    assert not merged.interrupted
+
+
+def test_run_concurrently_stops_other_cases_and_reraises_first_error() -> None:
+    stop = threading.Event()
+    blocked = threading.Event()
+
+    class _FailingCase:
+        name = "baseline"
+
+        def run(self, client: object, log: object) -> BenchResult:
+            raise RuntimeError("lookup timed out")
+
+    class _WaitingCase:
+        name = "baseline"
+
+        def run(self, client: object, log: object) -> BenchResult:
+            assert stop.wait(timeout=5)
+            blocked.set()
+            return BenchResult(case_name="baseline", interrupted=True)
+
+    with pytest.raises(RuntimeError, match="lookup timed out"):
+        run_concurrently(
+            [MagicMock(), MagicMock()],
+            [_WaitingCase(), _FailingCase()],
+            stop,
+            lambda _message: None,
+        )
+
+    assert blocked.is_set()
+
+
+def test_run_concurrently_needs_one_client_per_case() -> None:
+    with pytest.raises(ValueError, match="need one each"):
+        run_concurrently(
+            [MagicMock()],
+            [_FixedCase(BenchResult(case_name="baseline"))] * 2,
+            threading.Event(),
+            lambda _message: None,
+        )

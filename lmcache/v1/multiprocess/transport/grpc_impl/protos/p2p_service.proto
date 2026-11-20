@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// P2PService wire contract for LMCache mp-mode gRPC.
+
+syntax = "proto3";
+
+package lmcache.mp;
+
+message ObjectKey {
+  bytes chunk_hash = 1;
+  string model_name = 2;
+  int64 kv_rank = 3;
+  int64 object_group_id = 4;
+  string cache_salt = 5;
+}
+
+message TensorShape {
+  repeated int64 dims = 1;
+}
+
+message MemoryLayoutDesc {
+  repeated TensorShape shapes = 1;
+  repeated string dtypes = 2;
+}
+
+message TransferChannelAddress {
+  int64 offset = 1;
+  int64 size = 2;
+}
+
+message P2pLookupAndLockRequest {
+  repeated ObjectKey keys = 1;
+  map<int64, MemoryLayoutDesc> group_layout_descs = 2;
+}
+
+message P2pLookupAndLockResponse {
+  int64 task_id = 1;
+}
+
+message P2pQueryLookupResultsRequest {
+  int64 task_id = 1;
+}
+
+message TransferChannelAddressList {
+  repeated TransferChannelAddress addresses = 1;
+}
+
+message P2pQueryLookupResultsResponse {
+  optional TransferChannelAddressList addresses = 1;
+}
+
+message P2pUnlockObjectsRequest {
+  repeated ObjectKey keys = 1;
+}
+
+message P2pUnlockObjectsResponse {}
+
+service P2PService {
+  rpc P2PLookupAndLock(P2pLookupAndLockRequest)
+      returns (P2pLookupAndLockResponse);
+  rpc P2PQueryLookupResults(P2pQueryLookupResultsRequest)
+      returns (P2pQueryLookupResultsResponse);
+  rpc P2PUnlockObjects(P2pUnlockObjectsRequest)
+      returns (P2pUnlockObjectsResponse);
+}

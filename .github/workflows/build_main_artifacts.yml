@@ -1,12 +1,12 @@
 name: Build Main Artifacts
 
-# Reusable workflow that builds the main release artifacts:
-# - source distribution (tar ball)
-# - CUDA wheel (built via cibuildwheel, latest torch)
-# Uploaded as the `release-artifacts` GHA artifact.
+# Reusable workflow that builds the main CUDA release wheels natively for
+# amd64 and arm64. The amd64 leg also builds the architecture-independent
+# source distribution. Artifacts are uploaded separately per architecture.
 
 on:
     workflow_call:
+    workflow_dispatch:
 
 env:
     LC_ALL: en_US.UTF-8
@@ -20,8 +20,20 @@ permissions:
 
 jobs:
     build-artifacts:
-        name: Build artifacts
-        runs-on: ubuntu-latest
+        name: Build artifacts (${{ matrix.arch }})
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - arch: amd64
+                      cibw_arch: x86_64
+                      runner: ubuntu-latest
+                      artifact: release-artifacts
+                    - arch: arm64
+                      cibw_arch: aarch64
+                      runner: ubuntu-24.04-arm
+                      artifact: release-artifacts-arm64
+        runs-on: ${{ matrix.runner }}
         steps:
             - name: "Harden Runner"
               uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
@@ -32,36 +44,25 @@ jobs:
             - name: Checkout code
               uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
               with:
-                # for setuptools-scm
                 fetch-depth: 0
 
-            # Keep stable vX.Y.Z and rc/a/b pre-release tags; strip variant tags
-            # (v*-cu129, v*-alpha) that yield invalid PEP 440 versions (see #3123).
-            - name: Remove non-release tags (keep stable + rc/a/b pre-releases)
-              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
+            - name: Prepare artifact build
+              uses: ./.github/actions/build-artifacts
+              with:
+                free_disk_space: "true"
+                python_version: "3.13"
+                pip_packages: build cibuildwheel
 
             - name: Pin release version from tag (setuptools-scm)
               if: startsWith(github.ref, 'refs/tags/v')
               run: echo "SETUPTOOLS_SCM_PRETEND_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-
-            - name: Free disk space
-              uses: ./.github/actions/free-disk-space
-
-            - name: Setup Python 3.13
-              uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
-              with:
-                python-version: "3.13"
-
-            - name: Install build tooling
-              run: |
-                python -m pip install --upgrade pip
-                pip install build cibuildwheel
 
             - name: Clean up release artifacts
               run: |
                 rm -rf dist/
 
             - name: Build source distribution (no native extensions)
+              if: matrix.arch == 'amd64'
               run: |
                 NO_NATIVE_EXT=1 python -m build --sdist
 
@@ -71,6 +72,7 @@ jobs:
               # torch the published wheel is installed next to; building from
               # source is required for any other torch.
               env:
+                CIBW_BUILD: cp3*-manylinux_${{ matrix.cibw_arch }}
                 CIBW_TEST_COMMAND: "python {project}/.github/scripts/assert_native_ops.py"
               run: |
                 python -m cibuildwheel --output-dir dist
@@ -78,5 +80,5 @@ jobs:
             - name: Upload release artifacts to GHA
               uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
               with:
-                name: release-artifacts
+                name: ${{ matrix.artifact }}
                 path: dist/

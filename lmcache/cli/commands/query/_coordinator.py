@@ -182,6 +182,8 @@ def _render_directory_stats(body: Any, metrics: Metrics) -> None:
     for key, label in (
         ("num_contents", "Contents"),
         ("num_chunks", "Chunks"),
+        ("num_claims", "Claims"),
+        ("num_namespaces", "Namespaces"),
         ("table_size", "Table size"),
     ):
         section.add(key, label, blend.get(key))

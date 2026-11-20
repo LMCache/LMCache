@@ -250,8 +250,10 @@ class AzureConnector(RemoteConnector):
             dst = memoryview(memory_obj.byte_array).cast("B")
             if len(data) != len(dst):
                 logger.error(
-                    f"Downloaded {len(data)} bytes for {key_str} but the buffer is "
-                    f"{len(dst)} bytes; dropping."
+                    "Downloaded %s bytes for %s but the buffer is %s bytes; dropping.",
+                    len(data),
+                    key_str,
+                    len(dst),
                 )
                 memory_obj.ref_count_down()
                 return None

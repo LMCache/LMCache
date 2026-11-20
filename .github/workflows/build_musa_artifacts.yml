@@ -56,54 +56,28 @@ jobs:
         name: Build MUSA wheel
         runs-on: ubuntu-latest
         outputs:
-            musa_version: ${{ steps.musa-version.outputs.musa_version }}
+            musa_version: ${{ steps.prepare.outputs.version }}
         steps:
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                  fetch-depth: 0
+
             - name: Harden Runner
               uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
               with:
                   disable-sudo-and-containers: false
                   egress-policy: audit
 
-            - name: Checkout code
-              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+            - name: Prepare artifact build
+              id: prepare
+              uses: ./.github/actions/build-artifacts
               with:
-                  fetch-depth: 0
-
-            # Variant tags such as v0.5.5rc1-musa are not valid version
-            # anchors for setuptools_scm. Keep only release and rc/a/b tags.
-            - name: Remove non-release tags
-              run: |
-                  set -euo pipefail
-                  non_release_tags=$(git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' || true)
-                  if [[ -n "${non_release_tags}" ]]; then
-                      while IFS= read -r tag; do
-                          git tag -d "${tag}"
-                      done <<< "${non_release_tags}"
-                  fi
-
-            - name: Free disk space
-              uses: ./.github/actions/free-disk-space
-
-            - name: Resolve MUSA wheel version
-              id: musa-version
-              env:
-                  DEV_VERSION: ${{ inputs.dev_version }}
-              run: |
-                  set -euo pipefail
-                  LATEST_TAG=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
-                  if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-                      BASE="${GITHUB_REF_NAME#v}"
-                  elif [[ "${DEV_VERSION}" == "true" && -n "${LATEST_TAG}" ]]; then
-                      COMMITS=$(git rev-list --count "${LATEST_TAG}..HEAD")
-                      IFS=. read -r MAJOR MINOR PATCH <<< "${LATEST_TAG#v}"
-                      BASE="${MAJOR}.${MINOR}.$((PATCH + 1)).dev${COMMITS}"
-                  else
-                      BASE="${LATEST_TAG#v}"
-                      BASE="${BASE:-0.0.0.dev0}"
-                  fi
-                  MUSA_VERSION="${BASE}+${MUSA_LOCAL_VERSION}"
-                  echo "MUSA_VERSION=${MUSA_VERSION}" >> "$GITHUB_ENV"
-                  echo "musa_version=${MUSA_VERSION}" >> "$GITHUB_OUTPUT"
+                  free_disk_space: "true"
+                  resolve_version: "true"
+                  dev_version: ${{ inputs.dev_version }}
+                  version_suffix: +${{ env.MUSA_LOCAL_VERSION }}
+                  version_environment_variable: MUSA_VERSION
 
             - name: Build MUSA wheel in the public MUSA image
               env:

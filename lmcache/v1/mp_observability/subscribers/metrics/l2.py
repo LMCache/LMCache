@@ -41,7 +41,6 @@ class L2MetricsSubscriber(EventSubscriber):
       (attr: ``l2_name``)
     - ``lmcache_mp.l2_prefetch_lookup`` — prefetch lookup requests
     - ``lmcache_mp.l2_prefetch_lookup_objects`` — chunks submitted for lookup
-    - ``lmcache_mp.l2_prefetch_hit`` — prefix chunks found in L2
     - ``lmcache_mp.l2_prefetch_load_submitted`` — load tasks submitted
     - ``lmcache_mp.l2_prefetch_load_submitted_objects`` — chunks submitted for load
     - ``lmcache_mp.l2_prefetch_load_completed`` — chunks successfully loaded from L2
@@ -95,11 +94,6 @@ class L2MetricsSubscriber(EventSubscriber):
             description="Total chunks submitted for L2 prefetch lookup",
             unit="chunks",
         )
-        self._prefetch_lookup_hit = meter.create_counter(
-            "lmcache_mp.l2_prefetch_hit",
-            description="Total prefix chunks found in L2 lookup",
-            unit="chunks",
-        )
 
         # Prefetch load counters
         self._prefetch_load_submitted = meter.create_counter(
@@ -131,7 +125,6 @@ class L2MetricsSubscriber(EventSubscriber):
             EventType.L2_STORE_COMPLETED: self._on_store_completed,
             EventType.L2_LOAD_TASK_COMPLETED: self._on_load_task_completed,
             EventType.L2_PREFETCH_LOOKUP_SUBMITTED: self._on_lookup_submitted,
-            EventType.L2_PREFETCH_LOOKUP_COMPLETED: self._on_lookup_completed,
             EventType.L2_PREFETCH_LOAD_SUBMITTED: self._on_load_submitted,
             EventType.L2_PREFETCH_LOAD_COMPLETED: self._on_load_completed,
             EventType.L2_KEYS_EVICTED: self._on_evicted,
@@ -161,9 +154,6 @@ class L2MetricsSubscriber(EventSubscriber):
             self._prefetch_lookup_submitted_objects,
             event.metadata.get("key_count_per_salt", {}),
         )
-
-    def _on_lookup_completed(self, event: Event) -> None:
-        self._prefetch_lookup_hit.add(event.metadata["prefix_hit_count"])
 
     def _on_load_submitted(self, event: Event) -> None:
         self._prefetch_load_submitted.add(event.metadata["adapter_count"])

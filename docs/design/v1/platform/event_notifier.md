@@ -9,7 +9,7 @@ LMCache's multiprocess / distributed runtime uses a large number of
 **pollable file descriptors** to wake background loops from other
 threads:
 
-- `mq.MessageQueueServer._output_efd` — notify the poller that a
+- The ZMQ `MessageQueueServer` output notifier — notify the poller that a
   response frame is ready on the thread-pool output queue.
 - `StoreListener._event_fd` — notify the store-controller loop that
   L1 has finished writing new keys.

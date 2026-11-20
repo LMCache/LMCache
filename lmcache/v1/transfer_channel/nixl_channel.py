@@ -445,7 +445,7 @@ class NixlChannel(BaseTransferChannel):
         wait_time = 0.001
         while True:
             status = self.nixl_agent.check_xfer_state(handle)
-            logger.debug(f"Transfer status: {status}")
+            logger.debug("Transfer status: %s", status)
 
             if status == "ERR":
                 logger.error("Error in send operation")
@@ -491,7 +491,7 @@ class NixlChannel(BaseTransferChannel):
         wait_time = 0.001
         while True:
             status = self.nixl_agent.check_xfer_state(handle)
-            logger.debug(f"Read transfer status: {status}")
+            logger.debug("Read transfer status: %s", status)
 
             if status == "ERR":
                 logger.error("Error in read operation")
@@ -534,7 +534,7 @@ class NixlChannel(BaseTransferChannel):
         wait_time = 0.001
         while True:
             status = self.nixl_agent.check_xfer_state(handle)
-            logger.debug(f"Transfer status: {status}")
+            logger.debug("Transfer status: %s", status)
 
             if status == "ERR":
                 logger.error("Error in send operation")
@@ -576,7 +576,7 @@ class NixlChannel(BaseTransferChannel):
         wait_time = 0.001
         while True:
             status = self.nixl_agent.check_xfer_state(handle)
-            logger.debug(f"Transfer status: {status}")
+            logger.debug("Transfer status: %s", status)
 
             if status == "ERR":
                 logger.error("Error in send operation")

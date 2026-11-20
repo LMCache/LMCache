@@ -18,6 +18,15 @@
 #define LMC_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(TYPE, NAME, LMC_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
 
+// K-plane types the re-RoPE kernel accepts: the floating types plus the
+// per-tensor fp8 KV-cache formats (dequant-rotate-requant).
+#define LMC_DISPATCH_ROPE_KEY_TYPES(TYPE, NAME, ...)                   \
+  AT_DISPATCH_SWITCH(                                                  \
+      TYPE, NAME,                                                      \
+      LMC_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__)                    \
+          AT_DISPATCH_CASE(at::ScalarType::Float8_e4m3fn, __VA_ARGS__) \
+              AT_DISPATCH_CASE(at::ScalarType::Float8_e5m2, __VA_ARGS__))
+
 #define LMC_DISPATCH_CASE_FLOATING_AND_BYTE_TYPES(...)    \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
   AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)     \

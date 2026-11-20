@@ -1,0 +1,124 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Backend discovery and lazy imports."""
+
+# Standard
+from pathlib import Path
+import argparse
+import subprocess
+import sys
+import textwrap
+
+# Third Party
+import pytest
+
+# First Party
+from lmcache.v1.distributed.config import add_storage_manager_args
+from lmcache.v1.gpu_connector import gds_backends
+from lmcache.v1.gpu_connector._gds_backends import available_backends, create_backend
+
+
+@pytest.mark.parametrize(
+    ("selection", "platform", "expected"),
+    [
+        ("cufile", "cuda", "cufile"),
+        ("hipfile", "hip", "hipfile"),
+        ("ugds", "cuda", "ugds"),
+        ("phx", "hip", "phx"),
+        ("auto", "cuda", "cufile"),
+        ("auto", "hip", "hipfile"),
+        ("auto", "both", "hipfile"),
+    ],
+)
+def test_lazy_imports_in_fresh_interpreter(
+    selection: str, platform: str, expected: str
+) -> None:
+    # A fresh process avoids imports from pytest collection masking eager loads.
+    script = textwrap.dedent(
+        """
+        from unittest.mock import Mock, patch
+        import argparse
+        import ctypes
+        import sys
+        import torch
+        import lmcache.v1.gpu_connector
+        ctypes.CDLL = Mock(side_effect=AssertionError("native library loaded"))
+        from lmcache.v1.distributed.config import add_storage_manager_args
+        from lmcache.v1.gpu_connector import _gds_backends as factory
+
+        prefix = "lmcache.v1.gpu_connector.gds_backends."
+        def loaded():
+            return {
+                name.removeprefix(prefix) for name in sys.modules
+                if name.startswith(prefix)
+                and not name.removeprefix(prefix).startswith("_")
+                and name.removeprefix(prefix) != "base"
+            }
+
+        assert loaded() == set(), loaded()
+        selection, platform, expected = sys.argv[1:]
+        torch.version.cuda = "test" if platform in ("cuda", "both") else None
+        torch.version.hip = "test" if platform in ("hip", "both") else None
+        names = factory.available_backends()
+        assert "base" not in names
+        with patch("lmcache.v1.distributed.config.add_l2_adapters_args"):
+            parser = add_storage_manager_args(argparse.ArgumentParser())
+        args = parser.parse_args([
+            "--l1-size-gb", "1", "--eviction-policy", "LRU",
+            "--gds-l1-backend", selection,
+        ])
+        assert args.gds_l1_backend == selection
+        assert loaded() == set(), loaded()
+        backend = factory.create_backend(selection)
+        assert backend.name == expected
+        candidates = (
+            set(names[:names.index(expected) + 1])
+            if selection == "auto" else {expected}
+        )
+        assert loaded() == candidates, loaded()
+        backend.close_driver()
+        assert "cufile.bindings" not in sys.modules
+        assert "hipfile" not in sys.modules
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, selection, platform, expected],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_discovery_does_not_execute_modules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "unavailable.py").write_text("raise RuntimeError('must stay lazy')\n")
+    (tmp_path / "_helper.py").write_text("raise RuntimeError('private helper')\n")
+    monkeypatch.setattr(gds_backends, "__path__", [str(tmp_path)])
+    monkeypatch.setattr(
+        "lmcache.v1.distributed.config.add_l2_adapters_args", lambda parser: None
+    )
+    assert available_backends() == ("unavailable",)
+    parser = add_storage_manager_args(argparse.ArgumentParser(exit_on_error=False))
+    assert "{auto,unavailable}" in parser.format_help()
+    required_args = ["--l1-size-gb", "1", "--eviction-policy", "LRU"]
+    args = parser.parse_args([*required_args, "--gds-l1-backend", "unavailable"])
+    assert args.gds_l1_backend == "unavailable"
+    with pytest.raises(argparse.ArgumentError, match="choose from .*auto.*unavailable"):
+        parser.parse_args([*required_args, "--gds-l1-backend", "missing"])
+    with pytest.raises(ValueError, match="Choose from: auto, unavailable"):
+        create_backend("missing")
+    assert f"{gds_backends.__name__}.unavailable" not in sys.modules
+
+
+@pytest.mark.parametrize("source", ["", "class Backend: pass\n"])
+def test_backend_module_must_export_an_interface_subclass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    (tmp_path / "invalid.py").write_text(source)
+    monkeypatch.setattr(gds_backends, "__path__", [str(tmp_path)])
+    try:
+        with pytest.raises(TypeError, match="GDS backend 'invalid' must export"):
+            create_backend("invalid")
+    finally:
+        sys.modules.pop(f"{gds_backends.__name__}.invalid", None)

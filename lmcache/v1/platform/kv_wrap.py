@@ -12,6 +12,7 @@ them without importing the vLLM integration package.
 from __future__ import annotations
 
 # Standard
+from logging import DEBUG
 from typing import Any
 
 # Third Party
@@ -19,6 +20,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.gpu_connector.utils import get_device
 from lmcache.v1.multiprocess.custom_types import KVCache
 from lmcache.v1.platform import resolve_kv_wrapper_factory
 
@@ -26,49 +28,56 @@ logger = init_logger(__name__)
 
 
 def wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
-    """Dispatch by ``tensor.device.type`` via the platform registry.
+    """Dispatch by the layer KVCache's device type via the platform registry.
 
     Concrete factories are supplied by the registered ``DeviceSpec`` objects,
     so this call site stays free of if/elif chains and external accelerators
     can provide their wrapper from an installed device-plugin wheel.
     """
-    return resolve_kv_wrapper_factory(tensor.device.type)(tensor)
+    return resolve_kv_wrapper_factory(get_device(tensor).type)(tensor)
+
+
+def _layer_shape_and_dtype(value: Any) -> tuple[object, str]:
+    """Shape/dtype summary for a layer value (tensor or plane sequence)."""
+    if isinstance(value, torch.Tensor):
+        return tuple(value.shape), str(value.dtype)
+    return tuple(tuple(p.shape) for p in value), str(tuple(p.dtype for p in value))
 
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
-    """Wrap every KV cache tensor for IPC transport.
+    """Wrap every KV cache value for IPC transport.
 
     Args:
-        kv_caches: Mapping from layer name to worker-owned KV cache tensor.
+        kv_caches: Mapping from layer name to worker-owned KV cache value.
 
     Returns:
-        The list of per-tensor IPC wrappers, ready for the msgspec wire.
+        The list of per-layer IPC wrappers, ready for the msgspec wire.
     """
     # Emit a per-layer (name, shape, dtype) summary so the operator can
     # verify the exact layer set & tensor geometry being shipped to the
     # LMCache server, then the low-noise count of handles being wrapped.
-    kept_summary = [
-        (name, tuple(tensor.shape), str(tensor.dtype))
-        for name, tensor in kv_caches.items()
-    ]
-    logger.debug(
-        "KV cache transfer keeping %d layer(s) (name, shape, dtype):\n%s",
-        len(kept_summary),
-        "\n".join(
-            f"  [{i}] {name}  shape={shape}  dtype={dtype}"
-            for i, (name, shape, dtype) in enumerate(kept_summary)
-        ),
-    )
+    if logger.isEnabledFor(DEBUG):
+        kept_summary = [
+            (name, *_layer_shape_and_dtype(value)) for name, value in kv_caches.items()
+        ]
+        logger.debug(
+            "KV cache transfer keeping %d layer(s) (name, shape, dtype):\n%s",
+            len(kept_summary),
+            "\n".join(
+                f"  [{i}] {name}  shape={shape}  dtype={dtype}"
+                for i, (name, shape, dtype) in enumerate(kept_summary)
+            ),
+        )
     logger.info("Wrapping %d KV cache tensors for IPC", len(kv_caches))
-    # Per-iteration resource management: if wrapping the N-th tensor
+    # Per-iteration resource management: if wrapping the N-th value
     # raises, ``shm_unlink`` whatever earlier iterations already
     # registered with POSIX SHM so the named segments do not outlive
     # the failed batch. CUDA wrappers do not own a named segment and
     # are skipped via the duck-typed ``shm_name`` check.
     wrappers: KVCache = []
     try:
-        for tensor in kv_caches.values():
-            wrappers.append(wrap_one_kv_cache(tensor))
+        for value in kv_caches.values():
+            wrappers.append(wrap_one_kv_cache(value))
     except BaseException:
         _release_partial_kv_wrappers(wrappers)
         raise

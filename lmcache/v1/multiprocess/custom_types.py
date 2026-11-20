@@ -313,3 +313,36 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
         )
 
     return msgspec.msgpack.Decoder(ext_hook=ext_hook, dec_hook=dec_hook, type=type)
+
+
+# Subscribe only to advertising servers; older versions expose a polling API.
+KV_EVENT_CAPABILITY = "kv_event_stream"
+KV_EVENT_KIND_STORED = "stored"
+KV_EVENT_KIND_REMOVED = "removed"
+KV_EVENT_MEDIUM_CPU = "CPU"
+
+
+@dataclass
+class KVEventRecord:
+    """Sequenced CPU cache change; stores carry one chunk's tokens and parent."""
+
+    seq: int
+    kind: str
+    medium: str
+    model_name: str
+    block_hashes: list[bytes]
+    parent_block_hash: bytes | None
+    token_ids: list[int]
+
+
+@dataclass
+class KVEventBatch:
+    """One ordered batch. Incarnation changes or lost=True require withdrawal
+    of earlier announcements; enabled=False ends the stream. Resume at next_cursor.
+    """
+
+    enabled: bool
+    incarnation: int
+    next_cursor: int
+    lost: bool
+    events: list[KVEventRecord]

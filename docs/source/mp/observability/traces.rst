@@ -80,6 +80,15 @@ breakdown of ``hit_tokens`` (prefix / segmented-prefix / non-prefix).
      - ``l2_hit_tokens / requested_tokens``; ``0.0`` when the denominator
        is zero.  Sums with ``l1_hit_rate`` to ``hit_rate`` up to float
        rounding.  ``request`` span only.
+   * - ``l1_hit_keys``
+     - ``int``
+     - Hit keys (one per object group, kv rank and chunk) L1 already
+       held.  ``request`` span only.
+   * - ``l2_hit_keys``
+     - ``int``
+     - Hit keys loaded from L2.  On hybrid models this can be small while
+       ``l2_hit_tokens`` covers the whole hit (L2 supplied only the
+       sliding-window keys).  ``request`` span only.
    * - ``early_exit_reason``
      - ``str``
      - Which branch of the lookup returned before a prefetch was
@@ -109,6 +118,9 @@ Example TraceQL queries (Grafana Tempo):
 
     # Requests that had to go to L2 for most of their hit
     { name = "request" && span.l2_hit_rate > 0.5 }
+
+    # Requests that loaded anything from L2
+    { name = "request" && span.l2_hit_keys > 0 }
 
     # Lookups that exited early rather than genuinely missing
     { name = "request" && span.early_exit_reason != "" }
@@ -166,6 +178,28 @@ With an implicit timestamped output path under ``$TMPDIR``:
 The trace file is closed cleanly on shutdown (SIGTERM is handled by
 the EventBus stop path).
 
+Capturing the cache-event stream
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``--trace-level events`` records what this server would report to an MP
+coordinator: every cache-event batch (stores, deletes, accesses, capacity
+declarations) in the exact form ``POST /events`` carries. No coordinator is
+needed, so a fleet that runs without one can be captured and replayed later
+against a coordinator or a test double.
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 100 --eviction-policy LRU \
+        --trace-level events --trace-output /data/events-$(hostname).lct
+
+One file is written per server; capture every server in the fleet. When
+``--coordinator-url`` and ``--coordinator-event-reporting`` are also set, the
+same batches go to both the coordinator and the file. ``lmcache trace info``
+prints instances, restarts, batches by type and tier, and bytes stored.
+Store entries carry the chunks' token ids, which are the prompt: treat the
+file as sensitive.
+
 Replay
 ^^^^^^
 
@@ -216,6 +250,32 @@ The format is deliberately extensible: future trace **levels**
 (``mq``, ``gpu``) will share this layout and use the ``level`` header
 field to discriminate. Additional captured ops add new ``qualname``
 strings without bumping the format version.
+
+Transfer phase sub-spans
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+With tracing enabled, each ``mp.store`` / ``mp.retrieve`` gets two child
+spans, one per GPU transfer phase:
+
+- ``transfer.kernel_interval`` -- gather/scatter kernel sections (paged KV
+  blocks <-> GPU staging buffers). The name says *interval* because the
+  kernel queues behind the co-resident inference engine's SM work: most of
+  this bar is that wait, not the copy itself. Do not read it as a rate.
+- ``transfer.staging`` -- DMA copies (GPU staging buffers <-> pinned host
+  memory) on the copy engine, which does not contend for SMs.
+
+The two bars are a **stacked breakdown, not a timeline**: the phases
+alternate every batch step on one stream, so their real intervals
+interleave. The phase that ran first starts at the transfer's real start
+and lasts its total elapsed; the other follows for its own. Their sum is
+the transfer's stream time; the gap to the parent span is idle time.
+
+Attributes: ``nbytes``, ``elapsed_seconds``, ``num_steps``, the real
+``first_start_s`` / ``last_end_s``, ``device_index``, ``session_id``, and
+-- on ``transfer.staging`` only -- ``throughput_GB_per_second``
+(``nbytes / elapsed_seconds``; see above for why the kernel span carries
+none). Timings are CUDA-event based, anchored to the same wall clock as
+the other MP events; the children are exported shortly after their parent.
 
 For the full design rationale see
 

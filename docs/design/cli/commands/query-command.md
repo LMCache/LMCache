@@ -102,7 +102,8 @@ Throughput (tokens/s):                   1100.64
 - `prompt_tokens`, `output_tokens`, `model`
 - `ttft_ms`, `tpot_ms_per_token`, `total_latency_ms`, `throughput_tokens_per_s`
 
- 
+`output_tokens` uses the server's `completion_tokens` when present, including
+zero. The request's `max_tokens` is used only when the count is absent.
 
 ### `query kvcache`
 

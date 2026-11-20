@@ -180,3 +180,15 @@ def test_slice_block_ids_misaligned_range_raises():
         assert "does not align" in str(exc)
     else:
         raise AssertionError("Expected misaligned range to fail")
+
+
+def test_slice_block_ids_scratch_group_yields_empty():
+    """A scratch group (tokens_per_block 0) contributes no block IDs."""
+    allocated = {0: list(range(2)), 1: [7]}
+    sliced = slice_block_ids_per_group(
+        allocated,
+        group_tokens_per_block=[1600, 0],
+        start_token_idx=0,
+        end_token_idx=3200,
+    )
+    assert sliced == [[0, 1], []]

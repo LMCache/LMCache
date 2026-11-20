@@ -195,7 +195,7 @@ Register your C++ sources in ``setup.py`` alongside the existing Redis extension
             "csrc/storage_backends",
             "csrc/storage_backends/mybackend",
         ],
-        extra_compile_args={"cxx": ["-O3", "-std=c++17"]},
+        extra_compile_args={"cxx": ["-O3"]},
     ),
 
 Then rebuild:

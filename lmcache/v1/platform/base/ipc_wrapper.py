@@ -4,24 +4,30 @@
 :class:`DeviceIPCWrapper` is the abstract base for KV-cache IPC wrapper
 implementations.  Every concrete wrapper (e.g. :class:`~.cpu.shm.CpuShmTensorWrapper`,
 :class:`~.cuda.ipc_wrapper.CudaIPCWrapper`) subclasses it so they share
-the single msgspec ext code (1) -- pickle preserves the concrete
-subclass identity across the wire so ``to_tensor`` dispatches correctly
-on the receiving side.
+the single msgspec ext code (1). A data-only descriptor selects the
+concrete implementation from a local allowlist.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
-from typing import Any, Tuple
-import pickle
+from typing import Any, Tuple, cast
+import importlib
 import threading
 
 # Third Party
+import msgspec
 import torch
 
 # First Party
 from lmcache import torch_dev
+from lmcache.v1.platform.base.ipc_wire import (
+    DTYPES,
+    WRAPPER_TYPES,
+    TensorMetadata,
+    WireIPCData,
+)
 
 
 class DeviceIPCWrapper:
@@ -30,12 +36,11 @@ class DeviceIPCWrapper:
     Holds the device-agnostic mechanism shared by all transports: the
     interface fields (``dtype``/``shape``/``stride``/``storage_offset``/
     ``device_uuid``), UUID<->ordinal discovery via the ``torch_dev``
-    abstraction, equality, and pickle-based (de)serialization.
+    abstraction, equality, and data-only (de)serialization.
 
     Every wire-level wrapper subclasses this so they share the single
-    msgspec ext code (1) registered for ``DeviceIPCWrapper``: pickle
-    preserves the concrete subclass identity across the wire so
-    ``to_tensor`` dispatches correctly on the receiving side.
+    msgspec ext code (1) registered for ``DeviceIPCWrapper``. Explicit
+    descriptor tags preserve concrete wrapper identity without unpickling.
 
     Subclasses implement ``__init__`` (populate the interface fields from a
     tensor) and ``to_tensor`` (reconstruct the tensor from the handle).
@@ -138,32 +143,75 @@ class DeviceIPCWrapper:
             and self.device_uuid == other.device_uuid
         )
 
+    def wire_metadata(self) -> TensorMetadata:
+        """Return the data-only tensor view metadata for this wrapper."""
+        return TensorMetadata(
+            dtype=str(self.dtype).removeprefix("torch."),
+            shape=self.shape,
+            stride=self.stride,
+            storage_offset=self.storage_offset,
+            device_uuid=self.device_uuid,
+        )
+
+    def restore_metadata(self, metadata: TensorMetadata) -> None:
+        """Restore validated tensor metadata without opening IPC resources."""
+        self.dtype = DTYPES[metadata.dtype]
+        self.shape = metadata.shape
+        self.stride = metadata.stride
+        self.storage_offset = metadata.storage_offset
+        self.device_uuid = metadata.device_uuid
+
+    def to_wire(self) -> WireIPCData:
+        """Return an explicit descriptor for a supported IPC implementation."""
+        raise NotImplementedError
+
+    @classmethod
+    def from_wire(cls, data: WireIPCData) -> "DeviceIPCWrapper":
+        """Restore a wrapper from its validated descriptor without opening it."""
+        raise NotImplementedError
+
     @staticmethod
     def Serialize(obj: "DeviceIPCWrapper") -> bytes:
-        """Pickle ``obj`` for the multiprocess wire.
-
-        Pickle (rather than msgspec) is used so the concrete subclass
-        identity round-trips: every wrapper shares the single msgspec
-        ext code (1), and the receiver relies on the unpickled type to
-        dispatch ``to_tensor`` correctly.
+        """Encode an IPC descriptor as MessagePack, without Python objects.
 
         Args:
-            obj: The wrapper instance to serialize.
+            obj: A supported concrete IPC wrapper.
 
         Returns:
-            The pickled bytes payload.
+            Versioned descriptor bytes for both MP transports.
+
+        Raises:
+            ValueError: If the wrapper is not an explicitly supported type.
         """
-        return pickle.dumps(obj)
+        data = obj.to_wire()
+        module, name = WRAPPER_TYPES[type(data)]
+        if (type(obj).__module__, type(obj).__name__) != (
+            f"lmcache.v1.platform.devices.{module}",
+            name,
+        ):
+            raise ValueError("Unsupported IPC wrapper type")
+        return msgspec.msgpack.encode(data)
 
     @staticmethod
     def Deserialize(data: bytes) -> "DeviceIPCWrapper":
-        """Inverse of :meth:`Serialize`.
+        """Decode a data-only IPC descriptor. Legacy pickle is rejected.
 
         Args:
-            data: The pickled bytes payload produced by :meth:`Serialize`.
+            data: Bytes produced by :meth:`Serialize`.
 
         Returns:
-            The reconstructed wrapper instance, with its concrete
-            subclass identity preserved.
+            A wrapper with no receiver-local resources opened.
+
+        Raises:
+            msgspec.DecodeError: If the descriptor is malformed or unsupported.
         """
-        return pickle.loads(data)
+        descriptor = msgspec.msgpack.decode(data, type=WireIPCData)
+        module, name = WRAPPER_TYPES[type(descriptor)]
+        # Module and class names come exclusively from the local allowlist.
+        wrapper_cls = cast(
+            type[DeviceIPCWrapper],
+            getattr(
+                importlib.import_module(f"lmcache.v1.platform.devices.{module}"), name
+            ),
+        )
+        return wrapper_cls.from_wire(descriptor)

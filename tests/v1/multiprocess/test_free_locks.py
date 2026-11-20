@@ -1,30 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Tests for the FREE_LOOKUP_LOCKS protocol: enum registration, protocol definition,
-message-queue round-trip, server handler, and client-side adapter API.
+Tests for the FREE_LOOKUP_LOCKS RPC contract, request-transport round-trip,
+server handler, and client-side adapter API.
 """
 
 # Standard
 from unittest.mock import MagicMock, patch
 import threading
 
+# Third Party
+import pytest
+
 # First Party
-from lmcache.v1.distributed.api import AttnWindowDesc
+from lmcache.lmcache_native import Bitmap
+from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
+from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.protocol import (
-    RequestType,
-    get_handler_type,
-    get_payload_classes,
-    get_response_class,
-)
-from lmcache.v1.multiprocess.protocols.base import HandlerType
+from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.rpc import get_rpc_spec
 from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 
 # Test helpers
-from tests.v1.multiprocess import test_mq_handler_helpers
 from tests.v1.multiprocess.test_mq import (
-    MessageQueueTestHelper,
     create_cache_key,
+)
+from tests.v1.multiprocess.transport_test_utils import (
+    REQUEST_TRANSPORTS,
+    RequestTransport,
+    request_server_url,
+    start_lookup_request_server,
 )
 
 # ============================================================================
@@ -32,15 +38,9 @@ from tests.v1.multiprocess.test_mq import (
 # ============================================================================
 
 
-def test_free_locks_in_request_type():
-    """FREE_LOOKUP_LOCKS should be a member of RequestType."""
-    assert hasattr(RequestType, "FREE_LOOKUP_LOCKS")
-    assert isinstance(RequestType.FREE_LOOKUP_LOCKS, RequestType)
-
-
 def test_free_locks_payload_classes():
     """FREE_LOOKUP_LOCKS payload should be [IPCCacheServerKey, int]."""
-    payload_classes = get_payload_classes(RequestType.FREE_LOOKUP_LOCKS)
+    payload_classes = get_rpc_spec("free_lookup_locks").payload_types
     assert len(payload_classes) == 2
     assert payload_classes[0] is IPCCacheServerKey
     assert payload_classes[1] is int
@@ -48,39 +48,44 @@ def test_free_locks_payload_classes():
 
 def test_free_locks_response_class():
     """FREE_LOOKUP_LOCKS should have no response (None)."""
-    response_class = get_response_class(RequestType.FREE_LOOKUP_LOCKS)
-    assert response_class is None
-
-
-def test_free_locks_handler_type():
-    """FREE_LOOKUP_LOCKS should use BLOCKING handler type."""
-    handler_type = get_handler_type(RequestType.FREE_LOOKUP_LOCKS)
-    assert handler_type == HandlerType.BLOCKING
+    response_class = get_rpc_spec("free_lookup_locks").response_type
+    assert response_class is type(None)
 
 
 # ============================================================================
-# Message-queue round-trip test
+# Request-transport round-trip test
 # ============================================================================
 
 
-def test_mq_free_locks():
-    """
-    Test MessageQueue with FREE_LOOKUP_LOCKS request type.
-    FREE_LOOKUP_LOCKS takes (key: KeyType) and returns None.
-    """
+class _FreeLocksHandler:
+    """Record FREE_LOOKUP_LOCKS calls from a request server."""
+
+    def __init__(self) -> None:
+        self.call: tuple[IPCCacheServerKey, int] | None = None
+
+    @request_handler(HandlerType.BLOCKING)
+    def free_lookup_locks(self, key: IPCCacheServerKey, tp_size: int) -> None:
+        """Record the decoded request payload."""
+        self.call = (key, tp_size)
+
+
+@pytest.mark.parametrize("request_transport", REQUEST_TRANSPORTS)
+def test_free_locks_request_transport(request_transport: RequestTransport) -> None:
+    """FREE_LOOKUP_LOCKS round-trips over every request transport."""
     key = create_cache_key(0)
-
-    helper = MessageQueueTestHelper(server_url="tcp://127.0.0.1:5570")
-    helper.register_handler(
-        RequestType.FREE_LOOKUP_LOCKS, test_mq_handler_helpers.free_locks_handler
+    handler = _FreeLocksHandler()
+    server_url = request_server_url(
+        request_transport,
+        15570 if request_transport == "zmq" else 15571,
     )
-
-    helper.run_test(
-        request_type=RequestType.FREE_LOOKUP_LOCKS,
-        payloads=[key, 1],
-        expected_response=None,
-        num_requests=1,
-    )
+    server = start_lookup_request_server(request_transport, server_url, handler)
+    client = RequestClientFactory.create(server_url)
+    try:
+        assert client.free_lookup_locks(key, 1).result(timeout=5) is None
+        assert handler.call == (key, 1)
+    finally:
+        client.close()
+        server.close()
 
 
 # ============================================================================
@@ -108,6 +113,7 @@ def _make_free_locks_ctx(
         The configured MagicMock context.
     """
     ctx = MagicMock()
+    ctx.get_read_owners.return_value = None
     ctx.chunk_size = 256
     ctx.token_hasher.chunk_size = 256
     ctx.token_hasher.compute_chunk_hashes.return_value = chunk_hashes
@@ -141,7 +147,7 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
         module.free_lookup_locks(key, 1)
 
     module.context.storage_manager.finish_read_prefetched.assert_called_once_with(
-        sentinel_obj_keys, read_locks=1
+        sentinel_obj_keys, read_locks=1, l1_owners=None
     )
 
 
@@ -162,7 +168,7 @@ def _free_locks_key(num_tokens: int, start: int, end: int) -> IPCCacheServerKey:
 def _released_chunks(finish_read_mock: MagicMock) -> set[tuple[int, bytes]]:
     """Collect (object_group_id, chunk_hash) pairs released by the module."""
     (obj_keys,), kwargs = finish_read_mock.call_args
-    assert kwargs == {"read_locks": 1}
+    assert kwargs == {"read_locks": 1, "l1_owners": None}
     return {(k.object_group_id, k.chunk_hash) for k in obj_keys}
 
 
@@ -226,13 +232,11 @@ def test_server_free_lookup_locks_caps_release_at_hit_length():
     assert released == {(0, b"h0"), (0, b"h1")}
 
 
-def test_server_free_lookup_locks_unknown_hit_skips_window_groups():
-    """Without a recorded hit length, window groups release nothing.
+def test_server_free_lookup_locks_without_result_releases_nothing():
+    """Without a lookup result there is no ownership record.
 
-    Full-attention groups keep the legacy full-range release; a
-    sliding-window group's locked suffix is unknown, so it is skipped
-    (leaked locks expire with the TTL, over-releasing could strip a
-    concurrent reader's lock).
+    Nothing is released and the locks expire with the TTL; guessing could
+    strip a concurrent reader's lock.
     """
     # First Party
     from lmcache.v1.multiprocess.modules.lookup import LookupModule
@@ -243,8 +247,78 @@ def test_server_free_lookup_locks_unknown_hit_skips_window_groups():
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
 
-    released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
-    assert released == {(1, b"h0"), (1, b"h1"), (1, b"h2")}
+    ctx.storage_manager.finish_read_prefetched.assert_not_called()
+
+
+def test_server_free_lookup_locks_consumes_pending_result_first():
+    """An unconsumed result supplies the exact hit length and retained owners."""
+    ctx = _make_free_locks_ctx([b"h0", b"h1", b"h2"], windows=[-1], hit_chunks=-1)
+    session = ctx.session_manager.get_or_create.return_value
+    session.record_prefetch_result.side_effect = lambda hit, gids, owners=None: (
+        setattr(session, "prefetch_hit_chunks", hit),
+        setattr(session, "prefetch_locked_gids", gids),
+    )
+    owners = {"owner-map": 1}
+    ctx.get_read_owners.return_value = owners
+    ctx.storage_manager.query_prefetch_status.return_value = PrefetchResult(
+        hit_cells=[Bitmap(3, 2)],
+        l1_hit_cells=[Bitmap(3, 2)],
+        l2_hit_cells=[Bitmap(3)],
+        l1_owners=owners,
+    )
+    module = LookupModule(ctx)
+    module._prefetch_jobs["req-sw"] = _PrefetchJob(
+        handle=PrefetchHandle(
+            prefetch_request_id=0,
+            external_request_id="req-sw",
+            total_requested_keys=3,
+            submit_time=0.0,
+        ),
+        row_windows=(-1,),
+        request_id="req-sw",
+        requested_tokens=768,
+    )
+
+    module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
+
+    session.record_prefetch_result.assert_called_once_with(2, (0,), owners)
+    assert "req-sw" not in module._prefetch_jobs
+    ctx.event_bus.publish.assert_called_once()
+    assert (
+        ctx.event_bus.publish.call_args.args[0].event_type
+        == EventType.MP_LOOKUP_PREFETCH_END
+    )
+    ctx.storage_manager.finish_read_prefetched.assert_called_once()
+    (obj_keys,), kwargs = ctx.storage_manager.finish_read_prefetched.call_args
+    assert {(k.object_group_id, k.chunk_hash) for k in obj_keys} == {
+        (0, b"h0"),
+        (0, b"h1"),
+    }
+    assert kwargs == {"read_locks": 1, "l1_owners": owners}
+
+
+def test_server_free_lookup_locks_while_prefetch_running_releases_nothing():
+    """A running prefetch retains its locks and can still be polled later."""
+    ctx = _make_free_locks_ctx([b"h0", b"h1", b"h2"], windows=[-1], hit_chunks=-1)
+    ctx.storage_manager.query_prefetch_status.return_value = None
+    module = LookupModule(ctx)
+    module._prefetch_jobs["req-sw"] = _PrefetchJob(
+        handle=PrefetchHandle(
+            prefetch_request_id=0,
+            external_request_id="req-sw",
+            total_requested_keys=3,
+            submit_time=0.0,
+        ),
+        row_windows=(-1,),
+        request_id="req-sw",
+        requested_tokens=768,
+    )
+
+    module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
+
+    ctx.storage_manager.finish_read_prefetched.assert_not_called()
+    assert "req-sw" in module._prefetch_jobs
+    ctx.session_manager.get_or_create.return_value.record_prefetch_result.assert_not_called()
 
 
 def test_server_free_lookup_locks_no_matching_chunks():
@@ -253,6 +327,7 @@ def test_server_free_lookup_locks_no_matching_chunks():
     from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
     ctx = MagicMock()
+    ctx.get_read_owners.return_value = None
     ctx.token_hasher.chunk_size = 256
     ctx.token_hasher.compute_chunk_hashes.return_value = []
 

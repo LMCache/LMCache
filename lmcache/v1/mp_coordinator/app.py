@@ -28,7 +28,10 @@ import httpx
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.config import (
+    KafkaCacheEventSourceConfig,
+    MPCoordinatorConfig,
+)
 from lmcache.v1.mp_coordinator.controllers import build_controllers
 from lmcache.v1.mp_coordinator.controllers.base import ControllerRuntime
 from lmcache.v1.mp_coordinator.http_apis.dependencies import CoordinatorContext
@@ -38,7 +41,18 @@ from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
     CacheEventConsumer,
 )
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
+from lmcache.v1.mp_coordinator.ingest.event_source import CacheEventSource
 from lmcache.v1.mp_coordinator.ingest.http_event_source import HttpCacheEventSource
+from lmcache.v1.mp_coordinator.ingest.kafka_event_source import (
+    KafkaCacheEventSource,
+)
+from lmcache.v1.mp_coordinator.ingest.stream_position import StreamPosition
+from lmcache.v1.mp_coordinator.observability import (
+    register_broadcaster_metrics,
+    register_event_gate_metrics,
+    register_kafka_source_metrics,
+    register_key_directory_metrics,
+)
 from lmcache.v1.mp_coordinator.persistence.checkpoint import (
     load_checkpoint,
     save_checkpoint,
@@ -56,6 +70,8 @@ from lmcache.v1.mp_coordinator.persistence.store import (
 )
 from lmcache.v1.mp_coordinator.views import build_views
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
+from lmcache.v1.mp_coordinator.views.server_config import ServerConfigRegistry
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
@@ -93,6 +109,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     """
     views = build_views(config)
     registry = views.get(InstanceRegistry)
+    server_configs = views.get(ServerConfigRegistry)
     controllers = build_controllers(config, views)
     # Resolves pin requests' token_ids to object keys; must match the fleet's
     # chunk size and hash algorithm (see MPCoordinatorConfig).
@@ -111,15 +128,32 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # to read across the consumers consistently.
     quiesce = QuiesceLock()
     event_gate = EventGate(event_broadcaster, quiesce)
-    event_source = HttpCacheEventSource(event_gate)
+    # Exactly one source feeds the gate, chosen by the config: the HTTP push
+    # source behind ``POST /events`` or the Kafka pull source, never both, so
+    # every emitter's stream has one ordered path in (which is what the
+    # gate's per-emitter seq cursor assumes).
+    event_source: CacheEventSource
+    stream_position: StreamPosition | None = None
+    if isinstance(config.event_source_config, KafkaCacheEventSourceConfig):
+        stream_position = StreamPosition()
+        event_source = KafkaCacheEventSource(
+            event_gate, config.event_source_config, stream_position
+        )
+    else:
+        event_source = HttpCacheEventSource(event_gate)
 
     # The gate is named because it is durable but is neither a view nor
-    # a controller; everything else advertises its own state.
+    # a controller; everything else advertises its own state. The stream
+    # position rides beside them for the same reason a partial checkpoint
+    # must never look complete: captured under the same quiesce, restored
+    # before the source seeks to it.
     checkpoint_components: list[DurableComponent] = [
         event_gate,
         *views.durable_components()[PersistenceType.CHECKPOINT],
         *controllers.durable_components()[PersistenceType.CHECKPOINT],
     ]
+    if stream_position is not None:
+        checkpoint_components.append(stream_position)
     checkpoint_store = _artifact_store(config.checkpoint_path)
     metadata_persister = MetadataPersister(_artifact_store(config.metadata_path))
     for component in controllers.durable_components()[PersistenceType.METADATA]:
@@ -127,6 +161,12 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # Before the checkpoint, so a restored key arrives already pinned.
     metadata_persister.load()
     load_checkpoint(checkpoint_store, checkpoint_components)
+    if config.metrics_enabled:
+        register_key_directory_metrics(views.get(KeyDirectory))
+        register_event_gate_metrics(event_gate)
+        register_broadcaster_metrics(event_broadcaster)
+        if isinstance(event_source, KafkaCacheEventSource):
+            register_kafka_source_metrics(event_source)
 
     ctx = CoordinatorContext(
         views=views,
@@ -159,12 +199,15 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         A timed-out instance takes its L1 contents with it, so its
         reported L1 state is fenced across every consumer. Its L2
         contents stay: they live on storage the fleet shares and leave
-        only via ``DELETE`` events.
+        only via ``DELETE`` events. Its capacity declaration goes too,
+        as on ``DELETE /instances``; a server that was only slow
+        redeclares when it re-registers.
         """
         while True:
             await asyncio.sleep(config.health_check_interval)
             for instance_id in evict_stale(registry, config.instance_timeout):
                 event_gate.drop_instance(instance_id)
+                server_configs.forget(instance_id)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

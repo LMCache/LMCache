@@ -6,6 +6,14 @@ export AMD_SERIALIZE_KERNEL=1
 echo "AMD kernel mode: serialized"
 echo "$PWD" # for debugging
 
+# shellcheck source=.buildkite/scripts/amd-disk-guard.sh
+source .buildkite/scripts/amd-disk-guard.sh
+
+# Keep the AMD pod aligned with the PR + latest target branch, matching the
+# k3 harness behavior used by the other test suites.
+source .buildkite/k3_tests/common_scripts/helpers.sh
+merge_pr_base_branch
+
 uv venv --python 3.12 ".venv-${BUILDKITE_BUILD_ID}"
 # shellcheck disable=SC1090 # Buildkite generates a unique virtualenv path per build.
 source ".venv-${BUILDKITE_BUILD_ID}/bin/activate"
@@ -25,6 +33,10 @@ uv pip install -r requirements/common.txt
 uv pip install -r requirements/test.txt
 uv pip install -e . --no-build-isolation
 uv pip freeze
+
+# Keep uv's package cache from growing unbounded across builds (pruned here,
+# before tests run, so a test failure doesn't skip it).
+uv cache prune
 
 LMCACHE_TRACK_USAGE="false" \
 pytest --maxfail=1 --cov=lmcache \

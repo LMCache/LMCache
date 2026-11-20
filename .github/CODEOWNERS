@@ -35,7 +35,7 @@
 # Platform
 /lmcache/v1/platform/                  @maobaolong @hlin99
 /lmcache/v1/platform/base/event_ipc.py @maobaolong @hlin99 @andyluo7
-/lmcache/v1/platform/rocm/             @maobaolong @hlin99 @andyluo7
+/lmcache/v1/platform/devices/rocm/     @maobaolong @hlin99 @andyluo7
 
 # Lookup client
 /lmcache/v1/lookup_client/             @maobaolong @YaoJiayi @sammshen
@@ -79,7 +79,7 @@
 /lmcache/tools/                        @yoo-kumaneko
 
 # Tests
-/tests/                                @hickeyma @sammshen @ApostaC @deng451e
+/tests/                                @hickeyma @sammshen @ApostaC @deng451e @VincyZhang
 
 # CLI
 /lmcache/cli/                          @KuntaiDu @deng451e @royyhuang @ApostaC @sammshen @zhengfeihe @ruizhang0101
@@ -98,11 +98,11 @@
 /examples/                             @sammshen @deng451e
 
 # CI / Infrastructure
-/.github/                              @hickeyma @sammshen @ApostaC @deng451e
-/.buildkite/                           @sammshen @ApostaC @deng451e @hickeyma
+/.github/                              @hickeyma @sammshen @ApostaC @deng451e @VincyZhang
+/.buildkite/                           @sammshen @ApostaC @deng451e @hickeyma @VincyZhang
 
 # Operator
-/operator/                             @royyhuang @DongDongJu @ruizhang0101
+/operator/                             @royyhuang @DongDongJu @ruizhang0101 @VincyZhang
 
 # Rust
 /rust/                                 @DongDongJu @zhengfeihe

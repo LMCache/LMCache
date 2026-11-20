@@ -72,10 +72,15 @@ class HitLimitLookupClient(LookupClientInterface):
                 # check again
                 result = min(result, new_result)
                 logger.debug(
-                    f"hit ratio upper: {hit_ratio_upper} is smaller than "
-                    f"the real hit ratio {current_hit_ratio}, "
-                    f"the origin result is {origin_result}, "
-                    f"the new result is {new_result}, the final result is {result}"
+                    "hit ratio upper: %s is smaller than "
+                    "the real hit ratio %s, "
+                    "the origin result is %s, "
+                    "the new result is %s, the final result is %s",
+                    hit_ratio_upper,
+                    current_hit_ratio,
+                    origin_result,
+                    new_result,
+                    result,
                 )
         return result
 

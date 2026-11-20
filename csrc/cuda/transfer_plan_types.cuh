@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "kv_transfer_plan_types.h"  // PageBufferShapeDesc, EngineKVFormat
+
 // CUDA-specific plan descriptors for staged object-group transfers. These stay
 // local to the CUDA backend because different accelerators may need different
 // batching / launch metadata layouts.
@@ -34,4 +36,39 @@ struct LaunchVar {
 struct BatchStep {
   std::vector<StagingCopy> staging;
   std::vector<LaunchVar> launches;
+};
+
+// ---------------------------------------------------------------------------
+// Direct copy-engine plan (no GPU staging buffer, no SM kernel).
+//
+// Every (kv plane, layer, block) of one memory object is one entry of a
+// cudaMemcpyBatchAsync call between the pinned host object and the paged
+// buffer. Only token-major formats whose block is one contiguous
+// [bs, nh, hs] run are eligible (see direct_copy_format_supported); HND and
+// blocked-scale layouts stay on the kernel path.
+// ---------------------------------------------------------------------------
+
+// Per-kernel-group invariants for the direct copy path, resolved once per
+// object group on the Python side.
+struct DirectCopyGroupSpec {
+  // Host copy of the group's device layer pointers, in the same order as the
+  // kernel's paged_buffer_ptrs array (per layer; K layers then V layers for
+  // the SGLang two-list formats; a single base for cross-layer formats).
+  std::vector<uintptr_t> paged_layer_ptrs;
+  PageBufferShapeDesc shape_desc;
+  EngineKVFormat engine_kv_format;
+  int slots_per_chunk;             // tokens per object for this group
+  size_t byte_offset_in_object;    // start of this group's [kv, nl, slots,
+                                   // nh*hs] region inside the memory object
+  std::vector<int64_t> block_ids;  // host block ids after window downsample,
+                                   // slots_per_chunk / bs entries per chunk
+};
+
+// One pinned host memory object (chunk) to scatter/gather.
+struct DirectCopyObject {
+  uintptr_t host_ptr;
+  size_t host_offset;  // allocator virtual offset (pin-chunk boundary split)
+  size_t nbytes;       // object size; every host range is bounds-checked
+  int chunk_idx;       // index into each group's block_ids (x blocks/chunk)
+  std::vector<int> skip_prefix_n_blocks;  // per group_specs index
 };

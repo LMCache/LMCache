@@ -54,6 +54,7 @@ def _build(name: str):
         "NL_X_NB_BS_NH_TWO_HS": lambda: [_t(NB, BS, NH, 2, HS) for _ in range(NL)],
         "NL_X_NB_NH_BS_CS": lambda: [_t(NB, NH, BS, 2 * HS) for _ in range(NL)],
         "NL_X_NB_BS_NH_CS": lambda: [_t(NB, BS, NH, 2 * HS) for _ in range(NL)],
+        "NL_X_NB_BS_NH_HS": lambda: [_t(NB, BS, NH, HS) for _ in range(NL)],
     }
     return builders[name]()
 
@@ -258,6 +259,19 @@ GOLDEN = {
         tokens_per_layer=PBS,
         elements_per_layer=NB * BS * NH * HS * 2,
         concrete="5 x [7, 3, 2, 8]",
+    ),
+    "NL_X_NB_BS_NH_HS": dict(
+        shape_desc="NL x [NB, BS, NH, HS]",
+        num_layers=NL,
+        num_blocks=NB,
+        block_size=BS,
+        page_buffer_size=PBS,
+        num_heads=NH,
+        hidden_dim=NH * HS,
+        head_size=HS,
+        tokens_per_layer=PBS,
+        elements_per_layer=NB * BS * NH * HS,
+        concrete="5 x [7, 3, 2, 4]",
     ),
 }
 

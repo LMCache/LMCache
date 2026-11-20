@@ -515,8 +515,9 @@ def create_singleton_config(
                             "configurations from the environment variables."
                         )
                         logger.warning(
-                            f"You can set the configuration file through "
-                            f"the environment variable: {config_env_var}"
+                            "You can set the configuration file through "
+                            "the environment variable: %s",
+                            config_env_var,
                         )
                         _config_instance = config_class.from_env()
                     else:

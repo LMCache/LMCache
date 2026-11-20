@@ -62,7 +62,10 @@ StoreController / PrefetchController
 ```
 
 This split lets LMCache reuse the same on-device metadata and recovery model in
-both non-MP and MP mode without duplicating the raw-block implementation.
+both non-MP and MP mode without duplicating the raw-block implementation. During
+restart recovery, the shared `RawBlockCore` validates POSIX per-slot headers with
+an internal pool of 8 reader threads. Both regular `io_uring` and `io_uring_cmd`
+batch header reads up to `iouring_queue_depth`.
 
 ## Zero-Copy Data Path
 
@@ -102,6 +105,13 @@ No fixed numbers are included here because results are host/device/workload depe
   requests whose offset or `total_len` is not a multiple of the configured
   alignment; misaligned write buffers are copied through an aligned bounce
   buffer.
+- `write_uring` and `batched_write` take a logical payload length alongside the
+  physical transfer length (`write_uring`'s `total_len` defaults to
+  `payload_len`; `batched_write`'s `payload_lens` defaults to `total_lens`).
+  They read only within the source buffer bounds, never modify it, and always
+  write the padding region as zeroes. A bounce buffer is used when the source is
+  shorter than the transfer length or its padding tail is not already zero,
+  so a caller buffer whose tail is zero keeps the fixed-buffer zero-copy path.
 
 ## Build
 

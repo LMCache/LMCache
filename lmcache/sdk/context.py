@@ -223,7 +223,11 @@ class LMCacheSDKContext:
                 for i in range(num_layers)
             }
 
-        transfer_ctx = create_transfer_context(self._kv_caches)
+        transfer_ctx = create_transfer_context(
+            self._kv_caches,
+            instance_id=self.instance_id,
+            req_client=self._req_client,
+        )
         self.blocks_in_chunk = self._chunk_size // block_size
         layout_hints = LayoutHints(
             kv_layout="HND",
@@ -233,12 +237,10 @@ class LMCacheSDKContext:
         )
 
         transfer_ctx.register(
-            self.instance_id,
             self._kv_caches,
             self._model_name,
             self._world_size,
             self.blocks_in_chunk,
-            self._req_client,
             self._mq_timeout,
             layout_hints=layout_hints,
         )
@@ -268,7 +270,7 @@ class LMCacheSDKContext:
         return self._transfer_ctx
 
     def close(self) -> None:
-        """Close the request client and ZMQ context."""
+        """Close the request client and release its transport resources."""
         self._req_client.close()
 
     def maybe_submit_lookup_request(

@@ -74,7 +74,6 @@ reporter (same endpoint; `message_type` discriminates):
 | Field | Source |
 |---|---|
 | `interval_l2_lookup_keys` | `L2_PREFETCH_LOOKUP_SUBMITTED.key_count` |
-| `interval_l2_lookup_hit_keys` | `L2_PREFETCH_LOOKUP_COMPLETED.prefix_hit_count` |
 | `interval_l2_loaded_keys` / `interval_l2_load_failed_keys` | `L2_PREFETCH_LOAD_COMPLETED` |
 | `interval_l2_prefetch_failures_{l1_oom,not_found,other}` | `L2_PREFETCH_FAILED.reason` (conditional extract returning `None`; `_other` absorbs new reasons, e.g. planned `serde_failure`) |
 | `interval_l2_evicted_keys` | `L2_KEYS_EVICTED.key_count` (policy eviction; hotplug deletions bypass this event, verified) |

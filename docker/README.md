@@ -55,9 +55,10 @@ docker build \
 
 ```bash
 export HF_TOKEN=<your_huggingface_token>
+mkdir -p "$HOME/.cache/huggingface"
 
 docker run --runtime nvidia --gpus all \
-  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  -v "$HOME/.cache/huggingface:/home/lmcache/.cache/huggingface" \
   -p 8000:8000 \
   --ipc=host \
   lmcache/vllm-openai:latest \
@@ -65,6 +66,23 @@ docker run --runtime nvidia --gpus all \
   --kv-transfer-config \
   '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
 ```
+
+**Note**: The image runs as the non-root user `lmcache` (uid 1000) by
+default, so Hugging Face caches under the user's home directory
+(`/home/lmcache/.cache/huggingface`).
+
+- The bind mount above reuses models already downloaded in the host's
+  `$HOME/.cache/huggingface`. The directory and its contents must be readable
+  and writable by container uid 1000. If the host cache has different ownership,
+  grant that user access using the host's permission or ACL configuration.
+- For a separate Docker-managed cache, use
+  `-v hf-cache:/home/lmcache/.cache/huggingface` instead. A new empty named volume
+  inherits the image's pre-created cache directory ownership; existing volumes
+  retain their permissions. This does not reuse the host's Hugging Face cache.
+- To reuse a cache previously populated under `/root` (or to run with
+  root for any other reason), use `docker run --user 0 ...`. On
+  Kubernetes, set `securityContext.runAsUser: 0` (or use the `lmcache`
+  uid 1000).
 
 ---
 
@@ -151,6 +169,57 @@ docker run --runtime nvidia --gpus all \
 
 ---
 
+### 4. `Dockerfile.sglang` - SGLang
+
+**Image**: `lmcache/sglang:latest`
+
+**Description**: The official SGLang release image (`lmsysorg/sglang`) with the matching LMCache wheel from PyPI installed. SGLang supports only LMCache MP mode, so this image runs SGLang with `--enable-lmcache` and connects to a separate LMCache server (for example `lmcache/standalone`).
+
+Release builds use the newest SGLang release: the workflow resolves the `vX.Y.Z` tag that `lmsysorg/sglang:latest` points to and passes it as `SGLANG_VERSION`, so the image label names the SGLang it contains. LMCache's compiled extensions only load against the torch they were built with, so that SGLang release must ship the torch pinned in `pyproject.toml`. The build fails if the two disagree, if installing LMCache would change SGLang's torch/CUDA stack, or if LMCache's native extension or SGLang connector does not load.
+
+**Build Arguments**:
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `LMCACHE_VERSION` | (required) | LMCache release on PyPI, e.g. `v0.5.6` |
+| `SGLANG_VERSION` | `latest` | `lmsysorg/sglang` tag, e.g. `v0.5.21` |
+| `EXPECTED_TORCH` | (empty, check skipped) | torch version from `pyproject.toml`; the release workflow always sets it |
+
+**Usage**:
+
+```bash
+docker build \
+  --build-arg LMCACHE_VERSION=v0.5.6 \
+  --build-arg EXPECTED_TORCH=2.13.0 \
+  --tag lmcache/sglang:v0.5.6 \
+  --file docker/Dockerfile.sglang .
+```
+
+**Run Example**:
+
+```bash
+# LMCache server
+docker run -d --name lmcache --runtime nvidia --gpus all \
+  --network host --ipc host \
+  lmcache/standalone:latest \
+  /opt/venv/bin/lmcache server --host 127.0.0.1 --port 5555 \
+  --l1-size-gb 10 --eviction-policy LRU
+
+# SGLang, connected through the environment variables
+docker run --runtime nvidia --gpus all \
+  --network host --ipc host \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  --env "HF_TOKEN=$HF_TOKEN" \
+  --env LMCACHE_MP_HOST=127.0.0.1 --env LMCACHE_MP_PORT=5555 \
+  lmcache/sglang:latest \
+  python3 -m sglang.launch_server --model-path Qwen/Qwen3-0.6B \
+  --host 0.0.0.0 --port 30000 --enable-lmcache
+```
+
+Both containers share the host IPC namespace (`--ipc host`) so the LMCache server can open the CUDA IPC handles SGLang registers.
+
+---
+
 ## Which Dockerfile Should I Use?
 
 ### Use `Dockerfile` if you:
@@ -167,6 +236,9 @@ docker run --runtime nvidia --gpus all \
 ### Use `Dockerfile.lightweight` if you:
 - Prefer stable releases from PyPI
 - Need fast build times
+
+### Use `Dockerfile.sglang` if you:
+- Serve with SGLang instead of vLLM
 
 ---
 
@@ -207,11 +279,29 @@ Pre-built images are available on Docker Hub:
 - `lmcache/vllm-openai:lightweight` - Lightweight version
 - `lmcache/standalone:latest` - Latest standalone release
 - `lmcache/standalone:{version}` - Specific standalone version
+- `lmcache/sglang:latest` - Latest stable release with SGLang
+- `lmcache/sglang:{version}` - Specific version, including release candidates (e.g., `v0.5.6rc1`)
 
 ```bash
 # Pull pre-built images
 docker pull lmcache/vllm-openai:latest
 docker pull lmcache/standalone:latest
+```
+
+The default CUDA 13 `lmcache/vllm-openai`, `lmcache/standalone`, and
+`lmcache/lmcache-payload` release and nightly tags, and the `lmcache/sglang`
+release tags, are multi-platform images
+for `linux/amd64` and `linux/arm64`. The `lmcache/vllm-openai:lightweight`
+release image and the CUDA 12.9 `-cu129` release and nightly variants support
+both platforms as well. Docker selects the matching image automatically. The
+ARM64 variant targets NVIDIA Grace/SBSA systems; it is not a Jetson/L4T image.
+To select one explicitly:
+
+```bash
+docker pull --platform linux/arm64 lmcache/vllm-openai:latest
+docker pull --platform linux/arm64 lmcache/vllm-openai:lightweight
+docker pull --platform linux/arm64 lmcache/vllm-openai:latest-cu129
+docker pull --platform linux/arm64 lmcache/standalone:latest
 ```
 
 ---

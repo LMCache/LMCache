@@ -14,11 +14,15 @@ from lmcache.v1.mp_observability.subscribers.tracing.span_registry import (
 from lmcache.v1.mp_observability.subscribers.tracing.timeout import (
     TimeoutTracingSubscriber,
 )
+from lmcache.v1.mp_observability.subscribers.tracing.transfer_phase import (
+    TransferPhaseTracingSubscriber,
+)
 
 __all__ = [
     "BlendTracingSubscriber",
     "MPServerTracingSubscriber",
     "SpanRegistry",
     "TimeoutTracingSubscriber",
+    "TransferPhaseTracingSubscriber",
     "get_span_registry",
 ]

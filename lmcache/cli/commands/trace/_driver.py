@@ -267,6 +267,12 @@ class StorageReplayDriver:
         stats = ReplayStatsCollector()
         context = ReplayContext(sm=self._sm)
         header = self._reader.header
+        if header.level != "storage":
+            raise ValueError(
+                f"trace {self._reader.path!r} is level {header.level!r}; "
+                "StorageReplayDriver replays 'storage' traces only. An "
+                "'events' trace holds the cache-event stream for a coordinator."
+            )
         t_start = time.time()
         stats.mark_start(t_start)
 

@@ -106,3 +106,8 @@ def test_transfer_result_reports_partial_failure() -> None:
 def test_transfer_result_requires_exact_worker_partition() -> None:
     with pytest.raises(ValueError, match="exactly partition"):
         TransferResult("store", 256, 2.5, (0, 1), (0,), ())
+
+
+def test_bench_config_rejects_non_positive_concurrency() -> None:
+    with pytest.raises(ValueError, match="concurrency must be positive"):
+        parse_args_to_config(_args(concurrency=0))

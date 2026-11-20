@@ -26,6 +26,10 @@ on:
                 type: boolean
                 default: false
                 required: false
+        secrets:
+            dockerhub_token:
+                description: DockerHub token used to avoid image pull rate limits.
+                required: false
         outputs:
             rocm_version:
                 description: >-
@@ -67,60 +71,30 @@ jobs:
         name: Build ROCm wheel (gfx942, gfx950)
         runs-on: ubuntu-latest
         outputs:
-            rocm_version: ${{ steps.rocm-version.outputs.rocm_version }}
+            rocm_version: ${{ steps.prepare.outputs.version }}
         steps:
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
             - name: "Harden Runner"
               uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
               with:
                 disable-sudo-and-containers: false
                 egress-policy: audit
 
-            - name: Checkout code
-              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+            - name: Prepare artifact build
+              id: prepare
+              uses: ./.github/actions/build-artifacts
               with:
-                fetch-depth: 0
-
-            # Keep stable vX.Y.Z and rc/a/b pre-release tags; strip variant tags
-            # (v*-rocm, v*-cu129) that yield invalid PEP 440 versions (see #3123).
-            - name: Remove non-release tags (keep stable + rc/a/b pre-releases)
-              run: git tag -l | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+((rc|a|b)[0-9]+)?$' | xargs -r git tag -d
-
-            - name: Login to DockerHub
-              # Skip when creds are absent (fork PRs never get secrets). The
-              # public dev-ubuntu / vllm-openai-rocm pulls work unauthenticated
-              # but DockerHub anonymous rate limits can bite CI.
-              if: vars.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
-              env:
-                DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
-              with:
-                username: ${{ vars.DOCKERHUB_USERNAME }}
-                password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-            - name: Free disk space
-              uses: ./.github/actions/free-disk-space
-
-            - name: Get base version for rocm wheel
-              id: rocm-version
-              env:
-                DEV_VERSION: ${{ inputs.dev_version }}
-              run: |
-                LATEST_TAG=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
-                if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-                  BASE="${GITHUB_REF_NAME#v}"
-                elif [[ "${DEV_VERSION}" == "true" && -n "${LATEST_TAG}" ]]; then
-                  # guess-next-dev, matching setuptools_scm and therefore the
-                  # cu130/cu129 nightlies: bump the patch of the newest release
-                  # and append the commit count since that tag.
-                  COMMITS=$(git rev-list --count "${LATEST_TAG}..HEAD")
-                  IFS=. read -r MAJOR MINOR PATCH <<< "${LATEST_TAG#v}"
-                  BASE="${MAJOR}.${MINOR}.$((PATCH + 1)).dev${COMMITS}"
-                else
-                  BASE="${LATEST_TAG#v}"
-                  BASE="${BASE:-0.0.0.dev}"
-                fi
-                echo "ROCM_VERSION=${BASE}+${ROCM_LOCAL_VERSION}" >> "$GITHUB_ENV"
-                echo "rocm_version=${BASE}+${ROCM_LOCAL_VERSION}" >> "$GITHUB_OUTPUT"
+                dockerhub_login: "true"
+                dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+                dockerhub_token: ${{ secrets.dockerhub_token }}
+                free_disk_space: "true"
+                resolve_version: "true"
+                dev_version: ${{ inputs.dev_version }}
+                fallback_version: 0.0.0.dev
+                version_suffix: +${{ env.ROCM_LOCAL_VERSION }}
+                version_environment_variable: ROCM_VERSION
 
             # Build inside the ROCm dev image. No GPU is needed to compile HIP
             # kernels; PYTORCH_ROCM_ARCH bakes gfx942+gfx950 code objects into

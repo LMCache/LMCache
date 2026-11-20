@@ -82,29 +82,32 @@ These are straightforward to fix:
 6. **Bare `logging.getLogger(__name__)`** (Section 7.4): Replace with `init_logger(__name__)` from `lmcache.logging`.
 7. **Operational logs at `INFO` level** (Section 7.4): If a log is about store/retrieve/task progress, change `logger.info(...)` to `logger.debug(...)`.
 8. **Inappropriate `WARNING`** (Section 7.4): For log messages about benign concurrent conditions (e.g., "key not found, this should not happen" in a code path documented as not holding the global lock), downgrade to `debug` and fix the misleading message.
+9. **`logger.error` inside `except` blocks** (Section 10.1): Replace with `logger.exception(...)` so the traceback is preserved, unless the exception is re-raised.
 
 #### B. Docstring issues (fix when content is clear; ask when content is unclear)
 
-9. **Missing docstrings** on public/modified functions (Section 3.1-3.2):
-   - If the function is simple and its purpose is obvious from the code, draft a full docstring (summary, args, returns, raises).
-   - If behavior is non-obvious, draft a docstring with clear sections but add a `TODO: confirm` note where you are uncertain, and flag it in the report.
-10. **Docstring accuracy** (Section 3.3): If you added a parameter but the docstring still describes the old signature, update it. If a parameter is currently a no-op (accepted but ignored), the docstring must say so explicitly.
-11. **Missing type hints** on function args or return values (Section 2.1): Add them based on the function's body.
+10. **Missing docstrings** on public/modified functions (Section 3.1-3.2):
+    - If the function is simple and its purpose is obvious from the code, draft a full docstring (summary, args, returns, raises).
+    - If behavior is non-obvious, draft a docstring with clear sections but add a `TODO: confirm` note where you are uncertain, and flag it in the report.
+11. **Docstring accuracy** (Section 3.3): If you added a parameter but the docstring still describes the old signature, update it. If a parameter is currently a no-op (accepted but ignored), the docstring must say so explicitly.
+12. **Missing type hints** on function args or return values (Section 2.1): Add them based on the function's body.
 
 #### C. Design issues (flag; do NOT silently refactor)
 
 These are judgment calls and should be reported, not auto-fixed:
 
-12. **Cross-class private member access** (Section 4.4): Accessing `other._private` outside the defining class.
-13. **Ambiguous return values** (Section 4.3): Function returns `None` for multiple distinct meanings.
-14. **Boolean parameters on public APIs** (Section 4.3).
-15. **New features without tests** (Section 5.2).
-16. **Bug fixes without regression tests** (Section 5.2).
-17. **Unbounded collection growth** (Section 7.6): A set/dict that is appended to without cleanup.
-18. **Error paths that leave state inconsistent** (Section 7.5): Exceptions that skip lock release, FD close, or pool free.
-19. **Missing design doc** for non-trivial new features (Section 5.1).
-20. **PR scope too large** (Section 1.1): If the diff touches many unrelated modules, suggest how to split.
-21. **Lock protocol violations** (Section 8): Debug methods not holding `self._lock`; shared state accessed without synchronization.
+13. **Cross-class private member access** (Section 4.4): Accessing `other._private` outside the defining class.
+14. **Ambiguous return values** (Section 4.3): Function returns `None` for multiple distinct meanings.
+15. **Boolean parameters on public APIs** (Section 4.3).
+16. **New features without tests** (Section 5.2).
+17. **Bug fixes without regression tests** (Section 5.2).
+18. **Unbounded collection growth** (Section 7.6): A set/dict that is appended to without cleanup.
+19. **Error paths that leave state inconsistent** (Section 7.5): Exceptions that skip lock release, FD close, or pool free.
+20. **Missing design doc** for non-trivial new features (Section 5.1).
+21. **PR scope too large** (Section 1.1): If the diff touches many unrelated modules, suggest how to split.
+22. **Lock protocol violations** (Section 8): Debug methods not holding `self._lock`; shared state accessed without synchronization.
+23. **Defensive programming** (Section 10.1): Handling for failures that cannot occur — speculative `None` checks, fallback defaults, or a broad `try/except` wrapping a large block outside a thread/RPC/background-loop boundary.
+24. **AI comment/TODO violations** (Section 10.2): Comments narrating the change ("now we...", "previously..."), boilerplate docstrings restating signatures on internal helpers, or TODOs that defer required work or lack a GitHub handle.
 
 ### Step 4 -- Apply fixes
 

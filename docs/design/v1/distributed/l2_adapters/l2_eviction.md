@@ -73,7 +73,7 @@ JSON spec passed to `--l2-adapter`:
 
 | Field               | Type    | Default | Description                                                     |
 |---------------------|---------|---------|-----------------------------------------------------------------|
-| `eviction_policy`   | string  | —       | Policy name: `"LRU"` or `"noop"`. Required.                    |
+| `eviction_policy`   | string  | —       | Policy name: `"LRU"`, `"ARC"`, `"IsolatedLRU"`, or `"noop"`. Required. |
 | `trigger_watermark` | float   | `0.8`   | Usage fraction [0, 1] above which eviction is triggered.        |
 | `eviction_ratio`    | float   | `0.2`   | Fraction of **used** capacity to evict each cycle.              |
 
@@ -156,11 +156,28 @@ to evict. It has no knowledge of adapters or listeners:
 ```
 EvictionPolicy (abstract)
   ├─ LRUEvictionPolicy   — evicts least-recently-used keys
+  ├─ ARCEvictionPolicy   — balances recent and frequently accessed keys
+  ├─ IsolatedLRUEvictionPolicy — maintains one LRU list per cache salt
   └─ NoOpEvictionPolicy  — never evicts
 ```
 
 Policies are created by `CreateEvictionPolicy(eviction_config)` in
 `eviction_policy/factory.py`.
+
+`ARCEvictionPolicy` maintains four ordered key indexes. `T1` and `T2` contain
+resident recent and frequent keys; `B1` and `B2` contain only the keys of
+completed policy evictions. A key recreated from `B1` increases the target
+size of `T1`, while a key recreated from `B2` decreases it. Explicit deletes
+do not enter ghost history. Since the policy interface exposes ratios and
+keys rather than byte sizes, ARC learns capacity from the largest observed
+resident-key count; fixed-size chunks and fixed-slot adapters are the closest
+fit.
+
+The original ARC paper's `REPLACE(x)` operation can use the incoming key to
+break a tie at the adaptive boundary. MP eviction runs later in an independent
+pressure loop, so there is no corresponding `x`. The MP policy follows the
+request-independent threshold used by vLLM's CPU-offload ARC variant: select
+from `T1` when `len(T1) >= int(p)`, otherwise select from `T2`.
 
 ## Adapter Implementation Guide
 
@@ -271,8 +288,9 @@ for each L2AdapterEvictionState:
 ## Relationship to L1 Eviction
 
 L1 and L2 eviction share the same policy classes (`LRUEvictionPolicy`,
-`NoOpEvictionPolicy`) and the same listener-bridge pattern (composition over
-multi-inheritance). They differ in how they are wired:
+`ARCEvictionPolicy`, `IsolatedLRUEvictionPolicy`, `NoOpEvictionPolicy`) and the
+same listener-bridge pattern (composition over multi-inheritance). They differ
+in how they are wired:
 
 | Aspect              | L1                                   | L2                                    |
 |---------------------|--------------------------------------|---------------------------------------|

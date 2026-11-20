@@ -5,6 +5,7 @@ from __future__ import annotations
 
 # Standard
 from pathlib import Path
+from threading import Event
 from typing import Any
 from unittest.mock import patch
 
@@ -32,11 +33,16 @@ pytest.importorskip("lmcache_rust_raw_block_io")
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey  # noqa: E402
+from lmcache.v1.distributed.internal_api import L1MemoryDesc  # noqa: E402
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (  # noqa: E402
     RawBlockL2Adapter,
     RawBlockL2AdapterConfig,
 )
-from lmcache.v1.storage_backend.raw_block import RawBlockPutManyResult  # noqa: E402
+from lmcache.v1.memory_management import MemoryObj  # noqa: E402
+from lmcache.v1.storage_backend.raw_block import (  # noqa: E402
+    RawBlockKeySpec,
+    RawBlockPutManyResult,
+)
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -129,15 +135,28 @@ class _FakeFdpCore:
         self.slot_bytes = RAW_BLOCK_CI_SLOT_BYTES
         self.meta_checkpoint_placement_id: int | None = None
         self.put_many_calls: list[list[int | None] | None] = []
+        self.worker_failure: str | None = None
+        self.fixed_buffer_range_calls: list[tuple[int, int]] = []
+        self.fixed_buffer_registration_error: Exception | None = None
+        self.registered_bytes = 0
 
     def fetch_fdp_status(self) -> list[tuple[int, int]]:
         return self.status
 
     def report_status(self) -> dict:
+        """Return worker health and capacity for adapter status propagation."""
         return {
-            "is_healthy": True,
+            "is_healthy": self.worker_failure is None,
+            "worker_error": self.worker_failure,
             "usable_capacity_bytes": RAW_BLOCK_CI_SLOT_BYTES * 8,
+            "fixed_buffers_registered": self.registered_bytes > 0,
+            "fixed_buffer_registered_bytes": self.registered_bytes,
         }
+
+    def raise_if_failed(self) -> None:
+        """Raise RuntimeError when a terminal worker failure is configured."""
+        if self.worker_failure is not None:
+            raise RuntimeError(self.worker_failure)
 
     def put_many(
         self,
@@ -156,8 +175,14 @@ class _FakeFdpCore:
     def snapshot_indexed_keys(self) -> list[str]:
         return []
 
+    def register_fixed_buffer_range(self, ptr: int, size: int) -> None:
+        self.fixed_buffer_range_calls.append((ptr, size))
+        if self.fixed_buffer_registration_error is not None:
+            raise self.fixed_buffer_registration_error
+        self.registered_bytes = size
+
     def close(self) -> None:
-        pass
+        self.registered_bytes = 0
 
 
 def _make_fdp_config(
@@ -204,6 +229,157 @@ def _make_fdp_adapter(
         return RawBlockL2Adapter(config)
 
 
+def _make_fixed_buffer_config(
+    *,
+    io_engine: str = "io_uring",
+    enable_zero_copy: bool = True,
+) -> RawBlockL2AdapterConfig:
+    return RawBlockL2AdapterConfig(
+        device_path="/tmp/raw-block",
+        capacity_bytes=RAW_BLOCK_CI_CAPACITY_BYTES,
+        block_align=RAW_BLOCK_CI_BLOCK_ALIGN,
+        header_bytes=RAW_BLOCK_CI_HEADER_BYTES,
+        slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
+        meta_total_bytes=RAW_BLOCK_CI_META_TOTAL_BYTES,
+        use_odirect=False,
+        enable_zero_copy=enable_zero_copy,
+        meta_enable_periodic=False,
+        meta_idle_quiet_ms=0,
+        io_engine=io_engine,
+        iouring_queue_depth=8,
+        num_store_workers=1,
+        num_lookup_workers=1,
+        num_load_workers=1,
+    )
+
+
+def _make_fixed_buffer_adapter(
+    fake_core: _FakeFdpCore,
+    config: RawBlockL2AdapterConfig,
+    l1_memory_desc: L1MemoryDesc | None,
+) -> RawBlockL2Adapter:
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.RawBlockCore",
+        return_value=fake_core,
+    ):
+        return RawBlockL2Adapter(config, l1_memory_desc)
+
+
+def test_raw_block_adapter_registers_eligible_l1_range() -> None:
+    fake_core = _FakeFdpCore()
+    stable_size = (1 << 30) + RAW_BLOCK_CI_BLOCK_ALIGN
+    l1_memory_desc = L1MemoryDesc(
+        ptr=0x4000,
+        size=2 << 30,
+        align_bytes=RAW_BLOCK_CI_BLOCK_ALIGN,
+        stable_registration_size=stable_size,
+    )
+    adapter = _make_fixed_buffer_adapter(
+        fake_core,
+        _make_fixed_buffer_config(),
+        l1_memory_desc,
+    )
+    try:
+        assert fake_core.fixed_buffer_range_calls == [(l1_memory_desc.ptr, stable_size)]
+        status = adapter.report_status()["core"]
+        assert status["fixed_buffers_registered"] is True
+        assert status["fixed_buffer_registered_bytes"] == stable_size
+    finally:
+        adapter.close()
+
+    status = adapter.report_status()["core"]
+    assert status["fixed_buffers_registered"] is False
+    assert status["fixed_buffer_registered_bytes"] == 0
+
+
+@pytest.mark.parametrize(
+    ("io_engine", "enable_zero_copy", "l1_memory_desc"),
+    [
+        (
+            "posix",
+            True,
+            L1MemoryDesc(
+                ptr=0x4000,
+                size=8192,
+                align_bytes=RAW_BLOCK_CI_BLOCK_ALIGN,
+                stable_registration_size=8192,
+            ),
+        ),
+        (
+            "io_uring",
+            False,
+            L1MemoryDesc(
+                ptr=0x4000,
+                size=8192,
+                align_bytes=RAW_BLOCK_CI_BLOCK_ALIGN,
+                stable_registration_size=8192,
+            ),
+        ),
+        ("io_uring", True, None),
+        (
+            "io_uring",
+            True,
+            L1MemoryDesc(
+                ptr=0x4000,
+                size=8192,
+                align_bytes=RAW_BLOCK_CI_BLOCK_ALIGN,
+            ),
+        ),
+    ],
+)
+def test_raw_block_adapter_skips_ineligible_fixed_buffer_registration(
+    io_engine: str,
+    enable_zero_copy: bool,
+    l1_memory_desc: L1MemoryDesc | None,
+) -> None:
+    fake_core = _FakeFdpCore()
+    adapter = _make_fixed_buffer_adapter(
+        fake_core,
+        _make_fixed_buffer_config(
+            io_engine=io_engine,
+            enable_zero_copy=enable_zero_copy,
+        ),
+        l1_memory_desc,
+    )
+    try:
+        assert fake_core.fixed_buffer_range_calls == []
+        status = adapter.report_status()["core"]
+        assert status["fixed_buffers_registered"] is False
+        assert status["fixed_buffer_registered_bytes"] == 0
+    finally:
+        adapter.close()
+
+
+def test_raw_block_adapter_falls_back_when_fixed_buffer_registration_fails() -> None:
+    fake_core = _FakeFdpCore()
+    fake_core.fixed_buffer_registration_error = RuntimeError("memlock exhausted")
+    l1_memory_desc = L1MemoryDesc(
+        ptr=0x4000,
+        size=8192,
+        align_bytes=RAW_BLOCK_CI_BLOCK_ALIGN,
+        stable_registration_size=8192,
+    )
+
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.logger.warning"
+    ) as warning:
+        adapter = _make_fixed_buffer_adapter(
+            fake_core,
+            _make_fixed_buffer_config(),
+            l1_memory_desc,
+        )
+    try:
+        assert fake_core.fixed_buffer_range_calls == [(l1_memory_desc.ptr, 8192)]
+        assert adapter.report_status()["is_healthy"] is True
+        status = adapter.report_status()["core"]
+        assert status["fixed_buffers_registered"] is False
+        assert status["fixed_buffer_registered_bytes"] == 0
+        warning.assert_called_once()
+        assert "Falling back" in warning.call_args.args[0]
+    finally:
+        adapter.close()
+
+
 def test_raw_block_meta_checkpoint_placement_id_reaches_core_config() -> None:
     config = RawBlockL2AdapterConfig.from_dict(
         {
@@ -217,6 +393,113 @@ def test_raw_block_meta_checkpoint_placement_id_reaches_core_config() -> None:
 
     assert config.meta_checkpoint_placement_id == 7
     assert config.to_core_config().meta_checkpoint_placement_id == 7
+
+
+@pytest.mark.no_shared_allocator
+@pytest.mark.parametrize("operation", ["store", "lookup", "load"])
+def test_raw_block_l2_adapter_completes_failed_tasks_without_dispatch(
+    operation: str,
+) -> None:
+    """A terminal worker failure produces one result without queuing work."""
+    fake_core = _FakeFdpCore()
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config())
+    try:
+        assert adapter.report_status()["is_healthy"] is True
+        fake_core.worker_failure = "io_uring worker submission failed: test error"
+        keys = [make_object_key(700), make_object_key(701)]
+        with patch(
+            "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter."
+            "ThreadPoolExecutor.submit",
+            side_effect=AssertionError("failed worker must not queue work"),
+        ):
+            if operation == "store":
+                task_id = adapter.submit_store_task(
+                    keys, [make_memory_obj(b"payload") for _key in keys]
+                )
+                event_fd = adapter.get_store_event_fd()
+                results = adapter.pop_completed_store_tasks()
+                assert set(results) == {task_id}
+                assert not results[task_id].is_successful()
+                assert results[task_id].bytes_transferred() == 0
+                assert adapter.pop_completed_store_tasks() == {}
+            elif operation == "lookup":
+                task_id = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+                event_fd = adapter.get_lookup_and_lock_event_fd()
+                bitmap = adapter.query_lookup_and_lock_result(task_id)
+                assert bitmap is not None
+                assert str(bitmap) == "00"
+                assert adapter.query_lookup_and_lock_result(task_id) is None
+            else:
+                task_id = adapter.submit_load_task(
+                    keys, [make_empty_memory_obj(7) for _key in keys]
+                )
+                event_fd = adapter.get_load_event_fd()
+                bitmap = adapter.query_load_result(task_id)
+                assert bitmap is not None
+                assert str(bitmap) == "00"
+                assert adapter.query_load_result(task_id) is None
+
+        assert task_id >= 0
+        assert wait_for_event_fd(event_fd)
+        assert not wait_for_event_fd(event_fd, timeout=0)
+
+        status = adapter.report_status()
+        assert status["is_healthy"] is False
+        assert status["core"]["worker_error"] == fake_core.worker_failure
+        for task_kind in ("store", "lookup", "load"):
+            assert status[f"{task_kind}_inflight_task_count"] == 0
+            assert status[f"completed_{task_kind}_task_count"] == 0
+        assert fake_core.put_many_calls == []
+    finally:
+        adapter.close()
+
+
+@pytest.mark.no_shared_allocator
+def test_raw_block_l2_adapter_failed_store_bypasses_busy_pool() -> None:
+    """New failures complete without retiring a store that is still running."""
+    fake_core = _FakeFdpCore()
+    adapter = _make_fdp_adapter(fake_core, _make_fdp_config())
+    started = Event()
+    release = Event()
+    put_many = fake_core.put_many
+
+    def blocked_put(
+        specs: list[RawBlockKeySpec],
+        objects: list[MemoryObj],
+        placement_ids: list[int | None] | None = None,
+    ) -> RawBlockPutManyResult:
+        started.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("test store was not released")
+        return put_many(specs, objects, placement_ids)
+
+    try:
+        with patch.object(fake_core, "put_many", side_effect=blocked_put):
+            accepted_id = adapter.submit_store_task(
+                [make_object_key(702)], [make_memory_obj(b"accepted")]
+            )
+            assert started.wait(timeout=5)
+            fake_core.worker_failure = "io_uring worker submission failed: test error"
+            failed_id = adapter.submit_store_task(
+                [make_object_key(703)], [make_memory_obj(b"rejected")]
+            )
+            assert failed_id != accepted_id
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            failed_results = adapter.pop_completed_store_tasks()
+            assert set(failed_results) == {failed_id}
+            assert not failed_results[failed_id].is_successful()
+            assert adapter.report_status()["store_inflight_task_count"] == 1
+
+            release.set()
+            assert wait_for_event_fd(adapter.get_store_event_fd())
+            accepted_results = adapter.pop_completed_store_tasks()
+            assert set(accepted_results) == {accepted_id}
+            assert accepted_results[accepted_id].is_successful()
+            assert adapter.report_status()["store_inflight_task_count"] == 0
+            assert len(fake_core.put_many_calls) == 1
+    finally:
+        release.set()
+        adapter.close()
 
 
 def test_raw_block_meta_checkpoint_placement_id_requires_uring_cmd() -> None:

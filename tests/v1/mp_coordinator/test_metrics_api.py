@@ -7,10 +7,12 @@ from unittest.mock import patch
 # Third Party
 from fastapi.testclient import TestClient
 from prometheus_client import CONTENT_TYPE_LATEST
+import pytest
 
 # First Party
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 
 def _client(config: MPCoordinatorConfig) -> TestClient:
@@ -77,3 +79,37 @@ def test_otlp_push_returns_404() -> None:
 
     assert response.status_code == 404
     mock_generate.assert_not_called()
+
+
+@pytest.mark.parametrize("otlp_endpoint", [None, "http://collector:4317"])
+def test_enabled_app_registers_its_discovered_key_directory(
+    otlp_endpoint: str | None,
+) -> None:
+    config = MPCoordinatorConfig(
+        metrics_enabled=True,
+        otlp_endpoint=otlp_endpoint,
+        health_check_interval=0.0,
+        eviction_check_interval=0.0,
+    )
+
+    with patch(
+        "lmcache.v1.mp_coordinator.app.register_key_directory_metrics"
+    ) as mock_register:
+        app = create_app(config)
+
+    mock_register.assert_called_once_with(app.state.ctx.views.get(KeyDirectory))
+
+
+def test_disabled_app_does_not_register_key_directory_metrics() -> None:
+    config = MPCoordinatorConfig(
+        metrics_enabled=False,
+        health_check_interval=0.0,
+        eviction_check_interval=0.0,
+    )
+
+    with patch(
+        "lmcache.v1.mp_coordinator.app.register_key_directory_metrics"
+    ) as mock_register:
+        create_app(config)
+
+    mock_register.assert_not_called()

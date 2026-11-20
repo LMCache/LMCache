@@ -17,7 +17,7 @@ the full system context.
 
 | Dependency | Used for |
 |---|---|
-| `MessageQueueClient` → peer's P2P controller | lookup-and-lock, unlock RPCs |
+| `RequestClient` → peer's P2P controller | lookup-and-lock, query, and unlock RPCs over ZMQ or gRPC |
 | `TransferChannelContext` / `TransferChannelClient` | translating local L1 addresses + reading the peer's L1 |
 | `PeriodicEventNotifier` | pulsing the lookup / load event fds (see below) |
 
@@ -48,8 +48,8 @@ descriptors verbatim so the peer can size objects.
 ## Why the periodic notifier
 
 Neither the lookup RPC nor the transfer-channel read exposes a completion fd:
-the MQ response resolves on the shared client polling thread, and the RDMA read
-completes asynchronously inside the transfer engine. So the adapter registers
+the request response resolves asynchronously in the selected transport, and
+the RDMA read completes inside the transfer engine. So the adapter registers
 its lookup and load event fds with the `PeriodicEventNotifier` singleton, which
 pulses them every few milliseconds. Each pulse drives the prefetch controller
 to re-poll `query_lookup_and_lock_result` / `query_load_result`, which in turn
@@ -69,6 +69,11 @@ P2P is error-prone, so both queries are bounded by a per-task deadline
 all-zero `Bitmap` (treated as a miss); a load past its deadline returns an
 all-zero `Bitmap` (treated as a failure). The prefetch controller then trims
 those keys as if the peer never had them.
+
+On the owner, `P2P_LOOKUP_AND_LOCK` drops finished lookups older than
+`--p2p-lookup-timeout` that the requester never queried, scanning at most once
+per timeout. Their read locks are
+left to expire by TTL; a late query gets `None` and counts as a miss.
 
 ## No store / no eviction
 
@@ -105,6 +110,6 @@ storage manager owns its lifecycle. The config carries the peer's two URLs:
 Sets a closed flag (later submits are inert), unregisters the lookup/load fds
 from the periodic notifier, removes the transfer-channel client from the
 `TransferChannelContext` via `remove_transfer_channel_client(peer_url)` (which
-closes it and releases its transport handles), closes the MQ client, and closes
-the three event notifiers. `close()` is idempotent: the closed flag guards
+closes it and releases its transport handles), closes the request client, and
+closes the three event notifiers. `close()` is idempotent: the closed flag guards
 against a second teardown of these shared resources.

@@ -6,9 +6,10 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 import itertools
+import threading
 import time
 
 # First Party
@@ -49,6 +50,8 @@ class BaselineBenchCase:
     sequence_count: int | None
     interval_seconds: float
     sequence_id_offset: int = 0
+    sequence_id_stride: int = 1
+    stop: threading.Event | None = field(default=None, compare=False)
     name: str = "baseline"
 
     def __post_init__(self) -> None:
@@ -59,6 +62,10 @@ class BaselineBenchCase:
         if self.interval_seconds < 0:
             raise ValueError(
                 f"interval_seconds must be non-negative, got {self.interval_seconds}"
+            )
+        if self.sequence_id_stride < 1:
+            raise ValueError(
+                f"sequence_id_stride must be positive, got {self.sequence_id_stride}"
             )
 
     def run(
@@ -73,24 +80,29 @@ class BaselineBenchCase:
             log: Progress logger.
 
         Returns:
-            Structured checks and operation latencies. An interrupted run
-            contains results from completed sequences.
+            Structured checks and operation latencies. An interrupted or
+            stopped run contains results from completed sequences.
         """
         result = BenchResult(case_name=self.name)
         try:
             for sequence_id in self._sequence_ids():
+                if self.stop is not None and self.stop.is_set():
+                    result.interrupted = True
+                    break
                 self._run_sequence(client, sequence_id, result, log)
         except KeyboardInterrupt:
             result.interrupted = True
         return result
 
     def _sequence_ids(self) -> Iterator[int]:
+        stride = self.sequence_id_stride
         if self.sequence_count is None:
-            return itertools.count(self.sequence_id_offset)
+            return itertools.count(self.sequence_id_offset, stride)
         return iter(
             range(
                 self.sequence_id_offset,
-                self.sequence_id_offset + self.sequence_count,
+                self.sequence_id_offset + self.sequence_count * stride,
+                stride,
             )
         )
 

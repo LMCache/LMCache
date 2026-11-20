@@ -69,9 +69,10 @@ class RemoteBackendHealthCheck(HealthCheck):
                 self._fallback_policy = FallbackPolicy(fallback_policy_str)
             except ValueError:
                 logger.warning(
-                    f"Invalid fallback_policy '{fallback_policy_str}' "
-                    f"for {backend}, using default: "
-                    f"{DEFAULT_FALLBACK_POLICY}"
+                    "Invalid fallback_policy '%s' for %s, using default: %s",
+                    fallback_policy_str,
+                    backend,
+                    DEFAULT_FALLBACK_POLICY,
                 )
                 self._fallback_policy = DEFAULT_FALLBACK_POLICY
         elif isinstance(fallback_policy_str, FallbackPolicy):
@@ -111,7 +112,7 @@ class RemoteBackendHealthCheck(HealthCheck):
                 check = cls(backend)
                 check._backend_name = backend_name
                 instances.append(check)
-                logger.info(f"Created {check} for {backend_name}")
+                logger.info("Created %s for %s", check, backend_name)
 
         return instances
 
@@ -239,7 +240,7 @@ class RemoteBackendHealthCheck(HealthCheck):
             self._stats_monitor.update_remote_ping_error_code(error_code)
 
             if error_code != 0:
-                logger.warning(f"Ping failed with error code: {error_code}")
+                logger.warning("Ping failed with error code: %s", error_code)
                 return False
 
             return True
@@ -249,7 +250,7 @@ class RemoteBackendHealthCheck(HealthCheck):
             self._stats_monitor.update_remote_ping_error_code(PING_TIMEOUT_ERROR_CODE)
             return False
         except Exception as e:
-            logger.error(f"Ping error: {e}")
+            logger.error("Ping error: %s", e)
             self._stats_monitor.update_remote_ping_error_code(PING_GENERIC_ERROR_CODE)
             return False
 
@@ -299,7 +300,7 @@ class RemoteBackendHealthCheck(HealthCheck):
             logger.warning("Put timeout, check failed.")
             yield None, None
         except Exception as e:
-            logger.error(f"Put error, check failed: {e}")
+            logger.error("Put error, check failed: %s", e)
             yield None, None
         finally:
             if put_obj is not None:

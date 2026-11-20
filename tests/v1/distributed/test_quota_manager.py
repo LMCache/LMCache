@@ -245,3 +245,39 @@ class TestQuotaManagerDefaultLimit:
         qm = QuotaManager()
         with pytest.raises(ValueError):
             qm.set_default_limit_bytes(-1)
+
+
+class TestQuotaManagerSectionName:
+    """The durable section a registry writes to is its own, so a process
+    holding one registry per tier can persist them side by side."""
+
+    def test_defaults_to_the_single_registry_name(self):
+        assert QuotaManager().name == "quotas"
+
+    def test_a_named_registry_writes_its_own_section(self):
+        assert QuotaManager(section_name="l1_quotas").name == "l1_quotas"
+
+    def test_two_registries_do_not_share_a_section(self):
+        """An artifact is keyed by section name, so a shared one would
+        make the second registry silently overwrite the first."""
+        l1 = QuotaManager(section_name="l1_quotas")
+        l2 = QuotaManager()
+        l1.set_quota("alice", 1024)
+        l2.set_quota("alice", 4096)
+
+        assert l1.name != l2.name
+        sections = {q.name: q.capture() for q in (l1, l2)}
+        assert len(sections) == 2
+        assert sections["l1_quotas"]["limits"] == {"alice": 1024}
+        assert sections["quotas"]["limits"] == {"alice": 4096}
+
+    def test_a_named_registry_round_trips(self):
+        source = QuotaManager(section_name="l1_quotas")
+        source.set_quota("alice", 2048)
+        source.set_default_limit_bytes(0)
+
+        restored = QuotaManager(section_name="l1_quotas")
+        restored.restore(source.capture())
+
+        assert restored.get_limit_bytes("alice") == 2048
+        assert restored.get_default_limit_bytes() == 0

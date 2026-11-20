@@ -384,7 +384,7 @@ class MooncakestoreConnector(RemoteConnector):
                     gpu_to_numa = getattr(numa_mapping, "gpu_to_numa_mapping", {})
                     numa_id = gpu_to_numa.get(current_device_id)
                     logger.info(
-                        f"NUMA mapping detected (pre-Mooncake setup): {gpu_to_numa}"
+                        "NUMA mapping detected (pre-Mooncake setup): %s", gpu_to_numa
                     )
                     try:
                         # Third Party
@@ -393,12 +393,13 @@ class MooncakestoreConnector(RemoteConnector):
                         if numa_id is not None:
                             bind_to_numa_node(numa_id)
                             logger.info(
-                                f"GPU {current_device_id}, "
-                                f"NUMA node {numa_id} binding done"
+                                "GPU %s, NUMA node %s binding done",
+                                current_device_id,
+                                numa_id,
                             )
                         else:
                             logger.info(
-                                f"NUMA mapping not found for GPU {current_device_id}"
+                                "NUMA mapping not found for GPU %s", current_device_id
                             )
                     except ImportError:
                         logger.warning(
@@ -408,7 +409,7 @@ class MooncakestoreConnector(RemoteConnector):
                     logger.info("NUMA mapping unavailable or disabled")
             except Exception as e:
                 logger.warning(
-                    f"Failed to determine NUMA mapping before Mooncake setup: {e}"
+                    "Failed to determine NUMA mapping before Mooncake setup: %s", e
                 )
 
             setup_mooncake_store(self.store, self.config)
@@ -450,15 +451,17 @@ class MooncakestoreConnector(RemoteConnector):
                 result = self.store.register_buffer(buffer.data_ptr(), buffer.numel())
                 if result == 0:
                     logger.info(
-                        f"Registered: {hex(buffer.data_ptr())}, {buffer.numel()} bytes"
+                        "Registered: %s, %d bytes",
+                        hex(buffer.data_ptr()),
+                        buffer.numel(),
                     )
                 else:
-                    logger.warning(f"Buffer registration failed: error={result}")
+                    logger.warning("Buffer registration failed: error=%s", result)
                     self.registered_buffer_ptr = None
             else:
                 self.registered_buffer_ptr = None
         except Exception as e:
-            logger.error(f"Buffer registration error: {e}")
+            logger.error("Buffer registration error: %s", e)
             self.registered_buffer_ptr = None
 
     def _unregister_cpu_buffer(self):
@@ -466,9 +469,9 @@ class MooncakestoreConnector(RemoteConnector):
         if self.registered_buffer_ptr is not None:
             result = self.store.unregister_buffer(self.registered_buffer_ptr)
             if result == 0:
-                logger.info(f"Unregistered buffer: {hex(self.registered_buffer_ptr)}")
+                logger.info("Unregistered buffer: %s", hex(self.registered_buffer_ptr))
             else:
-                logger.warning(f"Buffer unregistration failed: error={result}")
+                logger.warning("Buffer unregistration failed: error=%s", result)
             self.registered_buffer_ptr = None
 
     def support_batched_get(self) -> bool:
@@ -529,14 +532,15 @@ class MooncakestoreConnector(RemoteConnector):
         """
         if not self.meta_shapes or not self.meta_dtypes or not self.meta_fmt:
             logger.error(
-                f"Metadata required for batch_get_into but not available: "
-                f"meta_shapes={self.meta_shapes}, "
-                f"meta_dtypes={self.meta_dtypes}, "
-                f"meta_fmt={self.meta_fmt}"
+                "Metadata required for batch_get_into but not available: "
+                "meta_shapes=%s, meta_dtypes=%s, meta_fmt=%s",
+                self.meta_shapes,
+                self.meta_dtypes,
+                self.meta_fmt,
             )
             return [None] * len(keys)
 
-        logger.debug(f"Using batch_get_into for {len(keys)} keys (zero-copy mode)")
+        logger.debug("Using batch_get_into for %d keys (zero-copy mode)", len(keys))
 
         # Reserve a buffer for every requested chunk
         memory_objs: list[Optional[MemoryObj]] = []
@@ -565,11 +569,11 @@ class MooncakestoreConnector(RemoteConnector):
 
         try:
             # Single RPC call for multiple chunks
-            logger.debug(f"Calling batch_get_into with {len(key_strs)} keys")
+            logger.debug("Calling batch_get_into with %d keys", len(key_strs))
             bytes_read_list = await asyncio.to_thread(
                 self.store.batch_get_into, key_strs, buffer_ptrs, buffer_sizes
             )
-            logger.debug(f"batch_get_into returned: {bytes_read_list}")
+            logger.debug("batch_get_into returned: %s", bytes_read_list)
 
             # Assemble the final result list
             results: list[Optional[MemoryObj]] = [None] * len(keys)
@@ -577,7 +581,7 @@ class MooncakestoreConnector(RemoteConnector):
             for i, n_read in zip(valid_idx, bytes_read_list, strict=False):
                 if n_read <= 0:
                     logger.warning(
-                        f"batch_get_into failed for key {keys[i]} (code={n_read})"
+                        "batch_get_into failed for key %s (code=%s)", keys[i], n_read
                     )
                     memory_objs[i].ref_count_down()  # type: ignore
                     continue
@@ -588,13 +592,13 @@ class MooncakestoreConnector(RemoteConnector):
                         n_read,
                     )
                 except Exception as exc:
-                    logger.error(f"Reshape failed for key {keys[i]}: {exc}")
+                    logger.error("Reshape failed for key %s: %s", keys[i], exc)
                     memory_objs[i].ref_count_down()  # type: ignore
 
             return results
 
         except Exception as exc:
-            logger.error(f"batch_get_into threw exception: {str(exc)}")
+            logger.error("batch_get_into threw exception: %s", exc)
             # Release any buffers we successfully allocated
             for i in valid_idx:
                 memory_objs[i].ref_count_down()  # type: ignore
@@ -612,13 +616,13 @@ class MooncakestoreConnector(RemoteConnector):
         try:
             buffers = await asyncio.to_thread(self.store.batch_get_buffer, key_strs)
         except Exception as e:
-            logger.error(f"batch_get_buffer failed: {str(e)}")
+            logger.error("batch_get_buffer failed: %s", e)
             return [None] * len(keys)
 
         results: list[Optional[MemoryObj]] = []
         for i, buffer in enumerate(buffers):
             if buffer is None:
-                logger.warning(f"Buffer {i} is None for key {key_strs[i]}")
+                logger.warning("Buffer %d is None for key %s", i, key_strs[i])
                 results.append(None)
                 continue
             try:
@@ -626,7 +630,7 @@ class MooncakestoreConnector(RemoteConnector):
                 results.append(memory_obj)
             except Exception as e:
                 logger.error(
-                    f"Failed to process buffer {i} for key {key_strs[i]}: {str(e)}"
+                    "Failed to process buffer %d for key %s: %s", i, key_strs[i], e
                 )
                 results.append(None)
         return results
@@ -773,13 +777,16 @@ class MooncakestoreConnector(RemoteConnector):
             )
         except asyncio.TimeoutError:
             logger.warning(
-                f"Timeout when putting key {key_str} using put_from. "
-                "Decode instance may redo prefill."
+                "Timeout when putting key %s using put_from. "
+                "Decode instance may redo prefill.",
+                key_str,
             )
         except Exception as e:
             logger.error(
-                f"Failed to put key {key_str} using put_from: "
-                f"{type(e).__name__}: {str(e)}"
+                "Failed to put key %s using put_from: %s: %s",
+                key_str,
+                type(e).__name__,
+                e,
             )
             raise
 
@@ -808,13 +815,16 @@ class MooncakestoreConnector(RemoteConnector):
             )
         except asyncio.TimeoutError:
             logger.warning(
-                f"Timeout when putting key {key_str} using put_parts. "
-                "Decode instance may redo prefill."
+                "Timeout when putting key %s using put_parts. "
+                "Decode instance may redo prefill.",
+                key_str,
             )
         except Exception as e:
             logger.error(
-                f"Failed to put key {key_str} using put_parts: "
-                f"{type(e).__name__}: {str(e)}"
+                "Failed to put key %s using put_parts: %s: %s",
+                key_str,
+                type(e).__name__,
+                e,
             )
             raise
 

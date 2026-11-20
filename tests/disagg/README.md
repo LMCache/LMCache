@@ -1,5 +1,37 @@
 # Test disaggregated prefill related components
 
+## Native vLLM P/D with multi-L1 storage
+
+`test_multi_l1_pd.py` checks running prefill/decode instances configured with
+`MultiConnector[NixlConnector, LMCacheMPConnector]` and a separate LMCache server
+for each instance. Configure NIXL with `kv_load_failure_policy=fail` and use
+independent Device-DAX regions or GDS directories for the two servers. Hybrid
+Mamba models require `VLLM_SSM_CONV_STATE_LAYOUT=DS` in vLLM 0.30.0.
+
+Set `LMCACHE_PD_TEST_CONFIG` to a JSON file containing:
+
+- `prefill`, `decode`: engine HTTP URLs.
+- `prefill_cache`, `decode_cache`: corresponding LMCache HTTP URLs.
+- `model`: the served model name.
+- `l1_tags`: configured L1 tags in placement order.
+- `prompts`: one distinct long prompt per L1, with pools sized to force overflow.
+- `expected_token_ids`: matching output token-ID lists from an uncached reference
+  using the same model, engine, TP size, temperature 0, seed 42, and 16 output tokens.
+- `evidence_dir`: directory for responses, status, and Prometheus snapshots.
+
+```bash
+LMCACHE_PD_TEST_CONFIG=/path/to/pd.json \
+    pytest -q tests/disagg/test_multi_l1_pd.py
+```
+
+The test verifies native NIXL transfer bytes, reference output agreement,
+prefill-side cache reuse, and drained ownership locks. It separately computes
+and reloads prefixes on the decoder to exercise its LMCache storage: vLLM does
+not automatically offload NIXL-imported prefixes. Every configured L1 must
+record writes and reads on both roles. Without the configuration file, the
+test is skipped. SGLang 0.5.21 rejects native P/D combined with LMCache during
+configuration validation, so this test targets vLLM.
+
 ## NIXL Pipe
 
 ```bash

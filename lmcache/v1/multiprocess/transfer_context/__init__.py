@@ -16,7 +16,7 @@ from .base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
-from .pickle import EngineDrivenContextPickle
+from .inline import EngineDrivenContextInline
 from .shm import EngineDrivenContextShm, ShmSlotDescriptor
 from .worker_transfer import (
     EngineDrivenTransferContext,
@@ -33,7 +33,7 @@ __all__ = [
     "MPTransferMode",
     "EngineDrivenContext",
     "EngineDrivenContextMetadata",
-    "EngineDrivenContextPickle",
+    "EngineDrivenContextInline",
     "EngineDrivenContextShm",
     "ShmSlotDescriptor",
     "TransferContext",

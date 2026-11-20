@@ -7,8 +7,9 @@ vLLM-specific modules.
 Covers:
 - ``run_script_api`` IS now registered on the mp HTTP server.
 - Other common endpoints (env, loglevel, metrics, …) ARE present.
-- /run_script works in mp mode (no lmcache_adapter on app.state).
-- /run_script works in inProcess mode (lmcache_adapter on app.state).
+- /run_script is DISABLED by default (404) and works only when
+  ``run_script_api_enabled`` is set, in mp mode (``configs`` on app.state)
+  and in inProcess mode (``lmcache_adapter`` on app.state).
 """
 
 # Standard
@@ -64,11 +65,15 @@ class TestCommonApiAggregation:
 @dataclass
 class _FakeAdapterConfig:
     script_allowed_imports: Optional[list] = None
+    run_script_api_enabled: bool = True
 
 
 class _FakeAdapter:
-    def __init__(self, allowed=None):
-        self.config = _FakeAdapterConfig(script_allowed_imports=allowed)
+    def __init__(self, allowed=None, enabled=True):
+        self.config = _FakeAdapterConfig(
+            script_allowed_imports=allowed,
+            run_script_api_enabled=enabled,
+        )
 
 
 def _make_run_script_app(state_kwargs: dict) -> FastAPI:
@@ -84,7 +89,9 @@ class TestRunScriptMpMode:
 
     def test_mp_mode_basic_script(self):
         """Script executes and returns result in mp mode."""
-        app = _make_run_script_app({"configs": {"mp": MPServerConfig()}})
+        app = _make_run_script_app(
+            {"configs": {"mp": MPServerConfig(run_script_api_enabled=True)}}
+        )
         client = TestClient(app)
         script = b"result = 1 + 2"
         resp = client.post(
@@ -96,14 +103,18 @@ class TestRunScriptMpMode:
 
     def test_mp_mode_no_script_file(self):
         """Missing script file returns 400."""
-        app = _make_run_script_app({"configs": {"mp": MPServerConfig()}})
+        app = _make_run_script_app(
+            {"configs": {"mp": MPServerConfig(run_script_api_enabled=True)}}
+        )
         client = TestClient(app)
         resp = client.post("/run_script", data={})
         assert resp.status_code == 400
 
     def test_mp_mode_allowed_imports(self):
         """script_allowed_imports in MPServerConfig is respected."""
-        cfg = MPServerConfig(script_allowed_imports=["math"])
+        cfg = MPServerConfig(
+            script_allowed_imports=["math"], run_script_api_enabled=True
+        )
         app = _make_run_script_app({"configs": {"mp": cfg}})
         client = TestClient(app)
         script = b"math = __import__('math'); result = math.floor(3.9)"
@@ -115,7 +126,7 @@ class TestRunScriptMpMode:
         assert resp.text == "3"
 
     def test_mp_mode_no_state(self):
-        """No app.state set — allowed_imports falls back to empty list."""
+        """No app.state set — the secure default applies: 404."""
         app = FastAPI()
         app.include_router(run_script_router)
         client = TestClient(app)
@@ -124,8 +135,20 @@ class TestRunScriptMpMode:
             "/run_script",
             files={"script": ("test.py", BytesIO(script), "text/plain")},
         )
-        assert resp.status_code == 200
-        assert resp.text == "ok"
+        assert resp.status_code == 404
+        assert "disabled" in resp.text
+
+    def test_mp_mode_disabled_by_default(self):
+        """A default MPServerConfig leaves /run_script disabled (404)."""
+        app = _make_run_script_app({"configs": {"mp": MPServerConfig()}})
+        client = TestClient(app)
+        script = b"result = 'ok'"
+        resp = client.post(
+            "/run_script",
+            files={"script": ("test.py", BytesIO(script), "text/plain")},
+        )
+        assert resp.status_code == 404
+        assert "disabled" in resp.text
 
 
 class TestRunScriptInProcessMode:
@@ -154,3 +177,15 @@ class TestRunScriptInProcessMode:
         )
         assert resp.status_code == 200
         assert resp.text == "Script executed successfully"
+
+    def test_inprocess_mode_disabled(self):
+        """run_script_api_enabled=False on the adapter config -> 404."""
+        app = _make_run_script_app({"lmcache_adapter": _FakeAdapter(enabled=False)})
+        client = TestClient(app)
+        script = b"result = 'nope'"
+        resp = client.post(
+            "/run_script",
+            files={"script": ("test.py", BytesIO(script), "text/plain")},
+        )
+        assert resp.status_code == 404
+        assert "disabled" in resp.text

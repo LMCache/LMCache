@@ -123,13 +123,21 @@ class SageMakerHyperPodConnectorAdapter(ConnectorAdapter):
         url = self._parse_url(context.url, use_https)
 
         logger.info(
-            f"Creating SageMaker HyperPod connector: url={url}, "
-            f"bucket={bucket_name}, shared_memory={shared_memory_name}, "
-            f"max_connections={max_connections}, "
-            f"max_concurrent_requests={max_concurrent_requests}, "
-            f"timeout_ms={timeout_ms}, lease_ttl_s={lease_ttl_s}s"
-            f"max_lease_size_mb="
-            f"{max_lease_size_mb if max_lease_size_mb else 'unlimited'}"
+            "Creating SageMaker HyperPod connector: url=%s, "
+            "bucket=%s, shared_memory=%s, "
+            "max_connections=%s, "
+            "max_concurrent_requests=%s, "
+            "timeout_ms=%s, lease_ttl_s=%ss"
+            "max_lease_size_mb="
+            "%s",
+            url,
+            bucket_name,
+            shared_memory_name,
+            max_connections,
+            max_concurrent_requests,
+            timeout_ms,
+            lease_ttl_s,
+            max_lease_size_mb if max_lease_size_mb else "unlimited",
         )
 
         # Create connector instance

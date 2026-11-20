@@ -32,16 +32,15 @@ I/O queue depth on a single Python thread.
    ``O_DIRECT`` has two independent alignment requirements:
 
    1. **Length alignment.**  The transfer length must be a multiple of
-      the filesystem's block size.  The connector queries the disk block
-      size at construction time and, on each operation, checks
-      ``len % disk_block_size``.  If the length is **not** a multiple,
-      the connector silently falls back to a buffered open (no
-      ``O_DIRECT``) for that operation -- correctness is preserved but
-      you do not get true direct I/O.  To ensure ``O_DIRECT`` is
-      actually used, choose ``--chunk-size`` so that the resulting
-      per-chunk byte size is a multiple of the FS block size.  GPFS and
-      similar parallel filesystems often use large blocks (e.g. several
-      MiB).
+      the filesystem's block size.  With ``use_odirect: true`` the adapter
+      automatically transfers each object's full alignment-padded L1 slot
+      (logical bytes plus padding up to ``--l1-align-bytes``), so this
+      requirement holds even when KV chunk byte sizes are not multiples of
+      the block size; on-disk files are correspondingly padded, and loads
+      must run with the same ``use_odirect`` and ``--l1-align-bytes``
+      settings as the stores.  Raise ``--l1-align-bytes`` to match the
+      block size on filesystems with large blocks (GPFS and similar
+      parallel filesystems often use several MiB).
 
    2. **Memory-buffer alignment.**  The I/O buffer pointer itself must
       also be aligned (typically to 4096 bytes on local disks, or to the

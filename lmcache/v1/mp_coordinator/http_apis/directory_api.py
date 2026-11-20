@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 # First Party
 from lmcache.v1.distributed.api import Tier
+from lmcache.v1.mp_coordinator.api import BlendNamespace
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
 from lmcache.v1.mp_coordinator.schemas import (
     BlendLookupRequest,
@@ -61,6 +62,7 @@ async def lookup_placements(
             per-request cap or a key field is invalid.
     """
     ctx = get_context(request)
+    directory = ctx.views.get(KeyDirectory)
     if body.keys:
         encoded_keys = list(body.keys)
         obj_keys = [encoded.to_object_key() for encoded in encoded_keys]
@@ -76,8 +78,8 @@ async def lookup_placements(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        obj_keys = directory.get_keys_across_object_groups(obj_keys)
         encoded_keys = [key.to_encoded_object_key() for key in obj_keys]
-    directory = ctx.views.get(KeyDirectory)
     placements = directory.lookup(obj_keys)
     token_ids = directory.get_token_ids([key.chunk_hash for key in obj_keys])
     access_counts = directory.get_access_counts(obj_keys)
@@ -107,8 +109,11 @@ async def blend_lookup(
     be a prefix, and each match reports both where the content sits in
     the query and where it sat when stored, so the caller can re-RoPE it.
 
+    Matches are restricted to the namespace the body names.
+
     Args:
-        body: The query tokens.
+        body: The query tokens and the caller's key-resolution
+            parameters.
         request: The FastAPI request carrying the coordinator context.
 
     Returns:
@@ -116,6 +121,11 @@ async def blend_lookup(
     """
     directory = get_context(request).views.get(KeyDirectory)
     tokens = decode_tokens(body.tokens_b64)
+    namespace = BlendNamespace(
+        model_name=body.model_name,
+        cache_salt=body.cache_salt,
+        world_size=body.world_size,
+    )
 
     def _match() -> BlendLookupResponse:
         """Run the fragment match and shape it for the wire."""
@@ -126,7 +136,7 @@ async def blend_lookup(
                     old_st=match.old_st,
                     cur_st=match.cur_st,
                 )
-                for match in directory.blend_match(tokens)
+                for match in directory.blend_match(tokens, namespace)
             ]
         )
 

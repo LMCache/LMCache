@@ -13,6 +13,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.periodic_thread import (
@@ -45,6 +46,7 @@ class Session:
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
     prefetch_group_windows: tuple[int, ...] = ()
+    _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
     _lookup_generation: int = field(default=0, repr=False)
     _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
@@ -154,16 +156,24 @@ class Session:
             self.prefetch_group_windows = group_windows
             self._lookup_generation += 1
             self._failed_retrieve_releases.clear()
+            self._prefetch_owners.clear()
 
     def record_prefetch_result(
         self,
         hit_chunks: int,
         locked_gids: tuple[int, ...],
+        l1_owners: dict[ObjectKey, int] | None = None,
     ) -> None:
         """Record the lock set acquired by the current lookup."""
         with self._lock:
             self.prefetch_hit_chunks = hit_chunks
             self.prefetch_locked_gids = locked_gids
+            self._prefetch_owners = dict(l1_owners) if l1_owners is not None else {}
+
+    def get_prefetch_owners(self) -> dict[ObjectKey, int]:
+        """Snapshot the L1 owners whose read locks this session's lookup retained."""
+        with self._lock:
+            return self._prefetch_owners.copy()
 
     def prepare_failed_retrieve_release(
         self,

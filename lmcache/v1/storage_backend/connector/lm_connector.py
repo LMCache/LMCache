@@ -105,7 +105,7 @@ class LMCServerConnector(RemoteConnector):
             res = future.result()
             return res
         except Exception as e:
-            logger.warning(f"lm connector failed in exists: {e}")
+            logger.warning("lm connector failed in exists: %s", e)
             return False
 
     async def put(

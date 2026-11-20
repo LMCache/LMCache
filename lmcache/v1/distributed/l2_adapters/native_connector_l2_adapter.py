@@ -22,7 +22,9 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from functools import cache
 from typing import Any
+import ctypes
 import select
 import threading
 
@@ -35,7 +37,7 @@ from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
 )
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
@@ -46,6 +48,27 @@ logger = init_logger(__name__)
 # and ``@`` in ``cache_salt`` are rejected by ObjectKey.__post_init__
 # so splitting on ``@`` is unambiguous.
 _KEY_SEP = "@"
+
+
+@cache
+def _cached_ubyte_array_type(num_bytes: int) -> "type[ctypes.Array[ctypes.c_ubyte]]":
+    """Return a cached ``ctypes.c_ubyte * num_bytes`` array type.
+
+    Mirrors ``memory_management._get_cached_ubyte_array_type`` (re-implemented
+    here because that helper is module-private): ctypes builds a fresh heap
+    type for every ``(c_ubyte * N)`` expression and never reclaims it, leaking
+    ~1-2 kB per distinct ``N`` per call. Caching the type per length avoids
+    that leak; the ``from_address`` instances never own the underlying buffer,
+    so sharing the type is safe. See
+    https://github.com/LMCache/LMCache/issues/3767.
+
+    Args:
+        num_bytes: The length of the array type in bytes.
+
+    Returns:
+        The cached ``ctypes.Array`` subclass for the given length.
+    """
+    return ctypes.c_ubyte * num_bytes
 
 
 def _object_key_to_string(key: ObjectKey) -> str:
@@ -70,14 +93,42 @@ def _object_key_to_string(key: ObjectKey) -> str:
 
 def _obj_to_memoryview(
     obj: MemoryObj,
+    pad_to_physical: bool = False,
 ) -> memoryview:  # type: ignore[type-arg]
-    """
-    Extract a byte-oriented memoryview from a MemoryObj.
+    """Extract a byte-oriented memoryview from a MemoryObj.
 
-    Uses the MemoryObj's byte_array property which returns
-    a ctypes-backed memoryview with itemsize=1, so pybind's
-    buffer_info.size == num_bytes.
+    By default this returns ``obj.byte_array``: a ctypes-backed memoryview
+    with itemsize=1 spanning the logical size (``get_size()``), so pybind's
+    ``buffer_info.size == num_bytes``.
+
+    When ``pad_to_physical`` is true and ``obj`` is a TensorMemoryObj whose
+    physical allocation exceeds its logical size (alignment padding from the
+    L1 allocator), the view instead spans the full physical slot:
+    ``get_physical_size()`` bytes starting at ``data_ptr``. The view is a
+    zero-copy pointer overlay (no payload is allocated or copied). The
+    padding tail belongs to the object's own allocation and stays within the
+    L1 arena, but its contents are undefined and are transferred as-is. This
+    mode exists for O_DIRECT / DMA native connectors that require buffer
+    lengths aligned to the L1 alignment (e.g. 4096 bytes).
+
+    Args:
+        obj: The memory object to expose.
+        pad_to_physical: Whether to include allocator alignment padding when
+            present.
+
+    Returns:
+        A byte-oriented memoryview over the object's bytes.
     """
+    if (
+        pad_to_physical
+        and isinstance(obj, TensorMemoryObj)
+        and obj.get_physical_size() > obj.get_size()
+    ):
+        num_bytes = obj.get_physical_size()
+        arr_type = _cached_ubyte_array_type(num_bytes)
+        ubyte_ptr = ctypes.cast(obj.data_ptr, ctypes.POINTER(ctypes.c_ubyte))
+        byte_array = arr_type.from_address(ctypes.addressof(ubyte_ptr.contents))
+        return memoryview(byte_array)
     return obj.byte_array  # type: ignore[return-value]
 
 
@@ -108,12 +159,33 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         max_capacity_gb: float = 0,
         type_name: str = "",
         extra_status: dict[str, Any] | None = None,
+        pad_buffers_to_alignment: bool = False,
     ) -> None:
+        """Initialize the adapter over a native connector client.
+
+        Args:
+            native_client: Pybind-wrapped C++ connector client exposing
+                ``event_fd``, ``submit_batch_*``, ``drain_completions`` and
+                ``close``.
+            max_capacity_gb: Capacity in GiB used for L2 usage accounting.
+                Zero disables the capacity limit.
+            type_name: Stable adapter type label for status reporting.
+            extra_status: Extra key-value pairs merged into
+                ``report_status()``.
+            pad_buffers_to_alignment: When true, store/load submit the full
+                physical (alignment-padded) slot of each TensorMemoryObj
+                instead of just its logical bytes, so transfer lengths are
+                aligned to the L1 allocator's ``align_bytes``. Enable for
+                native connectors whose I/O path requires aligned buffer
+                lengths (e.g. O_DIRECT file storage). See
+                ``_obj_to_memoryview``.
+        """
         super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
         self._client = native_client
         self._client_fd: int = int(native_client.event_fd())
         self._type_name: str = type_name or type(native_client).__name__
         self._extra_status: dict[str, Any] = dict(extra_status or {})
+        self._pad_buffers_to_alignment = pad_buffers_to_alignment
 
         # 3 distinct cross-platform notifiers for the L2 adapter
         # interface
@@ -192,8 +264,13 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         objects: list[MemoryObj],
     ) -> L2TaskId:
         key_strings = [_object_key_to_string(k) for k in keys]
-        memviews = [_obj_to_memoryview(obj) for obj in objects]
-        per_key_sizes = [obj.get_size() for obj in objects]
+        memviews = [
+            _obj_to_memoryview(obj, self._pad_buffers_to_alignment) for obj in objects
+        ]
+        # Charge the byte count actually submitted to the backend: the
+        # physical (alignment-padded) size when padding is enabled and
+        # present, otherwise the logical size.
+        per_key_sizes = [len(mv) for mv in memviews]
 
         # Register pending op BEFORE submit to avoid race
         # with demux thread. The native submit is
@@ -266,7 +343,9 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         objects: list[MemoryObj],
     ) -> L2TaskId:
         key_strings = [_object_key_to_string(k) for k in keys]
-        memviews = [_obj_to_memoryview(obj) for obj in objects]
+        memviews = [
+            _obj_to_memoryview(obj, self._pad_buffers_to_alignment) for obj in objects
+        ]
 
         with self._lock:
             task_id = self._get_next_task_id()

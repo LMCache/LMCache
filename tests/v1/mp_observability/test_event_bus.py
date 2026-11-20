@@ -14,6 +14,7 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import (
     EventBus,
     EventBusConfig,
+    EventCallback,
     EventSubscriber,
     get_event_bus,
     init_event_bus,
@@ -264,6 +265,71 @@ class TestEventDispatch:
 # ---------------------------------------------------------------------------
 # Exception isolation
 # ---------------------------------------------------------------------------
+
+
+class TestShutdownOrder:
+    def test_subscribers_shut_down_in_reverse_registration_order(self, bus):
+        """A later subscriber may write into an earlier one at shutdown, so
+        the later one must go first."""
+        order: list[str] = []
+
+        class _Named(EventSubscriber):
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def get_subscriptions(self) -> dict[EventType, EventCallback]:
+                return {}
+
+            def shutdown(self) -> None:
+                order.append(self.name)
+
+        for name in ("first", "second", "third"):
+            bus.register_subscriber(_Named(name))
+        bus.start()
+
+        bus.stop()
+
+        assert order == ["third", "second", "first"]
+
+    def test_a_writer_registered_after_its_target_flushes_before_it_closes(self, bus):
+        """The case the order exists for: a target that closes at shutdown
+        and a writer that emits its last record at shutdown."""
+
+        class _Target(EventSubscriber):
+            def __init__(self) -> None:
+                self.closed = False
+                self.received: list[str] = []
+
+            def get_subscriptions(self) -> dict[EventType, EventCallback]:
+                return {}
+
+            def write(self, record: str) -> None:
+                if self.closed:
+                    raise RuntimeError("write after close")
+                self.received.append(record)
+
+            def shutdown(self) -> None:
+                self.closed = True
+
+        class _Writer(EventSubscriber):
+            def __init__(self, target: _Target) -> None:
+                self.target = target
+
+            def get_subscriptions(self) -> dict[EventType, EventCallback]:
+                return {}
+
+            def shutdown(self) -> None:
+                self.target.write("final")
+
+        target = _Target()
+        bus.register_subscriber(target)
+        bus.register_subscriber(_Writer(target))
+        bus.start()
+
+        bus.stop()
+
+        assert target.received == ["final"]
+        assert target.closed
 
 
 class TestExceptionIsolation:

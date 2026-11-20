@@ -37,15 +37,20 @@ import argparse
 import math
 import os
 import sys
+import threading
+import time
 
 # First Party
 from lmcache.cli.commands.bench.server_bench.cases.base import BenchResult
 from lmcache.cli.commands.bench.server_bench.cases.baseline import (
     BaselineBenchCase,
 )
+from lmcache.cli.commands.bench.server_bench.cases.concurrent import (
+    run_concurrently,
+)
 from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
 from lmcache.cli.commands.bench.server_bench.config import (
-    BenchRunSpec,
+    BenchConfig,
     parse_args_to_config,
 )
 
@@ -103,8 +108,8 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         default="gpu",
         help=(
             "Run mode (default: gpu). In cpu mode the client allocates "
-            "POSIX-SHM-backed KV cache tensors and the server maps the "
-            "same physical pages."
+            "regular CPU KV tensors; the selected TransferContext owns "
+            "any SHM migration or staging."
         ),
     )
     parser.add_argument(
@@ -211,6 +216,17 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=0.5,
         help=("Seconds between requests (default: 0.5)"),
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help=(
+            "Number of clients sending requests at the same time "
+            "(default: 1). Each client opens its own connection, allocates "
+            "its own KV tensors, and registers its Workers under distinct "
+            "instance IDs; sequences are dealt round-robin across clients."
+        ),
     )
     parser.add_argument(
         "--url",
@@ -357,6 +373,28 @@ def _build_server_profiler(
         sys.exit(2)
 
 
+def _build_cases(
+    config: BenchConfig,
+    args: argparse.Namespace,
+    stop: threading.Event,
+) -> list[BaselineBenchCase]:
+    """Deal the ``[--start, --end)`` sequences round-robin across clients."""
+    concurrency = config.concurrency
+    total = None if args.end is None else max(0, args.end - args.start)
+    return [
+        BaselineBenchCase(
+            sequence_count=(
+                None if total is None else len(range(index, total, concurrency))
+            ),
+            sequence_id_offset=args.start + index,
+            sequence_id_stride=concurrency,
+            interval_seconds=args.interval,
+            stop=stop,
+        )
+        for index in range(concurrency)
+    ]
+
+
 def run_server_bench(
     command: "BaseCommand",
     args: argparse.Namespace,
@@ -371,15 +409,8 @@ def run_server_bench(
     """
     _require_full_install()
     config = parse_args_to_config(args)
-    sequence_count = None if args.end is None else max(0, args.end - args.start)
-    run_spec = BenchRunSpec(
-        config=config,
-        bench_case=BaselineBenchCase(
-            sequence_count=sequence_count,
-            sequence_id_offset=args.start,
-            interval_seconds=args.interval,
-        ),
-    )
+    stop = threading.Event()
+    cases = _build_cases(config, args, stop)
 
     def log(msg: str) -> None:
         """Print progress messages; suppressed by --quiet."""
@@ -392,15 +423,23 @@ def run_server_bench(
     # benchmark has already run. ``None`` when --flamegraph is off.
     profiler = _build_server_profiler(args, log)
 
-    result = BenchResult(case_name=run_spec.bench_case.name)
-    bench_client = ServerBenchClient(run_spec.config, log)
+    result = BenchResult(case_name=cases[0].name)
+    clients: list[ServerBenchClient] = []
     try:
-        bench_client.start()
+        for index in range(config.concurrency):
+            client = ServerBenchClient(config, log, client_index=index)
+            clients.append(client)
+            client.start()
 
         # Record only the steady-state load, not the one-time registration.
         if profiler is not None:
             profiler.start(log)
-        result = run_spec.bench_case.run(bench_client, log)
+        started_at = time.monotonic()
+        if len(clients) == 1:
+            result = cases[0].run(clients[0], log)
+        else:
+            result = run_concurrently(clients, cases, stop, log)
+        result.elapsed_seconds = time.monotonic() - started_at
         if result.interrupted:
             log("\nStopping...")
     except RuntimeError as exc:
@@ -412,7 +451,8 @@ def run_server_bench(
         # Stop recording once load ends, before teardown
         if profiler is not None:
             profiler.stop(log)
-        bench_client.close()
+        for client in clients:
+            client.close()
 
     # Emit structured metrics summary.
     _emit_server_bench_metrics(
@@ -451,6 +491,7 @@ def _emit_server_bench_metrics(
     )
     cfg_section.add("num_tokens", "Tokens / request", args.num_tokens)
     cfg_section.add("interval", "Interval (s)", args.interval)
+    cfg_section.add("concurrency", "Concurrency", getattr(args, "concurrency", 1))
 
     result_section = metrics.add_section("results", "Results")
     result_section.add("total_requests", "Total requests", result.completed_runs)
@@ -459,6 +500,13 @@ def _emit_server_bench_metrics(
     if result.completed_runs > 0:
         pass_rate = total_checksum_ok / result.completed_runs * 100
         result_section.add("pass_rate", "Pass rate (%)", round(pass_rate, 2))
+    if result.elapsed_seconds > 0:
+        result_section.add("elapsed_s", "Elapsed (s)", round(result.elapsed_seconds, 3))
+        result_section.add(
+            "requests_per_s",
+            "Requests / s",
+            round(result.completed_runs / result.elapsed_seconds, 2),
+        )
 
     # Per-operation latency summary (cold pass).
     _add_latency_section(

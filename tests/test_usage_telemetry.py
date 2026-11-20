@@ -409,6 +409,21 @@ class TestMPContinuous:
         assert sender.sent[1][1]["interval_num_stored_tokens"] == 0
         assert sender.sent[1][1]["sequence_number"] == 2
 
+    def test_update_chunk_size_updates_token_count_conversion(self, usage_env):
+        sender = RecordingSender()
+        bus = EventBus(EventBusConfig(enabled=True))
+        bus.start()
+        reporter = InitializeMPContinuousUsage(bus, chunk_size=256, sender=sender)
+        assert reporter is not None
+
+        reporter.update_chunk_size(640)
+        publish_mp_traffic(bus)
+        bus.stop()
+
+        payload = sender.sent[0][1]
+        assert payload["interval_num_hit_tokens"] == 4 * 640
+        assert payload["interval_num_stored_tokens"] == 2 * 640
+
     def test_initialize_returns_none_when_disabled(self, usage_env, monkeypatch):
         monkeypatch.setenv("LMCACHE_TRACK_USAGE", "false")
         bus = EventBus(EventBusConfig(enabled=True))
