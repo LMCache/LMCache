@@ -207,6 +207,15 @@ def grpc_client(
                 context={"slot": 3},
             )
 
+        @request_handler(
+            HandlerType.BLOCKING,
+            requires_client_affinity=True,
+        )
+        def commit_retrieve(
+            self, key: IPCCacheServerKey, instance_id: int, failed: bool = False
+        ) -> bool:
+            return failed
+
         @request_handler()
         def register_kv_cache_engine_driven_context(
             self, payload: RegisterEngineDrivenContextPayload
@@ -724,6 +733,8 @@ def test_generated_grpc_services_communicate_end_to_end(
         data=b"retrieved",
         context={"slot": 3},
     )
+    assert client.commit_retrieve(key, 7, True).result(5) is True
+    assert client.commit_retrieve(key, 7).result(5) is False
     registration = client.register_kv_cache_engine_driven_context(
         RegisterEngineDrivenContextPayload(
             instance_id=7,

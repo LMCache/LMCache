@@ -237,9 +237,11 @@ class EngineDrivenContextInline(EngineDrivenContext):
                 tensors += page_tensors
         return merged
 
-    def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
+    def commit_retrieve(
+        self, key: IPCCacheServerKey, instance_id: int, failed: bool = False
+    ) -> bool:
         """Send COMMIT_RETRIEVE (no-op for inline path)."""
-        future = self.req_client.commit_retrieve(key, instance_id)
+        future = self.req_client.commit_retrieve(key, instance_id, failed)
         try:
             future.result(timeout=self.mq_timeout)
         except TimeoutError:

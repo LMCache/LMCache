@@ -2167,10 +2167,11 @@ def test_server_page_without_inline_data_releases_later_pages(
     assert released == [["obj1", "obj2"]]
 
 
-def test_server_commit_after_unfinished_pages_releases_them(
-    server_module_factory: ServerModuleFactory,
+@pytest.mark.parametrize("pages_read", [1, 3])
+def test_server_commit_after_failed_retrieve_records_failure(
+    server_module_factory: ServerModuleFactory, pages_read: int
 ) -> None:
-    """A worker that commits before reading every page, e.g. after a timeout,
+    """A worker that fails after a page the server served, e.g. on a timeout,
     leaves no read lock on the unread pages and the retrieve counts as failed."""
     keys = ["obj0", "obj1", "obj2"]
     objects = {k: MagicMock(tensor=torch.zeros(2, 2, 8, 16)) for k in keys}
@@ -2194,10 +2195,14 @@ def test_server_commit_after_unfinished_pages_releases_them(
     key = _default_key(tokens=24)
     events: list[Event] = []
     with patch.object(ctx.event_bus, "publish", side_effect=events.append):
-        assert module.prepare_retrieve(key, 2, 0, 1).success
-        assert not module.commit_retrieve(key, 2)
+        for page in range(pages_read):
+            assert module.prepare_retrieve(key, 2, page, 1 if page < 2 else 0).success
+        assert not module.commit_retrieve(key, 2, True)
     released = [c.args[0] for c in storage.finish_read_prefetched.call_args_list]
-    assert released == [["obj0"], ["obj1", "obj2"]]
+    if pages_read == 1:
+        assert released == [["obj0"], ["obj1", "obj2"]]
+    else:
+        assert released == [["obj0"], ["obj1"], ["obj2"]]
     assert events[-1].event_type == EventType.MP_RETRIEVE_END
     assert events[-1].metadata["retrieved_count"] == 0
 

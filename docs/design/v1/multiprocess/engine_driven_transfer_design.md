@@ -304,7 +304,9 @@ the unread pages start:
   the first page and ends at `commit_retrieve`, or on a failed later page.
   A failed page releases the read locks of the pages after it. If the worker
   stops after a successful page, for example on a timeout, `commit_retrieve`
-  releases the unread pages and records the retrieve as failed.
+  releases the unread pages. The worker also passes `failed` to
+  `commit_retrieve` when it did not get or apply the data, and the retrieve is
+  then recorded as failed.
 
 ```text
 Store (inline tensor)

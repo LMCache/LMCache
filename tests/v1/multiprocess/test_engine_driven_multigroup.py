@@ -236,7 +236,7 @@ class _FakeGroupedContext:
         self.committed = True
         return True
 
-    def commit_retrieve(self, _key, _iid):
+    def commit_retrieve(self, _key, _iid, _failed=False):
         return True
 
     @contextmanager

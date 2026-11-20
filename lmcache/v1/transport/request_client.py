@@ -185,7 +185,7 @@ class RequestClient(Protocol):
 
     @rpc_method
     def commit_retrieve(
-        self, key: IPCCacheServerKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int, failed: bool = False
     ) -> MessagingFuture[bool]: ...
 
     @rpc_method

@@ -93,6 +93,7 @@ message PrepareRetrieveResponse {
 message CommitRetrieveRequest {
   IpcCacheServerKey key = 1;
   int64 instance_id = 2;
+  bool failed = 3;
 }
 
 message CommitRetrieveResponse {

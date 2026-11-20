@@ -852,15 +852,18 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self,
         key: IPCCacheServerKey,
         instance_id: int,
+        failed: bool = False,
     ) -> bool:
         """Finalize a retrieve and publish its transfer completion.
 
         Args:
             key: Cache key identifying the prepared retrieve.
             instance_id: Worker instance identifier.
+            failed: The worker did not get or apply the data, so the transfer
+                is recorded as failed.
 
         Returns:
-            Always ``True``.
+            Whether the transfer is recorded as successful.
         """
         _, strategy = self._resolve_for_transfer(instance_id)
         session = self._ctx.session_manager.get_or_create(key.request_id)
@@ -874,7 +877,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             if unread is not None:
                 self._release_pages_from(key, *unread)
             result = strategy.commit_retrieve(key=key, instance_id=instance_id)
-            result = result and unread is None
+            result = result and unread is None and not failed
         finally:
             self._finish_transfer(key, instance_id, EventType.MP_RETRIEVE_START, result)
         if st is not None:

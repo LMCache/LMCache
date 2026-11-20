@@ -1274,7 +1274,7 @@ class EngineDrivenTransferContext(TransferContext):
                     # releasing the SHM slot (server may immediately reuse it
                     # after commit_retrieve).
                     synchronize_device(device)
-                ctx.commit_retrieve(key, self._instance_id)
+                ctx.commit_retrieve(key, self._instance_id, not ok)
         except ContextClosedError:
             # Context is being swapped/shut down; report a miss so the
             # engine recomputes the blocks.
@@ -1595,7 +1595,7 @@ class EngineDrivenTransferContext(TransferContext):
                 logger.exception("Failed to scatter retrieved CPU context chunks")
                 ok = False
             synchronize_device(device)
-        ctx.commit_retrieve(key, self._instance_id)
+        ctx.commit_retrieve(key, self._instance_id, not ok)
         future.set_result(ok)
         return future
 
@@ -1653,7 +1653,7 @@ class EngineDrivenTransferContext(TransferContext):
                 ok = False
             # Complete device writes before the server may reuse the slots.
             synchronize_device(device)
-        ctx.commit_retrieve(key, self._instance_id)
+        ctx.commit_retrieve(key, self._instance_id, not ok)
         future.set_result(ok)
         return future
 
