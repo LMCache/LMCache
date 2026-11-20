@@ -34,6 +34,7 @@ import aiofiles.os
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.v1.common.errors import LMCacheTimeoutError
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -491,7 +492,7 @@ class FSL2Adapter(L2AdapterInterface):
         """Stop issuing work and wait for workers to release their buffers.
 
         Raises:
-            TimeoutError: I/O still owns buffers. The storage manager must
+            LMCacheTimeoutError: I/O still owns buffers. The storage manager must
                 retain the allocator and may retry close after I/O resumes.
         """
 
@@ -528,7 +529,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         self._executor_drain.join(timeout=_CLOSE_TIMEOUT_SECONDS)
         if self._executor_drain.is_alive():
-            raise TimeoutError("Filesystem workers still own cache buffers")
+            raise LMCacheTimeoutError("Filesystem workers still own cache buffers")
         logger.info("FSL2Adapter closed")
 
     # ------------------------------------------------------------------

@@ -9,10 +9,10 @@ import os
 import time
 
 # Third Party
-import aiofiles.threadpool
 import pytest
 
 # First Party
+from lmcache.v1.common.errors import LMCacheTimeoutError
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.key_codec import encode_fs_filename
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
@@ -35,14 +35,14 @@ def test_close_reports_stalled_fifo_and_can_be_retried(
     path = tmp_path / encode_fs_filename(key)
     os.mkfifo(path)
     opening = Event()
-    original_open = aiofiles.threadpool.sync_open
 
-    def track_open(file: Path, mode: str, *args: object, **kwargs: object) -> BinaryIO:
+    def track_open(file: Path, mode: str, **kwargs: object) -> BinaryIO:
+        assert mode == "rb"
         if file == path:
             opening.set()
-        return original_open(file, mode, *args, **kwargs)
+        return file.open("rb")
 
-    monkeypatch.setattr(aiofiles.threadpool, "sync_open", track_open)
+    monkeypatch.setattr("aiofiles.threadpool.sync_open", track_open)
     monkeypatch.setattr(
         "lmcache.v1.distributed.l2_adapters.fs_l2_adapter._CLOSE_TIMEOUT_SECONDS",
         0.25,
@@ -52,7 +52,7 @@ def test_close_reports_stalled_fifo_and_can_be_retried(
     try:
         assert opening.wait(5)
         start = time.monotonic()
-        with pytest.raises(TimeoutError, match="Filesystem workers"):
+        with pytest.raises(LMCacheTimeoutError, match="Filesystem workers"):
             adapter.close()
         assert time.monotonic() - start < 2
     finally:
