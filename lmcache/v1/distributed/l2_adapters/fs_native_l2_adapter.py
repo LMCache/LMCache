@@ -92,6 +92,7 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         max_capacity_gb: float = 0,
         num_read_workers: int = DEFAULT_NUM_READ_WORKERS,
         read_max_bytes_in_flight: int = 0,
+        per_op_workers: Optional[dict[str, int]] = None,
     ):
         """Build the config; see the class docstring for each field.
 
@@ -110,6 +111,9 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         )
         self.read_max_bytes_in_flight = _validate_non_negative_int(
             "read_max_bytes_in_flight", read_max_bytes_in_flight
+        )
+        self.per_op_workers = L2AdapterConfigBase._validate_per_op_workers(
+            per_op_workers
         )
         if num_read_workers == 0 and read_max_bytes_in_flight > 0:
             logger.warning(
@@ -155,6 +159,8 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
                 base_path,
             )
 
+        per_op_workers = L2AdapterConfigBase._parse_per_op_workers_from_dict(d)
+
         return cls(
             base_path=base_path,
             num_workers=num_workers,
@@ -164,6 +170,7 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             max_capacity_gb=float(max_capacity_gb),
             num_read_workers=d.get("num_read_workers", DEFAULT_NUM_READ_WORKERS),
             read_max_bytes_in_flight=d.get("read_max_bytes_in_flight", 0),
+            per_op_workers=per_op_workers,
         )
 
     @classmethod
@@ -190,7 +197,12 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
             "- max_capacity_gb (float): declared L2 capacity in GB "
             "for usage accounting (default 0 = disabled). Does not "
             "bound disk usage by itself; add an 'eviction' block "
-            "to enforce it"
+            "to enforce it\n"
+            "- per_op_workers (dict[str, int]): optional per-lane "
+            "worker counts, e.g. {\"delete\": 2}. Valid lane keys: "
+            "lookup / retrieve / store / delete. Unlisted lanes share "
+            "the num_workers pool; configuring the \"delete\" lane "
+            "isolates eviction storms from the request serving path."
         )
 
 
@@ -226,18 +238,20 @@ def _create_fs_native_l2_adapter(
         config.read_ahead_size or 0,
         config.num_read_workers,
         config.read_max_bytes_in_flight,
+        per_op_workers=config.per_op_workers,
     )
     effective_read_budget = native_client.read_budget_bytes()
     logger.info(
         "Created FS native L2 adapter: %s (workers=%d, odirect=%s, "
         "read_ahead=%s, num_read_workers=%d, "
-        "read_max_bytes_in_flight=%d)",
+        "read_max_bytes_in_flight=%d, per_op_workers=%s)",
         config.base_path,
         config.num_workers,
         config.use_odirect,
         config.read_ahead_size,
         config.num_read_workers,
         effective_read_budget,
+        config.per_op_workers,
     )
     residency = MemoryResidency.REMOTE if config.shared else MemoryResidency.LOCAL
     memory_tags = MemoryTags(MemorySegment.STORAGE, residency)
