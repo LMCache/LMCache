@@ -106,25 +106,22 @@ def require_auto_rdma_provider(rdma_provider: str) -> None:
         )
 
 
-def discover_efa_direct_domains(
-    sysfs_dir: Optional[str] = None, dev_dir: Optional[str] = None
-) -> tuple[str, ...]:
+def discover_efa_direct_domains() -> tuple[str, ...]:
     """List the efa-direct fabric domains this process can open.
 
     Reads sysfs instead of asking libfabric, so it needs no tool on ``PATH``:
     every device under ``/sys/class/infiniband`` whose driver is ``efa`` and
-    whose verbs node (``uverbsN``) is present in ``/dev/infiniband``, named as
-    libfabric names its efa-direct domain, ``<device>-rdm``.
+    whose verbs node (``uverbsN``) in ``/dev/infiniband`` this process may
+    read and write, named as libfabric names its efa-direct domain,
+    ``<device>-rdm``.
 
     The ``/dev`` check matters in containers: sysfs lists every device of the
     host, while ``/dev/infiniband`` holds only the nodes of the devices the
     container was given (for example, a Kubernetes pod requesting 2 of a
     node's 16 EFA devices still sees all 16 in sysfs). Those are the devices
-    libfabric can open and lists.
-
-    Args:
-        sysfs_dir: Overrides ``SYSFS_INFINIBAND_DIR``; for tests.
-        dev_dir: Overrides ``DEV_INFINIBAND_DIR``; for tests.
+    libfabric can open and lists. A node that is present but not readable
+    and writable (for example in a non-root container without access to it)
+    cannot be opened either, so its device is left out.
 
     Returns:
         The domain names (on EFA, like ``rdmap85s0-rdm``), sorted; never
@@ -135,8 +132,8 @@ def discover_efa_direct_domains(
             opened by this process. The message names the cause and how to
             list the domains by hand.
     """
-    sysfs_dir = sysfs_dir or SYSFS_INFINIBAND_DIR
-    dev_dir = dev_dir or DEV_INFINIBAND_DIR
+    sysfs_dir = SYSFS_INFINIBAND_DIR
+    dev_dir = DEV_INFINIBAND_DIR
     prefix = f'rdma_interface "{RDMA_INTERFACE_AUTO}" could not discover EFA devices: '
     try:
         devices = sorted(os.listdir(sysfs_dir))
@@ -158,7 +155,9 @@ def discover_efa_direct_domains(
             verbs = os.listdir(os.path.join(device_dir, "infiniband_verbs"))
         except OSError:
             continue
-        if any(os.path.exists(os.path.join(dev_dir, node)) for node in verbs):
+        if any(
+            os.access(os.path.join(dev_dir, node), os.R_OK | os.W_OK) for node in verbs
+        ):
             domains.append(device + EFA_RDM_DOMAIN_SUFFIX)
 
     if not efa_devices:
@@ -169,9 +168,10 @@ def discover_efa_direct_domains(
     if not domains:
         raise RuntimeError(
             f"{prefix}this host has {len(efa_devices)} EFA device(s), but none of "
-            f"their verbs nodes is in {dev_dir}, so this process cannot open "
-            "them. In a container, request the devices (on Kubernetes, the "
-            f"vpc.amazonaws.com/efa resource). {_EXPLICIT_LIST_HINT}"
+            f"their verbs nodes in {dev_dir} can be read and written by this "
+            "process, so it cannot open them. In a container, request the "
+            "devices (on Kubernetes, the vpc.amazonaws.com/efa resource). "
+            f"{_EXPLICIT_LIST_HINT}"
         )
     return tuple(domains)
 

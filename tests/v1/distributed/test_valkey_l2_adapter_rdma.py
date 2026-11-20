@@ -1083,48 +1083,71 @@ def _fake_discovery(
 
 
 class TestDomainDiscovery:
-    def test_all_devices_match_fi_info(self, tmp_path):
+    def test_all_devices_match_fi_info(self, tmp_path, monkeypatch):
         sysfs, dev = _efa_host(tmp_path, _P5EN_DEVICES)
-        assert discover_efa_direct_domains(sysfs, dev) == _P5EN_FI_INFO_ALL
+        _use_efa_host(monkeypatch, (sysfs, dev))
+        assert discover_efa_direct_domains() == _P5EN_FI_INFO_ALL
 
-    def test_only_the_devices_given_to_the_container(self, tmp_path):
+    def test_only_the_devices_given_to_the_container(self, tmp_path, monkeypatch):
         # sysfs lists all 16; /dev holds the 2 the container may open.
         sysfs, dev = _efa_host(
             tmp_path, _P5EN_DEVICES, allocated={"uverbs6", "uverbs10"}
         )
+        _use_efa_host(monkeypatch, (sysfs, dev))
         assert len(os.listdir(sysfs)) == 16
-        assert discover_efa_direct_domains(sysfs, dev) == _P5EN_FI_INFO_TWO
+        assert discover_efa_direct_domains() == _P5EN_FI_INFO_TWO
 
-    def test_other_rdma_devices_are_ignored(self, tmp_path):
+    def test_other_rdma_devices_are_ignored(self, tmp_path, monkeypatch):
         sysfs, dev = _efa_host(tmp_path, {"rdmap85s0": "uverbs0"})
+        _use_efa_host(monkeypatch, (sysfs, dev))
         # A non-EFA card (e.g. a Mellanox HCA) next to the EFA device.
         _efa_host(tmp_path, {"mlx5_0": "uverbs1"}, driver="mlx5_core")
         assert sorted(os.listdir(sysfs)) == ["mlx5_0", "rdmap85s0"]
-        assert discover_efa_direct_domains(sysfs, dev) == ("rdmap85s0-rdm",)
+        assert discover_efa_direct_domains() == ("rdmap85s0-rdm",)
 
-    def test_no_rdma_devices_is_an_error(self, tmp_path):
+    def test_no_rdma_devices_is_an_error(self, tmp_path, monkeypatch):
         missing = os.path.join(str(tmp_path), "sys", "class", "infiniband")
+        _use_efa_host(monkeypatch, (missing, str(tmp_path)))
         with pytest.raises(RuntimeError, match="cannot be read") as raised:
-            discover_efa_direct_domains(missing, str(tmp_path))
+            discover_efa_direct_domains()
         assert "explicit list" in str(raised.value)
 
-    def test_no_efa_device_is_an_error(self, tmp_path):
+    def test_no_efa_device_is_an_error(self, tmp_path, monkeypatch):
         sysfs, dev = _efa_host(tmp_path, {"mlx5_0": "uverbs0"}, driver="mlx5_core")
+        _use_efa_host(monkeypatch, (sysfs, dev))
         with pytest.raises(
             RuntimeError, match="no device with the efa driver"
         ) as raised:
-            discover_efa_direct_domains(sysfs, dev)
+            discover_efa_direct_domains()
         message = str(raised.value)
         assert "mlx5_0" in message
         assert "explicit list" in message
 
-    def test_efa_devices_not_given_to_the_container_are_an_error(self, tmp_path):
+    def test_efa_devices_not_given_to_the_container_are_an_error(
+        self, tmp_path, monkeypatch
+    ):
         sysfs, dev = _efa_host(tmp_path, _P5EN_DEVICES, allocated=set())
+        _use_efa_host(monkeypatch, (sysfs, dev))
         with pytest.raises(RuntimeError, match="16 EFA device") as raised:
-            discover_efa_direct_domains(sysfs, dev)
+            discover_efa_direct_domains()
         message = str(raised.value)
         assert "vpc.amazonaws.com/efa" in message
         assert "explicit list" in message
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root may open any device node",
+    )
+    def test_nodes_this_process_cannot_open_are_left_out(self, tmp_path, monkeypatch):
+        sysfs, dev = _efa_host(
+            tmp_path, {"rdmap85s0": "uverbs0", "rdmap86s0": "uverbs1"}
+        )
+        _use_efa_host(monkeypatch, (sysfs, dev))
+        os.chmod(os.path.join(dev, "uverbs1"), 0o000)
+        assert discover_efa_direct_domains() == ("rdmap85s0-rdm",)
+        os.chmod(os.path.join(dev, "uverbs0"), 0o400)
+        with pytest.raises(RuntimeError, match="can be read and written"):
+            discover_efa_direct_domains()
 
     def test_the_defaults_are_the_real_paths(self):
         assert rdma_worker_pool.SYSFS_INFINIBAND_DIR == "/sys/class/infiniband"
