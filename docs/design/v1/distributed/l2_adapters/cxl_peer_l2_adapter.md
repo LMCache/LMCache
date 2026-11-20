@@ -42,9 +42,13 @@ are the base's and are described in the GDR doc. This class adds only:
 | `_bind_borrowed_object` | `obj.bind(lease, local_view=mapping.view(offset, size), ...)`. The lease additionally requires the mapped header to still be current. |
 | `_unregister_peer_region` | Return unborrowed reservations, then unpin and unmap. Raises while a lease is live (`RuntimeError`) or a reader still references a view (`BufferError`); the P2P controller retries the removal every discovery cycle. |
 
-`read_window_s` is 0: a read from the mapping is a host/GPU copy queued at
-retrieve, and the base's TTL margin (`min(1 s, TTL / 10)`) is its time to
-finish. As with GDR, **every node must use the same
+`read_window_s` (default 5 s, adapter config) is the lease time a read
+needs left to start: a read from the mapping is a host/GPU copy queued at
+retrieve and finished asynchronously, so a view is valid only while the
+owner's lock is held for at least that long afterwards. Together with the
+base's TTL margin (`min(1 s, TTL / 10)`), a copy queued for longer than the
+window can still read reused bytes; the window must exceed the worst-case
+copy latency. As with GDR, **every node must use the same
 `--l1-read-ttl-seconds`**; the borrower bounds a lease with its own.
 
 ## Local views
@@ -129,7 +133,7 @@ sequenceDiagram
 | Lookup hit in another slab, or the owner restarted | Reported as a miss. The owner lock is returned at once, unless the owner restarted (it no longer holds the lock). |
 | Hit the prefetch controller does not load | `submit_unlock` returns its reservation. |
 | Address outside the mapped slab, or size differing from the layout | The load reports a miss for the key; `submit_unlock` returns the reservation. |
-| Lease expired (`lookup start + read TTL - margin`) | The view is invalid: `unsafe_read` answers `KEY_NOT_READABLE` and the key is a miss. No unlock is sent; the owner's TTL reclaims the lock. |
+| Lease expired (`lookup start + read TTL - margin - read window`) | The view is invalid: `unsafe_read` answers `KEY_NOT_READABLE` and the key is a miss. No unlock is sent; the owner's TTL reclaims the lock. |
 | Owner closes or restarts its slab | The header no longer matches, so every view of that incarnation is invalid at once. A GPU copy already queued keeps reading the mapped bytes. |
 | Last local reader finishes | The shadow L1 frees the view; the lease ends and one unlock RPC is fired without waiting for the answer. |
 | Owner unreachable for unlocks | The unlock is lost; the owner's TTL reclaims the lock. |
@@ -152,7 +156,9 @@ User guide: [P2P](../../../../source/mp/p2p.rst).
   header check of the next lease validity test.
 - A view released after its owner restarted still sends its (key-only)
   unlock to the new incarnation, as GDR does; it is harmless unless another
-  borrower locked the same key there within the TTL.
+  borrower locked the same key there within the TTL. Read locks carry no
+  reservation id, so a late key-only unlock can release a newer borrow of
+  the same key (shared with GDR; tracked in issue #5669).
 - A node with a shorter read TTL than its borrowers lets them read reused
   bytes; nothing checks TTL equality (shared with GDR).
 - Cross-host CXL coherency, DMA performance and failure recovery still need

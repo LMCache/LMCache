@@ -251,9 +251,10 @@ extra DAX arenas, and borrowed views are not exported. Peer mappings must
 support the existing GPU host-registration path.
 
 ``--l1-read-ttl-seconds`` bounds retrieval time and must be **the same on
-every node**. A borrower stops using a borrowed view slightly before that TTL
-ends (``min(1 s, TTL / 10)`` early) so in-flight GPU copies finish before the
-owner can reuse the bytes. A chunk whose lease lapsed before the retrieve is a
+every node**. A borrower stops using a borrowed view 5 seconds (the adapter's
+``read_window_s``) plus ``min(1 s, TTL / 10)`` before that TTL ends, so a GPU
+copy started from the view finishes before the owner can reuse the bytes. A
+chunk whose lease lapsed before the retrieve is a
 cache miss. This mode is not combined with ``--enable-p2p-write`` or
 ``--p2p-load-mode gdr``. Normal
 peer removal drains readers before unmapping. Slab assignment is managed by the

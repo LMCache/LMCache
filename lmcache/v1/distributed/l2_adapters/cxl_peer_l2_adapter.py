@@ -65,10 +65,14 @@ class CxlPeerL2AdapterConfig(PeerL2AdapterConfigBase):
         lookup_timeout_s: P2P lookup deadline in seconds.
         read_ttl_s: The L1 read-lock TTL, the same on every node; bounds a
             lease. The P2P controller sets it from the local CXL L1.
+        read_window_s: Seconds a lease must have left, before the owner's
+            lock may lapse, for a GPU copy from the view to start. It bounds
+            how long a queued copy may take.
 
     Raises:
-        ValueError: If a deadline or TTL is not positive and finite, or if
-            pools differ or owned slab ranges overlap.
+        ValueError: If a deadline or TTL is not positive and finite, if
+            ``read_window_s`` is not shorter than ``read_ttl_s``, or if pools
+            differ or owned slab ranges overlap.
     """
 
     def __init__(
@@ -79,18 +83,23 @@ class CxlPeerL2AdapterConfig(PeerL2AdapterConfigBase):
         peer_arena: CxlArenaDescriptor,
         lookup_timeout_s: float = 30.0,
         read_ttl_s: float = 300.0,
+        read_window_s: float = 5.0,
     ) -> None:
         for name, value in (
             ("lookup_timeout_s", lookup_timeout_s),
             ("read_ttl_s", read_ttl_s),
+            ("read_window_s", read_window_s),
         ):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be positive and finite")
+        if read_window_s >= read_ttl_s:
+            raise ValueError("read_window_s must be shorter than read_ttl_s")
         super().__init__(peer_mq_server_url, lookup_timeout_s)
         self.local_device_path = local_device_path
         self.local_arena = local_arena
         self.peer_arena = peer_arena
         self.read_ttl_s = read_ttl_s
+        self.read_window_s = read_window_s
         local, peer = local_arena, peer_arena
         if local.pool_id != peer.pool_id or (
             local.offset < peer.offset + peer.alignment + peer.size
@@ -106,7 +115,8 @@ class CxlPeerL2AdapterConfig(PeerL2AdapterConfigBase):
             d: ``peer_mq_server_url`` and ``local_device_path`` strings,
                 ``local_arena`` and ``peer_arena`` descriptor objects (the
                 fields of :class:`CxlArenaDescriptor`), and optional
-                ``lookup_timeout_s`` and ``read_ttl_s`` numbers.
+                ``lookup_timeout_s``, ``read_ttl_s`` and ``read_window_s``
+                numbers.
 
         Returns:
             Validated CXL peer configuration.
@@ -124,6 +134,7 @@ class CxlPeerL2AdapterConfig(PeerL2AdapterConfigBase):
             CxlArenaDescriptor.from_json(json.dumps(d.get("peer_arena"))),
             float(d.get("lookup_timeout_s", 30.0)),
             float(d.get("read_ttl_s", 300.0)),
+            float(d.get("read_window_s", 5.0)),
         )
 
     @classmethod
@@ -138,7 +149,9 @@ class CxlPeerL2AdapterConfig(PeerL2AdapterConfigBase):
             "- lookup_timeout_s (float): lookup result deadline in seconds "
             "(optional, default 30)\n"
             "- read_ttl_s (float): the L1 read-lock TTL of every node in seconds "
-            "(optional, default 300)"
+            "(optional, default 300)\n"
+            "- read_window_s (float): lease time a GPU copy from the view needs "
+            "to start, in seconds (optional, default 5)"
         )
 
     def get_wanted_l1_memory_tags(self) -> tuple[MemoryTags, ...]:
@@ -162,10 +175,14 @@ class CxlPeerL2Adapter(BorrowingPeerL2AdapterBase):
     _config: CxlPeerL2AdapterConfig
 
     def __init__(self, config: CxlPeerL2AdapterConfig) -> None:
-        # A read from the mapping is a host/GPU copy queued at retrieve; the
-        # margin the base keeps before the owner's TTL is its time to finish,
-        # so a lease needs no further window to start a read.
-        super().__init__(config, read_window_s=0.0, owner_read_ttl_s=config.read_ttl_s)
+        # A read from the mapping is a host/GPU copy queued at retrieve and
+        # finished asynchronously; the window keeps the owner's lock held for
+        # at least that long after a copy is allowed to start.
+        super().__init__(
+            config,
+            read_window_s=config.read_window_s,
+            owner_read_ttl_s=config.read_ttl_s,
+        )
 
     def _register_peer_region(self) -> None:
         """Map and GPU-register the configured peer slab.

@@ -277,6 +277,7 @@ def test_borrowing_uses_no_local_capacity(peers: _Peers) -> None:
     assert borrower.get_l1_usage() == used_before
     assert KEY in result.l1_owners
     with borrower.read_prefetched_results([KEY], result.l1_owners) as objects:
+        assert objects is not None
         view = objects[0]
         assert isinstance(view, BorrowedMemoryObj) and view.is_local
         assert view.tensor is not None and torch.all(view.tensor == 37)
@@ -344,16 +345,19 @@ def test_hit_outside_the_mapped_slab_is_refused_and_unlocked(
 def test_view_ends_before_the_owners_ttl(
     peers: _Peers, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A view stops being valid a margin before the owner's read lock can
-    lapse, and no unlock is sent for it afterwards: the owner's TTL covers
-    it, and a late unlock could release a newer borrow."""
+    """A view stops being valid once less than the read window is left
+    before the owner's read lock can lapse (TTL minus a margin), so a GPU
+    copy queued from it has that long to finish. No unlock is sent for it
+    afterwards: the owner's TTL covers it, and a late unlock could release a
+    newer borrow."""
     _store(peers.owner)
+    # The lock may lapse at 30 - 1 s margin; a copy needs 5 s of it left.
     adapter = _adapter(peers, read_ttl_s=30)
     obj = _borrow(adapter)
     now = time.monotonic()
-    monkeypatch.setattr(time, "monotonic", lambda: now + 28)
+    monkeypatch.setattr(time, "monotonic", lambda: now + 23)
     assert obj.is_valid()
-    monkeypatch.setattr(time, "monotonic", lambda: now + 29.5)
+    monkeypatch.setattr(time, "monotonic", lambda: now + 24.5)
     assert not obj.is_valid()
     obj.release()
     assert peers.client.unlocked == []
@@ -391,7 +395,7 @@ def test_close_refuses_while_views_are_live_then_drains(peers: _Peers) -> None:
     obj.release()
     adapter.close()
     adapter.close()
-    assert sorted(peers.client.unlocked) == [KEY, KEY]
+    assert peers.client.unlocked == [KEY, KEY]
     assert not _owner_holds_lock(peers.owner)
 
 
@@ -423,6 +427,12 @@ def test_config_validates_peer_identity(peers: _Peers) -> None:
         CxlPeerL2AdapterConfig(URL, path, local, replace(remote, offset=0))
     with pytest.raises(ValueError, match="read_ttl_s"):
         CxlPeerL2AdapterConfig(URL, path, local, remote, read_ttl_s=0)
+    with pytest.raises(ValueError, match="read_window_s"):
+        CxlPeerL2AdapterConfig(URL, path, local, remote, read_window_s=0)
+    with pytest.raises(ValueError, match="shorter than read_ttl_s"):
+        CxlPeerL2AdapterConfig(
+            URL, path, local, remote, read_ttl_s=10, read_window_s=10
+        )
     with pytest.raises(ValueError, match="peer_mq_server_url"):
         CxlPeerL2AdapterConfig.from_dict({"local_device_path": path})
     config = CxlPeerL2AdapterConfig(URL, path, local, remote)
