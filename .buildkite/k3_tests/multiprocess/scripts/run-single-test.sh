@@ -243,13 +243,14 @@ echo "============================================"
 echo "=== Running test: ${TEST_NAME} ==="
 echo "============================================"
 
-# Keep the workload's status: a step can soft-fail on one code (client_wheel: 42).
-"$exec_script"
-status=$?
-if [[ "$status" -ne 0 ]]; then
+# Pass the workload's exit status through: a pipeline step may soft-fail or
+# retry only specific codes (client_wheel exits 42 when only engine_driven
+# fails; abort_lookup_locks exits 75 for a known vLLM engine crash).
+"$exec_script" || {
+    status=$?
     echo "${TEST_NAME} test failed (exit ${status})"
     exit "$status"
-fi
+}
 
 echo ""
 echo "============================================"
