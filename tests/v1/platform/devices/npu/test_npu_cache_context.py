@@ -25,7 +25,6 @@ from lmcache.v1.multiprocess.cache_context.npu import (
     _NpuHostCallbackStream,
     _TempNpuBuffer,
 )
-from lmcache.v1.platform.devices.npu import NpuDeviceSpec
 import lmcache.lmcache_native as lmcache_native
 
 pytestmark = pytest.mark.no_shared_allocator
@@ -212,32 +211,6 @@ def test_close_synchronizes_before_releasing_ipc_owners(
     context.close()
     assert calls == expected
     assert context.kv_caches_ == ([] if n_wrappers else ["keep"])
-
-
-def test_device_spec_creates_npu_cache_context(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The spec hook constructs NpuCacheContext with forwarded arguments."""
-
-    class _Sentinel:
-        pass
-
-    created: dict[str, object] = {}
-
-    def _fake_init(
-        self: object,
-        kv_caches: object,
-        lmcache_tokens_per_chunk: int = 256,
-        **kwargs: object,
-    ) -> None:
-        created["kv_caches"] = kv_caches
-        created["chunk"] = lmcache_tokens_per_chunk
-
-    monkeypatch.setattr(NpuCacheContext, "__init__", _fake_init)
-    context = NpuDeviceSpec().create_cache_context([_Sentinel()], 128)
-    assert isinstance(context, NpuCacheContext)
-    assert isinstance(created["kv_caches"], list)
-    assert created["chunk"] == 128
 
 
 @requires_npu

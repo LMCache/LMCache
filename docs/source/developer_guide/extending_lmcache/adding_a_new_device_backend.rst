@@ -520,12 +520,13 @@ checks — both must succeed, otherwise the factory raises
 Separately, the LMCache-driven server module also requires a
 ``BaseCacheContext`` subclass next to the backend (for example,
 ``lmcache/v1/multiprocess/cache_context/foo.py`` in-tree or
-``lmcache_foo/cache_context.py`` externally) **and** a matching
+``lmcache_foo/cache_context.py`` externally).  The platform-agnostic factory
+``lmcache.v1.multiprocess.cache_context.factory.create_cache_context`` resolves
+the spec by ``device_type`` through the ``DeviceSpec`` registry.  An in-tree
+backend is mapped to its class by ``backend_name`` inside that factory, so
+add one entry there.  An external plugin instead provides a matching
 ``DeviceSpec.create_cache_context`` override that lazy-imports and
-instantiates it.  The platform-agnostic factory
-``lmcache.v1.multiprocess.cache_context.factory.create_cache_context`` dispatches
-by ``device_type`` through the ``DeviceSpec`` registry and invokes
-that hook; the default ``DeviceSpec.create_cache_context`` raises
+instantiates its class; the default ``DeviceSpec.create_cache_context`` raises
 ``NotImplementedError`` so a missing override surfaces loudly instead
 of silently falling back.  The cache context itself manages the KV
 cache layout and pointers used for IPC transfer.
