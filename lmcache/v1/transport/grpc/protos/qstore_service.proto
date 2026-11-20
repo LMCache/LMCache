@@ -9,6 +9,19 @@ package lmcache.mp;
 import "common.proto";
 import "lmcache_driven_service.proto";
 
+// Q-cache registration keeps the existing seven fields and empty response.
+message RegisterQCacheRequest {
+  int64 instance_id = 1;
+  repeated DeviceIpcWrapper kv_cache = 2;
+  string model_name = 3;
+  int64 world_size = 4;
+  string engine_type = 5;
+  bytes encoded_layout_hints = 6;
+  repeated EngineGroupInfo engine_group_infos = 7;
+}
+
+message RegisterQCacheResponse {}
+
 message ReportQRingStateRequest {
   int64 instance_id = 1;
   int64 worker_id = 2;
@@ -63,7 +76,7 @@ message SDKStoreResponse {
 }
 
 service QStoreService {
-  rpc RegisterQCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
+  rpc RegisterQCache(RegisterQCacheRequest) returns (RegisterQCacheResponse);
   rpc UnregisterQCache(UnregisterKvCacheRequest)
       returns (UnregisterKvCacheResponse);
   rpc StoreQ(StoreRequest) returns (StoreResponse);
