@@ -133,6 +133,18 @@ class TestContextLifecycle:
         with pytest.raises(RuntimeError, match="driver is not open"):
             closed_lib.register_stream(7)
 
+    def test_driver_open_rejects_unexpected_api_version(
+        self, fake_cdll: _FakeCDLL, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def wrong_version(param_ref: Any) -> int:
+            param_ref._obj.version = NDS_API_VERSION + 1
+            return 0
+
+        monkeypatch.setattr(fake_cdll, "nds_init", wrong_version, raising=False)
+        instance = OpenEulerNDSLibrary(library_path="/fake/libnds.so")
+        with pytest.raises(RuntimeError, match="API version"):
+            instance.driver_open()
+
     def test_driver_close_destroys_remaining_contexts(
         self, lib: OpenEulerNDSLibrary, fake_cdll: _FakeCDLL
     ) -> None:
@@ -141,6 +153,59 @@ class TestContextLifecycle:
         lib.driver_close()
         assert len(fake_cdll.calls["nds_io_destroy_ctx"]) == 2
         assert len(fake_cdll.calls["nds_exit"]) == 1
+
+
+class TestRegistration:
+    def test_file_register_marshals_descriptor_and_raises_on_error(
+        self,
+        lib: OpenEulerNDSLibrary,
+        fake_cdll: _FakeCDLL,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        assert lib.file_register(42) == 42
+        (desc_ref,) = fake_cdll.calls["nds_register_fs"][0]
+        desc = desc_ref._obj
+        assert desc.fs_fd[0] == 42
+        assert desc.fs_fd_cnt == 1
+        assert desc.reserved == 0
+
+        monkeypatch.setattr(
+            fake_cdll, "nds_register_fs", lambda _desc: -13, raising=False
+        )
+        with pytest.raises(OSError, match="nds_register_fs"):
+            lib.file_register(42)
+
+    def test_register_and_unregister_memory(
+        self,
+        lib: OpenEulerNDSLibrary,
+        fake_cdll: _FakeCDLL,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        lib.register_memory(0x2000, 8192)
+        addr, size, devid = fake_cdll.calls["nds_register_mem"][0]
+        assert (addr.value, size.value, devid) == (0x2000, 8192, 0)
+
+        lib.unregister_memory(0x2000, 8192)
+        addr, size, devid = fake_cdll.calls["nds_unregister_mem"][0]
+        assert (addr.value, size.value, devid) == (0x2000, 8192, 0)
+
+        # ENOENT (-2) on unregister is ignored; other errors propagate.
+        monkeypatch.setattr(
+            fake_cdll, "nds_unregister_mem", lambda *_args: -2, raising=False
+        )
+        lib.unregister_memory(0x2000, 8192)
+
+        monkeypatch.setattr(
+            fake_cdll, "nds_unregister_mem", lambda *_args: -5, raising=False
+        )
+        with pytest.raises(OSError, match="nds_unregister_mem"):
+            lib.unregister_memory(0x2000, 8192)
+
+        monkeypatch.setattr(
+            fake_cdll, "nds_register_mem", lambda *_args: -12, raising=False
+        )
+        with pytest.raises(OSError, match="nds_register_mem"):
+            lib.register_memory(0x2000, 8192)
 
 
 class TestBlockingIO:
