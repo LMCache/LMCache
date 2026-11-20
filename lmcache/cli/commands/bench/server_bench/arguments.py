@@ -143,7 +143,10 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         "--num-blocks",
         type=int,
         default=1024,
-        help="Paged blocks (default: 1024)",
+        help=(
+            "Fallback block count per group, including any reserved null block "
+            "(default: 1024)"
+        ),
     )
     kv.add_argument(
         "--block-size",
@@ -156,8 +159,8 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=0,
         help=(
-            "Server null block id, never allocated (default: 0; must match "
-            "the server's --null-block-id)"
+            "Match the server's --null-block-id (default: 0). "
+            "An ID in [0, NB) reserves one block per group."
         ),
     )
 
