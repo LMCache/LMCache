@@ -6,9 +6,11 @@
 #include <hf3fs_usrbio.h>
 #include <unistd.h>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <thread>
 #include <unordered_set>
 
 namespace hf3fs_mock {
@@ -16,6 +18,10 @@ std::string mount_point;
 std::atomic<int> created{0};
 std::atomic<int> destroyed{0};
 std::atomic<int> duplicate_destroys{0};
+std::atomic<bool> hold_io{false};
+std::atomic<bool> io_entered{false};
+std::atomic<bool> io_released{false};
+std::atomic<bool> exit_on_cleanup{false};
 }  // namespace hf3fs_mock
 
 namespace {
@@ -34,6 +40,9 @@ void* create_resource(size_t size) {
 }
 
 void destroy_resource(void* ptr) {
+  // The shutdown test stops at worker-local resource destruction, after
+  // the worker has finished using the connector's members.
+  if (hf3fs_mock::exit_on_cleanup) ::_exit(0);
   std::lock_guard<std::mutex> lock(resource_mutex);
   if (resources.erase(ptr) == 0) {
     ++hf3fs_mock::duplicate_destroys;
@@ -99,6 +108,12 @@ int hf3fs_submit_ios(const hf3fs_ior*) { return 0; }
 
 int hf3fs_wait_for_ios(const hf3fs_ior*, hf3fs_cqe* cqes, int, int,
                        const timespec*) {
+  if (hf3fs_mock::hold_io) {
+    hf3fs_mock::io_entered = true;
+    while (!hf3fs_mock::io_released) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
   cqes[0] = pending;
   return 1;
 }
