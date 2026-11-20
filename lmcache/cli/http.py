@@ -4,7 +4,6 @@
 # Standard
 from http.client import IncompleteRead
 from typing import Any
-import codecs
 import json
 import urllib.error
 import urllib.request
@@ -39,65 +38,36 @@ def normalize_url(url: str) -> str:
     return url.rstrip("/")
 
 
-def _error_body(url: str, exc: urllib.error.HTTPError, method: str) -> tuple[str, bool]:
+def _error_body(url: str, exc: urllib.error.HTTPError) -> tuple[str, bool]:
     """Read a bounded prefix of an HTTP error body for diagnostics.
+
+    The body is only a diagnostic, so it is decoded leniently: undecodable
+    or bound-split characters become replacement characters rather than
+    failing the error report. An ``IncompleteRead`` escapes to
+    :func:`fetch_json`, which reports it as an incomplete response.
 
     Args:
         url: The URL the failed request targeted (used in error messages).
         exc: The HTTP error whose response body should be read.
-        method: The request method. HEAD responses, like 204/304 statuses,
-            legitimately carry no body regardless of ``Content-Length``
-            (RFC 9110 section 8.6) and skip the short-body check.
 
     Returns:
-        ``(body, truncated)`` — the decoded body text, cut at the last
-        complete character when the bound splits one, and whether the
-        bound truncated the body at all.
+        ``(body, truncated)`` — the body text and whether the bound
+        truncated the body at all.
 
     Raises:
-        CLIHTTPError: When the body ends before its declared length or
-            cannot be read or decoded; the original failure is chained
-            as the cause.
+        CLIHTTPError: When the body cannot be read; the original failure
+            is chained as the cause.
     """
     try:
-        try:
-            raw = exc.read(_MAX_ERROR_BODY_BYTES + 1)
-        except IncompleteRead as read_exc:
-            raise CLIHTTPError(
-                f"Incomplete HTTP response from {url}: {read_exc}"
-            ) from read_exc
-        except OSError as read_exc:
-            raise CLIHTTPError(
-                f"Cannot read HTTP {exc.code} response from {url}: {read_exc}"
-            ) from read_exc
-
-        # A bounded read returns a short body instead of raising when the
-        # server declares Content-Length and closes early; detect that.
-        bodyless = exc.code in (204, 304) or method.upper() == "HEAD"
-        declared = None if bodyless else exc.headers.get("Content-Length")
-        try:
-            expected = int(declared) if declared is not None else None
-        except ValueError:
-            expected = None
-        if expected and len(raw) < min(expected, _MAX_ERROR_BODY_BYTES + 1):
-            incomplete = IncompleteRead(raw, expected - len(raw))
-            raise CLIHTTPError(
-                f"Incomplete HTTP response from {url}: {incomplete}"
-            ) from incomplete
-
-        truncated = len(raw) > _MAX_ERROR_BODY_BYTES
-        try:
-            # Incremental strict decode: a truncated tail character is
-            # tolerated, invalid bytes anywhere in the prefix are not.
-            decoder = codecs.getincrementaldecoder("utf-8")()
-            body = decoder.decode(raw[:_MAX_ERROR_BODY_BYTES], final=not truncated)
-        except UnicodeDecodeError as read_exc:
-            raise CLIHTTPError(
-                f"Cannot read HTTP {exc.code} response from {url}: {read_exc}"
-            ) from read_exc
-        return body, truncated
+        raw = exc.read(_MAX_ERROR_BODY_BYTES + 1)
+    except OSError as read_exc:
+        raise CLIHTTPError(
+            f"Cannot read HTTP {exc.code} response from {url}: {read_exc}"
+        ) from read_exc
     finally:
         exc.close()
+    truncated = len(raw) > _MAX_ERROR_BODY_BYTES
+    return raw[:_MAX_ERROR_BODY_BYTES].decode(errors="replace"), truncated
 
 
 def _detail_from_body(body: str) -> str | None:
@@ -159,7 +129,7 @@ def fetch_json(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
-        error_body, truncated = _error_body(url, exc, method)
+        error_body, truncated = _error_body(url, exc)
         detail = _detail_from_body(error_body)
         if exc.code == 503:
             # Legacy contract kept for existing consumers (see the

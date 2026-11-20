@@ -19,7 +19,6 @@ from lmcache.cli.main import main
 
 ReplyPayload = Mapping[str, object] | str | bytes
 Reply = tuple[int, ReplyPayload]
-ReplyWithLength = tuple[int, ReplyPayload, int]
 Request = tuple[str, str, bytes, str]
 
 NEXT_PAGE_TOKEN = "opaque+/=?& %游标"
@@ -70,7 +69,7 @@ class CacheServer:
     """HTTP boundary with queued replies and captured requests."""
 
     url: str
-    replies: Queue[Reply | ReplyWithLength]
+    replies: Queue[Reply]
     requests: Queue[Request]
 
 
@@ -81,7 +80,7 @@ def cache_server() -> Iterator[CacheServer]:
     Yields:
         The server URL, reply queue, and captured requests.
     """
-    replies: Queue[Reply | ReplyWithLength] = Queue()
+    replies: Queue[Reply] = Queue()
     requests: Queue[Request] = Queue()
 
     class Handler(BaseHTTPRequestHandler):
@@ -95,11 +94,7 @@ def cache_server() -> Iterator[CacheServer]:
                 reply = replies.get_nowait()
             except Empty:
                 reply = (500, {"detail": "unexpected extra request"})
-            if len(reply) == 3:
-                status, payload, declared = reply
-            else:
-                status, payload = reply
-                declared = None
+            status, payload = reply
             if isinstance(payload, bytes):
                 encoded = payload
             else:
@@ -108,13 +103,7 @@ def cache_server() -> Iterator[CacheServer]:
                 ).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
-            if declared is not None and declared > len(encoded):
-                self.close_connection = True
-                self.send_header("Connection", "close")
-            self.send_header(
-                "Content-Length",
-                str(declared if declared is not None else len(encoded)),
-            )
+            self.send_header("Content-Length", str(len(encoded)))
             self.end_headers()
             self.wfile.write(encoded)
 
@@ -344,28 +333,6 @@ def test_list_legacy_keys_get_protocol_defaults(
     ]
 
 
-def test_list_rejects_missing_required_key_field(
-    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """A key missing a required field is a format error, not a default."""
-    page: dict[str, object] = {
-        "adapter": "s3",
-        "shared": False,
-        "entries": [
-            {
-                "key": {"chunk_hash_hex": "c0ffee", "model_name": "org/model"},
-                "size_bytes": 2048,
-            }
-        ],
-        "next_page_token": None,
-    }
-    cache_server.replies.put((200, page))
-    with pytest.raises(SystemExit) as exc:
-        main(["kvcache", "list", "--quiet", "--url", cache_server.url])
-    assert exc.value.code == 1
-    assert "required key field 'kv_rank' must be int" in capsys.readouterr().err
-
-
 def test_clear_preserves_l1_post(
     cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -396,155 +363,6 @@ def test_clear_surfaces_error_detail(
     assert "server not initialized" in capsys.readouterr().err
 
 
-def _page_with(key: dict[str, object] | None, size_bytes: object) -> dict[str, object]:
-    """Build a one-entry page whose key and size are as given."""
-    return {
-        "adapter": "s3",
-        "shared": False,
-        "entries": [{"key": key, "size_bytes": size_bytes}],
-        "next_page_token": None,
-    }
-
-
-@pytest.mark.parametrize(
-    ("page", "error"),
-    [
-        (
-            _page_with(
-                {"chunk_hash_hex": "c0ffee", "model_name": "m", "kv_rank": None}, 1
-            ),
-            "required key field 'kv_rank' must be int",
-        ),
-        (
-            _page_with(
-                {"chunk_hash_hex": "c0ffee", "model_name": "m", "kv_rank": 0}, None
-            ),
-            "'size_bytes' must be an integer",
-        ),
-        (
-            _page_with(None, 1),
-            "'key' is not an object",
-        ),
-        (
-            _page_with(
-                {"chunk_hash_hex": "c0ffee", "model_name": "m", "kv_rank": True}, 1
-            ),
-            "required key field 'kv_rank' must be int",
-        ),
-        (
-            _page_with(
-                {"chunk_hash_hex": "c0ffee", "model_name": "m", "kv_rank": 0}, True
-            ),
-            "'size_bytes' must be an integer",
-        ),
-        (
-            _page_with(
-                {
-                    "chunk_hash_hex": "c0ffee",
-                    "model_name": "m",
-                    "kv_rank": 0,
-                    "object_group_id": False,
-                },
-                1,
-            ),
-            "optional key field 'object_group_id' must be int",
-        ),
-        (
-            _page_with(
-                {
-                    "chunk_hash_hex": "c0ffee",
-                    "model_name": "m",
-                    "kv_rank": 0,
-                    "tags": {"version": 2},
-                },
-                1,
-            ),
-            "tag values must be strings",
-        ),
-        (
-            _page_with(
-                {
-                    "chunk_hash_hex": "c0ffee",
-                    "model_name": "m",
-                    "kv_rank": 0,
-                    "tags": {"": "ok"},
-                },
-                1,
-            ),
-            "tag names must be non-empty strings",
-        ),
-    ],
-    ids=[
-        "null-rank",
-        "null-size",
-        "null-key",
-        "bool-rank",
-        "bool-size",
-        "bool-group",
-        "tag-value-type",
-        "tag-empty-name",
-    ],
-)
-def test_list_rejects_mistyped_entries(
-    cache_server: CacheServer,
-    page: dict[str, object],
-    error: str,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Null or mistyped entries fail with exit 1 instead of a success report."""
-    cache_server.replies.put((200, page))
-    output = tmp_path / "failed.json"
-    with pytest.raises(SystemExit) as exc:
-        main(
-            [
-                "kvcache",
-                "list",
-                "--quiet",
-                "--output",
-                str(output),
-                "--url",
-                cache_server.url,
-            ]
-        )
-    assert exc.value.code == 1
-    captured = capsys.readouterr()
-    assert error in captured.err
-    assert "Traceback" not in captured.err
-    assert not output.exists()
-
-
-def test_list_entries_must_be_a_list(
-    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """A non-list entries field is a format error, not an empty page."""
-    page: dict[str, object] = {
-        "adapter": "s3",
-        "shared": False,
-        "entries": {},
-        "next_page_token": None,
-    }
-    cache_server.replies.put((200, page))
-    with pytest.raises(SystemExit) as exc:
-        main(["kvcache", "list", "--quiet", "--url", cache_server.url])
-    assert exc.value.code == 1
-    assert "'entries' is not a list" in capsys.readouterr().err
-
-
-def test_list_multibyte_char_across_body_bound(
-    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """A multi-byte character split by the 4 KiB bound keeps the JSON detail."""
-    body = b'{"detail": "kaboom"}'.ljust(4095, b" ") + "雪".encode()
-    cache_server.replies.put((400, body))
-    with pytest.raises(SystemExit) as exc:
-        main(["kvcache", "list", "--quiet", "--url", cache_server.url])
-    assert exc.value.code == 1
-    captured = capsys.readouterr()
-    assert "kaboom" in captured.err
-    assert "Traceback" not in captured.err
-
-
 def test_list_json_detail_beyond_whitespace_bound(
     cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -559,99 +377,14 @@ def test_list_json_detail_beyond_whitespace_bound(
     assert "[truncated]" not in captured.err
 
 
-def test_list_short_body_reports_remaining_bytes(
+def test_list_invalid_utf8_in_error_body_is_lenient(
     cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A body cut short of its Content-Length reports the remaining count."""
-    cache_server.replies.put((400, b'{"ok":', 100))
+    """Undecodable bytes in an error body become replacement characters."""
+    cache_server.replies.put((400, b'{"detail": "a\xffb"}'))
     with pytest.raises(SystemExit) as exc:
         main(["kvcache", "list", "--quiet", "--url", cache_server.url])
     assert exc.value.code == 1
     captured = capsys.readouterr()
-    assert "Incomplete HTTP response" in captured.err
-    assert "94 more expected" in captured.err
-
-
-def test_list_bodyless_status_not_flagged_incomplete(
-    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """A 304 response carries no body and is not an incomplete read."""
-    cache_server.replies.put((304, b"", 18))
-    with pytest.raises(SystemExit) as exc:
-        main(["kvcache", "list", "--quiet", "--url", cache_server.url])
-    assert exc.value.code == 1
-    captured = capsys.readouterr()
-    assert "304" in captured.err
-    assert "Not Modified" in captured.err
-    assert "Incomplete" not in captured.err
-
-
-def test_list_invalid_utf8_inside_oversized_body(
-    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Invalid bytes before the bound stay an error, not silent data loss."""
-    body = b'{"detail": "a\xffb"}'.ljust(4097, b" ")
-    cache_server.replies.put((400, body))
-    with pytest.raises(SystemExit) as exc:
-        main(["kvcache", "list", "--quiet", "--url", cache_server.url])
-    assert exc.value.code == 1
-    captured = capsys.readouterr()
-    assert "Cannot read HTTP 400 response" in captured.err
+    assert "a\ufffdb" in captured.err
     assert "Traceback" not in captured.err
-
-
-_VALID_PAGE: dict[str, object] = {
-    "adapter": "s3",
-    "shared": False,
-    "entries": [],
-    "next_page_token": None,
-}
-
-
-@pytest.mark.parametrize(
-    ("page", "error"),
-    [
-        ("[]", "body is not an object"),
-        (
-            {k: v for k, v in _VALID_PAGE.items() if k != "adapter"},
-            "'adapter' must be a string",
-        ),
-        ({**_VALID_PAGE, "shared": "false"}, "'shared' must be a boolean"),
-        (
-            {k: v for k, v in _VALID_PAGE.items() if k != "next_page_token"},
-            "'next_page_token' is missing",
-        ),
-        (
-            {**_VALID_PAGE, "next_page_token": {"cursor": "p2"}},
-            "'next_page_token' must be a string or null",
-        ),
-    ],
-    ids=["top-array", "no-adapter", "shared-string", "no-token", "token-object"],
-)
-def test_list_rejects_malformed_pages(
-    cache_server: CacheServer,
-    page: dict[str, object] | str,
-    error: str,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A malformed page object fails before any report is written."""
-    cache_server.replies.put((200, page))
-    output = tmp_path / "failed.json"
-    with pytest.raises(SystemExit) as exc:
-        main(
-            [
-                "kvcache",
-                "list",
-                "--quiet",
-                "--output",
-                str(output),
-                "--url",
-                cache_server.url,
-            ]
-        )
-    assert exc.value.code == 1
-    captured = capsys.readouterr()
-    assert f"Invalid response: {error}" in captured.err
-    assert "Traceback" not in captured.err
-    assert not output.exists()

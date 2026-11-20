@@ -23,121 +23,33 @@ _KEY_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _is_int(value: Any) -> bool:
-    """Return whether *value* is an integer and not a boolean."""
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _invalid_entry(index: int, message: str) -> CLIHTTPError:
-    """Build the format error for the page entry at *index*."""
-    return CLIHTTPError(f"Invalid cache object at index {index}: {message}")
-
-
-def _validated_page(result: Any) -> dict[str, Any]:
-    """Validate the shape of a ``/cache/objects`` page before use.
-
-    Args:
-        result: The decoded response body.
-
-    Returns:
-        The same object, once every documented field checks out:
-        ``adapter`` a string, ``shared`` a boolean, ``entries`` a list,
-        and ``next_page_token`` present as a string or ``null``.
-
-    Raises:
-        CLIHTTPError: If the body is not an object or any documented
-            field is missing or has the wrong type.
-    """
-    if not isinstance(result, dict):
-        raise CLIHTTPError("Invalid response: body is not an object")
-    if not isinstance(result.get("adapter"), str):
-        raise CLIHTTPError("Invalid response: 'adapter' must be a string")
-    if not isinstance(result.get("shared"), bool):
-        raise CLIHTTPError("Invalid response: 'shared' must be a boolean")
-    if not isinstance(result.get("entries"), list):
-        raise CLIHTTPError("Invalid response: 'entries' is not a list")
-    if "next_page_token" not in result:
-        raise CLIHTTPError("Invalid response: 'next_page_token' is missing")
-    token = result["next_page_token"]
-    if token is not None and not isinstance(token, str):
-        raise CLIHTTPError(
-            "Invalid response: 'next_page_token' must be a string or null"
-        )
-    return result
-
-
-def _flatten_entry(index: int, entry: dict[str, Any]) -> dict[str, Any]:
+def _flatten_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """Flatten one ``{key, size_bytes}`` wire object into a table/JSON row.
 
     ``object_group_id`` (``0``), ``cache_salt`` (``""``), and ``tags``
     (``{}``) are optional on the wire for backward compatibility with
     older servers and are filled with their protocol defaults when absent
-    or ``null``. Every other field is required with its protocol type;
-    anything missing, ``null``, wrongly typed, or a boolean in an integer
-    slot is reported as a format error instead of being passed off as a
-    value. Tag names must be non-empty strings and tag values strings,
-    per the identity-tag contract.
+    or ``null``. Like ``quota list``, everything else is rendered as the
+    server sent it — the CLI does not re-check the server's schema.
 
     Args:
-        index: Position of the entry in the page, for error messages.
         entry: One wire entry with ``key`` and ``size_bytes``.
 
     Returns:
         The flattened row, ready for ``Section.add_row``.
-
-    Raises:
-        CLIHTTPError: If the entry, its key, or any field is missing,
-            mistyped, or violates the tag contract.
     """
-    if not isinstance(entry, dict):
-        raise _invalid_entry(index, "entry is not an object")
-    key = entry.get("key")
-    if not isinstance(key, dict):
-        raise _invalid_entry(index, "'key' is not an object")
-
-    chunk_hash_hex = key.get("chunk_hash_hex")
-    if not isinstance(chunk_hash_hex, str):
-        raise _invalid_entry(index, "required key field 'chunk_hash_hex' must be str")
-    model_name = key.get("model_name")
-    if not isinstance(model_name, str):
-        raise _invalid_entry(index, "required key field 'model_name' must be str")
-    kv_rank = key.get("kv_rank")
-    if not _is_int(kv_rank):
-        raise _invalid_entry(index, "required key field 'kv_rank' must be int")
-
+    key = entry.get("key") or {}
     object_group_id = key.get("object_group_id")
-    if object_group_id is None:
-        object_group_id = 0
-    elif not _is_int(object_group_id):
-        raise _invalid_entry(index, "optional key field 'object_group_id' must be int")
     cache_salt = key.get("cache_salt")
-    if cache_salt is None:
-        cache_salt = ""
-    elif not isinstance(cache_salt, str):
-        raise _invalid_entry(index, "optional key field 'cache_salt' must be str")
     tags = key.get("tags")
-    if tags is None:
-        tags = {}
-    elif not isinstance(tags, dict):
-        raise _invalid_entry(index, "optional key field 'tags' must be an object")
-    for tag_name, tag_value in tags.items():
-        if not isinstance(tag_name, str) or not tag_name:
-            raise _invalid_entry(index, "tag names must be non-empty strings")
-        if not isinstance(tag_value, str):
-            raise _invalid_entry(index, "tag values must be strings")
-
-    size_bytes = entry.get("size_bytes")
-    if not _is_int(size_bytes):
-        raise _invalid_entry(index, "'size_bytes' must be an integer")
-
     return {
-        "chunk_hash_hex": chunk_hash_hex,
-        "model_name": model_name,
-        "kv_rank": kv_rank,
-        "object_group_id": object_group_id,
-        "cache_salt": cache_salt,
-        "tags": tags,
-        "size_bytes": size_bytes,
+        "chunk_hash_hex": key.get("chunk_hash_hex"),
+        "model_name": key.get("model_name"),
+        "kv_rank": key.get("kv_rank"),
+        "object_group_id": 0 if object_group_id is None else object_group_id,
+        "cache_salt": "" if cache_salt is None else cache_salt,
+        "tags": {} if tags is None else tags,
+        "size_bytes": entry.get("size_bytes"),
     }
 
 
@@ -201,16 +113,18 @@ class ListCommand(BaseCommand):
             f"{normalize_url(args.url)}/cache/objects?{urllib.parse.urlencode(params)}"
         )
         try:
-            result = _validated_page(fetch_json(url))
+            result = fetch_json(url)
             metrics = self.create_metrics("L2 Cache Objects", args)
-            metrics.add("adapter", "Adapter", result["adapter"])
-            metrics.add("shared", "Shared", result["shared"])
-            metrics.add("next_page_token", "Next page token", result["next_page_token"])
+            metrics.add("adapter", "Adapter", result.get("adapter"))
+            metrics.add("shared", "Shared", result.get("shared"))
+            metrics.add(
+                "next_page_token", "Next page token", result.get("next_page_token")
+            )
             entries = metrics.add_table(
                 "entries", "Objects", *_KEY_COLUMNS, ("size_bytes", "Bytes")
             )
-            for index, entry in enumerate(result["entries"]):
-                entries.add_row(**_flatten_entry(index, entry))
+            for entry in result.get("entries") or []:
+                entries.add_row(**_flatten_entry(entry))
             metrics.emit()
         except CLIHTTPError as exc:
             print(str(exc), file=sys.stderr)
