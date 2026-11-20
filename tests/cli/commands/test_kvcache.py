@@ -81,7 +81,7 @@ def cache_server() -> Iterator[CacheServer]:
     Yields:
         The server URL, reply queue, and captured requests.
     """
-    replies: Queue[Reply] = Queue()
+    replies: Queue[Reply | ReplyWithLength] = Queue()
     requests: Queue[Request] = Queue()
 
     class Handler(BaseHTTPRequestHandler):
@@ -399,6 +399,84 @@ def test_list_short_body_reports_remaining_bytes(
     captured = capsys.readouterr()
     assert "Incomplete HTTP response" in captured.err
     assert "94 more expected" in captured.err
+
+
+@pytest.mark.parametrize("status", [400, 503])
+def test_list_chunked_body_cut_reports_incomplete(
+    status: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A chunked error body cut mid-transfer is an incomplete response."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(status)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self.wfile.write(b'5\r\n{"ok"\r\n')
+            self.wfile.flush()
+            self.close_connection = True
+
+        def log_message(self, format: str, *args: object) -> None:
+            """Suppress HTTP access logs in successful tests."""
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        with pytest.raises(SystemExit) as exc:
+            main(
+                [
+                    "kvcache",
+                    "list",
+                    "--quiet",
+                    "--url",
+                    f"http://127.0.0.1:{server.server_port}",
+                ]
+            )
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "Incomplete HTTP response" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_list_not_modified_with_content_length_is_not_incomplete(
+    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A 304 describes its representation's size; it carries no body."""
+    cache_server.replies.put((304, b"", 80))
+    with pytest.raises(SystemExit) as exc:
+        main(["kvcache", "list", "--quiet", "--url", cache_server.url])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "304" in captured.err
+    assert "Incomplete" not in captured.err
+
+
+def test_list_multibyte_char_across_body_bound(
+    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A multi-byte character split by the 4 KiB bound keeps the JSON detail."""
+    body = b'{"detail": "kaboom"}'.ljust(4095, b" ") + "雪".encode()
+    cache_server.replies.put((400, body))
+    with pytest.raises(SystemExit) as exc:
+        main(["kvcache", "list", "--quiet", "--url", cache_server.url])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "kaboom" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_list_oversized_multibyte_error_body_decodes_prefix(
+    cache_server: CacheServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A large Chinese error body yields a readable truncated prefix."""
+    body = json.dumps({"detail": "诊断" * 800}).encode()
+    cache_server.replies.put((503, body))
+    with pytest.raises(SystemExit) as exc:
+        main(["kvcache", "list", "--quiet", "--url", cache_server.url])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "Server unhealthy" in captured.err
+    assert "诊断" in captured.err
+    assert "[truncated]" in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_list_invalid_utf8_in_error_body(

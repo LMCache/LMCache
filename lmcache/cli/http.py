@@ -4,6 +4,7 @@
 # Standard
 from http.client import IncompleteRead
 from typing import Any
+import codecs
 import json
 import urllib.error
 import urllib.request
@@ -41,10 +42,11 @@ def normalize_url(url: str) -> str:
 def _error_body(url: str, exc: urllib.error.HTTPError) -> tuple[str, bool]:
     """Read a bounded prefix of an HTTP error body for diagnostics.
 
-    Preserves the diagnostics ``describe`` already guarantees: a body that
-    ends before its declared ``Content-Length`` is reported as an
-    incomplete response, and undecodable bytes (including a multi-byte
-    character split by the bound) as a read failure.
+    Preserves the diagnostics ``describe`` already guarantees: a body
+    that ends before the response's effective length is reported as an
+    incomplete response, and undecodable bytes as a read failure. A
+    multi-byte character split by the bound is the one tolerated defect:
+    the prefix is all that is shown either way.
 
     Args:
         url: The URL the failed request targeted (used in error messages).
@@ -59,6 +61,11 @@ def _error_body(url: str, exc: urllib.error.HTTPError) -> tuple[str, bool]:
             original failure is chained as the cause.
     """
     try:
+        # The length the client expects for this response, read before
+        # read() consumes it: 0 for HEAD and 204/304 (which carry no body
+        # regardless of Content-Length, RFC 9110 section 8.6), None when
+        # chunked — an interrupted chunk makes read() raise below.
+        expected = getattr(getattr(exc, "fp", None), "length", None)
         raw = exc.read(_MAX_ERROR_BODY_BYTES + 1)
     except IncompleteRead as read_exc:
         raise CLIHTTPError(
@@ -73,12 +80,9 @@ def _error_body(url: str, exc: urllib.error.HTTPError) -> tuple[str, bool]:
 
     # A bounded read returns a short body instead of raising when the
     # server declares Content-Length and closes early; detect that.
-    declared = exc.headers.get("Content-Length")
-    try:
-        expected = int(declared) if declared is not None else None
-    except ValueError:
-        expected = None
-    if expected and len(raw) < min(expected, _MAX_ERROR_BODY_BYTES + 1):
+    if isinstance(expected, int) and len(raw) < min(
+        expected, _MAX_ERROR_BODY_BYTES + 1
+    ):
         incomplete = IncompleteRead(raw, expected - len(raw))
         raise CLIHTTPError(
             f"Incomplete HTTP response from {url}: {incomplete}"
@@ -86,7 +90,10 @@ def _error_body(url: str, exc: urllib.error.HTTPError) -> tuple[str, bool]:
 
     truncated = len(raw) > _MAX_ERROR_BODY_BYTES
     try:
-        body = raw[:_MAX_ERROR_BODY_BYTES].decode()
+        # Incremental strict decode: a character split by the bound is
+        # tolerated, invalid bytes anywhere in the prefix are not.
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        body = decoder.decode(raw[:_MAX_ERROR_BODY_BYTES], final=not truncated)
     except UnicodeDecodeError as read_exc:
         raise CLIHTTPError(
             f"Cannot read HTTP {exc.code} response from {url}: {read_exc}"
