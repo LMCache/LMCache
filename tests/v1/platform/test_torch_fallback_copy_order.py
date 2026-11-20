@@ -113,6 +113,45 @@ class TestStreamOrderedCopy:
         # ctypes normalises a NULL pointer to None.
         assert args[4].value in (None, 0)
 
+    def test_a_hip_only_runtime_still_takes_the_async_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ROCm exposes `hipMemcpy*` and no `cudaMemcpy`; the gate must not care.
+
+        Gating on `cudaMemcpy` sent device pointers to the tensor copy on ROCm,
+        which is the case this covers: the fake has no CUDA spelling at all.
+        """
+
+        class _HipOnly:
+            def __init__(self) -> None:
+                self.calls: list[tuple[Any, ...]] = []
+
+            def hipMemcpyAsync(self, *args: Any) -> int:
+                self.calls.append(args)
+                return 0
+
+        runtime = _HipOnly()
+        copied: list[tuple[int, int, int]] = []
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+        monkeypatch.setattr(
+            torch.cuda,
+            "current_stream",
+            lambda *a, **k: type("S", (), {"cuda_stream": 9})(),
+        )
+        monkeypatch.setattr(mem_kernels, "_get_copy_lib", lambda: runtime)
+        monkeypatch.setattr(
+            mem_kernels,
+            "_copy_bytes_with_tensor",
+            lambda dest, src, nbytes: copied.append((dest, src, nbytes)),
+        )
+
+        _d2h()
+
+        assert copied == []
+        assert len(runtime.calls) == 1
+        assert runtime.calls[0][4].value == 9
+
     def test_tensor_copy_fallback_when_no_async_symbol(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
