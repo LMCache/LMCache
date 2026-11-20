@@ -134,6 +134,9 @@ PY
     if [[ -n "${KV_CACHE_MEMORY_BYTES:-}" ]]; then
         VLLM_MODEL_ARGS+=(--kv-cache-memory-bytes "$KV_CACHE_MEMORY_BYTES")
     fi
+    if [[ "${VLLM_ENABLE_SLEEP_MODE:-0}" == "1" ]]; then
+        VLLM_MODEL_ARGS+=(--enable-sleep-mode)
+    fi
 
     VLLM_BLOCK_ARGS=()
     if [[ -n "${VLLM_BLOCK_SIZE:-}" ]]; then
