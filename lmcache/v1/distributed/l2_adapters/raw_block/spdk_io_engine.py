@@ -419,6 +419,7 @@ class SpdkBlockIO(RawBlockIO):
         # Largest pooled buffer size; buffers no larger than this are leased from
         # the header pool, larger ones (variable-size payloads) are DMA-allocated.
         self._header_buffer_size = 0
+        self._terminal_error: Optional[str] = None
 
         if spdk_ffi is not None:
             # Test injection: reuse the provided FFI and skip the real
@@ -663,6 +664,7 @@ class SpdkBlockIO(RawBlockIO):
             IO_WRITE,
         )
         if rc != 0:
+            self._record_submission_failure("write")
             raise RuntimeError("SPDK batched write submission failed")
 
         status = ffi.wait_batch(batch_id)
@@ -762,6 +764,7 @@ class SpdkBlockIO(RawBlockIO):
                 IO_READ,
             )
             if rc != 0:
+                self._record_submission_failure("read")
                 raise RuntimeError("SPDK batched read submission failed")
 
             status = ffi.wait_batch(batch_id)
@@ -869,13 +872,13 @@ class SpdkBlockIO(RawBlockIO):
         return []
 
     def worker_error(self) -> Optional[str]:
-        """Return the worker's terminal error, or ``None`` when healthy.
+        """Return the terminal submission-path failure, or ``None`` when healthy.
 
         Returns:
-            ``None``; the SPDK engine does not report a terminal worker error
-            through this surface.
+            The terminal submission-path failure reason, or ``None`` when the
+            engine is usable.
         """
-        return None
+        return self._terminal_error
 
     def fixed_buffer_status(self) -> tuple[bool, int]:
         """Return ``(registered, registered_bytes)`` for fixed-buffer I/O.
@@ -923,7 +926,6 @@ class SpdkBlockIO(RawBlockIO):
 
         if self._ffi is not None:
             try:
-                self._ffi.shutdown_spdk_workers()
                 self._ffi.deinit()
             except Exception as e:
                 logger.warning("SpdkBlockIO: error shutting down SPDK engine: %s", e)
@@ -1085,3 +1087,15 @@ class SpdkBlockIO(RawBlockIO):
             if reg_ptr == ptr:
                 del self._fresh_dma_regions[i]
                 return
+
+    def _record_submission_failure(self, op_name: str) -> None:
+        """Record the terminal submission-path failure for :meth:`worker_error`.
+
+        Args:
+            op_name: The failed operation ("read" or "write") for the message.
+        """
+        if self._terminal_error is None:
+            self._terminal_error = (
+                f"SPDK batched {op_name} submission failed; the engine cannot "
+                "accept further submissions (no reset path)"
+            )

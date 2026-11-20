@@ -114,10 +114,6 @@ class SpdkIoEngineFFI:
             ]
             self._launch_spdk_workers.restype = ctypes.c_int
 
-            self._shutdown_spdk_workers = self._lib.core_shutdown_spdk_workers
-            self._shutdown_spdk_workers.argtypes = [ctypes.c_void_p]
-            self._shutdown_spdk_workers.restype = None
-
             self._get_device_size = self._lib.core_get_device_size
             self._get_device_size.argtypes = [
                 ctypes.c_void_p,
@@ -240,7 +236,13 @@ class SpdkIoEngineFFI:
         return rc
 
     def deinit(self) -> None:
-        """Deinitialize SPDK environment."""
+        """Tear the engine down and deinitialize the SPDK environment.
+
+        Single de-initialization entry point: stops and joins the I/O and admin
+        worker threads (which settles every outstanding I/O), then frees the I/O
+        ring and context mempool and releases this adapter's share of the EAL.
+        Idempotent.
+        """
         try:
             self._deinit_spdk(self._obj)
             logger.debug("SPDK environment deinitialized")
@@ -357,14 +359,6 @@ class SpdkIoEngineFFI:
             logger.error("SPDK worker launch failed with rc=%d", rc)
         return rc
 
-    def shutdown_spdk_workers(self) -> None:
-        """Signal the SPDK I/O and admin worker threads to shut down."""
-        try:
-            self._shutdown_spdk_workers(self._obj)
-            logger.debug("SPDK workers shutdown successfully")
-        except Exception as e:
-            logger.error("Error shutting down SPDK workers: %s", e)
-
     def get_device_size(self) -> int:
         """Get the NVMe device size in bytes"""
         size = ctypes.c_uint64(0)
@@ -419,7 +413,8 @@ class SpdkIoEngineFFI:
         if core is None:
             return
         try:
-            self.shutdown_spdk_workers()
+            # Single de-initialization entry point: it stops and joins the worker
+            # threads before releasing the ring, the mempool and the EAL reference.
             self.deinit()
         except Exception:
             pass
@@ -499,8 +494,11 @@ class SpdkIoEngineFFI:
             batch_id: The batch ID returned by batch_io_submit.
 
         Returns:
-            0 if every I/O in the batch succeeded, -1 if any I/O failed or the
-            batch_id is unknown.
+            0 if every I/O in the batch succeeded, -1 if any I/O reported a
+            settled failure or the batch_id is unknown, and 1 if the batch did
+            not finish within the wait deadline. A return of 1 means one or more
+            I/Os may still be outstanding on the device, so the outcome is
+            uncertain.
         """
         rc = self._wait_spdk_batch(self._obj, ctypes.c_uint(batch_id))
         if rc == 0:

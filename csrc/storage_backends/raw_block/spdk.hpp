@@ -35,6 +35,8 @@ struct ConnectionContext {
   std::atomic<bool> is_connected = false;
   std::atomic<uint32_t> io_queue_depth = 0;
   std::atomic<uint32_t> io_queue_requests = 0;
+  // Owning engine back-pointer, set once by SpdkIoEngineCore's constructor
+  SpdkIoEngineCore* engine = nullptr;
 };
 
 // Batch tracking structure.
@@ -53,29 +55,32 @@ struct IoContext {
   uint64_t lba = 0;             // Starting Logical Block Address
   uint32_t lba_count = 0;       // Number of logical blocks
   IoOp op = IO_READ;            // I/O operation type
-  void* buffer = nullptr;       // Data buffer for read/write
+  void* buffer = nullptr;       // Data buffer actually submitted for DMA. For
+                                // a partial-sector I/O this is the owned,
+                                // sector-aligned bounce buffer (see below).
   int re_enqueue_count = 0;     // Re-enqueue count
   uint32_t command_count = 0;   // NVMe child commands this key splits into
   BatchEntry* batch = nullptr;  // Batch info for batch submission
-  std::shared_ptr<BatchEntry> batch_ref;  // Retains the BatchEntry while this
-                                          // IoContext is still live
-  SpdkIoEngineCore* engine = nullptr;     // Back-pointer to the owning engine
-  bool from_mempool = false;  // True if this object came from the mempool
+  SpdkIoEngineCore* engine = nullptr;  // Back-pointer to the owning engine
+  bool from_mempool = false;      // True if this object came from the mempool
+  void* caller_buffer = nullptr;  // Caller's original buffer (head base)
+  void* bounce_buffer = nullptr;  // Owned, sector-sized unaligned-tail buffer
+  uint64_t requested_bytes = 0;   // Read tail bytes to copy back (reads only)
 };
 
 class SpdkIoEngineCore {
  public:
-  SpdkIoEngineCore();
   /**
    * @brief Default constructor. Leaves the engine unstarted; the caller must
    *  call init_spdk() then launch_spdk_workers() before issuing any I/O.
    */
-  ~SpdkIoEngineCore();
+  SpdkIoEngineCore();
   /**
-   * @brief Destructor that stops and joins the worker threads and releases all
-   *  SPDK resources, ensuring cleanup even if shutdown_spdk_workers() and
-   *  deinit_spdk() were never called explicitly.
+   * @brief Destructor that runs the single de-initialization path, so the
+   *  process-global SPDK resources are released even when deinit_spdk() was
+   *  never called explicitly.
    */
+  ~SpdkIoEngineCore();
 
   /**
    * @brief Initialize the SPDK environment.
@@ -88,10 +93,11 @@ class SpdkIoEngineCore {
    */
   int init_spdk(const char* core_mask, int mem_size_mb);
   /**
-   * @brief Release SPDK resources held by this engine: free the I/O ring and
-   *  IoContext mempool, and release this adapter's share of the process-global
-   *  EAL (torn down when the last adapter deinitializes). Idempotent - a second
-   *  call is a no-op.
+   * @brief The single de-initialization entry point: stop and join the worker
+   *  threads (which tears the device down on the io_worker), then free the I/O
+   *  ring and IoContext mempool and release this adapter's share of the
+   *  process-global EAL (torn down when the last adapter deinitializes).
+   *  Idempotent - a second call is a no-op.
    */
   void deinit_spdk();
 
@@ -117,6 +123,10 @@ class SpdkIoEngineCore {
    * @brief Synchronous read/write using externally registered memory at a byte
    * offset. Converts the byte offset/count to LBA internally (using the
    * attached NVMe namespace sector size) and blocks until the I/O completes.
+   *
+   * Each NVMe command is independently timed by SPDK's per-command timeout
+   * callback; a command that never completes is aborted so this call fails
+   * instead of blocking until the caller-side backstop.
    *
    * @param byte_offset Starting byte offset on the device.
    * @param byte_count Number of bytes to transfer.
@@ -151,7 +161,19 @@ class SpdkIoEngineCore {
   );
 
   /**
-   * @brief Signal the I/O loop to shut down and join the worker threads.
+   * @brief Signal the I/O loop to stop and join both worker threads.
+   *
+   * Serialized by an internal mutex and idempotent, so the destructor, an
+   * explicit close, and concurrent callers whose wait deadline expired can all
+   * call it safely. It does not fail the controller itself: a caller that still
+   * has an outstanding command fails it first (see fail_controller_now()), and
+   * the io_worker fails it during teardown when anything is still in flight.
+   *
+   * Joining the io_worker guarantees that the single device teardown has
+   * finished: the ring is cancelled, every submitted command has been aborted
+   * or completed, the qpair is freed, and the controller is detached. Once this
+   * returns, every IoContext is settled and no SPDK callback can run again, so
+   * callers may free their IoContexts and recycle buffers/slots.
    */
   void shutdown_spdk_workers();
 
@@ -204,7 +226,8 @@ class SpdkIoEngineCore {
    * @brief Submit a batch of read/write operations asynchronously. All
    * operations are pushed to the io_worker ring up front and the function
    * returns immediately without waiting for completions, so the device can
-   * overlap them.
+   * overlap them. Each operation's NVMe command is independently subject to the
+   * per-command timeout enforced by SPDK.
    *
    * @param offsets Array of byte offsets for each operation.
    * @param total_lens Array of byte counts for each operation.
@@ -224,11 +247,34 @@ class SpdkIoEngineCore {
    * I/O in the batch has completed, then releases the batch's resources and
    * returns an overall status.
    *
+   * A command that exceeds the per-command timeout is aborted by SPDK and
+   * completes with a failure status, so the batch settles with -1 rather than
+   * relying on the caller-side backstop. A command whose abort cannot settle is
+   * resolved by the single device teardown (see shutdown_spdk_workers()), which
+   * this call runs when its own deadline expires.
+   *
    * @param batch_id The positive batch ID returned by spdk_batch_io_submit.
-   * @return 0 if every I/O in the batch succeeded, -1 if any I/O failed or the
-   * batch_id is unknown.
+   * @return 0 if every I/O in the batch succeeded; -1 if any I/O failed, the
+   * batch_id is unknown, or the wait deadline expired with a command still
+   * outstanding. -1 is always a confirmed outcome: before returning it, the
+   * device teardown has cancelled ring entries and aborted every submitted
+   * command, so buffers and slots may be recycled on 0 and on -1.
    */
   int spdk_wait_batch(uint32_t batch_id);
+
+  /**
+   * @brief Record that the controller must be failed, without failing it.
+   *
+   * Completion-context safe: SPDK's timeout and abort callbacks can run while
+   * the controller lock is held (spdk_nvme_ctrlr_process_admin_completions()
+   * takes it for the whole admin poll), so calling spdk_nvme_ctrlr_fail() from
+   * them would self-deadlock. This only marks the fail as requested; the
+   * io_worker observes it, stops, and performs the actual fail inside
+   * teardown_io_device() -- outside any completion context.
+   *
+   * Called from timeout_cb (I/O or admin command) and spdk_abort_complete_cb.
+   */
+  void request_ctrlr_fail();
 
  private:
   struct rte_ring* m_io_ring_ = nullptr;
@@ -258,9 +304,26 @@ class SpdkIoEngineCore {
   bool m_setup_complete_ = false;  // guarded by m_setup_mutex_
   int m_setup_result_ = 0;         // guarded by m_setup_mutex_ (0 = ready)
 
-  // List for tracking timed-out IoContexts
-  std::mutex m_abandoned_mutex_;
-  std::vector<IoContext*> m_abandoned_io_ctx_;
+  // Serializes shutdown_spdk_workers() so the destructor, an explicit close,
+  // and concurrent callers whose wait deadline expired never join the same
+  // threads twice. The io_worker never takes it, so a joiner cannot deadlock
+  // against the worker's own teardown.
+  std::mutex m_teardown_mutex_;
+  // Guards m_ctx_.ctrlr between fail_controller_now() (which a caller whose
+  // wait deadline expired runs on its own thread) and the detach in
+  // teardown_io_device(), so the controller is never failed after it is freed.
+  // The io_worker does not hold m_teardown_mutex_ while taking this one, so the
+  // two are never taken in opposite orders.
+  std::mutex m_ctrlr_mutex_;
+  // Fail protocol between SPDK completion contexts and the worker threads:
+  //   Healthy       -- no fail requested.
+  //   FailRequested -- a completion/timeout callback asked for a fail. Those
+  //                    callbacks can run under the controller lock, which
+  //                    spdk_nvme_ctrlr_fail() also takes, so they only mark it.
+  //   Failed        -- spdk_nvme_ctrlr_fail() has actually run; see
+  //                    fail_controller_now().
+  enum class CtrlrState { Healthy, FailRequested, Failed };
+  std::atomic<CtrlrState> m_ctrlr_state_{CtrlrState::Healthy};
 
   // Flag to track io_worker existence
   std::atomic<bool> m_worker_alive_{true};
@@ -282,8 +345,9 @@ class SpdkIoEngineCore {
    * @brief io_worker main loop.
    *
    * Pins to its core, connects the device, and allocates the I/O qpair; then
-   * consumes the ring to issue reads/writes and reap completions until
-   * shutdown, draining in-flight I/O before detaching the controller.
+   * consumes the ring to issue reads/writes and reap completions until shutdown
+   * or a controller fail, after which the single device teardown settles every
+   * outstanding command.
    */
   void io_worker();
   /**
@@ -343,17 +407,35 @@ class SpdkIoEngineCore {
   void free_io_ctx(IoContext* io_ctx);
 
   /**
-   * @brief Register an IoContext a caller abandoned after timing out.
+   * @brief Build the aligned-head and bounced-tail IoContexts for one
+   * byte-range transfer and append them to ``out``.
    *
-   * @param io_ctx The context whose caller gave up on it (timed out, or its
-   * worker exited); it is reclaimed during the shutdown drain.
+   * Allocates a sector-sized bounce buffer only when there is an unaligned
+   * tail. On failure frees everything built, leaves ``out`` unchanged, and
+   * returns -1. Shared by spdk_io and spdk_batch_io_submit.
+   *
+   * @param byte_offset Sector-aligned starting byte offset.
+   * @param byte_count Number of bytes to transfer.
+   * @param buffer Caller's data buffer.
+   * @param op IO_READ or IO_WRITE.
+   * @param out Vector to append the built contexts to.
+   * @return 0 on success, -1 on allocation failure.
    */
-  void register_abandoned_io_ctx(IoContext* io_ctx);
+  int append_io_contexts(uint64_t byte_offset, uint64_t byte_count,
+                         void* buffer, IoOp op, std::vector<IoContext*>& out);
+
   /**
-   * @brief Reclaim IoContexts that were registered as abandoned during shutdown
-   * drain.
+   * @brief Stamp one IoContext with its batch and enqueue it on the I/O ring.
+   *
+   * Shared by spdk_io (batch == nullptr) and spdk_batch_io_submit (batch set).
+   * On a ring-full the command is marked completed with -ECANCELED; for a batch
+   * it is also recorded and accounted so waiters still settle. Never blocks.
+   *
+   * @param io_ctx Pre-populated context to submit.
+   * @param batch Owning batch, or nullptr for the standalone spdk_io path.
+   * @return 0 on enqueue, -1 when the ring is full and the command was failed.
    */
-  void drain_abandoned_io_ctxs();
+  int enqueue_io_context(IoContext* io_ctx, BatchEntry* batch);
 
   /**
    * @brief Cancel an I/O that can no longer be retried.
@@ -365,6 +447,51 @@ class SpdkIoEngineCore {
    */
   void cancel_io_ctx(IoContext* io_ctx);
 
+  /**
+   * @brief Fail the controller now, exactly once, from a non-completion thread.
+   *
+   * Moves the controller state to Failed and calls spdk_nvme_ctrlr_fail() for
+   * the first caller only, so a pending request_ctrlr_fail() or a concurrent
+   * second caller neither skips nor repeats the fail. Must not be invoked from
+   * an SPDK completion/timeout callback: those can run under the controller
+   * lock and spdk_nvme_ctrlr_fail() takes that (non-recursive) lock. Callers
+   * are teardown_io_device() and the spdk_io()/spdk_wait_batch() deadline
+   * paths, which must unblock a worker stuck in a transport call before
+   * joining.
+   */
+  void fail_controller_now();
+
+  /**
+   * @brief Report whether the engine has given up on the controller.
+   *
+   * Completion-context safe: reads the fail state without touching the
+   * controller.
+   *
+   * @return true once a fail has been requested or performed.
+   */
+  bool ctrlr_failing() const;
+
+  /**
+   * @brief Tear down the I/O device on the io_worker thread.
+   *
+   * Single teardown routine for the device/qpair/controller layer. It runs on
+   * the io_worker (qpair owner) in every case -- normal loop exit, controller
+   * fail self-shutdown, and setup-failure early returns -- so it never races
+   * the ring or qpair from another thread. It fails the controller when a
+   * command is still outstanding or a fail was requested, signals shutdown,
+   * gates out new submissions, cancels every entry still queued in the
+   * single-consumer ring, joins the admin worker (leaving one poller for the
+   * admin queue while the qpair is freed), frees the qpair, and detaches the
+   * controller. Freeing the qpair aborts every outstanding tracker to its
+   * completion callback, so every IoContext is settled when this returns.
+   *
+   * Tolerant of a null qpair (setup failed before allocation) and a null
+   * controller.
+   *
+   * @param qpair The I/O qpair to free, or nullptr when setup never allocated
+   *        it.
+   */
+  void teardown_io_device(struct spdk_nvme_qpair* qpair);
   /**
    * @brief Handle a failed NVMe submission.
    *

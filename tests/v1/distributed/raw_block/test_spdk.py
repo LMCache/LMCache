@@ -127,10 +127,6 @@ class _FakeSpdkIoEngine:
         """Return the configured max transfer size (0 means unknown)."""
         return self.max_transfer_size
 
-    def shutdown_spdk_workers(self) -> None:
-        """No-op shutdown for test cleanup."""
-        pass
-
     def deinit(self) -> None:
         """No-op deinit for test cleanup."""
         pass
@@ -488,6 +484,176 @@ class TestSpdkBlockIOReadWritePath:
             assert unrecovered == {}
         finally:
             engine.close()
+
+    def test_write_buffers_partial_sector_is_bounced(self, tmp_path):
+        """An unaligned write is forwarded verbatim and bounced in the native
+        layer.
+
+        Python hands the exact ``total_lens`` (4097 here, not the aligned 8192)
+        to the FFI without rounding. The native layer splits it into an aligned
+        4096-byte head served straight from the caller's buffer and a 1-byte
+        tail that is pre-filled into an owned, sector-sized bounce and
+        zero-padded, so the device only ever sees whole-sector, caller-owned
+        data. Python therefore submits the unaligned count unchanged and the
+        write succeeds.
+        """
+        fake = _FakeSpdkIoEngine(submit_rc=0, wait_status=0)
+        engine = _make_spdk_engine(tmp_path, fake)
+        try:
+            buf = bytearray(bytes([1]) * 4097)
+            ptr = self._register_buffer(engine, buf)
+
+            engine.write_buffers([0x1000], [buf], [4097], [4097])
+
+            assert len(fake.batch_io_submit_calls) == 1
+            offsets, total_lens, buf_ptrs, count, op = fake.batch_io_submit_calls[0]
+            assert offsets == [0x1000]
+            assert total_lens == [4097]
+            assert buf_ptrs == [ptr]
+            assert count == 1
+            assert op == IO_WRITE
+            assert len(fake.wait_batch_calls) == 1
+        finally:
+            engine.close()
+
+    def test_read_buffers_partial_sector_preserves_adjacent_guard_byte(self, tmp_path):
+        """A partial-sector read never touches bytes past the requested region.
+
+        Python hands the exact 4097-byte count to the FFI. The native engine
+        splits it into an aligned 4096-byte head read (DMA straight into the
+        caller buffer) and a bounced 1-byte tail read (whole-sector DMA into an
+        owned bounce, copying back only the requested tail bytes). The guard
+        byte at index 4097 is therefore never overwritten.
+        """
+        fake = _FakeSpdkIoEngine(submit_rc=0, wait_status=0)
+        engine = _make_spdk_engine(tmp_path, fake)
+        try:
+            payload_bytes = 4097
+            # Buffer spans the requested region plus one adjacent guard byte.
+            buf = bytearray(bytes([0xCC]) * (payload_bytes + 1))
+            self._register_buffer(engine, buf)
+
+            result = engine.read_buffers(
+                [0x1000], [buf], [payload_bytes], [payload_bytes]
+            )
+
+            assert result == [True]
+            assert len(fake.batch_io_submit_calls) == 1
+            offsets, total_lens, buf_ptrs, count, op = fake.batch_io_submit_calls[0]
+            assert offsets == [0x1000]
+            assert total_lens == [payload_bytes]
+            assert count == 1
+            assert op == IO_READ
+            # The adjacent guard byte past the 4097-byte region is never
+            # overwritten by the partial-sector read.
+            assert bytes(buf[payload_bytes:]) == bytes([0xCC])
+        finally:
+            engine.close()
+
+
+class TestSpdkBlockIOWorkerError:
+    """Tests for SpdkBlockIO.worker_error terminal-failure propagation.
+
+    ``worker_error`` reports a *submission-path* failure, mirroring the io_uring
+    backend: a nonzero ``batch_io_submit`` return (``submit_rc != 0``) means the
+    controller is failed or the device is unreachable (the engine has no reset
+    path), so the engine becomes terminal. A nonzero ``wait_batch`` return is a
+    *completion*-phase outcome (typically a per-command NVMe error on a
+    still-usable controller) and must NOT mark the engine terminal.
+    """
+
+    @staticmethod
+    def _register_buffer(engine: SpdkBlockIO, buf: bytearray) -> None:
+        """Register ``buf``'s address so the zero-copy registration check passes."""
+        ptr = ctypes.addressof((ctypes.c_ubyte * len(buf)).from_buffer(buf))
+        engine.register_io_buffers([ptr], [len(buf)])
+
+    def test_worker_error_none_when_healthy(self, tmp_path):
+        """A healthy engine reports no worker error and passes raise_if_failed."""
+        fake = _FakeSpdkIoEngine(submit_rc=0, wait_status=0)
+        engine = _make_spdk_engine(tmp_path, fake)
+        try:
+            assert engine.worker_error() is None
+            engine.raise_if_failed()  # must not raise
+            # A successful write leaves the engine healthy.
+            buf = bytearray(bytes([1]) * 4096)
+            self._register_buffer(engine, buf)
+            engine.write_buffers([0x1000], [buf], [4096], [4096])
+            assert engine.worker_error() is None
+        finally:
+            engine.close()
+
+    def test_submit_failure_is_terminal(self, tmp_path):
+        """A failed batch_io_submit (submit_rc != 0) marks the engine terminal."""
+        fake = _FakeSpdkIoEngine(submit_rc=1, wait_status=0)
+        engine = _make_spdk_engine(tmp_path, fake)
+        try:
+            buf = bytearray(bytes([1]) * 4096)
+            self._register_buffer(engine, buf)
+            with pytest.raises(
+                RuntimeError, match="SPDK batched write submission failed"
+            ):
+                engine.write_buffers([0x1000], [buf], [4096], [4096])
+            assert engine.worker_error() is not None
+            assert "write submission failed" in engine.worker_error()
+            with pytest.raises(RuntimeError, match="submission failed"):
+                engine.raise_if_failed()
+        finally:
+            engine.close()
+
+    def test_read_submit_failure_is_terminal(self, tmp_path):
+        """A failed read submission (submit_rc != 0) also marks the engine terminal."""
+        fake = _FakeSpdkIoEngine(submit_rc=1, wait_status=0)
+        engine = _make_spdk_engine(tmp_path, fake)
+        try:
+            buf = bytearray(bytes([0]) * 4096)
+            self._register_buffer(engine, buf)
+            with pytest.raises(
+                RuntimeError, match="SPDK batched read submission failed"
+            ):
+                engine.read_buffers([0x1000], [buf], [4096], [4096])
+            assert "read submission failed" in engine.worker_error()
+        finally:
+            engine.close()
+
+    def test_wait_failure_is_not_terminal(self, tmp_path):
+        """A per-command completion error does not mark the engine terminal.
+
+        ``wait_batch`` returning -1 on a successful submit is a completion-phase
+        outcome (controller still usable), so worker_error stays None.
+        """
+        fake = _FakeSpdkIoEngine(submit_rc=0, wait_status=-1)
+        engine = _make_spdk_engine(tmp_path, fake)
+        try:
+            buf = bytearray(bytes([1]) * 4096)
+            self._register_buffer(engine, buf)
+            with pytest.raises(RuntimeError, match="SPDK write failed"):
+                engine.write_buffers([0x1000], [buf], [4096], [4096])
+            assert engine.worker_error() is None
+            engine.raise_if_failed()  # engine still considered usable
+        finally:
+            engine.close()
+
+    def test_reader_wait_failure_is_not_terminal(self, tmp_path):
+        """A failed read batch on a healthy controller keeps the engine healthy."""
+        fake = _FakeSpdkIoEngine(submit_rc=0, wait_status=-1)
+        engine = _make_spdk_engine(tmp_path, fake)
+        try:
+            buf = bytearray(bytes([0]) * 4096)
+            self._register_buffer(engine, buf)
+            with pytest.raises(RuntimeError, match="SPDK read failed"):
+                engine.read_buffers([0x1000], [buf], [4096], [4096])
+            assert engine.worker_error() is None
+        finally:
+            engine.close()
+
+    def test_worker_error_none_before_and_after_close(self, tmp_path):
+        """A cleanly closed healthy engine reports no worker error."""
+        fake = _FakeSpdkIoEngine(submit_rc=0, wait_status=0)
+        engine = _make_spdk_engine(tmp_path, fake)
+        assert engine.worker_error() is None
+        engine.close()
+        assert engine.worker_error() is None
 
 
 class TestSpdkBlockIOReadBatchKeys:

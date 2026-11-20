@@ -1269,11 +1269,39 @@ def parse_args_to_config(
         eviction = l1_configs[0].eviction
         if eviction is None:
             raise ValueError("Each L1 requires eviction settings")
+
+        l2_adapter_config = parse_args_to_l2_adapters_config(args)
+
+        # SPDK zero-copy DMA requires pre-allocated hugepage memory, so force
+        # hugepage allocation
+        spdk_hugepage_mb = _spdk_requires_hugepages(l2_adapter_config)
+        if spdk_hugepage_mb:
+            dram_l1_bytes = 0
+            for cfg in l1_configs:
+                if not isinstance(cfg, DRAML1ManagerConfig):
+                    continue
+                if cfg.memory_config.use_lazy:
+                    logger.info(
+                        "Disabling lazy allocation for L1 %r because SPDK "
+                        "hugepage allocation requires pre-allocated memory",
+                        cfg.tag,
+                    )
+                cfg.memory_config = replace(
+                    cfg.memory_config,
+                    use_hugepages=True,
+                    use_lazy=False,
+                )
+                dram_l1_bytes += cfg.memory_config.size_in_bytes
+            if dram_l1_bytes:
+                _check_hugepage_availability(
+                    dram_l1_bytes + spdk_hugepage_mb * 1024 * 1024
+                )
+
         return StorageManagerConfig(
             l1_manager_config=l1_configs[0],
             eviction_config=eviction,
             l1_manager_configs=l1_configs,
-            l2_adapter_config=parse_args_to_l2_adapters_config(args),
+            l2_adapter_config=l2_adapter_config,
             store_policy=args.l2_store_policy,
             prefetch_policy=args.l2_prefetch_policy,
             prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,

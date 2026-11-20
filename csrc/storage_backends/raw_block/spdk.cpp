@@ -31,15 +31,11 @@ constexpr std::chrono::seconds g_spdk_wait_timeout{30};
 // (connection + qpair allocation) before giving up.
 constexpr std::chrono::seconds g_spdk_connect_timeout{10};
 
-// Max graceful drain time (ms) the io_worker reaps in-flight I/O at shutdown
-constexpr int g_drain_timeout_ms = 1000;
+// Max IO command timeout (ms)
+constexpr uint64_t g_spdk_cmd_timeout_us_default = 10ULL * 1000ULL * 1000ULL;
 
-static_assert(
-    g_drain_timeout_ms <=
-        static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                             g_spdk_wait_timeout)
-                             .count()),
-    "g_drain_timeout_ms must not exceed g_spdk_wait_timeout");
+// Max admin command timeout (ms)
+constexpr uint64_t g_spdk_admin_cmd_timeout_us = 30ULL * 1000ULL * 1000ULL;
 
 // IoContext objects preallocated for the per-adapter pool.
 #define IO_CTX_POOL_SIZE IO_RING_SIZE
@@ -57,6 +53,74 @@ std::mutex SpdkIoEngineCore::g_eal_mutex_;
 // File-local helper functions
 // ---------------------------------------------------------------------------
 
+// Resolve the per-command NVMe timeout (microseconds) from the environment.
+static uint64_t resolve_spdk_cmd_timeout_us() {
+  const uint64_t wait_us = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(g_spdk_wait_timeout)
+          .count());
+  const char* raw = std::getenv("LMCACHE_SPDK_COMMAND_TIMEOUT_US");
+  if (raw == nullptr || *raw == '\0') {
+    return g_spdk_cmd_timeout_us_default;
+  }
+  char* end = nullptr;
+  errno = 0;
+  unsigned long long value = std::strtoull(raw, &end, 10);
+  if (errno != 0 || end == raw || *end != '\0' || value == 0 ||
+      value >= wait_us) {
+    std::cerr << "[spdk_timeout] Ignoring invalid "
+                 "LMCACHE_SPDK_COMMAND_TIMEOUT_US="
+              << raw << " (must be in 1.." << (wait_us - 1)
+              << "); using default " << g_spdk_cmd_timeout_us_default
+              << std::endl;
+    return g_spdk_cmd_timeout_us_default;
+  }
+  return static_cast<uint64_t>(value);
+}
+
+// Abort completion handling
+static void spdk_abort_complete_cb(void* cb_arg,
+                                   const struct spdk_nvme_cpl* completion) {
+  SpdkIoEngineCore* engine = static_cast<SpdkIoEngineCore*>(cb_arg);
+  bool aborted = spdk_nvme_cpl_is_abort_success(completion);
+  if (aborted) {
+    return;
+  }
+  std::cerr << "[spdk_timeout] Abort request did not abort the timed-out "
+               "command; failing the controller"
+            << std::endl;
+  if (engine != nullptr) {
+    engine->request_ctrlr_fail();
+  }
+}
+
+// Per-command timeout callback: aborts the offending command or fails the
+// controller.
+static void timeout_cb(void* cb_arg, struct spdk_nvme_ctrlr* ctrlr,
+                       struct spdk_nvme_qpair* qpair, uint16_t cid) {
+  ConnectionContext* ctx = static_cast<ConnectionContext*>(cb_arg);
+  SpdkIoEngineCore* engine = (ctx != nullptr) ? ctx->engine : nullptr;
+
+  if (spdk_nvme_qpair_get_id(qpair) == 0) {
+    std::cerr << "[spdk_timeout] Admin command timed out (cid=" << cid
+              << "); failing the controller" << std::endl;
+    if (engine != nullptr) {
+      engine->request_ctrlr_fail();
+    }
+    return;
+  }
+
+  std::cerr << "[spdk_timeout] Command timed out (cid=" << cid << "); aborting"
+            << std::endl;
+  if (spdk_nvme_ctrlr_cmd_abort(ctrlr, qpair, cid, spdk_abort_complete_cb,
+                                engine) != 0) {
+    std::cerr << "[spdk_timeout] Failed to submit abort for cid=" << cid
+              << "; failing the controller" << std::endl;
+    if (engine != nullptr) {
+      engine->request_ctrlr_fail();
+    }
+  }
+}
+
 static bool probe_cb(void* cb_ctx, const struct spdk_nvme_transport_id* trid,
                      struct spdk_nvme_ctrlr_opts* opts) {
   // 0xFFFFFFFFu is SPDK's "use the controller default/maximum" sentinel, so the
@@ -70,6 +134,11 @@ static void attach_cb(void* cb_ctx, const struct spdk_nvme_transport_id* trid,
                       const struct spdk_nvme_ctrlr_opts* opts) {
   ConnectionContext* ctx = static_cast<ConnectionContext*>(cb_ctx);
   ctx->ctrlr = ctrlr;
+
+  // Register the per-command timeout once.
+  spdk_nvme_ctrlr_register_timeout_callback(
+      ctrlr, resolve_spdk_cmd_timeout_us(), g_spdk_admin_cmd_timeout_us,
+      timeout_cb, ctx);
 
   ctx->io_queue_depth.store(spdk_nvme_ctrlr_get_opts(ctrlr)->io_queue_size);
   ctx->io_queue_requests.store(
@@ -171,17 +240,25 @@ static void io_complete_cb(void* cb_arg,
     context->status = -1;
   } else {
     context->status = 0;
+    if (context->op == IO_READ && context->bounce_buffer != nullptr &&
+        context->caller_buffer != nullptr && context->requested_bytes > 0) {
+      std::memcpy(context->caller_buffer, context->bounce_buffer,
+                  context->requested_bytes);
+    }
   }
 
-  context->is_completed.store(true);
-  // Return this command's full child-command count.
-  if (context->engine != nullptr) {
-    context->engine->record_io_complete(context->command_count);
+  // Capture this context's pointers before publishing is_completed: a waiter
+  // frees (and recycles) the context the moment it sees the flag.
+  SpdkIoEngineCore* engine = context->engine;
+  BatchEntry* batch = context->batch;
+  if (engine != nullptr) {
+    // Return this command's full child-command count.
+    engine->record_io_complete(context->command_count);
   }
 
-  // Update batch completion count if part of a batch.
-  if (context->batch != nullptr) {
-    context->batch->completed_count.fetch_add(1, std::memory_order_acq_rel);
+  context->is_completed.store(true, std::memory_order_release);
+  if (batch != nullptr) {
+    batch->completed_count.fetch_add(1, std::memory_order_acq_rel);
   }
 }
 
@@ -200,22 +277,9 @@ static int spdk_command_count_for(struct spdk_nvme_ns* ns, uint64_t lba_count) {
 // SpdkIoEngineCore member functions
 // ---------------------------------------------------------------------------
 
-SpdkIoEngineCore::SpdkIoEngineCore() {}
+SpdkIoEngineCore::SpdkIoEngineCore() { m_ctx_.engine = this; }
 
-SpdkIoEngineCore::~SpdkIoEngineCore() {
-  // stop workers and release resources even if the Python FFI did not call
-  // shutdown_spdk_workers()/deinit_spdk()
-  if (m_io_thread_.joinable() || m_admin_thread_.joinable()) {
-    m_shutdown_.store(true, std::memory_order_release);
-    if (m_io_thread_.joinable()) {
-      m_io_thread_.join();
-    }
-    if (m_admin_thread_.joinable()) {
-      m_admin_thread_.join();
-    }
-  }
-  deinit_spdk();
-}
+SpdkIoEngineCore::~SpdkIoEngineCore() { deinit_spdk(); }
 
 // Allocate an IoContext from the per-adapter pool (lock-free), falling back to
 // a heap allocation. Marks from_mempool so free_io_ctx uses the matching path.
@@ -223,9 +287,8 @@ IoContext* SpdkIoEngineCore::alloc_io_ctx() {
   if (m_io_ctx_pool_ != nullptr) {
     void* obj = nullptr;
     if (rte_mempool_get(m_io_ctx_pool_, &obj) == 0 && obj != nullptr) {
-      // rte_mempool hands back memory reused by prior I/Os, so re-initialize it
-      // in place to mirror the value-init `new IoContext` takes on the heap
-      // path.
+      // The mempool hands back memory reused by prior I/Os, so re-initialize in
+      // place to mirror the heap path's value-init.
       IoContext* ctx = new (static_cast<IoContext*>(obj)) IoContext();
       ctx->from_mempool = true;
       return ctx;
@@ -245,8 +308,12 @@ void SpdkIoEngineCore::free_io_ctx(IoContext* io_ctx) {
   if (io_ctx == nullptr) {
     return;
   }
-  // Drop any retained BatchEntry reference before the memory is reclaimed.
-  io_ctx->batch_ref.reset();
+  // Release an owned partial-sector bounce buffer before the IoContext is
+  // reclaimed.
+  if (io_ctx->bounce_buffer != nullptr) {
+    spdk_dma_free(io_ctx->bounce_buffer);
+    io_ctx->bounce_buffer = nullptr;
+  }
   if (io_ctx->from_mempool) {
     rte_mempool_put(m_io_ctx_pool_, io_ctx);
     return;
@@ -281,28 +348,6 @@ void SpdkIoEngineCore::signal_setup_complete(int result) {
     m_setup_result_ = result;
   }
   m_setup_cv_.notify_all();
-}
-
-// Register an IoContext a caller gave up on (timed out or the worker exited)
-void SpdkIoEngineCore::register_abandoned_io_ctx(IoContext* io_ctx) {
-  if (io_ctx == nullptr) {
-    return;
-  }
-  std::lock_guard<std::mutex> lock(m_abandoned_mutex_);
-  m_abandoned_io_ctx_.push_back(io_ctx);
-}
-
-// Free every IoContext a caller abandoned after timing out, during shutdown
-// drain
-void SpdkIoEngineCore::drain_abandoned_io_ctxs() {
-  std::vector<IoContext*> to_free;
-  {
-    std::lock_guard<std::mutex> lock(m_abandoned_mutex_);
-    to_free.swap(m_abandoned_io_ctx_);
-  }
-  for (IoContext* io_ctx : to_free) {
-    free_io_ctx(io_ctx);
-  }
 }
 
 int SpdkIoEngineCore::resolve_worker_cores(const char* core_mask) {
@@ -417,6 +462,8 @@ void SpdkIoEngineCore::deinit_spdk() {
     return;
   }
 
+  shutdown_spdk_workers();
+
   if (m_io_ring_ != nullptr) {
     rte_ring_free(m_io_ring_);
     m_io_ring_ = nullptr;
@@ -432,8 +479,19 @@ void SpdkIoEngineCore::deinit_spdk() {
 }
 
 void SpdkIoEngineCore::shutdown_spdk_workers() {
+  // Join once under this lock: a deadline-expiry, close, and destructor can
+  // all arrive here concurrently. The io_worker never takes this mutex, so no
+  // deadlock with its own teardown.
+  std::lock_guard<std::mutex> lock(m_teardown_mutex_);
+
+  // Do not fail the controller here (a clean close confirms everything; failing
+  // a healthy controller only logs SPDK errors). Other callers fail it first if
+  // needed: teardown_io_device() already does so when a command is outstanding.
   m_shutdown_.store(true, std::memory_order_release);
 
+  // Join the io_worker first: its teardown cancels the ring, aborts outstanding
+  // commands, frees the qpair, and joins the admin thread, so no SPDK callback
+  // runs afterwards.
   if (m_io_thread_.joinable()) {
     m_io_thread_.join();
   }
@@ -463,9 +521,13 @@ void SpdkIoEngineCore::free_spdk_memory(uintptr_t buff) {
 
 void SpdkIoEngineCore::cancel_io_ctx(IoContext* io_ctx) {
   io_ctx->status = -ECANCELED;
-  io_ctx->is_completed.store(true);
-  if (io_ctx->batch != nullptr) {
-    io_ctx->batch->completed_count.fetch_add(1, std::memory_order_acq_rel);
+  // Same publication order as io_complete_cb: capture the batch before the flag
+  // is published, then bump the count, so a waiter that frees on the flag never
+  // races a read of the IoContext.
+  BatchEntry* batch = io_ctx->batch;
+  io_ctx->is_completed.store(true, std::memory_order_release);
+  if (batch != nullptr) {
+    batch->completed_count.fetch_add(1, std::memory_order_acq_rel);
   }
 }
 
@@ -500,12 +562,77 @@ void SpdkIoEngineCore::handle_submission_failure(
       uint32_t required_inflight = (current_inflight <= required_headroom)
                                        ? 0
                                        : (current_inflight - required_headroom);
+      // Reap only while the device is recoverable, so a wedged command cannot
+      // wedge the worker; the re-enqueued I/O is cancelled by teardown's drain.
       while (m_in_flight_.load(std::memory_order_acquire) > required_inflight &&
-             !m_shutdown_.load()) {
+             !m_shutdown_.load() && !ctrlr_failing()) {
         spdk_nvme_qpair_process_completions(qpair,
                                             IO_WORKER_COMPLETION_REAP_SIZE);
       }
     }
+  }
+}
+
+void SpdkIoEngineCore::request_ctrlr_fail() {
+  CtrlrState expected = CtrlrState::Healthy;
+  m_ctrlr_state_.compare_exchange_strong(expected, CtrlrState::FailRequested);
+}
+
+bool SpdkIoEngineCore::ctrlr_failing() const {
+  return m_ctrlr_state_.load(std::memory_order_acquire) != CtrlrState::Healthy;
+}
+
+void SpdkIoEngineCore::fail_controller_now() {
+  std::lock_guard<std::mutex> lock(m_ctrlr_mutex_);
+  if (m_ctrlr_state_.exchange(CtrlrState::Failed) == CtrlrState::Failed) {
+    return;
+  }
+  if (m_ctx_.ctrlr != nullptr) {
+    spdk_nvme_ctrlr_fail(m_ctx_.ctrlr);
+  }
+}
+
+void SpdkIoEngineCore::teardown_io_device(struct spdk_nvme_qpair* qpair) {
+  if (ctrlr_failing() || m_in_flight_.load(std::memory_order_acquire) > 0) {
+    fail_controller_now();
+  }
+
+  m_shutdown_.store(true, std::memory_order_release);
+  m_ctx_.is_connected.store(false);
+
+  IoContext* pending = nullptr;
+  constexpr int k_max_ring_drain =
+      IO_RING_SIZE + IO_WORKER_COMPLETION_REAP_SIZE;
+  int ring_drained = 0;
+  while (ring_drained < k_max_ring_drain &&
+         rte_ring_dequeue(m_io_ring_, reinterpret_cast<void**>(&pending)) ==
+             0) {
+    std::cerr << "[io_worker] Cancelling I/O from ring (LBA=" << pending->lba
+              << ", op=" << (pending->op == IO_WRITE ? "write" : "read") << ")"
+              << std::endl;
+    cancel_io_ctx(pending);
+    ring_drained++;
+  }
+
+  if (m_admin_thread_.joinable()) {
+    m_admin_thread_.join();
+  }
+
+  if (qpair != nullptr) {
+    spdk_nvme_ctrlr_free_io_qpair(qpair);
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(m_ctrlr_mutex_);
+    if (m_ctx_.ctrlr != nullptr) {
+      spdk_nvme_detach(m_ctx_.ctrlr);
+      m_ctx_.ctrlr = nullptr;
+    }
+  }
+
+  if (m_in_flight_.load(std::memory_order_acquire) != 0) {
+    std::cerr << "[io_worker] Teardown left " << m_in_flight_.load()
+              << " I/O still in flight" << std::endl;
   }
 }
 
@@ -520,6 +647,7 @@ void SpdkIoEngineCore::io_worker() {
   if (-1 == m_io_worker_core_) {
     std::cerr << "[io_worker] core is not initialized" << std::endl;
     signal_setup_complete(-1);
+    teardown_io_device(nullptr);
     return;
   }
   CPU_ZERO(&cpuset);
@@ -528,6 +656,7 @@ void SpdkIoEngineCore::io_worker() {
   if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) != 0) {
     std::cerr << "[io_worker] Failed to set thread affinity" << std::endl;
     signal_setup_complete(-1);
+    teardown_io_device(nullptr);
     return;
   }
 
@@ -535,11 +664,13 @@ void SpdkIoEngineCore::io_worker() {
     if (m_pcie_addr_.empty()) {
       std::cerr << "[io_worker] PCIe address not configured" << std::endl;
       signal_setup_complete(-1);
+      teardown_io_device(nullptr);
       return;
     }
     if (connect_local_device(m_pcie_addr_.c_str(), &m_ctx_) != 0) {
       std::cerr << "[io_worker] Failed to connect to PCIe device" << std::endl;
       signal_setup_complete(-1);
+      teardown_io_device(nullptr);
       return;
     }
   } else {
@@ -549,6 +680,7 @@ void SpdkIoEngineCore::io_worker() {
       std::cerr << "[io_worker] Failed to connect to NVMe-oF target"
                 << std::endl;
       signal_setup_complete(-1);
+      teardown_io_device(nullptr);
       return;
     }
   }
@@ -556,10 +688,10 @@ void SpdkIoEngineCore::io_worker() {
   queue_depth = m_ctx_.io_queue_depth.load();
   if (0 == queue_depth) {
     std::cerr << "[io_worker] Invalid IO queue depth" << std::endl;
-    // Controller is attached here (connect succeeded above); detach it so the
-    // resource is not leaked, matching the qpair-failure path below.
-    spdk_nvme_detach(m_ctx_.ctrlr);
+    // Controller is attached here (connect succeeded above); the single
+    // teardown detaches it so the resource is not leaked.
     signal_setup_complete(-1);
+    teardown_io_device(nullptr);
     return;
   }
 
@@ -575,8 +707,8 @@ void SpdkIoEngineCore::io_worker() {
                                          sizeof(qpair_opts));
   if (!qpair) {
     std::cerr << "[io_worker] Failed to allocate qpair" << std::endl;
-    spdk_nvme_detach(m_ctx_.ctrlr);
     signal_setup_complete(-1);
+    teardown_io_device(nullptr);
     return;
   }
 
@@ -586,6 +718,12 @@ void SpdkIoEngineCore::io_worker() {
 
   while (true) {
     if (m_shutdown_.load()) {
+      break;
+    }
+
+    // A failed controller has no reset path, so the loop must not spin
+    // process_completions on it, break to the single teardown.
+    if (ctrlr_failing()) {
       break;
     }
 
@@ -635,44 +773,9 @@ void SpdkIoEngineCore::io_worker() {
     }
   }
 
-  // Capture the drain start time to enforce the graceful drain timeout below.
-  auto drain_start = std::chrono::steady_clock::now();
-
-  // Gate out new submissions
-  m_ctx_.is_connected.store(false);
-
-  // Bounded drain count
-  constexpr int k_max_ring_drain =
-      IO_RING_SIZE + IO_WORKER_COMPLETION_REAP_SIZE;
-  int ring_drained = 0;
-  while (ring_drained < k_max_ring_drain &&
-         rte_ring_dequeue(m_io_ring_, reinterpret_cast<void**>(&io_ctx)) == 0) {
-    std::cerr << "[io_worker] Cancelling I/O from ring (LBA=" << io_ctx->lba
-              << ", op=" << (io_ctx->op == IO_WRITE ? "write" : "read") << ")"
-              << std::endl;
-    cancel_io_ctx(io_ctx);
-    ring_drained++;
-  }
-
-  while (m_in_flight_.load(std::memory_order_acquire) > 0) {
-    spdk_nvme_qpair_process_completions(qpair, IO_WORKER_COMPLETION_REAP_SIZE);
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       std::chrono::steady_clock::now() - drain_start)
-                       .count();
-    if (elapsed >= g_drain_timeout_ms) {
-      std::cerr << "[io_worker] Timeout (" << g_drain_timeout_ms
-                << "ms) waiting for " << m_in_flight_.load()
-                << " in-flight I/Os. Marking remaining as failed." << std::endl;
-      break;
-    }
-    std::this_thread::yield();
-  }
-
-  spdk_nvme_ctrlr_free_io_qpair(qpair);
-  spdk_nvme_detach(m_ctx_.ctrlr);
-
-  // Release abandoned IoContext
-  drain_abandoned_io_ctxs();
+  // Single device teardown for every exit path: normal shutdown, or the
+  // controller-fail self-shutdown that broke out of the loop above.
+  teardown_io_device(qpair);
 }
 
 void SpdkIoEngineCore::admin_worker() {
@@ -743,9 +846,6 @@ int SpdkIoEngineCore::launch_spdk_workers(const char* transport_type,
 
   m_io_thread_ = std::thread(&SpdkIoEngineCore::io_worker, this);
 
-  // Wait for the io_worker to finish device setup (success or failure) or time
-  // out, instead of a speculative sleep(1). A failed setup is surfaced here
-  // rather than silently failing on the first I/O.
   std::unique_lock<std::mutex> lock(m_setup_mutex_);
   bool ready = m_setup_cv_.wait_for(lock, g_spdk_connect_timeout, [this] {
     return m_setup_complete_ ||
@@ -760,11 +860,120 @@ int SpdkIoEngineCore::launch_spdk_workers(const char* transport_type,
   }
   lock.unlock();
 
-  /* Only launch admin worker for NVMe-oF, once the controller is attached */
-  if (m_transport_type_ != "pcie") {
+  if (m_admin_worker_core_ != -1) {
     m_admin_thread_ = std::thread(&SpdkIoEngineCore::admin_worker, this);
   }
 
+  return 0;
+}
+
+// Populate one IoContext for an NVMe transfer segment (head or tail), sharing
+// this file-local helper so both segments initialize identically.
+static void set_io_context(IoContext* ctx, SpdkIoEngineCore* engine,
+                           uint64_t lba, uint32_t lba_count, IoOp op,
+                           void* buffer, void* bounce_buffer,
+                           void* caller_buffer, uint64_t requested_bytes,
+                           uint32_t command_count) {
+  ctx->is_completed.store(false);
+  ctx->status = 0;
+  ctx->op = op;
+  ctx->lba = lba;
+  ctx->lba_count = lba_count;
+  ctx->command_count = command_count;
+  ctx->buffer = buffer;
+  ctx->bounce_buffer = bounce_buffer;
+  ctx->caller_buffer = caller_buffer;
+  ctx->requested_bytes = requested_bytes;
+  ctx->batch = nullptr;
+  ctx->engine = engine;
+  ctx->re_enqueue_count = 0;
+}
+
+int SpdkIoEngineCore::append_io_contexts(uint64_t byte_offset,
+                                         uint64_t byte_count, void* buffer,
+                                         IoOp op,
+                                         std::vector<IoContext*>& out) {
+  uint32_t sector_size = spdk_nvme_ns_get_sector_size(m_ctx_.ns);
+  uint64_t aligned_head = byte_count - (byte_count % sector_size);
+  uint64_t tail_bytes = byte_count - aligned_head;
+
+  // A partial-sector request splits into an aligned head (direct DMA into the
+  // caller buffer) and an unaligned tail DMAed through an owned bounce buffer.
+  void* bounce_buffer = nullptr;
+  if (tail_bytes > 0) {
+    bounce_buffer = spdk_dma_zmalloc_socket(sector_size, sector_size, nullptr,
+                                            SPDK_ENV_SOCKET_ID_ANY);
+    if (bounce_buffer == nullptr) {
+      std::cerr << "[spdk] Failed to allocate bounce buffer for "
+                   "partial-sector tail"
+                << std::endl;
+      return -1;
+    }
+    if (op == IO_WRITE) {
+      const void* tail_src = reinterpret_cast<void*>(
+          reinterpret_cast<uintptr_t>(buffer) + aligned_head);
+      std::memcpy(bounce_buffer, tail_src, tail_bytes);
+      std::memset(static_cast<char*>(bounce_buffer) + tail_bytes, 0,
+                  sector_size - tail_bytes);
+    }
+    IoContext* tail = alloc_io_ctx();
+    if (tail == nullptr) {
+      spdk_dma_free(bounce_buffer);
+      std::cerr << "[spdk] Failed to allocate IoContext for partial-sector tail"
+                << std::endl;
+      return -1;
+    }
+    uint64_t tail_offset = byte_offset + aligned_head;
+    set_io_context(tail, this, tail_offset / sector_size, 1, op, bounce_buffer,
+                   bounce_buffer,
+                   reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(buffer) +
+                                           aligned_head),
+                   (op == IO_READ) ? tail_bytes : 0,
+                   spdk_command_count_for(m_ctx_.ns, 1));
+    out.push_back(tail);
+  }
+
+  if (aligned_head > 0) {
+    IoContext* head = alloc_io_ctx();
+    if (head == nullptr) {
+      // free_io_ctx also releases the tail's bounce buffer.
+      for (IoContext* ctx : out) {
+        free_io_ctx(ctx);
+      }
+      out.clear();
+      std::cerr << "[spdk] Failed to allocate IoContext for aligned head"
+                << std::endl;
+      return -1;
+    }
+    uint32_t head_lba_count = (uint32_t)(aligned_head / sector_size);
+    set_io_context(head, this, byte_offset / sector_size, head_lba_count, op,
+                   buffer, nullptr, buffer, 0,
+                   spdk_command_count_for(m_ctx_.ns, head_lba_count));
+    out.push_back(head);
+  }
+  return 0;
+}
+
+int SpdkIoEngineCore::enqueue_io_context(IoContext* io_ctx, BatchEntry* batch) {
+  io_ctx->batch = batch;
+  io_ctx->engine = this;
+  io_ctx->re_enqueue_count = 0;
+
+  int rc = rte_ring_enqueue(m_io_ring_, reinterpret_cast<void*>(io_ctx));
+  if (rc != 0) {
+    std::cerr << (batch != nullptr ? "[spdk_batch_io_submit] Ring full"
+                                   : "[spdk_io] Ring full")
+              << std::endl;
+    if (batch != nullptr) {
+      batch->io_ctxs.push_back(io_ctx);
+    }
+    cancel_io_ctx(io_ctx);
+    return -1;
+  }
+
+  if (batch != nullptr) {
+    batch->io_ctxs.push_back(io_ctx);
+  }
   return 0;
 }
 
@@ -775,11 +984,15 @@ int SpdkIoEngineCore::spdk_io(uint64_t byte_offset, uint64_t byte_count,
     return -1;
   }
 
-  // Check if we have a connected namespace
   if (!m_ctx_.is_connected.load() || m_ctx_.ns == nullptr) {
     std::cerr << "[spdk_io] No namespace connected. Call launch_spdk_workers "
                  "first."
               << std::endl;
+    return -1;
+  }
+
+  if (ctrlr_failing()) {
+    std::cerr << "[spdk_io] Request rejected: controller failed" << std::endl;
     return -1;
   }
 
@@ -790,62 +1003,60 @@ int SpdkIoEngineCore::spdk_io(uint64_t byte_offset, uint64_t byte_count,
               << std::endl;
     return -1;
   }
-  uint64_t lba = byte_offset / sector_size;
-  uint64_t lba_count = (byte_count + sector_size - 1) / sector_size;
 
-  IoContext* io_ctx = alloc_io_ctx();
-  if (io_ctx == nullptr) {
-    std::cerr << "[spdk_io] Failed to allocate IoContext" << std::endl;
-    return -1;
-  }
-  io_ctx->is_completed.store(false);
-  io_ctx->status = 0;
-  io_ctx->lba = lba;
-  io_ctx->lba_count = lba_count;
-  io_ctx->command_count = spdk_command_count_for(m_ctx_.ns, lba_count);
-  io_ctx->op = op;
-  io_ctx->buffer = buffer;
-  // These two fields are not set by the caller, so initialize them explicitly:
-  io_ctx->batch = nullptr;
-  io_ctx->engine = this;
-  io_ctx->re_enqueue_count = 0;
-
-  int rc = rte_ring_enqueue(m_io_ring_, reinterpret_cast<void*>(io_ctx));
-  if (rc != 0) {
-    std::cerr << "[spdk_io] Ring full" << std::endl;
-    free_io_ctx(io_ctx);
+  // A partial-sector request is built (aligned head + bounced tail) by
+  // append_io_contexts, so this path shares its allocation-failure cleanup.
+  std::vector<IoContext*> io_ctxs;
+  io_ctxs.reserve(2);
+  if (append_io_contexts(byte_offset, byte_count, buffer, op, io_ctxs) != 0) {
+    std::cerr << "[spdk_io] Failed to prepare I/O contexts" << std::endl;
     return -1;
   }
 
-  // Never block forever: stop spinning once the I/O completes.
-  auto io_deadline = std::chrono::steady_clock::now() + g_spdk_wait_timeout;
-  while (!io_ctx->is_completed.load() && m_worker_alive_.load() &&
-         std::chrono::steady_clock::now() < io_deadline) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-
-  if (!io_ctx->is_completed.load()) {
-    std::cerr << "[spdk_io] Timed out waiting for completion (LBA="
-              << io_ctx->lba << ", op=" << (op == IO_WRITE ? "write" : "read")
-              << ")";
-    if (!m_worker_alive_.load()) {
-      std::cerr << "; worker exited";
+  bool submit_failed = false;
+  for (IoContext* io_ctx : io_ctxs) {
+    if (enqueue_io_context(io_ctx, nullptr) != 0) {
+      submit_failed = true;
     }
-    std::cerr << "; ownership handed to io_worker for reclamation."
+  }
+
+  // Never block forever: stop spinning once every I/O completes.
+  auto io_deadline = std::chrono::steady_clock::now() + g_spdk_wait_timeout;
+  bool timed_out = false;
+  for (IoContext* io_ctx : io_ctxs) {
+    while (!io_ctx->is_completed.load() && m_worker_alive_.load() &&
+           std::chrono::steady_clock::now() < io_deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!io_ctx->is_completed.load()) {
+      timed_out = true;
+    }
+  }
+
+  if (timed_out) {
+    std::cerr << "[spdk_io] Wait deadline reached with I/O still outstanding; "
+                 "tearing the device down to confirm it"
               << std::endl;
-    // Do NOT free here: this op may still be in-flight on the device and owned
-    // by the worker.
-    register_abandoned_io_ctx(io_ctx);
-    return -1;
+    fail_controller_now();
+    shutdown_spdk_workers();
   }
 
-  if (io_ctx->status != 0) {
+  const char* op_name = (op == IO_WRITE) ? "write" : "read";
+  bool failed = submit_failed || timed_out;
+  for (IoContext* io_ctx : io_ctxs) {
+    if (io_ctx->status != 0) {
+      failed = true;
+    }
+    if (!io_ctx->is_completed.load(std::memory_order_acquire)) {
+      std::cerr << "[spdk_io] Internal error: I/O still incomplete after "
+                   "teardown (LBA="
+                << io_ctx->lba << ", op=" << op_name << ")" << std::endl;
+      failed = true;
+    }
     free_io_ctx(io_ctx);
-    return -1;
   }
 
-  free_io_ctx(io_ctx);
-  return 0;
+  return failed ? -1 : 0;
 }
 
 int SpdkIoEngineCore::register_external_memory(uintptr_t ptr, size_t size) {
@@ -920,6 +1131,12 @@ int SpdkIoEngineCore::spdk_batch_io_submit(uint64_t* offsets,
     return -1;
   }
 
+  if (ctrlr_failing()) {
+    std::cerr << "[spdk_batch_io_submit] Request rejected: controller failed"
+              << std::endl;
+    return -1;
+  }
+
   if ((batch_id_out == nullptr) || (count <= 0)) {
     std::cerr << "[spdk_batch_io_submit] Invalid batch id buffer or count"
               << std::endl;
@@ -928,8 +1145,8 @@ int SpdkIoEngineCore::spdk_batch_io_submit(uint64_t* offsets,
 
   uint32_t sector_size = spdk_nvme_ns_get_sector_size(m_ctx_.ns);
 
-  // Validate all offsets are sector-aligned up front so a caller misalignment
-  // fails the whole batch instead of silently truncating the computed LBA.
+  // Validate the whole batch before allocating so no IoContext is enqueued for
+  // a batch that might later be abandoned.
   for (int i = 0; i < count; ++i) {
     if (offsets[i] % sector_size != 0) {
       std::cerr << "[spdk_batch_io_submit] offsets[" << i << "]=" << offsets[i]
@@ -937,58 +1154,43 @@ int SpdkIoEngineCore::spdk_batch_io_submit(uint64_t* offsets,
                 << std::endl;
       return -1;
     }
+    if (buf_ptrs[i] == 0) {
+      std::cerr << "[spdk_batch_io_submit] Null buffer pointer at index " << i
+                << std::endl;
+      return -1;
+    }
   }
 
-  // Allocate a batch entry for tracking completion
   uint32_t batch_id = m_next_batch_id_.fetch_add(1, std::memory_order_relaxed);
   auto batch = std::make_shared<BatchEntry>();
   batch->batch_id = batch_id;
-  batch->count = count;
-  batch->io_ctxs.reserve(count);
+  batch->io_ctxs.reserve(2 * (size_t)count);
   batch->completed_count.store(0, std::memory_order_relaxed);
   batch->alloc_fail_count = 0;
 
   for (int i = 0; i < count; ++i) {
-    uint64_t lba = offsets[i] / sector_size;
-    uint32_t lba_count = (total_lens[i] + sector_size - 1) / sector_size;
-    void* buffer = reinterpret_cast<void*>(buf_ptrs[i]);
-
-    IoContext* io_ctx = alloc_io_ctx();
-    if (io_ctx == nullptr) {
-      std::cerr
-          << "[spdk_batch_io_submit] Failed to allocate IoContext at index "
-          << i << "; marking batch " << batch_id << " slot failed" << std::endl;
+    // Build this slot's head/tail via the shared helper (bounce buffer only for
+    // the tail); a slot-level alloc failure is recorded as a batch failure so
+    // waiters still settle.
+    std::vector<IoContext*> slot_ctxs;
+    slot_ctxs.reserve(2);
+    if (append_io_contexts(offsets[i], total_lens[i],
+                           reinterpret_cast<void*>(buf_ptrs[i]), op,
+                           slot_ctxs) != 0) {
+      std::cerr << "[spdk_batch_io_submit] Failed to prepare I/O at index " << i
+                << "; marking batch " << batch_id << " slot failed"
+                << std::endl;
       batch->alloc_fail_count += 1;
       batch->completed_count.fetch_add(1, std::memory_order_acq_rel);
       continue;
     }
-    io_ctx->is_completed.store(false);
-    io_ctx->status = 0;
-    io_ctx->lba = lba;
-    io_ctx->lba_count = lba_count;
-    io_ctx->command_count = spdk_command_count_for(m_ctx_.ns, lba_count);
-    io_ctx->op = op;
-    io_ctx->buffer = buffer;
-    io_ctx->batch = batch.get();
-    io_ctx->engine = this;
-    io_ctx->re_enqueue_count = 0;
-
-    int rc = rte_ring_enqueue(m_io_ring_, reinterpret_cast<void*>(io_ctx));
-    if (rc != 0) {
-      std::cerr << "[spdk_batch_io_submit] Ring full at index " << i
-                << "; marking batch " << batch_id << " slot failed"
-                << std::endl;
-      io_ctx->status = -ECANCELED;
-      io_ctx->is_completed.store(true);
-      batch->io_ctxs.push_back(io_ctx);
-      batch->completed_count.fetch_add(1, std::memory_order_acq_rel);
-      continue;
+    for (IoContext* io_ctx : slot_ctxs) {
+      enqueue_io_context(io_ctx, batch.get());
     }
-    batch->io_ctxs.push_back(io_ctx);
   }
 
-  // Only expose the batch to waiters once it is fully populated, so a
-  // concurrent spdk_wait_batch never observes a half-initialized batch.
+  batch->count = (int)batch->alloc_fail_count + (int)batch->io_ctxs.size();
+
   {
     std::lock_guard<std::mutex> lock(m_batch_map_mutex_);
     m_batch_map_[batch_id] = batch;
@@ -1013,7 +1215,6 @@ int SpdkIoEngineCore::spdk_wait_batch(uint32_t batch_id) {
 
   int total = batch->count;
 
-  // Never block forever: stop spinning once every I/O completes.
   auto batch_deadline = std::chrono::steady_clock::now() + g_spdk_wait_timeout;
   while (batch->completed_count.load(std::memory_order_acquire) < total &&
          m_worker_alive_.load() &&
@@ -1021,37 +1222,28 @@ int SpdkIoEngineCore::spdk_wait_batch(uint32_t batch_id) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
-  // If completion is still short, the batch did not finish in time (the worker
-  // exited or the timeout elapsed); report it as a failure below.
-  bool timed_out =
-      batch->completed_count.load(std::memory_order_acquire) < total;
-
-  // Overall batch status: 0 if every I/O succeeded, -1 if any failed or the
-  // batch did not complete in time.
-  int status = timed_out ? -1 : 0;
-  if (batch->alloc_fail_count > 0) {
-    status = -1;
+  if (batch->completed_count.load(std::memory_order_acquire) < total) {
+    std::cerr << "[spdk_wait_batch] Batch " << batch_id
+              << " did not settle before its deadline/worker exit; tearing the "
+                 "device down to confirm it"
+              << std::endl;
+    fail_controller_now();
+    shutdown_spdk_workers();
   }
+
+  int status = (batch->alloc_fail_count > 0) ? -1 : 0;
   for (IoContext* io_ctx : batch->io_ctxs) {
     if (io_ctx->status != 0) {
       status = -1;
-      break;
     }
-  }
-
-  // Free only the I/Os this batch actually observed as completed (the worker no
-  // longer references them). Any I/O still in-flight when the batch timed out
-  // or the worker exited is owned by the worker and handed back for reclamation
-  // instead of freeing it here, which would race the worker's/SPDK's completion
-  // callback and cause a use-after-free.
-  for (IoContext* io_ctx : batch->io_ctxs) {
-    if (io_ctx->is_completed.load(std::memory_order_acquire)) {
-      free_io_ctx(io_ctx);
-    } else {
-      // Keep this BatchEntry alive for the abandoned (still in-flight) I/O.
-      io_ctx->batch_ref = batch;
-      register_abandoned_io_ctx(io_ctx);
+    if (!io_ctx->is_completed.load(std::memory_order_acquire)) {
+      std::cerr
+          << "[spdk_wait_batch] Internal error: I/O still incomplete after "
+             "teardown (LBA="
+          << io_ctx->lba << ")" << std::endl;
+      status = -1;
     }
+    free_io_ctx(io_ctx);
   }
 
   {
@@ -1076,11 +1268,6 @@ int core_init_spdk(void* core_ptr, const char* core_mask, int mem_size_mb) {
 void core_deinit_spdk(void* core_ptr) {
   auto* core = static_cast<SpdkIoEngineCore*>(core_ptr);
   core->deinit_spdk();
-}
-
-void core_shutdown_spdk_workers(void* core_ptr) {
-  auto* core = static_cast<SpdkIoEngineCore*>(core_ptr);
-  core->shutdown_spdk_workers();
 }
 
 uintptr_t core_allocate_spdk_memory(void* core_ptr, size_t size, size_t align,

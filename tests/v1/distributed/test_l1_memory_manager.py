@@ -34,6 +34,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     _check_hugepage_availability,
     _spdk_requires_hugepages,
+    parse_args,
 )
 from lmcache.v1.distributed.error import L1Error
 from tests.v1.distributed.utils import should_use_lazy_alloc
@@ -745,3 +746,31 @@ def test_check_hugepage_availability_fails_when_spdk_exhausts_pool(monkeypatch):
     _patch_open(monkeypatch, ["8192"])
     with pytest.raises(RuntimeError, match="Insufficient hugepages"):
         _check_hugepage_availability(payload_bytes + spdk_bytes)
+
+
+def test_tagged_dram_l1_forces_hugepages_off_lazy_for_spdk(monkeypatch):
+    """Tagged DRAM via --l1-manager applies the SPDK hugepage/lazy validation.
+
+    Mirroring the legacy L1 config path, an SPDK L2 adapter must force hugepage
+    allocation, disable lazy allocation, and size the hugepage pool for the DRAM
+    buffer plus the SPDK reservation. Without this, tagged DRAM skips the SPDK
+    hugepage check and leaves lazy allocation enabled.
+    """
+    # Standard
+    import json
+
+    monkeypatch.setattr(
+        "lmcache.v1.distributed.config._spdk_requires_hugepages",
+        lambda _l2_cfg: _SPDK_DEFAULT_MEM_SIZE_MB,
+    )
+    checked: list[int] = []
+    monkeypatch.setattr(
+        "lmcache.v1.distributed.config._check_hugepage_availability",
+        lambda size_in_bytes: checked.append(size_in_bytes),
+    )
+    dram = {"type": "DRAM", "tag": "_default", "size_gb": 1}
+    config = parse_args(["--eviction-policy", "LRU", "--l1-manager", json.dumps(dram)])
+    mem_cfg = config.l1_manager_config.memory_config
+    assert mem_cfg.use_hugepages is True
+    assert mem_cfg.use_lazy is False
+    assert checked == [(1 << 30) + _SPDK_DEFAULT_MEM_SIZE_MB * 1024 * 1024]
