@@ -180,29 +180,61 @@ def _reserve_write(ctx: ReplayContext, args: dict[str, Any]) -> None:
     ctx.write_owners.update(l1_owners_of(ctx.sm.reserve_write(**args)))
 
 
-def _finish_write(ctx: ReplayContext, args: dict[str, Any]) -> None:
-    """Handle a ``finish_write`` record.
+def _pop_write_owners(
+    ctx: ReplayContext, keys: list[ObjectKey], method_name: str
+) -> dict[ObjectKey, int]:
+    """Pop the owners stashed by :func:`_reserve_write` for ``keys``.
 
-    Finishes the keys with the owners stashed by :func:`_reserve_write`.
     A key without a stashed owner — the trace was truncated before its
     reservation, or the replay target had no room for it — is logged
     and left out so replay does not abort.
 
     Args:
         ctx: Active replay context.
-        args: Decoded record arguments.  Must contain ``"keys"``.
+        keys: Keys named by the record.
+        method_name: The replayed method, for the warning.
+
+    Returns:
+        The owner of every key that has one, in ``keys`` order.
     """
-    keys = args["keys"]
     owners = {key: ctx.write_owners.pop(key) for key in keys if key in ctx.write_owners}
     if len(owners) != len(keys):
         logger.warning(
-            "trace replay: finish_write with no matching reserve_write for "
-            "%d of %d keys; finishing the rest",
+            "trace replay: %s with no matching reserve_write for "
+            "%d of %d keys; replaying the rest",
+            method_name,
             len(keys) - len(owners),
             len(keys),
         )
+    return owners
+
+
+def _finish_write(ctx: ReplayContext, args: dict[str, Any]) -> None:
+    """Handle a ``finish_write`` record.
+
+    Finishes the keys with the owners stashed by :func:`_reserve_write`.
+
+    Args:
+        ctx: Active replay context.
+        args: Decoded record arguments.  Must contain ``"keys"``.
+    """
+    owners = _pop_write_owners(ctx, args["keys"], "finish_write")
     if owners:
         ctx.sm.finish_write(keys=list(owners.keys()), l1_owners=owners)
+
+
+def _abort_write(ctx: ReplayContext, args: dict[str, Any]) -> None:
+    """Handle an ``abort_write`` record.
+
+    Aborts the keys with the owners stashed by :func:`_reserve_write`.
+
+    Args:
+        ctx: Active replay context.
+        args: Decoded record arguments.  Must contain ``"keys"``.
+    """
+    owners = _pop_write_owners(ctx, args["keys"], "abort_write")
+    if owners:
+        ctx.sm.abort_write(keys=list(owners.keys()), l1_owners=owners)
 
 
 def _enter_read_prefetched(ctx: ReplayContext, args: dict[str, Any]) -> None:
@@ -262,6 +294,7 @@ def build_default_dispatcher() -> CallDispatcher:
 
     * ``StorageManager.reserve_write``
     * ``StorageManager.finish_write``
+    * ``StorageManager.abort_write``
     * ``StorageManager.submit_prefetch_task``
     * ``StorageManager.finish_read_prefetched``
     * ``StorageManager.read_prefetched_results.__enter__``
@@ -279,6 +312,7 @@ def build_default_dispatcher() -> CallDispatcher:
         )
     dispatcher.register(f"{_SM_PREFIX}.reserve_write", _reserve_write)
     dispatcher.register(f"{_SM_PREFIX}.finish_write", _finish_write)
+    dispatcher.register(f"{_SM_PREFIX}.abort_write", _abort_write)
     dispatcher.register(
         f"{_SM_PREFIX}.read_prefetched_results.__enter__",
         _enter_read_prefetched,

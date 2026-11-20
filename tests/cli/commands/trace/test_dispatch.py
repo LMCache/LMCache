@@ -45,6 +45,9 @@ class _FakeSM:
     def finish_write(self, **kw: Any) -> None:
         self.calls.append(("finish_write", kw))
 
+    def abort_write(self, **kw: Any) -> None:
+        self.calls.append(("abort_write", kw))
+
     def submit_prefetch_task(self, **kw: Any) -> None:
         self.calls.append(("submit_prefetch_task", kw))
 
@@ -111,6 +114,7 @@ class TestDefaultDispatcher:
         expected = {
             f"{_SM_PREFIX}.reserve_write",
             f"{_SM_PREFIX}.finish_write",
+            f"{_SM_PREFIX}.abort_write",
             f"{_SM_PREFIX}.submit_prefetch_task",
             f"{_SM_PREFIX}.finish_read_prefetched",
             f"{_SM_PREFIX}.read_prefetched_results.__enter__",
@@ -165,6 +169,22 @@ class TestDefaultDispatcher:
         assert [c for c in sm.calls if c[0] == "finish_write"] == [
             ("finish_write", {"keys": [_key(1)], "l1_owners": {_key(1): 7}}),
         ]
+
+    def test_abort_write_carries_owners_and_skips_unreserved_keys(self):
+        sm = _FakeSM(owner=7)
+        ctx = ReplayContext(sm=sm)
+        d = build_default_dispatcher()
+        d.dispatch(
+            f"{_SM_PREFIX}.reserve_write",
+            ctx,
+            {"keys": [_key(1)], "layout_desc": "LAYOUT"},
+        )
+        d.dispatch(f"{_SM_PREFIX}.abort_write", ctx, {"keys": [_key(1), _key(2)]})
+        assert sm.calls[-1] == (
+            "abort_write",
+            {"keys": [_key(1)], "l1_owners": {_key(1): 7}},
+        )
+        assert ctx.write_owners == {}
 
     def test_read_prefetched_enter_exit_fifo(self):
         """Two overlapping contexts with identical keys exit in FIFO order."""
