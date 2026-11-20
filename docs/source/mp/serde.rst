@@ -79,6 +79,10 @@ TurboQuant serde can be enabled by setting ``"type": "turboquant"`` in the
 adapter serde config. If ``preset`` is omitted, TurboQuant serde defaults to
 ``turboquant_k8v4``.
 
+TurboQuant accepts separate K/V planes and interleaved K/V heads when the
+registered engine format reports a fused K/V layout. This works with both
+LMCache-driven and engine-driven transfer.
+
 .. code-block:: bash
 
     lmcache server \
@@ -116,28 +120,6 @@ Supported presets:
      - 3-bit MSE key with norm correction
      - 3-bit value quantization
 
-
-Packed K/V tensors
-~~~~~~~~~~~~~~~~~~
-
-For a fused per-head K/V cache, set ``"kv_layout": "packed"``. This accepts
-``[1, layers, tokens, heads * 2 * head_dim]`` tensors with K then V inside
-each head, as used by current vLLM fused-content cache layouts::
-
-    --l2-adapter '{
-        "type": "fs",
-        "base_path": "/data/kv_cache",
-        "serde": {
-            "type": "turboquant",
-            "kv_layout": "packed",
-            "head_dim": 128
-        }
-    }'
-
-The default ``"split"`` layout expects separate K/V planes with shape
-``[2, layers, tokens, heads * head_dim]``. Select the mode matching the
-engine's staging layout; packed mode must not be used for MLA key-only
-caches. The compressed format and precision are the same in both modes.
 
 Encryption serde
 ----------------

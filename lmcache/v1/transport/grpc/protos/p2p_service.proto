@@ -21,6 +21,7 @@ message TensorShape {
 message MemoryLayoutDesc {
   repeated TensorShape shapes = 1;
   repeated string dtypes = 2;
+  repeated bool fused_kv = 3;
 }
 
 message TransferChannelAddress {

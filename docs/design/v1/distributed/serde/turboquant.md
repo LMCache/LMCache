@@ -111,25 +111,6 @@ packed layout.
 
 Invalid presets are rejected with `ValueError`.
 
-## Packed K/V input
-
-Set `kv_layout` to `"packed"` for tensors shaped
-`[1, num_layers, num_tokens, num_heads * 2 * head_dim]`, where each head
-holds K followed by V. This is the single-plane staging layout used by
-engines with a fused per-head content axis. The default `"split"` continues
-to accept `[2, num_layers, num_tokens, num_heads * head_dim]`.
-
-The choice is explicit: a single plane can also represent an MLA key-only
-cache, which cannot be interpreted as packed K/V. Packed mode validates the
-plane count and complete K/V head pairs before allocation. It does not
-support MLA, unequal K/V head sizes or a different content-axis ordering.
-
-The serializer converts packed input to split K/V on its working GPU before
-quantization. The deserializer reverses that conversion on the GPU before
-copying to the caller's destination. Serialized bytes and protected-layer
-semantics remain the split format, so existing serialized objects can be
-read into either configured layout when their logical KV dimensions match.
-
 ## Tensor Layout
 
 TurboQuant serde expects LMCache KV tensors in this layout:
@@ -142,6 +123,14 @@ The first dimension separates key and value tensors:
 
 * `src[0]`: key cache
 * `src[1]`: value cache
+
+An engine format that explicitly registers interleaved K/V instead supplies
+`[1, num_layers, num_tokens, 2 * hidden_dim]` in LMCache-driven mode or
+`[num_layers, num_tokens, 2 * hidden_dim]` in engine-driven mode. The engine
+format's fused K/V metadata is carried with the object. The codec maps each
+head's K then V into separate planes before encoding and reverses the mapping
+after decoding. A single-plane tensor without fused K/V metadata is rejected,
+since MLA and other single-plane formats do not contain separate K and V.
 
 The serialized byte layout is:
 

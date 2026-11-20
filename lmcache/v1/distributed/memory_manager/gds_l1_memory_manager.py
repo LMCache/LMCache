@@ -89,6 +89,7 @@ class GDSL1MemoryManager:
                 ref_count=0,
                 shapes=list(layout_desc.shapes),
                 dtypes=list(layout_desc.dtypes),
+                fused_kv=layout_desc.fused_kv,
             )
             objects.append(GDSMemoryObject(meta))
         return L1Error.SUCCESS, objects

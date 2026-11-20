@@ -172,6 +172,7 @@ class MemoryObjMetadata:
     # shapes and dtypes should be used in the future
     shapes: Optional[list[torch.Size]] = None
     dtypes: Optional[list[torch.dtype]] = None
+    fused_kv: tuple[bool, ...] = ()
 
     def to_dict(self):
         # Note(Kuntai): this is used for serializing MemoryObjMetadata via
@@ -186,6 +187,7 @@ class MemoryObjMetadata:
             "fmt": self.fmt.value,
             "shapes": [list(shape) for shape in self.shapes] if self.shapes else None,
             "dtypes": [str(dtype) for dtype in self.dtypes] if self.dtypes else None,
+            "fused_kv": list(self.fused_kv),
         }
 
     @staticmethod
@@ -209,6 +211,7 @@ class MemoryObjMetadata:
             fmt=MemoryFormat(d["fmt"]),
             shapes=shapes,
             dtypes=dtypes,
+            fused_kv=tuple(d.get("fused_kv", ())),
         )
 
     def get_size(self) -> int:

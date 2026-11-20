@@ -61,10 +61,11 @@ Prerequisites
 -------------
 
 - A Kubernetes cluster with one GPU node or more, and the NVIDIA GPU Operator.
-  Two GPUs on one node are necessary for P/D disaggregation.
+  Two GPUs on one node are necessary for P/D disaggregation. The test with two
+  decode pods uses two GPUs. Only its last step needs the two pods on one node.
 - ``kubectl`` and Helm 3.8 or later.
 - A Hugging Face token, if the model is gated. ``Qwen/Qwen3-0.6B`` is not
-  gated.
+  gated. `Create the namespace`_ shows how to give the token to the pods.
 
 Prefix KV reuse
 ---------------
@@ -78,6 +79,20 @@ can read a ConfigMap only from its own namespace.
 .. code-block:: bash
 
    kubectl create namespace llm-d
+
+For a gated model, put the Hugging Face token into a Secret in this namespace.
+The command reads the token from the ``HF_TOKEN`` variable of your shell:
+
+.. code-block:: bash
+
+   kubectl -n llm-d create secret generic llm-d-hf-token \
+       --from-literal=HF_TOKEN="$HF_TOKEN"
+
+``decode.yaml`` and ``pd_pods.yaml`` have an ``HF_TOKEN`` entry in comment
+marks for each vLLM container. Remove the comment marks before you apply the
+file. The tokenizer sidecar of the router chart reads the same Secret by
+default. ``tokenizer_router_values.yaml`` sets ``env: []`` to stop this. For a
+gated model, remove that line.
 
 Deploy the LMCache server
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -155,6 +170,9 @@ vLLM port:
    helm install llm-d oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
        --version v1.0.0 --namespace llm-d \
        -f examples/llm_d_integration/kubernetes/router_values.yaml --wait
+
+These values use the default plugins of the chart. The ``prefix-cache-scorer``
+is one of them (refer to `Prefix-aware routing with two or more pods`_).
 
 The chart gives the release name to its objects. ``llm-d-epp`` is the router
 Deployment and Service. ``llm-d`` is the InferencePool. Port 8081 of the
@@ -244,6 +262,119 @@ shows the retrieve operation of the second request:
 A ``Registered KV cache for GPU ID`` line in the same log shows that the
 CUDA IPC handshake with vLLM is complete.
 
+Prefix-aware routing with two or more pods
+------------------------------------------
+
+The default plugins of the chart include the ``prefix-cache-scorer``. This
+scorer compares blocks of tokens. It gives a high score to the pod that got
+the same prefix before. The EPP makes two default producers for the scorer: a
+``token-producer`` and the ``approx-prefix-cache-producer``. Without a
+tokenizer, the ``token-producer`` estimates the tokens from the bytes of the
+request. Thus ``router_values.yaml`` gives prefix-aware routing. A change to
+the router is not necessary for a second decode pod:
+
+.. code-block:: bash
+
+   kubectl -n llm-d scale deploy/decode --replicas=2
+   kubectl -n llm-d rollout status deploy/decode --timeout=15m
+
+Each decode pod requests one GPU.
+
+Send the prompt of `Do a test`_ 8 more times through the router. The
+port-forward of that test must be in operation. Then read the request counter
+of each decode pod:
+
+.. code-block:: bash
+
+   PROMPT="$(printf 'Tell me a long story about a brave knight who lived in a faraway kingdom. %.0s' $(seq 1 90))"
+   for i in $(seq 1 8); do
+     curl -s -o /dev/null localhost:8081/v1/completions -H 'Content-Type: application/json' \
+       -d "{\"model\":\"Qwen/Qwen3-0.6B\",\"prompt\":\"$PROMPT\",\"max_tokens\":16}"
+   done
+
+   OTHER=""
+   for p in $(kubectl -n llm-d get pod -l llm-d.ai/guide=lmcache \
+       -o jsonpath='{.items[*].metadata.name}'); do
+     n=$(kubectl get --raw /api/v1/namespaces/llm-d/pods/$p:8000/proxy/metrics \
+       | awk '/^vllm:request_success_total/ {s+=$2} END {print s+0}')
+     echo "$p: $n requests"
+     if [ "$n" = "0" ]; then OTHER=$p; fi
+   done
+   # decode-7b58cc687c-5f96g: 10 requests   (2 from "Do a test" and 8 new requests)
+   # decode-7b58cc687c-z227l: 0 requests
+
+The first pod got this prompt before. Thus the scorer gives it the high score,
+and the router sends all 8 requests to it. The new pod gets no request.
+
+The scorer is approximate. It records the pod that received each prefix. It
+has no data about the KV cache in the LMCache server. But two decode pods on
+one node use one LMCache server. Thus the new pod can read the prefix that the
+first pod stored. To see this, send the same prompt directly to the new pod.
+This step needs the two pods on one node, and ``kubectl scale`` does not make
+sure of that. The ``NODE`` column of this command shows the node of each pod:
+
+.. code-block:: bash
+
+   kubectl -n llm-d get pod -l llm-d.ai/guide=lmcache -o wide
+
+Start a port-forward to the new pod:
+
+.. code-block:: bash
+
+   kubectl -n llm-d port-forward pod/$OTHER 8001:8000 &
+
+Send the prompt to the new pod. Then read the source of its prompt tokens:
+
+.. code-block:: bash
+
+   curl -s -o /dev/null localhost:8001/v1/completions -H 'Content-Type: application/json' \
+     -d "{\"model\":\"Qwen/Qwen3-0.6B\",\"prompt\":\"$PROMPT\",\"max_tokens\":16}"
+
+   # The source of the prompt tokens of the new pod (vLLM counters).
+   kubectl get --raw /api/v1/namespaces/llm-d/pods/$OTHER:8000/proxy/metrics \
+     | grep '^vllm:prompt_tokens_by_source_total'
+   # vllm:prompt_tokens_by_source_total{...,source="local_compute"} 251.0
+   # vllm:prompt_tokens_by_source_total{...,source="local_cache_hit"} 0.0
+   # vllm:prompt_tokens_by_source_total{...,source="external_kv_transfer"} 1280.0
+
+The new pod read 1280 prompt tokens from the LMCache server
+(``external_kv_transfer``). It computed only the last 251 tokens. The server
+log shows one more ``Retrieved 1280 tokens`` line.
+
+Real token IDs (optional)
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The estimate is not the tokenization of the model. It is sufficient for the
+default ``approx-prefix-cache-producer``, which compares a request only with
+the requests that the router sent before. The tokenizer sidecar adds one
+container to the router pod (1 CPU and 2 Gi of memory in the example values)
+and one render call for each request. Use it when a plugin must have the
+tokens of the model. One example is the ``precise-prefix-cache-producer``,
+which compares the tokens of a request with the KV cache events of vLLM. A
+second example is a plugin with a threshold in tokens, such as the
+``prefix-based-pd-decider``. With the estimate, such a plugin gets an
+approximate token count.
+
+To give real token IDs to the scorer, add the tokenizer sidecar of the chart
+and connect the ``token-producer`` plugin to it.
+``tokenizer_router_values.yaml`` has only these two additions. Give it to Helm
+after ``router_values.yaml``. It uses the model name of the decode pods:
+
+.. literalinclude:: ../../../examples/llm_d_integration/kubernetes/tokenizer_router_values.yaml
+   :language: yaml
+   :caption: tokenizer_router_values.yaml
+
+.. code-block:: bash
+
+   helm upgrade --install llm-d oci://ghcr.io/llm-d/charts/llm-d-router-standalone \
+       --version v1.0.0 --namespace llm-d \
+       -f examples/llm_d_integration/kubernetes/router_values.yaml \
+       -f examples/llm_d_integration/kubernetes/tokenizer_router_values.yaml --wait
+
+The upgrade makes a new router pod. This stops the port-forward of
+`Do a test`_. Start that port-forward again. Then send the 8 requests and read
+the counters again. One pod gets all 8 requests, as before.
+
 P/D disaggregation
 ------------------
 
@@ -268,9 +399,9 @@ Remove the first router and its decode pod
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Each release of the router chart makes a ConfigMap with the name ``envoy``.
-Thus one namespace can contain only one release. The decode pod of
-`Prefix KV reuse`_ also uses one GPU. If you did that procedure, remove its
-router and its decode pod. Keep the LMCache server:
+Thus one namespace can contain only one release. The decode pods of the
+procedures before this one also use GPUs. If you did those procedures, remove
+their router and their decode pods. Keep the LMCache server:
 
 .. code-block:: bash
 
@@ -333,6 +464,13 @@ sidecar. The sidecar listens on port 8000 and sends requests to vLLM on port
        of vLLM causes connection resets.
    * - ``--enable-prompt-tokens-details`` on decode
      - The response then shows ``cached_tokens``.
+   * - ``kv_role: kv_both`` for the ``LMCacheMPConnector`` of the decode pod
+     - The operator gives this role to the two pods. In this procedure, the
+       prefill pod stores the prompt, and the decode pod gets its KV cache
+       through NIXL. The connector stores only the chunks that are not in the
+       server. Thus the decode pod stores no chunk. With the
+       ``prefix-based-pd-decider`` of llm-d, some requests go only to the
+       decode pod. The decode pod then stores the prompt.
 
 Do a P/D test
 ~~~~~~~~~~~~~
@@ -377,64 +515,16 @@ Then examine each part of the path:
    # prefill: 2 requests
    # decode: 2 requests
 
-Prefix-aware routing with two or more pods
-------------------------------------------
-
-The ``prefix-cache-scorer`` of the router compares token blocks. Thus the EPP
-must tokenize each prompt. The default plugins of the chart have no tokenizer.
-Without a tokenizer, the scorer gives 0 to every pod. The router then does not
-send a repeated prefix to the pod that has it.
-
-Add the tokenizer sidecar of the chart and the ``token-producer`` plugin to
-``router_values.yaml``. Use the model name of the decode pods. The router and
-vLLM then tokenize in the same way:
-
-.. code-block:: yaml
-
-   router:
-     tokenizer:
-       enabled: true
-       flavor: python
-       modelName: Qwen/Qwen3-0.6B
-       port: 8000                      # loopback port in the EPP pod
-       env: []                         # put HF_TOKEN here for a gated model
-       resources:
-         requests: { cpu: "1", memory: 2Gi }
-         limits: { memory: 4Gi }
-     epp:
-       pluginsConfigFile: lmcache-plugins.yaml
-       pluginsConfig:                  # the default plugins of the chart and the token-producer
-         apiVersion: llm-d.ai/v1
-         kind: EndpointPickerConfig
-         plugins:
-           - type: token-producer
-             parameters:
-               modelName: Qwen/Qwen3-0.6B
-               vllm: { url: http://localhost:8000, timeout: 10s }
-           - type: queue-scorer
-           - type: kv-cache-utilization-scorer
-           - type: prefix-cache-scorer
-           - type: metrics-data-source
-             parameters: { scheme: http, path: /metrics, insecureSkipVerify: true }
-           - type: core-metrics-extractor
-         schedulingProfiles:
-           - name: default
-             plugins:
-               - { pluginRef: queue-scorer, weight: 2 }
-               - { pluginRef: kv-cache-utilization-scorer, weight: 2 }
-               - { pluginRef: prefix-cache-scorer, weight: 3 }
-
-A test with two decode pods on one node used these values. Five repeats of one
-prompt went to one pod. The scorer gave 1 to that pod and 0 to the other pod.
-The other pod then got the same prompt directly. It read the prefix from the
-LMCache server (``Retrieved`` in the server log), because the two pods use one
-server.
-
-The scorer is approximate. It records the pod that received each prefix. It
-has no data about the KV cache in the LMCache server.
-
 Use the LMCache Operator
 ------------------------
+
+.. warning::
+
+   The LMCache Kubernetes operator (``operator/``) is deprecated and no
+   longer maintained. It is expected to be removed from this repository in
+   2027Q1. Existing release artifacts (e.g. ``operator-v*`` ``install.yaml``)
+   will not receive fixes or updates.
+   Prefer the manual manifests above for new deployments.
 
 The :doc:`LMCache Operator </mp/operator>` creates the same DaemonSet, Service
 and ConfigMap from an ``LMCacheEngine`` resource. The ConfigMap name is
@@ -481,8 +571,8 @@ Troubleshooting
      - Set ``securityContext.privileged`` for the server (refer to
        `Deploy the LMCache server`_).
    * - The LMCache server log shows no ``Stored`` line.
-     - The prompt is shorter than one chunk, or the request went to a server
-       on a different node.
+     - The prompt is shorter than one chunk, or the log is from the server of
+       a different node.
      - Use a longer prompt. Read the log of the server on the node of the
        vLLM pod.
 

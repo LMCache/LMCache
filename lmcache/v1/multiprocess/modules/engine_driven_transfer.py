@@ -381,7 +381,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 [2, payload.num_layers, num_physical_slots, payload.hidden_dim_size]
             )
         )
-        layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
+        layout_desc = MemoryLayoutDesc(
+            shapes=[shape], dtypes=[dtype], fused_kv=(payload.is_fused_packed,)
+        )
         group_layouts: list[MemoryLayoutDesc] | None = None
         if payload.group_layouts:
             group_layouts = []
@@ -409,7 +411,11 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     else torch.Size([2, gl.num_layers, g_slots, gl.hidden_dim_size])
                 )
                 group_layouts.append(
-                    MemoryLayoutDesc(shapes=[g_shape], dtypes=[g_dtype])
+                    MemoryLayoutDesc(
+                        shapes=[g_shape],
+                        dtypes=[g_dtype],
+                        fused_kv=(gl.is_fused_packed,),
+                    )
                 )
         group_windows: list[int] | None = None
         if payload.group_layouts:
@@ -484,12 +490,18 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 payload.model_name,
                 payload.world_size,
                 layout_desc,
+                self._ctx.chunk_size,
+                self._ctx.hash_algorithm_name,
                 attn_desc=attn_desc,
                 group_layout_descs=dict(enumerate(group_layouts)),
             )
         else:
             self._ctx.layout_desc_registry.register(
-                payload.model_name, payload.world_size, layout_desc
+                payload.model_name,
+                payload.world_size,
+                layout_desc,
+                self._ctx.chunk_size,
+                self._ctx.hash_algorithm_name,
             )
         return RegisterEngineDrivenContextResponse(
             shm_name=shm_name,

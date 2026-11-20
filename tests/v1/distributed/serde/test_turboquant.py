@@ -4,7 +4,6 @@ Unit tests for TurboQuant serde skeleton.
 """
 
 # Standard
-from dataclasses import replace
 from pathlib import Path
 from typing import cast
 import shutil
@@ -43,7 +42,7 @@ from lmcache.v1.distributed.serde.turboquant import (
 )
 from lmcache.v1.distributed.serde.turboquant.turboquant import TQ_PRESETS
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import MemoryObj, MemoryObjMetadata
 from lmcache.v1.platform import current_device_spec
 
 # Test helpers
@@ -525,8 +524,16 @@ def test_turboquant_storage_manager_roundtrip(
 
 
 class _FakeMemoryObj:
-    def __init__(self, tensor: torch.Tensor):
+    def __init__(self, tensor: torch.Tensor, packed: bool = False) -> None:
         self.tensor = tensor
+        self.metadata = MemoryObjMetadata(
+            shape=tensor.shape,
+            dtype=tensor.dtype,
+            address=0,
+            phy_size=tensor.nbytes,
+            ref_count=1,
+            fused_kv=(packed,),
+        )
 
 
 @pytest.mark.skipif(
@@ -664,9 +671,13 @@ def _make_turboquant_fs_storage_manager(
         ("turboquant_3bit_nc", 0.80),
     ],
 )
+@pytest.mark.parametrize(
+    "transfer_layout", ["split", "engine_driven", "lmcache_driven"]
+)
 def test_turboquant_fs_storage_manager_roundtrip(
     preset: str,
     corr_lower_bound: float,
+    transfer_layout: str,
 ) -> None:
     """Store/load through FSL2Adapter with TurboQuant serde."""
     base_dir = tempfile.mkdtemp(prefix="lmcache_turboquant_fs_")
@@ -675,6 +686,14 @@ def test_turboquant_fs_storage_manager_roundtrip(
     try:
         sm = _make_turboquant_fs_storage_manager(base_dir, preset)
         layout = _make_turboquant_layout()
+        if transfer_layout != "split":
+            _, layers, tokens, width = layout.shapes[0]
+            dimensions = (layers, tokens, 2 * width)
+            if transfer_layout == "lmcache_driven":
+                dimensions = (1, *dimensions)
+            layout = MemoryLayoutDesc(
+                shapes=[torch.Size(dimensions)], dtypes=layout.dtypes, fused_kv=(True,)
+            )
         keys = [_make_turboquant_object_key(i) for i in range(3)]
 
         ret = sm.reserve_write(keys, layout)
@@ -757,40 +776,73 @@ def test_turboquant_fs_storage_manager_roundtrip(
         shutil.rmtree(base_dir, ignore_errors=True)
 
 
-@pytest.mark.parametrize("shape", [(3, 16, 256), (2, 3, 16, 256), (1, 3, 16, 258)])
-def test_packed_estimate_rejects_invalid_layout(shape: tuple[int, ...]) -> None:
-    """Packed mode requires one plane and whole interleaved K/V heads."""
-    config = TurboQuantSerdeConfig(kv_layout="packed")
-    layout = MemoryLayoutDesc(shapes=[torch.Size(shape)], dtypes=[torch.bfloat16])
-    with pytest.raises(ValueError, match="Packed TurboQuant KV expects"):
-        TurboQuantSerializer(config).estimate_serialized_size(layout)
-
-
-def test_packed_layout_factory() -> None:
-    """The public factory forwards the explicit packed-layout choice."""
-    with pytest.raises(ValueError, match="kv_layout"):
-        TurboQuantSerdeConfig(kv_layout="unknown")
-    processor = create_serde_processor(
-        SerdeConfig(type="turboquant", kwargs={"kv_layout": "packed"})
+@pytest.mark.parametrize("singleton_plane", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_registered_packed_protected_layers_round_trip(
+    monkeypatch: pytest.MonkeyPatch, singleton_plane: bool, dtype: torch.dtype
+) -> None:
+    """The same bytes round trip for layouts from both transfer modes."""
+    monkeypatch.setattr(
+        "lmcache.v1.distributed.serde.turboquant.turboquant._select_cuda_device",
+        lambda *args: torch.device("cpu"),
     )
-    try:
-        layout = MemoryLayoutDesc(
-            shapes=[torch.Size([1, 5, 16, 512])], dtypes=[torch.bfloat16]
+    cfg = TurboQuantSerdeConfig(skip_first_layers=1, skip_last_layers=0)
+    serializer = TurboQuantSerializer(cfg)
+    deserializer = TurboQuantDeserializer(cfg)
+    split = torch.arange(2 * 16 * 256).reshape(2, 1, 16, 256)
+    split = (split % 97).to(dtype)
+    packed = split.reshape(2, 1, 16, 2, 128).permute(1, 2, 3, 0, 4).reshape(1, 16, 512)
+    if singleton_plane:
+        packed = packed.unsqueeze(0)
+    key = _make_turboquant_object_key(0)
+    layout = MemoryLayoutDesc(
+        shapes=[packed.shape], dtypes=[packed.dtype], fused_kv=(True,)
+    )
+    wire = torch.empty(serializer.estimate_serialized_size(layout), dtype=torch.uint8)
+    dense_layout = MemoryLayoutDesc(shapes=[split.shape], dtypes=[split.dtype])
+    dense_wire = torch.empty(
+        serializer.estimate_serialized_size(dense_layout), dtype=torch.uint8
+    )
+    assert wire.numel() == dense_wire.numel()
+    assert (
+        serializer.serialize(
+            cast(MemoryObj, _FakeMemoryObj(packed, packed=True)),
+            cast(MemoryObj, _FakeMemoryObj(wire)),
+            key,
         )
-        split = MemoryLayoutDesc(
-            shapes=[torch.Size([2, 5, 16, 256])], dtypes=[torch.bfloat16]
+        == wire.numel()
+    )
+    assert (
+        serializer.serialize(
+            cast(MemoryObj, _FakeMemoryObj(split)),
+            cast(MemoryObj, _FakeMemoryObj(dense_wire)),
+            key,
         )
-        assert processor.estimate_serialized_size(layout) == (
-            TurboQuantSerializer(TurboQuantSerdeConfig()).estimate_serialized_size(
-                split
-            )
+        == dense_wire.numel()
+    )
+    assert torch.equal(wire, dense_wire)
+    actual = torch.empty_like(packed)
+    deserializer.deserialize(
+        cast(MemoryObj, _FakeMemoryObj(dense_wire)),
+        cast(MemoryObj, _FakeMemoryObj(actual, packed=True)),
+        key,
+    )
+    assert torch.equal(actual, packed)
+
+
+@pytest.mark.parametrize("shape", [(1, 8, 16, 1024), (8, 16, 1024)])
+def test_unregistered_single_plane_is_not_fused_kv(shape: tuple[int, ...]) -> None:
+    """A compatible width alone cannot mark an MLA or index plane as fused."""
+    cfg = TurboQuantSerdeConfig()
+    with pytest.raises(ValueError, match="TurboQuant serde expects"):
+        TurboQuantSerializer(cfg).estimate_serialized_size(
+            MemoryLayoutDesc(shapes=[torch.Size(shape)], dtypes=[torch.bfloat16])
         )
-    finally:
-        processor.close()
 
 
 @pytest.mark.skipif(not torch_dev.is_available(), reason="Requires accelerator")
 @pytest.mark.parametrize("preset", list(TQ_PRESETS))
+@pytest.mark.parametrize("singleton_plane", [False, True])
 @pytest.mark.parametrize("on_device", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("tokens,layers,skip", [(16, 5, 2), (33, 3, 0), (16, 1, 2)])
@@ -801,6 +853,7 @@ def test_packed_kv_matches_split_layout(
     tokens: int,
     layers: int,
     skip: int,
+    singleton_plane: bool,
 ) -> None:
     """Packing changes neither the wire format nor any reconstructed KV value."""
     device = torch.device(f"{torch_device_type}:0" if on_device else "cpu")
@@ -810,7 +863,6 @@ def test_packed_kv_matches_split_layout(
         skip_last_layers=skip,
         cuda_device="0",
     )
-    packed_cfg = replace(cfg, kv_layout="packed")
     generator = torch.Generator().manual_seed(20261115)
     split = torch.randn((2, layers, tokens, 256), dtype=dtype, generator=generator).to(
         device
@@ -818,13 +870,17 @@ def test_packed_kv_matches_split_layout(
     packed = (
         split.reshape(2, layers, tokens, 2, 128)
         .permute(1, 2, 3, 0, 4)
-        .reshape(1, layers, tokens, 512)
+        .reshape(layers, tokens, 512)
     )
+    if singleton_plane:
+        packed = packed.unsqueeze(0)
     key = _make_turboquant_object_key(0)
 
-    def encode(tensor: torch.Tensor, config: TurboQuantSerdeConfig) -> torch.Tensor:
-        serializer = TurboQuantSerializer(config)
-        layout = MemoryLayoutDesc(shapes=[tensor.shape], dtypes=[dtype])
+    def encode(tensor: torch.Tensor, is_packed: bool) -> torch.Tensor:
+        serializer = TurboQuantSerializer(cfg)
+        layout = MemoryLayoutDesc(
+            shapes=[tensor.shape], dtypes=[dtype], fused_kv=(is_packed,)
+        )
         data = torch.zeros(
             serializer.estimate_serialized_size(layout),
             dtype=torch.uint8,
@@ -832,7 +888,7 @@ def test_packed_kv_matches_split_layout(
         )
         assert (
             serializer.serialize(
-                cast(MemoryObj, _FakeMemoryObj(tensor)),
+                cast(MemoryObj, _FakeMemoryObj(tensor, packed=is_packed)),
                 cast(MemoryObj, _FakeMemoryObj(data)),
                 key,
             )
@@ -840,8 +896,8 @@ def test_packed_kv_matches_split_layout(
         )
         return data
 
-    split_encoded = encode(split, cfg)
-    packed_encoded = encode(packed, packed_cfg)
+    split_encoded = encode(split, False)
+    packed_encoded = encode(packed, True)
     assert split_encoded.numel() == packed_encoded.numel()
     if tokens % cfg.block_size == 0:
         assert torch.equal(split_encoded, packed_encoded)
@@ -852,9 +908,9 @@ def test_packed_kv_matches_split_layout(
         cast(MemoryObj, _FakeMemoryObj(split_out)),
         key,
     )
-    TurboQuantDeserializer(packed_cfg).deserialize(
+    TurboQuantDeserializer(cfg).deserialize(
         cast(MemoryObj, _FakeMemoryObj(split_encoded)),
-        cast(MemoryObj, _FakeMemoryObj(packed_out)),
+        cast(MemoryObj, _FakeMemoryObj(packed_out, packed=True)),
         key,
     )
     unpacked = (
@@ -865,35 +921,3 @@ def test_packed_kv_matches_split_layout(
     assert torch.equal(unpacked.view(torch.uint8), split_out.view(torch.uint8))
     if layers <= 2 * skip:
         assert torch.equal(packed_out.view(torch.uint8), packed.view(torch.uint8))
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_protected_packed_layers_round_trip_on_cpu(
-    dtype: torch.dtype, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Both packed layout conversions preserve protected KV bytes on CPU."""
-    monkeypatch.setattr(
-        "lmcache.v1.distributed.serde.turboquant.turboquant._select_cuda_device",
-        lambda *args: torch.device("cpu"),
-    )
-    config = TurboQuantSerdeConfig(kv_layout="packed", skip_first_layers=2)
-    split = torch.arange(2 * 2 * 3 * 256, dtype=torch.int32).reshape(2, 2, 3, 256)
-    split = (split % 97).to(dtype)
-    packed = split.reshape(2, 2, 3, 2, 128).permute(1, 2, 3, 0, 4)
-    packed = packed.reshape(1, 2, 3, 512)
-    layout = MemoryLayoutDesc(shapes=[packed.shape], dtypes=[dtype])
-    serializer = TurboQuantSerializer(config)
-    data = torch.empty(serializer.estimate_serialized_size(layout), dtype=torch.uint8)
-    wire = cast(MemoryObj, _FakeMemoryObj(data))
-    key = _make_turboquant_object_key(0)
-    assert (
-        serializer.serialize(cast(MemoryObj, _FakeMemoryObj(packed)), wire, key)
-        == data.numel()
-    )
-    assert torch.equal(data, split.view(torch.uint8).flatten())
-
-    restored = torch.empty_like(packed)
-    TurboQuantDeserializer(config).deserialize(
-        wire, cast(MemoryObj, _FakeMemoryObj(restored)), key
-    )
-    assert torch.equal(restored.view(torch.uint8), packed.view(torch.uint8))
