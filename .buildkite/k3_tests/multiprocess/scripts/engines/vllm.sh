@@ -187,8 +187,6 @@ extra_config = {
     "lmcache.mp.port": int(os.environ["LMCACHE_PORT"]),
     "lmcache.mp.mq_timeout": int(os.environ["LMCACHE_MP_MQ_TIMEOUT"]),
 }
-if os.environ.get("VLLM_TARGET_DEVICE") == "xpu":
-    extra_config["lmcache.mp.use_vmm_api"] = False
 # A pinned KV pool (preemption_correctness sets NUM_GPU_BLOCKS_OVERRIDE) turns
 # off vLLM's extensible (VMM) KV cache. With use_vmm_api unset the connector
 # still declares POSIX-fd export, which needs that cache, so vLLM >= 0.34.0

@@ -47,16 +47,6 @@ KV_TRANSFER_CONFIG="$(
 import json
 import os
 
-extra_config = {
-    "lmcache.mp.port": int(os.environ["LMCACHE_PORT"]),
-    "lmcache.mp.mq_timeout": 60,
-    "lmcache.mp.autostart": True,
-    "lmcache.mp.autostart.wait_timeout": 120,
-    "lmcache.mp.autostart.server_args": os.environ["SERVER_ARGS"],
-}
-if os.environ.get("VLLM_TARGET_DEVICE") == "xpu":
-    extra_config["lmcache.mp.use_vmm_api"] = False
-
 print(
     json.dumps(
         {
@@ -64,7 +54,13 @@ print(
             "kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector",
             "kv_role": "kv_both",
             "kv_load_failure_policy": "recompute",
-            "kv_connector_extra_config": extra_config,
+            "kv_connector_extra_config": {
+                "lmcache.mp.port": int(os.environ["LMCACHE_PORT"]),
+                "lmcache.mp.mq_timeout": 60,
+                "lmcache.mp.autostart": True,
+                "lmcache.mp.autostart.wait_timeout": 120,
+                "lmcache.mp.autostart.server_args": os.environ["SERVER_ARGS"],
+            },
         }
     )
 )
