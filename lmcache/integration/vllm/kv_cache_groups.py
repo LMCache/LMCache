@@ -374,9 +374,8 @@ def _resolve_per_layer_tp_replicated(
     num_layers: int,
 ) -> list[bool]:
     """Resolve whether vLLM leaves each registered KV tensor unsharded across
-    tensor-parallel ranks: its spec declares ``max_tp_shards == 1``, is an
-    MLA spec that leaves ``max_tp_shards`` unset, or sets ``tp_replicated``
-    (Qwen4 PLE ``MambaSpec``). Every rank of a TP group then holds the
+    tensor-parallel ranks: its spec declares ``max_tp_shards == 1``, or is an
+    MLA spec that leaves it unset. Every rank of a TP group then holds the
     same KV for the layer, or the same token shard of it under DCP.
 
     Args:
@@ -391,12 +390,8 @@ def _resolve_per_layer_tp_replicated(
     for group in vllm_groups:
         for name, layer_spec in group_layer_specs(group).items():
             max_tp_shards = getattr(layer_spec, "max_tp_shards", None)
-            if (
-                max_tp_shards == 1
-                or (max_tp_shards is None and _is_mla_spec(layer_spec))
-                # MambaSpec has no max_tp_shards. tp_replicated is PLE;
-                # GDN stays sharded.
-                or bool(getattr(layer_spec, "tp_replicated", False))
+            if max_tp_shards == 1 or (
+                max_tp_shards is None and _is_mla_spec(layer_spec)
             ):
                 per_layer_tp_replicated[layer_to_idx[name]] = True
     return per_layer_tp_replicated

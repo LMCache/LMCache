@@ -367,15 +367,20 @@ class _MambaSlicePlaneEdit(KVCacheGroupEdit):
     as separate contiguous slices carved from a shared pool. Each slice's
     per-block stride is its own byte size, not the padded page, so
     :class:`_MambaPageViewEdit` does not apply. The transfer path expects
-    one uint8 plane per slice, ``[num_blocks, num_slots, 1, width]``. When
-    every payload is a multiple of ``spec.block_size``, ``num_slots`` is that
-    scheduler block size and ``width = payload_bytes // block_size``. When it
-    is not (Qwen4 PLE under block sizes 896 and 1664, or an MTP conv slice
-    whose byte count does not divide the scheduler block), ``num_slots`` is
-    ``gcd(block_size, *payloads)`` and the server treats the group as
-    slot-compressed. A coprime block (``gcd <= 1`` while ``block_size > 1``)
-    does not match. A packed page, whose conv stride equals
-    ``page_size_bytes``, remains owned by :class:`_MambaPageViewEdit`.
+    one uint8 plane per slice, ``[num_blocks, num_slots, 1, width]`` (format
+    17, ``NL_X_NP_X_NB_BS_ONE_HS``). ``num_slots`` is
+    ``gcd(block_size, *payloads)``, which equals ``spec.block_size`` when
+    every payload divides it and otherwise compresses slots (e.g. Qwen4 PLE
+    under block sizes 896 and 1664, or an indivisible conv/SSM pair) while
+    keeping ``width`` small enough for Ascend's per-row UB staging budget
+    (a single ``slots_per_block == 1`` row would exceed the 128 KiB fallback
+    for 184320-byte PLE and physical UB for 384 KiB--2 MiB SSM slices). Like
+    :meth:`_MambaUnifiedViewEdit._compressed_slots`, slot compression is
+    lossless because recurrent-state blocks are always transferred whole
+    (both full chunks and unfull-chunk boundary-state blocks). A coprime
+    block (``gcd <= 1`` while ``block_size > 1``) does not match. A packed
+    page, whose conv stride equals ``page_size_bytes``, remains owned by
+    :class:`_MambaPageViewEdit`.
     """
 
     name = "mamba-slice-planes"
@@ -394,14 +399,14 @@ class _MambaSlicePlaneEdit(KVCacheGroupEdit):
     ) -> int | None:
         """Return the uint8-plane slot count, or ``None`` when none is legal.
 
-        Each state must be one non-empty contiguous slice. Divisible payloads
-        keep one slot per scheduler token. Otherwise the slot count is
-        ``gcd(block_size, *payloads)``, which still divides the scheduler
-        block, so downstream slot compression
-        (``tokens_per_block % slots_per_block == 0``) stays valid. ``None``
-        rejects a slice that is not one contiguous block, an empty input, or
-        a coprime block. Row alignment and width are left to the transfer
-        kernel.
+        Each state must be one non-empty contiguous slice. ``num_slots`` is
+        ``gcd(block_size, *payloads)`` (``block_size`` when every payload is
+        a multiple of it), which divides ``block_size`` so downstream slot
+        compression (``tokens_per_block % slots_per_block == 0``) stays valid
+        while splitting each block into narrower rows that fit the Ascend
+        transfer kernel's per-row UB budget. ``None`` rejects a slice that is
+        not one contiguous block, an empty input, or a coprime block. Exact
+        row alignment and UB bounds are enforced by the transfer kernel.
         """
         if block_size <= 0 or not states:
             return None
@@ -411,11 +416,7 @@ class _MambaSlicePlaneEdit(KVCacheGroupEdit):
             if nbytes is None:
                 return None
             payloads.append(nbytes)
-        if all(payload % block_size == 0 for payload in payloads):
-            return block_size
-        num_slots = block_size
-        for payload in payloads:
-            num_slots = math.gcd(num_slots, payload)
+        num_slots = math.gcd(block_size, *payloads)
         if block_size > 1 and num_slots <= 1:
             return None
         return num_slots

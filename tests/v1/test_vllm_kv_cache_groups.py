@@ -695,8 +695,8 @@ def test_conversion_skips_format_discovery_for_scratch_layers(
 
 def test_conversion_marks_tp_replicated_groups():
     """A group whose spec declares full tensor-parallel replication
-    (``max_tp_shards == 1`` or ``tp_replicated``) carries the caller's replica
-    count; any other group carries 1."""
+    (``max_tp_shards == 1``) carries the caller's replica count; any other
+    group carries 1."""
     infos = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
@@ -714,8 +714,8 @@ def test_conversion_marks_tp_replicated_groups():
         kv_tp_size=8,
     )
 
-    assert [group.tp_replicas for group in infos] == [8, 1, 8]
-    assert [group.dcp_shards for group in infos] == [2, 1, 2]
+    assert [group.tp_replicas for group in infos] == [8, 1, 1]
+    assert [group.dcp_shards for group in infos] == [2, 1, 1]
 
 
 def test_conversion_mixed_uniform_group_replicates_only_its_mla_layers():

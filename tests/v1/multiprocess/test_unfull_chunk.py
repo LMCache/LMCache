@@ -18,6 +18,7 @@ import torch
 # First Party
 from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
@@ -34,6 +35,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess import object_group_transfer
 from lmcache.v1.multiprocess.engine_context import (
     LayoutDescRegistry,
@@ -336,6 +338,129 @@ def test_unfull_chunk_round_trip_carries_the_window_lead_block(
     held = [_paged_layers(torch.zeros) for _ in range(2)]
     copy(held, [[0, 4, 6], [2, 3, 7]], lmcache_native.TransferDirection.H2D, 4)
     _assert_moved(prefill, held, {0: {4: 2, 6: 3}, 1: {3: 6, 7: 7}})
+
+
+@pytest.mark.parametrize(
+    ("chunk_tokens", "tail_tokens", "src_blocks", "dst_blocks"),
+    [
+        # 1-block chunk (no lead block): 32-token tail is not divisible by ratio 7.
+        (896, 32, [2], [1]),
+        # 2-block chunk (sw_size < chunk_size -> lead block): 928 % 7 != 0.
+        (1792, 896 + 32, [0, 2], [0, 1]),
+    ],
+)
+def test_unfull_chunk_round_trip_copies_slot_compressed_mamba_slice_whole(
+    storage_manager: StorageManager,
+    monkeypatch: pytest.MonkeyPatch,
+    chunk_tokens: int,
+    tail_tokens: int,
+    src_blocks: list[int],
+    dst_blocks: list[int],
+) -> None:
+    """A gcd-compressed format-17 Mamba slice (Qwen4 PLE at block 896: 128
+    slots of 1440 B, ratio 7) copies whole blocks on an unaligned tail."""
+    if not hasattr(lmcache_native.EngineKVFormat, "NL_X_NP_X_NB_BS_ONE_HS"):
+        pytest.skip("extension lacks NL_X_NP_X_NB_BS_ONE_HS")
+    monkeypatch.setattr(
+        object_group_transfer,
+        "device_ops",
+        SimpleNamespace(
+            multi_layer_block_kv_transfer=torch_ops.multi_layer_block_kv_transfer
+        ),
+    )
+    fmt = lmcache_native.EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS
+    num_blocks, block_tokens, slots, width = 4, 896, 128, 1440
+    shape = (num_blocks, slots, 1, width)
+    prefill = [(torch.randint(0, 256, shape, dtype=torch.uint8),)]
+    decode = [(torch.zeros(shape, dtype=torch.uint8),)]
+    manager = KVLayerGroupsManager(
+        prefill,
+        engine_kv_formats=[fmt],
+        engine_group_infos=(
+            EngineGroupInfo(
+                0,
+                (0,),
+                tokens_per_block=block_tokens,
+                sw_size_tokens=block_tokens,
+                recurrent_state=True,
+            ),
+        ),
+        lmcache_tokens_per_chunk=chunk_tokens,
+    )
+    staging = torch.zeros(1 << 20, dtype=torch.uint8)
+    regular_bytes = slots * width
+
+    class _SliceContext:
+        lmcache_tokens_per_chunk = chunk_tokens
+        device = torch.device("cpu")
+        kv_layer_groups_manager = manager
+        paged_layers = prefill
+
+        def calculate_num_blocks(self, num_tokens: int, kernel_group_idx: int) -> int:
+            return manager.calculate_num_blocks(kernel_group_idx, num_tokens)
+
+        def get_slots_per_chunk_in_sw(self, kernel_group_idx: int) -> int:
+            return manager.get_slots_per_chunk_in_sw(kernel_group_idx)
+
+        def get_kernel_group_shape_dtype(
+            self, num_tokens: int, kernel_group_idx: int
+        ) -> tuple[torch.Size, torch.dtype]:
+            assert num_tokens == chunk_tokens
+            return torch.Size((1, slots, width)), torch.uint8
+
+        def stage_block_ids(self, block_ids: list[list[int]]) -> list[torch.Tensor]:
+            return [torch.tensor(ids, dtype=torch.int64) for ids in block_ids]
+
+        def get_temp_object_group_buffer(
+            self, batch_idx: int, object_group_idx: int
+        ) -> torch.Tensor:
+            return staging[:regular_bytes]
+
+        def get_temp_kernel_group_buffer(
+            self, batch_idx: int, kernel_group_idx: int
+        ) -> torch.Tensor:
+            return staging[:regular_bytes]
+
+        def get_temp_staging_buffer(self, num_bytes: int) -> torch.Tensor | None:
+            return staging[:num_bytes] if num_bytes <= staging.numel() else None
+
+        def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> object:
+            return self.paged_layers
+
+        def get_shape_desc(self, kernel_group_idx: int) -> object:
+            return manager.kernel_groups[kernel_group_idx].shape_desc
+
+        def get_engine_kv_format(self, kernel_group_idx: int) -> object:
+            return fmt
+
+    stub = _SliceContext()
+    context = cast(BaseCacheContext, stub)
+    layout = get_unfull_chunk_layout_desc(context, 0)
+    key = _unfull_keys(
+        TokenHasher(chunk_size=chunk_tokens), list(range(tail_tokens)), tail_tokens
+    )[0]
+    reserved = storage_manager.reserve_write([key], layout)
+    memory_obj = reserved[key]
+
+    for layers, blocks, direction in (
+        (prefill, [list(src_blocks)], lmcache_native.TransferDirection.D2H),
+        (decode, [list(dst_blocks)], lmcache_native.TransferDirection.H2D),
+    ):
+        stub.paged_layers = layers
+        staged, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
+            context, blocks, tail_tokens
+        )
+        buf = get_unfull_chunk_staging_buffer(context, 0)
+        assert buf is not None
+        transfer_unfull_chunk(
+            context, staged, skip_blocks, lead_blocks, memory_obj, 0, buf, direction
+        )
+    storage_manager.finish_write([key], l1_owners_of(reserved))
+
+    for src, dst in zip(src_blocks, dst_blocks, strict=True):
+        assert torch.equal(decode[0][0][dst], prefill[0][0][src])
+    untouched = [b for b in range(num_blocks) if b not in dst_blocks]
+    assert not decode[0][0][untouched].any()
 
 
 def test_unfull_chunk_with_a_lead_block_stages_only_if_it_fits() -> None:
