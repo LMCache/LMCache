@@ -41,7 +41,7 @@ API for high-performance distributed KV cache storage.
   The connector uses Abseil's ``flat_hash_set`` from the system library.
   Its headers must be in ``/usr/include``, ``/usr/local/include``, or a
   ``HF3FS_INCLUDE_DIR`` entry, and its libraries in the system library
-  path.  On Debian/Ubuntu:
+  path or a ``HF3FS_LIB_DIR`` entry.  On Debian/Ubuntu:
 
   .. code-block:: bash
 

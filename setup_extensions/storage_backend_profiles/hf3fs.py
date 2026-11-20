@@ -56,8 +56,8 @@ class Hf3fsStorageBackend(StorageBackendProfile):
         3FS usrbio and Abseil headers are searched in
         ``HF3FS_INCLUDE_DIR`` (``;``-separated) and then the system
         include paths, matching the compiler's include path; the 3FS
-        library is searched in ``HF3FS_LIB_DIR`` and then the system
-        library paths.
+        and Abseil libraries are searched in ``HF3FS_LIB_DIR`` and then
+        the system library paths, matching the linker's search path.
 
         Returns:
             ``True`` if ``BUILD_HF3FS=1`` and all dependencies are
@@ -138,9 +138,9 @@ class Hf3fsStorageBackend(StorageBackendProfile):
                 + " (set HF3FS_INCLUDE_DIR)"
             )
 
-        hf3fs_lib_dirs = _env_dirs("HF3FS_LIB_DIR")
+        lib_dirs = _env_dirs("HF3FS_LIB_DIR")
         if not (
-            _has_file("libhf3fs_api_shared.so", hf3fs_lib_dirs)
+            _has_file("libhf3fs_api_shared.so", lib_dirs)
             or ctypes.util.find_library("hf3fs_api_shared")
         ):
             missing.append(
@@ -148,8 +148,8 @@ class Hf3fsStorageBackend(StorageBackendProfile):
                 " or the system library paths (set HF3FS_LIB_DIR)"
             )
 
-        # build() passes every HF3FS_INCLUDE_DIR entry to the compiler, so
-        # Abseil headers there are as usable as system ones.
+        # build() passes every HF3FS_INCLUDE_DIR / HF3FS_LIB_DIR entry to the
+        # compiler / linker, so Abseil there is as usable as system Abseil.
         absl_header = os.path.join("absl", "container", "flat_hash_set.h")
         if not _has_file(absl_header, include_dirs):
             missing.append(
@@ -157,10 +157,13 @@ class Hf3fsStorageBackend(StorageBackendProfile):
                 + ", ".join(include_dirs)
                 + " (install libabsl-dev)"
             )
-        if not ctypes.util.find_library("absl_hash"):
+        if not (
+            _has_file("libabsl_hash.so", lib_dirs)
+            or ctypes.util.find_library("absl_hash")
+        ):
             missing.append(
-                "Abseil library libabsl_hash not found in the system library"
-                " paths (install libabsl-dev)"
+                "Abseil library libabsl_hash.so not found in HF3FS_LIB_DIR"
+                " or the system library paths (install libabsl-dev)"
             )
 
         return missing
