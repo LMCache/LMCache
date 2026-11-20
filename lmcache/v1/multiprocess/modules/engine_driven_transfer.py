@@ -114,6 +114,10 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._pending_transfers: dict[
             tuple[EventType, int, str, IPCCacheServerKey], tuple[Event, float]
         ] = {}
+        self._unread_retrieve_pages: dict[
+            tuple[int, str, IPCCacheServerKey],
+            tuple[int, "list[list[ObjectKey]] | None", list[int]],
+        ] = {}
         self._observation_cleanup = create_periodic_thread(
             name=f"lmcache-mp-transfer-observations-{id(self):x}",
             interval=_TRANSFER_OBSERVATION_TIMEOUT_SECONDS / 4,
@@ -161,6 +165,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             self._strategies.clear()
             pending = list(self._pending_transfers.values())
             self._pending_transfers.clear()
+            self._unread_retrieve_pages.clear()
         for event, _ in pending:
             self._publish_transfer_end(event, False)
 
@@ -269,8 +274,15 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         with self._lock:
             stale = [k for k in self._pending_transfers if k[1] == instance_id]
             pending = [self._pending_transfers.pop(k) for k in stale]
+            unread = [
+                (k[2], self._unread_retrieve_pages.pop(k))
+                for k in list(self._unread_retrieve_pages)
+                if k[0] == instance_id
+            ]
         for event, _ in pending:
             self._publish_transfer_end(event, False)
+        for key, pages in unread:
+            self._release_pages_from(key, *pages)
         with self._pending_shm_lock:
             stale_writes = [k for k in self._pending_shm_writes if k[0] == instance_id]
             stale_reads = [k for k in self._pending_shm_reads if k[0] == instance_id]
@@ -688,7 +700,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         group's window. The transfer starts on the first page. A page that
         fails, or succeeds without inline data (an SHM server's answer, which
         an inline worker cannot read), ends it and releases the read locks of
-        the pages after it, which the worker no longer requests.
+        the pages after it, which the worker no longer requests. If the worker
+        stops after a successful page instead, ``commit_retrieve`` releases the
+        unread pages and records the transfer as failed.
 
         Args:
             key: Cache key for the token range to retrieve.
@@ -706,7 +720,8 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
         start, end = self._page_range(key, chunk_start, chunk_count)
-        whole = (start, end) == (0, (key.end - key.start) // self._ctx.chunk_size)
+        total = (key.end - key.start) // self._ctx.chunk_size
+        whole = (start, end) == (0, total)
         group_keys = self._group_keys_for(entry, key)
         group_first_chunk: list[int] = []
         windows = entry.metadata.group_windows
@@ -766,10 +781,23 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     response.context,
                     window_keys,
                 )
-        if not whole and not (response.success and response.data):
+        if whole:
+            return response
+        if not (response.success and response.data):
             self._abandon_retrieve(
                 key, instance_id, chunk_start, end, window_keys, window_firsts
             )
+        else:
+            page_key = (instance_id, key.request_id, key)
+            with self._lock:
+                if end < total:
+                    self._unread_retrieve_pages[page_key] = (
+                        end,
+                        window_keys,
+                        window_firsts,
+                    )
+                else:
+                    self._unread_retrieve_pages.pop(page_key, None)
         return response
 
     def _abandon_retrieve(
@@ -787,8 +815,20 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         ``commit_retrieve``; the pages after it are never requested, so their
         prefetch read locks are released here.
         """
+        with self._lock:
+            self._unread_retrieve_pages.pop((instance_id, key.request_id, key), None)
         if chunk_start > 0:
             self._finish_transfer(key, instance_id, EventType.MP_RETRIEVE_START, False)
+        self._release_pages_from(key, end, window_keys, window_firsts)
+
+    def _release_pages_from(
+        self,
+        key: IPCCacheServerKey,
+        end: int,
+        window_keys: "list[list[ObjectKey]] | None",
+        window_firsts: list[int],
+    ) -> None:
+        """Release the prefetch read locks of chunks at ``end`` and later."""
         if window_keys is None:
             remaining = self._resolve_single_group_obj_keys(key)[end:]
         else:
@@ -825,9 +865,16 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         _, strategy = self._resolve_for_transfer(instance_id)
         session = self._ctx.session_manager.get_or_create(key.request_id)
         st = session.extras.pop("retrieve_start_time", None)
+        with self._lock:
+            unread = self._unread_retrieve_pages.pop(
+                (instance_id, key.request_id, key), None
+            )
         result = False
         try:
+            if unread is not None:
+                self._release_pages_from(key, *unread)
             result = strategy.commit_retrieve(key=key, instance_id=instance_id)
+            result = result and unread is None
         finally:
             self._finish_transfer(key, instance_id, EventType.MP_RETRIEVE_START, result)
         if st is not None:

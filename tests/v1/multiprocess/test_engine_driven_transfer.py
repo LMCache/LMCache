@@ -2167,6 +2167,41 @@ def test_server_page_without_inline_data_releases_later_pages(
     assert released == [["obj1", "obj2"]]
 
 
+def test_server_commit_after_unfinished_pages_releases_them(
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """A worker that commits before reading every page, e.g. after a timeout,
+    leaves no read lock on the unread pages and the retrieve counts as failed."""
+    keys = ["obj0", "obj1", "obj2"]
+    objects = {k: MagicMock(tensor=torch.zeros(2, 2, 8, 16)) for k in keys}
+    storage = MagicMock()
+
+    @contextmanager
+    def read_prefetched(
+        obj_keys: list[str], l1_owners: object = None
+    ) -> Iterator[list[MagicMock]]:
+        yield [objects[k] for k in obj_keys]
+
+    storage.read_prefetched_results.side_effect = read_prefetched
+    module, _, _, ctx = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(),
+        object_keys=keys,
+        mock_storage=storage,
+    )
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=2)
+    )
+    key = _default_key(tokens=24)
+    events: list[Event] = []
+    with patch.object(ctx.event_bus, "publish", side_effect=events.append):
+        assert module.prepare_retrieve(key, 2, 0, 1).success
+        assert not module.commit_retrieve(key, 2)
+    released = [c.args[0] for c in storage.finish_read_prefetched.call_args_list]
+    assert released == [["obj0"], ["obj1", "obj2"]]
+    assert events[-1].event_type == EventType.MP_RETRIEVE_END
+    assert events[-1].metadata["retrieved_count"] == 0
+
+
 @pytest.mark.parametrize("finish", ["invalid_commit", "unregister", "reap", "close"])
 def test_server_closes_failed_transfer_events(
     server_module_factory: ServerModuleFactory,

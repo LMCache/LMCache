@@ -419,33 +419,19 @@ class InlineTransferStrategy(TransferStrategy):
         )
 
         group_chunks: list[list[torch.Tensor]] = []
-        for g_keys in group_keys:
-            if not g_keys:
-                group_chunks.append([])
-                continue
-            prefetched_keys: list[ObjectKey] = []
-            try:
-                read_ctx = self._storage_manager.read_prefetched_results(
-                    g_keys, l1_owners=owners
-                )
-                with read_ctx as maybe_memory_objs:
-                    if not maybe_memory_objs or len(maybe_memory_objs) != len(g_keys):
-                        return PrepareRetrieveResponse(
-                            success=False, data=b"", context={}
-                        )
-                    prefetched_keys = g_keys[: len(maybe_memory_objs)]
-                    chunks: list[torch.Tensor] = []
-                    for memory_obj in maybe_memory_objs:
-                        if memory_obj.tensor is None:
-                            return PrepareRetrieveResponse(
-                                success=False, data=b"", context={}
-                            )
-                        chunks.append(memory_obj.tensor.cpu().clone())
-                    group_chunks.append(chunks)
-            finally:
-                if prefetched_keys:
+        gid = -1
+        try:
+            for gid, g_keys in enumerate(group_keys):
+                chunks = self._read_group(g_keys, owners)
+                if chunks is None:
+                    return PrepareRetrieveResponse(success=False, data=b"", context={})
+                group_chunks.append(chunks)
+        finally:
+            if len(group_chunks) < len(group_keys):
+                unread = [k for g_keys in group_keys[gid + 1 :] for k in g_keys]
+                if unread:
                     self._storage_manager.finish_read_prefetched(
-                        prefetched_keys, l1_owners=owners
+                        unread, l1_owners=owners
                     )
 
         if grouped:
@@ -459,6 +445,37 @@ class InlineTransferStrategy(TransferStrategy):
         else:
             data = encode_tensors(group_chunks[0])
         return PrepareRetrieveResponse(success=True, data=data, context={})
+
+    def _read_group(
+        self, g_keys: list[ObjectKey], owners: "dict[ObjectKey, int] | None"
+    ) -> list[torch.Tensor] | None:
+        """Copy one group's prefetched chunks and release their read locks.
+
+        Returns:
+            The chunks, or None if any of them is missing.
+        """
+        if not g_keys:
+            return []
+        prefetched_keys: list[ObjectKey] = []
+        try:
+            read_ctx = self._storage_manager.read_prefetched_results(
+                g_keys, l1_owners=owners
+            )
+            with read_ctx as maybe_memory_objs:
+                if not maybe_memory_objs or len(maybe_memory_objs) != len(g_keys):
+                    return None
+                prefetched_keys = g_keys[: len(maybe_memory_objs)]
+                chunks: list[torch.Tensor] = []
+                for memory_obj in maybe_memory_objs:
+                    if memory_obj.tensor is None:
+                        return None
+                    chunks.append(memory_obj.tensor.cpu().clone())
+                return chunks
+        finally:
+            if prefetched_keys:
+                self._storage_manager.finish_read_prefetched(
+                    prefetched_keys, l1_owners=owners
+                )
 
     def commit_retrieve(
         self,

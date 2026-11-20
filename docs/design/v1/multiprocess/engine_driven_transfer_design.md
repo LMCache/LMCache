@@ -292,7 +292,8 @@ bytes over 4 GiB. `commit_store` and `prepare_retrieve` take `chunk_start` and
 the last chunk, so `0, 0` is the whole range and a transfer that fits in one
 page is a single request as before. The worker cuts the positions into
 consecutive pages of at most 128 MiB (or one chunk) and sends them in order.
-The server keeps no state between pages:
+The server keeps no state between store pages, and for a retrieve only where
+the unread pages start:
 
 - A store page reserves and writes only its chunks. A grouped page may carry
   any subset of them but nothing outside its range. The store's observation
@@ -301,6 +302,9 @@ The server keeps no state between pages:
 - A retrieve page computes each group's window over the whole key and returns
   the part of it inside the page, all or nothing. The observation starts on
   the first page and ends at `commit_retrieve`, or on a failed later page.
+  A failed page releases the read locks of the pages after it. If the worker
+  stops after a successful page, for example on a timeout, `commit_retrieve`
+  releases the unread pages and records the retrieve as failed.
 
 ```text
 Store (inline tensor)

@@ -616,6 +616,41 @@ def test_inline_strategy_multigroup_store_retrieve_roundtrip() -> None:
     assert ret_miss.success is False
 
 
+def test_inline_strategy_group_miss_releases_later_groups() -> None:
+    """A group that misses ends the retrieve without leaving the groups after
+    it read-locked."""
+    shapes: dict[int, tuple[int, ...]] = {0: (2, 2, 8, 16), 1: (2, 1, 8, 4)}
+    sm = _FakeStorageManager(shapes)
+    strategy = InlineTransferStrategy(sm)  # type: ignore[arg-type]
+    key = IPCCacheServerKey.from_token_ids(
+        "m", 1, 0, [1] * 16, start=0, end=16, request_id="req-inline-miss"
+    )
+    group_keys = [
+        [_obj_key(1, 0), _obj_key(2, 0)],
+        [_obj_key(1, 1), _obj_key(2, 1)],
+    ]
+    assert strategy.commit_store(
+        key=key,
+        instance_id=7,
+        cpu_data=encode_grouped_tensors(
+            [([0, 1], [torch.zeros(shapes[g])] * 2) for g in (0, 1)]
+        ),
+        context=_group_metadata(),
+        resolve_obj_keys=lambda _k: group_keys[0],
+        group_keys=group_keys,
+    )
+
+    missing_first = [[_obj_key(1, 0), _obj_key(9, 0)], group_keys[1]]
+    ret = strategy.prepare_retrieve(
+        key=key,
+        instance_id=7,
+        resolve_obj_keys=lambda _k: missing_first[0],
+        group_keys=missing_first,
+    )
+    assert ret.success is False
+    assert sm.finished_reads == group_keys[1]
+
+
 def test_inline_strategy_store_shape_mismatch_releases_reservations() -> None:
     """A chunk whose shape disagrees with the reserved object fails the store,
     and the unwritten reservations are released and deleted -- they must not
