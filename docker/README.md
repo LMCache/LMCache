@@ -42,6 +42,11 @@ docker build \
   --file docker/Dockerfile .
 ```
 
+The stable vLLM release is currently built for CUDA 13.0, so `image-release`
+needs `CUDA_VERSION=13.0` and `NGC_VERSION=25.09` as shown. With the default
+CUDA 13.2 the build stops at its `import torchaudio` check, because vLLM's
+pinned torchaudio has no CUDA 13.2 wheel.
+
 Run the image with a separate ``lmcache server`` and
 ``LMCacheMPConnector`` as described in the
 [Docker deployment guide](../docs/source/production/docker_deployment.rst).
