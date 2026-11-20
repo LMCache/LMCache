@@ -1598,6 +1598,43 @@ class TestPartialL2Lookup:
             adapter.close()
 
 
+@pytest.mark.parametrize("window, expected_probes", [(2, 46), (8, 34)])
+def test_window_tail_only_trims_columns_warm_in_both_rows(
+    l1_manager: DramL1Manager, window: int, expected_probes: int
+) -> None:
+    """Windowed rows with a cold new tail share only part of their L1 overlap."""
+    adapter = LookupCountingAdapter()
+    full = [make_object_key(i, gid=0) for i in range(25)]
+    sliding = [make_object_key(i, gid=1) for i in range(25)]
+    layout = make_layout()
+    store_keys_in_l2(adapter, full + sliding, layout)
+    write_keys_to_l1(l1_manager, full[:-1] + sliding[-window - 1 : -1], layout)
+    ctrl = make_controller(l1_manager, [adapter])
+    ctrl.start()
+    try:
+        result = wait_for_result(
+            ctrl,
+            ctrl.submit_prefetch_request(
+                make_spec(
+                    [make_group(full, gid=0), make_group(sliding, gid=1, window=window)]
+                )
+            ),
+        )
+        assert len(adapter.lookup_keys) == 1
+        expected = (
+            full[: -window - 1] + full[-1:] + sliding[: -window - 1] + sliding[-1:]
+        )
+        assert len(expected) == expected_probes
+        assert adapter.lookup_keys[0] == expected
+        assert row_bits(result, 0) == list(range(25))
+        assert row_bits(result, 1) == list(range(25 - window, 25))
+        assert_l2_unlocked(adapter)
+        l1_manager.finish_read(full + sliding[-window:])
+    finally:
+        ctrl.stop()
+        adapter.close()
+
+
 class TestL1ServesWholeRequest:
     @pytest.mark.parametrize(
         "fetching_policy, window, row1_in_l1, lookups, hits",

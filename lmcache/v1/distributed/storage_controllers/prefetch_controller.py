@@ -1352,8 +1352,6 @@ class PrefetchController(StorageControllerInterface):
             signaled_adapters: Set of adapter indices that have signaled
                 completion of lookup tasks.
         """
-        num_rows = len(request.key_groups)
-        num_cols = len(request.key_groups[0].keys)
         for adapter_idx in list(request.inflight_lookup_tasks):
             if adapter_idx not in signaled_adapters:
                 continue
@@ -1365,12 +1363,7 @@ class PrefetchController(StorageControllerInterface):
             if result is None:
                 continue
 
-            if request.l2_lookup_cells.popcount() == num_rows * num_cols:
-                l2_found_bitmap = _scatter_bitmaps_full_global(
-                    result, num_rows, num_cols
-                )
-            else:
-                l2_found_bitmap = _scatter_bitmaps(request.l2_lookup_cells, result)
+            l2_found_bitmap = _scatter_bitmaps(request.l2_lookup_cells, result)
             request.key_states.l2_locked_keys[adapter_idx] = l2_found_bitmap
             request.found_cells += l2_found_bitmap
 
