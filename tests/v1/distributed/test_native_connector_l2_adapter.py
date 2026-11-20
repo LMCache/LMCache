@@ -218,6 +218,63 @@ def adapter():
     adp.close()
 
 
+class TestFailedCompletionLogging:
+    @pytest.fixture
+    def warnings(self, monkeypatch):
+        logged: list[str] = []
+        module = sys.modules[NativeConnectorL2Adapter.__module__]
+        monkeypatch.setattr(
+            module.logger, "warning", lambda msg, *args: logged.append(msg % args)
+        )
+        return logged
+
+    @staticmethod
+    def _failing_lookup(adapter, monkeypatch, error):
+        client = adapter._client
+
+        def submit_batch_exists(keys):
+            with client._lock:
+                fid = client._next_id
+                client._next_id += 1
+            client._push_completion(fid, False, error, None)
+            return fid
+
+        monkeypatch.setattr(client, "submit_batch_exists", submit_batch_exists)
+        task_id = adapter.submit_lookup_and_lock_task(
+            [create_object_key(1)], {0: _EMPTY_LAYOUT}
+        )
+        assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd(), timeout=5.0)
+        return adapter.query_lookup_and_lock_result(task_id)
+
+    def test_failed_completion_logs_connector_error(
+        self, adapter, monkeypatch, warnings
+    ):
+        bitmap = self._failing_lookup(adapter, monkeypatch, "transport down")
+        assert bitmap.test(0) is False
+        assert len(warnings) == 1
+        assert "transport down" in warnings[0]
+
+    def test_failed_completions_are_rate_limited_and_counted(
+        self, adapter, monkeypatch, warnings
+    ):
+        self._failing_lookup(adapter, monkeypatch, "transport down")
+        self._failing_lookup(adapter, monkeypatch, "transport down")
+        assert len(warnings) == 1
+
+        adapter._failed_completion_logged_at -= 11.0
+        self._failing_lookup(adapter, monkeypatch, "transport down")
+        assert len(warnings) == 2
+        assert "3 failed so far" in warnings[1]
+
+    def test_successful_lookup_logs_nothing(self, adapter, warnings):
+        task_id = adapter.submit_lookup_and_lock_task(
+            [create_object_key(999)], {0: _EMPTY_LAYOUT}
+        )
+        assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd(), timeout=5.0)
+        assert adapter.query_lookup_and_lock_result(task_id).test(0) is False
+        assert warnings == []
+
+
 # =============================================================================
 # ObjectKey Serialization Tests
 # =============================================================================
