@@ -127,7 +127,9 @@ def _resolving_context() -> MPCacheServerContext:
     return ctx
 
 
-def _store_key(tokens: list[int]) -> IPCCacheServerKey:
+def _store_key(
+    tokens: list[int], request_configs: dict[str, object] | None = None
+) -> IPCCacheServerKey:
     return IPCCacheServerKey(
         model_name=MODEL,
         world_size=1,
@@ -136,6 +138,7 @@ def _store_key(tokens: list[int]) -> IPCCacheServerKey:
         start=0,
         end=len(tokens),
         request_id="store",
+        request_configs=request_configs,
     )
 
 
@@ -156,14 +159,26 @@ def test_server_resolves_full_chunk_keys_and_the_tail_key_of_an_unaligned_key():
     assert not any(UNFULL_CHUNK_ATTRIBUTE in k.extra_attributes for k in full_keys[0])
 
 
-def test_stored_tail_stays_in_l1_while_full_chunks_go_to_l2():
+@pytest.mark.parametrize(
+    "request_configs",
+    [
+        None,
+        # A request cannot mark its full chunks as tails: the mark's name is
+        # not a connector-forwarded ``lmcache.*`` config, and request configs
+        # of that name are dropped when keys are built.
+        {"lmcache.unfull_chunk": True, UNFULL_CHUNK_ATTRIBUTE: True},
+    ],
+    ids=["plain", "config-spoofs-the-mark"],
+)
+def test_stored_tail_stays_in_l1_while_full_chunks_go_to_l2(request_configs):
     """#6747: the tail mark survives the store's commit (the keys go through
     the host-func dispatcher's msgpack round-trip, L1's finish_write and the
     StoreListener) and the default store policy keeps the tail out of L2."""
     ctx = _resolving_context()
-    key = _store_key(list(range(2 * CHUNK_SIZE + 5)))
+    key = _store_key(list(range(2 * CHUNK_SIZE + 5)), request_configs)
     full_keys = ctx.resolve_obj_keys(key, [0])[0]
     unfull_keys = ctx.resolve_unfull_chunk_obj_keys(key, [0])
+    assert not any(UNFULL_CHUNK_ATTRIBUTE in k.extra_attributes for k in full_keys)
     manager = StorageManager(
         StorageManagerConfig(
             l1_manager_config=L1ManagerConfig(

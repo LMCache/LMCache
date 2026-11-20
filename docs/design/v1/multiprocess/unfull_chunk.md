@@ -110,7 +110,7 @@ Server:
 
 | Interface | Change |
 |---|---|
-| `MPCacheServerContext` | New `resolve_unfull_chunk_obj_keys(key, object_group_ids)`: the tail's object key per group, with `extra_attributes[UNFULL_CHUNK_ATTRIBUTE]` (`"lmcache.unfull_chunk"`) set to `True`. The mark is not part of the key's identity. `resolve_obj_keys` is unchanged (it floors `end`). |
+| `MPCacheServerContext` | New `resolve_unfull_chunk_obj_keys(key, object_group_ids)`: the tail's object key per group, with `extra_attributes[UNFULL_CHUNK_ATTRIBUTE]` (`"_lmcache_internal.unfull_chunk"`) set to `True`. The mark is not part of the key's identity, and a request config of that name is dropped when keys are built, so clients cannot set it. `resolve_obj_keys` is unchanged (it floors `end`). |
 | `Session` | New `get_unfull_chunk_hash(boundary)`. No tail lookup state: the tail's L1 owners join the chunks' owners through the existing `record_prefetch_result`. |
 | `LookupModule.query_prefetch_status` / `wait_prefetch_status` / `free_lookup_locks` | Token reply and tail release as above. |
 | `LayoutDescRegistry.register` | New argument `group_unfull_chunk_layout_descs`. New `find_group_unfull_chunk_layout_descs()`, which falls back to the full-chunk layouts. |
