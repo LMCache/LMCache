@@ -865,3 +865,35 @@ def test_packed_kv_matches_split_layout(
     assert torch.equal(unpacked.view(torch.uint8), split_out.view(torch.uint8))
     if layers <= 2 * skip:
         assert torch.equal(packed_out.view(torch.uint8), packed.view(torch.uint8))
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_protected_packed_layers_round_trip_on_cpu(
+    dtype: torch.dtype, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both packed layout conversions preserve protected KV bytes on CPU."""
+    monkeypatch.setattr(
+        "lmcache.v1.distributed.serde.turboquant.turboquant._select_cuda_device",
+        lambda *args: torch.device("cpu"),
+    )
+    config = TurboQuantSerdeConfig(kv_layout="packed", skip_first_layers=2)
+    split = torch.arange(2 * 2 * 3 * 256, dtype=torch.int32).reshape(2, 2, 3, 256)
+    split = (split % 97).to(dtype)
+    packed = split.reshape(2, 2, 3, 2, 128).permute(1, 2, 3, 0, 4)
+    packed = packed.reshape(1, 2, 3, 512)
+    layout = MemoryLayoutDesc(shapes=[packed.shape], dtypes=[dtype])
+    serializer = TurboQuantSerializer(config)
+    data = torch.empty(serializer.estimate_serialized_size(layout), dtype=torch.uint8)
+    wire = cast(MemoryObj, _FakeMemoryObj(data))
+    key = _make_turboquant_object_key(0)
+    assert (
+        serializer.serialize(cast(MemoryObj, _FakeMemoryObj(packed)), wire, key)
+        == data.numel()
+    )
+    assert torch.equal(data, split.view(torch.uint8).flatten())
+
+    restored = torch.empty_like(packed)
+    TurboQuantDeserializer(config).deserialize(
+        wire, cast(MemoryObj, _FakeMemoryObj(restored)), key
+    )
+    assert torch.equal(restored.view(torch.uint8), packed.view(torch.uint8))
