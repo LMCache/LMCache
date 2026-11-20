@@ -167,6 +167,9 @@ void Hf3fsConnector::init_read_iov(hf3fs_iov& iov) {
     throw std::runtime_error("hf3fs_iovcreate (read) failed: " +
                              std::to_string(-ret));
   }
+  // 3FS FUSE has mapped the buffer by now. Without the unlink, its /dev/shm
+  // file is removed only by hf3fs_iovdestroy and outlives a SIGKILL.
+  hf3fs_iovunlink(&iov);
 }
 
 /**
@@ -183,6 +186,8 @@ void Hf3fsConnector::init_write_iov(hf3fs_iov& iov) {
     throw std::runtime_error("hf3fs_iovcreate (write) failed: " +
                              std::to_string(-ret));
   }
+  // See init_read_iov.
+  hf3fs_iovunlink(&iov);
 }
 
 /**
