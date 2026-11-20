@@ -542,8 +542,10 @@ def test_mamba_slice_planes_skip_indivisible_slice(edits):
             512,
             (160, 3072),
         ),
-        # Non-32B-aligned >64 KiB row. The view only requires an
-        # integer width; the kernel gates alignment.
+        # Non-32B-aligned 35000-byte row (70000 B / 2 slots). The view only
+        # requires an integer width; the Ascend kernel gates 32B alignment and
+        # per-row UB staging limits (which rule out slots_per_block == 1 on
+        # 184320-byte PLE and 384 KiB--2 MiB SSM slices).
         (6, (((70_000,), torch.uint8),), 2, (35_000,)),
     ],
 )

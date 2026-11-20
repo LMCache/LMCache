@@ -47,7 +47,7 @@ over the same storage, where `head_size` is derived so the bytes fill the page
 exactly. `matches` requires the conv state's per-block stride to equal
 `page_size_bytes` (one scheduler block == one full padded page in memory).
 
-A Mamba V2 packed page is also handled by this rule: its conv stride 
+A Mamba V2 packed page is also handled by this rule: its conv stride
 equals `page_size_bytes`.
 
 On some backends (e.g. vLLM-Ascend ≤ v0.29) conv and SSM are still one
@@ -56,19 +56,26 @@ from a shared pool. Each tensor's per-block stride is only **that slice's**
 byte length (conv-only or ssm-only), not `page_size_bytes`, so the packed
 page reinterpretation above does not apply.
 
-A second rule (mamba-slice-planes) then registers **one uint8 plane per slice** 
-(conv and ssm stay two LMCache tensors). For each slice it keeps the same 
+A second rule (`mamba-slice-planes`) then registers **one uint8 plane per slice**
+(conv and ssm stay two LMCache tensors). For each slice it keeps the same
 storage and only changes metadata: dtype `uint8` and shape
-``[num_blocks, num_slots, 1, width]``. When every payload is a multiple of
-the scheduler block, `num_slots` is `kv_cache_spec.block_size` and `width` is
-`payload_bytes / block_size`. When it is not (e.g, Qwen4 PLE `[NB, 9, 10240]`
-bf16 -> 184320 bytes under block sizes 896 or 1664) `num_slots` is
+`[num_blocks, num_slots, 1, width]`, where `num_slots` is
 `gcd(block_size, *payloads)` and `width` is `payload_bytes / num_slots`
-when `gcd > 1`. A gcd of 1 does not match.
-This edit is correct as long as the entire block is copied.
-The output shape is what LMCache's format detector recognizes as format 17
-(opaque sub-planes). The edit does not copy or pad bytes; the transfer kernel
-checks alignment, row size, and plane count when store/load runs.
+(when `block_size > 1`, a coprime `gcd == 1` does not match). When every
+payload divides `kv_cache_spec.block_size`, `num_slots` equals `block_size`;
+otherwise (e.g. Qwen4 PLE `[NB, 9, 10240]` bf16 -> 184320 bytes under block
+sizes 896 or 1664, or an indivisible conv/SSM pair) `gcd` compresses the slot
+count while keeping `width` within Ascend's per-row UB staging budget (a single
+1-slot row would exceed the 128 KiB fallback for 184320-byte PLE and physical
+UB on every Ascend SoC for 384 KiB–2 MiB SSM slices). Like
+`_MambaUnifiedViewEdit._compressed_slots`, slot compression is lossless because
+every MP path (full chunks and `unfull_chunk` boundary-state blocks via
+`multi_layer_block_kv_transfer`; `vLLM <= v0.29` without
+`kv_connector_block_state` rejects `save_unfull_chunk` at startup) transfers
+recurrent-state blocks whole. The output shape is what LMCache's format
+detector recognizes as format 17 (opaque sub-planes). The edit does not copy or
+pad bytes; the transfer kernel checks alignment, row size, and plane count when
+store/load runs.
 
 ### 2. Sub-paged full attention
 
@@ -274,8 +281,10 @@ bijective block-id → bytes mapping. Consequences:
 - Exception: a contiguous Mamba slice, such as PLE, whose state size is fixed
   by the model and does not divide `kv_cache_spec.block_size`. A view cannot
   give one integer-width slot per token without reading past the allocation
-  or copying, so `num_slots = gcd(block_size, *payloads)`, which still divides
-  the block, and the server stores that `slots_per_block`.
+  or copying, and `slots_per_block == 1` would exceed Ascend's per-row UB
+  staging limit on large slices, so `num_slots = gcd(block_size, *payloads)`
+  (still dividing `block_size`) and the server transfers each recurrent block
+  whole (`slots_per_block` rows).
 
 ## Code map
 
