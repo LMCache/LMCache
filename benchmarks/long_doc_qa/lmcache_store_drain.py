@@ -113,6 +113,9 @@ def parse_counter(text: str, name: str) -> Optional[float]:
 
     Returns:
         The sum over all label sets, or None if no series has this name.
+
+    Raises:
+        MetricsEndpointError: If a series is NaN, infinite or negative.
     """
     pattern = re.compile(
         r"^" + re.escape(name) + r"(?:\{[^}]*\})?[ \t]+(\S+)", re.MULTILINE
@@ -123,8 +126,12 @@ def parse_counter(text: str, name: str) -> Optional[float]:
             value = float(match.group(1))
         except ValueError:
             continue
-        if not math.isnan(value):
-            total = (total or 0.0) + value
+        if not math.isfinite(value) or value < 0:
+            raise MetricsEndpointError(
+                f"{name} has the invalid value {match.group(1)!r}; a counter must be "
+                "finite and not negative."
+            )
+        total = (total or 0.0) + value
     return total
 
 
@@ -180,12 +187,14 @@ def hit_rate_between(before: LookupSnapshot, after: LookupSnapshot) -> Optional[
 
     Returns:
         ``hit tokens / requested tokens`` over the interval, or None if no
-        tokens were requested.
+        tokens were requested or the counters are inconsistent (a counter went
+        down, or there were more hit tokens than requested tokens).
     """
     requested = after.requested_tokens - before.requested_tokens
-    if requested <= 0:
+    hits = after.hit_tokens - before.hit_tokens
+    if requested <= 0 or not 0 <= hits <= requested:
         return None
-    return (after.hit_tokens - before.hit_tokens) / requested
+    return hits / requested
 
 
 def wait_for_store_drain(
@@ -221,19 +230,35 @@ def wait_for_store_drain(
         monotonic: Clock; replaceable for tests.
 
     Returns:
-        A :class:`DrainResult`. ``drained`` is False on timeout or when no new
-        stores appeared; the caller decides how loudly to report that.
+        A :class:`DrainResult`. ``drained`` is False on timeout, when no new
+        stores appeared, or when a counter decreased; the caller decides how
+        loudly to report that.
 
     Raises:
-        MetricsEndpointError: If a read shows the endpoint is not LMCache's.
+        MetricsEndpointError: If a read shows the endpoint is not LMCache's,
+            or a counter value is invalid.
     """
     start = monotonic()
     candidate: Optional[StoreSnapshot] = None
     candidate_since = 0.0
+    previous: Optional[StoreSnapshot] = None
     while True:
         snapshot = read_store_snapshot(fetch)
         now = monotonic()
         waited = now - start
+        if previous is not None and (
+            snapshot.submitted < previous.submitted
+            or snapshot.completed < previous.completed
+        ):
+            return DrainResult(
+                False,
+                "the L2 store counters decreased during the wait (server restart "
+                "or a metric series disappeared), so the warm-up's stores cannot "
+                "be verified",
+                waited,
+                snapshot,
+            )
+        previous = snapshot
         has_new_stores = snapshot.submitted > baseline_submitted
         if has_new_stores and snapshot.completed >= snapshot.submitted:
             if snapshot != candidate:

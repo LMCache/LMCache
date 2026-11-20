@@ -304,3 +304,45 @@ def _unused_url() -> str:
 def test_fetch_metrics_reports_an_unreachable_server() -> None:
     with pytest.raises(drain.MetricsEndpointError):
         drain.fetch_metrics(_unused_url(), timeout=1.0)
+
+
+@pytest.mark.parametrize("value", ["NaN", "+Inf", "-1"])
+def test_counter_values_must_be_finite_and_non_negative(value: str) -> None:
+    with pytest.raises(drain.MetricsEndpointError):
+        drain.read_store_snapshot(lambda: _metrics(value, value))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "texts",
+    [
+        # The server restarts, then climbs back to equal counters.
+        [_metrics(15, 10), _metrics(0, 0), _metrics(5, 5)],
+        # A label series disappears, so the summed completed counter drops.
+        [_metrics(15, 10), _metrics(15, 4), _metrics(15, 15)],
+    ],
+)
+def test_wait_does_not_report_drained_when_a_counter_decreases(
+    texts: list[str],
+) -> None:
+    result = _wait(_Script(texts), _Clock(), baseline=0.0)
+    assert not result.drained
+    assert "decreased" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ((10, 10), (1, 20)),  # hit tokens went down
+        ((10, 10), (30, 20)),  # more hit tokens than requested tokens
+        ((10, 10), (10, 5)),  # requested tokens went down
+    ],
+)
+def test_hit_rate_between_rejects_an_impossible_interval(
+    before: tuple[int, int], after: tuple[int, int]
+) -> None:
+    assert (
+        drain.hit_rate_between(
+            drain.LookupSnapshot(*before), drain.LookupSnapshot(*after)
+        )
+        is None
+    )
