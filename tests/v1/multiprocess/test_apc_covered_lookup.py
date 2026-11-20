@@ -21,6 +21,7 @@ import threading
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.v1.common.custom_types import IPCCacheServerKey
@@ -81,9 +82,12 @@ def _make_key(n_chunks: int, start_chunks: int = 0) -> IPCCacheServerKey:
 def _ctx_with_hashes(n_chunks: int) -> MagicMock:
     ctx = MagicMock()
     ctx.chunk_size = CHUNK_SIZE
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = [
+    token_hasher = MagicMock()
+    token_hasher.compute_packed_chunk_hashes.return_value = [
         bytes([i]) * 4 for i in range(n_chunks)
     ]
+    ctx.layout_desc_registry.get_chunk_size.return_value = CHUNK_SIZE
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     return ctx
 
 
@@ -281,6 +285,14 @@ def test_shrink_cannot_recur_once_fallen_back():
     assert tracker.pending_free_ranges == []
 
 
+def _layout(dtype: Any) -> Any:
+    """A registered layout for object group 0, carrying the storage dtype."""
+    # First Party
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
+
+    return MemoryLayoutDesc(shapes=[torch.Size([CHUNK_SIZE, 1])], dtypes=[dtype])
+
+
 def _lookup_ctx(n_chunks: int) -> MagicMock:
     """Mock engine context sufficient to drive ``LookupModule.lookup``."""
     ctx = _ctx_with_hashes(n_chunks)
@@ -291,8 +303,42 @@ def _lookup_ctx(n_chunks: int) -> MagicMock:
     ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
         DEFAULT_SHARD_REPLICATION_DESC
     )
-    ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
+    ctx.layout_desc_registry.find_group_layout_descs.return_value = {
+        0: _layout(torch.float16)
+    }
     return ctx
+
+
+def test_the_covered_prefix_touch_matches_the_stored_keys():
+    """Passing no layouts here would touch keys no store ever wrote.
+
+    The touched set is compared with what ``ipc_key_to_object_keys`` builds
+    from the same registration, so dropping ``group_layout_descs`` at this call
+    site fails the test instead of silently refreshing nothing.
+    """
+    # First Party
+    from lmcache.v1.distributed.api import ipc_key_to_object_keys
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    ctx = _lookup_ctx(4)
+    module = LookupModule(ctx)
+    key = _make_key(4, start_chunks=4)
+    module.lookup(key, 1)
+
+    touched = ctx.storage_manager.touch_cached_keys.call_args[0][0]
+    stored = [
+        obj_key
+        for group_keys in ipc_key_to_object_keys(
+            key,
+            [bytes([i]) * 4 for i in range(4)],
+            [0],
+            DEFAULT_SHARD_REPLICATION_DESC,
+            group_layout_descs={0: _layout(torch.float16)},
+        )
+        for obj_key in group_keys
+    ]
+
+    assert sorted(touched, key=repr) == sorted(stored, key=repr)
 
 
 def test_all_covered_lookup_touches_and_submits_no_prefetch():

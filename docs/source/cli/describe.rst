@@ -58,6 +58,33 @@ The output shows:
 
 - **Overview** — health status, engine type, chunk size.
 - **L1 storage** — capacity, usage, eviction policy, cached object count.
+  On a server with several L1s (repeated ``--l1-manager``), these lines are
+  totals across all L1s, the eviction line lists each distinct policy, and
+  each L1 gets its own section:
+
+  .. code-block:: text
+
+     L1 capacity (GB):                             3.00
+     L1 used (GB):                          0.00 (0.0%)
+     Eviction policy:                          LRU, ARC
+     Cached objects:                                  0
+     Active sessions:                                 0
+     -------------------- L1: hot ---------------------
+     Tag:                                           hot
+     Backend:                                      dram
+     Capacity (GB):                                1.00
+     Used (GB):                             0.00 (0.0%)
+     Cached objects:                                  0
+     Eviction policy:                               LRU
+     -------------------- L1: warm --------------------
+     Tag:                                          warm
+     Backend:                                      dram
+     Capacity (GB):                                2.00
+     Used (GB):                             0.00 (0.0%)
+     Cached objects:                                  0
+     Eviction policy:                               ARC
+
+  In ``--format json`` output, these sections form the ``l1_managers`` list.
 - **Registered models** — per-model KV cache layout: a context-wide summary
   followed by one kernel group section per kernel group, each with the engine
   KV tensor shape (symbolic and concrete), attention backend, and group geometry.

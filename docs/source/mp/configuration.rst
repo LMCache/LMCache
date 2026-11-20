@@ -111,8 +111,10 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - ``32``
      - gRPC request-dispatch threads. Used only with ``--transport grpc``.
    * - ``--grpc-server-mode``
-     - ``sync``
-     - gRPC server implementation: ``sync``, ``aio`` or ``native``.
+     - ``auto``
+     - gRPC server implementation: ``auto``, ``sync``, ``aio`` or ``native``.
+       ``auto`` picks ``native`` when ``pygrpc-native`` is installed and
+       ``aio`` otherwise.
        ``aio`` receives requests on one event loop and hands only the
        handlers to worker threads. ``native`` does the HTTP/2 and gRPC
        framing in Rust, outside the GIL; it needs the ``pygrpc-native``
@@ -121,8 +123,8 @@ Source: ``lmcache/v1/multiprocess/config.py``
        All three serve the same clients over TCP.
        In ``native`` mode the native front reports the call count and
        duration metrics itself (pygrpc-native 0.3.0 or later), under the
-       same names, but not the message size ones. Used only with
-       ``--transport grpc``.
+       same names, but not the message size ones. Used with
+       ``--transport grpc`` and by the P2P listener.
    * - ``--hash-algorithm``
      - ``blake3``
      - Hash algorithm for token-based operations.
@@ -211,12 +213,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
        Events still carry LMCache chunk hashes and chunk size; native engine
        block identities are separate work.
        With the channel enabled, Stored requires a committed L1 copy of every
-       registered object group on every KV rank. Evicting one of several copies
-       of an object does not remove its CPU placement; losing the final copy
-       of a required object does. Duplicate commits are suppressed while the
+       distinct shard of each registered object group, as determined by its
+       TP replication and DCP sharding, within the same salt and identity tags.
+       Evicting one of several copies of an object does not remove its CPU
+       placement; losing the final copy of a required object does.
+       Duplicate commits are suppressed while the
        Stored record remains in the replay log. A later commit refreshes an
        aged-out record. EventBus loss clears the ownership projection and
-       requires fresh commits from all ranks.
+       requires fresh commits for every required object.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at
@@ -711,6 +715,10 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--eviction-ratio``
      - ``0.2``
      - Fraction of allocated memory to evict when triggered (0.0--1.0).
+       It also sets when stores to L2 wait: new ones wait once in-flight ones
+       reach ``trigger_watermark * (1 - eviction_ratio)`` of L1, so locked data
+       cannot fill L1 and block new KV and prefetches. At ``1.0`` this is 0, so
+       they go out one batch at a time.
 
 L2 Policies
 -----------

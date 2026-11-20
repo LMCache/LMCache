@@ -515,7 +515,12 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         kv_groups_manager = cache_context.kv_layer_groups_manager
         attn_desc = kv_groups_manager.get_attn_desc()
         self._ctx.layout_desc_registry.register(
-            model_name, world_size, layout_desc, attn_desc
+            model_name,
+            world_size,
+            layout_desc,
+            self._ctx.chunk_size,
+            self._ctx.hash_algorithm_name,
+            attn_desc=attn_desc,
         )
 
         with self._lock:

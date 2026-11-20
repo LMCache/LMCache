@@ -88,17 +88,24 @@ class AerospikeL2AdapterConfig(L2AdapterConfigBase):
         Raises:
             ValueError: If required fields are missing or invalid.
         """
-        hosts = d.get("hosts")
-        if not isinstance(hosts, str) or not hosts:
-            raise ValueError("hosts must be a non-empty string")
+        # Fields the JSON leaves out stay empty, so the factory can fall back
+        # to the LMCACHE_AEROSPIKE_* variables before the built-in defaults.
+        hosts = d.get("hosts", "")
+        if not isinstance(hosts, str):
+            raise ValueError("hosts must be a string")
+        if not hosts and not os.environ.get("LMCACHE_AEROSPIKE_HOSTS"):
+            raise ValueError(
+                "hosts must be a non-empty string when LMCACHE_AEROSPIKE_HOSTS "
+                "is not set"
+            )
 
-        namespace = d.get("namespace", "lmcache")
-        if not isinstance(namespace, str) or not namespace:
-            raise ValueError("namespace must be a non-empty string")
+        namespace = d.get("namespace", "")
+        if not isinstance(namespace, str):
+            raise ValueError("namespace must be a string")
 
-        set_name = d.get("set_name", d.get("set", "kv_chunks"))
-        if not isinstance(set_name, str) or not set_name:
-            raise ValueError("set_name must be a non-empty string")
+        set_name = d.get("set_name", d.get("set", ""))
+        if not isinstance(set_name, str):
+            raise ValueError("set_name must be a string")
 
         num_workers = d.get("num_workers", 8)
         if not isinstance(num_workers, int) or num_workers <= 0:
@@ -150,7 +157,8 @@ class AerospikeL2AdapterConfig(L2AdapterConfigBase):
     def help(cls) -> str:
         return (
             "Aerospike L2 adapter config fields:\n"
-            "- hosts (str): seed hosts host:port[,...] (required)\n"
+            "- hosts (str): seed hosts host:port[,...] (required unless\n"
+            "  LMCACHE_AEROSPIKE_HOSTS is set)\n"
             "- namespace (str): Aerospike namespace (default lmcache)\n"
             "- set_name / set (str): Aerospike set (default kv_chunks)\n"
             "- num_workers (int): C++ I/O threads (default 8)\n"
@@ -193,10 +201,10 @@ def _create_aerospike_l2_adapter(
     assert isinstance(config, AerospikeL2AdapterConfig)
 
     hosts = config.hosts or os.environ.get("LMCACHE_AEROSPIKE_HOSTS", "")
-    namespace = config.namespace or os.environ.get(
-        "LMCACHE_AEROSPIKE_NAMESPACE", "lmcache"
+    namespace = (
+        config.namespace or os.environ.get("LMCACHE_AEROSPIKE_NAMESPACE") or "lmcache"
     )
-    set_name = config.set_name or os.environ.get("LMCACHE_AEROSPIKE_SET", "kv_chunks")
+    set_name = config.set_name or os.environ.get("LMCACHE_AEROSPIKE_SET") or "kv_chunks"
     username = config.username or os.environ.get("LMCACHE_AEROSPIKE_USERNAME", "")
     password = config.password or os.environ.get("LMCACHE_AEROSPIKE_PASSWORD", "")
 

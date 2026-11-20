@@ -250,6 +250,7 @@ class StorageManager:
                     [self._l2_adapters[d.index] for d in descriptors],
                     descriptors,
                     create_store_policy(config.store_policy, self._l1_managers),
+                    eviction_config=manager.config.eviction or config.eviction_config,
                 )
                 self._store_controllers[manager.l1_manager_id] = controller
                 controller.start()
@@ -387,6 +388,30 @@ class StorageManager:
         )
 
         # TODO: global key states update
+
+    def abort_write(
+        self, keys: list[ObjectKey], l1_owners: dict[ObjectKey, int]
+    ) -> None:
+        """Discard reserved objects whose store failed, once their copies drained.
+
+        Schedule it on the copies' stream so every device write into the
+        buffers has finished. A private L1 frees them before write-TTL expiry;
+        a shared Device-DAX L1 aborts its grants, which would otherwise block
+        every later writer of the keys.
+
+        Args:
+            keys: Keys reserved by :meth:`reserve_write`.
+            l1_owners: The L1 manager each key was reserved in, from
+                :func:`l1_owners_of`.
+
+        Raises:
+            ValueError: ``l1_owners`` omits a key or names an unregistered L1
+                manager.
+        """
+        for owner, group in self._group_by_owner(keys, l1_owners).items():
+            self._l1_managers_by_id[owner].finish_write_and_delete(
+                group, tag=_L1_WRITE_TAG
+            )
 
     @contextmanager
     def read_prefetched_results(

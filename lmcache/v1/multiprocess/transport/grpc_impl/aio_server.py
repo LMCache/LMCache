@@ -232,7 +232,7 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
                         registered.operation,
                         exc_info=item,
                     )
-                    await context.abort(grpc.StatusCode.INTERNAL, str(item))
+                    break
                 yield registered.response_encoder(item)
                 credits.release()
         finally:

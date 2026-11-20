@@ -13,29 +13,86 @@ import msgspec
 from lmcache.v1.distributed.api import ObjectKey, validate_identity_tags
 from lmcache.v1.utils.frozen_dict import freeze_dict
 
+# Known tag names are encoded as an index, unknown ones as their name. The table
+# is append-only: an index is part of the wire format, so inserting a name in the
+# middle would rename every object written by an older engine.
+_TAG_NAMES: tuple[str, ...] = ("kv_dtype",)
+
+
+def _tag_name_item(name: str) -> object:
+    """Encode a tag name as its table index, or as itself when unknown."""
+    try:
+        return _TAG_NAMES.index(name)
+    except ValueError:
+        return name
+
+
+def _tag_name_from_item(item: object) -> str:
+    """Decode a tag name from its table index or its literal name."""
+    if isinstance(item, int):
+        try:
+            return _TAG_NAMES[item]
+        except IndexError:
+            raise ValueError(f"unknown identity tag index {item}") from None
+    if isinstance(item, str):
+        return item
+    raise ValueError(f"invalid identity tag name {item!r}")
+
 
 def encode_tags(tags: Mapping[str, str]) -> str:
-    """Return a canonical path-safe tag token."""
+    """Return a canonical path-safe tag token.
+
+    The payload is msgpack rather than JSON because every byte lands in an L2
+    file name, where the limit is 255 bytes; known names ride as table indices.
+    """
     if not tags:
         return ""
+    payload = msgspec.msgpack.encode(
+        [[_tag_name_item(name), value] for name, value in sorted(tags.items())]
+    )
+    return "x2-" + base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _encode_legacy_tags(tags: Mapping[str, str]) -> str:
+    """Return the JSON token older engines wrote, for canonicality checks."""
     payload = msgspec.json.encode(dict(sorted(tags.items())))
     return "x1-" + base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_legacy_tags(encoded: str) -> dict[str, str]:
+    """Decode the JSON token older engines wrote."""
+    payload = base64.b64decode(
+        encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True
+    )
+    return msgspec.json.decode(payload, type=dict[str, str])
 
 
 def decode_tags(token: str) -> Mapping[str, str]:
     """Decode a tag token, rejecting malformed or noncanonical encodings."""
     if not token:
         return {}
-    if not token.startswith("x1-"):
+    if token.startswith("x1-"):
+        decoded = _decode_legacy_tags(token[3:])
+    elif token.startswith("x2-"):
+        encoded = token[3:]
+        payload = base64.b64decode(
+            encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True
+        )
+        pairs = msgspec.msgpack.decode(payload)
+        decoded = {_tag_name_from_item(name): value for name, value in pairs}
+    else:
         raise ValueError("unsupported identity tags version")
-    encoded = token[3:]
-    payload = base64.b64decode(
-        encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True
-    )
-    decoded = msgspec.json.decode(payload, type=dict[str, str])
+    if not decoded:
+        # An empty mapping is encoded as no token at all, never as one.
+        raise ValueError("non-canonical identity tags token")
     validate_identity_tags(decoded)
     tags = freeze_dict(decoded, sort_keys=True)
-    if encode_tags(tags) != token:
+    # Only the current encoding has a canonical form here: a legacy token was
+    # produced by a different encoder and is accepted as written.
+    canonical = (
+        encode_tags(tags) if token.startswith("x2-") else _encode_legacy_tags(tags)
+    )
+    if canonical != token:
         raise ValueError("non-canonical identity tags token")
     return tags
 

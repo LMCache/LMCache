@@ -77,6 +77,7 @@ jobs:
               - '.github/scripts/cpu_server_bench_test.sh'
               - '.github/scripts/cpu_vllm_e2e_test.sh'
               - '.github/scripts/install_vllm_cpu.sh'
+              - '.github/scripts/cpu_nightly.py'
               - '.github/scripts/install_lmcache_cpu.sh'
               - '.github/scripts/download_model.sh'
               - '.github/scripts/download_gh_release_model.sh'
@@ -266,6 +267,11 @@ jobs:
                 || steps.resolve-vllm.outputs.VLLM_CPU_NIGHTLY_SPEC }}
         run: bash .github/scripts/install_vllm_cpu.sh
 
+      - name: Require a fresh CPU nightly build
+        id: freshness
+        if: inputs.nightly_verify
+        run: python .github/scripts/cpu_nightly.py check-freshness
+
       - name: Install lmcache (CPU-only, no vLLM)
         id: install-lmcache
         run: bash .github/scripts/install_lmcache_cpu.sh
@@ -374,6 +380,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           INSTALL_VLLM_OUTCOME: ${{ steps.install-vllm.outcome }}
           INSTALL_LMC_OUTCOME: ${{ steps.install-lmcache.outcome }}
+          FRESHNESS_OUTCOME: ${{ steps.freshness.outcome }}
           MATRIX_OS: ${{ matrix.os }}
           MATRIX_MODEL: ${{ matrix.model.name }}
           MATRIX_REQUEST_TRANSPORT: ${{ matrix.request_transport }}
@@ -385,3 +392,4 @@ jobs:
         with:
           name: verify-result-${{ matrix.os }}-${{ matrix.model.name }}-${{ matrix.request_transport }}
           path: verify_result.json
+

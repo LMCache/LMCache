@@ -16,7 +16,7 @@ from lmcache.v1.common.custom_types import (
     KVEventBatch,
     KVEventRecord,
 )
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import ObjectKey, get_kv_worker_ids
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -41,30 +41,17 @@ from lmcache.v1.transport.futures import MessagingStream
 
 _KIND_LOST = "lost"
 _TOKEN_BINDING_CACHE_SIZE = 65536
-_ChunkKey = tuple[str, int, str, bytes]
+_ChunkKey = tuple[str, int, str, tuple[tuple[str, str], ...], bytes]
 
 
 def _chunk_key(key: ObjectKey) -> _ChunkKey:
-    """Identify content independently of its required rank and object group."""
+    """Scope content by model, world, salt and identity tags, across rank/group."""
     return (
         key.model_name,
         ObjectKey.WorldSizeFromKVRank(key.kv_rank),
         key.cache_salt,
+        tuple(key.identity.tags.items()),
         key.chunk_hash,
-    )
-
-
-_ResidencyKey = tuple[bytes, int, str, int, str]
-
-
-def _residency_key(key: ObjectKey) -> _ResidencyKey:
-    """Fields that decide whether one L1 copy of a chunk exists."""
-    return (
-        key.chunk_hash,
-        key.kv_rank,
-        key.model_name,
-        key.object_group_id,
-        key.cache_salt,
     )
 
 
@@ -75,22 +62,22 @@ class CommittedKVResidency:
     Owners are retained only while their ObjectKey has a readable copy.
 
     Args:
-        layouts: Registered geometry supplying every required object group;
-            ObjectKey supplies the complete KV world size.
+        layouts: Registered geometry supplying object groups and their TP/DCP
+            shard replication; ObjectKey supplies the KV world size.
     """
 
     def __init__(self, layouts: LayoutDescRegistry) -> None:
         self._layouts = layouts
-        self._owners: dict[_ResidencyKey, set[str]] = {}
+        self._owners: dict[ObjectKey, set[str]] = {}
 
     def commit(self, key: ObjectKey, l1_tag: str) -> None:
         """Record a completed readable copy; duplicate notifications are idempotent.
 
         Args:
-            key: The committed object, including rank, group, and cache salt.
+            key: The committed object, including rank, group, salt and identity tags.
             l1_tag: The L1 manager that completed the write.
         """
-        self._owners.setdefault(_residency_key(key), set()).add(l1_tag)
+        self._owners.setdefault(key, set()).add(l1_tag)
 
     def evict(self, key: ObjectKey, l1_tag: str) -> None:
         """Forget one L1 copy, removing owner state when its final copy is gone.
@@ -99,37 +86,41 @@ class CommittedKVResidency:
             key: The object removed from L1.
             l1_tag: The L1 manager that removed it. Unknown copies are ignored.
         """
-        owners = self._owners.get(_residency_key(key))
+        owners = self._owners.get(key)
         if owners is not None:
             owners.discard(l1_tag)
             if not owners:
-                del self._owners[_residency_key(key)]
+                del self._owners[key]
 
     def is_committed(self, key: ObjectKey) -> bool:
-        """Return whether every required rank/group has a readable L1 copy.
+        """Return whether every distinct registered group shard has an L1 copy.
 
         Args:
-            key: Any object identifying the chunk's model, world, salt, and hash.
+            key: Any object identifying the chunk's model, world, salt, tags and hash.
 
         Returns:
-            False for missing/empty registered geometry or an incomplete chunk.
+            False for missing or empty registered geometry, or an
+            incomplete chunk. TP replicas require one object per DCP shard.
             Different L1 tags may supply different required objects.
         """
         world_size = ObjectKey.WorldSizeFromKVRank(key.kv_rank)
-        groups = self._layouts.find_group_layout_descs(key.model_name, world_size)
-        if not world_size or not groups:
+        geometry = self._layouts.find_group_shard_geometry(key.model_name, world_size)
+        if not world_size or geometry is None:
             return False
+        groups, replication = geometry
         return all(
-            (
-                key.chunk_hash,
-                ObjectKey.ComputeKVRank(world_size, rank, world_size, rank),
-                key.model_name,
-                group,
-                key.cache_salt,
+            ObjectKey(
+                identity=key.identity,
+                kv_rank=ObjectKey.ComputeKVRank(world_size, rank, world_size, rank),
+                object_group_id=group,
             )
             in self._owners
-            for rank in range(world_size)
             for group in groups
+            for rank in get_kv_worker_ids(
+                world_size,
+                replication.tp_replicas(group),
+                replication.dcp_shards(group),
+            )
         )
 
     def clear(self) -> None:
