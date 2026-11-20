@@ -34,11 +34,9 @@ Validated models
       server (enabled by default). The chunk size is negotiated from vLLM's
       *unified block size*, which is model-specific — vLLM logs
       ``Setting attention block size to N tokens`` at startup. The values below
-      are for vLLM 0.34.0 and later (default ``--block-size 64``). On vLLM
-      0.33 and earlier, or with a 16-token block size, ``N`` is 784 for the
-      27B models and 544 for Qwen3.5-0.8B; use the logged ``N`` as
-      ``--chunk-size``, since a larger value rounds up to a multiple of ``N``.
-      See :ref:`mamba-block-size`:
+      are for vLLM 0.34.0 and later; older versions can report 784 and 544
+      (see :ref:`mamba-block-size`). Use the logged ``N`` as ``--chunk-size``,
+      since a larger value rounds up to a multiple of ``N``:
 
       .. list-table::
          :header-rows: 1

@@ -178,13 +178,16 @@ a Mamba state page. It depends on the model's head dimensions and GDN state
 size (and, when the recurrent state is sharded, on the tensor-parallel size),
 so it is model-specific. ``N`` is also rounded up to a multiple of the
 attention block alignment, which is the larger of vLLM's ``--block-size``
-(default 64 since vLLM 0.34.0, previously 16; some backends, such as vLLM's
-ROCm attention backend, still default to 16) and the attention backend's
-smallest kernel block. The Qwen values below are for the 64-token default; with a
-16-token block size the Qwen rows are 784 (27B) and 544 (0.8B). vLLM prints
-``N`` once at startup::
+(default 64 since vLLM 0.34.0, previously 16) and the attention backend's
+smallest kernel block. With prefix caching, which puts vLLM's Mamba cache in
+align mode, the GDN prefill's checkpoint alignment (64 tokens for the
+FlashInfer prefill) also applies. The Qwen values below are for vLLM 0.34.0
+and later. On vLLM 0.32 and earlier the Qwen rows are 784 (27B) and 544
+(0.8B); on 0.33 they are 832 and 576 with the FlashInfer GDN prefill (the
+default on Hopper) and 784 and 544 with the Triton prefill (for example, on
+A100). vLLM prints ``N`` once at startup::
 
-    INFO ... interface.py:670] Setting attention block size to 832 tokens to
+    INFO ... interface.py:...] Setting attention block size to 832 tokens to
     ensure that attention page size is >= mamba page size.
 
 Nothing has to be derived from ``N`` by hand: the LMCache server's
