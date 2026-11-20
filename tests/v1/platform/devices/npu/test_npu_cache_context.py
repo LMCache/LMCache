@@ -10,7 +10,9 @@ One ``@requires_npu`` case checks staging actually lands on device.
 """
 
 # Standard
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
+import contextlib
 
 # Third Party
 import pytest
@@ -21,6 +23,7 @@ from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.common.utils import get_group_data_ptrs
 from lmcache.v1.platform.devices.npu import NpuDeviceSpec
+from lmcache.v1.platform.devices.npu import cache_context as npu_ctx_mod
 from lmcache.v1.platform.devices.npu.cache_context import (
     NpuCacheContext,
     _NpuHostCallbackStream,
@@ -212,6 +215,47 @@ def test_close_synchronizes_before_releasing_ipc_owners(
     context.close()
     assert calls == expected
     assert context.kv_caches_ == ([] if n_wrappers else ["keep"])
+
+
+def test_close_deregisters_gds_staging_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Close deregisters the staging buffer from GDS before IPC release."""
+    calls: list[str] = []
+
+    class _Stream:
+        def synchronize(self) -> None:
+            calls.append("synchronize")
+
+    class _Wrapper:
+        def close(self) -> None:
+            calls.append("wrapper.close")
+
+    class _TestContext(NpuCacheContext):
+        def __init__(self) -> None:
+            self.stream_ = _Stream()  # type: ignore[assignment]
+            self._ipc_wrappers = (_Wrapper(),)  # type: ignore[assignment]
+            self._gds_buffer_registered = True
+            self._temp_buffer = cast(Any, SimpleNamespace(buffer="STAGING"))
+            self.kv_caches_ = []
+
+    monkeypatch.setattr(
+        npu_ctx_mod,
+        "deregister_gds_gpu_buffer",
+        lambda buffer: calls.append(f"deregister:{buffer}"),
+    )
+    monkeypatch.setattr(
+        npu_ctx_mod.torch_dev, "stream", lambda _s: contextlib.nullcontext()
+    )
+
+    context = _TestContext()
+    context.close()
+    context.close()
+
+    assert calls.index("synchronize") < calls.index("deregister:STAGING")
+    assert calls.index("deregister:STAGING") < calls.index("wrapper.close")
+    assert calls.count("deregister:STAGING") == 1
+    assert not context._gds_buffer_registered
 
 
 def test_device_spec_creates_npu_cache_context(

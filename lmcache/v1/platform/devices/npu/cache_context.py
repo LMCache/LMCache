@@ -386,7 +386,7 @@ class NpuCacheContext(BaseCacheContext):
 
     def _deregister_gds_buffer(self) -> None:
         """Deregister staging memory if this context registered it."""
-        if not self._gds_buffer_registered:
+        if not getattr(self, "_gds_buffer_registered", False):
             return
         stream = getattr(self, "stream_", None)
         synchronize = getattr(stream, "synchronize", None)
