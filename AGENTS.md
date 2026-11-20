@@ -352,3 +352,10 @@ When asked to review a PR, use the `pr-review` skill; before creating a PR,
 self-check with the `pre-pr-check` skill (both under `.claude/skills/`). Create
 the PR as a draft and leave the ready-for-review transition to the submitting
 human after their self-review.
+
+### Bash environment propagation in validation commands
+
+Put comments before a command whose environment assignments use backslash
+continuations. A comment inside the continued command can leave assignments
+unexported while `bash -n` still passes. Check that integration-test variables
+reach the pytest process before relying on a green validation run.

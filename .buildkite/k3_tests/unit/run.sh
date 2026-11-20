@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unit test entrypoint for K8s pods.
-# Installs LMCache (no vLLM) + test deps, then runs pytest with coverage.
+# Installs the pinned vLLM runtime for isolated nightly API verification.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -26,16 +26,27 @@ mkdir -p "${LMCACHE_TEST_TMPDIR}"
 trap 'rm -rf "${LMCACHE_TEST_TMPDIR}" 2>/dev/null || true' EXIT
 
 # ── Environment setup ────────────────────────────────────────
-source .buildkite/k3_harness/setup-lmcache-only-env.sh
+source .buildkite/k3_harness/setup-env.sh
 uv pip install -r requirements/test.txt
 # Generated gRPC bindings are intentionally not tracked. Generate them only
 # after the test dependencies have installed grpcio-tools.
 python lmcache/v1/transport/grpc/_proto_gen/_generate.py
 
+python - <<'PY'
+import importlib.metadata as md
+import vllm
+
+expected = "0.34.0rc1.dev957+gb2c92fa9c"
+if md.version("vllm") != expected or vllm.__version__ != expected:
+    raise SystemExit("Full nightly units must use the selected b2c92fa9 runtime")
+print("Full integration unit suite uses vLLM", vllm.__version__)
+PY
+
 # ── Run unit tests with coverage ─────────────────────────────
+# Collect all compatibility failures here; the regular PR job remains unchanged.
 RUN_DEVDAX_L1_INTEGRATION=1 RUN_DAX_L2_INTEGRATION=1 \
 LMCACHE_TEST_DEVDAX_L1_PATHS="" LMCACHE_TRACK_USAGE="false" \
-pytest --maxfail=1 --cov=lmcache \
+pytest --maxfail=0 --cov=lmcache \
     --cov-report term --cov-report=html:coverage-test \
     --cov-report=xml:coverage-test.xml --html=durations/test.html \
     --ignore=tests/skipped
