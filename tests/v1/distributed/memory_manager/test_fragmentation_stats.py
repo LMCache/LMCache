@@ -15,11 +15,14 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1 import memory_management
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     GdsL1Config,
     L1ManagerConfig,
     L1MemoryManagerConfig,
 )
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import create_l1_manager
 from lmcache.v1.distributed.memory_manager import (
     GDSL1MemoryManager,
@@ -37,13 +40,11 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-import lmcache.v1.distributed.memory_manager.l1_memory_manager as l1_memory_manager
-from lmcache.v1 import memory_management
-from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 
 # Importing this sets the process-wide MeterProvider with an
 # InMemoryMetricReader; the L1 gauges bind their instruments to it.
 from tests.v1.mp_observability.subscribers.metrics.otel_setup import reader as _reader
+import lmcache.v1.distributed.memory_manager.l1_memory_manager as l1_memory_manager
 
 _ALIGN = 4096
 _ARENA = 16 * 1024
@@ -243,24 +244,22 @@ def test_shadow_manager_reports_zeros() -> None:
 # =============================================================================
 
 
-def _value_for(metric: str, attrs: dict | None = None) -> float:
-    """Look up the current value of ``metric`` for the exact attribute set."""
+def _gauge_snapshot() -> dict[tuple, float]:
+    """Collect once: ``{(metric, sorted attrs): value}`` from one scrape."""
     data = _reader.get_metrics_data()
+    result: dict[tuple, float] = {}
     if data is None:
-        return 0
-    key = tuple(sorted((attrs or {}).items()))
+        return result
     for resource_metrics in data.resource_metrics:
         for scope_metrics in resource_metrics.scope_metrics:
             for metric_data in scope_metrics.metrics:
-                if metric_data.name != metric:
-                    continue
                 for dp in metric_data.data.data_points:
                     # Skip non-numeric (e.g. histogram) data points.
                     if not hasattr(dp, "value"):
                         continue
-                    if tuple(sorted(dict(dp.attributes or {}).items())) == key:
-                        return dp.value
-    return 0
+                    attrs = tuple(sorted(dict(dp.attributes or {}).items()))
+                    result[(metric_data.name, attrs)] = dp.value
+    return result
 
 
 def _dram_l1(allocator: MemoryAllocatorInterface):
@@ -288,20 +287,20 @@ def test_gauges_report_manager_stats_with_l1_labels() -> None:
     """The gauges surface the manager's stats tagged by L1 tag and medium."""
     manager = _dram_l1(_StatsOnlyAllocator())
     try:
-        assert (
-            _value_for("lmcache_mp.l1_largest_free_block_bytes", _DRAM_ATTRS) == 123456
-        )
-        assert _value_for("lmcache_mp.l1_free_block_count", _DRAM_ATTRS) == 7
+        snapshot = _gauge_snapshot()
+        attrs = tuple(sorted(_DRAM_ATTRS.items()))
+        assert snapshot[("lmcache_mp.l1_largest_free_block_bytes", attrs)] == 123456
+        assert snapshot[("lmcache_mp.l1_free_block_count", attrs)] == 7
     finally:
         manager.close()
 
 
 def test_gauges_track_a_real_arena(monkeypatch: pytest.MonkeyPatch) -> None:
-    """End to end: a real Mixed allocator's arena reaches the gauges.
+    """End to end: writes and deletes through a fully real DRAM L1.
 
-    Plain CPU storage stands in for the pinned arena; every layer above
-    the buffer (Mixed allocator, memory manager, L1 manager, gauges) is
-    real, and the usage gauges are asserted from the same scrape.
+    Only the pinned buffer's allocation and release are patched to plain
+    CPU storage; the allocator factory, L1 manager and write/delete path
+    are real. All four gauge values come from a single scrape.
     """
     unit = _ALIGN
     arena = 6 * unit
@@ -313,22 +312,36 @@ def test_gauges_track_a_real_arena(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         memory_management, "_free_cpu_memory", lambda *args, **kwargs: None
     )
-    allocator = MixedMemoryAllocator(arena, align_bytes=unit)
-    manager = _dram_l1(allocator)
+    config = L1ManagerConfig(
+        memory_config=L1MemoryManagerConfig(
+            size_in_bytes=arena, use_lazy=False, align_bytes=unit, shm_name=""
+        )
+    )
+    manager = create_l1_manager(config)
     try:
-        objects = [
-            allocator.allocate(torch.Size([unit]), torch.uint8) for _ in range(6)
+        keys = [
+            ObjectKey(
+                chunk_hash=ObjectKey.IntHash2Bytes(index),
+                model_name="test_model",
+                kv_rank=0,
+            )
+            for index in range(6)
         ]
-        assert objects[0] is not None
-        for odd_object in objects[1::2]:
-            assert odd_object is not None
-            allocator.free(odd_object)
-        assert _value_for("lmcache_mp.l1_memory_usage_bytes", _DRAM_ATTRS) == 3 * unit
-        assert _value_for("lmcache_mp.l1_usage_ratio", _DRAM_ATTRS) == 0.5
-        assert _value_for("lmcache_mp.l1_largest_free_block_bytes", _DRAM_ATTRS) == unit
-        assert _value_for("lmcache_mp.l1_free_block_count", _DRAM_ATTRS) == 3
-        for even_object in objects[0::2]:
-            assert even_object is not None
-            allocator.free(even_object)
+        layout = MemoryLayoutDesc(shapes=[torch.Size([unit])], dtypes=[torch.uint8])
+        results = manager.reserve_write(
+            keys=keys, is_temporary=[False] * len(keys), layout_desc=layout
+        )
+        written = [key for key, (_, mem_obj) in results.items() if mem_obj is not None]
+        assert len(written) == 6
+        manager.finish_write(written)
+        for key, error in manager.delete(keys[1::2]).items():
+            assert error == L1Error.SUCCESS
+
+        snapshot = _gauge_snapshot()
+        attrs = tuple(sorted(_DRAM_ATTRS.items()))
+        assert snapshot[("lmcache_mp.l1_memory_usage_bytes", attrs)] == 3 * unit
+        assert snapshot[("lmcache_mp.l1_usage_ratio", attrs)] == 0.5
+        assert snapshot[("lmcache_mp.l1_largest_free_block_bytes", attrs)] == unit
+        assert snapshot[("lmcache_mp.l1_free_block_count", attrs)] == 3
     finally:
         manager.close()
