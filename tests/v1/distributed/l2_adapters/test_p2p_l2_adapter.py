@@ -1448,3 +1448,58 @@ def test_a_canary_rejected_by_the_peer_is_logged():
         submit()  # probe
         assert adapter.query_lookup_and_lock_result(submit()).popcount() == 0
         assert log_exception.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "ack_error",
+    [
+        MPServerUnavailableError("UNAVAILABLE", "peer down"),
+        MPRequestError("DEADLINE_EXCEEDED", "peer frozen"),
+    ],
+    ids=["down", "frozen"],
+)
+def test_one_traceback_per_outage(ack_error, caplog, monkeypatch):
+    """A run of failed acks to an unreachable peer logs one traceback for the
+    outage, a canary that fails the same way adds none, and the next outage
+    after the peer recovers logs one again."""
+    acks: list[_PendingFuture] = []
+
+    def send_lookup(*_args) -> _PendingFuture:
+        acks.append(_PendingFuture())
+        return acks[-1]
+
+    with _adapter() as (adapter, req_client, *_):
+        req_client.p2p_lookup_and_lock.side_effect = send_lookup
+        req_client.p2p_query_lookup_results.return_value = _FakeFuture(
+            value=[TransferChannelAddress(offset=100, size=10)]
+        )
+        req_client.probe.return_value = _FakeFuture()  # answered at once
+        # The lmcache logger does not propagate, so caplog would see nothing.
+        monkeypatch.setattr(p2p_mod.logger, "handlers", [caplog.handler])
+
+        def submit() -> int:
+            return adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+
+        def tracebacks() -> int:
+            return sum(r.exc_info is not None for r in caplog.records)
+
+        for outage in (1, 2):
+            run = [submit() for _ in range(5)]
+            for ack in acks[-5:]:
+                ack.resolve(exc=ack_error)
+            assert all(
+                adapter.query_lookup_and_lock_result(t).popcount() == 0 for t in run
+            )
+            assert tracebacks() == outage
+
+            submit()  # skipped; sends a probe, answered at once
+            canary = submit()
+            acks[-1].resolve(exc=ack_error)  # the canary fails the same way
+            assert adapter.query_lookup_and_lock_result(canary).popcount() == 0
+            assert tracebacks() == outage
+
+            submit()  # probe again
+            canary = submit()
+            acks[-1].resolve(value=7)  # the peer is back
+            assert adapter.query_lookup_and_lock_result(canary).popcount() == 1
+        assert req_client.p2p_lookup_and_lock.call_count == 14
