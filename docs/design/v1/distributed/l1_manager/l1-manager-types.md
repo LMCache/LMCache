@@ -163,3 +163,18 @@ adapter checks, hot-plug through the `/reconfigure/dax/l1/*` routes),
 controller with the `borrowing_mock` adapter), `test_runtime_adapters.py`
 (borrowers added and removed under a configured shadow) and
 `test_multi_l1_serving.py` (the `SHADOW` configuration).
+
+## Orchestrator-owned Device-DAX regions
+
+A Device-DAX manager configured with `shared` joins the orchestrator's region
+and reports `(CXL, REMOTE)`. The orchestrator owns the extents and decides
+which keys are readable. A manager maps them through `SharedDevDaxRegion`,
+tracks write grants by key and writer tag, and holds a lease for each reader.
+It publishes completed writes before committing them and acquires visibility
+before returning a read view. An RPC outage makes new reads miss and writes
+fail. An epoch mismatch disables the manager until restart.
+
+A shared region exposes neither local eviction nor arena hot-plug. After
+copies drain, closing the manager retires its client and releases the mapping.
+Exported views must be released before the mapping can finish closing.
+Server startup remains guarded until the StorageManager integration.

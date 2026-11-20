@@ -31,6 +31,7 @@ from lmcache.v1.distributed.api import (
     Tier,
 )
 from lmcache.v1.distributed.config import (
+    DevDaxL1ManagerConfig,
     EvictionConfig,
     StorageManagerConfig,
     requires_single_l1_memory_region,
@@ -143,6 +144,15 @@ class StorageManager:
         """
         with ExitStack() as cleanup:
             self._event_bus = get_event_bus()
+
+            if any(
+                isinstance(c, DevDaxL1ManagerConfig) and c.shared is not None
+                for c in config.l1_manager_configs
+            ):
+                # The integration change that follows serves it.
+                raise ValueError(
+                    "StorageManager does not run a shared Device-DAX L1 yet"
+                )
 
             # L1 Managers:
             self._l1_managers: list[L1ManagerInterface] = create_l1_managers(

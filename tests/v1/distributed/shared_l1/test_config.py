@@ -18,6 +18,7 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     parse_args,
 )
+from lmcache.v1.distributed.storage_manager import StorageManager
 
 SHARED = {"orchestrator": "h:1", "region_id": "region", "client_id": "host"}
 PRIVATE = dict(type="DEVDAX", tag="pool", size_gb=1, path="/dev/dax0.0", offset_gb=1)
@@ -36,7 +37,10 @@ def parse(*specs: dict[str, object]) -> StorageManagerConfig:
 
 
 def test_shared_object_is_optional_unique_and_reuses_the_dax_fields() -> None:
-    shared, _, shadow = parse(SPEC, DRAM, SHADOW).l1_manager_configs
+    config = parse(SPEC, DRAM, SHADOW)
+    shared, _, shadow = config.l1_manager_configs
+    with pytest.raises(ValueError, match="does not run a shared"):
+        StorageManager(config)
     private = parse(PRIVATE).l1_manager_configs[0]
     assert isinstance(shadow, ShadowL1ManagerConfig)
     assert shadow.segment is MemorySegment.CXL
