@@ -5,8 +5,8 @@ Most tests are pure (no GPU storage library): they exercise the public interface
 (singleton/no-op semantics, the <=16 MiB region split through the backend object,
 and the registered-region mapping driven through
 :meth:`GDSContext.transfer_async`). Round-trip tests cover cuFile on NVIDIA,
-hipFile on AMD ROCm, or an explicitly configured uGDS device, and are skipped
-unless the corresponding stack is available.
+hipFile on AMD ROCm, NDS on Ascend, or an explicitly configured uGDS device,
+and are skipped unless the corresponding stack is available.
 """
 
 # Standard
@@ -104,9 +104,33 @@ def _ugds_device() -> str:
     return device
 
 
+def _nds_library_path() -> str:
+    """Return the libnds path the round-trip tests would load."""
+    return os.environ.get("NDS_LIBRARY_PATH", "/usr/local/lib/libnds.so")
+
+
+def _nds_available() -> bool:
+    """Whether an NPU and libnds are present for the NDS round-trip tests.
+
+    The scratch directory is checked separately. These tests write a slab file
+    on a local block device, so they stay skipped until ``NDS_TEST_DIR`` names
+    that directory.
+    """
+    if torch_device_type != "npu" or not torch_dev.is_available():
+        return False
+    return os.path.isfile(_nds_library_path())
+
+
 requires_gds = pytest.mark.skipif(
     not _gds_available(),
     reason="needs CUDA + nvidia-fs or ROCm + libhipfile.so (real GPUDirect Storage)",
+)
+requires_nds = pytest.mark.skipif(
+    not _nds_available(),
+    reason=(
+        "needs an available NPU and libnds.so (NDS_LIBRARY_PATH); "
+        "set NDS_TEST_DIR to a scratch directory on a local block device"
+    ),
 )
 requires_ugds = pytest.mark.skipif(
     not _ugds_device(),
@@ -186,6 +210,44 @@ def gds_slab_dir(tmp_path: Path) -> Iterator[Path]:
     with tempfile.TemporaryDirectory(dir=override, prefix="lmcache_gds_test_") as d:
         slab_dir = Path(d)
         _skip_unless_gds_registrable(slab_dir)
+        yield slab_dir
+
+
+def _skip_unless_nds_slab(directory: Path) -> None:
+    """Skip when ``directory`` cannot host an NDS slab file."""
+    try:
+        with tempfile.TemporaryDirectory(
+            dir=directory, prefix=".nds_registration_probe_"
+        ) as probe_dir:
+            backend = create_backend("nds")
+            try:
+                with backend.open_slab(probe_dir, 4096, direct_io=True):
+                    pass
+            finally:
+                backend.close_driver()
+    except (OSError, RuntimeError, ValueError) as exc:
+        pytest.skip(
+            f"NDS cannot open a slab under {directory} ({exc}); "
+            "point NDS_TEST_DIR at a directory on a local block device"
+        )
+
+
+@pytest.fixture
+def nds_slab_dir() -> Iterator[Path]:
+    """Scratch directory for the real NDS DMA round-trip tests.
+
+    ``tmp_path`` is not a fallback. NDS reads and writes the slab through the
+    block device behind the file, and the OS disk is often the wrong device.
+    """
+    override = os.environ.get("NDS_TEST_DIR", "")
+    if not override:
+        pytest.skip(
+            "set NDS_TEST_DIR to a directory on a local block device to run "
+            "the NDS DMA round-trip tests"
+        )
+    with tempfile.TemporaryDirectory(dir=override, prefix="lmcache_nds_test_") as d:
+        slab_dir = Path(d)
+        _skip_unless_nds_slab(slab_dir)
         yield slab_dir
 
 
@@ -520,6 +582,138 @@ def test_gds_chunk_larger_than_region_roundtrip(gds_slab_dir: Path):
         # Position-dependent pattern: a mis-offset or swapped segment (e.g. the
         # second segment using the wrong slab offset) would corrupt the bytes
         # around the 16 MiB boundary, which a uniform fill would not catch.
+        pattern = (torch.arange(chunk_bytes, dtype=torch.int64) % 251).to(torch.uint8)
+        buf.copy_(pattern.to(torch_device_type))
+        torch_dev.synchronize()
+        ctx.transfer_async(mem_obj, buf, SlabDirection.WRITE)
+
+        buf.zero_()
+        torch_dev.synchronize()
+        ctx.transfer_async(mem_obj, buf, SlabDirection.READ)
+        torch_dev.synchronize()
+
+        assert torch.equal(buf.cpu(), pattern)
+    finally:
+        ctx.close()
+
+
+@requires_nds
+def test_nds_two_stream_write_read(nds_slab_dir: Path):
+    """Verify independent chunk writes and reads on two NPU streams."""
+    cfg = GdsL1Config(
+        file_location=str(nds_slab_dir), size_in_bytes=64 << 20, backend="nds"
+    )
+    chunk_bytes = 8 << 20
+    ctx = GDSContext()
+    ctx.initialize(cfg)
+    mgr = GDSL1MemoryManager(cfg)
+
+    def register_and_write(stream, pattern):
+        """Register a buffer on ``stream`` and write ``pattern`` to a chunk."""
+        with torch_dev.stream(stream):
+            buf = torch.empty(chunk_bytes, dtype=torch.uint8, device=torch_device_type)
+            ctx.register_gpu_buffer(buf)
+            err, objs = mgr.allocate(
+                MemoryLayoutDesc(
+                    shapes=[torch.Size([chunk_bytes])], dtypes=[torch.uint8]
+                ),
+                1,
+            )
+            assert err == L1Error.SUCCESS
+            buf.fill_(pattern)
+            torch_dev.synchronize()
+            ctx.transfer_async(objs[0], buf, SlabDirection.WRITE)
+            torch_dev.synchronize()
+        return buf, objs[0]
+
+    stream_a = torch_dev.Stream()
+    stream_b = torch_dev.Stream()
+    try:
+        buf_a, mem_a = register_and_write(stream_a, 0xA1)
+        buf_b, mem_b = register_and_write(stream_b, 0xB2)
+
+        for stream, buf, mem, pattern in (
+            (stream_a, buf_a, mem_a, 0xA1),
+            (stream_b, buf_b, mem_b, 0xB2),
+        ):
+            with torch_dev.stream(stream):
+                buf.zero_()
+                torch_dev.synchronize()
+                ctx.transfer_async(mem, buf, SlabDirection.READ)
+                torch_dev.synchronize()
+                expected = torch.full((chunk_bytes,), pattern, dtype=torch.uint8)
+                assert torch.equal(buf.cpu(), expected)
+
+        for stream, buf in ((stream_a, buf_a), (stream_b, buf_b)):
+            with torch_dev.stream(stream):
+                ctx.deregister_gpu_buffer(buf)
+    finally:
+        ctx.close()
+
+
+@requires_nds
+def test_nds_write_read_roundtrip(nds_slab_dir: Path):
+    """Cold write then read of a chunk through the real NDS DMA path."""
+    cfg = GdsL1Config(
+        file_location=str(nds_slab_dir), size_in_bytes=64 << 20, backend="nds"
+    )
+    ctx = GDSContext()
+    ctx.initialize(cfg)
+    try:
+        chunk_bytes = 8 << 20
+        buf = torch.empty(chunk_bytes, dtype=torch.uint8, device=torch_device_type)
+        ctx.register_gpu_buffer(buf)
+
+        mgr = GDSL1MemoryManager(cfg)
+        err, objs = mgr.allocate(
+            MemoryLayoutDesc(shapes=[torch.Size([chunk_bytes])], dtypes=[torch.uint8]),
+            1,
+        )
+        assert err == L1Error.SUCCESS
+        mem_obj = objs[0]
+        assert isinstance(mem_obj, GDSMemoryObject)
+
+        buf.fill_(0xAB)
+        torch_dev.synchronize()
+        ctx.transfer_async(mem_obj, buf, SlabDirection.WRITE)
+
+        buf.zero_()
+        torch_dev.synchronize()
+        ctx.transfer_async(mem_obj, buf, SlabDirection.READ)
+        torch_dev.synchronize()
+
+        expected = torch.full((chunk_bytes,), 0xAB, dtype=torch.uint8)
+        assert torch.equal(buf.cpu(), expected)
+    finally:
+        ctx.close()
+
+
+@requires_nds
+def test_nds_chunk_larger_than_region_roundtrip(nds_slab_dir: Path):
+    """A chunk larger than the 16 MiB region cap round-trips through NDS.
+
+    A 24 MiB chunk is registered and transferred as a 16 MiB region plus an
+    8 MiB region.
+    """
+    cfg = GdsL1Config(
+        file_location=str(nds_slab_dir), size_in_bytes=64 << 20, backend="nds"
+    )
+    ctx = GDSContext()
+    ctx.initialize(cfg)
+    try:
+        chunk_bytes = 24 << 20
+        buf = torch.empty(chunk_bytes, dtype=torch.uint8, device=torch_device_type)
+        ctx.register_gpu_buffer(buf)
+
+        mgr = GDSL1MemoryManager(cfg)
+        err, objs = mgr.allocate(
+            MemoryLayoutDesc(shapes=[torch.Size([chunk_bytes])], dtypes=[torch.uint8]),
+            1,
+        )
+        assert err == L1Error.SUCCESS
+        mem_obj = objs[0]
+        assert isinstance(mem_obj, GDSMemoryObject)
+
         pattern = (torch.arange(chunk_bytes, dtype=torch.int64) % 251).to(torch.uint8)
         buf.copy_(pattern.to(torch_device_type))
         torch_dev.synchronize()
