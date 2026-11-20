@@ -656,7 +656,10 @@ much of the free L1 space can serve an allocation?
 
 The gauges sample independently, so their values can come from different
 instants. One `AddressManager.get_fragmentation_stats()` call returns both
-values from the same locked snapshot. Paged allocators report the page size
+values from the same locked snapshot. For a first-fit allocator, each gauge
+or L1 status read walks the free segments while holding the allocator lock.
+The cost is linear in the number of segments. Reading memory usage alone
+still uses the existing size counters. Paged allocators report the page size
 and the free-page count while pages are available. Every free page can serve
 one object, so external fragmentation cannot occur. Exhausted tiers and tiers
 without address-space stats (such as a shadow L1) both report `(0, 0)`.

@@ -23,6 +23,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l1_manager import create_l1_manager
 from lmcache.v1.distributed.memory_manager import (
     GDSL1MemoryManager,
@@ -262,7 +263,7 @@ def _gauge_snapshot() -> dict[tuple, float]:
     return result
 
 
-def _dram_l1(allocator: MemoryAllocatorInterface):
+def _dram_l1(allocator: MemoryAllocatorInterface) -> L1ManagerInterface:
     """Create a real ``DramL1Manager`` around ``allocator`` (no real buffer)."""
     config = L1ManagerConfig(
         memory_config=L1MemoryManagerConfig(

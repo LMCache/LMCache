@@ -1337,18 +1337,18 @@ class TestFragmentationSignal:
         assert not worker.is_alive(), "allocation deadlocked while reporting free space"
         assert "4096 bytes free" in message
 
-    def test_fresh_address_space_is_one_free_block(self):
+    def test_fresh_address_space_is_one_free_block(self) -> None:
         """A pristine space reports one block spanning the whole arena."""
         manager = AddressManager(4096 * 10)
         assert manager.get_fragmentation_stats() == (4096 * 10, 1)
 
-    def test_exhausted_address_space_reports_no_free_blocks(self):
+    def test_exhausted_address_space_reports_no_free_blocks(self) -> None:
         """A fully allocated space reports no free blocks."""
         manager = AddressManager(4096 * 4)
         manager.batched_allocate(4096 * 4, 1)
         assert manager.get_fragmentation_stats() == (0, 0)
 
-    def test_interleaved_free_leaves_sub_aligned_holes(self):
+    def test_interleaved_free_leaves_sub_aligned_holes(self) -> None:
         """Freeing every other object leaves holes no single block fits."""
         object_size = 1179648  # 288 * 4096, one L1 object from issue #6724
         hole_size = object_size // 2
@@ -1372,7 +1372,7 @@ class TestFragmentationSignal:
         ):
             manager.batched_allocate(object_size, 2)
 
-    def test_allocate_failure_message_reports_free_space(self):
+    def test_allocate_failure_message_reports_free_space(self) -> None:
         """Single allocations report the same free-space hint on failure."""
         manager = AddressManager(4096 * 2)
         manager.allocate(4096 * 2)

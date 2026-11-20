@@ -15,7 +15,11 @@ from lmcache.v1.memory_allocators.lazy_memory_allocator import (
     mlock_on_fault,
 )
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
+from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
+    PagedAddressManager,
+)
 from lmcache.v1.memory_management import (
+    AddressManager,
     MemoryAllocatorInterface,
     MemoryObj,
 )
@@ -44,11 +48,11 @@ def _unlink_stale_shm(shm_name: str) -> None:
         )
 
 
-def _resolve_address_manager(allocator: MemoryAllocatorInterface):
+def _resolve_address_manager(
+    allocator: MemoryAllocatorInterface,
+) -> AddressManager | PagedAddressManager:
     """Return the allocator's address manager for usage/fragmentation reads."""
-    if isinstance(allocator, MixedMemoryAllocator) and hasattr(
-        allocator.pin_allocator, "address_manager"
-    ):
+    if isinstance(allocator, MixedMemoryAllocator):
         return allocator.pin_allocator.address_manager
     if isinstance(allocator, LazyMemoryAllocator):
         return allocator.get_address_manager()
@@ -207,12 +211,7 @@ class L1MemoryManager:
         if hasattr(self._allocator, "get_fragmentation_stats"):
             return self._allocator.get_fragmentation_stats()
 
-        address_manager = _resolve_address_manager(self._allocator)
-        if hasattr(address_manager, "get_fragmentation_stats"):
-            return address_manager.get_fragmentation_stats()
-        raise NotImplementedError(
-            "get_fragmentation_stats is not implemented for this allocator type."
-        )
+        return _resolve_address_manager(self._allocator).get_fragmentation_stats()
 
     def get_l1_memory_desc(self) -> L1MemoryDesc:
         """
