@@ -83,6 +83,15 @@ class NpuDeviceSpec(DeviceSpec):
         """Ascend NPU has the full IPC stack for LMCache-driven transfer."""
         return True
 
+    def get_stream_handle(self, stream: object) -> int:
+        """Return Ascend's native handle for ``stream``."""
+        handle = getattr(stream, "npu_stream", None)
+        if not isinstance(handle, int) or handle == 0:
+            raise RuntimeError(
+                "NPU stream does not expose a non-zero integer npu_stream."
+            )
+        return handle
+
     def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
         """Create the NPU cache context for LMCache-driven transfer."""
         # First Party
