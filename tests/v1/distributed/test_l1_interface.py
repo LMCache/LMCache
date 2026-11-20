@@ -126,7 +126,7 @@ def test_l1_only_write_is_kept_from_the_l2_store_listener(
 
     # Only the full chunk is handed to the L2 store path; other listeners
     # (eviction) still hear about both.
-    assert store_listener.pop_pending_keys() == [full]
+    assert store_listener.pop_pending_changes() == ([full], [])
     assert recorder.written == [tail, full]
 
     # A write of only L1-only keys does not wake the store listener at all.
