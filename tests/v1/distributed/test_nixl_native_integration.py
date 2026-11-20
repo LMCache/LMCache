@@ -234,25 +234,57 @@ def _client_round_trip(
     assert list(results) == [True] * len(keys)
 
 
+def _make_client_with_worker_params(
+    arena: torch.Tensor,
+    base_path: Path,
+    worker_backend_params: list[dict[str, str]],
+    num_workers: int,
+) -> Any:
+    """Create a native client with per-worker backend parameter overrides."""
+    # First Party
+    from lmcache.lmcache_nixl import LMCacheNixlClient
+
+    return LMCacheNixlClient(
+        backend="POSIX",
+        backend_params={"file_path": str(base_path)},
+        num_workers=num_workers,
+        l1_base=arena.data_ptr(),
+        l1_size=arena.numel(),
+        l1_alignment=_ALIGNMENT,
+        worker_backend_params=worker_backend_params,
+    )
+
+
 @requires_nixl_integration
 @requires_nixl_extension
-def test_blank_endpoint_override_list_is_rejected(tmp_path: Path) -> None:
-    """An endpoint_override with no non-blank entry fails at construction."""
+def test_worker_backend_params_apply_per_worker(tmp_path: Path) -> None:
+    """Worker i receives worker_backend_params[i % n], replacing shared params.
+
+    Per-worker file_path overrides stand in for per-worker endpoints: a bad
+    entry at index 1 is only hit when worker 1 is built, and a bad shared
+    value is harmless when every worker is overridden.
+    """
     _, arena = _aligned_arena(_CHUNK_SIZE)
-    config = NixlNativeL2AdapterConfig.from_dict(
-        {
-            "backend": "POSIX",
-            "backend_params": {
-                "file_path": str(tmp_path),
-                "endpoint_override": " , ",
-            },
-        }
+    good_a, good_b = tmp_path / "a", tmp_path / "b"
+    good_a.mkdir()
+    good_b.mkdir()
+    missing = tmp_path / "missing"
+
+    with pytest.raises(RuntimeError, match="not a directory"):
+        _make_client_with_worker_params(
+            arena,
+            good_a,
+            [{"file_path": str(good_a)}, {"file_path": str(missing)}],
+            num_workers=2,
+        )
+
+    client = _make_client_with_worker_params(
+        arena,
+        missing,
+        [{"file_path": str(good_a)}, {"file_path": str(good_b)}],
+        num_workers=4,
     )
-    descriptor = L1MemoryDesc(
-        ptr=arena.data_ptr(), size=arena.numel(), align_bytes=_ALIGNMENT
-    )
-    with pytest.raises(RuntimeError, match="no endpoints"):
-        create_l2_adapter(config, descriptor)
+    client.close()
 
 
 @requires_nixl_integration

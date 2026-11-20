@@ -41,7 +41,9 @@ class NixlConnector : public ConnectorBase<std::unique_ptr<WorkerNixlContext>> {
   NixlConnector(std::string backend,
                 std::unordered_map<std::string, std::string> backend_params,
                 int num_workers, uintptr_t l1_base, size_t l1_size,
-                size_t l1_alignment);
+                size_t l1_alignment,
+                std::vector<std::unordered_map<std::string, std::string>>
+                    worker_backend_params = {});
   ~NixlConnector() override;
 
   const std::string& storage_type() const noexcept;
