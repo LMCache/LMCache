@@ -120,7 +120,6 @@ class ShadowL1Manager(BaseL1Manager):
         tag: str = "",
         *,
         allow_resident: bool = False,
-        l1_only: bool = False,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Stage an unbound placeholder per key, with no capacity check.
 
@@ -129,8 +128,7 @@ class ShadowL1Manager(BaseL1Manager):
         staged as well, so this request's lease can renew the resident view
         at admission. Entries no reader holds any more, and placeholders
         whose write reservation expired, are swept first. ``allow_resident``
-        changes nothing here: resident keys are always staged. Nor does
-        ``l1_only``: a temporary placeholder never reaches L2 anyway.
+        changes nothing here: resident keys are always staged.
 
         Returns:
             Per key: ``(SUCCESS, placeholder)``, or ``(KEY_NOT_WRITABLE,

@@ -70,11 +70,6 @@ class L1ManagerListener(EventListener):
     Listener for L1 manager events
     """
 
-    receives_l1_only_writes: bool = True
-    """Whether ``on_l1_keys_write_finished`` also reports keys reserved with
-    ``l1_only=True``. A listener that hands written keys to L2 sets this to
-    ``False`` so those keys never leave L1."""
-
     @abstractmethod
     def on_l1_keys_reserved_read(self, keys: list[ObjectKey]):
         """
@@ -309,11 +304,9 @@ class L1ManagerInterface(Protocol):
         tag: str = "",
         *,
         allow_resident: bool = False,
-        l1_only: bool = False,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Reserve a write buffer per key for the writer ``tag``; with
-        ``allow_resident``, also for keys that are already resident; with
-        ``l1_only``, keep the committed keys out of L2."""
+        ``allow_resident``, also for keys that are already resident."""
         ...
 
     def finish_write(

@@ -1408,8 +1408,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
         Runs inside a store transaction, on its stream, after the producer
         event was waited on. The objects are temporary when
-        ``key.request_configs`` sets ``lmcache.temporary_unfull_chunk``, and
-        are always kept out of L2: the tail lookup reads L1 only. An
+        ``key.request_configs`` sets ``lmcache.temporary_unfull_chunk``. An
         object group whose blocks are all null (no real state), or an object
         larger than the staging buffer, stores nothing.
 
@@ -1462,7 +1461,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     [obj_key],
                     get_unfull_chunk_layout_desc(cache_context, obj_group_id),
                     is_temporary=is_temporary,
-                    l1_only=True,
                 )
             )
             memory_obj = reserved.get(obj_key)

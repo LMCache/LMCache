@@ -3,14 +3,15 @@
 `lmcache/v1/distributed/storage_controllers/store_policy.py`,
 `lmcache/v1/distributed/storage_controllers/p2p_store_policy.py`
 
-A store policy answers two questions for the `StoreController` after an
+A store policy answers three questions for the `StoreController` after an
 object has been written to L1:
 
-1. `select_store_targets(keys, adapters)`: which L2 adapters get which keys.
-2. `select_l1_deletions(keys, adapter)`: after `adapter` stored `keys`
+1. `should_store(key)`: whether the key goes to L2 at all.
+2. `select_store_targets(keys, adapters)`: which L2 adapters get which keys.
+3. `select_l1_deletions(keys, adapter)`: after `adapter` stored `keys`
    successfully, which of them leave L1.
 
-The store flow around these two calls is described in
+The store flow around these calls is described in
 [`l2_adapters/overall.md`](../l2_adapters/overall.md#storecontroller).
 
 ## Interface
@@ -18,6 +19,7 @@ The store flow around these two calls is described in
 ```python
 class StorePolicy(ABC):
     def __init__(self, l1_managers: list[L1ManagerInterface]) -> None: ...
+    def should_store(self, key: ObjectKey) -> bool: ...  # not abstract
     def select_store_targets(self, keys, adapters) -> dict[int, list[ObjectKey]]: ...
     def select_l1_deletions(self, keys, adapter) -> list[ObjectKey]: ...
 ```
@@ -31,6 +33,14 @@ class StorePolicy(ABC):
   attached to the calling store controller. An adapter is attached to the
   controller of the one L1 it has affinity with (`resolve_l1_affinity`), so a
   policy only ever sees adapters that can read that L1's objects.
+- **`should_store`** is called once per key when its write finishes, before
+  the key is queued. A key it rejects takes no store budget and never reaches
+  `select_store_targets`; it stays in L1 and is evicted like any other
+  object. The default rejects unfull-chunk tails, whose keys carry
+  `extra_attributes[UNFULL_CHUNK_ATTRIBUTE]`, because lookups read tails
+  from L1 only (see [`unfull_chunk.md`](../../multiprocess/unfull_chunk.md)).
+  A policy may override it to skip keys by other fields (`tags`,
+  `cache_salt`, `extra_attributes`, ...), or to store tails too.
 - **`adapter`** in `select_l1_deletions` is the descriptor of the adapter
   whose store task succeeded. It lets a policy drop the L1 copy after a store
   into one kind of adapter and keep it after a store into another.
@@ -38,6 +48,7 @@ class StorePolicy(ABC):
 The storage manager creates one policy instance per store controller with
 `create_store_policy(name, l1_managers)`. Both methods are called only from
 that controller's loop thread, so a policy may keep plain (unlocked) state.
+Every built-in policy inherits the default `should_store`.
 
 ## Built-in policies
 

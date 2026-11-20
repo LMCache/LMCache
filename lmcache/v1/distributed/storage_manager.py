@@ -290,7 +290,6 @@ class StorageManager:
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
         is_temporary: bool = False,
-        l1_only: bool = False,
     ) -> dict[ObjectKey, MemoryObj]:
         """
         Reserve the object for writing into the storage manager.
@@ -301,9 +300,6 @@ class StorageManager:
                 for the objects to be reserved.
             is_temporary: Store the objects as temporary: L1 deletes each one
                 when its last read lock is released, and never offloads it
-                to L2.
-            l1_only: Keep the objects in L1 only: they stay resident and
-                are evicted like any other object, but are never offloaded
                 to L2.
         Returns:
             dict[ObjectKey, MemoryObj]: A dictionary mapping object keys to their
@@ -324,7 +320,6 @@ class StorageManager:
                     is_temporary=[is_temporary] * len(group),
                     layout_desc=layout_desc,
                     tag=_L1_WRITE_TAG,
-                    l1_only=l1_only,
                 )
             )
 

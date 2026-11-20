@@ -231,6 +231,13 @@ class ObjectKeyIdentity:
         object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
 
+UNFULL_CHUNK_ATTRIBUTE = "lmcache.unfull_chunk"
+"""``ObjectKey.extra_attributes`` entry set to ``True`` on the key of an
+unfull chunk (the tail after the last full chunk). It does not change the
+key's identity; ``StorePolicy.should_store`` reads it to keep tails out of L2,
+since lookups read tails from L1 only."""
+
+
 @dataclass(frozen=True, init=False)
 class ObjectKey:
     """
@@ -245,7 +252,8 @@ class ObjectKey:
     """Request-scoped metadata exposed to L2 adapters.
 
     This field is excluded from equality, hashing, and ``repr``.
-    Upstream modules may enrich it before dispatch.
+    Upstream modules may enrich it before dispatch (for example
+    :data:`UNFULL_CHUNK_ATTRIBUTE`).
     L1 managers and L2 adapters should not mutate it.
     """
 
