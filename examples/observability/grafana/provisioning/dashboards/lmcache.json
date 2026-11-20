@@ -1316,7 +1316,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Chunks loaded into the engine, and lookup token counts (requested vs hit).",
+      "description": "Chunks loaded into the engine, and lookup token counts: requested vs hit (the range LMCache was asked for, past the prefix the engine already held), the whole prompt, and the request-level prefix served by the engine's prefix cache or LMCache.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1407,6 +1407,18 @@
         },
         {
           "editorMode": "code",
+          "expr": "rate(lmcache_mp_lookup_prompt_tokens_total[$__rate_interval])",
+          "legendFormat": "prompt tokens/s [{{service_instance_id}}]",
+          "refId": "E"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_lookup_request_hit_tokens_total[$__rate_interval])",
+          "legendFormat": "request-level hit tokens/s (engine + LMCache) [{{service_instance_id}}]",
+          "refId": "G"
+        },
+        {
+          "editorMode": "code",
           "expr": "rate(lmcache_mp_num_chunks_loaded_total[$__rate_interval])",
           "legendFormat": "chunks loaded/s [{{service_instance_id}}]",
           "refId": "C"
@@ -1420,7 +1432,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Token-level cache hit rate: fraction of requested tokens found in L1+L2 during lookup (contiguous prefix hits only).",
+      "description": "Token-level hit rates over the whole prompt. L1+L2: fraction of prompt tokens LMCache served (contiguous prefix only, past the prefix the engine already held). Request-level: fraction of prompt tokens served by the engine's prefix cache or LMCache.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1510,9 +1522,15 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_lookup_hit_tokens_total[$__rate_interval]) / rate(lmcache_mp_lookup_requested_tokens_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_lookup_hit_tokens_total[$__rate_interval]) / rate(lmcache_mp_lookup_prompt_tokens_total[$__rate_interval])",
           "legendFormat": "L1+L2 token hit rate [{{service_instance_id}}]",
           "refId": "A"
+        },
+        {
+          "editorMode": "code",
+          "expr": "rate(lmcache_mp_lookup_request_hit_tokens_total[$__rate_interval]) / rate(lmcache_mp_lookup_prompt_tokens_total[$__rate_interval])",
+          "legendFormat": "request-level hit rate (engine + LMCache) [{{service_instance_id}}]",
+          "refId": "C"
         }
       ],
       "title": "Cache Hit Rate",

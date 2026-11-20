@@ -25,9 +25,6 @@ source "${SCRIPT_DIR}/helpers.sh"
 source "${SCRIPT_DIR}/path-filter.sh"
 
 case "${PIPELINE_FILE}" in
-    *k3_tests/integration/pipeline.yml)
-        expensive_pipeline_name="integration"
-        ;;
     *k3_tests/multiprocess/pipeline.yml)
         expensive_pipeline_name="multiprocess"
         ;;
@@ -75,6 +72,14 @@ if [[ "${PIPELINE_FILE}" == */xpu/*/pipeline.yml ]]; then
         XPU_CI_IMAGE="${PINNED_XPU_IMAGE}"
     fi
     export XPU_CI_IMAGE
+fi
+
+if [[ "${PIPELINE_FILE}" == */rbln/pipeline.yml ]]; then
+    # The RBLN nightly lane uploads pipeline.yml itself with its candidate
+    # image; PR and dev builds run on the last image that lane verified.
+    # shellcheck source=.buildkite/k3_harness/resolve-pinned-vllm.sh
+    source "${SCRIPT_DIR}/../../k3_harness/resolve-pinned-vllm.sh"
+    export RBLN_SERVE_IMAGE="${PINNED_RBLN_IMAGE}"
 fi
 
 echo "--- :pipeline: Uploading ${PIPELINE_FILE}"

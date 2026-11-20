@@ -79,7 +79,7 @@ CLI, pass the flags below; when embedding programmatically, construct an
 | `enabled` | `bool` | `True` | Master switch for the EventBus. |
 | `max_queue_size` | `int` | `10000` | Maximum events in the EventBus queue before tail-drop. |
 | `metrics_enabled` | `bool` | `True` | Register metrics subscribers (OTel counters / histograms). |
-| `grpc_metrics_enabled` | `bool \| None` | `None` | Register gRPC Python runtime metrics with the same OTel provider. `None` means the MP server enables them for gRPC transport and disables them for ZMQ. Requires `grpcio-observability`, which upstream currently supports on Linux. |
+| `grpc_metrics_enabled` | `bool \| None` | `None` | Register gRPC Python runtime metrics with the same OTel provider. `None` means the MP server enables them for gRPC transport and disables them for ZMQ. Requires `grpcio-observability`, which upstream currently supports on Linux. With `--grpc-server-mode native` it only covers out-of-tree gRPC services, since pygrpc-native serves the generated services. |
 | `logging_enabled` | `bool` | `True` | Register logging subscribers. |
 | `tracing_enabled` | `bool` | `False` | Register tracing subscribers (OTel spans). |
 | `otlp_endpoint` | `str \| None` | `None` | OTLP gRPC endpoint. When set, metrics and traces are pushed. When `None`, metrics use Prometheus pull fallback. |

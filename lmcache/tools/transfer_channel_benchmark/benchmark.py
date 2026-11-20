@@ -6,10 +6,13 @@ L1 region, allocates a pool of source memory objects in it, registers the
 region with a transfer channel, and publishes the source object catalog
 (offset/size per object) over a small ZMQ side-channel.
 
-A *client* process fetches the catalog, allocates its own destination objects
-via an :class:`L1MemoryManager`, connects the transfer channel, and issues
-batched reads of a random subset of the source objects, reporting aggregate
-read throughput in GB/s.
+A *client* process fetches the catalog, allocates its own objects via an
+:class:`L1MemoryManager`, connects the transfer channel, and issues batched
+transfers of a random subset of the source objects, reporting aggregate
+throughput in GB/s. With ``--op read`` the client pulls the server's objects
+into its own buffer; with ``--op write`` it pushes its objects into the
+server's buffer. ``--verify`` checks reads in the client's buffer and writes in
+the server's buffer (through the same side-channel).
 """
 
 # Standard
@@ -49,10 +52,12 @@ from lmcache.v1.distributed.transfer_channel import (
     delete_transfer_channel_context,
     initialize_transfer_channel_context,
 )
+from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
 _CATALOG_REQUEST = b"catalog"
+_VERIFY_KEY = "verify"
 _LARGE_LAZY_INIT = 20 * 1024**3
 _CLIENT_BUFFER_SLACK = 64 * 1024**2
 
@@ -79,6 +84,41 @@ def _create_l1_manager(cfg: BenchmarkConfig, size_bytes: int) -> L1MemoryManager
         align_bytes=cfg.page_size,
     )
     return L1MemoryManager(manager_config)
+
+
+def _mismatched_objects(
+    source_objs: list[MemoryObj], expected: dict[int, int]
+) -> list[int]:
+    """Return the source object indices whose bytes differ from ``expected``.
+
+    Args:
+        source_objs: The server's source objects, indexed by catalog index.
+        expected: Catalog index -> byte value every byte of that object must
+            hold.
+
+    Returns:
+        The mismatching indices in ascending order (out-of-range indices count
+        as mismatches).
+    """
+    mismatched: list[int] = []
+    for index in sorted(expected):
+        value = expected[index]
+        if index < 0 or index >= len(source_objs):
+            mismatched.append(index)
+            continue
+        tensor = source_objs[index].tensor
+        if tensor is None or not bool((tensor == value).all()):
+            mismatched.append(index)
+    return mismatched
+
+
+def _expected_write_pattern(index: int, iteration: int) -> int:
+    """Return the byte a write iteration stores into source object ``index``.
+
+    The pattern differs from the server's initial ``index % 256`` on every
+    iteration, so a verified write proves the bytes actually landed.
+    """
+    return (index + iteration + 1) % 256
 
 
 def _object_layout(cfg: BenchmarkConfig) -> MemoryLayoutDesc:
@@ -115,7 +155,7 @@ def server_main(cfg: BenchmarkConfig) -> None:
         cfg.num_source_objects,
     )
     manager = _create_l1_manager(cfg, cfg.buffer_size)
-    source_objs: list = []
+    source_objs: list[MemoryObj] = []
     try:
         error, source_objs = manager.allocate(
             _object_layout(cfg), cfg.num_source_objects
@@ -135,11 +175,6 @@ def server_main(cfg: BenchmarkConfig) -> None:
             assert obj.tensor is not None, "Failed to allocate tensor!"
             obj.tensor.fill_(index % 256)
 
-        catalog = [
-            (obj.shm_offset, obj.shm_byte_length, index)
-            for index, obj in enumerate(source_objs)
-        ]
-
         initialize_transfer_channel_context(
             cfg.transfer_channel_type,
             l1_memory_desc=manager.get_l1_memory_desc(),
@@ -148,7 +183,7 @@ def server_main(cfg: BenchmarkConfig) -> None:
             backends=[cfg.nixl_backend],
         )
         try:
-            _serve_catalog(cfg, catalog)
+            _serve_catalog(cfg, source_objs)
         finally:
             delete_transfer_channel_context()
     finally:
@@ -157,9 +192,19 @@ def server_main(cfg: BenchmarkConfig) -> None:
         manager.close()
 
 
-def _serve_catalog(cfg: BenchmarkConfig, catalog: list[tuple[int, int, int]]) -> None:
-    """Serve the source object catalog over a ZMQ REP socket until timeout."""
-    payload = json.dumps(
+def _serve_catalog(cfg: BenchmarkConfig, source_objs: list[MemoryObj]) -> None:
+    """Serve the source object catalog and verify requests until timeout.
+
+    Two request kinds arrive on the ZMQ REP socket: the raw ``catalog`` word,
+    answered with the catalog JSON, and a JSON ``{"verify": {index: byte}}``
+    object, answered with ``{"ok": bool, "mismatched": [index, ...]}`` after
+    checking the named source objects in this process's buffer.
+    """
+    catalog = [
+        (obj.shm_offset, obj.shm_byte_length, index)
+        for index, obj in enumerate(source_objs)
+    ]
+    catalog_payload = json.dumps(
         {
             "page_size": cfg.page_size,
             "object_size": cfg.object_size,
@@ -182,9 +227,25 @@ def _serve_catalog(cfg: BenchmarkConfig, catalog: list[tuple[int, int, int]]) ->
     try:
         while time.monotonic() < deadline:
             events = dict(poller.poll(timeout=1000))
-            if socket in events:
-                socket.recv()
-                socket.send(payload)
+            if socket not in events:
+                continue
+            request = socket.recv()
+            if request == _CATALOG_REQUEST:
+                socket.send(catalog_payload)
+                continue
+            expected = {
+                int(index): int(value)
+                for index, value in json.loads(request)[_VERIFY_KEY].items()
+            }
+            mismatched = _mismatched_objects(source_objs, expected)
+            print(
+                f"[server] verify request: {len(expected)} objects, "
+                f"{len(mismatched)} mismatched",
+                flush=True,
+            )
+            socket.send(
+                json.dumps({"ok": not mismatched, "mismatched": mismatched}).encode()
+            )
     except KeyboardInterrupt:
         pass
     finally:
@@ -196,7 +257,7 @@ def _serve_catalog(cfg: BenchmarkConfig, catalog: list[tuple[int, int, int]]) ->
 # Client
 ############################################################
 def client_main(cfg: BenchmarkConfig) -> bool:
-    """Run the benchmark client: read a subset of source objects and report.
+    """Run the benchmark client: transfer a subset of source objects and report.
 
     Args:
         cfg: The benchmark configuration (``role == "client"``).
@@ -207,7 +268,7 @@ def client_main(cfg: BenchmarkConfig) -> bool:
     Raises:
         ValueError: If the server's page/object size or pool size is
             incompatible with this client's configuration.
-        RuntimeError: If allocation or a read transfer fails.
+        RuntimeError: If allocation, a transfer, or verification fails.
     """
     catalog = _fetch_catalog(cfg)
     if catalog["page_size"] != cfg.page_size:
@@ -229,12 +290,12 @@ def client_main(cfg: BenchmarkConfig) -> bool:
 
     client_buffer = cfg.num_objects * cfg.object_size + _CLIENT_BUFFER_SLACK
     manager = _create_l1_manager(cfg, client_buffer)
-    dst_objs: list = []
+    local_objs: list[MemoryObj] = []
     try:
-        error, dst_objs = manager.allocate(_object_layout(cfg), cfg.num_objects)
+        error, local_objs = manager.allocate(_object_layout(cfg), cfg.num_objects)
         if error != L1Error.SUCCESS:
             raise RuntimeError(
-                f"Failed to allocate {cfg.num_objects} destination objects: {error}."
+                f"Failed to allocate {cfg.num_objects} local objects: {error}."
             )
 
         ctx = initialize_transfer_channel_context(
@@ -246,7 +307,7 @@ def client_main(cfg: BenchmarkConfig) -> bool:
         )
         try:
             local_addrs = ctx.get_transfer_channel_address(
-                [(obj.shm_offset, obj.shm_byte_length) for obj in dst_objs]
+                [(obj.shm_offset, obj.shm_byte_length) for obj in local_objs]
             )
             rng = random.Random(cfg.seed)
             chosen = rng.sample(source_objs, cfg.num_objects)
@@ -258,33 +319,51 @@ def client_main(cfg: BenchmarkConfig) -> bool:
 
             connect_start = time.perf_counter()
             client = ctx.get_transfer_channel_client(cfg.url)
+            verb = "writing" if cfg.op == "write" else "reading"
             print(
                 f"[client] connected in {time.perf_counter() - connect_start:.1f}s; "
-                f"reading {cfg.num_objects} objects x "
+                f"{verb} {cfg.num_objects} objects x "
                 f"{cfg.object_size / 1024**2:.1f} MiB",
                 flush=True,
             )
 
-            def one_read() -> float:
-                start = time.perf_counter()
-                task_id = client.submit_read(local_addrs, remote_addrs)
-                result = client.query_read_status(task_id)
+            def one_transfer(iteration: int) -> float:
+                if cfg.op == "write":
+                    # Filling the local objects is setup, not transfer time.
+                    for obj, index in zip(local_objs, chosen_indices, strict=True):
+                        assert obj.tensor is not None, "Failed to allocate tensor!"
+                        obj.tensor.fill_(_expected_write_pattern(index, iteration))
+                    start = time.perf_counter()
+                    task_id = client.submit_write(local_addrs, remote_addrs)
+                else:
+                    start = time.perf_counter()
+                    task_id = client.submit_read(local_addrs, remote_addrs)
+                result = client.query_status(task_id)
                 while not result.is_finished():
-                    result = client.query_read_status(task_id)
+                    result = client.query_status(task_id)
                 elapsed = time.perf_counter() - start
                 succeeded = sum(result.succeeded_mask)
                 if succeeded != cfg.num_objects:
                     raise RuntimeError(
-                        f"read failed: {succeeded}/{cfg.num_objects} objects succeeded."
+                        f"{cfg.op} failed: {succeeded}/{cfg.num_objects} objects "
+                        "succeeded."
                     )
                 return elapsed
 
-            for _ in range(cfg.warmup):
-                one_read()
-            times = [one_read() for _ in range(cfg.iters)]
+            total_iters = cfg.warmup + cfg.iters
+            times = [one_transfer(iteration) for iteration in range(total_iters)]
+            times = times[cfg.warmup :]
 
-            if cfg.verify:
-                _verify(dst_objs, chosen_indices)
+            if cfg.verify and cfg.op == "write":
+                _verify_remote(
+                    cfg,
+                    {
+                        index: _expected_write_pattern(index, total_iters - 1)
+                        for index in chosen_indices
+                    },
+                )
+            elif cfg.verify:
+                _verify(local_objs, chosen_indices)
 
             _report(cfg, times)
             return True
@@ -292,38 +371,77 @@ def client_main(cfg: BenchmarkConfig) -> bool:
             delete_transfer_channel_context()
             del ctx
     finally:
-        if dst_objs:
-            manager.free(dst_objs)
+        if local_objs:
+            manager.free(local_objs)
         manager.close()
 
 
-def _fetch_catalog(cfg: BenchmarkConfig) -> dict:
-    """Fetch the source object catalog from the server's control socket."""
+def _control_request(cfg: BenchmarkConfig, request: bytes, what: str) -> dict:
+    """Send one request to the server's control socket and decode the reply.
+
+    Args:
+        cfg: The client configuration (``control_url``, ``server_timeout``).
+        request: The raw request bytes.
+        what: Short description of the request for the timeout error.
+
+    Raises:
+        RuntimeError: No reply arrived within ``server_timeout``.
+    """
     socket = zmq.Context.instance().socket(zmq.REQ)
     socket.setsockopt(zmq.LINGER, 0)
     socket.setsockopt(zmq.RCVTIMEO, int(cfg.server_timeout * 1000))
     socket.connect(_zmq_endpoint(cfg.control_url))
     try:
-        socket.send(_CATALOG_REQUEST)
+        socket.send(request)
         try:
             reply = socket.recv()
         except zmq.Again as exc:
             raise RuntimeError(
-                f"timed out fetching catalog from {cfg.control_url}; is the "
-                f"server running?"
+                f"timed out {what} from {cfg.control_url}; is the server running?"
             ) from exc
     finally:
         socket.close(linger=0)
     return json.loads(reply)
 
 
-def _verify(dst_objs: list, chosen_indices: list[int]) -> None:
-    """Check each destination object holds the expected per-object byte pattern.
+def _fetch_catalog(cfg: BenchmarkConfig) -> dict:
+    """Fetch the source object catalog from the server's control socket."""
+    return _control_request(cfg, _CATALOG_REQUEST, "fetching catalog")
+
+
+def _verify_remote(cfg: BenchmarkConfig, expected: dict[int, int]) -> None:
+    """Ask the server to check the written source objects against ``expected``.
+
+    Args:
+        cfg: The client configuration.
+        expected: Catalog index -> byte value the whole object must hold.
+
+    Raises:
+        RuntimeError: The server reports mismatching objects.
+    """
+    reply = _control_request(
+        cfg,
+        json.dumps({_VERIFY_KEY: {str(k): v for k, v in expected.items()}}).encode(),
+        "verifying written objects",
+    )
+    if not reply["ok"]:
+        raise RuntimeError(
+            f"verify FAILED on the server for source objects {reply['mismatched']}."
+        )
+    print(
+        f"[client] verify OK: server confirms {len(expected)} written objects "
+        "match expected pattern",
+        flush=True,
+    )
+
+
+def _verify(local_objs: list[MemoryObj], chosen_indices: list[int]) -> None:
+    """Check each local object holds the expected per-object byte pattern.
 
     Raises:
         RuntimeError: If any destination object does not match.
     """
-    for obj, index in zip(dst_objs, chosen_indices, strict=False):
+    for obj, index in zip(local_objs, chosen_indices, strict=True):
         expected = index % 256
         tensor = obj.tensor
         if tensor is None or not bool((tensor == expected).all()):
@@ -332,22 +450,22 @@ def _verify(dst_objs: list, chosen_indices: list[int]) -> None:
                 f"== {expected}."
             )
     print(
-        f"[client] verify OK: {len(dst_objs)} objects match expected pattern",
+        f"[client] verify OK: {len(local_objs)} objects match expected pattern",
         flush=True,
     )
 
 
 def _report(cfg: BenchmarkConfig, times: list[float]) -> None:
-    """Print best/median/mean latency and throughput for the measured reads."""
+    """Print best/median/mean latency and throughput for the measured transfers."""
     total_bytes = cfg.num_objects * cfg.object_size
     ordered = sorted(times)
     best = ordered[0]
     median = ordered[len(ordered) // 2]
     mean = sum(ordered) / len(ordered)
-    print("\n==== Transfer channel read throughput ====", flush=True)
+    print(f"\n==== Transfer channel {cfg.op} throughput ====", flush=True)
     print(f"  channel type     : {cfg.transfer_channel_type}", flush=True)
     print(
-        f"  payload per read : {total_bytes / 1e9:.3f} GB "
+        f"  payload per {cfg.op:<5}: {total_bytes / 1e9:.3f} GB "
         f"({cfg.num_objects} objs x {cfg.object_size / 1024**2:.1f} MiB)",
         flush=True,
     )

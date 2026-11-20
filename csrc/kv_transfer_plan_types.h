@@ -46,6 +46,15 @@ struct PageBufferShapeDesc {
   // and ignore this field.
   int block_stride_elems;
 
+  // Per-plane geometry for the plane-tuple formats
+  // (NL_X_NP_X_NB_BS_ONE_HS / NL_X_TWO_X_NB_BS_NH_HS), filled by
+  // make_page_buffer_shape_desc; num_planes == 0 for all other formats.
+  int32_t num_planes = 0;
+  // Per-plane payload bytes per token slot (shape[2]*shape[3]*element_size).
+  int64_t plane_slot_bytes[4] = {};
+  // Per-plane per-block dim-0 step in bytes (stride(0)*element_size).
+  int64_t plane_block_stride_bytes[4] = {};
+
   template <typename ScalarType>
   LMC_TRANSFER_PLAN_HD inline size_t scalars_per_head() const {
     return hs * element_size / sizeof(ScalarType);
@@ -75,8 +84,8 @@ struct PageBufferShapeDesc {
 
 // Per-kernel-group invariants, resolved once on the Python side.
 struct KernelGroupSpec {
-  uintptr_t paged_buffer_ptrs;                // device ptr-array base address
-  std::vector<int64_t> lmcache_objects_ptrs;  // temp GPU buffer ptr per slot
+  uintptr_t paged_buffer_ptrs;                  // device ptr-array base address
+  std::vector<uintptr_t> lmcache_objects_ptrs;  // temp GPU buffer ptr per slot
   PageBufferShapeDesc shape_desc;
   int lmcache_chunk_size;
   EngineKVFormat engine_kv_format;

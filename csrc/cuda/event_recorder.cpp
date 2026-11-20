@@ -86,7 +86,10 @@ void record_event_on_stream(
 
   auto stream = reinterpret_cast<lmcache_stream_t>(
       static_cast<uintptr_t>(cuda_stream_ptr));
-  LMCACHE_LAUNCH_HOST_FUNC(stream, event_host_callback, event);
+  auto err = LMCACHE_LAUNCH_HOST_FUNC(stream, event_host_callback, event);
+  if (err != 0) {
+    delete event;
+  }
 }
 
 DrainResult drain_recorded_events() {

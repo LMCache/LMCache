@@ -82,6 +82,10 @@ with two sub-connectors:
        a failed transfer surfaces instead of silently recomputing.
    * - ``LMCacheMPConnector``
      - Offload/load to the local LMCache server; use ``kv_role`` = ``kv_both``.
+       ``kv_load_failure_policy`` is a ``NixlConnector`` setting above, not an
+       ``LMCacheMPConnector`` one — LMCache's own L2 adapters (including its
+       own optional Nixl-backed L2 store) do not currently distinguish a load
+       failure from a cache miss, so setting it here would have no effect.
    * - ``lmcache.mp.host`` / ``lmcache.mp.port``
      - Request transport, host, and ``--port`` of the instance's LMCache
        server (distinct per instance).
@@ -217,6 +221,14 @@ Verifying it is working
 
 Using the Operator
 ------------------
+
+.. warning::
+
+   The LMCache Kubernetes operator (``operator/``) is deprecated and no
+   longer maintained. It is expected to be removed from this repository in
+   2027Q1. Existing release artifacts (e.g. ``operator-v*`` ``install.yaml``)
+   will not receive fixes or updates.
+   Do not build new deployments on it.
 
 For Kubernetes deployments, the operator can manage the ``LMCacheEngine`` CRs
 for both the prefiller and decoder roles and automatically inject the

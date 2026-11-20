@@ -56,16 +56,20 @@ each instance is the sole writer of its own facts, so there is no
 global order and no cross-instance arbitration. `instance_id` is really
 the *emitter stream id* — a shared medium's controller sends under its
 own stable id and gets an ordinary deduplicated, fenced stream with no
-special-casing (see [key_directory.md](key_directory.md), Shared pools).
+special-casing (see [key_directory.md](views/key_directory.md), Shared pools).
 
 The gate's lock is held across the fan-out, so an emitter's batches
 reach the consumers in admission order. Consumers must therefore not
 call back into the gate.
 
 `drop_instance(id)` is the same fence without a batch — for
-deregistration and heartbeat-timeout eviction. It also forgets the
-cursor, so a reconnect starts fresh at any incarnation. (Wiring it to
-the registry is still a follow-up; the method exists and is tested.)
+deregistration, heartbeat-timeout eviction, and instances restored from a
+checkpoint that do not re-register within `instance_timeout`. It forgets
+the cursor but remembers the dropped incarnation: a late L1 batch from it
+is dropped as `STALE_INCARNATION`, while a higher incarnation or a
+re-registration (`readmit_instance`) starts a fresh cursor at any
+incarnation. L2 batches are still admitted, since L2 bytes outlive the
+process.
 
 ## Sources
 
@@ -127,8 +131,10 @@ computed when metrics are read so it can never stall ingest), plus `kafka.partit
 Because the restored view and the resume point cannot disagree, nothing
 gates startup on catching up. A partition
 `StreamPosition` has never seen -- a first start, one added since, or
-any start with no checkpoint path configured -- falls back to
-`auto.offset.reset` (`earliest`).
+any start with no checkpoint path configured -- is read from its
+beginning (`OFFSET_BEGINNING`), not left to the consumer's default: a
+group that an older coordinator committed offsets for would otherwise
+resume from that commit and skip what the restored state lacks.
 
 Kafka partition offsets are a separate coordinate system from the gate's
 per-emitter seq cursors; both ride in the checkpoint, independently.
@@ -197,9 +203,7 @@ coordinator keeps measuring against the last report. See
   resumes correctly on its own. Replaying from further back --
   reprocessing retained history the checkpoint has already moved past --
   is still manual: an operator clears the `kafka_stream_position`
-  section from the checkpoint, and the source falls back to
-  `auto.offset.reset`.
-- **Registry integration**: calling `EventGate.drop_instance` from
-  deregistration / heartbeat-timeout eviction.
+  section from the checkpoint, and the source replays each partition
+  from its beginning.
 - **Allocation generations** for shared pools (deterministic
   cross-reporter conflict resolution).

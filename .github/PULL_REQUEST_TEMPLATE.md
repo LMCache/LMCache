@@ -7,7 +7,31 @@
 
 **Special notes for your reviewers**:
 
+**AI-generated PR explainer** (required when AI-generated code is included):
+<!-- Link the current .html attachment here. It must provide complete English and Chinese
+views with a one-click language switch, detailed annotated code and call-chain explanations,
+and multiple substantive diagrams for non-trivial changes. Use controlled animation or a
+step-through view when it materially clarifies the flow. Do not post a separate comment or
+zip one file. -->
+
 **If applicable**:
 
 - [ ] this PR contains user facing changes - docs added
 - [ ] this PR contains unit tests
+
+<details>
+<summary>Before marking ready for review</summary>
+
+- [ ] I reviewed every changed line since the latest update, including generated or
+      agent-assisted changes.
+- [ ] I ran the relevant local checks and recorded the commands and results above.
+- [ ] I confirmed the description matches the final diff and documents any missing coverage
+      or compatibility concerns.
+- [ ] I confirmed every commit has a DCO `Signed-off-by` trailer.
+- [ ] I stated whether AI assistance was used in **Special notes for your reviewers**.
+- [ ] If AI-generated code is included, this PR is a draft and its title, description, and
+      bilingual HTML explainer all match the current head.
+- [ ] The HTML explainer is detailed enough for a reviewer without prior context, and its
+      diagrams, optional motion, code walkthrough, and test rationale match the implementation.
+
+</details>

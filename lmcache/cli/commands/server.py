@@ -108,6 +108,6 @@ class ServerCommand(BaseCommand):
             obs_config=parse_args_to_observability_config(args),
             coordinator_config=parse_args_to_coordinator_config(args),
             http_authentication=HTTPAuthenticationConfig.from_sources(
-                args.http_api_key_file
+                args.api_key_file
             ),
         )

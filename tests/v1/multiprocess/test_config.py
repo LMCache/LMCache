@@ -175,6 +175,22 @@ def test_grpc_server_workers_are_parsed():
     assert _parse_mp(["--grpc-server-workers", "7"]).grpc_server_workers == 7
 
 
+def test_api_key_files_share_one_option_and_legacy_alias() -> None:
+    """The MP configuration carries one cumulative file list for all entry points."""
+    config = _parse_mp(
+        [
+            "--api-key-file",
+            "current-key",
+            "--http-api-key-file",
+            "next-key",
+            "--grpc-server-mode",
+            "aio",
+        ]
+    )
+    assert config.api_key_files == ["current-key", "next-key"]
+    assert config.grpc_server_mode == "aio"
+
+
 def test_server_module_flags_are_parsed():
     config = _parse_mp(
         [
@@ -390,8 +406,7 @@ def test_new_flags_win_over_deprecated_aliases():
 def test_deprecated_flags_log_warning():
     # lmcache's ``init_logger`` sets ``propagate = False``, so pytest's
     # ``caplog`` (root-logger based) cannot see the records. Attach a local
-    # handler to the named logger instead (established pattern, see
-    # tests/v1/test_v1_adapter_state_desync.py).
+    # handler to the named logger instead.
     records: list[logging.LogRecord] = []
 
     class _ListHandler(logging.Handler):

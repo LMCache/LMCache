@@ -11,6 +11,7 @@ torch storage path cannot do or what only the raw path must get right
 # Standard
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
+from pathlib import Path
 import threading
 
 # Third Party
@@ -26,6 +27,7 @@ from lmcache.v1.platform.devices.cuda.ipc_wrapper import (
     RawCudaIPCWrapper,
 )
 from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
+from lmcache.v1.platform.kv_wrap import kv_wrapper_fds_delivered
 
 pytestmark = [
     pytest.mark.cuda,
@@ -143,6 +145,21 @@ def test_raw_wrapper_rejects_unpermutable_noncontiguous() -> None:
     base = torch.arange(1024, device=DEVICE, dtype=torch.float32)
     with pytest.raises(ValueError, match="contiguous"):
         RawCudaIPCWrapper(base[::2])
+
+
+@pytest.mark.parametrize("kind", ["torch", "raw"])
+def test_registration_skips_the_fd_channel_without_vmm(
+    kind: str, tmp_path: Path
+) -> None:
+    """With ``use_vmm_api`` off the wrappers carry no fd, so registration
+    neither connects to the fd channel nor needs a server serving it."""
+    tensor = torch.arange(64, device=DEVICE, dtype=torch.float32)
+    wrapper = _make_wrapper(kind, tensor)
+    assert wrapper.fd_payload() is None
+    with kv_wrapper_fds_delivered(
+        [wrapper], str(tmp_path / "unserved.sock"), timeout=1
+    ):
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +387,44 @@ def test_cross_process_round_trip_of_interior_view(kind: str) -> None:
         # Neighbors outside the view must be untouched (offset correct).
         assert bool((pool[:4096] == 0).all().item())
         assert bool((pool[4096 + 2048 :] == 0).all().item())
+        parent_conn.send("release")
+    finally:
+        child.join(timeout=60)
+        if child.is_alive():
+            child.kill()
+            child.join()
+    assert child.exitcode == 0
+
+
+@pytest.mark.parametrize("kind", ["torch", "raw"])
+def test_cross_process_round_trip_of_dim0_padded_view(kind: str) -> None:
+    """Regression for #5097: a hybrid-model unified KV pool view (blocks at
+    a padded dim-0 stride, e.g. GLM-5.3-Flash) round-trips element for
+    element, and consumer writes never touch the inter-block padding.
+    Strides are distinct so the layout normalization never reorders dims.
+    """
+    pool = torch.full((4096,), 7.0, device=DEVICE, dtype=torch.float32)
+    view = pool[512:].as_strided((4, 8, 16), (256, 16, 1))
+    view.copy_(
+        torch.arange(view.numel(), device=DEVICE, dtype=torch.float32).reshape(
+            view.shape
+        )
+    )
+    torch.cuda.synchronize()
+    payload = DeviceIPCWrapper.Serialize(_make_wrapper(kind, view))
+
+    ctx = get_context("spawn")
+    parent_conn, child_conn = ctx.Pipe()
+    child = ctx.Process(target=_consumer, args=(child_conn,))
+    child.start()
+    try:
+        parent_conn.send_bytes(payload)
+        assert parent_conn.recv() is True  # consumer saw the exact pattern
+
+        torch.cuda.synchronize()
+        assert bool((view == -1.0).all().item())  # consumer wrote back
+        blocks = pool[512 : 512 + 4 * 256].view(4, 256)
+        assert bool((blocks[:, 128:] == 7.0).all().item())  # padding untouched
         parent_conn.send("release")
     finally:
         child.join(timeout=60)

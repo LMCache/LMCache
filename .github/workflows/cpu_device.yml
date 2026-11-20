@@ -21,6 +21,7 @@ on:
         required: false
   workflow_dispatch:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - "dev"
       - "release-**"
@@ -38,8 +39,9 @@ defaults:
 
 jobs:
   changes:
+    if: github.event.pull_request.draft != true
     name: Detect changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pull-requests: read
     outputs:
@@ -75,6 +77,7 @@ jobs:
               - '.github/scripts/cpu_server_bench_test.sh'
               - '.github/scripts/cpu_vllm_e2e_test.sh'
               - '.github/scripts/install_vllm_cpu.sh'
+              - '.github/scripts/cpu_nightly.py'
               - '.github/scripts/install_lmcache_cpu.sh'
               - '.github/scripts/download_model.sh'
               - '.github/scripts/download_gh_release_model.sh'
@@ -130,11 +133,35 @@ jobs:
             trust_remote_code: "1"
             mla_disable: "0"
             run_engine_driven_e2e: true
-        # One representative gRPC leg covers the CPU request path without
-        # duplicating every OS/model combination.
+        # One representative leg for each gRPC server mode covers the CPU
+        # request path without duplicating every OS/model combination.
         include:
           - os: ubuntu-22.04
             request_transport: grpc
+            model:
+              name: opt-125m
+              id: facebook/opt-125m
+              tarball_url: https://github.com/LMCache/opt-125m/releases/download/v1.0/opt-125m.tar.gz
+              cache_marker: pytorch_model.bin
+              load_format: ""
+              hf_overrides: ""
+              trust_remote_code: "0"
+              mla_disable: "0"
+              run_engine_driven_e2e: true
+          - os: ubuntu-22.04
+            request_transport: grpc-aio
+            model:
+              name: opt-125m
+              id: facebook/opt-125m
+              tarball_url: https://github.com/LMCache/opt-125m/releases/download/v1.0/opt-125m.tar.gz
+              cache_marker: pytorch_model.bin
+              load_format: ""
+              hf_overrides: ""
+              trust_remote_code: "0"
+              mla_disable: "0"
+              run_engine_driven_e2e: true
+          - os: ubuntu-22.04
+            request_transport: grpc-native
             model:
               name: opt-125m
               id: facebook/opt-125m
@@ -240,9 +267,19 @@ jobs:
                 || steps.resolve-vllm.outputs.VLLM_CPU_NIGHTLY_SPEC }}
         run: bash .github/scripts/install_vllm_cpu.sh
 
+      - name: Require a fresh CPU nightly build
+        id: freshness
+        if: inputs.nightly_verify
+        run: python .github/scripts/cpu_nightly.py check-freshness
+
       - name: Install lmcache (CPU-only, no vLLM)
         id: install-lmcache
         run: bash .github/scripts/install_lmcache_cpu.sh
+
+      # pygrpc-native is optional, so only the native leg installs it.
+      - name: Install pygrpc-native
+        if: matrix.request_transport == 'grpc-native'
+        run: pip install pygrpc-native==0.7.0
 
       # server_bench is model-agnostic (cpu_server_bench_test.sh never
       # touches any model — it only exercises the lmcache server's KV
@@ -343,6 +380,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           INSTALL_VLLM_OUTCOME: ${{ steps.install-vllm.outcome }}
           INSTALL_LMC_OUTCOME: ${{ steps.install-lmcache.outcome }}
+          FRESHNESS_OUTCOME: ${{ steps.freshness.outcome }}
           MATRIX_OS: ${{ matrix.os }}
           MATRIX_MODEL: ${{ matrix.model.name }}
           MATRIX_REQUEST_TRANSPORT: ${{ matrix.request_transport }}
@@ -354,3 +392,4 @@ jobs:
         with:
           name: verify-result-${{ matrix.os }}-${{ matrix.model.name }}-${{ matrix.request_transport }}
           path: verify_result.json
+

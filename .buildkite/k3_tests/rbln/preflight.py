@@ -28,6 +28,8 @@ def main() -> None:
     print("torch", torch.__version__)
     print("torch-rbln", importlib.metadata.version("torch-rbln"))
     print("rebel-compiler", importlib.metadata.version("rebel-compiler"))
+    print("vllm", importlib.metadata.version("vllm"))
+    print("vllm-rbln", importlib.metadata.version("vllm-rbln"))
 
     if torch.rbln.device_count() == 0:
         raise SystemExit("torch.rbln sees no NPU")

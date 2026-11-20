@@ -17,6 +17,15 @@ if TYPE_CHECKING:
 # First Party
 from setup_extensions.build_profiles import BuildProfile
 
+# icpx links every shared object against Intel's libsvml / libimf / libirng /
+# libintlc by default and emits ``__svml_*`` calls at compile time. The flag
+# must be present on BOTH the compile and the link line: compile-only leaves
+# the NEEDED entries, link-only leaves unresolved ``__svml_*`` symbols.
+# Without it auditwheel vendors ~37 MB of those runtime libs into
+# ``lmcache.libs`` although the XPU runtime image already ships them via
+# ``intel-cmplr-lib-rt``.
+_NO_INTEL_LIB = "-no-intel-lib"
+
 
 class SyclProfile(BuildProfile):
     """SYCL / Intel XPU GPU extension build profile."""
@@ -37,6 +46,11 @@ class SyclProfile(BuildProfile):
         if shutil.which("icpx") is None:
             raise RuntimeError("icpx not found. Please source oneAPI setvars.sh first")
         os.environ["CXX"] = "icpx"
+        # distutils appends LDFLAGS to the shared-link command of every
+        # extension, including the common ones built via ``common_cpp``.
+        ldflags = os.environ.get("LDFLAGS", "").split()
+        if _NO_INTEL_LIB not in ldflags:
+            os.environ["LDFLAGS"] = " ".join(ldflags + [_NO_INTEL_LIB])
         oneapi_root = os.environ.get("ONEAPI_ROOT", "/opt/intel/oneapi")
         include_dirs = ["%s/include" % oneapi_root]
         library_dirs = ["%s/lib" % oneapi_root]
@@ -61,15 +75,22 @@ class SyclProfile(BuildProfile):
                     "cxx": [
                         "-D_GLIBCXX_USE_CXX11_ABI=1",
                         "-O3",
+                        # Python's sysconfig CFLAGS inject ``-g``. icpx applies
+                        # it to the SPIR-V device compile as well, inflating
+                        # the embedded device image ~170x (31 KB -> 5.3 MB per
+                        # TU). Override it; the CUDA/ROCm wheels ship no
+                        # device debug info either.
+                        "-g0",
                         "-fsycl",
                         "-fno-sycl-id-queries-fit-in-int",
                         "-ffast-math",
                         "-funroll-loops",
                         "-Wno-deprecated-declarations",
                         "-Wno-nan-infinity-disabled",
+                        _NO_INTEL_LIB,
                     ],
                 },
-                extra_link_args=["-fsycl"],
+                extra_link_args=["-fsycl", _NO_INTEL_LIB],
             ),
         ]
         cmdclass = {"build_ext": cpp_extension.BuildExtension}
@@ -80,8 +101,8 @@ class SyclProfile(BuildProfile):
         ``lmcache_fs``, which omits ABI flags to preserve pre-refactor
         behaviour."""
         if spec.name == "lmcache_fs":
-            return []
-        return ["-D_GLIBCXX_USE_CXX11_ABI=1"]
+            return [_NO_INTEL_LIB]
+        return ["-D_GLIBCXX_USE_CXX11_ABI=1", _NO_INTEL_LIB]
 
     def default_cxx_flags(self) -> list[str]:
         """SYCL downstream consumers use the CXX11 ABI."""

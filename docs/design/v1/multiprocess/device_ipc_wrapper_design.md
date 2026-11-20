@@ -41,7 +41,7 @@ transport shares:
 
 ## How to dispatch
 
-- `_CUSTOMERIZED_SERIALIZERS` is keyed on `DeviceIPCWrapper` with ext code 1, dispatched by `isinstance` in the encoder hook. Every subclass instance therefore encodes through the same path.
+- `_CUSTOMERIZED_SERIALIZERS` in `lmcache/v1/transport/zmq/codec.py` is keyed on `DeviceIPCWrapper` with ext code 1, dispatched by `isinstance` in the encoder hook. Every subclass instance therefore encodes through the same path.
 - Each wrapper implements `to_wire` / `from_wire` for its explicit descriptor. `Deserialize` validates the version, tag and fields before selecting a local implementation; only `to_tensor()` opens device resources.
 - `KVCache = list[DeviceIPCWrapper]` is the registered msgspec type, so a single `list[...]` payload can mix any of the wrappers and the server needs zero per-type branching.
 
@@ -82,7 +82,7 @@ needed:
 
 ## Backward compatibility
 
-- ZMQ ext code 1 and the gRPC bytes field remain unchanged, but their contents are versioned MessagePack. Old pickle payloads are rejected with no fallback: upgrade clients and servers together.
+- ZMQ ext code 1 and the gRPC bytes field retain their field numbers, but their contents are versioned MessagePack. Old pickle payloads are rejected with no fallback: upgrade clients and servers together.
 - MUSA handles must contain only MessagePack scalars, lists and string-keyed maps. Opaque SDK objects require an explicit data codec; they are rejected rather than pickled.
 - Additional wrapper implementations require an explicit descriptor and local allowlist entry; arbitrary subclasses are not reconstructed from network input.
 - `MusaIPCWrapper` keeps the receiver-side `open_tensor()` owner alive locally and excludes that owner from serialized state.

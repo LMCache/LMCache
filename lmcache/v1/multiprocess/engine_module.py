@@ -127,7 +127,7 @@ class ModuleBuildContext:
         self.mp_config = mp_config
         self.coordinator_config = coordinator_config
         self.liveness_targets: list[InstanceLivenessTarget] = []
-        self.experimental_transfer = list(mp_config.enable)
+        self.experimental: list[str] = []
         self._module_configs = {
             module_type: dict(config)
             for module_type, config in (module_configs or {}).items()
@@ -149,8 +149,22 @@ class ModuleBuildContext:
         return self._module_configs.get(module_type, {})
 
     def require(self, module_type: type[DiscoverableModuleT]) -> DiscoverableModuleT:
-        """Return an already-built module dependency."""
+        """Return an already-built dependency with the requested module name.
+
+        A configured external subclass may replace a built-in class while
+        retaining its ``module_name``. In that case, a dependency declared
+        with the built-in class resolves to the external instance.
+        """
         module = self._built.get(module_type)
+        if module is None:
+            module = next(
+                (
+                    built_module
+                    for built_type, built_module in self._built.items()
+                    if built_type.module_name == module_type.module_name
+                ),
+                None,
+            )
         if module is None:
             raise ValueError(
                 f"Module {module_type.module_name!r} is not built yet; built so "
@@ -170,10 +184,17 @@ class ModuleBuildContext:
         if _is_liveness_target(module):
             self.liveness_targets.append(module)
 
-    def add_experimental_transfer(self, capability: str) -> None:
-        """Advertise a capability contributed by a constructed module."""
-        if capability not in self.experimental_transfer:
-            self.experimental_transfer.append(capability)
+    def add_experimental(self, feature: str) -> None:
+        """Advertise an experimental feature contributed by a constructed module.
+
+        The collected names are returned to clients by the management
+        module's ``get_experimental`` handler.
+
+        Args:
+            feature: Feature identifier (e.g. ``TRANSFER_QUERY``).
+        """
+        if feature not in self.experimental:
+            self.experimental.append(feature)
 
 
 class DiscoverableModule(abc.ABC):
@@ -186,12 +207,24 @@ class DiscoverableModule(abc.ABC):
     module_name: ClassVar[str] = ""
     module_dependencies: ClassVar[tuple[type[DiscoverableModule], ...]] = ()
     deferred: ClassVar[bool] = False
+    rpc_service: ClassVar[str] = "worker"
 
     @classmethod
     @abc.abstractmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
         """Construct this module, or return ``None`` if it does not apply."""
         raise NotImplementedError
+
+
+def modules_for_service(
+    modules: list[EngineModule], service: str
+) -> list[EngineModule]:
+    """Select modules by their declared RPC service; unmarked adapters use worker."""
+    return [
+        module
+        for module in modules
+        if getattr(module, "rpc_service", "worker") == service
+    ]
 
 
 def _is_liveness_target(module: EngineModule) -> TypeGuard[InstanceLivenessTarget]:
@@ -209,6 +242,8 @@ def order_modules(
 
     Dependencies outside this phase must still appear in ``known_modules``;
     this supports a deferred phase whose dependencies were already built.
+    A dependency class resolves through its ``module_name`` so a configured
+    external subclass can take the place of a same-named built-in class.
     """
     if known_modules is None:
         known_modules = set(module_classes)
@@ -232,14 +267,17 @@ def order_modules(
     module_set = set(module_classes)
     graph: dict[type[DiscoverableModule], set[type[DiscoverableModule]]] = {}
     for module_type in sorted(module_classes, key=_module_sort_key):
-        unknown = set(module_type.module_dependencies) - known_modules
-        if unknown:
-            dependency = min(unknown, key=_module_sort_key)
-            raise ValueError(
-                f"{module_type.__name__} depends on {dependency.__name__}, "
-                "which is not a discoverable module."
-            )
-        graph[module_type] = set(module_type.module_dependencies) & module_set
+        dependencies: set[type[DiscoverableModule]] = set()
+        for declared_dependency in module_type.module_dependencies:
+            dependency = names.get(declared_dependency.module_name)
+            if dependency is None:
+                raise ValueError(
+                    f"{module_type.__name__} depends on "
+                    f"{declared_dependency.__name__}, which is not a "
+                    "discoverable module."
+                )
+            dependencies.add(dependency)
+        graph[module_type] = dependencies & module_set
 
     try:
         return list(TopologicalSorter(graph).static_order())

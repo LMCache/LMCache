@@ -64,8 +64,11 @@ BlockLayout resolve_layout(PageBufferShapeDesc d, EngineKVFormat format) {
     layout.kv_stride = block_bytes;
   }
   if (d.block_stride_elems != 0) {
-    TORCH_CHECK(format == EngineKVFormat::NL_X_NB_BS_HS,
-                "block_stride_elems is supported only for NL_X_NB_BS_HS");
+    TORCH_CHECK(
+        format == EngineKVFormat::NL_X_NB_BS_HS ||
+            format == EngineKVFormat::NL_X_NB_BSV_BSS ||
+            format == EngineKVFormat::NL_X_NB_BS_NH_HS || facts.is_fused_packed,
+        "block_stride_elems requires a block-major single-plane format");
     const size_t stride =
         static_cast<size_t>(d.block_stride_elems) * d.element_size;
     TORCH_CHECK(stride >= block_bytes, "block stride is smaller than a block");

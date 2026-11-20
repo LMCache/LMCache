@@ -54,7 +54,7 @@ permissions:
 jobs:
     build-xpu-artifacts:
         name: Build XPU wheel (SYCL)
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         outputs:
             xpu_version: ${{ steps.prepare.outputs.version }}
             wheel_artifact_id: ${{ steps.upload.outputs.artifact-id }}

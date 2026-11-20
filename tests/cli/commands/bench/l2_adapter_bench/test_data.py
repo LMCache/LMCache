@@ -8,6 +8,7 @@ from lmcache.cli.commands.bench.l2_adapter_bench.data import (
     create_l1_memory_desc,
     make_aligned_tensor,
     make_memory_objects,
+    make_object_keys,
 )
 
 
@@ -61,3 +62,17 @@ def test_make_memory_objects_can_use_different_fill_pattern() -> None:
 
     assert torch.all(objects[0].raw_data == 1)
     assert torch.all(objects[1].raw_data == 2)
+
+
+def test_make_object_keys_is_unique_and_deterministic() -> None:
+    keys = make_object_keys(64, key_offset=0) + make_object_keys(64, key_offset=64)
+    assert len({k.chunk_hash for k in keys}) == len(keys)
+    assert make_object_keys(64, key_offset=0) == keys[:64]
+    assert all(len(k.chunk_hash) == 32 for k in keys)
+
+
+def test_make_object_keys_spreads_leading_hash_bytes() -> None:
+    # Hash-prefix placement (e.g. shard_dirs) must not collapse into one
+    # directory for sequential key indices.
+    keys = make_object_keys(256)
+    assert len({k.chunk_hash[0] for k in keys}) > 64

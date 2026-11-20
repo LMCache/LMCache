@@ -3,25 +3,26 @@
 Shared helpers for the storage controllers.
 
 Holds the lightweight descriptors the controllers and policies use to tell
-L1 managers and L2 adapters apart without touching runtime objects, and the
-per-index bitmap map that the prefetch controller keeps for every request.
+L1 managers and L2 adapters apart without touching runtime objects, the
+per-index bitmap map that the prefetch controller keeps for every request,
+and the L1 affinity resolver for L2 adapters.
 """
 
 # Standard
-from collections.abc import ItemsView, Iterator
+from collections.abc import ItemsView, Iterator, Mapping
 from dataclasses import dataclass
+from typing import TypeVar
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import L1BackendType
-from lmcache.v1.distributed.config import (
-    L1ManagerConfig,
-    get_configured_capacity_bytes,
-)
+from lmcache.v1.distributed.config import L1ManagerConfig
+from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     get_type_name_for_config,
 )
+
+_K = TypeVar("_K")
 
 
 @dataclass(frozen=True)
@@ -60,34 +61,10 @@ class L1ManagerDescriptor:
     """
 
     index: int
-    """Position in the L1 managers list."""
+    """The manager's ``l1_manager_id`` (the owner tag on its memory objects)."""
 
     config: L1ManagerConfig
     """The manager's configuration object."""
-
-    @property
-    def backend_types(self) -> frozenset[L1BackendType]:
-        """
-        The storage media backing this L1 manager.
-
-        A hybrid Device-DAX tier spans both DRAM and Device-DAX; every other
-        tier has a single medium.
-
-        Returns:
-            The backend types with a non-zero configured capacity.
-        """
-        return frozenset(get_configured_capacity_bytes(self.config))
-
-    @property
-    def type_name(self) -> str:
-        """
-        Wire names of the backing media joined with ``+`` in sorted order
-        (e.g., "dram", "gds", "devdax+dram").
-
-        Returns:
-            str: The combined backend type name.
-        """
-        return "+".join(sorted(backend.value for backend in self.backend_types))
 
 
 class Bitmap2D:
@@ -432,3 +409,39 @@ class MapState:
             if adapter_idx in self._state:
                 self[adapter_idx] = self._state[adapter_idx] - grid_r
         return self
+
+
+def resolve_l1_affinity(
+    adapter_config: L2AdapterConfigBase,
+    l1_managers: Mapping[_K, L1ManagerInterface],
+) -> _K:
+    """Pick the L1 manager whose buffers an L2 adapter uses.
+
+    Args:
+        adapter_config: The L2 adapter's configuration.
+        l1_managers: The L1 managers by key, in write-placement order.
+
+    Returns:
+        The key of the first L1 manager, in placement order, whose memory
+        tags equal the adapter's most preferred wanted L1 tags that any
+        manager has.
+
+    Raises:
+        ValueError: If no L1 manager has any of the wanted memory tags.
+
+    Note:
+        **Pure**: the same adapter config and managers always pick the same
+        L1 manager.
+    """
+    wanted = adapter_config.get_wanted_l1_memory_tags()
+    for tags in wanted:
+        for key, manager in l1_managers.items():
+            if manager.get_memory_tags() == tags:
+                return key
+    available = [m.get_memory_tags() for m in l1_managers.values()]
+    raise ValueError(
+        f"No L1 has the memory tags wanted by L2 adapter "
+        f"{get_type_name_for_config(adapter_config)!r}: wanted "
+        f"{[f'{t.segment.value}/{t.residency.value}' for t in wanted]}, "
+        f"L1s have {[f'{t.segment.value}/{t.residency.value}' for t in available]}"
+    )
