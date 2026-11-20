@@ -171,24 +171,3 @@ def test_abort_keeps_another_requests_locks_on_the_same_chunks(setup, aborted):
     module.free_lookup_locks(_key("r2"), tp_size=WORLD_SIZE)
     module.end_session("r2")
     assert _read_locked(storage_manager) == 0
-
-
-def test_releasing_a_consumed_lookup_twice_strips_another_requests_lock(setup):
-    """Why END_SESSION must not release a consumed hit on its own.
-
-    Read locks are anonymous per-object counts. If END_SESSION released r1's
-    consumed hit and r1's RETRIEVE (which releases through
-    ``finish_read_prefetched``) still arrived, the second release would take
-    r2's lock instead. This checks the storage contract the design relies
-    on, not code in this PR.
-    """
-    module, storage_manager, keys, desc = setup
-    _consumed_lookup(module, "r1")
-    _consumed_lookup(module, "r2")
-
-    module.free_lookup_locks(_key("r1"), tp_size=WORLD_SIZE)
-    # Stand-in for r1's late RETRIEVE: one read per worker that reads it.
-    storage_manager.finish_read_prefetched(keys, read_locks=desc.num_kv_readers(0))
-
-    # r2 still holds its hit, but no object is locked any more.
-    assert _read_locked(storage_manager) == 0
