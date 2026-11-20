@@ -260,31 +260,28 @@ def _make_client_with_worker_params(
 def test_worker_backend_params_apply_per_worker(tmp_path: Path) -> None:
     """Worker i receives worker_backend_params[i % n], replacing shared params.
 
-    Per-worker file_path overrides stand in for per-worker endpoints: a bad
-    entry at index 1 is only hit when worker 1 is built, and a bad shared
-    value is harmless when every worker is overridden.
+    The POSIX strategy creates its ``file_path`` directory when a worker is
+    built, so per-worker ``file_path`` overrides stand in for per-worker
+    endpoints: only directories of overrides that were assigned to a worker
+    exist afterwards, and the shared value is never used.
     """
     _, arena = _aligned_arena(_CHUNK_SIZE)
-    good_a, good_b = tmp_path / "a", tmp_path / "b"
-    good_a.mkdir()
-    good_b.mkdir()
-    missing = tmp_path / "missing"
-
-    with pytest.raises(RuntimeError, match="not a directory"):
-        _make_client_with_worker_params(
-            arena,
-            good_a,
-            [{"file_path": str(good_a)}, {"file_path": str(missing)}],
-            num_workers=2,
-        )
+    shared, first, second, unused = (
+        tmp_path / name for name in ("shared", "first", "second", "unused")
+    )
 
     client = _make_client_with_worker_params(
         arena,
-        missing,
-        [{"file_path": str(good_a)}, {"file_path": str(good_b)}],
-        num_workers=4,
+        shared,
+        [{"file_path": str(p)} for p in (first, second, unused)],
+        num_workers=2,
     )
     client.close()
+
+    assert first.is_dir()
+    assert second.is_dir()
+    assert not unused.exists()
+    assert not shared.exists()
 
 
 @requires_nixl_integration
