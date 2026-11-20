@@ -23,6 +23,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
 )
@@ -290,6 +291,9 @@ func TestBuildCBEngineMetricsService_Headless(t *testing.T) {
 	}
 	if svc.Spec.Ports[0].Port != 9090 {
 		t.Fatalf("expected metrics port 9090, got %d", svc.Spec.Ports[0].Port)
+	}
+	if svc.Spec.Ports[0].TargetPort != intstr.FromString("http") {
+		t.Fatalf("expected targetPort http, got %v", svc.Spec.Ports[0].TargetPort)
 	}
 }
 

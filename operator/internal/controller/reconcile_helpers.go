@@ -364,10 +364,7 @@ func (r *LMCacheEngineReconciler) updateStatus(ctx context.Context, engine *lmca
 	if engine.Spec.Server != nil && engine.Spec.Server.Port != nil {
 		serverPort = *engine.Spec.Server.Port
 	}
-	metricsPort := int32(9090)
-	if engine.Spec.Prometheus != nil && engine.Spec.Prometheus.Port != nil {
-		metricsPort = *engine.Spec.Prometheus.Port
-	}
+	metricsPort := resources.HTTPPort(engine.Spec.Server)
 
 	podList := &corev1.PodList{}
 	if err := r.List(ctx, podList,
