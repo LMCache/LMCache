@@ -20,6 +20,7 @@ test('Clear resets selectors, node badge and tab contents, and stops requests to
     assert.equal(ui.run('currentNode'), null);
     assert.equal(ui.run('currentProxy'), null);
     assert.equal(ui.document.getElementById('currentNode').textContent, 'No Node Selected');
+    assert.equal(ui.document.getElementById('proxySelector').value, '');
     assert.equal(ui.document.getElementById('proxySearchInput').value, '');
     assert.equal(ui.document.getElementById('targetSelector').disabled, true);
     assert.equal(ui.document.getElementById('overviewContent').innerHTML, 'Please select a target node first');
