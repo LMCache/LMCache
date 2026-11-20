@@ -954,3 +954,66 @@ def test_lmcache_memcpy_async_int8_hidden132():
     ptr_dst = cpu_dst.data_ptr()
     for i in range(num_chunks):
         rt.cudaHostUnregister(ptr_dst + i * chunk_size)
+
+
+@pytest.mark.parametrize("padding", [0, 8])
+@pytest.mark.parametrize("head_size", [16, 17])
+@pytest.mark.parametrize(
+    "direction",
+    [lmcache_native.TransferDirection.H2D, lmcache_native.TransferDirection.D2H],
+)
+def test_independent_component_transfer(
+    padding: int, head_size: int, direction: lmcache_native.TransferDirection
+) -> None:
+    """Transfer single-plane components without touching holes or page padding."""
+    num_layers, num_blocks, block_size, num_heads = 4, 8, 4, 2
+    hidden = num_heads * head_size
+    block_stride = block_size * hidden + padding
+    device = torch_device_type
+    storage = [
+        torch.full(
+            (num_blocks, block_stride), -1.0, device=device, dtype=torch.bfloat16
+        )
+        for _ in range(num_layers)
+    ]
+    paged = [
+        t.as_strided(
+            (num_blocks, block_size, num_heads, head_size),
+            (block_stride, hidden, head_size, 1),
+        )
+        for t in storage
+    ]
+    slots = torch.tensor([23, 4, -1, 17, 0, 9, 30], device=device)
+    values = torch.randn(1, num_layers, len(slots), hidden, device=device).bfloat16()
+    expected_storage = [t.clone() for t in storage]
+    for layer in range(num_layers):
+        for token, slot in enumerate(slots.tolist()):
+            if slot >= 0:
+                offset = slot % block_size * hidden
+                expected_storage[layer][
+                    slot // block_size, offset : offset + hidden
+                ] = values[0, layer, token]
+    expected_values = torch.full_like(values, -1)
+    expected_values[:, :, slots >= 0] = values[:, :, slots >= 0]
+    if direction == lmcache_native.TransferDirection.D2H:
+        for target, source in zip(storage, expected_storage, strict=True):
+            target.copy_(source)
+        values.fill_(-1)
+    ptrs = torch.tensor([t.data_ptr() for t in paged], device=device)
+    cuda_ops.multi_layer_kv_transfer(
+        values,
+        ptrs,
+        slots,
+        torch.device(device),
+        num_blocks * block_size,
+        direction,
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS,
+        block_size=block_size,
+        head_size=head_size,
+        block_stride_elems=block_stride,
+    )
+    torch_dev.synchronize()
+    for actual, expected in zip(storage, expected_storage, strict=True):
+        assert torch.equal(actual, expected)
+    if direction == lmcache_native.TransferDirection.D2H:
+        assert torch.equal(values, expected_values)

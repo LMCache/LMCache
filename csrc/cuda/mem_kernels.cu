@@ -308,7 +308,8 @@ page_buffer_offset(const int k_or_v, const int token_idx,
     return block_idx * block_step + head_idx * block_size * hs2 +
            block_offset * hs2 + head_offset;
   } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS ||
-                       format == EngineKVFormat::NL_X_NB_BS_NH_CS) {
+                       format == EngineKVFormat::NL_X_NB_BS_NH_CS ||
+                       format == EngineKVFormat::NL_X_NB_BS_NH_HS) {
     const int block_idx = token_idx / block_size;
     const int block_offset = token_idx % block_size;
     // vLLM blocks-first pools pass the real per-block step; 0 means tight.
@@ -555,8 +556,10 @@ void multi_layer_kv_transfer_templated(
 
   // Fused packs K+V in the trailing dim (kv_size == 1, like MLA): single pass.
   int k_or_v_size =
-      (::is_mla(engine_kv_format) || ::is_fused_packed(engine_kv_format)) ? 1
-                                                                          : 2;
+      (::is_mla(engine_kv_format) || ::is_fused_packed(engine_kv_format) ||
+       ::is_single_kv(engine_kv_format))
+          ? 1
+          : 2;
 
   dim3 grid(num_transfer_tokens, num_layers, k_or_v_size);
   dim3 block(std::min(num_xwords, 128));
@@ -605,6 +608,9 @@ void multi_layer_kv_transfer_templated(
       case EngineKVFormat::NL_X_NB_BS_NH_CS:
         LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NL_X_NB_BS_NH_CS);
         break;
+      case EngineKVFormat::NL_X_NB_BS_NH_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NL_X_NB_BS_NH_HS);
+        break;
       case EngineKVFormat::NL_X_NB_BSV_BSS:
         LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NL_X_NB_BSV_BSS);
         break;
@@ -651,6 +657,9 @@ void multi_layer_kv_transfer_templated(
         break;
       case EngineKVFormat::NL_X_NB_BS_NH_CS:
         LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NB_BS_NH_CS);
+        break;
+      case EngineKVFormat::NL_X_NB_BS_NH_HS:
+        LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NB_BS_NH_HS);
         break;
       case EngineKVFormat::NL_X_NB_BSV_BSS:
         LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NB_BSV_BSS);
@@ -706,8 +715,10 @@ void multi_layer_kv_transfer_fused_templated(
       "must be divisible by 4 and not by 8)");
 
   int k_or_v_size =
-      (::is_mla(engine_kv_format) || ::is_fused_packed(engine_kv_format)) ? 1
-                                                                          : 2;
+      (::is_mla(engine_kv_format) || ::is_fused_packed(engine_kv_format) ||
+       ::is_single_kv(engine_kv_format))
+          ? 1
+          : 2;
 
   T** page_buffer_ptrs = reinterpret_cast<T**>(page_buffer_ptrs_raw);
   dim3 grid(max_tok, num_layers, k_or_v_size * n_chunks);
@@ -766,6 +777,9 @@ void multi_layer_kv_transfer_fused_templated(
         break;                                                                \
       case EngineKVFormat::NL_X_NB_BS_NH_CS:                                  \
         LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NL_X_NB_BS_NH_CS)   \
+        break;                                                                \
+      case EngineKVFormat::NL_X_NB_BS_NH_HS:                                  \
+        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NL_X_NB_BS_NH_HS)   \
         break;                                                                \
       case EngineKVFormat::NL_X_NB_BSV_BSS:                                   \
         LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NL_X_NB_BSV_BSS)    \
