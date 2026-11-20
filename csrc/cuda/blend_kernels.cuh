@@ -53,6 +53,10 @@ struct CBGroupSpec {
   // Byte offset from the slot's K-plane base to the first rope-carrying
   // element: 0 unless MLA, where rope dims trail the latent row.
   int64_t rope_base_offset;
+  // Rotate only this many leading layer/component entries in the K plane.
+  // -1 preserves all num_layers; 0 skips rotation. Scatter still copies all
+  // entries, so a [K layers..., V layers...] group can leave V unchanged.
+  int rope_num_layers = -1;
 };
 
 // One K-only re-RoPE launch: rotate tmp slot `slot_idx` of group `group_idx`
