@@ -10,12 +10,15 @@ from queue import Empty, Queue
 from threading import Thread
 from urllib.parse import parse_qs, urlsplit
 import json
+import subprocess
+import sys
 
 # Third Party
 import pytest
 
 # First Party
 from lmcache.cli.main import main
+from tests.import_utils import lmcache_subprocess_env
 
 ReplyPayload = Mapping[str, object] | str | bytes
 Reply = tuple[int, ReplyPayload]
@@ -332,12 +335,58 @@ def test_list_invalid_page_size(cache_server: CacheServer, page_size: str) -> No
     assert cache_server.requests.empty()
 
 
-def test_output_flags_belong_to_subcommands(cache_server: CacheServer) -> None:
-    """Parent-level output flags are rejected now that leaves own them."""
+def test_list_requires_output_flags_after_the_subcommand(
+    cache_server: CacheServer,
+) -> None:
+    """Only clear has a legacy group-level syntax."""
     with pytest.raises(SystemExit) as exc:
         main(["kvcache", "--format", "json", "list", "--url", cache_server.url])
     assert exc.value.code == 2
     assert cache_server.requests.empty()
+
+
+@pytest.mark.parametrize(
+    ("group_options", "leaf_options"),
+    [
+        (["-q", "--format", "json", "--output", "clear"], []),
+        (["--format=terminal", "--output", "clear"], ["--quiet", "--format", "json"]),
+    ],
+)
+def test_legacy_clear_output_options(
+    cache_server: CacheServer,
+    tmp_path: Path,
+    group_options: list[str],
+    leaf_options: list[str],
+) -> None:
+    """Older scripts reach the same POST and preserve their output settings."""
+    cache_server.replies.put((200, {"ok": True}))
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "lmcache.cli.main",
+            "kvcache",
+            *group_options,
+            "clear",
+            *leaf_options,
+            "--url",
+            cache_server.url,
+        ],
+        cwd=tmp_path,
+        env=lmcache_subprocess_env(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert not proc.stdout
+    assert json.loads((tmp_path / "clear").read_text())["metrics"] == {"status": "OK"}
+    method, target, body, _ = cache_server.requests.get_nowait()
+    assert (method, target, json.loads(body)) == (
+        "POST",
+        "/cache/clear",
+        {"tier": "l1"},
+    )
 
 
 LEGACY_PAGE: dict[str, object] = {
@@ -401,10 +450,10 @@ def test_clear_preserves_l1_post(
     [["kvcache", "clear"], ["describe", "kvcache"]],
     ids=["clear", "describe"],
 )
-def test_legacy_503_wording(
+def test_clear_and_describe_report_server_health_on_503(
     cache_server: CacheServer, command: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Clear and describe retain the health diagnostic and server reason for a 503."""
+    """Both commands include the health diagnostic and the server's reason."""
     cache_server.replies.put((503, {"detail": "server not initialized"}))
     with pytest.raises(SystemExit) as exc:
         main([*command, "--quiet", "--url", cache_server.url])

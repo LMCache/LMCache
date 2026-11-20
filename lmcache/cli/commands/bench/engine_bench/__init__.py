@@ -33,7 +33,7 @@ class EngineBenchCommand(BaseCommand):
         """Register without the common output args (--format/--output).
 
         The engine bench manages its own output lifecycle (CSV/JSON export,
-        --quiet) so the generic _add_output_args flags are not applicable
+        --quiet) so the shared output flags are not applicable
         and would only clutter ``-h`` output.
         """
         parser = subparsers.add_parser(self.name(), help=self.help())

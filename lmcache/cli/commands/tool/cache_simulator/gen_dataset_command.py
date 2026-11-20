@@ -32,7 +32,7 @@ class GenDatasetCommand(BaseCommand):
         add_gen_dataset_arguments(parser)
 
     def register(self, subparsers: argparse._SubParsersAction) -> None:
-        # Skip _add_output_args — this command defines its own --output.
+        # This command defines its own --output.
         # Gracefully skip if optional dependencies are missing.
         try:
             parser = subparsers.add_parser(self.name(), help=self.help())

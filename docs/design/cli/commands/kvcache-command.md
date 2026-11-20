@@ -294,6 +294,9 @@ All CLI operations target the **MP HTTP server**
   leaf commands, matching the `quota` shape. Package:
   `lmcache/cli/commands/kvcache/` (`clear_command.py`, `list_command.py`).
   Each leaf owns the shared output options (`--format`, `--output`, `-q`).
+  Existing `kvcache -q clear` scripts also accept these options before
+  `clear`. Explicit leaf values override group values. Only `clear` had
+  this syntax before the group became a composite.
 - **MP HTTP only:** every leaf uses the shared CLI `fetch_json()` helper
   (GET or POST with a JSON body), which surfaces the server's
   `detail`/`error` explanation on HTTP failures. All requests target the

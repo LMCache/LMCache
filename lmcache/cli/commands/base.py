@@ -144,7 +144,7 @@ class BaseCommand(abc.ABC):
         """
         parser = subparsers.add_parser(self.name(), help=self.help())
         self.add_arguments(parser)
-        _add_output_args(parser)
+        add_output_args(parser)
         parser.set_defaults(func=self.execute)
 
     def create_metrics(
@@ -334,8 +334,8 @@ class CompositeCommand(BaseCommand):
         return subcmds
 
 
-def _add_output_args(parser: argparse.ArgumentParser) -> None:
-    """Add the common ``--format`` and ``--output`` flags.
+def add_output_args(parser: argparse.ArgumentParser) -> None:
+    """Add the shared format, output path and quiet flags to a parser.
 
     Called automatically by :meth:`BaseCommand.register` — subcommands
     do not need to call this themselves.
@@ -346,14 +346,12 @@ def _add_output_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--format",
         type=str,
-        default=None,
         metavar="FORMAT",
         help=("Stdout output format (default: terminal). Available: terminal, json."),
     )
     parser.add_argument(
         "--output",
         type=str,
-        default=None,
         metavar="PATH",
         help="Save metrics to a file at PATH (format chosen by --format).",
     )
@@ -361,6 +359,5 @@ def _add_output_args(parser: argparse.ArgumentParser) -> None:
         "-q",
         "--quiet",
         action="store_true",
-        default=False,
         help="Suppress stdout output. Exit code only.",
     )

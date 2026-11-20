@@ -151,6 +151,13 @@ clear
 
 Clear all cached KV data in **L1 (CPU memory)** on the target LMCache server.
 
+Existing scripts can also pass ``-q`` / ``--quiet``, ``--format``, or
+``--output`` before ``clear``, for example
+``lmcache kvcache -q clear --url http://localhost:8080``. If an output
+option is given in both positions, the value after ``clear`` takes precedence.
+A 503 from this command uses the same ``Server unhealthy`` diagnostic as
+``describe kvcache``.
+
 .. code-block:: bash
 
    lmcache kvcache clear --url <MP_HTTP_URL>
