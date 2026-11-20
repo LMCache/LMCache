@@ -389,6 +389,8 @@ print(json.dumps({
     'kv_connector_extra_config': {
         'lmcache.mp.host': '${LMCACHE_REQUEST_SCHEME}://localhost',
         'lmcache.mp.port': int('${LMCACHE_REQUEST_PORT}'),
+        # CPU tensors use shared memory, not CUDA driver-mapped allocations.
+        'lmcache.mp.use_vmm_api': False,
     },
 }))")"
   # Optional flags — appended only when set, so unrelated callers stay
