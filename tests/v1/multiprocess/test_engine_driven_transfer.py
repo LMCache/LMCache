@@ -2815,6 +2815,7 @@ def test_register_engine_driven_propagates_fused_layout(
     else:
         payload.is_fused_packed = True
     module.register_kv_cache_engine_driven_context(payload)
+    layout: MemoryLayoutDesc | None
     if grouped:
         layouts = ctx.layout_desc_registry.find_group_layout_descs("m", 1)
         assert layouts is not None

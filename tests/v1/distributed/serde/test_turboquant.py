@@ -689,10 +689,11 @@ def test_turboquant_fs_storage_manager_roundtrip(
         if transfer_layout != "split":
             _, layers, tokens, width = layout.shapes[0]
             dimensions = (layers, tokens, 2 * width)
-            if transfer_layout == "lmcache_driven":
-                dimensions = (1, *dimensions)
+            shape = torch.Size(
+                (1, *dimensions) if transfer_layout == "lmcache_driven" else dimensions
+            )
             layout = MemoryLayoutDesc(
-                shapes=[torch.Size(dimensions)], dtypes=layout.dtypes, fused_kv=(True,)
+                shapes=[shape], dtypes=layout.dtypes, fused_kv=(True,)
             )
         keys = [_make_turboquant_object_key(i) for i in range(3)]
 
