@@ -1,55 +1,21 @@
 #!/usr/bin/env bash
-# Test LMCache server restart recovery: engine workers should re-register
-# their KV caches with the new LMCache server (driven by the heartbeat
-# thread's recover callback) and resume successful stores.
-#
-# Flow:
-#   1. Run a `lmcache bench engine --workload random-prefill` round.
-#   2. Snapshot lmcache_mp_l1_write_chunks_total via /metrics.
-#   3. Kill the LMCache server, relaunch on the same port.
-#   4. Wait for the new server to be ready and for the worker to
-#      re-register (poll /status until transfer-context metadata is non-empty).
-#   5. Clear the engine-local prefix/radix cache and run another bench round.
-#   6. Snapshot the metric again.
-#   7. Assert run2 > 0 and run2 >= 0.8 * run1.
-#
-# The metric counter is reset to 0 by the new server process, so
-# run2 is the absolute count for the post-restart benchmark only.
+# Verify recovery on the same engine: re-registration, write volume, and retrieve.
 set -o pipefail
 
 COMMON_WORKLOAD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${COMMON_WORKLOAD_DIR}/../helpers.sh"
+source "${COMMON_WORKLOAD_DIR}/../verification/l1-round-trip-verification.sh"
 
-# ── Configuration (inherited from run-single-test.sh) ─────────
 LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
-CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
-MAX_WORKERS="${MAX_WORKERS:-4}"
-
-# Bench parameters — small enough for CI but big enough to register
-# a non-trivial l1_write_keys count per round.
 NUM_REQUESTS="${RR_NUM_REQUESTS:-100}"
 REQUEST_LEN="${RR_REQUEST_LEN:-5000}"
 KV_CACHE_VOLUME="${RR_KV_CACHE_VOLUME:-5}"
-
-# Recovery timing
 RECOVER_TIMEOUT="${RR_RECOVER_TIMEOUT:-150}"
-
-# Output
+PID_FILE="${MP_TEST_PID_FILE:-/tmp/lmcache_mp_pids_${BUILD_ID}}"
 OUT_DIR="$RESULTS_DIR/restart_recovery"
+LMCACHE_LOG="${LMCACHE_RESTART_LOG:-/tmp/build_${BUILD_ID}_lmcache_restart.log}"
 mkdir -p "$OUT_DIR"
-
-PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
-
-echo "=== Restart Recovery Test ==="
-echo "Model: $MODEL"
-echo "${ENGINE_NAME} URL: http://localhost:${ENGINE_PORT}"
-echo "LMCache HTTP URL: http://localhost:${LMCACHE_HTTP_PORT}"
-echo "Bench: ${NUM_REQUESTS} requests x ${REQUEST_LEN} tokens"
-echo "Recovery timeout: ${RECOVER_TIMEOUT}s"
-echo ""
-
-# ── Helpers ──────────────────────────────────────────────────
 
 run_bench_round() {
     local label="$1"
@@ -92,222 +58,164 @@ run_bench_round() {
     return 0
 }
 
-scrape_l1_write_keys() {
-    # Print the latest lmcache_mp_l1_write_chunks_total value (single sample,
-    # unlabeled) from the LMCache HTTP server's /metrics endpoint.
-    python3 - <<EOF
-import sys, urllib.request
-url = "http://localhost:${LMCACHE_HTTP_PORT}/metrics"
-try:
-    body = urllib.request.urlopen(url, timeout=10).read().decode()
-except Exception as e:
-    print(f"ERROR fetching {url}: {e}", file=sys.stderr)
-    sys.exit(1)
-total = None
-for line in body.splitlines():
-    if line.startswith("#"):
-        continue
-    if not line.startswith("lmcache_mp_l1_write_chunks_total"):
-        continue
-    parts = line.rsplit(" ", 1)
-    if len(parts) != 2:
-        continue
-    try:
-        val = float(parts[1])
-    except ValueError:
-        continue
-    total = (total or 0.0) + val
-if total is None:
-    print(f"ERROR: lmcache_mp_l1_write_chunks_total not found at {url}", file=sys.stderr)
-    sys.exit(1)
-print(int(total))
-EOF
-}
-
-wait_for_lmcache_http() {
-    local deadline=$(( $(date +%s) + 60 ))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        if curl -sf "http://localhost:${LMCACHE_HTTP_PORT}/healthcheck" > /dev/null 2>&1; then
-            echo "LMCache HTTP healthy"
-            return 0
+start_lmcache() {
+    if [[ -n "${MP_TEST_LMCACHE_LAUNCH_SCRIPT:-}" ]]; then
+        bash "$MP_TEST_LMCACHE_LAUNCH_SCRIPT" > "$LMCACHE_LOG" 2>&1 &
+    else
+        local -a server_environment=()
+        if [[ "${ENGINE_USE_ALL_DEVICES:-false}" != "true" ]]; then
+            server_environment+=("${DEVICE_AFFINITY_VAR}=${GPU_FOR_ENGINE}")
         fi
-        sleep 2
-    done
-    echo "FAIL: LMCache HTTP did not come back within 60s"
-    return 1
-}
-
-wait_for_worker_reregister() {
-    # Each transfer mode exposes its registered contexts under a different key.
-    local context_meta_key="cache_context_meta"
-    if [[ "${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}" == "engine_driven" ]]; then
-        context_meta_key="non_cuda_context_meta"
-    fi
-    local deadline=$(( $(date +%s) + RECOVER_TIMEOUT ))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        local count
-        count=$(python3 - <<EOF 2>/dev/null
-import json, urllib.request
-try:
-    body = urllib.request.urlopen("http://localhost:${LMCACHE_HTTP_PORT}/status", timeout=5).read()
-    data = json.loads(body)
-    print(len(data.get("${context_meta_key}", {})))
-except Exception:
-    print(0)
-EOF
-)
-        if [ "$count" -gt 0 ]; then
-            echo "Worker re-registered (${context_meta_key} entries: $count)"
-            return 0
+        engine_add_lmcache_server_environment server_environment
+        local -a transfer_args=(
+            --supported-transfer-mode "${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
+        )
+        if [[ -n "${CHUNK_SIZE:-}" ]]; then
+            transfer_args+=(--chunk-size "$CHUNK_SIZE")
         fi
-        sleep 2
-    done
-    echo "FAIL: worker did not re-register within ${RECOVER_TIMEOUT}s"
-    return 1
-}
-
-restart_lmcache() {
-    local old_pid
-    old_pid=$(sed -n '1p' "$PID_FILE" 2>/dev/null || true)
-    if [ -z "$old_pid" ]; then
-        echo "FAIL: no LMCache PID in $PID_FILE"
-        return 1
-    fi
-    echo "Killing LMCache PID $old_pid..."
-    if kill -0 "$old_pid" 2>/dev/null; then
-        kill "$old_pid" 2>/dev/null || true
-        wait "$old_pid" 2>/dev/null || true
-    fi
-    sleep 60
-
-    echo "Relaunching LMCache on port ${LMCACHE_PORT} / HTTP ${LMCACHE_HTTP_PORT}..."
-    local -a server_environment=()
-    if [[ "${ENGINE_USE_ALL_DEVICES:-false}" != "true" ]]; then
-        server_environment+=("${DEVICE_AFFINITY_VAR}=${GPU_FOR_ENGINE}")
-    fi
-    engine_add_lmcache_server_environment server_environment
-    local -a transfer_args=(
-        --supported-transfer-mode "${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
-    )
-    if [[ -n "${CHUNK_SIZE:-}" ]]; then
-        transfer_args+=(--chunk-size "$CHUNK_SIZE")
-    fi
-    if [[ "${L1_USE_LAZY:-true}" == "false" ]]; then
-        transfer_args+=(--no-l1-use-lazy)
-        if [[ "${LMCACHE_MP_TRANSFER_MODE:-}" == "engine_driven" ]]; then
-            transfer_args+=(--shm-name "mp_${BUILD_ID}")
+        if [[ "${L1_USE_LAZY:-true}" == "false" ]]; then
+            transfer_args+=(--no-l1-use-lazy)
+            if [[ "${LMCACHE_MP_TRANSFER_MODE:-}" == "engine_driven" ]]; then
+                transfer_args+=(--shm-name "mp_${BUILD_ID}")
+            fi
         fi
+        env "${server_environment[@]}" lmcache server \
+            --transport "$LMCACHE_REQUEST_TRANSPORT" \
+            --l1-size-gb "${CPU_BUFFER_SIZE:-80}" \
+            --eviction-policy LRU --max-workers "${MAX_WORKERS:-4}" \
+            --port "$LMCACHE_PORT" --http-port "$LMCACHE_HTTP_PORT" \
+            "${transfer_args[@]}" > "$LMCACHE_LOG" 2>&1 &
     fi
-    env "${server_environment[@]}" lmcache server \
-        --transport "$LMCACHE_REQUEST_TRANSPORT" \
-        --l1-size-gb "$CPU_BUFFER_SIZE" \
-        --eviction-policy LRU \
-        --max-workers "$MAX_WORKERS" \
-        --port "$LMCACHE_PORT" \
-        --http-port "$LMCACHE_HTTP_PORT" \
-        "${transfer_args[@]}" \
-        > "/tmp/build_${BUILD_ID}_lmcache_restart.log" 2>&1 &
-
     local new_pid=$!
-    echo "$new_pid" > /tmp/.new_lmcache_pid
-    # Replace line 1 of the PID file so cleanup.sh kills the new process.
-    sed -i "1s/.*/$new_pid/" "$PID_FILE"
-    echo "LMCache restarted (PID=$new_pid)"
-    return 0
+    python3 - "$PID_FILE" "$new_pid" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+lines = path.read_text().splitlines()
+lines[0] = sys.argv[2]
+path.write_text("\n".join(lines) + "\n")
+PY
 }
 
-# ── Step 1: Bench round 1 ────────────────────────────────────
-echo "============================================"
-echo "=== Round 1: bench against original server ==="
-echo "============================================"
-if ! run_bench_round "round1" "41"; then
-    echo "FAIL: round 1 bench failed"
-    exit 1
-fi
+wait_for_registrations() {
+    python3 - "$LMCACHE_HTTP_PORT" "$RECOVER_TIMEOUT" \
+        "${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}" "$OUT_DIR/registrations.json" "$1" \
+        "${RR_EXCLUDE_REGISTRATIONS:-}" <<'PY'
+import json
+from pathlib import Path
+import sys
+import time
+import urllib.error
+import urllib.request
 
-ROUND1_WRITES=$(scrape_l1_write_keys) || {
-    echo "FAIL: could not scrape /metrics after round 1"
-    exit 1
+port, timeout, mode, snapshot, action, excluded_snapshot = sys.argv[1:]
+key = "non_cuda_context_meta" if mode == "engine_driven" else "cache_context_meta"
+if action == "recover":
+    expected = set(json.loads(Path(snapshot).read_text()))
+    if not expected:
+        raise SystemExit("No original Worker registrations were captured")
+else:
+    expected = set()
+excluded = set()
+if excluded_snapshot:
+    excluded = set(json.loads(Path(excluded_snapshot).read_text()).get(key, {}))
+deadline = time.monotonic() + float(timeout)
+while time.monotonic() < deadline:
+    try:
+        with urllib.request.urlopen(f"http://localhost:{port}/status", timeout=5) as response:
+            status = json.load(response)
+        ids = set(status.get(key, {})) - excluded
+        Path(snapshot + "." + action).write_text(json.dumps(status, indent=2))
+        if ids and (action == "snapshot" or expected <= ids):
+            if action == "snapshot":
+                Path(snapshot).write_text(json.dumps(sorted(ids)))
+            print(f"{action}: {key}={sorted(ids)}", flush=True)
+            sys.exit(0)
+    except (urllib.error.URLError, TimeoutError):
+        pass
+    time.sleep(1)
+raise SystemExit(f"Timed out waiting for {action} of registrations {sorted(expected)}")
+PY
 }
-echo "Round 1 lmcache_mp_l1_write_chunks_total = $ROUND1_WRITES"
 
-if [ "$ROUND1_WRITES" -le 0 ]; then
-    echo "FAIL: round 1 produced no L1 writes; benchmark setup is broken"
-    exit 1
-fi
-
-# ── Step 2: Kill + relaunch LMCache ──────────────────────────
-echo ""
-echo "============================================"
-echo "=== Restarting LMCache server ==="
-echo "============================================"
-if ! restart_lmcache; then
-    exit 1
-fi
-
-if ! wait_for_lmcache_http; then
-    echo "--- new lmcache log (last 80 lines) ---"
-    tail -80 "/tmp/build_${BUILD_ID}_lmcache_restart.log" 2>/dev/null || true
-    exit 1
-fi
-
-if ! wait_for_worker_reregister; then
-    echo "--- new lmcache log (last 80 lines) ---"
-    tail -80 "/tmp/build_${BUILD_ID}_lmcache_restart.log" 2>/dev/null || true
-    echo "--- ${ENGINE_NAME} log (last 80 lines) ---"
-    tail -80 "$ENGINE_LOG_FILE" 2>/dev/null || true
-    exit 1
-fi
-
-# ── Step 3: Bench round 2 ────────────────────────────────────
-echo ""
-echo "============================================"
-echo "=== Round 2: bench against restarted server ==="
-echo "============================================"
-# Engine-local KV entries survive an LMCache-only restart. Clear them so
-# round 2 cannot bypass prefill and stores using round 1's prefix/radix hits.
-echo "Clearing ${ENGINE_NAME} local cache before round 2..."
-if ! engine_clear_local_cache "$ENGINE_PORT"; then
-    echo "FAIL: could not clear ${ENGINE_NAME} local cache before round 2"
-    exit 1
-fi
-
-if ! run_bench_round "round2" "42"; then
-    echo "FAIL: round 2 bench failed"
-    echo "--- ${ENGINE_NAME} log (last 80 lines) ---"
-    tail -80 "$ENGINE_LOG_FILE" 2>/dev/null || true
-    exit 1
-fi
-
-ROUND2_WRITES=$(scrape_l1_write_keys) || {
-    echo "FAIL: could not scrape /metrics after round 2"
-    exit 1
+verify_cache_service() {
+    local phase="$1"
+    PROMPT_FILE="$OUT_DIR/${phase}_prompt.txt"
+    export OUT_A="$OUT_DIR/${phase}_cold.txt"
+    export OUT_B="$OUT_DIR/${phase}_hit.txt"
+    export MAX_TOKENS=8
+    # A unique prefix prevents a previous workload from supplying the cold run.
+    printf '%s %s\n' "$BUILD_ID" "$phase" > "$PROMPT_FILE"
+    local body="$OUT_DIR/prompt_body.txt"
+    l1_round_trip_build_prompt "$body" "$phase" 4 || return 1
+    cat "$body" >> "$PROMPT_FILE"
+    l1_round_trip_verify_cache_service "$phase" || return 1
 }
-echo "Round 2 lmcache_mp_l1_write_chunks_total = $ROUND2_WRITES"
 
-# ── Step 4: Compare metrics ──────────────────────────────────
-echo ""
-echo "============================================"
-echo "=== Verification ==="
-echo "============================================"
-echo "Round 1 writes: $ROUND1_WRITES"
-echo "Round 2 writes: $ROUND2_WRITES"
+measure_bench_writes() {
+    local label="$1" seed="$2" before after
+    engine_clear_local_cache "$ENGINE_PORT" || return 1
+    before=$(l1_round_trip_metric lmcache_mp_l1_write_chunks_total) || return 1
+    run_bench_round "$label" "$seed" || return 1
+    sleep "${STORE_DRAIN_SECONDS:-5}"
+    after=$(l1_round_trip_metric lmcache_mp_l1_write_chunks_total) || return 1
+    printf '%s\n' "$((after - before))" > "$OUT_DIR/${label}_writes.txt"
+}
 
-if [ "$ROUND2_WRITES" -le 0 ]; then
-    echo "FAIL: round 2 produced no L1 writes — re-registration likely failed"
+# CPU prepares round 1 before fault tolerance, then resumes the same outage.
+if [[ "${RR_SERVER_STOPPED:-0}" != "1" ]]; then
+    measure_bench_writes round1 41 || exit 1
+    wait_for_registrations snapshot || exit 1
+    if [[ "${RR_PREPARE_ONLY:-0}" == "1" ]]; then exit 0; fi
+fi
+ROUND1_WRITES=$(cat "$OUT_DIR/round1_writes.txt") || exit 1
+if ((ROUND1_WRITES <= 0)); then
+    echo "FAIL: round 1 produced no completed L1 writes"
     exit 1
 fi
 
-# Floor-divide: round2 >= 0.8 * round1  <=>  round2 * 10 >= round1 * 8
-if [ $((ROUND2_WRITES * 10)) -lt $((ROUND1_WRITES * 8)) ]; then
-    pct=$(python3 -c "print(f'{$ROUND2_WRITES / $ROUND1_WRITES * 100:.1f}')")
-    echo "FAIL: round 2 only ${pct}% of round 1 writes (threshold: 80%)"
+old_pid=$(sed -n '1p' "$PID_FILE")
+if [[ -z "$old_pid" ]]; then
+    echo "FAIL: no LMCache PID in $PID_FILE"
     exit 1
 fi
+python3 "${COMMON_WORKLOAD_DIR}/../../stop-processes.py" "$old_pid" \
+    --ports "$LMCACHE_PORT" "$LMCACHE_HTTP_PORT" || exit 1
 
-pct=$(python3 -c "print(f'{$ROUND2_WRITES / $ROUND1_WRITES * 100:.1f}')")
-echo "PASS: round 2 = ${pct}% of round 1 (>= 80%)"
-echo ""
-echo "============================================"
-echo "=== Restart Recovery Test PASSED ==="
-echo "============================================"
+# Allow default 10s heartbeats to time out on every adapter before recovery.
+sleep "${RR_OUTAGE_SECONDS:-30}"
+start_lmcache || exit 1
+wait_for_registrations recover || exit 1
+# Registration is visible before the Worker finishes publishing recovery.
+# Wait for a real store, clearing local KV so fallback cannot hide readiness.
+deadline=$((SECONDS + RECOVER_TIMEOUT))
+PROMPT_FILE="$OUT_DIR/recovery_probe.txt"
+printf '%s recovery probe\n' "$BUILD_ID" > "$PROMPT_FILE"
+l1_round_trip_build_prompt "$OUT_DIR/probe_body.txt" recovery 4 || exit 1
+cat "$OUT_DIR/probe_body.txt" >> "$PROMPT_FILE"
+MAX_TOKENS=8
+writes_before=$(l1_round_trip_metric lmcache_mp_l1_write_chunks_total) || exit 1
+while :; do
+    engine_clear_local_cache "$ENGINE_PORT" || exit 1
+    l1_round_trip_send_completion "$OUT_DIR/recovery_probe_output.txt" recovery_probe || exit 1
+    sleep 1
+    writes_after=$(l1_round_trip_metric lmcache_mp_l1_write_chunks_total) || exit 1
+    if ((writes_after > writes_before)); then break; fi
+    if ((SECONDS >= deadline)); then
+        echo "FAIL: Worker registered but no completed L1 writes after recovery"
+        exit 1
+    fi
+done
+
+measure_bench_writes round2 42 || exit 1
+ROUND2_WRITES=$(cat "$OUT_DIR/round2_writes.txt") || exit 1
+if ((ROUND2_WRITES <= 0 || ROUND2_WRITES * 10 < ROUND1_WRITES * 8)); then
+    echo "FAIL: round 2 writes=$ROUND2_WRITES; expected >=80% of round 1=$ROUND1_WRITES"
+    exit 1
+fi
+echo "PASS: round 2 writes=$ROUND2_WRITES >=80% of round 1=$ROUND1_WRITES"
+engine_clear_local_cache "$ENGINE_PORT" || exit 1
+verify_cache_service after_restart || exit 1
+
+echo "PASS: original workers re-registered; cache store, hit and retrieve succeeded"

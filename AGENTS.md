@@ -298,3 +298,18 @@ When asked to review a PR, use the `pr-review` skill; before creating a PR,
 self-check with the `pre-pr-check` skill (both under `.claude/skills/`). Create
 the PR as a draft and leave the ready-for-review transition to the submitting
 human after their self-review.
+
+## CPU recovery validation environments
+
+- When reusing a Python environment across worktrees, verify the editable
+  LMCache installation points at the checkout under test before launching CLI
+  subprocesses. Reinstall with `NO_GPU_EXT=1 uv pip install --python <venv>/bin/python
+  --no-deps --no-build-isolation -e .` when necessary; importing from the current
+  directory alone does not prove the installed CLI uses the same worktree.
+- `lmcache bench engine` random-prefill sends chat requests. CPU tests using
+  `facebook/opt-125m` must supply a chat template to vLLM; the fault-tolerance
+  benchmark itself uses `/v1/completions`.
+- Offline vLLM may register a local HF snapshot path while `/v1/models`
+  reports a public model ID. For the fixed BF16 OPT-125m recovery benchmark,
+  provide `RR_TOKENS_PER_GB=29127` (36864 KV bytes/token) instead of relying on
+  the benchmark's model-name-based capacity lookup.

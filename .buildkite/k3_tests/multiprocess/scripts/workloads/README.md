@@ -15,7 +15,10 @@ a workload owns its requests and assertions.
   runs every check before exiting so a threshold failure still leaves the
   `/metrics` snapshot and a per-check summary in `RESULTS_DIR`, and it runs
   on CPU with stub inputs (`tests/tools/test_long_doc_qa_l2_verify.py`).
-- `restart-recovery.sh`: LMCache server restart and worker re-registration.
+- `restart-recovery.sh`: restart LMCache after a heartbeat-length outage, verify
+  the original workers re-register, and require the second random-prefill bench
+  to complete at least 80% of the first round's writes. Also verify store, retrieve,
+  engine-loaded chunks and identical output. Fast restarts are not covered.
 - `http-api.sh`: LMCache HTTP API and CLI coverage with a live engine.
 
 `verification/` contains shared assertions and request helpers that are sourced
@@ -63,3 +66,16 @@ An adapter may temporarily skip unsupported common workloads through
 allowlist. Transfer-mode and request-transport support is declared separately
 by the adapter, so a common pipeline matrix can safely include engines with
 different capabilities.
+
+CPU E2E reuses `common/restart-recovery.sh` and `vllm/fault-tolerance.sh`
+in its opt-125m / LMCache-driven / ZMQ leg. `RR_PREPARE_ONLY=1` captures the first
+benchmark (4 requests × 512 tokens) and current registrations before fault
+injection. `FT_REUSE_SERVICES=1` preserves the running engine;
+`RR_SERVER_STOPPED=1` then resumes recovery from that same outage.
+`RR_EXCLUDE_REGISTRATIONS` points to the status snapshot taken before the earlier
+vLLM restart, so retired Worker IDs are excluded from the expected recovery set.
+Both workloads use `MP_TEST_PID_FILE` (server PID on line 1);
+`MP_TEST_LMCACHE_LAUNCH_SCRIPT` supplies the exact server launch command.
+Recovery waits for an actual completed store before measuring the second bench:
+server-side registration can precede completion of the Worker's recovery callback.
+Benchmark summaries, counter deltas, outputs and registration snapshots are retained.
