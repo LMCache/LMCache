@@ -12,6 +12,8 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 import ctypes
+import logging
+import os
 import select
 import sys
 import threading
@@ -313,6 +315,13 @@ from lmcache.v1.distributed.l2_adapters.config import (  # noqa: E402
 )
 from lmcache.v1.distributed.l2_adapters.factory import (  # noqa: E402
     create_l2_adapter_from_registry,
+)
+from lmcache.v1.distributed.l2_adapters.valkey import (  # noqa: E402
+    rdma_worker_pool,
+)
+from lmcache.v1.distributed.l2_adapters.valkey.rdma_worker_pool import (  # noqa: E402
+    ValkeyRdmaWorkerPool,
+    discover_efa_direct_domains,
 )
 from lmcache.v1.distributed.l2_adapters.valkey_l2_adapter import (  # noqa: E402
     ValkeyL2Adapter,
@@ -989,3 +998,378 @@ class TestWindowDerivation:
         pool.submit_set("direct", view).result(timeout=5)
         assert _transfers("set")[-1] == (b"direct", 4096, 64)
         assert _SERVER.store[b"direct"] == bytes(range(64))
+
+
+# ===========================================================================
+# rdma_interface: "auto"
+# ===========================================================================
+
+# A p5en.48xlarge as a container sees it (recorded with libfabric 2.7.0amzn2.0):
+# every EFA device of the host under /sys/class/infiniband, each with the
+# uverbs node it owns. Only the nodes of the devices the container was given
+# appear in /dev/infiniband.
+_P5EN_DEVICES: dict[str, str] = {
+    "rdmap85s0": "uverbs0",
+    "rdmap86s0": "uverbs1",
+    "rdmap87s0": "uverbs2",
+    "rdmap88s0": "uverbs3",
+    "rdmap110s0": "uverbs4",
+    "rdmap111s0": "uverbs5",
+    "rdmap112s0": "uverbs6",
+    "rdmap113s0": "uverbs7",
+    "rdmap135s0": "uverbs8",
+    "rdmap136s0": "uverbs9",
+    "rdmap137s0": "uverbs10",
+    "rdmap138s0": "uverbs11",
+    "rdmap160s0": "uverbs12",
+    "rdmap161s0": "uverbs13",
+    "rdmap162s0": "uverbs14",
+    "rdmap163s0": "uverbs15",
+}
+
+# The `domain:` lines `fi_info -p efa -f efa-direct` printed on that host, given
+# all 16 devices (each line appears once, as `domain: rdmapNNs0-rdm`).
+_P5EN_FI_INFO_ALL = tuple(sorted(f"{d}-rdm" for d in _P5EN_DEVICES))
+
+# ... and given 2 of the 16 (vpc.amazonaws.com/efa: "2", nodes uverbs6 and
+# uverbs10), while /sys/class/infiniband still listed all 16.
+_P5EN_FI_INFO_TWO = ("rdmap112s0-rdm", "rdmap137s0-rdm")
+
+
+def _efa_host(
+    root: Any,
+    devices: dict[str, str],
+    allocated: Optional[set[str]] = None,
+    driver: str = "efa",
+) -> tuple[str, str]:
+    """Build a fake /sys/class/infiniband and /dev/infiniband under ``root``.
+
+    ``devices`` maps a device to its uverbs node, ``allocated`` names the
+    nodes present in /dev (all of them by default). Returns the two paths.
+    """
+    sysfs = os.path.join(str(root), "sys", "class", "infiniband")
+    dev = os.path.join(str(root), "dev", "infiniband")
+    drivers = os.path.join(str(root), "sys", "bus", "pci", "drivers")
+    os.makedirs(sysfs, exist_ok=True)
+    os.makedirs(dev, exist_ok=True)
+    for device, node in devices.items():
+        device_dir = os.path.join(sysfs, device, "device")
+        os.makedirs(os.path.join(device_dir, "infiniband_verbs", node))
+        os.makedirs(os.path.join(drivers, driver), exist_ok=True)
+        os.symlink(os.path.join(drivers, driver), os.path.join(device_dir, "driver"))
+    for node in devices.values() if allocated is None else allocated:
+        open(os.path.join(dev, node), "w").close()
+    return sysfs, dev
+
+
+def _use_efa_host(monkeypatch: pytest.MonkeyPatch, paths: tuple[str, str]) -> None:
+    """Point the pool's discovery at a fake host."""
+    monkeypatch.setattr(rdma_worker_pool, "SYSFS_INFINIBAND_DIR", paths[0])
+    monkeypatch.setattr(rdma_worker_pool, "DEV_INFINIBAND_DIR", paths[1])
+
+
+def _fake_discovery(
+    monkeypatch: pytest.MonkeyPatch, domains: tuple[str, ...]
+) -> list[int]:
+    """Replace domain discovery; return a list that grows by one per call."""
+    calls: list[int] = []
+
+    def discover() -> tuple[str, ...]:
+        calls.append(1)
+        return domains
+
+    monkeypatch.setattr(rdma_worker_pool, "discover_efa_direct_domains", discover)
+    return calls
+
+
+class TestDomainDiscovery:
+    def test_all_devices_match_fi_info(self, tmp_path, monkeypatch):
+        sysfs, dev = _efa_host(tmp_path, _P5EN_DEVICES)
+        _use_efa_host(monkeypatch, (sysfs, dev))
+        assert discover_efa_direct_domains() == _P5EN_FI_INFO_ALL
+
+    def test_only_the_devices_given_to_the_container(self, tmp_path, monkeypatch):
+        # sysfs lists all 16; /dev holds the 2 the container may open.
+        sysfs, dev = _efa_host(
+            tmp_path, _P5EN_DEVICES, allocated={"uverbs6", "uverbs10"}
+        )
+        _use_efa_host(monkeypatch, (sysfs, dev))
+        assert len(os.listdir(sysfs)) == 16
+        assert discover_efa_direct_domains() == _P5EN_FI_INFO_TWO
+
+    def test_other_rdma_devices_are_ignored(self, tmp_path, monkeypatch):
+        sysfs, dev = _efa_host(tmp_path, {"rdmap85s0": "uverbs0"})
+        _use_efa_host(monkeypatch, (sysfs, dev))
+        # A non-EFA card (e.g. a Mellanox HCA) next to the EFA device.
+        _efa_host(tmp_path, {"mlx5_0": "uverbs1"}, driver="mlx5_core")
+        assert sorted(os.listdir(sysfs)) == ["mlx5_0", "rdmap85s0"]
+        assert discover_efa_direct_domains() == ("rdmap85s0-rdm",)
+
+    def test_no_rdma_devices_is_an_error(self, tmp_path, monkeypatch):
+        missing = os.path.join(str(tmp_path), "sys", "class", "infiniband")
+        _use_efa_host(monkeypatch, (missing, str(tmp_path)))
+        with pytest.raises(RuntimeError, match="cannot be read") as raised:
+            discover_efa_direct_domains()
+        assert "explicit list" in str(raised.value)
+
+    def test_no_efa_device_is_an_error(self, tmp_path, monkeypatch):
+        sysfs, dev = _efa_host(tmp_path, {"mlx5_0": "uverbs0"}, driver="mlx5_core")
+        _use_efa_host(monkeypatch, (sysfs, dev))
+        with pytest.raises(
+            RuntimeError, match="no device with the efa driver"
+        ) as raised:
+            discover_efa_direct_domains()
+        message = str(raised.value)
+        assert "mlx5_0" in message
+        assert "explicit list" in message
+
+    def test_efa_devices_not_given_to_the_container_are_an_error(
+        self, tmp_path, monkeypatch
+    ):
+        sysfs, dev = _efa_host(tmp_path, _P5EN_DEVICES, allocated=set())
+        _use_efa_host(monkeypatch, (sysfs, dev))
+        with pytest.raises(RuntimeError, match="16 EFA device") as raised:
+            discover_efa_direct_domains()
+        message = str(raised.value)
+        assert "vpc.amazonaws.com/efa" in message
+        assert "explicit list" in message
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root may open any device node",
+    )
+    def test_nodes_this_process_cannot_open_are_left_out(self, tmp_path, monkeypatch):
+        sysfs, dev = _efa_host(
+            tmp_path, {"rdmap85s0": "uverbs0", "rdmap86s0": "uverbs1"}
+        )
+        _use_efa_host(monkeypatch, (sysfs, dev))
+        os.chmod(os.path.join(dev, "uverbs1"), 0o000)
+        assert discover_efa_direct_domains() == ("rdmap85s0-rdm",)
+        os.chmod(os.path.join(dev, "uverbs0"), 0o400)
+        with pytest.raises(RuntimeError, match="can be read and written"):
+            discover_efa_direct_domains()
+
+    def test_the_defaults_are_the_real_paths(self):
+        assert rdma_worker_pool.SYSFS_INFINIBAND_DIR == "/sys/class/infiniband"
+        assert rdma_worker_pool.DEV_INFINIBAND_DIR == "/dev/infiniband"
+
+
+class TestInterfaceAuto:
+    def test_config_accepts_auto_without_discovering(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        calls = _fake_discovery(monkeypatch, ("efa0",))
+        cfg = _make_config(rdma_interface="auto")
+        assert cfg.rdma_interface_auto
+        assert cfg.rdma_interfaces == ()
+        # Validating a config must not need libfabric.
+        assert calls == []
+
+    def test_an_explicit_interface_is_not_auto(self):
+        assert not _make_config().rdma_interface_auto
+        assert not _make_config(rdma_interface="efa0").rdma_interface_auto
+
+    def test_from_dict_accepts_auto(self):
+        cfg = ValkeyL2AdapterConfig.from_dict(
+            {"startup_nodes": "h:1", "transport": "rdma", "rdma_interface": "auto"}
+        )
+        assert cfg.rdma_interface_auto
+
+    def test_auto_is_rejected_with_the_tcp_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        calls = _fake_discovery(monkeypatch, ("efa0",))
+        with pytest.raises(ValueError, match="not supported with rdma_provider 'tcp'"):
+            _make_config(rdma_provider="tcp", rdma_interface="auto")
+        with pytest.raises(ValueError, match="rdma_interface"):
+            ValkeyL2AdapterConfig.from_dict(
+                {
+                    "startup_nodes": "h:1",
+                    "transport": "rdma",
+                    "rdma_provider": "tcp",
+                    "rdma_interface": "auto",
+                }
+            )
+        assert calls == []
+
+    def test_the_pool_rejects_auto_with_the_tcp_provider_too(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+    ):
+        calls = _fake_discovery(monkeypatch, ("efa0",))
+        with pytest.raises(ValueError, match="not supported with rdma_provider 'tcp'"):
+            ValkeyRdmaWorkerPool(
+                l1_base=arena.desc.ptr,
+                l1_size=arena.desc.size,
+                rdma_provider="tcp",
+                rdma_interface="auto",
+                addresses=[("localhost", 6379)],
+                num_workers=1,
+            )
+        assert calls == []
+        assert _SERVER.configs == []
+
+    @pytest.mark.parametrize("value", [["auto"], ["efa0", "auto"]])
+    def test_auto_inside_a_list_is_rejected(self, value: list[str]):
+        with pytest.raises(ValueError, match="not as an entry of a list"):
+            _make_config(rdma_interface=value)
+
+    def test_workers_are_spread_across_the_discovered_domains(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        _use_efa_host(
+            monkeypatch,
+            _efa_host(
+                tmp_path,
+                {
+                    d: _P5EN_DEVICES[d]
+                    for d in ("rdmap110s0", "rdmap111s0", "rdmap112s0")
+                },
+            ),
+        )
+        workers = 3
+        adapter = ValkeyL2Adapter(
+            _make_config(num_workers=workers, rdma_interface="auto"), arena.desc
+        )
+        try:
+            gate = threading.Barrier(workers)
+            _SERVER.faults["set"] = lambda key: (gate.wait(timeout=5), None)[1]
+            keys = [_key(i) for i in range(workers)]
+            assert _store(adapter, keys, [arena.alloc() for _ in keys]).is_successful()
+
+            opened = Counter(kwargs["rdma"].interface for _, kwargs in _SERVER.configs)
+            assert opened == {
+                "rdmap110s0-rdm": 1,
+                "rdmap111s0-rdm": 1,
+                "rdmap112s0-rdm": 1,
+            }
+            # Status reports what was found, not the word "auto".
+            assert adapter.report_status()["rdma_interfaces"] == [
+                "rdmap110s0-rdm",
+                "rdmap111s0-rdm",
+                "rdmap112s0-rdm",
+            ]
+        finally:
+            adapter.close()
+
+    def test_more_workers_than_domains_wrap_around(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+    ):
+        _fake_discovery(monkeypatch, ("efa0", "efa1"))
+        workers = 4
+        adapter = ValkeyL2Adapter(
+            _make_config(num_workers=workers, rdma_interface="auto"), arena.desc
+        )
+        try:
+            gate = threading.Barrier(workers)
+            _SERVER.faults["set"] = lambda key: (gate.wait(timeout=5), None)[1]
+            keys = [_key(i) for i in range(workers)]
+            assert _store(adapter, keys, [arena.alloc() for _ in keys]).is_successful()
+            opened = Counter(kwargs["rdma"].interface for _, kwargs in _SERVER.configs)
+            assert opened == {"efa0": 2, "efa1": 2}
+        finally:
+            adapter.close()
+
+    def test_the_discovered_domains_are_logged_at_info(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+    ):
+        _fake_discovery(monkeypatch, ("efa0", "efa1"))
+        # LMCache loggers do not propagate to caplog, so listen on the pool's.
+        records: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        handler = _Capture(level=logging.INFO)
+        monkeypatch.setattr(rdma_worker_pool.logger, "level", logging.INFO)
+        rdma_worker_pool.logger.addHandler(handler)
+        try:
+            ValkeyL2Adapter(
+                _make_config(num_workers=2, rdma_interface="auto"), arena.desc
+            ).close()
+        finally:
+            rdma_worker_pool.logger.removeHandler(handler)
+        found = [r for r in records if '"auto" found' in r.getMessage()]
+        assert len(found) == 1
+        assert found[0].levelno == logging.INFO
+        assert "found 2 efa-direct domain(s): efa0, efa1" in found[0].getMessage()
+
+    def test_a_failed_discovery_fails_construction_before_any_client(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        _use_efa_host(monkeypatch, _efa_host(tmp_path, _P5EN_DEVICES, allocated=set()))
+        with pytest.raises(RuntimeError, match="could not discover EFA devices"):
+            ValkeyL2Adapter(_make_config(rdma_interface="auto"), arena.desc)
+        assert _SERVER.configs == []
+        assert _SERVER.registrations == []
+
+    def test_nothing_is_discovered_without_auto(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+    ):
+        calls = _fake_discovery(monkeypatch, ("efa0",))
+        for interface in (None, "efa0", ["efa0", "efa1"]):
+            ValkeyL2Adapter(
+                _make_config(num_workers=1, rdma_interface=interface), arena.desc
+            ).close()
+        assert calls == []
+
+    def test_help_describes_auto(self):
+        text = ValkeyL2AdapterConfig.help()
+        assert "'auto'" in text
+        assert "/sys/class/infiniband" in text
+
+
+class TestRegistrationFailureHint:
+    @staticmethod
+    def _refuse(monkeypatch: pytest.MonkeyPatch) -> None:
+        def refuse(self, memory):
+            raise RdmaError(
+                "fabric error in fi_mr_reg: Cannot allocate memory (errno -12)"
+            )
+
+        monkeypatch.setattr(_FakeRdmaClient, "register_rdma_region", refuse)
+
+    @pytest.mark.parametrize("interface", [None, "efa0", ["efa0", "efa1"]])
+    def test_efa_direct_without_auto_is_pointed_at_auto(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch, interface: Any
+    ):
+        self._refuse(monkeypatch)
+        with pytest.raises(RuntimeError, match="fi_mr_reg") as raised:
+            ValkeyL2Adapter(
+                _make_config(num_workers=4, rdma_interface=interface), arena.desc
+            )
+        message = str(raised.value)
+        assert 'set rdma_interface to "auto"' in message
+        assert "num_workers" in message
+
+    def test_the_per_device_share_is_reported(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+    ):
+        self._refuse(monkeypatch)
+        with pytest.raises(RuntimeError) as raised:
+            ValkeyL2Adapter(
+                _make_config(num_workers=4, rdma_interface=["efa0", "efa1"]),
+                arena.desc,
+            )
+        assert "the 2 listed domain(s), up to 2 worker(s)" in str(raised.value)
+
+    def test_auto_reports_how_the_workers_were_spread(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+    ):
+        self._refuse(monkeypatch)
+        _fake_discovery(monkeypatch, ("efa0", "efa1"))
+        with pytest.raises(RuntimeError, match="fi_mr_reg") as raised:
+            ValkeyL2Adapter(
+                _make_config(num_workers=3, rdma_interface="auto"), arena.desc
+            )
+        message = str(raised.value)
+        assert "across the 2 efa-direct domain(s) found, up to 2 worker(s)" in message
+        assert "set rdma_interface" not in message
+
+    def test_the_tcp_provider_is_not_pointed_at_auto(
+        self, arena: _Arena, monkeypatch: pytest.MonkeyPatch
+    ):
+        self._refuse(monkeypatch)
+        with pytest.raises(RuntimeError, match="fi_mr_reg") as raised:
+            ValkeyL2Adapter(_make_config(rdma_provider="tcp"), arena.desc)
+        assert "auto" not in str(raised.value)

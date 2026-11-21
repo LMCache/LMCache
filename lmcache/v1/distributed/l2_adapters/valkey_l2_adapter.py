@@ -31,7 +31,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 import functools
 import threading
 
@@ -68,9 +68,12 @@ from lmcache.v1.distributed.l2_adapters.valkey.blob_tcp_worker_pool import (
     ValkeyBlobTcpWorkerPool,
 )
 from lmcache.v1.distributed.l2_adapters.valkey.rdma_worker_pool import (
+    RDMA_INTERFACE_AUTO,
     RDMA_PROVIDERS,
     ValkeyRdmaWorkerPool,
+    is_auto_rdma_interface,
     normalize_rdma_interfaces,
+    require_auto_rdma_provider,
 )
 from lmcache.v1.distributed.l2_adapters.valkey.worker_pool import ValkeyWorkerPool
 from lmcache.v1.memory_management import MemoryObj
@@ -200,7 +203,8 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         tests). RDMA only.
       * ``rdma_interface``: Fabric domain, or list of domains, to open on
         a multi-card host; workers are spread across them round-robin.
-        RDMA only.
+        ``"auto"`` uses every EFA device this process can open, found when
+        the adapter is built; ``efa-direct`` only. RDMA only.
     """
 
     def __init__(
@@ -247,13 +251,17 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             transport: ``"tcp"``, ``"rdma"`` or ``"blob-tcp"``.
             rdma_provider: ``"efa-direct"`` or ``"tcp"``; RDMA only.
             rdma_interface: Optional fabric domain or domains; each must be
-                a non-empty string. RDMA only.
+                a non-empty string. ``"auto"`` discovers the efa-direct
+                domains when the adapter is built, and needs
+                ``rdma_provider="efa-direct"``. RDMA only.
 
         Raises:
             ValueError: If any validation fails (empty
                 ``startup_nodes``, non-positive ``num_workers``,
                 negative capacity, non-positive ``ttl_seconds``, ``@`` in
-                ``key_prefix``, an unknown transport or provider, etc.).
+                ``key_prefix``, an unknown transport or provider,
+                ``rdma_interface="auto"`` with a provider other than
+                ``efa-direct``, etc.).
         """
         super().__init__()
         if not startup_nodes:
@@ -319,7 +327,14 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             raise ValueError(
                 f"rdma_provider must be one of {RDMA_PROVIDERS}, got {rdma_provider!r}"
             )
-        rdma_interfaces = normalize_rdma_interfaces(rdma_interface)
+        rdma_interface_auto = is_auto_rdma_interface(rdma_interface)
+        if rdma_interface_auto:
+            # Only checked here; the domains are found when the pool is built,
+            # on the machine and in the process that will open them.
+            require_auto_rdma_provider(rdma_provider)
+            rdma_interfaces: tuple[str, ...] = ()
+        else:
+            rdma_interfaces = normalize_rdma_interfaces(rdma_interface)
 
         self.startup_nodes: list[tuple[str, int]] = startup_nodes
         self.cluster_mode: bool = cluster_mode
@@ -335,7 +350,10 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         self.ttl_seconds: Optional[int] = ttl_seconds
         self.transport: str = transport
         self.rdma_provider: str = rdma_provider
+        # The listed domains; empty when unpinned and when ``rdma_interface_auto``
+        # leaves the list to be discovered.
         self.rdma_interfaces: tuple[str, ...] = rdma_interfaces
+        self.rdma_interface_auto: bool = rdma_interface_auto
 
     @property
     def uses_rdma(self) -> bool:
@@ -478,7 +496,12 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             "- rdma_interface (str or list of str, optional): fabric domain or "
             "domains to open on a host with more than one card; workers are "
             "spread across a list round-robin. Omit to let the provider "
-            "choose. RDMA only."
+            "choose. 'auto' uses every EFA device this process can open (the "
+            "efa-direct domains `fi_info -p efa -f efa-direct` would list, "
+            "read from /sys/class/infiniband and /dev/infiniband), so each "
+            "worker's registration of the L1 arena lands on its own EFA "
+            "device while num_workers does not exceed the device count; "
+            "needs rdma_provider 'efa-direct'. RDMA only."
         )
 
 
@@ -629,7 +652,11 @@ class ValkeyL2Adapter(L2AdapterInterface):
             l1_base=self._l1_memory_desc.ptr,
             l1_size=self._l1_memory_desc.size,
             rdma_provider=config.rdma_provider,
-            rdma_interface=config.rdma_interfaces or None,
+            rdma_interface=(
+                RDMA_INTERFACE_AUTO
+                if config.rdma_interface_auto
+                else config.rdma_interfaces or None
+            ),
             **self._pool_kwargs(config),
         )
 
@@ -1198,7 +1225,10 @@ class ValkeyL2Adapter(L2AdapterInterface):
         }
         if self._config.uses_rdma and self._l1_memory_desc is not None:
             status["rdma_provider"] = self._config.rdma_provider
-            status["rdma_interfaces"] = list(self._config.rdma_interfaces)
+            # The pool's list, which is the discovered one under "auto". With
+            # RDMA the pool is always a ValkeyRdmaWorkerPool (see _create_pool).
+            rdma_pool = cast(ValkeyRdmaWorkerPool, self._pool)
+            status["rdma_interfaces"] = list(rdma_pool.rdma_interfaces)
             status["l1_arena_bytes"] = self._l1_memory_desc.size
         # In cluster mode also expose the server's real per-node memory
         # (``current_size_bytes`` above is LMCache's aggregate logical
