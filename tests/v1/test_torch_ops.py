@@ -3,7 +3,9 @@
 from typing import Any, Union
 import ctypes
 import os
+import subprocess
 import sys
+import threading
 import time
 import unittest.mock
 
@@ -12,6 +14,13 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.mp_observability.event import EventType
+from lmcache.v1.mp_observability.event_bus import (
+    EventBus,
+    EventBusConfig,
+    get_event_bus,
+    init_event_bus,
+)
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
@@ -38,6 +47,68 @@ def device_sync(device: str) -> None:
     CPU requires no synchronization.
     """
     platform_pkg.synchronize_device(torch.device(device))
+
+
+def _assert_record_drain_event(ops: Any, device: str) -> dict[str, torch.Tensor]:
+    """Check event payloads, stream ordering and destructive drain semantics.
+
+    Args:
+        ops: Backend providing record_event_on_stream and drain_recorded_events.
+        device: Device to synchronize before reading the recorded callbacks.
+
+    Returns:
+        A success tensor for the cross-backend scenario comparison.
+
+    Raises:
+        AssertionError: If any recording or drain contract is violated.
+    """
+    get_event_bus().stop()
+    init_event_bus(EventBusConfig(enabled=False))
+    ops.drain_recorded_events()  # clear residual global state
+
+    assert ops.drain_recorded_events() == []
+
+    ops.record_event_on_stream(
+        0, "mp.store.start", "sess-1", {"device": "cuda:0"}, {"count": 10}
+    )
+    ops.record_event_on_stream(
+        0, "mp.store.end", "sess-1", {"device": "cuda:0"}, {"count": 10}
+    )
+    device_sync(device)
+    result = ops.drain_recorded_events()
+    assert len(result) == 2
+
+    # Each element is (event_type_name, session_id, timestamp, str_meta, int_meta)
+    name0, sid0, ts0, str_meta0, int_meta0 = result[0]
+    name1, sid1, ts1, str_meta1, int_meta1 = result[1]
+
+    assert name0 == "mp.store.start"
+    assert name1 == "mp.store.end"
+    assert sid0 == "sess-1"
+    assert sid1 == "sess-1"
+    assert ts0 > 0.0
+    assert ts1 >= ts0  # timestamps must be monotonically non-decreasing
+    assert str_meta0 == {"device": "cuda:0"}
+    assert int_meta0 == {"count": 10}
+    assert str_meta1 == {"device": "cuda:0"}
+    assert int_meta1 == {"count": 10}
+
+    # Drain clears the buffer
+    assert ops.drain_recorded_events() == []
+
+    # Multiple records on the default stream (ptr=0) must all enqueue.
+    for i in range(5):
+        ops.record_event_on_stream(0, f"mp.test.{i}", f"sess-{i}", {}, {"idx": i})
+    device_sync(device)
+    events = ops.drain_recorded_events()
+    assert len(events) == 5
+    for i, (name, sid, ts, str_meta, int_meta) in enumerate(events):
+        assert name == f"mp.test.{i}"
+        assert sid == f"sess-{i}"
+        assert int_meta == {"idx": i}
+        assert ts > 0.0
+
+    return {"record_drain_event": torch.tensor([1], dtype=torch.int32)}
 
 
 # ==========================================
@@ -2546,71 +2617,41 @@ def scenario_multi_layer_block_kv_transfer(
 
 
 def scenario_record_drain_event(ops: Any, device: str) -> dict[str, torch.Tensor]:
-    """Test record_event_on_stream / drain_recorded_events contracts.
+    """Verify event recording with exclusive access to the native event queue.
 
-    Verified backend-agnostic: native cuda_ops uses cudaLaunchHostFunc on the
-    default stream (ptr=0), which fires synchronously after device_sync; the
-    fallback enqueues immediately with time.time(). Both paths satisfy every
-    assertion below.
+    Native CUDA recording runs in a fresh process because every EventBus in the
+    parent can drain the same process-global queue, including non-singletons.
+    Python fallbacks do not share that native queue and run in this process.
+
+    Args:
+        ops: Backend providing record_event_on_stream and drain_recorded_events.
+        device: Device on which to record and synchronize callbacks.
+
+    Returns:
+        A success tensor for the cross-backend scenario comparison.
+
+    Raises:
+        AssertionError: If a recording assertion fails, including in the child.
+        subprocess.TimeoutExpired: If the isolated scenario exceeds 60 seconds.
     """
-    # ``drain_recorded_events`` owns a process-global native buffer. Earlier
-    # observability tests can leave an EventBus drain thread running; stop it
-    # before this low-level test so it cannot consume a callback between the
-    # stream synchronization and the assertions below.
-    # First Party
-    from lmcache.v1.mp_observability.event_bus import (
-        EventBusConfig,
-        get_event_bus,
-        init_event_bus,
-    )
-
-    get_event_bus().stop()
-    init_event_bus(EventBusConfig(enabled=False))
-    ops.drain_recorded_events()  # clear residual global state
-
-    assert ops.drain_recorded_events() == []
-
-    ops.record_event_on_stream(
-        0, "mp.store.start", "sess-1", {"device": "cuda:0"}, {"count": 10}
-    )
-    ops.record_event_on_stream(
-        0, "mp.store.end", "sess-1", {"device": "cuda:0"}, {"count": 10}
-    )
-    device_sync(device)
-    result = ops.drain_recorded_events()
-    assert len(result) == 2
-
-    # Each element is (event_type_name, session_id, timestamp, str_meta, int_meta)
-    name0, sid0, ts0, str_meta0, int_meta0 = result[0]
-    name1, sid1, ts1, str_meta1, int_meta1 = result[1]
-
-    assert name0 == "mp.store.start"
-    assert name1 == "mp.store.end"
-    assert sid0 == "sess-1"
-    assert sid1 == "sess-1"
-    assert ts0 > 0.0
-    assert ts1 >= ts0  # timestamps must be monotonically non-decreasing
-    assert str_meta0 == {"device": "cuda:0"}
-    assert int_meta0 == {"count": 10}
-    assert str_meta1 == {"device": "cuda:0"}
-    assert int_meta1 == {"count": 10}
-
-    # Drain clears the buffer
-    assert ops.drain_recorded_events() == []
-
-    # Multiple records on the default stream (ptr=0) must all enqueue.
-    for i in range(5):
-        ops.record_event_on_stream(0, f"mp.test.{i}", f"sess-{i}", {}, {"idx": i})
-    device_sync(device)
-    events = ops.drain_recorded_events()
-    assert len(events) == 5
-    for i, (name, sid, ts, str_meta, int_meta) in enumerate(events):
-        assert name == f"mp.test.{i}"
-        assert sid == f"sess-{i}"
-        assert int_meta == {"idx": i}
-        assert ts > 0.0
-
-    return {"record_drain_event": torch.tensor([1], dtype=torch.int32)}
+    if device == "cuda" and ops is not _py_ops:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from lmcache import cuda_ops; "
+                "from tests.v1.test_torch_ops import _assert_record_drain_event; "
+                "_assert_record_drain_event(cuda_ops, 'cuda')",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout
+        return {"record_drain_event": torch.tensor([1], dtype=torch.int32)}
+    return _assert_record_drain_event(ops, device)
 
 
 # ==========================================
@@ -2667,7 +2708,8 @@ class TestScenarios:
         """Run a single scenario with a specific backend configuration.
 
         Each (scenario, backend) pair is a separate pytest test case, giving
-        per-scenario per-backend failure reporting without subprocess indirection.
+        per-scenario per-backend failure reporting. The native event recorder
+        runs in a child process to isolate its process-global queue.
 
         Results are stored in the module-level _results dict for later comparison
         by test_2_compare.
@@ -2738,6 +2780,40 @@ class TestScenarios:
                         pytest.fail(
                             f"{name}/{key}: '{bid}'={val} != '{base_bid}'={base_val}"
                         )
+
+
+def test_record_drain_event_with_competing_event_bus(
+    backend: tuple[str, Any, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep native event assertions independent of a second EventBus consumer."""
+    backend_id, ops, device = backend
+    if backend_id != "cuda_ops":
+        pytest.skip("Requires the native CUDA process-global event queue")
+
+    consumed = threading.Event()
+    bus = EventBus(EventBusConfig(enabled=True))
+    bus.subscribe(EventType.MP_STORE_START, lambda event: consumed.set())
+    original_record = ops.record_event_on_stream
+
+    def record_with_competing_drain(
+        stream: int,
+        name: str,
+        session: str,
+        str_meta: dict[str, str],
+        int_meta: dict[str, int],
+    ) -> None:
+        original_record(stream, name, session, str_meta, int_meta)
+        if name == "mp.store.start":
+            device_sync(device)
+            assert consumed.wait(3), "EventBus did not consume the start event"
+
+    bus.start()
+    try:
+        monkeypatch.setattr(ops, "record_event_on_stream", record_with_competing_drain)
+        result = scenario_record_drain_event(ops, device)
+        assert result["record_drain_event"].item() == 1
+    finally:
+        bus.stop()
 
 
 # ==========================================
