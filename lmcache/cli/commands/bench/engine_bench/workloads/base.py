@@ -4,6 +4,7 @@
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Awaitable, Callable
 import asyncio
 import queue
 import time
@@ -16,6 +17,85 @@ from lmcache.cli.commands.bench.engine_bench.stats import StatsCollector
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
+
+
+class DispatchTracker:
+    """Track benchmark sends, with an optional limit on concurrent tasks.
+
+    A slot is acquired before a bounded task is created and released when that
+    task finishes, including when it is cancelled before it starts running.
+    Unexpected task errors are logged rather than raised by the workload loop.
+
+    Args:
+        progress_monitor: Receives unexpected task error messages.
+        max_inflight: Maximum concurrent sends, or ``None`` for no limit.
+
+    Raises:
+        ValueError: If ``max_inflight`` is not positive.
+    """
+
+    def __init__(
+        self,
+        progress_monitor: ProgressMonitor,
+        max_inflight: int | None = None,
+    ) -> None:
+        if max_inflight is not None and max_inflight < 1:
+            raise ValueError("max_inflight must be positive")
+        self._progress_monitor = progress_monitor
+        self._semaphore = (
+            asyncio.Semaphore(max_inflight) if max_inflight is not None else None
+        )
+        self._pending_tasks: set[asyncio.Task[None]] = set()
+
+    @property
+    def has_pending(self) -> bool:
+        """Return whether any dispatched task has yet to be cleaned up.
+
+        Returns:
+            ``True`` while at least one send is tracked.
+        """
+        return bool(self._pending_tasks)
+
+    async def start(self, send: Callable[[], Awaitable[None]]) -> asyncio.Task[None]:
+        """Start a send after acquiring a slot, if a limit was configured.
+
+        Args:
+            send: Factory called in the task to create the send coroutine.
+
+        Returns:
+            The scheduled task, which callers may cancel if needed.
+        """
+        if self._semaphore is not None:
+            await self._semaphore.acquire()
+
+        task = asyncio.create_task(self._run(send))
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._on_task_done)
+        return task
+
+    async def wait_one(self) -> None:
+        """Wait until at least one pending send finishes, if any remain.
+
+        Returns:
+            Nothing. Returns immediately when there are no pending sends.
+        """
+        if self._pending_tasks:
+            await asyncio.wait(
+                self._pending_tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+    async def _run(self, send: Callable[[], Awaitable[None]]) -> None:
+        await send()
+
+    def _on_task_done(self, task: asyncio.Task[None]) -> None:
+        if self._semaphore is not None:
+            self._semaphore.release()
+        self._pending_tasks.discard(task)
+        if not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                self._progress_monitor.log_message(f"Dispatch task failed: {exc}")
 
 
 @dataclass

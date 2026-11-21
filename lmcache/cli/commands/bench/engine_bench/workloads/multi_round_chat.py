@@ -3,7 +3,6 @@
 
 # Standard
 from dataclasses import dataclass, field
-import asyncio
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
@@ -11,7 +10,10 @@ from lmcache.cli.commands.bench.engine_bench.request_sender import (
     RequestSender,
 )
 from lmcache.cli.commands.bench.engine_bench.stats import StatsCollector
-from lmcache.cli.commands.bench.engine_bench.workloads.base import BaseWorkload
+from lmcache.cli.commands.bench.engine_bench.workloads.base import (
+    BaseWorkload,
+    DispatchTracker,
+)
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -169,7 +171,7 @@ class MultiRoundChatWorkload(BaseWorkload):
         self._global_index = 0
         self._interval = 1.0 / config.qps
         self._pending_info: dict[str, tuple[int, str]] = {}
-        self._pending_tasks: set[asyncio.Task] = set()
+        self._dispatch_tracker = DispatchTracker(progress_monitor)
 
     def log_config(self) -> None:
         """Log key workload config before the benchmark starts."""
@@ -266,16 +268,16 @@ class MultiRoundChatWorkload(BaseWorkload):
     async def step(self, time_offset: float) -> float:
         """Dispatch the next request at the QPS-controlled rate.
 
+        Args:
+            time_offset: Seconds since benchmark start.
+
         Returns:
             Next wakeup time offset, or negative when done.
         """
         # Check duration — stop dispatching new requests
         if time_offset >= self._config.duration:
-            if self._pending_tasks:
-                await asyncio.wait(
-                    self._pending_tasks,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
+            if self._dispatch_tracker.has_pending:
+                await self._dispatch_tracker.wait_one()
                 return 0.0
             return -1.0
 
@@ -299,11 +301,7 @@ class MultiRoundChatWorkload(BaseWorkload):
             f"Session {session.session_id} dispatched request {self._global_index}"
         )
 
-        task = asyncio.create_task(
-            self._dispatch(request_id, messages),
-        )
-        self._pending_tasks.add(task)
-        task.add_done_callback(self._on_task_done)
+        await self._dispatch_tracker.start(lambda: self._dispatch(request_id, messages))
 
         self._global_index += 1
         return self._global_index * self._interval
@@ -319,14 +317,6 @@ class MultiRoundChatWorkload(BaseWorkload):
             messages,
             max_tokens=self._config.output_length,
         )
-
-    def _on_task_done(self, task: asyncio.Task) -> None:
-        """Clean up completed tasks and log unexpected errors."""
-        self._pending_tasks.discard(task)
-        if not task.cancelled():
-            exc = task.exception()
-            if exc is not None:
-                self._progress_monitor.log_message(f"Dispatch task failed: {exc}")
 
     def on_request_finished(self, request_id: str, output: str) -> None:
         """Record the response in the session's conversation history."""
