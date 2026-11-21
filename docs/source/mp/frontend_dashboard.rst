@@ -244,6 +244,13 @@ leave that box unchecked and enter its parent proxy's name in **Proxy ID**.
 The table labels the proxy flag and parent ID separately. **Edit** retains
 the original node identity, so changing **Node Name** renames that entry.
 
+The **Config** tab inspects MP server configuration. **Load Config** and
+**Get Config** read configuration from the server, with **Get Config**
+optionally filtering by configuration key. Runtime configuration updates are
+not supported for multiprocess servers; the **Set Config** action and
+configuration value input are disabled, and attempting to set configuration
+reports that updates are unsupported.
+
 
 - **Node tree view** — shows all proxies and their child nodes in a
   collapsible tree.
