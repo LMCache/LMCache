@@ -34,6 +34,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess import object_group_transfer
 from lmcache.v1.multiprocess.engine_context import (
     LayoutDescRegistry,
@@ -894,9 +895,9 @@ def test_consume_prefetch_result_fallback_when_fold_fails(lookup_module, monkeyp
     released_keys = []
     original_finish = storage_manager.finish_read_prefetched
 
-    def _spy_finish(keys, l1_owners=None):
+    def _spy_finish(keys, *args, **kwargs):
         released_keys.extend(keys)
-        return original_finish(keys, l1_owners=l1_owners)
+        return original_finish(keys, *args, **kwargs)
 
     monkeypatch.setattr(storage_manager, "finish_read_prefetched", _spy_finish)
 
@@ -929,6 +930,57 @@ def test_consume_prefetch_result_fallback_when_fold_fails(lookup_module, monkeyp
     assert session.prefetch_hit_chunks == 0
     assert "fold-fail-test" not in module._prefetch_jobs
     # free_lookup_locks runs cleanly without error or double-free
+    module.free_lookup_locks(key, tp_size=1)
+
+
+def test_consume_prefetch_result_fallback_releases_unfull_chunk_owners(
+    lookup_module, monkeypatch
+):
+    """If an exception occurs after _lock_unfull_chunk acquires unfull chunk
+    locks (e.g. during event_bus.publish), the fallback handler must release
+    both full-chunk and unfull-chunk L1 read locks using finish_lookup_read."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(CHUNK_SIZE + 5))
+    lookup_tokens = len(tokens)
+    _write(storage_manager, _chunk_keys(hasher, tokens, 1), is_temporary=False)
+    _write(
+        storage_manager, _unfull_keys(hasher, tokens, lookup_tokens), is_temporary=True
+    )
+
+    released_keys = []
+    original_finish = storage_manager.finish_read_prefetched
+
+    def _spy_finish(keys, *args, **kwargs):
+        released_keys.extend(keys)
+        return original_finish(keys, *args, **kwargs)
+
+    monkeypatch.setattr(storage_manager, "finish_read_prefetched", _spy_finish)
+
+    def _fail_publish(event, *args, **kwargs):
+        if getattr(event, "event_type", None) == EventType.MP_LOOKUP_PREFETCH_END:
+            raise RuntimeError("simulated publish failure")
+        return None
+
+    monkeypatch.setattr(module._ctx.event_bus, "publish", _fail_publish)
+
+    key = IPCCacheServerKey(
+        model_name=MODEL,
+        world_size=1,
+        worker_id=None,
+        token_bytes=pack_token_ids(tokens),
+        start=0,
+        end=lookup_tokens,
+        request_id="unfull-fail-test",
+        request_configs={"lmcache.hint.unfull_chunk_grid": 1},
+    )
+    module.lookup(key, tp_size=1)
+    with pytest.raises(RuntimeError, match="simulated publish failure"):
+        module.query_prefetch_status("unfull-fail-test")
+
+    # Both full chunk and unfull chunk locks were released
+    assert len(released_keys) >= 2
+    session = module._ctx.session_manager.get_or_create("unfull-fail-test")
+    assert session.prefetch_hit_chunks == 0
     module.free_lookup_locks(key, tp_size=1)
 
 

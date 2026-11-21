@@ -680,13 +680,16 @@ class LookupModule(DiscoverableModule):
         # The lookup's retained owners name every key it locked, so a key
         # ending anywhere else releases no unfull chunk.
         if key.has_unfull_chunk(chunk_size):
-            unfull_obj_keys = self._all_object_keys(
-                key,
-                [TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(key.end))],
-            )
-            locked_keys = session.get_prefetch_owners()
-            if all(obj_key in locked_keys for obj_key in unfull_obj_keys):
-                obj_keys.extend(unfull_obj_keys)
+            try:
+                unfull_obj_keys = self._all_object_keys(
+                    key,
+                    [TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(key.end))],
+                )
+                locked_keys = session.get_prefetch_owners()
+                if all(obj_key in locked_keys for obj_key in unfull_obj_keys):
+                    obj_keys.extend(unfull_obj_keys)
+            except ValueError:
+                pass
         if not obj_keys and session.get_prefetch_owners():
             obj_keys.extend(session.get_prefetch_owners().keys())
         if not obj_keys:
@@ -858,6 +861,7 @@ class LookupModule(DiscoverableModule):
             if result is None:
                 return None
 
+            unfull_chunk_owners: dict[ObjectKey, int] = {}
             try:
                 if job.row_windows:
                     found_count, _retain = fold_unfold_grouped(
@@ -969,12 +973,24 @@ class LookupModule(DiscoverableModule):
                 )
                 return job.consumed_hit_tokens
             except Exception:
-                if result is not None and result.l1_owners:
+                all_owners = {
+                    **(result.l1_owners if result is not None else {}),
+                    **unfull_chunk_owners,
+                }
+                if all_owners:
                     try:
-                        self._ctx.storage_manager.finish_read_prefetched(
-                            list(result.l1_owners.keys()),
-                            l1_owners=result.l1_owners,
-                        )
+                        if job.unfull_chunk_lookup_key is not None:
+                            finish_lookup_read(
+                                self._ctx,
+                                job.unfull_chunk_lookup_key,
+                                list(all_owners.keys()),
+                                l1_owners=all_owners,
+                            )
+                        else:
+                            self._ctx.storage_manager.finish_read_prefetched(
+                                list(all_owners.keys()),
+                                l1_owners=all_owners,
+                            )
                     except Exception:
                         logger.exception(
                             "Failed to release fallback L1 read locks for request %s",
@@ -984,8 +1000,7 @@ class LookupModule(DiscoverableModule):
                     fallback_session = self._ctx.session_manager.get_or_create(
                         job.request_id
                     )
-                    if fallback_session.prefetch_hit_chunks < 0:
-                        fallback_session.record_prefetch_result(0, (), {})
+                    fallback_session.record_prefetch_result(0, (), {})
                 except Exception:
                     logger.exception(
                         "Failed to record fallback lock state for request %s",
