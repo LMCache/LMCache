@@ -26,17 +26,22 @@ API for high-performance distributed KV cache storage.
 
   If 3FS Usrbio header or lib are not installed in the system path (e.g.,
   ``/usr/local/include``, ``/usr/local/lib``), you must set
-  ``HF3FS_INCLUDE_DIR`` and ``HF3FS_LIB_DIR`` to point to them explicitly:
+  ``HF3FS_INCLUDE_DIR`` and ``HF3FS_LIB_DIR`` to point to them explicitly.
+  Separate multiple directories with ``;``:
 
   .. code-block:: bash
 
       HF3FS_INCLUDE_DIR=/path/to/usrbio/include \
       HF3FS_LIB_DIR=/path/to/usrbio/lib \
 
+  These variables only locate the SDK; they do not enable the build.
+
 - **libabsl-dev**
 
-  The connector uses Abseil containers (``sharded_flat_hash_map``,
-  ``flat_hash_map``) from the system library.  On Debian/Ubuntu:
+  The connector uses Abseil's ``flat_hash_set`` from the system library.
+  Its headers must be in ``/usr/include``, ``/usr/local/include``, or a
+  ``HF3FS_INCLUDE_DIR`` entry, and its libraries in the system library
+  path or a ``HF3FS_LIB_DIR`` entry.  On Debian/Ubuntu:
 
   .. code-block:: bash
 
@@ -52,13 +57,17 @@ The LMCache 3FS extension is **not** built by default.  You must explicitly enab
     BUILD_HF3FS=1 \
     pip install -e . --verbose
 
-The **BUILD_HF3FS** environment variable controls compilation:
+Two environment variables enable the build:
 
-- ``BUILD_HF3FS=1``: Enable build 3FS C++ extension.
-- ``BUILD_HF3FS=0``: Force disable (highest priority), even if
-  ``HF3FS_INCLUDE_DIR`` is set.
-- **Not set**: Falls back to checking ``HF3FS_INCLUDE_DIR``. If
-  ``HF3FS_INCLUDE_DIR`` is also unset, the 3FS extension is skipped.
+- ``BUILD_HF3FS=1``: Check that the 3FS Usrbio header and lib and Abseil are
+  found, then build the 3FS C++ extension.  If any of them is missing, the
+  build fails with an error that lists what is missing and where it was
+  searched.
+- ``BUILD_WITH_HF3FS=1``: Build the extension without these checks.  This
+  takes precedence over ``BUILD_HF3FS=0``.
+
+If neither is set to ``1``, the 3FS extension is skipped, even if
+``HF3FS_INCLUDE_DIR`` or ``HF3FS_LIB_DIR`` is set.
 
 **LMCache-Specific Fields**
 
