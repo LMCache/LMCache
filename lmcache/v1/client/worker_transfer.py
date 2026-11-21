@@ -1061,11 +1061,17 @@ class EngineDrivenTransferContext(TransferContext):
             layout_desc = group_states[0].layout_desc
             num_physical_slots = chunk_tokens
         else:
-            chunk_tokens = (
-                blocks_in_chunk * block_size
-                if lmcache_chunk_tokens is None
-                else lmcache_chunk_tokens
-            )
+            expected_chunk_tokens = blocks_in_chunk * block_size
+            if (
+                lmcache_chunk_tokens is not None
+                and lmcache_chunk_tokens != expected_chunk_tokens
+            ):
+                raise ValueError(
+                    f"LMCache chunk of {lmcache_chunk_tokens} tokens does not "
+                    "match the single-group block geometry: "
+                    f"{blocks_in_chunk} blocks * {block_size} tokens"
+                )
+            chunk_tokens = expected_chunk_tokens
             shape = (
                 torch.Size([num_layers, blocks_in_chunk * block_size, hidden_dim_size])
                 if use_mla_flag

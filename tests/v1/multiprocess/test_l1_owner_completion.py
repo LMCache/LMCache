@@ -153,7 +153,7 @@ def test_store_owner_callback_round_trip(
     entry = SimpleNamespace(
         cache_context=cache_context,
         model_name="model",
-        chunk_size=1,
+        chunk_size=2,
         event_backend=backend,
     )
     monkeypatch.setattr(module, "get_and_touch_context_entry", lambda _: entry)
