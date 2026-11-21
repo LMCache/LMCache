@@ -231,6 +231,7 @@ def _make_connector() -> _Harness:
     # Default config: store only complete prompt chunks, no decode tokens.
     connector._save_decode_cache = False
     connector._save_unfull_chunk = False
+    connector._store_lookahead_tokens = 0
     connector._mamba_relocation_window = 0
     return _Harness(connector, manager, adapter)
 

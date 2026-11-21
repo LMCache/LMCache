@@ -3,6 +3,7 @@
 
 # Standard
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock
 
 # Third Party
@@ -11,10 +12,15 @@ import pytest
 pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
 
 # Third Party
+from vllm.config import KVTransferConfig, VllmConfig  # noqa: E402
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
+    KVConnectorRole,
+)
 from vllm.v1.request import RequestStatus  # noqa: E402
 from vllm.v1.utils import ConstantList  # noqa: E402
 
 # First Party
+from lmcache.integration.vllm import lmcache_mp_connector as connector_mod  # noqa: E402
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     LMCacheMPConnector,
 )
@@ -72,6 +78,63 @@ def test_prompt_ending_request_also_stores_its_exact_tail():
         # The running Mamba block holds the state at P: nothing runs after.
         (PROMPT, MAMBA_BLOCKS[2:]),
     ]
+
+
+def test_mamba_exact_tail_is_not_stored_under_speculative_decoding():
+    """With speculative decoding, a Mamba model saves only the grid tail: its
+    end-of-prompt state keeps changing as guessed tokens are added."""
+    tracker = _tracker(max_tokens=1)
+    tracker.increase_num_scheduled_tokens(PROMPT)
+
+    metas = _store_tails(
+        tracker, {TAIL_BOUNDARY: {1: BOUNDARY_STATE_BLOCK}}, num_speculative_tokens=2
+    )
+
+    assert [(meta.op.end, meta.op.block_ids[1]) for meta in metas] == [
+        (TAIL_BOUNDARY, [BOUNDARY_STATE_BLOCK]),
+    ]
+
+
+def test_attention_tails_are_stored_under_speculative_decoding():
+    """An attention-only model saves both tails: guessed tokens are written
+    after the prompt, so the saved rows never change."""
+    tracker = _tracker(max_tokens=1)
+    tracker.increase_num_scheduled_tokens(PROMPT)
+
+    metas = _store_tails(
+        tracker, {}, boundary_state_groups=(), num_speculative_tokens=2
+    )
+
+    assert [meta.op.end for meta in metas] == [TAIL_BOUNDARY, PROMPT]
+
+
+def test_speculative_decoding_does_not_block_unfull_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Partial chunks can be turned on together with speculative decoding."""
+    monkeypatch.setattr(
+        connector_mod,
+        "LMCacheMPSchedulerAdapter",
+        lambda **kwargs: MagicMock(lmcache_tokens_per_chunk=CHUNK),
+    )
+    monkeypatch.setattr(connector_mod, "print_banner_once", MagicMock())
+    monkeypatch.setattr(connector_mod, "vllm_layout_hints", lambda config: {})
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(model="test-model", use_mla=False),
+        parallel_config=SimpleNamespace(
+            world_size=1, rank=0, tensor_parallel_size=1, pipeline_parallel_size=1
+        ),
+        cache_config=SimpleNamespace(block_size=GRID, enable_prefix_caching=True),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=True),
+        speculative_config=SimpleNamespace(num_speculative_tokens=2),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"lmcache.mp.save_unfull_chunk": True},
+        ),
+    )
+
+    LMCacheMPConnector(cast(VllmConfig, vllm_config), KVConnectorRole.SCHEDULER)
 
 
 def test_exact_tail_waits_for_the_whole_prompt():
@@ -244,6 +307,33 @@ def test_boundary_state_block_is_pinned_until_the_request_is_sent():
     pool.free_blocks.assert_called_once_with(["boundary-state-block"])
 
 
+def test_connector_skips_the_mamba_exact_tail_under_speculative_decoding():
+    connector, _ = _connector(lookup_hit=0)
+    pool = MagicMock()
+    pool.blocks = {BOUNDARY_STATE_BLOCK: "boundary-state-block"}
+    connector._gpu_block_pool = pool
+    connector._boundary_state_groups = [1]
+    connector._pinned_boundary_state_blocks = {}
+    connector._group_tokens_per_block = GROUP_TOKENS_PER_BLOCK
+    connector._num_speculative_tokens = 2
+    tracker = _tracker(max_tokens=1)
+    tracker.increase_num_scheduled_tokens(PROMPT)
+    scheduler_output = SimpleNamespace(
+        kv_connector_block_state=SimpleNamespace(
+            boundary_state_offloads={
+                "req-0": [(1, BOUNDARY_STATE_BLOCK, TAIL_BOUNDARY)]
+            }
+        )
+    )
+    metadata = MagicMock()
+
+    connector._add_unfull_chunk_stores(scheduler_output, tracker, metadata)
+
+    assert [
+        call.args[0].op.end for call in metadata.add_request_metadata.call_args_list
+    ] == [TAIL_BOUNDARY]
+
+
 def test_pinned_boundary_state_block_is_released_after_a_preemption():
     """A request stores its tail, is preempted, then hits the whole tail and
     stores nothing more. It still delays its free, so the block it pinned
@@ -346,6 +436,7 @@ def _store_tails(
     tracker: LMCacheMPRequestTracker,
     boundary_state_blocks: dict[int, dict[int, int]],
     boundary_state_groups: tuple[int, ...] = (1,),
+    num_speculative_tokens: int = 0,
 ) -> list[LMCacheMPRequestMetadata]:
     stores = LMCacheMPRequestMetadata.GetUnfullChunkStoreMetadata(
         tracker,
@@ -354,5 +445,6 @@ def _store_tails(
         GRID,
         boundary_state_blocks,
         boundary_state_groups,
+        num_speculative_tokens=num_speculative_tokens,
     )
     return [meta for meta, _block_ids in stores]

@@ -624,6 +624,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
     # appends. The scheduler role sets it from the vLLM config.
     _mamba_relocation_window: int = 0
+    # Tokens the draft model guesses per step; 0 when speculative decoding is off.
+    _num_speculative_tokens: int = 0
 
     def __init__(
         self,
@@ -687,16 +689,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if not isinstance(self._save_unfull_chunk, bool):
             raise ValueError("lmcache.mp.save_unfull_chunk must be a boolean")
         spec_config = getattr(vllm_config, "speculative_config", None)
-        if (
-            self._save_unfull_chunk
-            and spec_config is not None
-            and (spec_config.num_speculative_tokens or 0) > 0
-        ):
-            # Draft rows sit past the prompt end in relocated Mamba blocks,
-            # so the state at the prompt end is not isolated.
-            raise ValueError(
-                "lmcache.mp.save_unfull_chunk does not support speculative decoding"
-            )
+        # Partial chunks work with speculative decoding: guessed tokens are
+        # written after the prompt, never inside a saved partial chunk.
+        self._num_speculative_tokens = (
+            spec_config.num_speculative_tokens or 0 if spec_config is not None else 0
+        )
         if (
             self._save_unfull_chunk
             and kv_cache_config is not None
@@ -816,6 +813,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # buffered and drained by the configured policy.
         self.lazy_offload = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.lazy_offload", False
+        )
+        # With speculative decoding, vLLM hashes a block only after the next few
+        # tokens exist, and lazy offload skips blocks without a hash. So wait for
+        # those tokens before saving (older vLLM has no such field: use 0).
+        self._store_lookahead_tokens: int = (
+            getattr(vllm_config, "num_hash_lookahead_tokens", 0)
+            if self.lazy_offload
+            else 0
         )
         if self.lazy_offload and self._save_unfull_chunk:
             raise ValueError(
@@ -2010,6 +2015,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
                 save_decode_cache=self._save_decode_cache,
+                lookahead_tokens=self._store_lookahead_tokens,
             )
             if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
@@ -2059,6 +2065,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
                 save_decode_cache=self._save_decode_cache,
+                lookahead_tokens=self._store_lookahead_tokens,
             )
 
             if r_meta is not None:
@@ -2276,6 +2283,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._unfull_chunk_grid,
             boundary_state_blocks,
             self._boundary_state_groups,
+            num_speculative_tokens=self._num_speculative_tokens,
         ):
             if pool is not None and boundary_state_block_ids:
                 pool.touch(
