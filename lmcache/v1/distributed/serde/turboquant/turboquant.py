@@ -882,12 +882,32 @@ def _create_turboquant_serde(kwargs: dict[str, object]) -> SerdeProcessor:
     )
     max_workers = int(kwargs.get("max_workers", 1))  # type: ignore[call-overload]
 
+    cuda_device = str(kwargs.get("cuda_device", ""))
+    if cuda_device:
+        try:
+            device = _normalize_cuda_device(cuda_device)
+        except (RuntimeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid TurboQuant cuda_device: {cuda_device!r}"
+            ) from exc
+        # Torch narrows device indices internally. Check the original index
+        # so a large value cannot wrap to a visible device.
+        suffix = cuda_device.rsplit(":", 1)[-1]
+        index = int(suffix) if suffix.isdigit() else device.index
+        if (
+            device.type == "cpu"
+            or index is None
+            or not 0 <= index < torch_dev.device_count()
+        ):
+            raise ValueError(f"Unavailable TurboQuant cuda_device: {cuda_device!r}")
+
     cfg = TurboQuantSerdeConfig(
         preset=preset,
         head_dim=head_dim,
         block_size=block_size,
         skip_first_layers=skip_first_layers,
         skip_last_layers=skip_last_layers,
+        cuda_device=cuda_device,
     )
 
     return AsyncSerdeProcessor(

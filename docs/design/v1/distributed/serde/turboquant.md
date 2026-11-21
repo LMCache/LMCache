@@ -195,7 +195,8 @@ Device selection follows these rules:
 1. If any source or destination tensor is already on CUDA, all CUDA tensors in
    the same serde operation must be on the same device. Otherwise, TurboQuant
    serde raises `ValueError`.
-2. If `cuda_device` is configured, that device is used as the staging device.
+2. The serde factory passes `cuda_device` to the serializer and deserializer.
+   When set, it selects the device used for staging.
    If CUDA tensors already exist, the configured device must match them.
 3. If all source and destination tensors are CPU tensors and `cuda_device` is
    not configured, TurboQuant serde selects a CUDA device with sufficient free

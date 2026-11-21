@@ -6,7 +6,9 @@ Unit tests for TurboQuant serde skeleton.
 # Standard
 from pathlib import Path
 from typing import cast
+import select
 import shutil
+import subprocess
 import tempfile
 import time
 
@@ -41,7 +43,7 @@ from lmcache.v1.distributed.serde.turboquant import (
 )
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.platform import current_device_spec
+from lmcache.v1.platform import consume_fd, current_device_spec
 
 # Test helpers
 from tests.v1.distributed.utils import single_row_spec
@@ -752,3 +754,86 @@ def test_turboquant_fs_storage_manager_roundtrip(
         if sm is not None:
             sm.close()
         shutil.rmtree(base_dir, ignore_errors=True)
+
+
+@pytest.mark.skipif(not torch_dev.is_available(), reason="Requires accelerator")
+@pytest.mark.parametrize("direction", ["serialize", "deserialize"])
+@pytest.mark.parametrize("cuda_device", ["0", ""])
+def test_factory_honors_staging_device(
+    direction: str, cuda_device: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit device is honored in both directions for CPU-backed KV.
+
+    Args:
+        direction: Whether to submit an encode or decode task.
+        cuda_device: Explicit staging device or an empty string for automatic placement.
+        monkeypatch: Replaces the utilization subprocess with a counting stub.
+    """
+    utilization_queries: list[list[str]] = []
+
+    def fake_check_output(command: list[str], **kwargs: object) -> str:
+        utilization_queries.append(command)
+        return "0\n"
+
+    monkeypatch.setattr(subprocess, "check_output", fake_check_output)
+    processor = create_serde_processor(
+        SerdeConfig(
+            type="turboquant",
+            kwargs={
+                "cuda_device": cuda_device,
+                "skip_first_layers": 4,
+                "skip_last_layers": 0,
+            },
+        )
+    )
+    # All four layers are protected by the test configuration, so the
+    # serialized data is the raw tensor bytes in both directions.
+    kv = torch.arange(2 * 4 * 16 * 128, dtype=torch.bfloat16).reshape(2, 4, 16, 128)
+    raw = kv.view(torch.uint8).flatten()
+    marker = 165
+    key = _make_turboquant_object_key(0)
+    try:
+        if direction == "serialize":
+            dst = torch.full_like(raw, marker)
+            src_buffer = cast(MemoryObj, _FakeMemoryObj(kv))
+            dst_buffer = cast(MemoryObj, _FakeMemoryObj(dst))
+            fd = processor.get_serialize_event_fd()
+            task = processor.submit_serialize([src_buffer], [dst_buffer], [key])
+            query = processor.query_serialize_result
+            expected = raw
+        else:
+            dst = torch.empty_like(kv)
+            dst.view(torch.uint8).fill_(marker)
+            src_buffer = cast(MemoryObj, _FakeMemoryObj(raw))
+            dst_buffer = cast(MemoryObj, _FakeMemoryObj(dst))
+            fd = processor.get_deserialize_event_fd()
+            task = processor.submit_deserialize([src_buffer], [dst_buffer], [key])
+            query = processor.query_deserialize_result
+            expected = kv
+        poll = select.poll()
+        poll.register(fd, select.POLLIN)
+        assert poll.poll(10000)
+        consume_fd(fd)
+        assert query(task) is True
+        assert torch.equal(dst, expected)
+        if cuda_device:
+            assert not utilization_queries
+        else:
+            assert utilization_queries
+            assert all(
+                "--query-gpu=utilization.gpu" in cmd for cmd in utilization_queries
+            )
+    finally:
+        processor.close()
+
+
+@pytest.mark.parametrize(
+    "cuda_device",
+    ["cpu", "not-a-device", "99999", "cuda:256", str(torch_dev.device_count())],
+)
+def test_factory_rejects_invalid_staging_device(cuda_device: str) -> None:
+    """Reject a non-accelerator, malformed, or unavailable GPU at startup."""
+    with pytest.raises(ValueError, match="TurboQuant cuda_device"):
+        create_serde_processor(
+            SerdeConfig(type="turboquant", kwargs={"cuda_device": cuda_device})
+        )
