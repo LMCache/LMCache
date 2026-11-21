@@ -26,10 +26,7 @@ from lmcache.v1.distributed.config import (
     ShadowL1ManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.l1_manager import (
-    DramL1Manager,
-    ShadowL1Manager,
-)
+from lmcache.v1.distributed.l1_manager import DramL1Manager, ShadowL1Manager
 from lmcache.v1.distributed.memory_manager import ShadowL1MemoryManager
 from lmcache.v1.memory_management import BorrowedMemoryObj, TensorMemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -140,11 +137,14 @@ def _lend(
     read_locks: int = 1,
     key: ObjectKey = KEY,
     tag: str = TAG,
+    read_generations: dict[ObjectKey, int] | None = None,
 ) -> BorrowedMemoryObj:
     """Stage, bind and admit one view: the whole prefetch path of a borrower."""
     placeholder = _stage(shadow, key, tag)
     _bind(placeholder, lease, address)
-    err, obj = shadow.finish_write_and_reserve_read([key], read_locks, tag=tag)[key]
+    err, obj = shadow.finish_write_and_reserve_read(
+        [key], read_locks, tag=tag, read_generations=read_generations
+    )[key]
     assert err is L1Error.SUCCESS and isinstance(obj, BorrowedMemoryObj)
     return obj
 
@@ -265,8 +265,54 @@ def test_borrow_read_locks_without_allocating(shadow: ShadowL1Manager) -> None:
 def test_shadow_is_never_a_lookup_hit(shadow: ShadowL1Manager) -> None:
     """reserve_read misses even a resident view: every request borrows afresh."""
     _lend(shadow, Lease())
-    assert shadow.reserve_read([KEY])[KEY] == (L1Error.KEY_NOT_EXIST, None)
+    generations: dict[ObjectKey, int] = {}
+    assert shadow.reserve_read([KEY], read_generations=generations)[KEY] == (
+        L1Error.KEY_NOT_EXIST,
+        None,
+    )
+    assert generations == {}
     assert shadow.unsafe_read([KEY])[KEY][0] == L1Error.SUCCESS
+
+
+def test_transfer_refuses_a_borrowed_lease_that_ended(shadow: ShadowL1Manager) -> None:
+    """A local read lock cannot authorize a copy after the peer lease ends."""
+    lease = Lease()
+    generations: dict[ObjectKey, int] = {}
+    _lend(shadow, lease, read_generations=generations)
+    lease.valid = False
+    assert shadow.pin_read_buffers([KEY], generations, "copy")[KEY] == (
+        L1Error.KEY_NOT_READABLE,
+        None,
+    )
+    assert shadow.finish_read([KEY], read_generations=generations)[KEY] == (
+        L1Error.SUCCESS
+    )
+    assert lease.releases == 1
+
+
+def test_shadow_sweep_keeps_a_transfer_pinned_view(
+    shadow_1s: ShadowL1Manager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Local TTL expiry cannot return a view while its copy still uses it."""
+    clock = [0.0]
+    monkeypatch.setattr(
+        "lmcache.v1.distributed.l1_manager.base.monotonic", lambda: clock[0]
+    )
+    lease = Lease()
+    generations: dict[ObjectKey, int] = {}
+    view = _lend(shadow_1s, lease, read_generations=generations)
+    assert shadow_1s.pin_read_buffers([KEY], generations, "copy")[KEY] == (
+        L1Error.SUCCESS,
+        view,
+    )
+    clock[0] = 2.0
+    _stage(shadow_1s, key=ObjectKey(b"next", "shadow", 0))
+    assert view.is_valid() and lease.releases == 0
+    assert shadow_1s.finish_read_transfer([KEY], "copy")[KEY] == (
+        L1Error.KEY_IN_WRONG_STATE
+    )
+    assert lease.releases == 1
+    assert shadow_1s.unsafe_read([KEY])[KEY][0] == L1Error.KEY_NOT_EXIST
 
 
 def test_a_lease_that_ended_by_admission_is_unreadable(shadow: ShadowL1Manager) -> None:

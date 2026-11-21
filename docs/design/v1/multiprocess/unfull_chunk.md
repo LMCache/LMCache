@@ -111,7 +111,7 @@ Server:
 | Interface | Change |
 |---|---|
 | `MPCacheServerContext` | New `resolve_unfull_chunk_obj_keys(key, object_group_ids)`: the tail's object key per group. `resolve_obj_keys` is unchanged (it floors `end`). |
-| `Session` | New `get_unfull_chunk_hash(boundary)`. No tail lookup state: the tail's L1 owners join the chunks' owners through the existing `record_prefetch_result`. |
+| `Session` | New `get_unfull_chunk_hash(boundary)`. The tail's original L1 owners, read generations and per-key reader counts join the full-chunk reservation through `record_prefetch_result`. |
 | `LookupModule.query_prefetch_status` / `wait_prefetch_status` / `free_lookup_locks` | Token reply and tail release as above. |
 | `LayoutDescRegistry.register` | New argument `group_unfull_chunk_layout_descs`. New `find_group_unfull_chunk_layout_descs()`, which falls back to the full-chunk layouts. |
 | `StorageManager` | `reserve_write` gets `is_temporary: bool = False`. |
@@ -341,6 +341,11 @@ multiple of `T`.)
 
 ### Temporary tails and locks
 
+The tail shares the RETRIEVE/FREE ownership ledger with full chunks. Once a
+worker claims its share, FREE cannot release it. RETRIEVE copies from the
+original pinned object and settles the pin after device completion, including
+failed copies; expiration of the local read lease does not permit early reuse.
+
 - `"lmcache.temporary_unfull_chunk": true` stores the request's tail as
   temporary. L1 deletes it when its last read lock is released and never
   copies it to L2. If nobody reads it, it is evicted like any other object.
@@ -370,9 +375,10 @@ multiple of `T`.)
   no boundary-state block for it, so only block-end boundaries are stored.
 - Sliding-window blocks below the window can be freed while a tail store is in
   flight, the same risk as for full-chunk sliding-window stores.
-- A failed tail retrieve, or a lookup dropped for an APC-shrink re-lookup
-  (`apc_covered_lookup.md`), leaves the tail's locks (and a temporary object)
-  to the read-lock TTL.
+- An APC-shrink retry retires the abandoned lookup through its original
+  boundary, keys and remaining reader shares (`apc_covered_lookup.md`).
+  Transfers that already claimed a share settle it on device completion.
+  Arbitrary replacement before a final prefetch result remains unsupported.
 - Only prompt tails are stored. A next round hits the previous round's prompt
   tail, not its generated tokens.
 - vLLM must accept an external hit that is not block-aligned (current vLLM
