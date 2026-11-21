@@ -68,7 +68,7 @@ class RblnDeviceSpec(DeviceSpec):
 
     @property
     def pin_memory_backend(self) -> type[PinMemoryBackend]:
-        """Return the optional torch-rbln host registration backend."""
+        """Return the torch-rbln host registration backend."""
         # First Party
         from lmcache.v1.platform.devices.rbln.pin_memory import RblnPinMemoryBackend
 

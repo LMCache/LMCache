@@ -44,8 +44,8 @@ registers its own mapping on its local NPU when opening the transfer
 context. This leaves registration capacity for the process that moves KV.
 
 The backend uses the public `torch.rbln.host_register` and `host_unregister`
-APIs available on torch-rbln main and in v0.12.1a0 and later. Older builds
-keep using unregistered SHM. Registration is subject to a per-device budget
+APIs (torch-rbln 0.12.1a0 and later). LMCache does not probe for them.
+Registration is subject to a per-device budget
 shared by every live registration on that device; torch-rbln documents its
 limits under "Host memory registration" in `docs/CONFIGURATION.md`. The
 request must fit as a whole. When it cannot, the worker logs a warning and

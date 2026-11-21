@@ -10,7 +10,6 @@ import torch
 
 # First Party
 from lmcache.v1.platform.devices.rbln import RblnDeviceSpec
-from lmcache.v1.platform.devices.rbln.pin_memory import RblnPinMemoryBackend
 from lmcache.v1.platform.posix_shm import (
     shm_create_readwrite,
     shm_munmap,
@@ -18,13 +17,16 @@ from lmcache.v1.platform.posix_shm import (
     shm_unlink,
 )
 
-pytestmark = pytest.mark.rbln
+pytestmark = [
+    pytest.mark.rbln,
+    pytest.mark.skipif(
+        not RblnDeviceSpec().is_available(), reason="RBLN NPU is required"
+    ),
+]
 
 
 def test_registered_shm_round_trip() -> None:
     spec = RblnDeviceSpec()
-    if not spec.is_available() or not RblnPinMemoryBackend().is_pin_supported:
-        pytest.skip("Requires an RBLN NPU and host registration support")
     nbytes = 2 << 20
     name = f"lmcache_test_registered_{uuid4().hex}"
     server_addr = shm_create_readwrite(name, 2 * nbytes)

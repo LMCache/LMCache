@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Optional torch-rbln host registration with device-scoped ownership."""
+"""torch-rbln host registration with device-scoped ownership."""
 
 # Future
 from __future__ import annotations
@@ -53,14 +53,14 @@ class RblnPinMemoryBackend(PinMemoryBackend):
             flags: Ignored; retained for the platform interface.
 
         Returns:
-            True after registration succeeds. False for an empty range, missing
-            registration APIs, an unregistered allocation scope, a duplicate
-            owned registration, or runtime failure.
+            True after registration succeeds. False for an empty range, an
+            unregistered allocation scope, a duplicate owned registration, or
+            runtime failure.
         """
         del flags
         if getattr(_registration_scope, "skip", False):
             return False
-        if ptr <= 0 or size <= 0 or not self.is_pin_supported:
+        if ptr <= 0 or size <= 0:
             return False
         device = torch.rbln.current_device()
         key = (ptr, device)
@@ -115,8 +115,5 @@ class RblnPinMemoryBackend(PinMemoryBackend):
 
     @property
     def is_pin_supported(self) -> bool:
-        """Whether torch-rbln exposes both registration and release APIs."""
-        rbln = getattr(torch, "rbln", None)
-        return callable(getattr(rbln, "host_register", None)) and callable(
-            getattr(rbln, "host_unregister", None)
-        )
+        """Report host registration as supported (torch-rbln 0.12.1a0+)."""
+        return True

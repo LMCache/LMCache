@@ -100,9 +100,8 @@ With a named SHM pool, the worker registers its mapping with the local
 NPU. The server allocates eager L1 and leaves its own SHM mapping
 unregistered, preserving registration capacity for the worker.
 
-Registration requires the public ``host_register`` and ``host_unregister``
-APIs in torch-rbln main and v0.12.1a0 and later. Older builds can use SHM
-without registration. The whole mapping must fit in the device's
+Registration uses the public ``host_register`` and ``host_unregister``
+APIs (torch-rbln 0.12.1a0 and later). The whole mapping must fit in the device's
 registration budget, which is shared with other live registrations on that
 device. If it does not fit, the worker warns and continues unpinned. The
 worker log reports the result as ``SHM pinned=True`` or
