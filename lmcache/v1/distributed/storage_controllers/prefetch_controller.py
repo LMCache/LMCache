@@ -259,32 +259,37 @@ def _scatter_bitmaps_full_global(
     local_bitmap: Bitmap,
     num_rows: int,
     num_cols: int,
+    first_col: int = 0,
 ) -> Bitmap2D:
     """Scatter the local bitmap to global assuming the original global bitmap
-    is full.
+    is full from column ``first_col`` on.
 
     Args:
-        local_bitmap: The local bitmap result to scatter.
+        local_bitmap: The local bitmap result to scatter, row-major over the
+            columns ``[first_col, num_cols)`` of every row.
         num_rows: The number of rows in the global bitmap.
         num_cols: The number of columns in the global bitmap.
+        first_col: The first global column the local bitmap covers; the
+            columns before it stay unset.
 
     Returns:
         The global bitmaps after scattering the 1s from the local bitmap.
 
     Raises:
-        ValueError: If the length of local_bitmap does not match the total
-        number of bits in the global bitmap (num_rows * num_cols).
+        ValueError: If the length of local_bitmap does not match the number
+        of bits it covers (num_rows * (num_cols - first_col)).
     """
-    if len(local_bitmap) != num_rows * num_cols:
+    local_cols = num_cols - first_col
+    if len(local_bitmap) != num_rows * local_cols:
         raise ValueError(
-            "Length of local_bitmap does not match the total number "
-            "of bits in the global bitmap"
+            "Length of local_bitmap does not match the number of bits it "
+            "covers in the global bitmap"
         )
 
     ret = Bitmap2D.zeros(num_rows, num_cols)
     for idx in local_bitmap.get_indices_list():
-        row = idx // num_cols
-        col = idx % num_cols
+        row = idx // local_cols
+        col = first_col + idx % local_cols
         ret[row].set(col)
 
     return ret
@@ -405,6 +410,27 @@ def _build_request(
     )
 
 
+def _l1_covered_columns(
+    key_groups: list[GroupedObjectKeys], l1_locked_keys: MapState
+) -> int:
+    """Return how many leading chunks L1 holds in every key group.
+
+    L1 hits are always planned from L1, so L2 is never asked for these
+    columns. Trimming whole columns keeps every group the same length.
+
+    Args:
+        key_groups: The request's key groups; all have the same length.
+        l1_locked_keys: L1 manager index -> per-group bitmaps of the cells
+            read-locked in that L1 manager.
+
+    Returns:
+        The index of the first chunk that some key group misses in every L1
+        manager, or the number of chunks when L1 holds every cell.
+    """
+    l1_found = _merged_or_zeros(l1_locked_keys, key_groups)
+    return min(row.count_leading_ones() for row in l1_found)
+
+
 def _needs_l2_lookup(
     key_groups: list[GroupedObjectKeys],
     l1_locked_keys: MapState,
@@ -487,6 +513,10 @@ class InFlightPrefetchRequest:
     # Every cell an allowed L1 held or an L2 lookup pinned, recorded before
     # the plan trims anything; reported as found_cells at finish.
     found_cells: Bitmap2D = field(init=False)
+
+    # First chunk column sent to the L2 lookups; the columns before it are
+    # held by L1 in every key group.
+    l2_lookup_first_col: int = 0
 
     # private fields
     _flattened_keys: list[ObjectKey] = field(init=False, repr=False)
@@ -1224,15 +1254,25 @@ class PrefetchController(StorageControllerInterface):
             self._retire_request(request)
             return
 
-        # TODO(ApostaC): Here, we submit the full keys to L2 adapters.
-        # In the future, we can do `All keys - L1 hit keys` to reduce the
-        # L2 lookup overhead.
-        # However, for P2P case, this will require the storage manager to
-        # support unequal length of key groups. We left this as future refactor
-        # TODOs.
+        # Skip the leading chunks L1 holds in every key group: L1 hits are
+        # planned from L1, so L2 cannot change them. Whole columns are
+        # dropped so the key groups keep equal lengths (P2P relies on it).
+        first_col = _l1_covered_columns(
+            request.key_groups, request.key_states.l1_locked_keys
+        )
+        request.l2_lookup_first_col = first_col
+        lookup_keys = (
+            list(
+                itertools.chain.from_iterable(
+                    group.keys[first_col:] for group in request.key_groups
+                )
+            )
+            if first_col > 0
+            else flattened_keys
+        )
         for adapter_idx, adapter in active_adapters.items():
             task_id = adapter.submit_lookup_and_lock_task(
-                flattened_keys, spec.group_layout_descs
+                lookup_keys, spec.group_layout_descs
             )
             request.inflight_lookup_tasks[adapter_idx] = task_id
 
@@ -1241,9 +1281,9 @@ class PrefetchController(StorageControllerInterface):
                 event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
                 metadata={
                     "request_id": request_id,
-                    "key_count": len(flattened_keys),
+                    "key_count": len(lookup_keys),
                     "adapter_count": len(request.inflight_lookup_tasks),
-                    "key_count_per_salt": Counter(k.cache_salt for k in flattened_keys),
+                    "key_count_per_salt": Counter(k.cache_salt for k in lookup_keys),
                 },
             )
         )
@@ -1363,11 +1403,12 @@ class PrefetchController(StorageControllerInterface):
                 continue
 
             # Update the l2 locked key states
-            # NOTE: since we do full global bitmap for L2 load, we use
-            # _scatter_bitmaps_full_global instead of _scatter_bitmaps here.
-            # Will be changed in the future after we implemented partial L2
-            # lookup.
-            l2_found_bitmap = _scatter_bitmaps_full_global(result, num_rows, num_cols)
+            # NOTE: the lookup covered every row from l2_lookup_first_col on,
+            # so we use _scatter_bitmaps_full_global with that column offset
+            # instead of _scatter_bitmaps here.
+            l2_found_bitmap = _scatter_bitmaps_full_global(
+                result, num_rows, num_cols, request.l2_lookup_first_col
+            )
             request.key_states.l2_locked_keys[adapter_idx] = l2_found_bitmap
             request.found_cells += l2_found_bitmap
 

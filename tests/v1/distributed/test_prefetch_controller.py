@@ -1361,16 +1361,18 @@ class TestSlidingWindowRows:
 
 
 class LookupCountingAdapter(MockL2Adapter):
-    """MockL2Adapter that counts the lookup tasks submitted to it."""
+    """MockL2Adapter that records the lookup tasks submitted to it."""
 
     def __init__(self) -> None:
         super().__init__(MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0))
         self.lookup_count = 0
+        self.looked_up_keys: list[ObjectKey] = []
 
     def submit_lookup_and_lock_task(
         self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
     ) -> L2TaskId:
         self.lookup_count += 1
+        self.looked_up_keys.extend(keys)
         return super().submit_lookup_and_lock_task(keys, group_layout_descs)
 
 
@@ -1426,6 +1428,61 @@ class TestL1ServesWholeRequest:
 
         assert adapter.lookup_count == lookups
         assert row_bits(result, 0) == [0, 1, 2, 3]
+        assert hit_counts(result) == hits
+        assert_l2_unlocked(adapter)
+        ctrl.stop()
+        adapter.close()
+
+
+class TestL2LookupSkipsL1CoveredChunks:
+    @pytest.mark.parametrize(
+        "fetching_policy, window, row1_in_l1, first_col, hits",
+        [
+            ("prefix", FULL, [0, 1, 2], 3, (7, 5)),
+            ("prefix", FULL, [1, 2], 0, (6, 6)),
+            ("prefix", 2, [0, 1, 2], 3, (4, 4)),
+            ("full", FULL, [0, 1], 2, (6, 6)),
+            ("whole_chunk", FULL, [0, 1], 2, (6, 6)),
+        ],
+        ids=[
+            "prefix_in_l1",
+            "row1_misses_chunk0",
+            "windowed_row",
+            "full",
+            "whole_chunk",
+        ],
+    )
+    def test_l2_skips_chunks_l1_holds_in_every_row(
+        self,
+        l1_manager,
+        fetching_policy: FetchingPolicy,
+        window: int,
+        row1_in_l1: list[int],
+        first_col: int,
+        hits: tuple[int, int],
+    ):
+        """L2 holds every cell and L1 a prefix of each row: L2 is asked only
+        for the chunks from the first one L1 misses in some row, and the
+        result is the same as if L2 had been asked for everything."""
+        adapter = LookupCountingAdapter()
+        layout = make_layout()
+        row0 = [make_object_key(i, gid=0) for i in range(6)]
+        row1 = [make_object_key(i, gid=1) for i in range(6)]
+        store_keys_in_l2(adapter, row0 + row1, layout)
+        write_keys_to_l1(l1_manager, row0[:4] + [row1[i] for i in row1_in_l1], layout)
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            make_spec(
+                [make_group(row0, gid=0), make_group(row1, gid=1, window=window)],
+                fetching_policy=fetching_policy,
+            )
+        )
+        result = wait_for_result(ctrl, req_id)
+
+        assert adapter.looked_up_keys == row0[first_col:] + row1[first_col:]
+        assert row_bits(result, 0) == list(range(6))
         assert hit_counts(result) == hits
         assert_l2_unlocked(adapter)
         ctrl.stop()

@@ -162,6 +162,12 @@ class PrefetchPolicy(ABC):
             This function does not raise any exceptions. Upon un-recoverable
             errors (e.g., invalid input argument), it will return an empty
             plan.
+
+            The controller assumes every needed cell read-locked in L1 is
+            planned from L1. It therefore does not look up L2 when L1 alone
+            serves the whole request, and does not look up L2 for the
+            leading chunks L1 holds in every key group, so
+            ``l2_locked_keys`` never covers those cells.
         """
         raise NotImplementedError
 

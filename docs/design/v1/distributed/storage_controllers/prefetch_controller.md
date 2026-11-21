@@ -138,8 +138,12 @@ afterwards.
    chunk, under `"full"` and `"whole_chunk"` L1 holds every cell), plan from
    L1 alone and finish (steps 3 and 7 with an empty L2 map).
    Otherwise, submit one `lookup_and_lock` task per
-   non-draining adapter, over the full key list. As each result arrives
-   (`_poll_lookup_results`) it becomes that adapter's row in `l2_locked_keys`.
+   non-draining adapter. The task covers every key group from the first chunk
+   L1 does not hold in every group: L1 hits are planned from L1, so L2 cannot
+   change those leading chunks, and trimming whole columns keeps the groups
+   the same length (the P2P peer requires it). As each result arrives
+   (`_poll_lookup_results`) it is placed back at that column offset and becomes
+   that adapter's row in `l2_locked_keys`.
 3. **Plan** (`_plan_load`). Call `policy.plan_load` on the two maps. Release
    every L1 lock and every L2 lock outside the plan, then set both locked maps
    to the plan.
