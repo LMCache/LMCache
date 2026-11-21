@@ -128,15 +128,21 @@ class Backend(FileGDSBackend):
             "cuFileBufDeregister",
         )
 
-    def register_stream(self, raw_stream: int) -> None:
-        """Use cuFile's FIXED_* flags (0x7) for per-submission IO parameters."""
+    def register_aligned_stream(self, raw_stream: int) -> None:
+        """Register a slot stream whose submitted parameters are page aligned."""
+        self.register_stream(raw_stream, aligned=True)
+
+    def register_stream(self, raw_stream: int, *, aligned: bool = False) -> None:
+        """Register fixed I/O parameters, with optional 4 KiB alignment."""
+
         # Third Party
         from cufile.bindings import libcufile
 
         self._ensure_driver_open()
         _check(
             libcufile.cuFileStreamRegister(
-                ctypes.c_void_p(raw_stream), _STREAM_REGISTER_FLAGS
+                ctypes.c_void_p(raw_stream),
+                _STREAM_REGISTER_FLAGS | (0x8 if aligned else 0),
             ),
             "cuFileStreamRegister",
         )
