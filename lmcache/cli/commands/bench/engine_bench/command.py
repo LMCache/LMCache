@@ -819,23 +819,26 @@ def run_engine_bench(command: "BaseCommand", args: argparse.Namespace) -> None:
     try:
         workload.run(config.warmup_policy)
     finally:
-        progress_monitor.stop()
+        final_stats_snapshot = stats_collector.take_snapshot(need_results=True)
+        progress_monitor.stop(final_stats_snapshot)
 
     # 7. Final metrics
-    final = stats_collector.get_final_stats()
+    final = stats_collector.get_final_stats_from_snapshot(final_stats_snapshot)
     _emit_final_metrics(command, config, final, args, workload)
 
     # 8. Export
     if config.export_csv:
         csv_path = os.path.join(config.output_dir, "bench_results.csv")
-        stats_collector.export_csv(csv_path)
+        stats_collector.export_csv_from_final_snapshot(csv_path, final_stats_snapshot)
         logger.info("CSV results written to %s", csv_path)
     if config.export_json:
         json_path = os.path.join(
             config.output_dir,
             "bench_summary.json",
         )
-        stats_collector.export_json(json_path, config)
+        stats_collector.export_json_from_final_snapshot(
+            json_path, config, final_stats_snapshot
+        )
         logger.info("JSON summary written to %s", json_path)
 
     # 9. Exit code
