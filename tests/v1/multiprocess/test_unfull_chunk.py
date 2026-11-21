@@ -553,6 +553,41 @@ def test_identical_prompt_resuming_before_its_last_token_hits_its_tail(
     assert hit == tail_boundary
 
 
+@pytest.mark.parametrize(
+    ("lookup_end", "grid", "expected_hit"),
+    [
+        # The repeat of the prompt: its lookup stops at P - 1 and the grid
+        # rounds it down to the stored tail.
+        (CHUNK_SIZE - 6, 4, 8),
+        # A lookup ending exactly at the stored tail.
+        (8, 0, 8),
+    ],
+    ids=["grid", "exact"],
+)
+def test_prompt_shorter_than_one_chunk_hits_its_tail(
+    lookup_module, lookup_end, grid, expected_hit
+):
+    """A prompt with no full chunk has no full-chunk hash, yet the tail it
+    stored inside chunk 0 is found on a repeat (#6745)."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(CHUNK_SIZE - 5))
+    _write(storage_manager, _unfull_keys(hasher, tokens, 8), is_temporary=False)
+
+    assert _lookup(module, tokens, lookup_end, "r1", grid=grid) == expected_hit
+
+
+def test_aligned_lookup_of_a_short_prompt_ignores_its_tail(lookup_module):
+    """A connector that does not load unfull chunks floors a short prompt's
+    lookup to 0 tokens: nothing is probed or locked."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(CHUNK_SIZE - 5))
+    _write(storage_manager, _unfull_keys(hasher, tokens, 8), is_temporary=True)
+
+    assert _lookup(module, tokens, 0, "r1", grid=4) == 0
+    # Never locked, so still there for a lookup that asks for it.
+    assert _lookup(module, tokens, 8, "r2") == 8
+
+
 def test_next_round_hits_the_previous_rounds_tail(lookup_module):
     """Round 2 extends round 1's prompt: its full-chunk hit stops at round 1's
     last chunk boundary, and the tail stored there extends it."""
