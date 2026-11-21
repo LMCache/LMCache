@@ -153,10 +153,11 @@
                         </div>
                         <div class="mb-3">
                             <label for="configValueInput" class="form-label">Configuration Value</label>
-                            <input type="text" class="form-control" id="configValueInput" placeholder="Enter config value">
+                            <input type="text" class="form-control" id="configValueInput" placeholder="Enter config value" disabled>
                         </div>
                         <button id="getConfigBtn" class="btn btn-info me-2">Get Config</button>
-                        <button id="setConfigBtn" class="btn btn-primary">Set Config</button>
+                        <button id="setConfigBtn" class="btn btn-primary" disabled aria-disabled="true">Set Config</button>
+                        <div id="configHelpText" class="form-text text-muted mt-2">Configuration updates are not supported for multiprocess servers.</div>
                     </div>
                     <div class="col-md-6">
                         <h4>Current Configuration</h4>
