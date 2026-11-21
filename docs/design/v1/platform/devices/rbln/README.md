@@ -93,7 +93,7 @@ Consequences of the format being first-class:
   `[NB, BS, HS]` MLA layout (`is_layer_list`, `is_mla`, not `is_pbs_fused` /
   `is_kv_second_tuple` / `requires_blocked_scale_repacking`) takes the MLA one
   (below), and any other layout is refused with a `ValueError` naming the
-  format and its shape. The HND side applies `squeeze_singleton_axis` at entry, so `hnd_ops.py` indexes a 5-D tensor.
+  format and its shape. The HND side applies `squeeze_singleton_axis` at entry, so `kv_ops.py` indexes a 5-D tensor.
   `kv_layout.py` therefore exports the strict squeezes plus the
   `is_rbln_kv_layout` predicate -- no tolerant pass-through variant.
   `NL_X_NB_TWO_NH_BS_HS` (7) shares format 19's layout facts (the singleton
@@ -119,7 +119,7 @@ scatter, all of which resolve it via `normalize_kv_and_discover_format` and
 never touch a connector -- which is why the format must be recognised by
 detection rather than by a connector.
 
-**Transfer.** Both HND directions use the device buffers in `hnd_ops`. Blocks-first
+**Transfer.** Both HND directions use the device buffers in `kv_ops`. Blocks-first
 layers are transposed as an addressing view to `[2, NB, NH, BS, HS]`;
 K/V-first layers already have that form. Neither view moves bytes. Row `r`
 in staging corresponds to `layers[r % L][r // L][block]`.
@@ -131,21 +131,21 @@ host chunk -> token-major device staging -> compiled swap
            -> head-major device staging -> paged blocks
 ```
 
-The first and last steps use `torch._foreach_copy_`. Each chiplet shard's
-swap is `head.copy_(tokens.permute(0, 2, 1, 3))` on the device. Restores skip
+The first and last steps use `torch._foreach_copy_`. The swap is
+`head.copy_(tokens.permute(0, 2, 1, 3))` over the whole staging on the
+device, run as the program built when the transfer was prepared (see
+[Preparing transfers](#preparing-transfers)). Restores skip
 the global block prefix, including a prefix ending inside a chunk. A
-multi-block chunk's token window across layers is strided on the host, so
-restores pair each contiguous `[BS, NH*HS]` layer slice with its staging row.
-One-block chunks group contiguous spans per shard and K/V half. This avoids
-an extra host transpose or temporary host tensors on restore.
+one-block chunk is one contiguous host copy. A multi-block chunk's token
+window across layers is strided on the host, so restores pair each
+contiguous `[BS, NH*HS]` layer slice with its staging row. This avoids an
+extra host transpose or temporary host tensors on restore.
 
 Stores reverse the device data flow. They batch paged blocks into head-major
-staging, swap each shard into token-major staging on the device, then batch
-contiguous copies directly into the canonical host chunk. A one-block chunk
-with unsharded staging needs one contiguous host copy. Split chiplet
-allocations and strided token windows in multi-block chunks use multiple
-contiguous spans. Stores write every requested block; a partial chunk leaves
-its unused tokens untouched.
+staging, swap it into token-major staging on the device, then copy directly
+into the canonical host chunk: one contiguous copy for a one-block chunk,
+one per row for a multi-block chunk's strided token window. Stores write
+every requested block; a partial chunk leaves its unused tokens untouched.
 
 ## The K/V-first layout
 
@@ -184,20 +184,23 @@ is a fresh device allocation per chunk, and every one of those ops carries a
 whole-layer CPU fallback behind it (`submit_or_fallback`) should the runtime
 reject a copy. Measured on a real vLLM-RBLN DeepSeek-V3 KV cache the fallback
 never fires and the shared path is correct, so the RBLN sequence exists for
-cost, not correctness: `kv_ops.py` fans the `L * B` blocks of a chunk into
-(or out of) a persistent per-thread *device* staging buffer with one batched
-`_foreach_copy_` of whole contiguous blocks -- direct `memcpy_v2v`, no index
-tensor, no fallback path -- and crosses the device boundary in one contiguous
-DMA. With one block per chunk this is on par with the shared path (the extra
-d2d hop cancels the saved submissions); with two or more blocks per chunk it
-is 3.5-5x faster (61-layer DeepSeek-V3, 137-549 MiB chunks: 10-41 ms vs
-37-213 ms per chunk).
+cost, not correctness: per block, `kv_ops.py` gathers the `L` layer slices
+into (or fans them out of) an `[L, BS, HS]` *device* staging buffer with one
+batched `_foreach_copy_` of whole contiguous blocks -- direct `memcpy_v2v`,
+no index tensor, no fallback path. With one block per chunk, which is how
+RBLN runs LMCache, the block then crosses the device boundary in one
+contiguous DMA. A multi-block chunk's token window is strided across layers
+on the host, so each block moves as one contiguous DMA per layer. Staging
+holds one block, rather than one chunk, the same way HND's does; that gives
+up the advantage a chunk-sized buffer had for multi-block chunks (3.5-5x
+over the shared path on a 61-layer DeepSeek-V3).
 
 How the two layouts relate inside the backend:
 
-- **No head axis to swap.** MLA keeps its persistent per-thread device
-  staging and chunk-sized host copies. The paged layers must be contiguous
-  for its whole-block copies to be direct; `validate_mla_layers` pins that.
+- **No head axis to swap.** MLA stages one block of every layer and needs
+  no program; only its staging is prepared. The paged layers must be
+  contiguous for its whole-block copies to be direct; `validate_mla_layers`
+  pins that.
 - **Nothing to squeeze, so the rank is pinned instead.**
   `validate_mla_layers` in `kv_layout.py` mirrors `squeeze_singleton_axis`'s
   strictness -- the detected format has already established what the caller
@@ -205,8 +208,12 @@ How the two layouts relate inside the backend:
   transfer boundary -- but returns the tensors unchanged.
 - **Per-format addressing, shared bookkeeping.**
   `RblnDeviceOps.multi_layer_block_kv_transfer` dispatches on the format
-  spec's layout facts (see above). HND transfers run per block in `hnd_ops`;
-  MLA uses chunk-oriented operations in `kv_ops`.
+  spec's layout facts (see above) and hands `kv_ops` blocks-first views
+  (`[NB, 2, NH, BS, HS]` or `[NB, BS, HS]`). `kv_ops` keeps one table of
+  prepared geometries, keyed by layer count, dtype and one block's shape;
+  each layout is one class (`HndTransfer`, `MlaTransfer`) that prepares its
+  staging (and HND's programs) and moves blocks. A new layout adds a class,
+  not a table.
 
 All RBLN layouts require the engine's KV caches to be real device tensors
 (vLLM-RBLN: `VLLM_RBLN_USE_DEVICE_TENSOR=1`). With the default compile-mode
@@ -215,53 +222,128 @@ backend's or the shared path's -- dies at the first host copy with "Cannot
 copy out of meta tensor".
 
 
-## HND requirements and staging lifetime
+## HND requirements and staging
 
-`RblnDeviceOps` checks HND requirements before any copy, on every call:
-bf16 KV/chunks, head size a multiple of 64, and a
-`torch_rbln::copy_strided_view` kernel registered for `PrivateUse1`.
-Unsupported dtype/head size raises `ValueError`; a missing compiled copy
-raises `RuntimeError`. These checks apply to stores too, so the first store
-refuses a cache that cannot later be restored. There is no native extension
-or transfer-path configuration, and no host-staged HND fallback. Paged
-layers and canonical host chunks must be contiguous.
+HND needs torch-rbln 0.12.1a0 or later: its compiled strided copy
+(`torch_rbln::copy_strided_view`), placement (`torch.rbln.set_device_alloc`,
+`DevicePlacement`), `get_device_properties(device).num_chiplet` and
+`torch.rbln.capture_programs()`. LMCache does not probe for them; an older
+torch-rbln fails at warm-up. The KV must be bf16 with a head size a
+multiple of 64: torch-rbln builds no swap program for other KV, so warm-up
+fails before serving, and a transfer of KV that was never prepared fails
+before copying. There is no native extension or transfer-path
+configuration, and no host-staged HND fallback. Canonical host chunks must
+be contiguous.
 
-Placement is optional. When `torch.rbln.set_device_alloc` and
-`DevicePlacement` are available, `staging.py` divides the `2L` rows over
-`min(num_chiplet, L)` shards, using
-`get_device_properties(device).num_chiplet`. Each shard owns a head-major
-`[rows, NH, BS, HS]` tensor and a token-major `[rows, BS, NH, HS]` tensor,
-placed whole on its chiplet. Without either placement API, each set
-uses one unplaced shard and no device-properties query is made. A warning
-names the missing APIs once per process and states that staging is not
-spread over chiplets. Without placement, all HND staging must fit on
-chiplet 0 alongside that chiplet's model and KV cache.
+For each HND geometry and direction, `kv_ops` keeps one head-major
+`[2L, NH, BS, HS]` and one token-major `[2L, BS, NH, HS]` staging tensor.
+Each is split on its row axis across `n = min(num_chiplet, L)` chiplets,
+one `DevicePlacement` per contiguous slice:
 
-The store and restore sets are shared process-wide for the latest geometry.
-Both are physically reserved on the first HND transfer, so the first store
-surfaces an allocation error before publishing chunks. Allocation does not
-copy or compile. Worker-side engine-driven KV registration does not pass the
-caches to a DeviceSpec or DeviceOps hook, so deployments must leave this
-memory free when sizing KV.
+```python
+torch.rbln.set_device_alloc(head, [
+    torch.rbln.DevicePlacement(0, c, ((0, 2 * L * c // n, 2 * L * (c + 1) // n),))
+    for c in range(n)
+])
+```
 
-For element size `E` bytes, device staging uses
-`2 directions * 2 buffers * 2L * NH * BS * HS * E` bytes, independent of
-commit-worker count. Qwen3-1.7B needs 448 MiB for both sets with bf16 and
-1024-token blocks.
+One swap covers every row, instead of one swap per chiplet.
 
-## HND submission and caller contract
+The staging is allocated when the geometry is prepared and every transfer
+reuses it. A split tensor is cheap to allocate, but the first swap and the
+first host copy that use a newly allocated one are far slower than later
+ones (on Qwen3-1.7B the first swap takes about 38 ms instead of 0.4 ms, and
+the first host copy about 8 ms more), so allocating per transfer would pay
+that on every transfer. Kept staging also exists before the
+engine measures free device memory to size its KV cache, so it is counted.
 
-Each direction holds its staging lock until the transfer completes. Separate
-sets allow a restore to overlap a store's copies. A process-wide swap lock
-serializes the compiled swaps, including swaps for different directions
-and geometries. Only the loaded model's latest KV geometry is retained;
-concurrent geometry changes are outside the caller contract.
+For element size `E` bytes, HND staging is
+`2 directions * 2 tensors * 2L * NH * BS * HS * E` bytes per prepared
+geometry (448 MiB for Qwen3-1.7B with bf16 and 1024-token blocks), and MLA
+staging `2 directions * L * BS * HS * E`. torch-rbln also keeps device
+memory on chiplet 0 for the two swap programs. Measured for Qwen3-1.7B,
+preparation adds about 0.9 GiB on chiplet 0 and 0.1 GiB on each other
+chiplet. `torch.rbln.empty_cache()`, which vLLM-RBLN calls before it
+measures free device memory, then releases the placed slices and leaves
+about 0.7 GiB, all on chiplet 0, without slowing transfers. That is what
+vLLM-RBLN's KV sizing counts: Qwen3-0.6B, whose KV has the same shape, gets
+1142 blocks instead of 1164.
 
-Restores run serially on the model-driving thread's current stream. A first
-swap on a new geometry may compile on the invoking thread. An engine using
-asynchronous stores should warm the swaps on the model-driving thread
-before submitting work to commit workers. LMCache's engine-driven
-registration has no RBLN callback that can do this automatically.
+## Preparing transfers
+
+`warm_up_kv_transfer` is the one entry point. The engine calls it once, on
+its model-driving thread, after the KV caches it registers are final and
+before the first request:
+
+```python
+from lmcache.v1.platform.devices.rbln import warm_up_kv_transfer
+
+warm_up_kv_transfer(kv_caches)  # the dict passed to register_kv_caches
+```
+
+It groups the caches by shape and dtype, so each group has one layout, and
+hands each group to `RblnDeviceOps.prepare_kv_transfer` as one KV cache
+group:
+
+- **HND** (`[NB, 2, NH, 1, BS, HS]` or `[2, NB, NH, 1, BS, HS]`): both
+  directions' split staging, and each direction's swap run once on it inside
+  `torch.rbln.capture_programs()`. The built program's `runtime.run` is
+  kept and is all a transfer runs.
+- **MLA** (`[NB, BS, HS]`, which also covers single-plane indexer and scale
+  caches): one `[L, BS, HS]` staging buffer per direction; nothing to
+  build.
+- **Any other layout** raises the `ValueError` a transfer of it would.
+
+Why the programs are kept instead of letting torch-rbln build them on first
+use:
+
+- **A build on a commit worker breaks the model thread.** Building the
+  compiled copy runs `torch.export` decompositions, which set process-wide
+  state (`torch.compiler._is_exporting_flag`, `fx_traceback.current_meta`).
+  While a store builds on a worker, a `torch._dynamo.disable` frame on the
+  model thread can fail with `KeyError: 'custom'`, and the build stalls the
+  forward it overlaps.
+- **torch-rbln's own lookup can miss later.** `torch._dynamo.reset()` or a
+  different cache key makes the next `copy_` build again. A kept program
+  runs without a lookup, so a transfer cannot build.
+
+With as many heads as tokens per block (`NH == BS`) both directions' swaps
+have one shape, and torch-rbln would serve the restore swap from the
+store's program. The restore then runs the store's program, which is valid
+because a program is not tied to the buffers it was built on, and shares
+the store's lock (below). A swap of either shape that already ran in the
+process before preparation has no build to capture, so preparation raises.
+
+A transfer whose geometry was not prepared raises `RuntimeError` before any
+copy. The engine-driven store logs the error and drops the store; the
+restore reports a miss, so the engine recomputes rather than reading partly
+written KV. Caches of one shape that LMCache splits into several groups (a
+hybrid model's groups of one layout) are prepared as one group, so their
+per-group transfers are not covered.
+
+## Submission and caller contract
+
+Preparation writes the prepared table, staging and programs before
+transfers start, and nothing writes them afterwards, so transfers find them
+without a lock. Each prepared geometry has one lock per direction, held for
+a whole transfer. LMCache runs stores on several commit workers and
+serializes only their commits to the server, not their gathers, so the
+stores of one geometry take turns on its store staging. torch-rbln's copies
+into host memory finish before they return, so the next store may refill
+the staging as soon as the lock is free. Restores run serially on the
+model-driving thread's current stream with their own staging, so a restore
+does not wait for stores.
+
+Taking turns also means no two threads run one swap program at once, which
+rebel's runtime requires: it fails with `INIT_INTERNAL` otherwise. When both
+directions share one program (`NH == BS`), they share one lock, and a
+restore waits for an in-flight store.
+
+Taking turns costs no throughput. On one NPU with Qwen3-1.7B and one block
+per chunk, a store takes 6.7 ms on kept split staging against 8.1 ms on
+per-chiplet staging allocated per transfer, and four threads storing back to
+back finish one store every 8.4-8.5 ms against 9.7-10.0 ms when each
+concurrent store allocates its own staging.
 
 Callers own ordering relative to model execution and publish a transfer
 only when the transfer context reports completion.

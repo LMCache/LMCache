@@ -112,27 +112,39 @@ HND restores and stores stage KV on the device and swap heads and tokens
 with a compiled device copy. Stores copy directly into canonical host
 chunks from device staging.
 
-Both directions require bf16 KV/chunks, a head size that is a multiple of 64,
-and ``torch_rbln::copy_strided_view`` registered for ``PrivateUse1``. Unsupported
-dtype or head size raises ``ValueError``; a missing compiled copy raises
-``RuntimeError`` before a store can publish chunks it cannot restore.
-torch-rbln 0.12.0 provides the compiled copy and
-``get_device_properties(...).num_chiplet``.
+HND needs torch-rbln 0.12.1a0 or later, for its compiled strided copy,
+placement, chiplet count and program capture APIs. The KV must be bf16 with
+a head size that is a multiple of 64; torch-rbln builds no swap program for
+other KV, so warm-up fails before serving. Staging is split across the
+chiplets.
 
-Builds providing ``torch.rbln.set_device_alloc`` and ``DevicePlacement``
-spread staging over chiplets; these placement APIs are not in a release
-yet. If either is missing, one unplaced pair is reserved on chiplet 0, with a
-warning once per process naming the missing API.
+Before serving, the engine prepares transfers once, on its model-driving
+thread, after its KV caches are final:
 
-Separate store and restore sets are reserved on the first HND transfer.
-Total bf16 device staging is ``2 * 2 * 2L * NH * BS * HS * 2 bytes``,
-independent of worker count. Qwen3-1.7B with 1024-token blocks needs
-448 MiB. Leave this memory free when sizing KV. Without placement it must
-all fit on chiplet 0.
+.. code-block:: python
 
-Issue restores serially from the model-driving thread with a fixed KV
-geometry. Before dispatching asynchronous stores, warm the device swap
-programs on the model-driving thread.
+   from lmcache.v1.platform.devices.rbln import warm_up_kv_transfer
+
+   warm_up_kv_transfer(kv_caches)  # the dict passed to register_kv_caches
+
+This allocates device staging for every cache layout, one set per
+direction, and builds HND's compiled swap programs on it, so an asynchronous
+store never allocates staging or compiles on a commit worker while the model
+runs. A vLLM-RBLN build that supports this calls it right after its model
+warm-up, before it sizes its KV cache, so the staging is counted. A
+transfer whose geometry was not prepared raises before copying: the store
+is dropped with an error, and the restore reports a miss so the engine
+recomputes.
+
+Stores take turns on the store staging; restores use their own. Total bf16
+HND staging is ``2 * 2 * 2L * NH * BS * HS * 2 bytes`` per prepared geometry
+(448 MiB for Qwen3-1.7B with 1024-token blocks), and MLA staging
+``2 * L * BS * HS * 2 bytes``. torch-rbln also keeps device memory for the
+two HND swap programs. For Qwen3-1.7B, LMCache holds about 0.7 GiB on
+chiplet 0 once vLLM-RBLN has emptied the allocator cache to size its KV
+cache, and that sizing counts it.
+
+Issue restores serially from the model-driving thread.
 
 Capability limits
 -----------------
