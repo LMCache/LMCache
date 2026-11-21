@@ -642,11 +642,20 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             ValueError: If cache geometry or auto-start configuration is invalid,
                 including auto-start with multiple server endpoints.
             ConnectionError: If the configured MP server cannot be reached.
+            RuntimeError: If the worker's vLLM lacks the startup-ready hook.
         """
-        # Older supported vLLM releases allow connectors to omit this value,
-        # while current vLLM's type declaration requires it.
         super().__init__(vllm_config, role, kv_cache_config)  # type: ignore[arg-type]
+        if role == KVConnectorRole.WORKER and not hasattr(
+            KVConnectorBase_V1, "on_kv_cache_ready"
+        ):
+            raise RuntimeError(
+                "LMCacheMPConnector requires vLLM's on_kv_cache_ready startup "
+                "hook (vllm-project/vllm#66574). Upgrade vLLM before using "
+                "deferred KV registration."
+            )
         self._connector_stats = LMCacheMPConnectorStats()
+        self._pending_kv_caches: dict[str, torch.Tensor] | None = None
+        self._kv_cache_ready = False
 
         # Fail fast, before the server handshake below.
         kv_cache_config = getattr(self, "_kv_cache_config", None)
@@ -1012,15 +1021,26 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         assert self._connector_metadata is not None
         return self._connector_metadata
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        """
-        Initialize with the KV caches. Useful for pre-registering the
-        KV Caches in the KVConnector (e.g. for NIXL).
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        """Keep the latest KV tensors local until on_kv_cache_ready()."""
+        if self._kv_cache_ready:
+            raise RuntimeError(
+                "KV caches are already ready; use unregister_kv_caches and "
+                "restore_kv_caches to replace their backing memory."
+            )
+        self._pending_kv_caches = dict(kv_caches)
 
-        Args:
-            kv_caches: dictionary of layer names, kv cache
+    def on_kv_cache_ready(self) -> None:
+        """Register after warmup/final sizing, then start heartbeat before requests.
+
+        Wait for the registration ACK; errors propagate to fail startup.
         """
-        logger.info("Registering kv caches!")
+        if self._kv_cache_ready:
+            return
+        kv_caches = self._pending_kv_caches
+        if kv_caches is None:
+            raise RuntimeError("register_kv_caches must precede on_kv_cache_ready")
+        logger.info("Registering KV caches after vLLM startup preparation")
         kv_cache_config = getattr(self, "_kv_cache_config", None)
         # Must precede both group-info creation and transfer registration so
         # they see the same edited views.
@@ -1055,7 +1075,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 kv_cache_config=kv_cache_config,
                 vllm_config=self._vllm_config,
             )
-        return
+        self.worker_adapter.start_heartbeat()
+        self._kv_cache_ready = True
+        self._pending_kv_caches = None
 
     def unregister_kv_caches(self) -> None:
         """Drop the LMCache server's registration of the KV caches before
