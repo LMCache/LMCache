@@ -21,6 +21,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.session import SessionManager
 
@@ -53,6 +54,30 @@ class _LayoutDescEntry:
     shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC
     """How each object group is spread over the kv ranks; the default stores
     every group per rank."""
+
+
+def check_chunk_hash_key(ctx: "MPCacheServerContext", key: IPCCacheServerKey) -> None:
+    """Reject a chunk-hash key while cache events need token ids.
+
+    KV-event and coordinator reporting bind every stored chunk to its token
+    ids (``MP_TOKENS``) and drop store records that have none. A key carrying
+    client-computed chunk hashes has no token ids, so its stores would never
+    be reported.
+
+    Args:
+        ctx: The server context.
+        key: Key of an incoming lookup or transfer.
+
+    Raises:
+        ValueError: If ``key`` carries ``chunk_hashes`` while token bindings
+            have subscribers.
+    """
+    if key.chunk_hashes and ctx.event_bus.has_subscribers(EventType.MP_TOKENS):
+        raise ValueError(
+            "Keys carrying client-computed chunk hashes have no token ids, "
+            "which KV-event and coordinator reporting need; turn off "
+            "client chunk hashes or cache-event reporting"
+        )
 
 
 def finish_lookup_read(
@@ -581,7 +606,8 @@ class MPCacheServerContext:
         """Resolve per-object-group object keys from an IPC cache key.
 
         Uses the session manager to track token state and the token hasher
-        to compute chunk hashes for the requested range. A partial chunk
+        to compute chunk hashes for the requested range; a key carrying
+        client-computed chunk hashes supplies them directly. A partial chunk
         past the last chunk boundary is not included; see
         :meth:`resolve_unfull_chunk_obj_keys`.
 
@@ -594,9 +620,12 @@ class MPCacheServerContext:
             ``object_group_ids[i]``.
 
         Raises:
-            ValueError: If ``key.worker_id`` is ``None``, or no KV cache is
-                registered for the key's ``(model_name, world_size)``.
+            ValueError: If ``key.worker_id`` is ``None``, no KV cache is
+                registered for the key's ``(model_name, world_size)``, or
+                the key carries chunk hashes while cache events need token
+                ids (see :func:`check_chunk_hash_key`).
         """
+        check_chunk_hash_key(self, key)
         chunk_size = self.layout_desc_registry.get_chunk_size(
             key.model_name, key.world_size
         )
@@ -604,7 +633,7 @@ class MPCacheServerContext:
             key.model_name, key.world_size
         )
         session = self.session_manager.get_or_create(key.request_id, token_hasher)
-        session.set_tokens(key.token_bytes)
+        session.update_from_key(key)
         if session.lookup_ipc_key is None:
             session.lookup_ipc_key = key.no_worker_id_version()
         # A partial chunk past the last chunk boundary is not a full chunk;

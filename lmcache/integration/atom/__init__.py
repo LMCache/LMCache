@@ -7,6 +7,7 @@ from .multi_process_adapter import (
     AtomMPSchedulerAdapter,
     AtomMPTransferSpec,
     AtomMPWorkerAdapter,
+    lmcache_chunk_hashes,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "AtomMPSchedulerAdapter",
     "AtomMPTransferSpec",
     "AtomMPWorkerAdapter",
+    "lmcache_chunk_hashes",
 ]
