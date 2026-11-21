@@ -1055,3 +1055,86 @@ def test_unfull_chunk_lock_exception_does_not_leak_or_hang(lookup_module, monkey
     assert session.prefetch_hit_chunks == 2
     # free_lookup_locks frees the locks cleanly
     module.free_lookup_locks(key, tp_size=1)
+
+
+@pytest.mark.parametrize(
+    "first,second", [("query", "query"), ("query", "free"), ("free", "query")]
+)
+def test_overlapping_consumers_keep_one_shot_result_and_release_real_l1(
+    lookup_module, monkeypatch, first, second
+):
+    # Standard
+    import sys
+    import threading
+
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE))
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=True)
+    key = _key(tokens, 0, len(tokens), "overlap")
+    entered, release, second_captured_job = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+    original_query = storage_manager.query_prefetch_status
+    calls, results, errors = [], {}, []
+
+    def hold_completed_result(handle):
+        calls.append(handle)
+        if len(calls) != 1:
+            return original_query(handle)
+        assert storage_manager.wait_prefetch_status(handle, 5)
+        result = original_query(handle)
+        assert result is not None
+        entered.set()
+        assert release.wait(5)
+        return result
+
+    monkeypatch.setattr(storage_manager, "query_prefetch_status", hold_completed_result)
+    module.lookup(key, tp_size=1)
+
+    def invoke(label, operation):
+        def observe(frame, event, arg):
+            # Observe entry only: the actual job/lock and handler stay unchanged.
+            # This prevents releasing the first consumer before the second has
+            # obtained the same live job through its public handler.
+            if event == "call" and frame.f_code.co_name == "_consume_prefetch_result":
+                second_captured_job.set()
+
+        try:
+            if label == "second":
+                sys.setprofile(observe)
+            if operation == "query":
+                results[label] = module.query_prefetch_status(key.request_id)
+            else:
+                results[label] = module.free_lookup_locks(key, tp_size=1)
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            sys.setprofile(None)
+
+    one = threading.Thread(target=invoke, args=("first", first))
+    two = threading.Thread(target=invoke, args=("second", second))
+    try:
+        one.start()
+        assert entered.wait(5)
+        two.start()
+        assert second_captured_job.wait(5)
+        # Give an incorrectly unlocked consumer time to finish while the first
+        # holds the real one-shot result; the correct consumer remains blocked.
+        two.join(0.1)
+    finally:
+        release.set()
+        one.join(5)
+        if two.ident is not None:
+            two.join(5)
+    assert not one.is_alive() and not two.is_alive()
+    assert not errors
+    assert len(calls) == 1
+    for label, operation in [("first", first), ("second", second)]:
+        assert results[label] == (len(tokens) if operation == "query" else None)
+    monkeypatch.setattr(storage_manager, "query_prefetch_status", original_query)
+    if first == second == "query":
+        module.free_lookup_locks(key, tp_size=1)
+    # Real temporary L1 objects disappear after their final lookup lock releases.
+    assert _lookup(module, tokens, len(tokens), request_id="after-release") == 0
