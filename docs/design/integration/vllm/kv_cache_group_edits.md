@@ -67,8 +67,9 @@ checks alignment, row size, and plane count when store/load runs.
 
 vLLM unifies page sizes across hybrid groups by inflating the attention
 *logical* block size (`vllm/platforms/interface.py:_align_hybrid_block_size`;
-Qwen3.5-0.8B: 544), while the attention backend re-pages the physical tensor
-at its own *kernel* block size (`vllm/v1/worker/utils.py:
+Qwen3.5-0.8B: 576 on vLLM 0.34.0 and later, 544 on 0.32 and earlier), while
+the attention backend re-pages the physical tensor at its own *kernel* block
+size (`vllm/v1/worker/utils.py:
 prepare_kernel_block_sizes`). Logical block `n` then occupies the
 `k = logical/kernel` contiguous kernel pages `n*k .. n*k+k-1` (vLLM expands
 the worker-side block table the same way, `BlockTable.map_to_kernel_blocks`);
