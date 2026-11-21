@@ -4,6 +4,8 @@
 # Standard
 from contextlib import contextmanager
 from typing import Any, Iterator
+import gc
+import weakref
 
 # Third Party
 import pytest
@@ -103,6 +105,114 @@ def test_check_event_support_fails_closed_without_abi() -> None:
 def test_check_event_support_passes_with_abi() -> None:
     backend = NpuEventIPCBackend(event_module=_FakeNpuModule())
     backend.check_event_support(_device())
+
+
+def test_check_event_support_rejects_runtime_without_ipc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Python IPC signature does not imply native runtime support."""
+    attempted: list[tuple[bool, object]] = []
+    native_error = RuntimeError(
+        "Parameter interprocess is not supported, please upgrade the "
+        "HDK(driver) or CANN package."
+    )
+
+    class _UnsupportedEvent(_FakeEvent):
+        def __init__(self, interprocess: bool = False) -> None:
+            attempted.append((interprocess, _FakeNpuModule.current_device))
+            raise native_error
+
+    module = _FakeNpuModule()
+    monkeypatch.setattr(module, "Event", _UnsupportedEvent)
+    backend = NpuEventIPCBackend(event_module=module)
+
+    with pytest.raises(RuntimeError, match="npu:3") as raised:
+        backend.check_event_support("npu:3")
+
+    assert raised.value.__cause__ is native_error
+    assert str(native_error) in str(raised.value)
+    assert attempted == [(True, "npu:3")]
+    assert _FakeNpuModule.current_device == "ambient"
+
+
+@pytest.mark.parametrize("device", [3, "npu:3", _device()])
+def test_check_event_support_probes_device_and_releases_event(
+    monkeypatch: pytest.MonkeyPatch, device: object
+) -> None:
+    """The temporary event is released without recording or exporting it."""
+    seen_devices: list[object] = []
+    events: list[weakref.ReferenceType[_FakeEvent]] = []
+    event_calls: list[list[tuple[object, ...]]] = []
+
+    class _TrackedEvent(_FakeEvent):
+        def __init__(self, interprocess: bool = False) -> None:
+            super().__init__(interprocess=interprocess)
+            seen_devices.append(_FakeNpuModule.current_device)
+            events.append(weakref.ref(self))
+            event_calls.append(self.calls)
+
+    module = _FakeNpuModule()
+    monkeypatch.setattr(module, "Event", _TrackedEvent)
+    backend = NpuEventIPCBackend(event_module=module)
+
+    backend.check_event_support(device)
+    gc.collect()
+
+    assert seen_devices == [device]
+    assert event_calls == [[]]
+    assert events[0]() is None
+    assert _FakeNpuModule.current_device == "ambient"
+
+
+def test_check_event_support_retries_after_runtime_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed attempt must not suppress validation on a later call."""
+    attempts: list[object] = []
+
+    class _RetryEvent(_FakeEvent):
+        def __init__(self, interprocess: bool = False) -> None:
+            attempts.append(_FakeNpuModule.current_device)
+            if len(attempts) == 1:
+                raise RuntimeError("runtime not ready")
+            super().__init__(interprocess=interprocess)
+
+    module = _FakeNpuModule()
+    monkeypatch.setattr(module, "Event", _RetryEvent)
+    backend = NpuEventIPCBackend(event_module=module)
+
+    with pytest.raises(RuntimeError, match="runtime not ready"):
+        backend.check_event_support("npu:2")
+    backend.check_event_support("npu:2")
+
+    assert attempts == ["npu:2", "npu:2"]
+    assert _FakeNpuModule.current_device == "ambient"
+
+
+def test_check_event_support_validates_each_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Success on one device must not hide another device's runtime error."""
+    attempts: list[object] = []
+
+    class _DeviceDependentEvent(_FakeEvent):
+        def __init__(self, interprocess: bool = False) -> None:
+            device = _FakeNpuModule.current_device
+            attempts.append(device)
+            if device == "npu:3":
+                raise RuntimeError("IPC unavailable on this device")
+            super().__init__(interprocess=interprocess)
+
+    module = _FakeNpuModule()
+    monkeypatch.setattr(module, "Event", _DeviceDependentEvent)
+    backend = NpuEventIPCBackend(event_module=module)
+
+    backend.check_event_support("npu:2")
+    with pytest.raises(RuntimeError, match="IPC unavailable on this device"):
+        backend.check_event_support("npu:3")
+
+    assert attempts == ["npu:2", "npu:3"]
+    assert _FakeNpuModule.current_device == "ambient"
 
 
 def test_backend_creates_exports_and_imports() -> None:
