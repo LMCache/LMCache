@@ -398,16 +398,13 @@ class LookupModule(DiscoverableModule):
             )
             return
 
-        configs = (
-            key.request_configs if isinstance(key.request_configs, Mapping) else None
-        )
         if not self._load_policy.should_load(
             KVLoadContext(
                 request_id=key.request_id,
                 model_name=model_name,
                 chunk_size=chunk_size,
                 num_lookup_tokens=requested_tokens,
-                request_configs=configs,
+                request_configs=key.request_configs,
             )
         ):
             # Report a miss without prefetching: nothing is fetched from L2
@@ -556,9 +553,16 @@ class LookupModule(DiscoverableModule):
             )
             return 0
 
+        with job.consume_lock:
+            if job.consumed:
+                return job.consumed_hit_tokens
+
         if not self._ctx.storage_manager.wait_prefetch_status(job.handle, timeout):
+            with job.consume_lock:
+                if job.consumed:
+                    return job.consumed_hit_tokens
             return None
-        return self.query_prefetch_status(request_id)
+        return self._consume_prefetch_result(job)
 
     @request_handler(HandlerType.BLOCKING)
     def free_lookup_locks(
@@ -683,6 +687,8 @@ class LookupModule(DiscoverableModule):
             locked_keys = session.get_prefetch_owners()
             if all(obj_key in locked_keys for obj_key in unfull_obj_keys):
                 obj_keys.extend(unfull_obj_keys)
+        if not obj_keys and session.get_prefetch_owners():
+            obj_keys.extend(session.get_prefetch_owners().keys())
         if not obj_keys:
             return
 
@@ -963,16 +969,23 @@ class LookupModule(DiscoverableModule):
                 )
                 return job.consumed_hit_tokens
             except Exception:
+                if result is not None and result.l1_owners:
+                    try:
+                        self._ctx.storage_manager.finish_read_prefetched(
+                            list(result.l1_owners.keys()),
+                            l1_owners=result.l1_owners,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to release fallback L1 read locks for request %s",
+                            job.request_id,
+                        )
                 try:
                     fallback_session = self._ctx.session_manager.get_or_create(
                         job.request_id
                     )
                     if fallback_session.prefetch_hit_chunks < 0:
-                        fallback_session.record_prefetch_result(
-                            0,
-                            tuple(range(job.attn_desc.num_object_groups)),
-                            result.l1_owners,
-                        )
+                        fallback_session.record_prefetch_result(0, (), {})
                 except Exception:
                     logger.exception(
                         "Failed to record fallback lock state for request %s",

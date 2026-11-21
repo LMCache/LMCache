@@ -47,7 +47,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     transfer_unfull_chunk,
     trim_and_stage_unfull_chunk_block_ids,
 )
-from lmcache.v1.multiprocess.session import SessionManager
+from lmcache.v1.multiprocess.session import Session, SessionManager
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
@@ -884,12 +884,21 @@ def test_concurrent_query_and_free_lookup_locks(lookup_module):
 
 def test_consume_prefetch_result_fallback_when_fold_fails(lookup_module, monkeypatch):
     """If fold_unfold_grouped fails before session.record_prefetch_result,
-    the fallback handler must record result.l1_owners on the session so
-    free_lookup_locks does not leak L1 locks."""
+    the fallback handler must immediately release result.l1_owners so
+    L1 read locks are never orphaned even if the client disconnects."""
     module, storage_manager, hasher = lookup_module
     tokens = list(range(2 * CHUNK_SIZE + 5))
     lookup_tokens = len(tokens)
     _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+
+    released_keys = []
+    original_finish = storage_manager.finish_read_prefetched
+
+    def _spy_finish(keys, l1_owners=None):
+        released_keys.extend(keys)
+        return original_finish(keys, l1_owners=l1_owners)
+
+    monkeypatch.setattr(storage_manager, "finish_read_prefetched", _spy_finish)
 
     # First Party
     import lmcache.v1.multiprocess.modules.lookup as lookup_mod
@@ -913,34 +922,26 @@ def test_consume_prefetch_result_fallback_when_fold_fails(lookup_module, monkeyp
     with pytest.raises(RuntimeError, match="simulated fold failure"):
         module.query_prefetch_status("fold-fail-test")
 
+    # The fallback handler immediately released the L1 read locks
+    assert len(released_keys) > 0
+
     session = module._ctx.session_manager.get_or_create("fold-fail-test")
     assert session.prefetch_hit_chunks == 0
-    # The session has the L1 owners recorded from fallback
     assert "fold-fail-test" not in module._prefetch_jobs
-    # free_lookup_locks frees them
+    # free_lookup_locks runs cleanly without error or double-free
     module.free_lookup_locks(key, tp_size=1)
 
 
-def test_unfull_chunk_grid_candidate_budget_capped(lookup_module, monkeypatch):
-    """When grid is very small (e.g. 1) across a large unfull tail,
-    the candidate boundaries probed must be capped at 32."""
+def test_wait_prefetch_status_returns_cached_hit_when_already_consumed(
+    lookup_module, monkeypatch
+):
+    """When wait_prefetch_status is called on a job where job.consumed is True
+    or storage_manager.wait_prefetch_status returns False because results were
+    already popped, wait_prefetch_status must return the cached hit tokens."""
     module, storage_manager, hasher = lookup_module
-    tokens = list(range(CHUNK_SIZE + 100))
+    tokens = list(range(2 * CHUNK_SIZE + 5))
     lookup_tokens = len(tokens)
-    _write(storage_manager, _chunk_keys(hasher, tokens, 1), is_temporary=False)
-
-    probed_boundaries = []
-    original_submit = module._ctx.storage_manager.submit_prefetch_task
-
-    def _spy_submit(spec, external_request_id):
-        # We record the probed unfull boundary
-        if getattr(spec, "end", None) is not None:
-            probed_boundaries.append(spec.end)
-        return original_submit(spec, external_request_id=external_request_id)
-
-    monkeypatch.setattr(
-        module._ctx.storage_manager, "submit_prefetch_task", _spy_submit
-    )
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
 
     key = IPCCacheServerKey(
         model_name=MODEL,
@@ -949,13 +950,73 @@ def test_unfull_chunk_grid_candidate_budget_capped(lookup_module, monkeypatch):
         token_bytes=pack_token_ids(tokens),
         start=0,
         end=lookup_tokens,
+        request_id="wait-race-test",
+        request_configs={"lmcache.hint.unfull_chunk_grid": 16},
+    )
+    module.lookup(key, tp_size=1)
+    with module._prefetch_job_lock:
+        job = module._prefetch_jobs["wait-race-test"]
+
+    # Mark job as consumed and simulate storage_manager.wait_prefetch_status
+    # returning False
+    job.consumed = True
+    job.consumed_hit_tokens = 2 * CHUNK_SIZE
+    monkeypatch.setattr(
+        module._ctx.storage_manager,
+        "wait_prefetch_status",
+        lambda handle, timeout: False,
+    )
+
+    # Calling wait_prefetch_status should return the cached hit tokens instead of None
+    assert module.wait_prefetch_status("wait-race-test", timeout=0.1) == 2 * CHUNK_SIZE
+    module.free_lookup_locks(key, tp_size=1)
+
+
+def test_unfull_chunk_grid_candidate_budget_capped(lookup_module, monkeypatch):
+    """When grid is very small (e.g. 1) across a large unfull tail,
+    the candidate boundaries probed must be capped at 32."""
+    module, storage_manager, _ = lookup_module
+    hasher_64 = TokenHasher(chunk_size=64)
+    session = Session("cap-test", hasher_64)
+    monkeypatch.setattr(
+        module._ctx.layout_desc_registry,
+        "get_chunk_size",
+        lambda *args, **kwargs: 64,
+    )
+
+    l1_unfull_probes = []
+    original_submit = module._ctx.storage_manager.submit_prefetch_task
+
+    def _spy_submit(spec, external_request_id):
+        if spec.allowed_l2_memory_tags == frozenset():
+            l1_unfull_probes.append(spec)
+        return original_submit(spec, external_request_id=external_request_id)
+
+    monkeypatch.setattr(
+        module._ctx.storage_manager, "submit_prefetch_task", _spy_submit
+    )
+
+    # 64-token chunk + 100 extra tokens creates an unfull chunk spanning tokens 64..127.
+    # With grid=1, range(127, 64, -1) would produce 63 candidates.
+    tokens = list(range(64 + 100))
+    key = IPCCacheServerKey(
+        model_name=MODEL,
+        world_size=1,
+        worker_id=None,
+        token_bytes=pack_token_ids(tokens),
+        start=0,
+        end=len(tokens),
         request_id="cap-test",
         request_configs={"lmcache.hint.unfull_chunk_grid": 1},
     )
-    module.lookup(key, tp_size=1)
-    module.query_prefetch_status("cap-test")
-    # Probed boundaries for unfull chunk should be capped at max_grid_probes (32)
-    assert len(probed_boundaries) <= 32
+    session.set_tokens(key.token_bytes)
+    attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1])
+    boundary, probes, owners = module._lock_unfull_chunk(
+        key, hit_chunks=1, attn_desc=attn_desc, session=session
+    )
+    # The grid generated 63 candidates (> 32); capping limits probes to exactly 32
+    assert probes == 32
+    assert len(l1_unfull_probes) == 32
     module.free_lookup_locks(key, tp_size=1)
 
 
