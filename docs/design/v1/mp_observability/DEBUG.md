@@ -86,10 +86,11 @@ triggered  = increase(lmcache_mp_l1_eviction_loop_triggered_total)
 fire_ratio = triggered / ticks   # 0.0 = never fired; 1.0 = fired every cycle
 ```
 
-If `triggered == 0` over a thrash test, the benchmark completed faster
-than the 1Hz polling interval.  Lower `--eviction-trigger-watermark` or
-raise `--eviction-ratio` (or run the workload longer) to see eviction
-engage.
+If `triggered == 0` over a thrash test, L1 usage was below the trigger
+watermark at every cycle.  Cycles run after L1 writes and reads (at most
+every 50 ms) and at least once per second, so a short burst is still
+checked.  Lower `--eviction-trigger-watermark` or add L1 pressure to see
+eviction engage.
 
 ## Self-service checklist
 
