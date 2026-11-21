@@ -18,6 +18,7 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     PrefetchLockMode,
     PrefetchTaskSpec,
+    Tier,
 )
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -44,6 +45,7 @@ if not torch_dev.is_available():
 
 try:
     # First Party
+    from lmcache.v1.distributed import storage_manager as storage_manager_module
     from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 except ImportError:
     # Skip tests if L1Manager cannot be imported
@@ -628,13 +630,13 @@ class TestStorageManagerL2Prefetch:
     """Tests for prefetching from L2 through StorageManager."""
 
     def test_prefetch_from_l2(self, l2_storage_manager_config, basic_layout):
-        """Write to L1 → store to L2 → clear L1 → prefetch from L2."""
+        """Write to L1 → store to L2 → clear L1 only → prefetch from L2."""
         sm = StorageManager(l2_storage_manager_config)
         keys = [make_object_key(i) for i in range(5)]
 
         write_keys_and_wait_for_l2(sm, keys, basic_layout)
 
-        sm.clear()
+        sm.clear(tier=Tier.L1)
         used, _ = sm.l1_managers()[0].get_memory_usage()
         assert used == 0, f"L1 should be empty after clear, but {used} bytes used"
 
@@ -651,6 +653,151 @@ class TestStorageManagerL2Prefetch:
             assert len(objs) == len(keys)
 
         sm.finish_read_prefetched(keys)
+        sm.close()
+
+    @pytest.mark.parametrize("tier", [Tier.L2, Tier.ALL])
+    def test_clear_l2_drops_stale_prefetch_hits(
+        self, l2_storage_manager_config, basic_layout, tier
+    ):
+        """After an L2-inclusive clear, prefetch must not serve old KV."""
+        sm = StorageManager(l2_storage_manager_config)
+        keys = [make_object_key(i) for i in range(5)]
+        write_keys_and_wait_for_l2(sm, keys, basic_layout)
+        sm.l1_managers()[0].delete(keys)  # leave the data only in L2
+
+        sm.clear(tier=tier)
+
+        handle = sm.submit_prefetch_task(single_row_spec(keys, basic_layout))
+        assert wait_for_prefetch_status(sm, handle) == 0
+        assert sm.l2_adapters()[0][1].get_usage().total_bytes_used == 0
+        sm.close()
+
+    def test_clear_default_tier_keeps_l2(self, l2_storage_manager_config, basic_layout):
+        """Default scope is L1 so existing callers keep their semantics."""
+        sm = StorageManager(l2_storage_manager_config)
+        keys = [make_object_key(i) for i in range(5)]
+        write_keys_and_wait_for_l2(sm, keys, basic_layout)
+
+        sm.clear()
+
+        assert sm.l2_adapters()[0][1].get_usage().total_bytes_used > 0
+        sm.close()
+
+    def test_clear_l2_failure_still_clears_l1(
+        self, l2_storage_manager_config, basic_layout, monkeypatch
+    ):
+        sm = StorageManager(l2_storage_manager_config)
+        keys = [make_object_key(i) for i in range(2)]
+        write_keys_and_wait_for_l2(sm, keys, basic_layout)
+
+        def _broken() -> None:
+            raise RuntimeError("disk gone")
+
+        monkeypatch.setattr(sm.l2_adapters()[0][1], "clear", _broken)
+
+        sm.clear(tier=Tier.ALL)  # must not raise
+
+        used, _ = sm.l1_managers()[0].get_memory_usage()
+        assert used == 0
+        sm.close()
+
+    def test_clear_skips_unsupported_adapter(
+        self, l2_storage_manager_config, basic_layout, monkeypatch
+    ):
+        sm = StorageManager(l2_storage_manager_config)
+        keys = [make_object_key(i) for i in range(2)]
+        write_keys_and_wait_for_l2(sm, keys, basic_layout)
+
+        def _unsupported() -> None:
+            raise NotImplementedError("no clear")
+
+        monkeypatch.setattr(sm.l2_adapters()[0][1], "clear", _unsupported)
+
+        sm.clear(tier=Tier.ALL)  # must not raise
+
+        used, _ = sm.l1_managers()[0].get_memory_usage()
+        assert used == 0
+        sm.close()
+
+    def test_clear_skips_shared_adapter(self, basic_l1_config, monkeypatch):
+        """A ``shared`` adapter holds other instances' KV: never cleared."""
+        shared_cfg = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
+        shared_cfg.shared = True
+        sm = StorageManager(
+            StorageManagerConfig(
+                l1_manager_config=basic_l1_config,
+                eviction_config=EvictionConfig(eviction_policy="LRU"),
+                l2_adapter_config=L2AdaptersConfig(
+                    adapters=[
+                        MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0),
+                        shared_cfg,
+                    ],
+                ),
+            )
+        )
+        cleared: list[int] = []
+        for i, (_desc, adapter) in enumerate(sm.l2_adapters()):
+            monkeypatch.setattr(adapter, "clear", lambda i=i: cleared.append(i))
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            storage_manager_module.logger,
+            "warning",
+            lambda msg, *args: warnings.append(msg % args),
+        )
+
+        for tier in (Tier.L2, Tier.ALL):
+            sm.clear(tier=tier)
+
+        assert cleared == [0, 0]
+        assert sum("is shared" in w for w in warnings) == 2
+        sm.close()
+
+    def test_clear_all_empties_l1_before_l2(
+        self, l2_storage_manager_config, basic_layout, monkeypatch
+    ):
+        """Stores still queued for L2 must find their L1 objects gone first."""
+        sm = StorageManager(l2_storage_manager_config)
+        keys = [make_object_key(i) for i in range(2)]
+        write_keys_and_wait_for_l2(sm, keys, basic_layout)
+        adapter = sm.l2_adapters()[0][1]
+        real_clear = adapter.clear
+        l1_used_at_l2_clear: list[int] = []
+
+        def _recording_clear() -> None:
+            l1_used_at_l2_clear.append(sm.l1_managers()[0].get_memory_usage()[0])
+            real_clear()
+
+        monkeypatch.setattr(adapter, "clear", _recording_clear)
+
+        sm.clear(tier=Tier.ALL)
+
+        assert l1_used_at_l2_clear == [0]
+        sm.close()
+
+    def test_clear_all_waits_for_in_flight_store(self, basic_l1_config, basic_layout):
+        """A store submitted before the clear leaves no copy in L1 or L2."""
+        # One 200 KB object at ~200 KB/s keeps the store in flight for ~1 s.
+        slow = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=2e-4)
+        sm = StorageManager(
+            StorageManagerConfig(
+                l1_manager_config=basic_l1_config,
+                eviction_config=EvictionConfig(eviction_policy="LRU"),
+                l2_adapter_config=L2AdaptersConfig(adapters=[slow]),
+            )
+        )
+        key = make_object_key(0)
+        ret = sm.reserve_write([key], basic_layout)
+        sm.finish_write(list(ret), l1_owners_of(ret))
+        adapter = sm.l2_adapters()[0][1]
+        l1 = sm.l1_managers()[0]
+        assert wait_for_condition(
+            lambda: adapter.debug_has_key(key) and not l1.is_key_evictable(key)
+        ), "store should be in flight, holding its L1 read lock"
+
+        sm.clear(tier=Tier.ALL)
+
+        assert l1.get_memory_usage()[0] == 0
+        assert not adapter.debug_has_key(key)
         sm.close()
 
     def test_prefetch_mixed_l1_l2(self, l2_storage_manager_config, basic_layout):

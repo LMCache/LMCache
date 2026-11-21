@@ -104,6 +104,9 @@ _L1_WRITE_TAG = "storage_manager"
 # ``prepare_read_completion``). No MemoryObj or device pointer crosses msgpack.
 L1WriteCompletion = list[tuple[int, list[ObjectKey]]]
 
+# Bound on clear()'s wait for in-flight L2 stores before deleting L2.
+_CLEAR_STORE_DRAIN_TIMEOUT_S = 30.0
+
 _DEVDAX_L1_TAGS = MemoryTags(segment=MemorySegment.CXL, residency=MemoryResidency.LOCAL)
 
 
@@ -1263,7 +1266,7 @@ class StorageManager:
         ]
 
     # Management APIs
-    def clear(self, force: bool = False):
+    def clear(self, force: bool = False, tier: Tier = Tier.L1) -> None:
         """
         Clear data in the storage manager.
 
@@ -1271,10 +1274,62 @@ class StorageManager:
             force: If True, clear ALL objects including locked ones.
                 This may corrupt in-flight store/prefetch operations.
                 If False (default), only clear unlocked objects, keeping
-                write-locked and read-locked objects intact.
+                write-locked and read-locked objects intact. Applies to L1
+                only.
+            tier: ``Tier.L1`` (default) clears L1 only; ``Tier.L2`` waits
+                for in-flight L2 stores, then calls ``clear()`` on every L2
+                adapter; ``Tier.ALL`` clears L1, does the ``Tier.L2`` steps,
+                then clears L1 again. L2 adapter errors are logged, never
+                raised.
+                Adapters configured ``shared`` and adapters without
+                ``clear()`` support are skipped with a warning.
         """
-        for manager in self._l1_managers:
-            manager.clear(force=force)
+        if tier in (Tier.L1, Tier.ALL):
+            for manager in self._l1_managers:
+                manager.clear(force=force)
+        if tier in (Tier.L2, Tier.ALL):
+            # A submitted store holds an L1 read lock, so the L1 clear kept its
+            # object; let it land before L2 is deleted, then clear L1 again.
+            for controller in self._store_controllers.values():
+                if not controller.wait_for_in_flight_stores(
+                    _CLEAR_STORE_DRAIN_TIMEOUT_S
+                ):
+                    logger.warning(
+                        "L2 stores still in flight after %ss; clear may leave stale KV",
+                        _CLEAR_STORE_DRAIN_TIMEOUT_S,
+                    )
+            for adapter_id, desc, adapter in self._snapshot_adapters():
+                # A shared store also holds other instances' KV, so one
+                # server must not wipe it.
+                if desc.config.shared:
+                    logger.warning(
+                        "L2 adapter %d (%s) is shared; clear skips it and "
+                        "stale KV may remain",
+                        adapter_id,
+                        desc.type_name,
+                    )
+                    continue
+                try:
+                    adapter.clear()
+                except NotImplementedError:
+                    logger.warning(
+                        "L2 adapter %d (%s) does not support clear(); clear "
+                        "skips it and stale KV may remain",
+                        adapter_id,
+                        desc.type_name,
+                    )
+                except Exception:
+                    # Any adapter failure must not block the other tiers, and
+                    # the clear RPC must not raise: vLLM's _reset_caches raises
+                    # RuntimeError when the connector reset reports failure.
+                    logger.exception(
+                        "Failed to clear L2 adapter %d (%s); stale KV may remain",
+                        adapter_id,
+                        desc.type_name,
+                    )
+        if tier is Tier.ALL:
+            for manager in self._l1_managers:
+                manager.clear(force=force)
 
     def close(self):
         """

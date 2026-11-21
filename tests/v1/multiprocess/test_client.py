@@ -9,6 +9,7 @@ from lmcache.v1.client.transport.grpc_impl.client import (
 )
 from lmcache.v1.client.transport.zmq_impl import ZmqMultiprocessClient
 from lmcache.v1.client.transport.zmq_impl.mq_client import MessageQueueClient
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.transport.futures import MessagingFuture
 from lmcache.v1.transport.grpc.descriptors import (
     client_method_name,
@@ -157,10 +158,12 @@ def test_zmq_clear_defaults_to_non_force_and_accepts_force() -> None:
 
     client.clear()
     client.clear(force=True)
+    client.clear(tier=Tier.ALL)
 
     assert transport.calls == [
-        ("clear", [False]),
-        ("clear", [True]),
+        ("clear", [False, None]),
+        ("clear", [True, None]),
+        ("clear", [False, Tier.ALL]),
     ]
 
 

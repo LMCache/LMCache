@@ -229,6 +229,9 @@ class FakeInnerAdapter(L2AdapterInterface):
     def delete(self, keys: list[ObjectKey]) -> None:
         self.passthrough_calls.append(("delete", (keys,)))
 
+    def clear(self) -> None:
+        self.passthrough_calls.append(("clear", ()))
+
     def list_l2_keys(
         self,
         model_name: str | None = None,
@@ -383,6 +386,13 @@ def wrapper(
     adapter = SerdeL2AdapterWrapper(inner, serde, l1)
     yield adapter
     adapter.close()
+
+
+def test_clear_delegates_to_inner(
+    wrapper: SerdeL2AdapterWrapper, inner: FakeInnerAdapter
+) -> None:
+    wrapper.clear()
+    assert inner.passthrough_calls == [("clear", ())]
 
 
 # =============================================================================
