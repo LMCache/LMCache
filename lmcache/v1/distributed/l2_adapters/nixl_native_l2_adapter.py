@@ -28,7 +28,7 @@ _BACKEND_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
 # The lmcache_nixl Python API this adapter is written against. It must equal the
 # module's API_VERSION (csrc/storage_backends/nixl/pybind.cpp); bump both
 # together.
-NIXL_CONNECTOR_API_VERSION = 1
+NIXL_CONNECTOR_API_VERSION = 2
 # lmcache-nixl is published only at release versions, at lmcache's version.
 _INSTALL_HINT = (
     'on a release, install it with `pip install "lmcache[nixl]==<lmcache version>"`'
@@ -117,6 +117,10 @@ class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
         num_workers: Number of native connector workers and NIXL agents.
         max_capacity_gb: Capacity used for L2 accounting. Zero disables the
             capacity limit.
+        endpoints: Optional object-store frontends for the ``OBJ`` backend.
+            Worker ``i`` uses ``endpoints[i % len(endpoints)]`` as its
+            ``endpoint_override``. This is static load spreading, not
+            failover: a worker never leaves its endpoint.
     """
 
     def __init__(
@@ -125,11 +129,13 @@ class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
         backend_params: dict[str, str],
         num_workers: int = 4,
         max_capacity_gb: float = 0,
+        endpoints: list[str] | None = None,
     ) -> None:
         self.backend = backend
         self.backend_params = dict(backend_params)
         self.num_workers = num_workers
         self.max_capacity_gb = max_capacity_gb
+        self.endpoints = endpoints
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "NixlNativeL2AdapterConfig":
@@ -179,11 +185,36 @@ class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
         ):
             raise ValueError("max_capacity_gb must be a non-negative number")
 
+        endpoints = d.get("endpoints")
+        if endpoints is not None:
+            if backend != "OBJ":
+                raise ValueError("endpoints is only supported by the OBJ backend")
+            if (
+                not isinstance(endpoints, list)
+                or not endpoints
+                or not all(isinstance(e, str) and e.strip() for e in endpoints)
+            ):
+                raise ValueError(
+                    "endpoints must be a non-empty list of non-blank strings"
+                )
+            if "endpoint_override" in backend_params:
+                raise ValueError(
+                    "endpoints and backend_params.endpoint_override are mutually "
+                    "exclusive"
+                )
+            if len(endpoints) > num_workers:
+                raise ValueError(
+                    f"endpoints has {len(endpoints)} entries but num_workers is "
+                    f"{num_workers}; every endpoint needs at least one worker"
+                )
+            endpoints = [e.strip() for e in endpoints]
+
         return cls(
             backend=backend,
             backend_params=backend_params,
             num_workers=num_workers,
             max_capacity_gb=float(max_capacity_gb),
+            endpoints=endpoints,
         )
 
     @classmethod
@@ -195,7 +226,9 @@ class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
             "- backend_params (dict[str, str]): parameters forwarded to NIXL; "
             "FILE_SEG backends require file_path and accept use_direct_io\n"
             "- num_workers (int): worker/agent count (default 4, >0)\n"
-            "- max_capacity_gb (float): accounting capacity (default 0)"
+            "- max_capacity_gb (float): accounting capacity (default 0)\n"
+            "- endpoints (list[str]): OBJ only; worker i uses endpoints[i % n] "
+            "as endpoint_override (not HA, at most num_workers entries)"
         )
 
 
@@ -233,6 +266,11 @@ def _create_nixl_native_l2_adapter(
 
     if not isinstance(config, NixlNativeL2AdapterConfig):
         raise TypeError("config must be NixlNativeL2AdapterConfig")
+    client_kwargs: dict[str, Any] = {}
+    if config.endpoints is not None:
+        client_kwargs["worker_backend_params"] = [
+            {"endpoint_override": endpoint} for endpoint in config.endpoints
+        ]
     native_client = client_class(
         backend=config.backend,
         backend_params=config.backend_params,
@@ -240,6 +278,7 @@ def _create_nixl_native_l2_adapter(
         l1_base=l1_memory_desc.ptr,
         l1_size=l1_memory_desc.size,
         l1_alignment=l1_memory_desc.align_bytes,
+        **client_kwargs,
     )
     try:
         if config.eviction_config is not None and not native_client.supports_delete:

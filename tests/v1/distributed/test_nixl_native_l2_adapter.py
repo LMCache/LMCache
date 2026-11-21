@@ -493,3 +493,99 @@ def test_pad_buffers_to_alignment_resolution(
         assert adapter.report_status()["pad_buffers_to_alignment"] is expected
     finally:
         adapter.close()
+
+
+_ENDPOINT_BASE = {"backend": "OBJ", "backend_params": {"bucket": "b"}}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"backend": "POSIX", "endpoints": ["http://a"]}, "only supported by the OBJ"),
+        ({"endpoints": []}, "non-empty list"),
+        ({"endpoints": "http://a,http://b"}, "non-empty list"),
+        ({"endpoints": ["http://a", " "]}, "non-blank"),
+        ({"endpoints": ["http://a", 1]}, "non-blank"),
+        (
+            {
+                "endpoints": ["http://a"],
+                "backend_params": {"endpoint_override": "http://b"},
+            },
+            "mutually exclusive",
+        ),
+        (
+            {"endpoints": ["http://a", "http://b", "http://c"], "num_workers": 2},
+            "needs at least one worker",
+        ),
+    ],
+)
+def test_invalid_endpoints_are_rejected(
+    overrides: dict[str, object], message: str
+) -> None:
+    """Invalid ``endpoints`` fail at config parse time."""
+    with pytest.raises(ValueError, match=message):
+        NixlNativeL2AdapterConfig.from_dict({**_ENDPOINT_BASE, **overrides})
+
+
+def test_endpoint_override_in_backend_params_is_unchanged() -> None:
+    """Plain endpoint_override, even with commas or empty, is not interpreted."""
+    for value in ("", "http://a:9020/p?x=1,2"):
+        config = NixlNativeL2AdapterConfig.from_dict(
+            {**_ENDPOINT_BASE, "backend_params": {"endpoint_override": value}}
+        )
+        assert config.endpoints is None
+        assert config.backend_params == {"endpoint_override": value}
+
+
+def test_endpoints_are_forwarded_as_per_worker_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each endpoint becomes one per-worker override; shared params stay put."""
+    captured: dict[str, object] = {}
+
+    def fake_client_factory(**kwargs: object) -> _FakeNixlClientForPadding:
+        captured.update(kwargs)
+        return _FakeNixlClientForPadding("OBJECT", **kwargs)
+
+    fake_module = ModuleType("lmcache.lmcache_nixl")
+    fake_module.LMCacheNixlClient = fake_client_factory  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "lmcache.lmcache_nixl", fake_module)
+
+    config = NixlNativeL2AdapterConfig.from_dict(
+        {**_ENDPOINT_BASE, "endpoints": [" http://a:9020 ", "http://b:9020"]}
+    )
+    adapter = create_l2_adapter(
+        config, L1MemoryDesc(ptr=0x12340000, size=0x400000, align_bytes=0x1000)
+    )
+    try:
+        assert captured["backend_params"] == {"bucket": "b"}
+        assert captured["worker_backend_params"] == [
+            {"endpoint_override": "http://a:9020"},
+            {"endpoint_override": "http://b:9020"},
+        ]
+    finally:
+        adapter.close()
+
+
+def test_no_endpoints_does_not_pass_worker_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without ``endpoints`` the native client call is unchanged."""
+    captured: dict[str, object] = {}
+
+    def fake_client_factory(**kwargs: object) -> _FakeNixlClientForPadding:
+        captured.update(kwargs)
+        return _FakeNixlClientForPadding("OBJECT", **kwargs)
+
+    fake_module = ModuleType("lmcache.lmcache_nixl")
+    fake_module.LMCacheNixlClient = fake_client_factory  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "lmcache.lmcache_nixl", fake_module)
+
+    adapter = create_l2_adapter(
+        NixlNativeL2AdapterConfig.from_dict(_ENDPOINT_BASE),
+        L1MemoryDesc(ptr=0x12340000, size=0x400000, align_bytes=0x1000),
+    )
+    try:
+        assert "worker_backend_params" not in captured
+    finally:
+        adapter.close()
