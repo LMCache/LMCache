@@ -987,7 +987,7 @@ def test_engine_driven_register_rejects_inconsistent_single_group_chunk_size(
     )
     context = EngineDrivenTransferContext(1, MagicMock())
 
-    with pytest.raises(ValueError, match="block geometry"):
+    with pytest.raises(ValueError, match="positive multiple"):
         context.register(
             kv_caches=_make_fused_nhd_kv_caches(),
             model_name="m",
@@ -995,7 +995,7 @@ def test_engine_driven_register_rejects_inconsistent_single_group_chunk_size(
             blocks_in_chunk=8,
             mq_timeout=1.0,
             layout_hints={"kv_layout": "NHD"},
-            lmcache_chunk_tokens=512,
+            lmcache_chunk_tokens=300,
         )
 
 
@@ -1636,30 +1636,39 @@ def test_server_register_and_find_non_cuda_context_layout(
     assert ctx.layout_desc_registry.get_chunk_size("m", 1) == 16
 
 
-@pytest.mark.parametrize(
-    ("chunk_size", "num_physical_slots", "error"),
-    [
-        (300, 300, "multiple of block_size"),
-        (512, 256, "num_physical_slots"),
-    ],
-)
 def test_server_rejects_invalid_single_group_chunk_geometry(
     server_module_factory: ServerModuleFactory,
-    chunk_size: int,
-    num_physical_slots: int,
-    error: str,
 ) -> None:
     """Server rejects logical chunks that the single-group layout cannot hold."""
     module, _, _, _ = server_module_factory(chunk_size=256)
     payload = _default_register_payload(
         instance_id=11,
-        chunk_size=chunk_size,
-        num_physical_slots=num_physical_slots,
+        chunk_size=300,
+        num_physical_slots=300,
         block_size=16,
     )
 
-    with pytest.raises(ValueError, match=error):
+    with pytest.raises(ValueError, match="multiple of block_size"):
         module.register_kv_cache_engine_driven_context(payload)
+
+
+def test_server_register_uses_worker_physical_slots(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Server keeps physical slots separate from the logical chunk size."""
+    module, _, _, ctx = server_module_factory(chunk_size=256)
+    payload = _default_register_payload(
+        instance_id=11,
+        chunk_size=256,
+        num_physical_slots=128,
+    )
+
+    module.register_kv_cache_engine_driven_context(payload)
+
+    layout = ctx.layout_desc_registry.find("m", 1)
+    assert layout is not None
+    assert layout.shapes[0] == torch.Size([2, 2, 128, 16])
 
 
 def test_register_multigroup_sizes_object_group_count(
@@ -2585,7 +2594,13 @@ def test_server_engine_driven_reregister_returns_existing_shm_response(
     assert second_response.shm_name == "lmcache_l1_pool_lmcache_test_pool"
     assert second_response.pool_size == 2048
     with pytest.raises(ValueError, match="already registered"):
-        module.register_kv_cache_engine_driven_context(replace(payload, chunk_size=32))
+        module.register_kv_cache_engine_driven_context(
+            msgspec.structs.replace(
+                payload,
+                chunk_size=32,
+                num_physical_slots=32,
+            )
+        )
 
 
 def test_server_unregister_engine_driven_context_releases_pending_shm_locks(
