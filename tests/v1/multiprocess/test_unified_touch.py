@@ -220,7 +220,11 @@ class TestEndSessionTouchKeys:
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0)]
         obj_keys = ipc_key_to_object_keys(
-            removed.lookup_ipc_key, chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
+            removed.lookup_ipc_key,
+            chunk_hashes,
+            [0],
+            DEFAULT_SHARD_REPLICATION_DESC,
+            group_layout_descs={},
         )[0]
 
         # With world_size=1 and worker_id=None, should have 3 keys
@@ -250,7 +254,11 @@ class TestEndSessionTouchKeys:
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0)]
         obj_keys = ipc_key_to_object_keys(
-            removed.lookup_ipc_key, chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
+            removed.lookup_ipc_key,
+            chunk_hashes,
+            [0],
+            DEFAULT_SHARD_REPLICATION_DESC,
+            group_layout_descs={},
         )[0]
 
         # 2 chunks * 2 workers = 4 keys
@@ -293,7 +301,11 @@ class TestEndSessionTouchKeys:
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in removed.get_hashes(0)]
         obj_keys = ipc_key_to_object_keys(
-            removed.lookup_ipc_key, chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
+            removed.lookup_ipc_key,
+            chunk_hashes,
+            [0],
+            DEFAULT_SHARD_REPLICATION_DESC,
+            group_layout_descs={},
         )[0]
         assert len(obj_keys) == 0
 

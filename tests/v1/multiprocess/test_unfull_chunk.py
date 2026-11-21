@@ -614,6 +614,7 @@ def _chunk_keys(
         hashes,
         [0],
         DEFAULT_SHARD_REPLICATION_DESC,
+        group_layout_descs={0: LAYOUT},
     )[0]
 
 
@@ -632,6 +633,7 @@ def _unfull_keys(
         [unfull_hash],
         [0],
         DEFAULT_SHARD_REPLICATION_DESC,
+        group_layout_descs={0: LAYOUT},
     )[0]
 
 

@@ -166,7 +166,7 @@ class LayoutDescRegistry:
                     layout_desc=layout_desc,
                     ref_count=1,
                     attn_desc=attn_desc,
-                    group_layout_descs=group_layout_descs,
+                    group_layout_descs=group_layout_descs or {},
                     group_unfull_chunk_layout_descs=group_unfull_chunk_layout_descs,
                     shard_replication_desc=shard_replication_desc,
                 )
@@ -619,8 +619,20 @@ class MPCacheServerContext:
         shard_replication_desc = self.layout_desc_registry.find_shard_replication_desc(
             key.model_name, key.world_size
         )
+        group_layout_descs = self.layout_desc_registry.find_group_layout_descs(
+            key.model_name, key.world_size
+        )
+        if not group_layout_descs:
+            raise ValueError(
+                f"no registered object groups for {key.model_name!r} "
+                f"world size {key.world_size}"
+            )
         return ipc_key_to_object_keys(
-            key, chunk_hashes, object_group_ids, shard_replication_desc
+            key,
+            chunk_hashes,
+            object_group_ids,
+            shard_replication_desc,
+            group_layout_descs=group_layout_descs,
         )
 
     def resolve_unfull_chunk_obj_keys(
@@ -648,6 +660,14 @@ class MPCacheServerContext:
         session = self.session_manager.get_or_create(key.request_id, token_hasher)
         session.set_tokens(key.token_bytes)
         unfull_hash = TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(key.end))
+        group_layout_descs = self.layout_desc_registry.find_group_layout_descs(
+            key.model_name, key.world_size
+        )
+        if not group_layout_descs:
+            raise ValueError(
+                f"no registered object groups for {key.model_name!r} "
+                f"world size {key.world_size}"
+            )
         return [
             group_keys[0]
             for group_keys in ipc_key_to_object_keys(
@@ -657,6 +677,7 @@ class MPCacheServerContext:
                 self.layout_desc_registry.find_shard_replication_desc(
                     key.model_name, key.world_size
                 ),
+                group_layout_descs=group_layout_descs,
             )
         ]
 

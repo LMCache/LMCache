@@ -196,6 +196,62 @@ def validate_identity_tags(tags: Mapping[str, str]) -> None:
             raise ValueError("tags require non-empty string names and string values")
 
 
+KV_DTYPE_TAG_NAME = "kv_dtype"
+
+
+_DTYPE_CODES = {
+    "bool": "b1",
+    "float16": "f16",
+    "float32": "f32",
+    "float64": "f64",
+    "float8_e4m3fn": "f8e4m3",
+    "float8_e4m3fnuz": "f8e4m3uz",
+    "float8_e5m2": "f8e5m2",
+    "float8_e5m2fnuz": "f8e5m2uz",
+    "int8": "i8",
+    "int16": "i16",
+    "int32": "i32",
+    "int64": "i64",
+    "uint8": "u8",
+    "bfloat16": "bf16",
+}
+
+
+def _layout_tag(layout_desc: "MemoryLayoutDesc | None") -> dict[str, str]:
+    """Return the dtype tag of a layout, or nothing when the group has none."""
+    return layout_dtype_tags(layout_desc) if layout_desc is not None else {}
+
+
+def layout_dtype_tags(layout_desc: "MemoryLayoutDesc") -> dict[str, str]:
+    """Describe the storage dtypes of one object group as an identity tag.
+
+    The value is a comma-separated, sorted list of short dtype codes, because
+    the tag is part of the object name and every byte counts against the file
+    system's name limit. An unknown dtype keeps its full name rather than being
+    dropped: two unknown dtypes must not collide.
+
+    Args:
+        layout_desc: The registered layout of one object group.
+
+    Returns:
+        ``{"kv_dtype": "bf16"}``, ``{"kv_dtype": "bf16,f8e4m3"}`` for a
+        mixed-precision group, or an empty mapping when the group stores
+        nothing.
+    """
+    names = sorted(
+        {
+            _DTYPE_CODES.get(name, name)
+            for name in (
+                str(dtype).removeprefix("torch.") for dtype in layout_desc.dtypes
+            )
+            if name
+        }
+    )
+    if not names:
+        return {}
+    return {KV_DTYPE_TAG_NAME: ",".join(names)}
+
+
 def get_request_tags(
     request_configs: Mapping[str, object] | None,
 ) -> Mapping[str, str]:
@@ -855,6 +911,8 @@ def ipc_key_to_object_keys(
     chunk_hashes: list[bytes],
     object_group_ids: list[int],
     shard_replication_desc: ShardReplicationDesc,
+    *,
+    group_layout_descs: Mapping[int, MemoryLayoutDesc],
 ) -> list[list[ObjectKey]]:
     """
     Convert a single IPCCacheServerKey and its chunk hashes to per-object-group
@@ -883,6 +941,9 @@ def ipc_key_to_object_keys(
         shard_replication_desc: How each object group is spread over the kv ranks
             (the registration's :class:`ShardReplicationDesc`;
             :data:`DEFAULT_SHARD_REPLICATION_DESC` stores every group per rank).
+        group_layout_descs: Registered layout of each object group produced.
+            Required: it carries the storage dtype, and a caller that omits it
+            would build names that do not match what was written.
 
     Returns:
         list[list[ObjectKey]]: The i-th element is the list of ObjectKeys
@@ -892,7 +953,7 @@ def ipc_key_to_object_keys(
     extra_attributes = (
         ipc_key.request_configs if ipc_key.request_configs is not None else {}
     )
-    tags = get_request_tags(ipc_key.request_configs)
+    request_tags = get_request_tags(ipc_key.request_configs)
 
     return [
         [
@@ -903,7 +964,10 @@ def ipc_key_to_object_keys(
                 object_group_id=object_group_id,
                 cache_salt=cache_salt,
                 extra_attributes=extra_attributes,
-                tags=tags,
+                tags={
+                    **request_tags,
+                    **_layout_tag(group_layout_descs.get(object_group_id)),
+                },
             )
             for chunk_hash in chunk_hashes
             for kv_rank in _lookup_kv_ranks(
@@ -959,7 +1023,7 @@ def ipc_key_to_grouped_object_keys(
         ``ipc_key.request_configs`` through ``extra_attributes`` when request
         configs are present.
     """
-    tags = get_request_tags(ipc_key.request_configs)
+    request_tags = get_request_tags(ipc_key.request_configs)
     extra_attributes = (
         ipc_key.request_configs if ipc_key.request_configs is not None else {}
     )
@@ -993,7 +1057,10 @@ def ipc_key_to_grouped_object_keys(
                             object_group_id=object_group_id,
                             cache_salt=ipc_key.cache_salt,
                             extra_attributes=extra_attributes,
-                            tags=tags,
+                            tags={
+                                **request_tags,
+                                **layout_dtype_tags(layout_desc),
+                            },
                         )
                         for chunk_hash in chunk_hashes
                     ],

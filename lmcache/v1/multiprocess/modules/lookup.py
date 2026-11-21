@@ -76,6 +76,11 @@ def resolve_prefetched_obj_keys(
     shard_replication_desc = registry.find_shard_replication_desc(
         key.model_name, key.world_size
     )
+    group_layout_descs = registry.find_group_layout_descs(
+        key.model_name, key.world_size
+    )
+    if not group_layout_descs:
+        return []
 
     obj_keys: list[ObjectKey] = []
     for group_idx, window in enumerate(group_windows):
@@ -96,7 +101,11 @@ def resolve_prefetched_obj_keys(
         group_hashes = chunk_hashes[lo - start_chunk : hi - start_chunk]
         obj_keys.extend(
             ipc_key_to_object_keys(
-                key, group_hashes, [group_idx], shard_replication_desc
+                key,
+                group_hashes,
+                [group_idx],
+                shard_replication_desc,
+                group_layout_descs=group_layout_descs,
             )[0]
         )
     return obj_keys
@@ -357,6 +366,7 @@ class LookupModule(DiscoverableModule):
                         chunk_hashes[:start_chunk],
                         list(range(attn_desc.num_object_groups)),
                         shard_replication_desc,
+                        group_layout_descs=group_layout_descs,
                     )
                     for obj_key in group_keys
                 ]
@@ -672,11 +682,17 @@ class LookupModule(DiscoverableModule):
         shard_replication_desc = registry.find_shard_replication_desc(
             key.model_name, key.world_size
         )
+        group_layout_descs = registry.find_group_layout_descs(
+            key.model_name, key.world_size
+        )
+        if not group_layout_descs:
+            return []
         per_group = ipc_key_to_object_keys(
             key,
             chunk_hashes,
             list(range(attn_desc.num_object_groups)),
             shard_replication_desc,
+            group_layout_descs=group_layout_descs,
         )
         return [obj_key for group_keys in per_group for obj_key in group_keys]
 

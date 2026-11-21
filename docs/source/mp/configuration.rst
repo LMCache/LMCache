@@ -1013,6 +1013,35 @@ revisions of one model ID share the registered layout. That is correct as long
 as the revisions keep the same cache layout, which is the case for weights-only
 revisions.
 
+KV storage dtype
+~~~~~~~~~~~~~~~~
+
+The dtype of the registered KV cache is part of the cache identity. The server
+derives it from the layout an engine registers with
+(:class:`MemoryLayoutDesc`) and adds ``kv_dtype`` to every object key, so a
+reader whose engine stores another dtype misses instead of decoding the bytes
+it finds.
+
+The tag is needed because size cannot separate these cases: ``float16`` and
+``bfloat16`` are both two bytes wide, so an object written by one engine fits
+the other engine's allocation exactly. Without the tag, an L2 reload hands the
+reader the other dtype's bytes and the engine produces garbage rather than an
+error.
+
+A mixed-precision group gets one tag naming all of its dtypes, written as short
+codes so the tag stays small: ``bf16,f8e4m3`` rather than
+``bfloat16,float8_e4m3fn``. The tag is part of the object name, and names are
+limited to 255 bytes on most file systems, so a long model path benefits from
+every byte saved.
+
+**Upgrading renames every cache object once.** Objects written before this tag
+existed keep their untagged names, so a tagged reader misses them; they stay
+unreachable until the tier evicts them, and the first run after the upgrade
+repopulates the cache. An untagged writer is likewise never matched by a tagged
+reader, so a mixed-version rollout recomputes rather than decoding the wrong
+dtype. Tags are already part of the L2 key format, so the separation holds for
+disk and remote tiers as well.
+
 Connector ``extra_config`` Keys
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

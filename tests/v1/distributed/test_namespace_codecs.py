@@ -42,6 +42,12 @@ def test_storage_names_round_trip_tags(salt: str) -> None:
 
 def test_storage_key_rejects_unknown_tag_encoding() -> None:
     with pytest.raises(ValueError, match="unsupported"):
+        decode_storage_key("model@1@0@31323334@@x3-abc")
+
+
+def test_storage_key_rejects_a_malformed_tag_token() -> None:
+    """A known version with a corrupt payload must not decode to tags."""
+    with pytest.raises(ValueError):
         decode_storage_key("model@1@0@31323334@@x2-abc")
 
 

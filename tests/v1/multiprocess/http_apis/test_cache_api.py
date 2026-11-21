@@ -16,6 +16,7 @@ from typing import Optional, cast
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
+import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
@@ -23,6 +24,7 @@ from lmcache.v1.common.attn_window import DEFAULT_ATTN_WINDOW_DESC, AttnWindowDe
 from lmcache.v1.distributed.api import (
     KeyEntry,
     KeyListPage,
+    MemoryLayoutDesc,
     ObjectKey,
     PrefetchResult,
     ShardReplicationDesc,
@@ -520,6 +522,11 @@ def _make_prefetch_app(ctx: Optional[_FakeContext]) -> FastAPI:
     return app
 
 
+def _layout() -> MemoryLayoutDesc:
+    """The registered layout shape the fake registry hands back."""
+    return MemoryLayoutDesc(shapes=[torch.Size([16, 1])], dtypes=[torch.uint8])
+
+
 def _ctx(layout: Optional[object]) -> _FakeContext:
     return _FakeContext(
         layout_desc_registry=_FakeLayoutRegistry(layout=layout),
@@ -554,7 +561,7 @@ class TestPrefetchEndpoint:
             cast(dict[str, str], request.tags)["adapter"] = "B"
 
     def test_submit_returns_request_id_and_resolves_layout(self):
-        ctx = _ctx(layout=object())
+        ctx = _ctx(layout=_layout())
         client = TestClient(_make_prefetch_app(ctx))
         tags = {"adapter": "A", "version": "2"}
         body = _prefetch_body([1, 2, 3, 4, 5, 6, 7, 8], world_size=2, tags=tags)
@@ -569,20 +576,20 @@ class TestPrefetchEndpoint:
         assert body["request_id"]
         assert ("m", 2) in ctx.layout_desc_registry.lookup_calls
         assert all(
-            dict(key.identity.tags) == tags
+            dict(key.identity.tags) == {**tags, "kv_dtype": "u8"}
             for key in ctx.storage_manager.submit_calls[0]["keys"]
         )
 
     @pytest.mark.parametrize("tags", [{"": "bad"}, {"adapter": 1}, {"adapter": None}])
     def test_rejects_invalid_matching_tags(self, tags: dict) -> None:
-        client = TestClient(_make_prefetch_app(_ctx(layout=object())))
+        client = TestClient(_make_prefetch_app(_ctx(layout=_layout())))
         response = client.post(
             "/cache/prefetches", json=_prefetch_body([1, 2, 3, 4], tags=tags)
         )
         assert response.status_code == 422, response.text
 
     def test_status_poll_completes_then_404(self):
-        ctx = _ctx(layout=object())
+        ctx = _ctx(layout=_layout())
         client = TestClient(_make_prefetch_app(ctx))
         rid = client.post(
             "/cache/prefetches",
@@ -598,11 +605,11 @@ class TestPrefetchEndpoint:
         assert client.get(f"/cache/prefetches/{rid}").status_code == 404
 
     def test_status_unknown_request_id_404(self):
-        client = TestClient(_make_prefetch_app(_ctx(layout=object())))
+        client = TestClient(_make_prefetch_app(_ctx(layout=_layout())))
         assert client.get("/cache/prefetches/nope").status_code == 404
 
     def test_short_sequence_is_noop(self):
-        client = TestClient(_make_prefetch_app(_ctx(layout=object())))
+        client = TestClient(_make_prefetch_app(_ctx(layout=_layout())))
         resp = client.post("/cache/prefetches", json=_prefetch_body([1, 2]))
         assert resp.status_code == 202, resp.text
         assert resp.json() == {"chunks": 0, "status": "noop"}
@@ -615,14 +622,14 @@ class TestPrefetchEndpoint:
         assert resp.status_code == 503
 
     def test_400_on_invalid_cache_salt(self):
-        client = TestClient(_make_prefetch_app(_ctx(layout=object())))
+        client = TestClient(_make_prefetch_app(_ctx(layout=_layout())))
         resp = client.post(
             "/cache/prefetches", json=_prefetch_body([1, 2, 3, 4], salt="bad@salt")
         )
         assert resp.status_code == 400
 
     def test_400_on_unsupported_direction(self):
-        client = TestClient(_make_prefetch_app(_ctx(layout=object())))
+        client = TestClient(_make_prefetch_app(_ctx(layout=_layout())))
         body = _prefetch_body([1, 2, 3, 4])
         body["target_tier"] = "l2"
         resp = client.post("/cache/prefetches", json=body)

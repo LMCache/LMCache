@@ -159,6 +159,14 @@ def _groups() -> KVLayerGroupsManager:
     return manager
 
 
+def _dtype_layouts(manager: KVLayerGroupsManager) -> dict[int, MemoryLayoutDesc]:
+    """Per-group layouts carrying the dtype, which is what identity tagging needs."""
+    return {
+        gid: MemoryLayoutDesc(shapes=[torch.Size([1, 1])], dtypes=[torch.uint8])
+        for gid in range(len(manager.object_groups))
+    }
+
+
 def _key(world_size: int = 1, tokens: tuple[int, ...] = TOKENS) -> IPCCacheServerKey:
     return IPCCacheServerKey.from_token_ids(
         model_name="native-state",
@@ -189,7 +197,11 @@ def _lookup(
     for rank, endpoints in enumerate(checkpoint_ends):
         worker_key = replace(key, worker_id=rank)
         per_group = ipc_key_to_object_keys(
-            worker_key, hashes, [0, 1], DEFAULT_SHARD_REPLICATION_DESC
+            worker_key,
+            hashes,
+            [0, 1],
+            DEFAULT_SHARD_REPLICATION_DESC,
+            group_layout_descs=_dtype_layouts(manager),
         )
         # Every native store contributes PAGE for its token range and only
         # one STATE object at its endpoint, exactly as the ATOM worker emits.

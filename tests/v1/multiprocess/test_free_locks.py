@@ -543,7 +543,7 @@ def test_server_free_lookup_locks_honors_the_session_lock_model():
 
     with patch(
         "lmcache.v1.multiprocess.modules.lookup.ipc_key_to_object_keys",
-        side_effect=lambda k, hs, gids, shard_replication_desc: [
+        side_effect=lambda k, hs, gids, shard_replication_desc, **_: [
             [_key(gids[0], h) for h in hs]
         ],
     ):

@@ -107,7 +107,11 @@ def test_lookup_single_group_matches_single_group_expansion():
     )
 
     expected = ipc_key_to_object_keys(
-        _lookup_key(world_size=2), chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
+        _lookup_key(world_size=2),
+        chunk_hashes,
+        [0],
+        DEFAULT_SHARD_REPLICATION_DESC,
+        group_layout_descs={},
     )[0]
     assert len(rows) == 2
     submitted = [k for row in rows for k in row.keys]

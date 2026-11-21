@@ -457,7 +457,9 @@ def test_dcp_rank_matches_vllm_group_construction(tp_size: int, dcp_size: int):
             end=3,
             request_id="req",
         )
-        [[obj_key]] = ipc_key_to_object_keys(key, [b"chunk"], [0], shards)
+        [[obj_key]] = ipc_key_to_object_keys(
+            key, [b"chunk"], [0], shards, group_layout_descs={}
+        )
         shard = vllm_dcp_rank[rank]
         assert obj_key.kv_rank == ObjectKey.ComputeKVRank(
             world_size=tp_size,

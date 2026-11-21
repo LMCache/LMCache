@@ -90,7 +90,11 @@ def test_request_tags_reach_expanded_object_keys() -> None:
     )
 
     groups = ipc_key_to_object_keys(
-        ipc_key, [b"1234"], [0, 1], DEFAULT_SHARD_REPLICATION_DESC
+        ipc_key,
+        [b"1234"],
+        [0, 1],
+        DEFAULT_SHARD_REPLICATION_DESC,
+        group_layout_descs={},
     )
 
     assert get_request_tags(ipc_key.request_configs) == {
@@ -116,3 +120,55 @@ def test_request_tags_reject_invalid_values(
 ) -> None:
     with pytest.raises(ValueError, match="string values"):
         get_request_tags(request_configs)
+
+
+class TestTagToken:
+    """The tag token is part of an L2 file name, so its size is a constraint."""
+
+    def test_round_trip(self):
+        # First Party
+        from lmcache.v1.distributed.key_codec import decode_tags, encode_tags
+
+        tags = {"kv_dtype": "bf16,f8e4m3"}
+        assert dict(decode_tags(encode_tags(tags))) == tags
+
+    def test_known_names_ride_as_indices(self):
+        """A known name must not cost its spelling; unknown ones still work."""
+        # First Party
+        from lmcache.v1.distributed.key_codec import decode_tags, encode_tags
+
+        known = encode_tags({"kv_dtype": "bf16"})
+        unknown = encode_tags({"revision": "abc"})
+        assert known.startswith("x2-")
+        assert len(known) < len(unknown)
+        assert dict(decode_tags(unknown)) == {"revision": "abc"}
+
+    def test_legacy_tokens_still_decode(self):
+        """Objects written before the compact encoding stay readable."""
+        # Standard
+        import base64
+
+        # Third Party
+        import msgspec
+
+        # First Party
+        from lmcache.v1.distributed.key_codec import decode_tags
+
+        payload = msgspec.json.encode({"kv_dtype": "float16"})
+        legacy = "x1-" + base64.urlsafe_b64encode(payload).decode().rstrip("=")
+        assert dict(decode_tags(legacy)) == {"kv_dtype": "float16"}
+
+    def test_a_tampered_token_is_rejected(self):
+        # First Party
+        from lmcache.v1.distributed.key_codec import decode_tags
+
+        with pytest.raises(ValueError):
+            decode_tags("x2-not-a-real-payload")
+
+    def test_the_mixed_group_token_fits_a_file_name(self):
+        """Qwen3-1.7B's bf16 name was 255 bytes with the JSON token."""
+        # First Party
+        from lmcache.v1.distributed.key_codec import encode_tags
+
+        assert len(encode_tags({"kv_dtype": "bf16"})) <= 20
+        assert len(encode_tags({"kv_dtype": "bf16,f8e4m3"})) <= 30

@@ -790,6 +790,13 @@ class RetrieveMixin:
         )
         # One key per (hash, read group), chunk-major; the stash holds every
         # rank's keys only so the unretrieved ones can be released below.
+        group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
+            key.model_name, key.world_size
+        )
+        if not group_layout_descs:
+            raise ValueError(
+                f"blend retrieve for {key.model_name!r} has no registered layout"
+            )
         all_obj_keys = _cb_chunk_major_object_keys(
             key,
             [r.hash for r in cb_match_result],
@@ -797,6 +804,7 @@ class RetrieveMixin:
             self._ctx.layout_desc_registry.find_shard_replication_desc(
                 key.model_name, key.world_size
             ),
+            group_layout_descs,
         )
 
         # The connector may have dropped matches after the lookup read-locked

@@ -26,6 +26,11 @@ from lmcache.v1.distributed.api import (
 LAYOUT = MemoryLayoutDesc(shapes=[torch.Size([2, 3])], dtypes=[torch.float16])
 
 
+def _layouts(count: int) -> dict[int, MemoryLayoutDesc]:
+    """Layouts for the first ``count`` object groups."""
+    return {gid: LAYOUT for gid in range(count)}
+
+
 def _keys(n: int, gid: int = 0, kv_rank: int = 0) -> list[ObjectKey]:
     return [
         ObjectKey(
@@ -141,7 +146,11 @@ class TestIpcKeyToGroupedObjectKeys:
         attn = AttnWindowDesc(num_chunks_in_sw=[-1, -1], world_size=2)
 
         flat = ipc_key_to_object_keys(
-            ipc_key, hashes, [0, 1], DEFAULT_SHARD_REPLICATION_DESC
+            ipc_key,
+            hashes,
+            [0, 1],
+            DEFAULT_SHARD_REPLICATION_DESC,
+            group_layout_descs={0: LAYOUT, 1: LAYOUT},
         )
         grouped = ipc_key_to_grouped_object_keys(
             ipc_key,
@@ -199,7 +208,11 @@ class TestIpcKeyToGroupedObjectKeys:
             DEFAULT_SHARD_REPLICATION_DESC,
         )
         flat = ipc_key_to_object_keys(
-            _ipc_key(2), hashes, [0, 1], DEFAULT_SHARD_REPLICATION_DESC
+            _ipc_key(2),
+            hashes,
+            [0, 1],
+            DEFAULT_SHARD_REPLICATION_DESC,
+            group_layout_descs={0: LAYOUT, 1: LAYOUT},
         )
         assert sorted((k for r in rows for k in r.keys), key=repr) == sorted(
             (k for g in flat for k in g), key=repr
@@ -261,13 +274,19 @@ class TestTpReplicatedGroups:
     SHARDS = ShardReplicationDesc(group_tp_replicas=(4, 1))
 
     def test_lookup_expands_a_replicated_group_to_one_key(self):
-        per_group = ipc_key_to_object_keys(_ipc_key(4), [b"c0"], [0, 1], self.SHARDS)
+        per_group = ipc_key_to_object_keys(
+            _ipc_key(4), [b"c0"], [0, 1], self.SHARDS, group_layout_descs=_layouts(2)
+        )
         assert [k.kv_rank for k in per_group[0]] == [_kv_rank(4, 0)]
         assert [k.kv_rank for k in per_group[1]] == [_kv_rank(4, r) for r in range(4)]
 
     def test_every_worker_key_resolves_a_replicated_group_to_rank_zero(self):
         per_group = ipc_key_to_object_keys(
-            _ipc_key(4, worker_id=3), [b"c0"], [0, 1], self.SHARDS
+            _ipc_key(4, worker_id=3),
+            [b"c0"],
+            [0, 1],
+            self.SHARDS,
+            group_layout_descs=_layouts(2),
         )
         assert [k.kv_rank for k in per_group[0]] == [_kv_rank(4, 0)]
         assert [k.kv_rank for k in per_group[1]] == [_kv_rank(4, 3)]
@@ -297,14 +316,20 @@ class TestDcpShardedReplicatedGroups:
     SHARDS = ShardReplicationDesc(group_tp_replicas=(4, 1), group_dcp_shards=(2, 1))
 
     def test_lookup_expands_a_run_to_one_key_per_shard(self):
-        per_group = ipc_key_to_object_keys(_ipc_key(4), [b"c0"], [0, 1], self.SHARDS)
+        per_group = ipc_key_to_object_keys(
+            _ipc_key(4), [b"c0"], [0, 1], self.SHARDS, group_layout_descs=_layouts(2)
+        )
         assert [k.kv_rank for k in per_group[0]] == [_kv_rank(4, 0), _kv_rank(4, 1)]
         assert [k.kv_rank for k in per_group[1]] == [_kv_rank(4, r) for r in range(4)]
 
     @pytest.mark.parametrize("worker_id,shard_rank", [(0, 0), (1, 1), (2, 0), (3, 1)])
     def test_worker_key_resolves_to_its_shard(self, worker_id: int, shard_rank: int):
         per_group = ipc_key_to_object_keys(
-            _ipc_key(4, worker_id=worker_id), [b"c0"], [0, 1], self.SHARDS
+            _ipc_key(4, worker_id=worker_id),
+            [b"c0"],
+            [0, 1],
+            self.SHARDS,
+            group_layout_descs=_layouts(2),
         )
         assert [k.kv_rank for k in per_group[0]] == [_kv_rank(4, shard_rank)]
         assert [k.kv_rank for k in per_group[1]] == [_kv_rank(4, worker_id)]
