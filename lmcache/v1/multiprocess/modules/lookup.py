@@ -3,7 +3,7 @@
 
 # Standard
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any
 import threading
@@ -109,13 +109,18 @@ def _parse_positive_int_hint(configs: Mapping[str, Any] | None, key: str) -> int
 
     Returns 0 if invalid or absent.
     """
-    if not configs:
+    if not isinstance(configs, Mapping):
         return 0
     val = configs.get(key)
     if val is None:
         return 0
-    if isinstance(val, bool):
-        logger.warning("Ignoring boolean value for %s hint: %r", key, val)
+    if isinstance(val, (bool, float)):
+        logger.warning(
+            "Ignoring non-integer type %s for %s hint: %r",
+            type(val).__name__,
+            key,
+            val,
+        )
         return 0
     try:
         parsed = int(val)
@@ -123,7 +128,7 @@ def _parse_positive_int_hint(configs: Mapping[str, Any] | None, key: str) -> int
             logger.warning("Ignoring non-positive value for %s hint: %r", key, val)
             return 0
         return parsed
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         logger.warning("Ignoring non-integer value for %s hint: %r", key, val)
         return 0
 
@@ -135,13 +140,18 @@ def _parse_non_negative_int_hint(
 
     Returns default if invalid or absent.
     """
-    if not configs:
+    if not isinstance(configs, Mapping):
         return default
     val = configs.get(key)
     if val is None:
         return default
-    if isinstance(val, bool):
-        logger.warning("Ignoring boolean value for %s hint: %r", key, val)
+    if isinstance(val, (bool, float)):
+        logger.warning(
+            "Ignoring non-integer type %s for %s hint: %r",
+            type(val).__name__,
+            key,
+            val,
+        )
         return default
     try:
         parsed = int(val)
@@ -149,7 +159,7 @@ def _parse_non_negative_int_hint(
             logger.warning("Ignoring negative value for %s hint: %r", key, val)
             return default
         return parsed
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         logger.warning("Ignoring non-integer value for %s hint: %r", key, val)
         return default
 
@@ -189,6 +199,10 @@ class _PrefetchJob:
     # The lookup key, for the unfull-chunk stage that runs once the hit is
     # known; None on early exits, which never probe an unfull chunk.
     unfull_chunk_lookup_key: IPCCacheServerKey | None = None
+    # Synchronizes one-shot prefetch result consumption and lock release.
+    consume_lock: threading.Lock = field(default_factory=threading.Lock)
+    consumed: bool = False
+    consumed_hit_tokens: int | None = None
 
 
 class LookupModule(DiscoverableModule):
@@ -270,6 +284,16 @@ class LookupModule(DiscoverableModule):
             key: Cache key with request_id embedded.
             tp_size: Legacy wire field; ignored (kept for payload arity).
         """
+        if key.request_configs is not None and not isinstance(
+            key.request_configs, Mapping
+        ):
+            logger.warning(
+                "Ignoring non-mapping request_configs of type %s for request %s",
+                type(key.request_configs).__name__,
+                key.request_id,
+            )
+            key = replace(key, request_configs=None)
+
         model_name, world_size = key.model_name, key.world_size
         self._ctx.event_bus.publish(
             Event(
@@ -374,13 +398,16 @@ class LookupModule(DiscoverableModule):
             )
             return
 
+        configs = (
+            key.request_configs if isinstance(key.request_configs, Mapping) else None
+        )
         if not self._load_policy.should_load(
             KVLoadContext(
                 request_id=key.request_id,
                 model_name=model_name,
                 chunk_size=chunk_size,
                 num_lookup_tokens=requested_tokens,
-                request_configs=key.request_configs,
+                request_configs=configs,
             )
         ):
             # Report a miss without prefetching: nothing is fetched from L2
@@ -573,6 +600,11 @@ class LookupModule(DiscoverableModule):
         """
         if key.start >= key.end and not extra_ranges:
             return
+
+        if key.request_configs is not None and not isinstance(
+            key.request_configs, Mapping
+        ):
+            key = replace(key, request_configs=None)
 
         token_hasher = self._ctx.layout_desc_registry.get_token_hasher(
             key.model_name, key.world_size
@@ -812,110 +844,146 @@ class LookupModule(DiscoverableModule):
             None while the prefetch is still running (the job is kept so a
             later call can resolve it).
         """
-        result = self._ctx.storage_manager.query_prefetch_status(job.handle)
-        if result is None:
-            return None
+        with job.consume_lock:
+            if job.consumed:
+                return job.consumed_hit_tokens
 
-        try:
-            if job.row_windows:
-                found_count, _retain = fold_unfold_grouped(
-                    result.hit_cells, job.row_windows
-                )
-                l1_found_count, _l1_retain = fold_unfold_grouped(
-                    result.l1_hit_cells, job.row_windows
-                )
-            else:
-                # Nothing was submitted (early exit), so nothing can be hit.
-                found_count = 0
-                l1_found_count = 0
+            result = self._ctx.storage_manager.query_prefetch_status(job.handle)
+            if result is None:
+                return None
 
-            # The fold covers only the looked-up sub-range: the tier split is
-            # attributed on it, so the covered prefix never counts as an L1 hit.
-            l1_chunks = min(l1_found_count, found_count)
-            l2_chunks = found_count - l1_chunks
-            # The engine resolves the hit in absolute chunks; shift it back.
-            found_count += job.start_chunk
+            try:
+                if job.row_windows:
+                    found_count, _retain = fold_unfold_grouped(
+                        result.hit_cells, job.row_windows
+                    )
+                    l1_found_count, _l1_retain = fold_unfold_grouped(
+                        result.l1_hit_cells, job.row_windows
+                    )
+                else:
+                    # Nothing was submitted (early exit), so nothing can be hit.
+                    found_count = 0
+                    l1_found_count = 0
 
-            # Record the model-wide hit length on the session so a later
-            # free_lookup_locks can reconstruct which keys the prefetch
-            # read-locked (see ``unfold``: full-attention groups lock the whole
-            # hit prefix, sliding-window groups only its in-window suffix).
-            # The unfull chunk's owners join the full chunks', so a retrieve and
-            # free_lookup_locks release it on the L1 that holds its locks.
-            session = self._ctx.session_manager.get_or_create(job.request_id)
-            if job.unfull_chunk_lookup_key is not None:
-                try:
-                    unfull_chunk_boundary, unfull_chunk_probes, unfull_chunk_owners = (
-                        self._lock_unfull_chunk(
+                # The fold covers only the looked-up sub-range: the tier split is
+                # attributed on it, so the covered prefix never counts as an L1 hit.
+                l1_chunks = min(l1_found_count, found_count)
+                l2_chunks = found_count - l1_chunks
+                # The engine resolves the hit in absolute chunks; shift it back.
+                found_count += job.start_chunk
+
+                # Record the model-wide hit length on the session so a later
+                # free_lookup_locks can reconstruct which keys the prefetch
+                # read-locked (see ``unfold``: full-attention groups lock the whole
+                # hit prefix, sliding-window groups only its in-window suffix).
+                # The unfull chunk's owners join the full chunks', so a retrieve and
+                # free_lookup_locks release it on the L1 that holds its locks.
+                session = self._ctx.session_manager.get_or_create(job.request_id)
+                if job.unfull_chunk_lookup_key is not None:
+                    try:
+                        (
+                            unfull_chunk_boundary,
+                            unfull_chunk_probes,
+                            unfull_chunk_owners,
+                        ) = self._lock_unfull_chunk(
                             job.unfull_chunk_lookup_key,
                             found_count,
                             job.attn_desc,
                             session,
                         )
-                    )
-                except Exception:
-                    logger.warning(
-                        "Failed to probe/lock unfull chunk for request %s; "
-                        "ignoring unfull chunk",
-                        job.request_id,
-                        exc_info=True,
-                    )
+                    except Exception:
+                        logger.warning(
+                            "Failed to probe/lock unfull chunk for request %s; "
+                            "ignoring unfull chunk",
+                            job.request_id,
+                            exc_info=True,
+                        )
+                        (
+                            unfull_chunk_boundary,
+                            unfull_chunk_probes,
+                            unfull_chunk_owners,
+                        ) = (
+                            0,
+                            0,
+                            {},
+                        )
+                else:
                     unfull_chunk_boundary, unfull_chunk_probes, unfull_chunk_owners = (
                         0,
                         0,
                         {},
                     )
-            else:
-                unfull_chunk_boundary, unfull_chunk_probes, unfull_chunk_owners = (
-                    0,
-                    0,
-                    {},
+                session.record_prefetch_result(
+                    found_count,
+                    tuple(range(job.attn_desc.num_object_groups)),
+                    {**result.l1_owners, **unfull_chunk_owners},
                 )
-            session.record_prefetch_result(
-                found_count,
-                tuple(range(job.attn_desc.num_object_groups)),
-                {**result.l1_owners, **unfull_chunk_owners},
-            )
 
-            chunk_size = job.chunk_size
-            covered_tokens = job.engine_covered_chunks * chunk_size
-            hit_tokens = (l1_chunks + l2_chunks) * chunk_size
-            # Prefix served by either cache: both ranges start at 0 and overlap in
-            # the sub-chunk gap below the lookup start, so take the longer, not the sum.
-            request_hit_tokens = max(job.engine_hit_tokens, covered_tokens + hit_tokens)
-            self._ctx.event_bus.publish(
-                Event(
-                    event_type=EventType.MP_LOOKUP_PREFETCH_END,
-                    session_id=job.request_id,
-                    metadata={
-                        "found_count": found_count,
-                        "requested_tokens": job.requested_tokens,
-                        # Hit-rate counters cover only the looked-up range; the
-                        # engine-covered prefix gets its own field.
-                        "apc_covered_tokens": covered_tokens,
-                        "hit_tokens": hit_tokens,
-                        "l1_hit_tokens": l1_chunks * chunk_size,
-                        "l2_hit_tokens": l2_chunks * chunk_size,
-                        # Request-level view: the whole prompt as denominator and
-                        # what the engine plus LMCache served as numerator.
-                        "prompt_tokens": job.prompt_tokens,
-                        "engine_hit_tokens": job.engine_hit_tokens,
-                        "request_hit_tokens": request_hit_tokens,
-                        "l1_hit_keys": result.l1_hit_count,
-                        "l2_hit_keys": result.l2_hit_count,
-                        "early_exit_reason": job.early_exit_reason,
-                        "unfull_chunk_boundary": unfull_chunk_boundary,
-                        "unfull_chunk_probes": unfull_chunk_probes,
-                        "model_name": job.model_name,
-                        "cache_salt": job.cache_salt,
-                    },
+                chunk_size = job.chunk_size
+                covered_tokens = job.engine_covered_chunks * chunk_size
+                hit_tokens = (l1_chunks + l2_chunks) * chunk_size
+                # Prefix served by either cache: both ranges start at 0 and
+                # overlap in the sub-chunk gap below the lookup start, so
+                # take the longer, not the sum.
+                request_hit_tokens = max(
+                    job.engine_hit_tokens, covered_tokens + hit_tokens
                 )
-            )
+                self._ctx.event_bus.publish(
+                    Event(
+                        event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                        session_id=job.request_id,
+                        metadata={
+                            "found_count": found_count,
+                            "requested_tokens": job.requested_tokens,
+                            # Hit-rate counters cover only the looked-up range; the
+                            # engine-covered prefix gets its own field.
+                            "apc_covered_tokens": covered_tokens,
+                            "hit_tokens": hit_tokens,
+                            "l1_hit_tokens": l1_chunks * chunk_size,
+                            "l2_hit_tokens": l2_chunks * chunk_size,
+                            # Request-level view: the whole prompt as denominator and
+                            # what the engine plus LMCache served as numerator.
+                            "prompt_tokens": job.prompt_tokens,
+                            "engine_hit_tokens": job.engine_hit_tokens,
+                            "request_hit_tokens": request_hit_tokens,
+                            "l1_hit_keys": result.l1_hit_count,
+                            "l2_hit_keys": result.l2_hit_count,
+                            "early_exit_reason": job.early_exit_reason,
+                            "unfull_chunk_boundary": unfull_chunk_boundary,
+                            "unfull_chunk_probes": unfull_chunk_probes,
+                            "model_name": job.model_name,
+                            "cache_salt": job.cache_salt,
+                        },
+                    )
+                )
 
-            return unfull_chunk_boundary or found_count * job.chunk_size
-        finally:
-            with self._prefetch_job_lock:
-                self._prefetch_jobs.pop(job.request_id, None)
+                job.consumed = True
+                job.consumed_hit_tokens = (
+                    unfull_chunk_boundary or found_count * job.chunk_size
+                )
+                return job.consumed_hit_tokens
+            except Exception:
+                try:
+                    fallback_session = self._ctx.session_manager.get_or_create(
+                        job.request_id
+                    )
+                    if fallback_session.prefetch_hit_chunks < 0:
+                        fallback_session.record_prefetch_result(
+                            0,
+                            tuple(range(job.attn_desc.num_object_groups)),
+                            result.l1_owners,
+                        )
+                except Exception:
+                    logger.exception(
+                        "Failed to record fallback lock state for request %s",
+                        job.request_id,
+                    )
+                job.consumed = True
+                job.consumed_hit_tokens = 0
+                raise
+            finally:
+                with self._prefetch_job_lock:
+                    self._prefetch_jobs.pop(job.request_id, None)
 
     def _lock_unfull_chunk(
         self,
@@ -964,11 +1032,22 @@ class LookupModule(DiscoverableModule):
             [key.end] if hit_tokens < key.end == last_boundary else []
         )
         if grid:
-            candidate_boundaries.extend(
+            max_grid_probes = 32
+            grid_candidates = [
                 boundary
                 for boundary in range(last_boundary // grid * grid, hit_tokens, -grid)
                 if boundary != key.end
-            )
+            ]
+            if len(grid_candidates) > max_grid_probes:
+                logger.warning(
+                    "Limiting unfull chunk grid candidates from %d to %d for "
+                    "request %s",
+                    len(grid_candidates),
+                    max_grid_probes,
+                    key.request_id,
+                )
+                grid_candidates = grid_candidates[:max_grid_probes]
+            candidate_boundaries.extend(grid_candidates)
         # A connector that does not load unfull chunks sends an aligned end
         # and no grid, so it has no candidate.
         if not candidate_boundaries:
@@ -1005,7 +1084,14 @@ class LookupModule(DiscoverableModule):
                 external_request_id=key.request_id,
             )
             result = self._ctx.storage_manager.query_prefetch_status(handle)
-            assert result is not None, "an L1-only prefetch completes on submit"
+            if result is None:
+                logger.warning(
+                    "L1-only prefetch for unfull chunk boundary %d did not complete "
+                    "synchronously for request %s",
+                    boundary,
+                    key.request_id,
+                )
+                continue
             # A partial hit keeps no lock, so a miss here holds nothing.
             hit, _retain = fold_unfold_grouped(
                 result.hit_cells, [row.sliding_window_size for row in key_groups]
