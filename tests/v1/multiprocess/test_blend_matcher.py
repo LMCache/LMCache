@@ -879,6 +879,39 @@ def test_duplicate_content_registers_twice_by_default():
     assert first not in _matched_hashes(matcher, _content_chunk(1))
 
 
+def test_evicting_an_older_duplicate_keeps_the_newer_one():
+    """Evicting the older copy of a text must not hide the newer copy that
+    holds the slot."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    first, second = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
+
+    _register_content(matcher, _content_chunk(1), [101])
+    _register_content(matcher, _content_chunk(1), [202], position_offset=CHUNK_SIZE)
+
+    assert matcher.remove_chunks([first]) == 1
+    matches = matcher.match_sub_sequence(_content_chunk(1))
+    assert [m.hash for m in matches] == [second]
+    assert matches[0].old_st == CHUNK_SIZE
+
+    assert matcher.remove_chunks([second]) == 1
+    assert matcher.match_sub_sequence(_content_chunk(1)) == []
+
+
+def test_evicting_a_shadowed_collision_keeps_the_slot_holder():
+    """Evicting a chunk whose slot a colliding chunk took over must not hide
+    that chunk."""
+    matcher = _SmallTableBlendTokenRangeMatcher(chunk_size=1)
+    older_token, newer_token = 1, 1 + COMPACT_ID_TEST_TABLE_SIZE
+    older, newer = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
+    assert matcher.on_new_token_hashes([older_token], [older]) == 1
+    assert matcher.on_new_token_hashes([newer_token], [newer]) == 1
+    # The two tokens share a slot: the newer chunk shadows the older one.
+    assert matcher.match_sub_sequence([older_token]) == []
+
+    assert matcher.remove_chunks([older]) == 1
+    assert _matched_hashes(matcher, [newer_token]) == {newer}
+
+
 # -- Enabled ------------------------------------------------------------------
 
 
@@ -1183,3 +1216,14 @@ def _ranges(*rs):
 )
 def test_covered_chunks(ranges, expected):
     assert covered_chunks(_ranges(*ranges), 256) == expected
+
+
+def test_repeated_chunk_matches_every_copy() -> None:
+    """A stored chunk repeated later in the query matches at each copy."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    a = _chunk(1)
+    _register(matcher, a, [1301])
+
+    matches = matcher.match_sub_sequence(a + list(range(95000, 95032)) + a)
+
+    assert [m.cur_st for m in matches] == [0, CHUNK_SIZE + 32]

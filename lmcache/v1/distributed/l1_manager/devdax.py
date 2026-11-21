@@ -9,7 +9,7 @@ from lmcache.v1.distributed.api import (
     MemorySegment,
     MemoryTags,
 )
-from lmcache.v1.distributed.config import L1ManagerConfig
+from lmcache.v1.distributed.config import DevDaxL1ManagerConfig, L1ManagerConfig
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l1_manager.base import BaseL1Manager
 from lmcache.v1.distributed.memory_manager import DevDaxL1MemoryManager
@@ -38,9 +38,14 @@ class DevDaxL1Manager(BaseL1Manager):
             config: L1 settings with ``memory_config.devdax_path`` set.
 
         Raises:
-            ValueError: If ``devdax_path`` is not configured.
+            ValueError: If ``devdax_path`` is not configured, or ``shared`` is
+                set.
         """
         memory_config = config.memory_config
+        if isinstance(config, DevDaxL1ManagerConfig) and config.shared is not None:
+            # A private allocator over orchestrator-owned bytes would corrupt
+            # them; the coordination change serves the region.
+            raise ValueError("A shared Device-DAX L1 is not served yet")
         memory_manager = DevDaxL1MemoryManager(memory_config)
         super().__init__(config, memory_manager)
         # Typed reference for the arena calls the base class does not know.
