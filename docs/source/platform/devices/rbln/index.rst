@@ -48,8 +48,9 @@ As on GPUs, start an LMCache server and point vLLM-RBLN at it with
 
 .. code-block:: bash
 
-   lmcache server --port 6555 --l1-size-gb 32 --eviction-policy LRU \
-       --chunk-size N --supported-transfer-mode engine_driven
+   lmcache server --port 6555 --l1-size-gb 8 --eviction-policy LRU \
+       --chunk-size N --supported-transfer-mode engine_driven \
+       --shm-name lmcache-rbln
 
    vllm serve <model> \
        --model-impl vllm \
@@ -63,6 +64,11 @@ As on GPUs, start an LMCache server and point vLLM-RBLN at it with
                "lmcache.mp.port": 6555
            }
        }'
+
+With ``--shm-name``, the worker registers its mapping of the server's pool
+with its NPU (torch-rbln 0.12.1a0 and later), so transfers copy to and from
+the pool directly. The pool must fit the device's host registration budget
+(16 GiB for a pool on ordinary 4 KiB pages).
 
 Three settings are specific to RBLN:
 
@@ -99,10 +105,53 @@ The backend accepts the per-layer KV cache layouts that vLLM-RBLN allocates:
 
 Any other layout raises ``ValueError``.
 
+HND device staging
+------------------
+
+HND restores and stores stage KV on the device and swap heads and tokens
+with a compiled device copy. Stores copy directly into canonical host
+chunks from device staging.
+
+HND needs torch-rbln 0.12.1a0 or later, for its compiled strided copy,
+placement, chiplet count and program capture APIs. The KV must be bf16 with
+a head size that is a multiple of 64; torch-rbln builds no swap program for
+other KV, so warm-up fails before serving. Staging is split across the
+chiplets.
+
+Before serving, the engine prepares transfers once, on its model-driving
+thread, after its KV caches are final:
+
+.. code-block:: python
+
+   from lmcache.v1.platform.devices.rbln import warm_up_kv_transfer
+
+   warm_up_kv_transfer(kv_caches)  # the dict passed to register_kv_caches
+
+This allocates device staging for every cache layout, one set per
+direction, and builds HND's compiled swap programs on it, so an asynchronous
+store never allocates staging or compiles on a commit worker while the model
+runs. A vLLM-RBLN build that supports this calls it right after its model
+warm-up, before it sizes its KV cache, so the staging is counted. A
+transfer whose geometry was not prepared raises before copying: the store
+is dropped with an error, and the restore reports a miss so the engine
+recomputes.
+
+Stores take turns on the store staging; restores use their own. Total bf16
+HND staging is ``2 * 2 * 2L * NH * BS * HS * 2 bytes`` per prepared geometry
+(448 MiB for Qwen3-1.7B with 1024-token blocks), and MLA staging
+``2 * L * BS * HS * 2 bytes``. torch-rbln also keeps device memory for the
+two HND swap programs. For Qwen3-1.7B, LMCache holds about 0.7 GiB on
+chiplet 0 once vLLM-RBLN has emptied the allocator cache to size its KV
+cache, and that sizing counts it.
+
+Issue restores serially from the model-driving thread.
+
 Capability limits
 -----------------
 
-LMCache-driven MP transfer is not supported. On the worker, setting
+``torch.rbln`` provides ``Stream`` / ``Event`` types for in-process ordering,
+but LMCache has no RBLN tensor IPC wrapper or event IPC backend.
+LMCache-driven MP transfer is therefore not supported. On the worker, setting
 ``LMCACHE_MP_TRANSFER_MODE=lmcache_driven`` fails at validation, and ``auto``
 (the default) resolves to ``engine_driven``. The server does not check the
 device: started with ``--supported-transfer-mode lmcache_driven`` (its
