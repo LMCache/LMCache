@@ -29,6 +29,7 @@ from lmcache.v1.multiprocess.object_group_transfer.planning import (
     resolve_chunk_range,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.ops_types import StagingCopy
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -36,6 +37,90 @@ _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
     device_ops, "execute_object_group_transfer"
 )
 _HAS_TRANSFER_PHASE_TIMING: bool = hasattr(device_ops, "pop_completed_phase_timings")
+
+_MIN_STAGING_PREFIX_BYTES = 1 << 20
+
+
+def _build_prefix_staging_copies(
+    cache_context: BaseCacheContext,
+    memory_objs: Sequence[MemoryObj],
+    gpu_buffers: Sequence[torch.Tensor],
+    object_group_id: int,
+    skip_tokens_in_batch: int,
+    skip_blocks_by_group: dict[int, tuple[int, int]],
+) -> list[StagingCopy]:
+    """Build H2D staging for the rows consumed by the native scatter plan.
+
+    Fully covered objects need no staging. Partial objects use row tails only
+    when every remaining kernel group avoids at least 1 MiB and half its bytes
+    per row; otherwise retain the object's single contiguous copy. The existing
+    kernel skip calculation still determines which paged blocks are written.
+
+    Args:
+        cache_context: Context defining the object's 2LTD kernel-group regions.
+        memory_objs: Allocated lazy objects in batch-slot order.
+        gpu_buffers: Corresponding whole-object GPU staging buffers.
+        object_group_id: Group whose regions occupy each memory object.
+        skip_tokens_in_batch: Leading logical tokens not read by scatter,
+            relative to this batch; may span multiple objects.
+        skip_blocks_by_group: Window block count and batch-relative skip used
+            by each corresponding kernel launch.
+
+    Returns:
+        Copy descriptors with original host offsets and GPU staging positions.
+
+    Raises:
+        ValueError: An object is unallocated or does not match its GPU buffer.
+    """
+    full_copies = build_staging_copies(memory_objs, gpu_buffers, True)
+    if skip_tokens_in_batch == 0:
+        return full_copies
+    chunk = cache_context.lmcache_tokens_per_chunk
+    group_ids = cache_context.kv_layer_groups_manager.object_groups[
+        object_group_id
+    ].kernel_group_indices
+    copies: list[StagingCopy] = []
+    for slot, (memory_obj, gpu_buffer) in enumerate(
+        zip(memory_objs, gpu_buffers, strict=True)
+    ):
+        skip_tokens = max(0, skip_tokens_in_batch - slot * chunk)
+        if skip_tokens == 0:
+            copies.append(full_copies[slot])
+            continue
+        if skip_tokens >= chunk:
+            continue
+        object_copies: list[StagingCopy] = []
+        for kernel_group_id in group_ids:
+            shape = cache_context.get_shape_desc(kernel_group_id)
+            slots = cache_context.get_slots_per_chunk_in_sw(kernel_group_id)
+            blocks_per_window, batch_skip_blocks = skip_blocks_by_group[kernel_group_id]
+            skip_blocks = max(
+                0, min(blocks_per_window, batch_skip_blocks - slot * blocks_per_window)
+            )
+            token_bytes = shape.nh * shape.hs * shape.element_size
+            row_bytes = slots * token_bytes
+            skip_bytes = skip_blocks * shape.bs * token_bytes
+            if skip_bytes == row_bytes:
+                continue
+            if skip_bytes < _MIN_STAGING_PREFIX_BYTES or skip_bytes * 2 < row_bytes:
+                copies.append(full_copies[slot])
+                break
+            group_offset = cache_context.get_kernel_group_offset_in_object(
+                object_group_id, kernel_group_id
+            )
+            for row in range(shape.kv_size * shape.nl):
+                offset = group_offset + row * row_bytes + skip_bytes
+                object_copies.append(
+                    device_ops.StagingCopy(
+                        gpu_buffer.data_ptr() + offset,
+                        memory_obj.data_ptr + offset,
+                        row_bytes - skip_bytes,
+                        memory_obj.meta.address + offset,
+                    )
+                )
+        else:
+            copies.extend(object_copies)
+    return copies
 
 
 def native_plan_available() -> bool:
@@ -177,13 +262,8 @@ def run_object_group_transfer_plan(
 
         skip_tokens_in_chunk = effective_start - batch_start_token
 
-        staging = build_staging_copies(
-            memory_object_batch,
-            object_group_buffers[:batch_len],
-            is_h2d,
-        )
-
         launches: list[Any] = []
+        skip_blocks_by_group: dict[int, tuple[int, int]] = {}
         for kernel_group_id in kernel_group_ids:
             blocks_per_chunk = blocks_per_chunk_by_kg[kernel_group_id]
             blocks_per_window = blocks_per_window_by_kg[kernel_group_id]
@@ -200,6 +280,10 @@ def run_object_group_transfer_plan(
                 orig_skip_blocks,
             )
 
+            skip_blocks_by_group[kernel_group_id] = (
+                blocks_per_window,
+                recalculated_skip_blocks,
+            )
             launches.append(
                 device_ops.LaunchVar(
                     spec_index_by_kg[kernel_group_id],
@@ -210,6 +294,19 @@ def run_object_group_transfer_plan(
                 )
             )
 
+        if is_h2d:
+            staging = _build_prefix_staging_copies(
+                cache_context,
+                memory_object_batch,
+                object_group_buffers[:batch_len],
+                object_group_id,
+                skip_tokens_in_chunk,
+                skip_blocks_by_group,
+            )
+        else:
+            staging = build_staging_copies(
+                memory_object_batch, object_group_buffers[:batch_len], False
+            )
         batch_steps.append(device_ops.BatchStep(staging, launches))
 
     if not batch_steps:
