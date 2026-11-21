@@ -173,3 +173,54 @@ def test_prompt_store_namespaces():
     assert store.resolve("", 0, "") is None
     assert store.candidates(ns, [b"a"], []) == ([], 0)
     assert store._ns == {"salt": {("m", 1): [2, (salted, "r5")]}}  # nothing left
+
+
+def test_repeated_headers_choose_the_longest_matching_document() -> None:
+    """Shared boilerplate must not hide the document that extends the cache hit."""
+    header = list(range(100, 100 + br.LMIN))
+    docs = [header + _doc(seed, n=496) for seed in range(120, 136)]
+    incoming = SYS + sum(docs[::-1], []) + Q
+    cached = SYS + sum(docs, []) + [8] * br.LMIN
+    served = _serve(incoming, [cached], keep_prefix=len(SYS))
+    assert served[: -len(Q)] == cached[: -len(Q)]
+    assert served[-len(Q) :] == Q
+
+
+def test_matching_runs_cross_multiple_comparison_slices() -> None:
+    """A long exact run must survive the planner's bounded comparisons."""
+    for length in [1023, 1024, 1025, 3071, 3072, 3073, 8192]:
+        first, second = _doc(140, n=length), _doc(141, n=length + 17)
+        incoming = SYS + second + first + Q
+        cached = SYS + first + second + [8] * br.LMIN
+        served = _serve(incoming, [cached], keep_prefix=len(SYS))
+        assert served[: -len(Q)] == cached[: -len(Q)]
+        assert served[-len(Q) :] == Q
+
+
+def test_repeated_pieces_never_reuse_an_input_token() -> None:
+    """Overlapping matches must still produce a permutation of the input."""
+    piece = _doc(150, n=1200)
+    other = _doc(151, n=1200)
+    incoming = SYS + piece + other + piece + Q
+    cached = SYS + piece + piece + other + [8] * br.LMIN
+    served = _serve(incoming, [cached], keep_prefix=len(SYS))
+    assert served == cached[: -len(Q)] + Q
+
+
+def test_equal_length_matches_keep_the_leftmost_input_piece() -> None:
+    """Equal matches use the leftmost unused run before appending the remainder."""
+    shared = _doc(160, n=1200)
+    left, right, lead = _doc(161), _doc(162), _doc(163)
+    incoming = SYS + lead + shared + left + shared + right + Q
+    cached = SYS + shared + [8] * br.LMIN
+    served = _serve(incoming, [cached], keep_prefix=len(SYS))
+    expected = SYS + shared + lead + left + shared + right + Q
+    assert served == expected
+
+
+def test_mismatch_in_a_later_slice_keeps_the_longer_run() -> None:
+    """A later partial match must not beat the full run already at the front."""
+    shared = _doc(170, n=1050)
+    incoming = SYS + shared + _doc(171) + shared[:700] + _doc(172) + Q
+    cached = SYS + shared + [8] * br.LMIN
+    assert _serve(incoming, [cached], keep_prefix=len(SYS)) == incoming
