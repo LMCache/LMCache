@@ -156,3 +156,16 @@ reduction in benchmark duration (23.47 s → 13.79 s) from LMCache offloading.
    throughput don't improve even when content repeats. LMCache keeps the
    evicted blocks on CPU RAM and restores them on demand -- that's where
    the speedup comes from.
+
+
+Long-document QA latency
+------------------------
+
+With ``--json-output``, the long-document benchmark reports
+``warmup_mean_request_latency`` and ``query_mean_request_latency`` in seconds.
+Both average ``request_end - request_start`` across successful requests in
+their respective rounds and honor ``--trim-fraction``. The endpoint includes
+stream completion, including trailing finish and usage frames.
+
+If a warmup or query stream ends after returning content without a finish
+reason, the benchmark writes both round CSVs and exits with a non-zero status.

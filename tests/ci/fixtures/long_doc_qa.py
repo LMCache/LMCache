@@ -32,6 +32,7 @@ def main() -> None:
     args = parser.parse_args()
 
     phase = "baseline" if args.port == 9000 else "lmcache"
+    fails = phase == os.environ.get("STUB_FAILED_PHASE")
     prompt_id_offset = 100 if phase == "baseline" else 200
     query_ttft = 1.0 if phase == "baseline" else float(os.environ["STUB_QUERY_TTFT"])
     query_round_time = (
@@ -69,7 +70,7 @@ def main() -> None:
                         start,
                         ttft,
                         start + round_time,
-                        True,
+                        not (fails and round_name == "query" and index == 0),
                         start + ttft,
                         round_name == "warmup",
                     )
@@ -78,6 +79,9 @@ def main() -> None:
     with args.output.open("a", encoding="utf-8") as f:
         f.write(f"{phase} responses\n")
     print(f"{phase} stderr", file=sys.stderr)
+    if fails:
+        print("request ended before its terminal frame", file=sys.stderr)
+        sys.exit(17)
     print(f"{phase} benchmark completed")
     print(
         json.dumps(
