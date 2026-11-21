@@ -749,3 +749,105 @@ def _assert_moved(
                 )
             untouched = [b for b in range(_NUM_BLOCKS) if b not in block_map]
             assert not decode[group][layer][:, untouched].any()
+
+
+@pytest.mark.parametrize("bad_grid", ["x", [], None, -1, True, {}])
+def test_non_integer_unfull_chunk_grid_does_not_hang_or_leak(lookup_module, bad_grid):
+    """When a lookup request carries an invalid unfull_chunk_grid hint,
+    the lookup should safely ignore the hint (fallback to 0), resolve full-chunk
+    hits without error, clean up the prefetch job, and allow locks to be freed."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    lookup_tokens = len(tokens)
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+
+    key = IPCCacheServerKey(
+        model_name=MODEL,
+        world_size=1,
+        worker_id=None,
+        token_bytes=pack_token_ids(tokens),
+        start=0,
+        end=lookup_tokens,
+        request_id="bad-grid-test",
+        request_configs={"lmcache.hint.unfull_chunk_grid": bad_grid},
+    )
+    module.lookup(key, tp_size=1)
+    # Prefetch status resolves to full chunks (32 tokens) without ValueError
+    hits = module.query_prefetch_status("bad-grid-test")
+    assert hits == 2 * CHUNK_SIZE
+
+    # The job must be removed from active prefetch jobs immediately
+    assert "bad-grid-test" not in module._prefetch_jobs
+
+    # Subsequent queries must return 0 (already consumed), never None (hang)
+    assert module.query_prefetch_status("bad-grid-test") == 0
+
+    # Read locks are recorded on the session and can be freed without error
+    session = module._ctx.session_manager.get_or_create("bad-grid-test")
+    assert session.prefetch_hit_chunks == 2
+    module.free_lookup_locks(key, tp_size=1)
+
+
+@pytest.mark.parametrize("bad_engine_tokens", ["x", [], None, -5, True, {}])
+def test_non_integer_engine_computed_tokens_does_not_crash(
+    lookup_module, bad_engine_tokens
+):
+    """When a lookup request carries an invalid engine_computed_tokens hint,
+    the lookup should safely default to 0 and resolve without crashing or leaking."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    lookup_tokens = len(tokens)
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+
+    key = IPCCacheServerKey(
+        model_name=MODEL,
+        world_size=1,
+        worker_id=None,
+        token_bytes=pack_token_ids(tokens),
+        start=0,
+        end=lookup_tokens,
+        request_id="bad-engine-test",
+        request_configs={"lmcache.hint.engine_computed_tokens": bad_engine_tokens},
+    )
+    module.lookup(key, tp_size=1)
+    hits = module.query_prefetch_status("bad-engine-test")
+    assert hits == 2 * CHUNK_SIZE
+    assert "bad-engine-test" not in module._prefetch_jobs
+    module.free_lookup_locks(key, tp_size=1)
+
+
+def test_unfull_chunk_lock_exception_does_not_leak_or_hang(lookup_module, monkeypatch):
+    """If _lock_unfull_chunk raises an unexpected exception, the lookup
+    should log a warning, preserve full-chunk hits, pop the prefetch job,
+    and record session locks so they can be freed."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    lookup_tokens = len(tokens)
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("simulated unfull chunk lock failure")
+
+    monkeypatch.setattr(module, "_lock_unfull_chunk", _raise)
+
+    key = IPCCacheServerKey(
+        model_name=MODEL,
+        world_size=1,
+        worker_id=None,
+        token_bytes=pack_token_ids(tokens),
+        start=0,
+        end=lookup_tokens,
+        request_id="exc-test",
+        request_configs={"lmcache.hint.unfull_chunk_grid": 16},
+    )
+    module.lookup(key, tp_size=1)
+    hits = module.query_prefetch_status("exc-test")
+    # Returns the full-chunk hit count
+    assert hits == 2 * CHUNK_SIZE
+    # Job was popped
+    assert "exc-test" not in module._prefetch_jobs
+    # Session recorded the 2 hit chunks
+    session = module._ctx.session_manager.get_or_create("exc-test")
+    assert session.prefetch_hit_chunks == 2
+    # free_lookup_locks frees the locks cleanly
+    module.free_lookup_locks(key, tp_size=1)

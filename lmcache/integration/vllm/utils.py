@@ -130,7 +130,8 @@ def extract_request_configs_from_sampling_params(
 
     Only ``lmcache.*`` entries from ``extra_args["kv_transfer_params"]`` are
     forwarded. Other transfer params are transport-only metadata and must not
-    participate in LMCache key derivation.
+    participate in LMCache key derivation. Connector-owned hints (``lmcache.hint.*``)
+    are ignored so client requests cannot forge them.
     """
     extra_args = getattr(sampling_params, "extra_args", None)
     if not isinstance(extra_args, Mapping):
@@ -142,7 +143,9 @@ def extract_request_configs_from_sampling_params(
     request_configs = {
         key: value
         for key, value in kv_transfer_params.items()
-        if isinstance(key, str) and key.startswith("lmcache.")
+        if isinstance(key, str)
+        and key.startswith("lmcache.")
+        and not key.startswith("lmcache.hint.")
     }
     return request_configs or None
 
