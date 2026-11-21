@@ -143,13 +143,25 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
         "--num-blocks",
         type=int,
         default=1024,
-        help="Paged blocks (default: 1024)",
+        help=(
+            "Fallback block count per group, including any reserved null block "
+            "(default: 1024)"
+        ),
     )
     kv.add_argument(
         "--block-size",
         type=int,
         default=16,
         help="Tokens per block (default: 16)",
+    )
+    kv.add_argument(
+        "--null-block-id",
+        type=int,
+        default=0,
+        help=(
+            "Match the server's --null-block-id (default: 0). "
+            "An ID in [0, NB) reserves one block per group."
+        ),
     )
 
     parser.add_argument(

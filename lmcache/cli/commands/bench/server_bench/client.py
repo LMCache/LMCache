@@ -250,15 +250,16 @@ class ServerBenchClient:
                 ready.set()
             for future in warmup:
                 future.result(timeout=self._config.transfer_timeout_s)
+            self._allocator = BlockAllocator(
+                self._num_engine_group_infos,
+                self._num_blocks,
+                null_block_id=self._config.null_block_id,
+                allocation_order=self._config.block_allocation,
+            )
         except BaseException:
             self.close()
             raise
 
-        self._allocator = BlockAllocator(
-            self._num_engine_group_infos,
-            self._num_blocks,
-            allocation_order=self._config.block_allocation,
-        )
         self._started = True
 
     def create_request(
