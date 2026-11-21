@@ -67,6 +67,8 @@ class FileDynamicNixlStorageAgent(DynamicNixlStorageAgent):
         # Subdirs already created (shard_dirs only), to skip redundant makedirs
         # on the store hot path. Bounded by the fanout (<= 256*256 entries).
         self._created_subdirs: set[str] = set()
+        # Times a store found its directory gone and recreated it.
+        self.dir_recreated_count = 0
 
     async def dynamic_store(self, mem_indices: list[int], key: ObjectKey) -> None:
         """Write-to-temp-then-rename to publish the final file atomically.
@@ -88,7 +90,7 @@ class FileDynamicNixlStorageAgent(DynamicNixlStorageAgent):
             if subdir not in self._created_subdirs:
                 os.makedirs(subdir, exist_ok=True)
                 self._created_subdirs.add(subdir)
-        fd = os.open(tmp_path, self._open_flags(create=True))
+        fd = self._open_for_store(tmp_path)
         try:
             reg_descs, xfer_handler = self._register_single_file(
                 fd, file_size, page_size
@@ -110,6 +112,27 @@ class FileDynamicNixlStorageAgent(DynamicNixlStorageAgent):
         # Atomic publish: readers only ever see a complete file at file_path.
         # TODO(Jiayi): Only guaranteed to be atomic within the local posix filesystems.
         os.rename(tmp_path, file_path)
+
+    def _open_for_store(self, tmp_path: str) -> int:
+        """Open the temp file, recreating its directory once if it vanished.
+
+        The shard-subdir cache (and the base directory created at init) goes
+        stale when the L2 directory is removed externally; without this every
+        later store into that directory would fail with ENOENT. Only
+        ``FileNotFoundError`` is retried, and only once.
+        """
+        flags = self._open_flags(create=True)
+        try:
+            return os.open(tmp_path, flags)
+        except FileNotFoundError:
+            subdir = os.path.dirname(tmp_path)
+            self._created_subdirs.discard(subdir)
+            os.makedirs(subdir, exist_ok=True)
+            if self.shard_dirs:
+                self._created_subdirs.add(subdir)
+            self.dir_recreated_count += 1
+            logger.warning("L2 store directory was missing, recreated: %s", subdir)
+            return os.open(tmp_path, flags)
 
     async def dynamic_load(self, mem_indices: list[int], key: ObjectKey) -> None:
         """Open an existing file, DMA read into L1 memory, then clean up."""
