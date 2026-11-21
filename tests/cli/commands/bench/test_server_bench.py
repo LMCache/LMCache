@@ -138,6 +138,13 @@ class TestCaseDelegation:
         parser: argparse.ArgumentParser,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """A failing case emits its metrics and closes its client before exiting.
+
+        Args:
+            cmd: Owning benchmark command.
+            parser: Parser with the server benchmark registered.
+            monkeypatch: Replaces clients, cases, and metrics for orchestration.
+        """
         # Standard
         from unittest.mock import ANY, MagicMock, call
 
@@ -186,7 +193,9 @@ class TestCaseDelegation:
             ]
         )
 
-        sv_cmd.run_server_bench(cmd, args)
+        with pytest.raises(SystemExit) as exc:
+            sv_cmd.run_server_bench(cmd, args)
+        assert exc.value.code == 1
 
         case_factory.assert_called_once_with(
             sequence_count=2,
