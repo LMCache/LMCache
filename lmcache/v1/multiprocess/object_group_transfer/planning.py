@@ -9,7 +9,7 @@ from typing import Generator, Sequence
 import torch
 
 # First Party
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
 
 
 def batched_iteration_with_skip(

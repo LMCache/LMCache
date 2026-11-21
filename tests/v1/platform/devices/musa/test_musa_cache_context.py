@@ -11,7 +11,7 @@ import contextlib
 import pytest
 
 # First Party
-from lmcache.v1.platform.devices.musa.cache_context import MUSACacheContext
+from lmcache.v1.multiprocess.cache_context.musa import MUSACacheContext
 
 
 def test_close_synchronizes_before_releasing_ipc_owners() -> None:
@@ -48,7 +48,7 @@ def test_close_synchronizes_before_releasing_ipc_owners() -> None:
 def test_close_deregisters_gds_staging_buffer(monkeypatch: Any) -> None:
     """Close deregisters the staging buffer from GDS before IPC release."""
     # First Party
-    import lmcache.v1.platform.devices.musa.cache_context as musa_ctx_mod
+    import lmcache.v1.multiprocess.cache_context.musa as musa_ctx_mod
 
     calls: list[str] = []
 
@@ -93,7 +93,7 @@ def test_close_releases_ipc_wrappers_when_gds_deregister_fails(
 ) -> None:
     """Cleanup still releases IPC owners when GDS deregistration fails."""
     # First Party
-    import lmcache.v1.platform.devices.musa.cache_context as musa_ctx_mod
+    import lmcache.v1.multiprocess.cache_context.musa as musa_ctx_mod
 
     calls: list[str] = []
 

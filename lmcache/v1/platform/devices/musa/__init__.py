@@ -15,7 +15,7 @@ from lmcache.v1.platform.transfer_mode import MPTransferMode
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.platform.base.cache_context import BaseCacheContext
+    from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
     from lmcache.v1.platform.base.device_ops import DeviceOps
     from lmcache.v1.platform.base.event_ipc import EventIPCBackend
     from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
@@ -93,7 +93,7 @@ class MusaDeviceSpec(DeviceSpec):
     def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
         """Create the MUSA cache context for LMCache-driven transfer."""
         # First Party
-        from lmcache.v1.platform.devices.musa.cache_context import MUSACacheContext
+        from lmcache.v1.multiprocess.cache_context.musa import MUSACacheContext
 
         return MUSACacheContext(*args, **kwargs)
 

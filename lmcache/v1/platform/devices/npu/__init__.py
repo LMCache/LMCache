@@ -25,7 +25,7 @@ from lmcache.v1.platform.devices.npu.pin_memory import NpuPinMemoryBackend
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.platform.base.cache_context import BaseCacheContext
+    from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
     from lmcache.v1.platform.base.device_ops import DeviceOps
     from lmcache.v1.platform.base.event_ipc import EventIPCBackend
     from lmcache.v1.platform.devices.npu.ipc_wrapper import NpuIPCWrapper
@@ -86,7 +86,7 @@ class NpuDeviceSpec(DeviceSpec):
     def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
         """Create the NPU cache context for LMCache-driven transfer."""
         # First Party
-        from lmcache.v1.platform.devices.npu.cache_context import NpuCacheContext
+        from lmcache.v1.multiprocess.cache_context.npu import NpuCacheContext
 
         return NpuCacheContext(*args, **kwargs)
 

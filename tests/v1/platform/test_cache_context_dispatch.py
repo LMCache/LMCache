@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests for the device-type-driven dispatch in
-``lmcache.v1.platform.cache_context.create_cache_context``.
+``lmcache.v1.multiprocess.cache_context.factory.create_cache_context``.
 
 The facade routes by the ``torch.device.type`` reported by the
 wrappers' ``to_tensor()`` output and delegates to the matching
@@ -21,9 +21,9 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
+from lmcache.v1.multiprocess.cache_context.factory import create_cache_context
 from lmcache.v1.platform import get_device_spec
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
-from lmcache.v1.platform.cache_context import create_cache_context
 
 
 class _FakeWrapper:

@@ -42,6 +42,7 @@ from lmcache.v1.mp_observability.gc_monitor import (
 )
 from lmcache.v1.mp_observability.otel_init import shutdown_grpc_otel_metrics
 from lmcache.v1.mp_observability.trace import maybe_initialize_trace_recorder
+from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
 from lmcache.v1.multiprocess.config import (
     DEFAULT_COORDINATOR_CONFIG,
     CoordinatorConfig,
@@ -70,7 +71,6 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.ipc_policy import set_isolated_ipc
 
 if TYPE_CHECKING:

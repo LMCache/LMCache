@@ -20,6 +20,7 @@ from lmcache.v1.mp_observability.event_bus import (
     get_event_bus,
     is_observability_enabled,
 )
+from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
 from lmcache.v1.multiprocess.object_group_transfer.engines import (
     TransferEngine,
     stage,
@@ -28,7 +29,6 @@ from lmcache.v1.multiprocess.object_group_transfer.planning import (
     batched_iteration_with_skip,
     resolve_chunk_range,
 )
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)

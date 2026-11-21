@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU-only cache context for platforms without CUDA GPUs.
 
-This module sits next to :mod:`lmcache.v1.platform.devices.cuda.cache_context`
-under :mod:`lmcache.v1.platform` and provides the same public API as
-:class:`~lmcache.v1.platform.devices.cuda.cache_context.GPUCacheContext` but
+This module sits next to :mod:`lmcache.v1.multiprocess.cache_context.cuda`
+under :mod:`lmcache.v1.multiprocess.cache_context` and provides the same public API as
+:class:`~lmcache.v1.multiprocess.cache_context.cuda.GPUCacheContext` but
 keeps all tensors on CPU. Stream / Event objects are provided by
 :class:`~lmcache.v1.platform.devices.cpu.stub_cpu_device.StubStream` so
 CPU-only hosts never import ``cupy`` or instantiate a real CUDA
 stream object.
 
 The platform-agnostic dispatcher ``create_cache_context`` lives in
-:mod:`lmcache.v1.platform.cache_context`.
+:mod:`lmcache.v1.multiprocess.cache_context.factory`.
 """
 
 # Future
@@ -33,7 +33,7 @@ from lmcache.v1.common.utils import (
     normalize_and_discover_per_layer_formats,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
 from lmcache.v1.platform.devices.cpu.stub_cpu_device import StubStream
 
 if TYPE_CHECKING:
@@ -83,7 +83,7 @@ class CPUCacheContext(BaseCacheContext):
             )
 
         # First Party
-        from lmcache.v1.platform.devices.cuda.cache_context import (
+        from lmcache.v1.multiprocess.cache_context.cuda import (
             unwrap_kv_cache_tensors,
         )
 
