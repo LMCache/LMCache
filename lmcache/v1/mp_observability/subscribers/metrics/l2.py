@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""L2 storage metrics subscriber — OTel counters for L2 store/prefetch events."""
+"""OpenTelemetry metrics for L2 store and prefetch events."""
 
 # Future
 from __future__ import annotations
@@ -30,7 +30,7 @@ def _l2_name_attrs(event: Event) -> dict[str, Any]:
 
 
 class L2MetricsSubscriber(EventSubscriber):
-    """Maintains OTel counters for L2 store and prefetch operations.
+    """Records OpenTelemetry metrics for L2 store and prefetch operations.
 
     Metrics:
     - ``lmcache_mp.l2_store_submitted`` — store requests submitted to L2
@@ -40,6 +40,7 @@ class L2MetricsSubscriber(EventSubscriber):
     - ``lmcache_mp.l2_load_completed`` — per-adapter load tasks completed
       (attr: ``l2_name``)
     - ``lmcache_mp.l2_prefetch_lookup`` — prefetch lookup requests
+    - ``lmcache_mp.l2_prefetch_queue_wait`` — seconds waiting for admission
     - ``lmcache_mp.l2_prefetch_lookup_objects`` — chunks submitted for lookup
     - ``lmcache_mp.l2_prefetch_load_submitted`` — load tasks submitted
     - ``lmcache_mp.l2_prefetch_load_submitted_objects`` — chunks submitted for load
@@ -88,6 +89,27 @@ class L2MetricsSubscriber(EventSubscriber):
             "lmcache_mp.l2_prefetch_lookup",
             description="Total L2 prefetch lookup requests submitted",
             unit="requests",
+        )
+        self._prefetch_queue_wait = meter.create_histogram(
+            "lmcache_mp.l2_prefetch_queue_wait",
+            description="Seconds from L2 prefetch enqueue to controller admission",
+            unit="s",
+            explicit_bucket_boundaries_advisory=(
+                0.0001,
+                0.0005,
+                0.001,
+                0.005,
+                0.01,
+                0.025,
+                0.05,
+                0.1,
+                0.25,
+                0.5,
+                1.0,
+                2.5,
+                5.0,
+                10.0,
+            ),
         )
         self._prefetch_lookup_submitted_objects = meter.create_counter(
             "lmcache_mp.l2_prefetch_lookup_objects",
@@ -150,6 +172,9 @@ class L2MetricsSubscriber(EventSubscriber):
 
     def _on_lookup_submitted(self, event: Event) -> None:
         self._prefetch_lookup_submitted.add(1)
+        queue_wait_seconds = event.metadata.get("queue_wait_seconds")
+        if queue_wait_seconds is not None:
+            self._prefetch_queue_wait.record(queue_wait_seconds)
         emit_salt_counts(
             self._prefetch_lookup_submitted_objects,
             event.metadata.get("key_count_per_salt", {}),

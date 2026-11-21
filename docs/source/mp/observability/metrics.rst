@@ -187,6 +187,14 @@ L2 Metrics
    * - ``lmcache_mp.l2_prefetch_lookup``
      - Counter
      - Number of L2 prefetch lookup requests.
+   * - ``lmcache_mp.l2_prefetch_queue_wait``
+     - Histogram (seconds)
+     - Time from entering the prefetch submission queue to admission by the
+       controller. Includes scheduling and L1 admission waits. Records one
+       observation per request that submits an L2 lookup, regardless of the
+       number of adapters. L1-only requests and L2 I/O time are excluded.
+       The Prometheus bucket series is
+       ``lmcache_mp_l2_prefetch_queue_wait_seconds_bucket``.
    * - ``lmcache_mp.l2_prefetch_lookup_objects``
      - Counter (attr: ``cache_salt``)
      - Number of chunks submitted for L2 prefetch lookup, grouped by
