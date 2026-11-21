@@ -3,6 +3,8 @@
 
 # Standard
 from pathlib import Path
+from unittest.mock import Mock
+import argparse
 import json
 import tempfile
 
@@ -13,9 +15,11 @@ import pytest
 from lmcache.tools.cache_simulator.lru_cache import LRUCache, LRUCacheFast
 from lmcache.tools.cache_simulator.simulator import (
     _percentiles,
+    add_simulate_arguments,
     compute_kv_bytes_per_chunk,
     load_lookup_events,
     print_statistics,
+    run_simulate,
     simulate,
 )
 
@@ -178,6 +182,23 @@ def test_simulation_capacity_respects_chunk_footprint(
 
 
 class TestComputeKvBytesPerChunk:
+    @pytest.mark.parametrize(
+        "dtypes,bytes_per_element",
+        [
+            (["uint8"], 1),
+            (["torch.uint8"], 1),
+            (["float16", "uint8"], 3),
+            (["torch.float16", "torch.uint8"], 3),
+        ],
+    )
+    def test_uint8_storage(self, dtypes: list[str], bytes_per_element: int) -> None:
+        """Count byte-backed KV tensors, including mixed-dtype layouts."""
+        event = {
+            "shapes": [[32, 256, 128] for _ in dtypes],
+            "dtypes": dtypes,
+        }
+        assert compute_kv_bytes_per_chunk(event) == 32 * 256 * 128 * bytes_per_element
+
     def test_float16(self):
         event = {"shapes": [[32, 256, 128]], "dtypes": ["float16"]}
         assert compute_kv_bytes_per_chunk(event) == 32 * 256 * 128 * 2
@@ -191,11 +212,63 @@ class TestComputeKvBytesPerChunk:
         expected = 4 * 256 * 64 * 2 + 4 * 256 * 64 * 1
         assert compute_kv_bytes_per_chunk(event) == expected
 
+    def test_torch_qualified_dtype(self):
+        # The server serialises dtypes as str(torch.dtype), so a float8 KV
+        # cache is logged as "torch.float8_e4m3fn"
+        event = {"shapes": [[32, 256, 128]], "dtypes": ["torch.float8_e4m3fn"]}
+        assert compute_kv_bytes_per_chunk(event) == 32 * 256 * 128 * 1
+
+    def test_torch_qualified_and_bare_dtypes_mixed(self):
+        event = {
+            "shapes": [[4, 256, 64], [4, 256, 64]],
+            "dtypes": ["torch.float16", "float8_e4m3fn"],
+        }
+        expected = 4 * 256 * 64 * 2 + 4 * 256 * 64 * 1
+        assert compute_kv_bytes_per_chunk(event) == expected
+
+    def test_unknown_qualified_dtype_still_warns(self):
+        event = {"shapes": [[2, 2]], "dtypes": ["torch.float64"]}
+        with pytest.warns(UserWarning, match="Unknown dtype 'torch.float64'"):
+            assert compute_kv_bytes_per_chunk(event) == 0
+
     def test_empty_shapes_returns_zero(self):
         assert compute_kv_bytes_per_chunk({"shapes": [], "dtypes": []}) == 0
 
     def test_missing_fields_returns_zero(self):
         assert compute_kv_bytes_per_chunk({}) == 0
+
+
+def test_simulate_reads_torch_uint8_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Infer chunk capacity from server-formatted JSONL without a byte override."""
+    event = {
+        "timestamp": 1.0,
+        "model_name": "byte-kv",
+        "chunk_hashes": ["0xaa"],
+        "seq_len": 256,
+        "chunk_size": 256,
+        "shapes": [[32, 256, 128]],
+        "dtypes": ["torch.uint8"],
+    }
+    path = tmp_path / "lookup.jsonl"
+    path.write_text(json.dumps(event) + "\n" + json.dumps(event) + "\n")
+    plot = Mock()
+    monkeypatch.setattr("lmcache.tools.cache_simulator.simulator.plot_statistics", plot)
+    parser = argparse.ArgumentParser()
+    add_simulate_arguments(parser)
+    args = parser.parse_args(["-i", str(path), "--cache-capacity-gib", str(1 / 1024)])
+
+    run_simulate(args)
+
+    assert "Auto-detected kv_bytes_per_chunk = 1,048,576 bytes" in (
+        capsys.readouterr().out
+    )
+    plot.assert_called_once()
+    result = plot.call_args.args[0]
+    assert result["cache_capacity_chunks"] == 1
+    assert result["total_hit_tokens"] == 256
+    assert result["token_hit_rate"] == 0.5
 
 
 # ---------------------------------------------------------------------------
