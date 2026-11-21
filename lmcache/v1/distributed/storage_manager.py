@@ -669,24 +669,22 @@ class StorageManager:
     def watch_prefetch_status(
         self,
         handle: PrefetchHandle,
-        timeout: float,
     ) -> Future[bool]:
-        """Non-blocking wait_prefetch_status: return a future of its result.
+        """Non-blocking wait_prefetch_status: return a future of publication.
 
         Args:
             handle (PrefetchHandle): The handle of the prefetch task.
-            timeout: Seconds after which the future completes with False.
 
         Returns:
-            A future that becomes True once a result is available, or False
-            when the timeout passes first.
+            A future that becomes True once the result is published, or False
+            if the controller stops first.
         """
         if handle.prefetch_request_id == -1:
             done: Future[bool] = Future()
             done.set_result(True)
             return done
         return self._prefetch_controller.watch_prefetch_result(
-            handle.prefetch_request_id, timeout
+            handle.prefetch_request_id
         )
 
     def touch_cached_keys(self, keys: list[ObjectKey]) -> None:

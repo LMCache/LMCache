@@ -16,7 +16,11 @@ import zmq
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.security.api_key import APIKeyVerifier
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
-from lmcache.v1.multiprocess.request_handler import HandlerType, handler_return_type
+from lmcache.v1.multiprocess.request_handler import (
+    Deferred,
+    HandlerType,
+    handler_return_type,
+)
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.platform import create_event_notifier
 from lmcache.v1.transport.errors import InvalidRequestError
@@ -163,22 +167,30 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
 
 class NonBlockingRequestHandler(RequestHandlerBase[ResponseType]):
     """
-    The handler for functions that return a future of the response at once;
-    it runs in the main loop and the reply is sent when the future completes.
+    Starts in the main loop and waits on ``Deferred.ready`` without holding a
+    worker; once ready, ``Deferred.resume`` runs on the assigned normal pool.
     """
 
     def __init__(
         self,
         payload_clss: list[Any],
         response_cls: ResponseType,
-        handler: Callable[..., Future[ResponseType]],
+        handler: Callable[..., Deferred[ResponseType]],
     ):
+        self.executor: ThreadPoolExecutor | None = None
         self.payload_clss = payload_clss
         self.response_cls = response_cls
         self.handler = handler
 
-    def __call__(self, payloads: list[bytes]) -> Future[ResponseType]:
+    def __call__(self, payloads: list[bytes]) -> Deferred[ResponseType]:
         return self.handler(*unwrap_request_payloads(payloads, self.payload_clss))
+
+    def submit_resume(self, deferred: Deferred[ResponseType]) -> Future[ResponseType]:
+        assert self.executor is not None, (
+            "NonBlockingRequestHandler has no executor assigned. "
+            "Call add_normal_thread_pool first."
+        )
+        return self.executor.submit(deferred.resume)
 
     def get_response_class(self) -> ResponseType:
         return self.response_cls
@@ -315,7 +327,7 @@ class MessageQueueServer(RequestServer):
         payloads: list[bytes],
         prefix_frames: list[bytes],
     ) -> None:
-        """Call the handler in the main loop and reply when its future is done.
+        """Start the handler in the main loop; finish it on its worker pool.
 
         Args:
             handler_entry (NonBlockingRequestHandler[Any]): The handler entry.
@@ -323,11 +335,25 @@ class MessageQueueServer(RequestServer):
             prefix_frames (list[bytes]): The prefix frames to send back.
         """
         try:
-            future = handler_entry(payloads)
+            deferred = handler_entry(payloads)
         except Exception as exc:
-            future = Future()
-            future.set_exception(exc)
-        self._reply_when_done(handler_entry, future, prefix_frames)
+            failed: Future[Any] = Future()
+            failed.set_exception(exc)
+            self._reply_when_done(handler_entry, failed, prefix_frames)
+            return
+
+        def _resume(_ready: Future[Any]) -> None:
+            if self.is_finished.is_set():
+                return
+            try:
+                future = handler_entry.submit_resume(deferred)
+            except RuntimeError:
+                if self.is_finished.is_set():
+                    return
+                raise
+            self._reply_when_done(handler_entry, future, prefix_frames)
+
+        deferred.ready.add_done_callback(_resume)
 
     def _reply_when_done(
         self,
@@ -637,12 +663,13 @@ class MessageQueueServer(RequestServer):
             list(rpc_spec.payload_types), rpc_spec.response_type, handler
         )
 
-    def _validate_blocking_handlers(
+    def _validate_pool_handlers(
         self,
         operations: list[RpcOperation],
         method_name: str,
+        allowed_types: tuple[type[RequestHandlerBase[Any]], ...],
     ) -> None:
-        """Validate that all operations are registered blocking handlers."""
+        """Validate that all operations are registered with an allowed handler."""
         for operation in operations:
             handler = self.handlers.get(operation)
             if handler is None:
@@ -650,11 +677,12 @@ class MessageQueueServer(RequestServer):
                     f"No handler registered for operation: {operation}. "
                     f"Register handlers before calling {method_name}."
                 )
-            if not isinstance(handler, BlockingRequestHandler):
+            if not isinstance(handler, allowed_types):
+                allowed = " or ".join(t.__name__ for t in allowed_types)
                 raise TypeError(
                     f"Handler for {operation} is "
-                    f"{type(handler).__name__}, not BlockingRequestHandler. "
-                    f"Only blocking handlers can use thread pools."
+                    f"{type(handler).__name__}, not {allowed}. "
+                    f"Only {allowed} can use {method_name}."
                 )
 
     def add_normal_thread_pool(
@@ -664,18 +692,24 @@ class MessageQueueServer(RequestServer):
     ) -> None:
         """Assign a ThreadPoolExecutor to specific request types.
 
-        Use this for non-GPU blocking handlers (e.g. LOOKUP, END_SESSION).
+        Use this for non-GPU blocking and non-blocking handlers (e.g. LOOKUP,
+        WAIT_PREFETCH_STATUS, END_SESSION).
 
         Must be called after the handlers are registered (via add_handler /
         add_blocking_handler) and before start(). Each operation must
-        already be registered as a BlockingRequestHandler; otherwise a
-        ValueError or TypeError is raised.
+        already be registered as a BlockingRequestHandler or
+        NonBlockingRequestHandler; otherwise a ValueError or TypeError is
+        raised.
 
         Args:
             operations: The RPC operations that should use this pool.
             max_workers: Number of worker threads in the pool.
         """
-        self._validate_blocking_handlers(operations, "add_normal_thread_pool")
+        self._validate_pool_handlers(
+            operations,
+            "add_normal_thread_pool",
+            (BlockingRequestHandler, NonBlockingRequestHandler),
+        )
         if not operations:
             return
 
@@ -686,7 +720,9 @@ class MessageQueueServer(RequestServer):
         self.extra_pools.append(pool)
         for operation in operations:
             handler = self.handlers[operation]
-            assert isinstance(handler, BlockingRequestHandler)
+            assert isinstance(
+                handler, (BlockingRequestHandler, NonBlockingRequestHandler)
+            )
             handler.executor = pool
 
         logger.debug(
@@ -714,7 +750,11 @@ class MessageQueueServer(RequestServer):
             operations: The RPC operations that should use this pool.
             max_workers: Number of worker threads in the pool.
         """
-        self._validate_blocking_handlers(operations, "add_affinity_thread_pool")
+        self._validate_pool_handlers(
+            operations,
+            "add_affinity_thread_pool",
+            (BlockingRequestHandler,),
+        )
         if not operations:
             return
 
@@ -735,11 +775,14 @@ class MessageQueueServer(RequestServer):
         )
 
     def start(self) -> None:
-        # Validate all blocking handlers have an executor assigned
+        # Validate all pooled handlers have an executor assigned
         for rt, handler in self.handlers.items():
-            if isinstance(handler, BlockingRequestHandler) and handler.executor is None:
+            if (
+                isinstance(handler, (BlockingRequestHandler, NonBlockingRequestHandler))
+                and handler.executor is None
+            ):
                 raise RuntimeError(
-                    f"BlockingRequestHandler for {rt} has no thread pool "
+                    f"{type(handler).__name__} for {rt} has no thread pool "
                     f"assigned. Call add_normal_thread_pool or "
                     f"add_affinity_thread_pool before start()."
                 )

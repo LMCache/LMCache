@@ -5,15 +5,29 @@
 from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Callable, TypeVar, cast, get_type_hints
+from typing import Any, Callable, Generic, TypeVar, cast, get_type_hints
 import inspect
 
 # First Party
 from lmcache.v1.transport.rpc import RpcOperation, RpcSpec, get_rpc_spec
 
 F = TypeVar("F", bound=Callable[..., Any])
+ResponseType = TypeVar("ResponseType", covariant=True)
 
 _HANDLER_OPTIONS_ATTR = "__lmcache_request_handler_options__"
+
+
+@dataclass(frozen=True)
+class Deferred(Generic[ResponseType]):
+    """Wait on ``ready`` without a worker, then call ``resume`` on one."""
+
+    ready: Future[Any]
+    resume: Callable[[], ResponseType]
+
+    def result(self, timeout: float | None = None) -> ResponseType:
+        """Wait for ``ready`` and run ``resume``."""
+        self.ready.result(timeout=timeout)
+        return self.resume()
 
 
 class HandlerType(Enum):
@@ -21,8 +35,8 @@ class HandlerType(Enum):
 
     SERIALIZED = auto()
     BLOCKING = auto()
-    # Returns a concurrent.futures.Future of the response without blocking;
-    # the transport answers when it completes, holding no worker meanwhile.
+    # Returns a Deferred without blocking; the transport waits on ``ready``
+    # with no normal worker held, then runs ``resume`` on one.
     NON_BLOCKING = auto()
 
 
@@ -82,7 +96,7 @@ def _normalize_none_type(value: Any) -> Any:
 def handler_return_type(spec: RpcSpec, handler_type: HandlerType) -> Any:
     """Return the annotation a handler of ``handler_type`` must declare."""
     if handler_type is HandlerType.NON_BLOCKING:
-        return cast(Any, Future)[spec.handler_response_type]
+        return cast(Any, Deferred)[spec.handler_response_type]
     return spec.handler_response_type
 
 

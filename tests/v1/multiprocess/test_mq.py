@@ -34,7 +34,11 @@ from lmcache.v1.common.custom_types import (
 )
 from lmcache.v1.distributed.api import get_request_tags
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.request_handler import (
+    Deferred,
+    HandlerType,
+    request_handler,
+)
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     BlockingRequestHandler,
     MessageQueueServer,
@@ -882,15 +886,25 @@ def test_blocking_handler_value_error_returns_remote_error() -> None:
 
 
 def test_non_blocking_handler_answers_without_a_normal_worker() -> None:
-    """A NON_BLOCKING request is answered when its future completes, and
-    while it is pending the only normal worker still serves other requests."""
+    """A NON_BLOCKING request holds no normal worker while waiting, and runs
+    its continuation on a normal worker whether ready later or at once."""
     pending: list[Future[bool]] = []
+    resume_threads: list[str] = []
 
     class Module:
         @request_handler(HandlerType.NON_BLOCKING)
-        def ping(self, instance_id: int | None) -> Future[bool]:
-            pending.append(Future())
-            return pending[-1]
+        def ping(self, instance_id: int | None) -> Deferred[bool]:
+            ready: Future[bool] = Future()
+            if instance_id == 0:
+                ready.set_result(True)
+            else:
+                pending.append(ready)
+
+            def resume() -> bool:
+                resume_threads.append(threading.current_thread().name)
+                return ready.result()
+
+            return Deferred(ready, resume)
 
         @request_handler(HandlerType.BLOCKING)
         def get_chunk_size(self) -> int:
@@ -912,6 +926,11 @@ def test_non_blocking_handler_answers_without_a_normal_worker() -> None:
         assert len(pending) == 1 and not answer.query()
         pending[0].set_result(True)
         assert answer.result(timeout=5) is True
+
+        immediate = cast(MessagingFuture[bool], client.submit_request("ping", [0]))
+        assert immediate.result(timeout=5) is True
+        assert len(resume_threads) == 2
+        assert all(name.startswith("normal-pool-") for name in resume_threads)
     finally:
         client.close()
         server.close()
@@ -922,7 +941,7 @@ def test_non_blocking_handler_error_returns_remote_error() -> None:
 
     class Module:
         @request_handler(HandlerType.NON_BLOCKING)
-        def ping(self, instance_id: int | None) -> Future[bool]:
+        def ping(self, instance_id: int | None) -> Deferred[bool]:
             raise ValueError("bad instance")
 
     port = _unused_tcp_port()

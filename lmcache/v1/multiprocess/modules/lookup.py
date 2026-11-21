@@ -5,6 +5,8 @@
 from concurrent.futures import Future
 from dataclasses import dataclass, replace
 from functools import partial
+import heapq
+import itertools
 import threading
 import time
 
@@ -40,7 +42,11 @@ from lmcache.v1.multiprocess.kv_load_policy import (
     KVLoadPolicy,
     create_kv_load_policy,
 )
-from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.request_handler import (
+    Deferred,
+    HandlerType,
+    request_handler,
+)
 from lmcache.v1.multiprocess.session import Session
 
 logger = init_logger(__name__)
@@ -170,6 +176,73 @@ class _PrefetchJob:
     unfull_chunk_lookup_key: IPCCacheServerKey | None = None
 
 
+class _WaitDeadlines:
+    """Cancels futures at their deadlines from one shared daemon thread, so a
+    pending WAIT_PREFETCH_STATUS costs a heap entry rather than a thread."""
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        # (deadline, seq, future); a future completed before its deadline
+        # stays until then, and cancelling it is a no-op.
+        self._heap: list[tuple[float, int, Future[bool]]] = []
+        self._seq = itertools.count()
+        self._closed = False
+        self._thread: threading.Thread | None = None
+
+    def add(self, timeout: float, future: Future[bool]) -> None:
+        """Cancel ``future`` once ``timeout`` seconds have passed.
+
+        Args:
+            timeout: Seconds from now.
+            future: The future to cancel; cancelled at once after close().
+        """
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            if not self._closed:
+                if self._thread is None:
+                    # Started on first use, so a module that never serves a
+                    # WAIT starts no thread.
+                    self._thread = threading.Thread(
+                        target=self._run, name="lookup-wait-deadlines", daemon=True
+                    )
+                    self._thread.start()
+                heapq.heappush(self._heap, (deadline, next(self._seq), future))
+                if self._heap[0][2] is future:
+                    self._cond.notify()
+                return
+        future.cancel()
+
+    def close(self) -> None:
+        """Stop the thread; pending futures are left to their producers."""
+        with self._cond:
+            self._closed = True
+            self._cond.notify()
+            thread = self._thread
+        if thread is not None:
+            thread.join()
+
+    def _run(self) -> None:
+        while True:
+            with self._cond:
+                while not self._closed:
+                    if not self._heap:
+                        self._cond.wait()
+                        continue
+                    delay = self._heap[0][0] - time.monotonic()
+                    if delay <= 0:
+                        break
+                    self._cond.wait(delay)
+                if self._closed:
+                    return
+                now = time.monotonic()
+                expired = []
+                while self._heap and self._heap[0][0] <= now:
+                    expired.append(heapq.heappop(self._heap)[2])
+            # Outside the lock: cancel() runs the waiters' done-callbacks.
+            for future in expired:
+                future.cancel()
+
+
 class LookupModule(DiscoverableModule):
     """Handles lookup, prefetch polling, lock release, and session lifecycle.
 
@@ -207,6 +280,7 @@ class LookupModule(DiscoverableModule):
         self._load_policy = load_policy
         self._prefetch_jobs: dict[str, _PrefetchJob] = {}
         self._prefetch_job_lock = threading.Lock()
+        self._wait_deadlines = _WaitDeadlines()
         self._setup_metrics()
 
     @property
@@ -225,8 +299,8 @@ class LookupModule(DiscoverableModule):
         }
 
     def close(self) -> None:
-        """Release resources owned by this module (no-op)."""
-        pass
+        """Stop the WAIT_PREFETCH_STATUS deadline thread."""
+        self._wait_deadlines.close()
 
     # -----------------------------------------------------------------
     # Handlers
@@ -489,24 +563,23 @@ class LookupModule(DiscoverableModule):
         self,
         request_id: str,
         timeout: float,
-    ) -> Future[int | None]:
+    ) -> Deferred[int | None]:
         """Answer like query_prefetch_status once the prefetch job completes.
 
         The reply waits for the daemon to publish the result instead of
-        returning None while the prefetch is still in progress. The job
-        entry is removed once a non-None result is returned (exactly-once
-        semantics).
+        returning None while the prefetch is still in progress, then consumes
+        the result on a server worker. The job entry is removed once a
+        non-None result is returned (exactly-once semantics).
 
         Args:
             request_id: The external request ID passed in the lookup key.
             timeout: Seconds to wait for the prefetch before answering None.
 
         Returns:
-            A future of the hit tokens (int) when done, None if the wait
+            A deferred hit token count (int) when done, None if the wait
             timed out, 0 if the request_id is unknown (already completed and
             consumed, or invalid).
         """
-        reply: Future[int | None] = Future()
         with self._prefetch_job_lock:
             job = self._prefetch_jobs.get(request_id)
         if job is None:
@@ -514,25 +587,32 @@ class LookupModule(DiscoverableModule):
                 "Prefetch job for request %s not found (already completed or invalid)",
                 request_id,
             )
-            reply.set_result(0)
-            return reply
+            missing: Future[bool] = Future()
+            missing.set_result(False)
+            return Deferred(missing, lambda: 0)
 
-        def answer(done: Future[bool]) -> None:
-            # A cancelled reply has no client; leave the result to a later query.
-            if not reply.set_running_or_notify_cancel():
-                return
-            try:
-                reply.set_result(
-                    self.query_prefetch_status(request_id) if done.result() else None
-                )
-            except Exception as exc:
-                logger.exception("Failed to answer WAIT_PREFETCH_STATUS")
-                reply.set_exception(exc)
+        watched = self._ctx.storage_manager.watch_prefetch_status(job.handle)
+        ready: Future[bool] = Future()
 
-        self._ctx.storage_manager.watch_prefetch_status(
-            job.handle, timeout
-        ).add_done_callback(answer)
-        return reply
+        def on_watched(done: Future[bool]) -> None:
+            if ready.set_running_or_notify_cancel():
+                ready.set_result(not done.cancelled() and done.result())
+
+        def on_ready(done: Future[bool]) -> None:
+            # The client went away; stop watching.
+            if done.cancelled():
+                watched.cancel()
+
+        if not watched.done():
+            # Cancelling the watch at the deadline answers None.
+            self._wait_deadlines.add(timeout, watched)
+            ready.add_done_callback(on_ready)
+        watched.add_done_callback(on_watched)
+
+        return Deferred(
+            ready,
+            lambda: self.query_prefetch_status(request_id) if ready.result() else None,
+        )
 
     @request_handler(HandlerType.BLOCKING)
     def free_lookup_locks(

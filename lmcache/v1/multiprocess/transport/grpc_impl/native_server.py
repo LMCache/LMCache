@@ -23,7 +23,7 @@ from lmcache.v1.mp_observability.otel_init import (
     grpc_metrics_enabled,
     register_metrics_source,
 )
-from lmcache.v1.multiprocess.request_handler import HandlerType
+from lmcache.v1.multiprocess.request_handler import Deferred, HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.auth import AUTHENTICATION_ERROR
 from lmcache.v1.multiprocess.transport.grpc_impl.native_metrics import (
     native_metrics_source,
@@ -381,8 +381,14 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
             handler = cast(Callable[..., Any], registered.handler)
             result = handler(*registered.request_decoder(request))
             if registered.handler_type is HandlerType.NON_BLOCKING:
-                result.add_done_callback(
-                    functools.partial(self._respond_when_done, registered, call_id)
+                deferred = cast(Deferred[Any], result)
+                deferred.ready.add_done_callback(
+                    functools.partial(
+                        self._schedule_non_blocking_resume,
+                        registered,
+                        call_id,
+                        deferred,
+                    )
                 )
                 return
             if method.server_streaming:
@@ -410,12 +416,34 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
             return
         front.respond(call_id, response)
 
-    def _respond_when_done(
-        self, registered: GrpcRequestHandler, call_id: int, future: Future[Any]
+    def _schedule_non_blocking_resume(
+        self,
+        registered: GrpcRequestHandler,
+        call_id: int,
+        deferred: Deferred[Any],
+        _ready: Future[Any],
     ) -> None:
-        """Answer a NON_BLOCKING call once its handler's future completes."""
+        if self._closed.is_set():
+            return
         try:
-            response = registered.response_encoder(future.result()).SerializeToString()
+            self._normal_pool.submit(
+                self._resume_non_blocking, registered, call_id, deferred
+            )
+        except RuntimeError:
+            if not self._closed.is_set():
+                raise
+
+    def _resume_non_blocking(
+        self,
+        registered: GrpcRequestHandler,
+        call_id: int,
+        deferred: Deferred[Any],
+    ) -> None:
+        """Finish a NON_BLOCKING call on a normal worker and send its reply."""
+        try:
+            response = registered.response_encoder(
+                deferred.resume()
+            ).SerializeToString()
         except Exception as exc:
             self._fail_application(registered, call_id, exc)
             return

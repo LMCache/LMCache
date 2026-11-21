@@ -61,6 +61,7 @@ from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.plugin_modules.qstore import QStoreModule
 from lmcache.v1.multiprocess.request_handler import (
+    Deferred,
     HandlerType,
     iter_request_handlers,
     request_handler,
@@ -836,16 +837,25 @@ def test_call_fails_like_a_timeout_when_the_server_goes_away(
 def test_non_blocking_handler_answers_without_a_normal_worker(
     grpc_server_mode: str,
 ) -> None:
-    """A NON_BLOCKING call is answered when its future completes, and while it
-    is pending the only normal worker still serves other calls."""
+    """A NON_BLOCKING call holds no normal worker while waiting, and runs its
+    continuation on a worker whether ready later or at once."""
     pending: queue.Queue[Future[bool]] = queue.Queue()
+    resume_threads: list[str] = []
 
     class Module:
         @request_handler(HandlerType.NON_BLOCKING)
-        def ping(self, instance_id: int | None) -> Future[bool]:
+        def ping(self, instance_id: int | None) -> Deferred[bool]:
             reply: Future[bool] = Future()
-            pending.put(reply)
-            return reply
+            if instance_id == 0:
+                reply.set_result(True)
+            else:
+                pending.put(reply)
+
+            def resume() -> bool:
+                resume_threads.append(threading.current_thread().name)
+                return reply.result()
+
+            return Deferred(reply, resume)
 
         @request_handler(HandlerType.BLOCKING)
         def get_chunk_size(self) -> int:
@@ -863,6 +873,7 @@ def test_non_blocking_handler_answers_without_a_normal_worker(
     client = GrpcMultiprocessClient(  # type: ignore[abstract]
         f"grpc://127.0.0.1:{server.bound_port}"
     )
+    caller_thread = threading.current_thread().name
     try:
         ping = client.ping(1)
         reply = pending.get(timeout=5)
@@ -870,6 +881,11 @@ def test_non_blocking_handler_answers_without_a_normal_worker(
         assert not ping.query()
         reply.set_result(True)
         assert ping.result(5) is True
+        assert client.ping(0).result(5) is True
+        assert len(resume_threads) == 2
+        assert all(
+            name not in {caller_thread, "grpc-aio-loop"} for name in resume_threads
+        )
     finally:
         client.close()
         server.close()

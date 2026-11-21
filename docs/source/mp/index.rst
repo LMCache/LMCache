@@ -346,9 +346,9 @@ methods:
   ``query_prefetch_status()``: waits on a controller condition variable
   until the prefetch result is published (or a timeout expires).
   L1-only prefetches return immediately.
-- ``watch_prefetch_status()`` -- Non-blocking ``wait_prefetch_status()``:
-  returns a future of the same result. Used by the ``WAIT_PREFETCH_STATUS``
-  RPC, which answers when that future completes.
+- ``watch_prefetch_status()`` -- Non-blocking notification of publication:
+  returns a future that completes when the prefetch result is published. Used
+  by the ``WAIT_PREFETCH_STATUS`` RPC.
 - ``read_prefetched_results()`` / ``finish_read_prefetched()`` -- Read
   prefetched data from L1 with automatic lock management.
 
