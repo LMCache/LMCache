@@ -58,6 +58,7 @@ class EngineDrivenContextEntry:
         metadata: Layout metadata describing the non-CUDA chunk format.
         model_name: The name of the model associated with this context.
         world_size: The world size associated with this context.
+        chunk_size: Effective logical tokens per LMCache chunk.
         last_seen: ``time.monotonic()`` of the most recent activity from this
             instance (register, PING, prepare/commit). Drives reaping.
         has_liveness_signal: True once the instance has sent at least one
@@ -67,6 +68,7 @@ class EngineDrivenContextEntry:
     metadata: EngineDrivenContextMetadata
     model_name: str
     world_size: int
+    chunk_size: int
     last_seen: float = 0.0
     has_liveness_signal: bool = False
 
@@ -330,19 +332,45 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         Args:
             payload: Struct containing all registration fields
                 (instance_id, model_name, world_size, block_size,
-                num_layers, hidden_dim_size, dtype_str, use_mla,
+                num_layers, hidden_dim_size, dtype_str, use_mla, chunk_size,
                 num_physical_slots).
 
         Raises:
-            ValueError: If ``payload.dtype_str`` is not a valid torch dtype name.
+            ValueError: If the payload has an invalid dtype, chunk geometry,
+                or metadata that conflicts with an existing registration.
         """
         shm_name = self._shm_pool_info["shm_name"]
         pool_size = self._shm_pool_info["pool_size"]
+        self._ctx.validate_chunk_size(payload.chunk_size)
+        if payload.block_size <= 0:
+            raise ValueError(f"block_size must be positive, got {payload.block_size}")
+        if payload.chunk_size % payload.block_size:
+            raise ValueError(
+                f"chunk_size {payload.chunk_size} must be a multiple of "
+                f"block_size {payload.block_size}"
+            )
+
+        num_physical_slots = payload.num_physical_slots
+        if num_physical_slots <= 0:
+            raise ValueError(
+                f"num_physical_slots must be positive, got {num_physical_slots}"
+            )
 
         now = time.monotonic()
         with self._lock:
             existing = self._engine_driven_contexts.get(payload.instance_id)
             if existing is not None:
+                if (
+                    existing.model_name != payload.model_name
+                    or existing.world_size != payload.world_size
+                    or existing.chunk_size != payload.chunk_size
+                ):
+                    raise ValueError(
+                        f"Instance {payload.instance_id} is already registered "
+                        f"with model={existing.model_name!r}, "
+                        f"world_size={existing.world_size}, "
+                        f"chunk_size={existing.chunk_size}"
+                    )
                 existing.last_seen = now
                 logger.info(
                     "Instance %d already registered (non-GPU); refreshing liveness",
@@ -360,16 +388,6 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 f"Invalid dtype_str '{payload.dtype_str}': must be a valid torch dtype "
                 "attribute name (e.g. 'float16' for torch.float16, "
                 "'bfloat16' for torch.bfloat16, 'float32' for torch.float32)."
-            )
-
-        num_physical_slots = payload.num_physical_slots
-        if num_physical_slots is None:
-            # Compatibility with clients from before the physical-slot field
-            # was added. Those clients require one slot per logical token.
-            num_physical_slots = self._ctx.chunk_size
-        elif num_physical_slots <= 0:
-            raise ValueError(
-                f"num_physical_slots must be positive, got {num_physical_slots}"
             )
 
         shape = (
@@ -393,8 +411,6 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         "engine-driven registration"
                     )
                 g_slots = gl.num_physical_slots
-                if g_slots is None:
-                    g_slots = gl.window_tokens or self._ctx.chunk_size
                 if g_slots <= 0:
                     raise ValueError(
                         f"Group num_physical_slots must be positive, got {g_slots}"
@@ -435,6 +451,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             metadata=metadata,
             model_name=payload.model_name,
             world_size=payload.world_size,
+            chunk_size=payload.chunk_size,
             last_seen=now,
             has_liveness_signal=False,
         )
@@ -448,17 +465,6 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             pending_lock=self._pending_shm_lock,
             transfer_key_factory=self._make_transfer_key,
         )
-        with self._lock:
-            self._engine_driven_contexts[payload.instance_id] = entry
-            self._strategies[payload.instance_id] = strategy
-
-        logger.info(
-            "Registered non-GPU context for instance %d (model=%s, world_size=%d)",
-            payload.instance_id,
-            payload.model_name,
-            payload.world_size,
-        )
-
         if group_layouts:
             # The lookup/prefetch path fans its object-group lookups out over
             # the registered AttnWindowDesc's group count. A hybrid-KV worker
@@ -484,7 +490,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 payload.model_name,
                 payload.world_size,
                 layout_desc,
-                self._ctx.chunk_size,
+                payload.chunk_size,
                 self._ctx.hash_algorithm_name,
                 attn_desc=attn_desc,
                 group_layout_descs=dict(enumerate(group_layouts)),
@@ -494,9 +500,19 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 payload.model_name,
                 payload.world_size,
                 layout_desc,
-                self._ctx.chunk_size,
+                payload.chunk_size,
                 self._ctx.hash_algorithm_name,
             )
+        with self._lock:
+            self._engine_driven_contexts[payload.instance_id] = entry
+            self._strategies[payload.instance_id] = strategy
+
+        logger.info(
+            "Registered non-GPU context for instance %d (model=%s, world_size=%d)",
+            payload.instance_id,
+            payload.model_name,
+            payload.world_size,
+        )
         return RegisterEngineDrivenContextResponse(
             shm_name=shm_name,
             pool_size=pool_size,
@@ -632,7 +648,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             self._finish_transfer(key, instance_id, EventType.MP_STORE_START, result)
         if st is not None and result:
             num_tokens = (
-                len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
+                len(self._resolve_single_group_obj_keys(key)) * entry.chunk_size
             )
             logger.info(
                 "Stored %d tokens in %.3f seconds",
@@ -717,7 +733,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         Returns:
             Always ``True``.
         """
-        _, strategy = self._resolve_for_transfer(instance_id)
+        entry, strategy = self._resolve_for_transfer(instance_id)
         session = self._ctx.session_manager.get_or_create(key.request_id)
         st = session.extras.pop("retrieve_start_time", None)
         result = False
@@ -727,7 +743,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             self._finish_transfer(key, instance_id, EventType.MP_RETRIEVE_START, result)
         if st is not None:
             num_tokens = (
-                len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
+                len(self._resolve_single_group_obj_keys(key)) * entry.chunk_size
             )
             logger.info(
                 "Retrieved %d tokens in %.3f seconds",
@@ -774,7 +790,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             counts = (
                 [len(keys) for keys in group_keys]
                 if group_keys is not None
-                else [(key.end - key.start) // self._ctx.chunk_size]
+                else [(key.end - key.start) // entry.chunk_size]
             )
             if skipped_chunks:
                 counts = [

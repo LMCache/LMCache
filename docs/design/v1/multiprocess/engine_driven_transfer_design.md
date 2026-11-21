@@ -260,9 +260,8 @@ single compressed group. Retrieve converts a logical prefix skip to blocks
 using `tokens_per_block`, not the tensor's slot count.
 
 This applies to both SHM and inline, including asynchronous stores. No
-model-specific copy kernel is needed. Workers and servers must both support
-the physical-slot field for compressed transfers; omitted fields retain the
-uncompressed layout for older workers.
+model-specific copy kernel is needed. Workers must report the physical-slot
+count for every registered layout.
 
 Store:
 1. Worker `prepare_store` RPC.

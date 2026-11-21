@@ -985,6 +985,7 @@ class ServerBenchClient:
                     layout_hints=layout_hints,
                     engine_group_infos=buffers.engine_group_infos,
                     engine_type=EngineType.VLLM,
+                    lmcache_chunk_tokens=self._chunk_size,
                 )
             except TimeoutError:
                 raise RuntimeError(
