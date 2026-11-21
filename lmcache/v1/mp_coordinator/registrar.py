@@ -43,20 +43,43 @@ def bind_coordinator_chunk_size(
     chunk_size: int,
     timeout: float = _DEFAULT_CHUNK_SIZE_BIND_TIMEOUT,
     api_key_files: Sequence[str] = (),
-) -> int:
-    """Synchronously bind coordinator hashing to an MP server's final size."""
+) -> int | None:
+    """Synchronously bind coordinator hashing to an MP server's final size.
+
+    Args:
+        base_url: Coordinator base URL.
+        chunk_size: The MP server's finalized chunk size.
+        timeout: Request timeout in seconds.
+        api_key_files: API key files for the coordinator request.
+
+    Returns:
+        The coordinator's bound chunk size, or ``None`` if it was unreachable.
+
+    Raises:
+        httpx.HTTPStatusError: If the coordinator answers with an error, e.g.
+            409 when it is already bound to a different chunk size.
+    """
     # First Party
     from lmcache.v1.transport.auth import (
         request_client_auth_headers,
     )
 
     body = ChunkSizeBindRequest(chunk_size=chunk_size)
-    response = httpx.put(
-        f"{base_url.rstrip('/')}/config/chunk-size",
-        json=body.model_dump(mode="json"),
-        headers=request_client_auth_headers(api_key_files),
-        timeout=timeout,
-    )
+    try:
+        response = httpx.put(
+            f"{base_url.rstrip('/')}/config/chunk-size",
+            json=body.model_dump(mode="json"),
+            headers=request_client_auth_headers(api_key_files),
+            timeout=timeout,
+        )
+    except httpx.TransportError as e:
+        logger.warning(
+            "Coordinator unreachable while binding chunk size %d (%s); "
+            "the registration loop sends it once the coordinator is back",
+            chunk_size,
+            e,
+        )
+        return None
     response.raise_for_status()
     return ChunkSizeBindResponse.model_validate(response.json()).chunk_size
 
@@ -131,6 +154,10 @@ async def keep_registered(
     an explicit ``404`` (the coordinator forgot us) or after a failed initial
     registration.
 
+    The finalized chunk size goes with every registration; one finalized
+    after registering is bound on the next tick. A ``409`` on either request
+    deregisters and stops the loop.
+
     Args:
         client: The HTTP client to send with.
         coordinator_url: Coordinator base URL.
@@ -154,8 +181,13 @@ async def keep_registered(
     base_url = coordinator_url.rstrip("/")
     ip = advertise_ip or get_ip()
     assigned_id: str | None = None
+    # Chunk size the coordinator accepted from this loop; None until then.
+    bound_chunk_size: int | None = None
     try:
         while True:
+            chunk_size = (
+                chunk_size_provider() if chunk_size_provider is not None else None
+            )
             try:
                 if assigned_id is None:
                     assigned_id = await register(
@@ -166,12 +198,9 @@ async def keep_registered(
                         instance_id=instance_id,
                         p2p_advertised_url=p2p_advertised_url,
                         mq_port=mq_port,
-                        chunk_size=(
-                            chunk_size_provider()
-                            if chunk_size_provider is not None
-                            else None
-                        ),
+                        chunk_size=chunk_size,
                     )
+                    bound_chunk_size = chunk_size
                     logger.info("Registered with coordinator as %s", assigned_id)
                     on_registered()
                 else:
@@ -187,7 +216,28 @@ async def keep_registered(
                         assigned_id = None
                     else:
                         response.raise_for_status()
+                        if bound_chunk_size is None and chunk_size is not None:
+                            response = await client.put(
+                                f"{base_url}/config/chunk-size",
+                                json=ChunkSizeBindRequest(
+                                    chunk_size=chunk_size
+                                ).model_dump(mode="json"),
+                            )
+                            response.raise_for_status()
+                            bound_chunk_size = chunk_size
             except (httpx.HTTPError, ValueError, ValidationError) as e:
+                if (
+                    isinstance(e, httpx.HTTPStatusError)
+                    and e.response.status_code == 409
+                ):
+                    logger.error(
+                        "Coordinator rejected chunk size %s (%s); leaving it. "
+                        "MP servers with different chunk sizes need separate "
+                        "coordinators",
+                        chunk_size,
+                        e.response.text,
+                    )
+                    return
                 # Transient: keep the current id so the next tick retries and
                 # shutdown can still deregister. ValueError/ValidationError cover
                 # bad JSON or schema skew; CancelledError still propagates.
