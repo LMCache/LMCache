@@ -36,6 +36,24 @@ Commandline arguments:
     --sleep-time-after-warmup: Sleep time after warm up iteration.
                               (Optional, default: 0.0 seconds)
 
+    --lmcache-url: Base URL of the LMCache MP HTTP server, e.g.
+                  http://localhost:8080. When set, the benchmark reads its
+                  /metrics to wait for the warm-up round's L2 stores to finish
+                  before the query round, and reports the LMCache lookup hit
+                  rate of the query round. Without it, a large working set can
+                  make the query round start before the stores land and report
+                  almost no speed-up; use --sleep-time-after-warmup instead.
+
+    --store-drain-timeout: Seconds to wait for the warm-up round's L2 stores
+                          when --lmcache-url is set. (Optional, default: 300)
+
+    --store-drain-settle: Seconds the store counters must stay unchanged before
+                         the wait ends. (Optional, default: 3)
+
+    --warn-speedup-below: Print a warning if the query round's mean TTFT is
+                         less than this many times lower than the warm-up
+                         round's. (Optional, default: 1.2)
+
     --output: Filename to write all responses to. If omitted, writes to stdout.
 
     --expected-ttft-gain: Expected minimum speed-up in time-to-first-token
@@ -66,14 +84,29 @@ Commandline arguments:
 from dataclasses import dataclass
 import argparse
 import asyncio
+import functools
 import os
 import random
 import sys
 import time
 
 # Third Party
+from lmcache_store_drain import (
+    fetch_metrics,
+    hit_rate_between,
+    low_speedup_warning,
+    missing_wait_warning,
+    read_lookup_snapshot,
+    read_store_snapshot,
+    wait_for_store_drain,
+)
 from openai import AsyncOpenAI
 import pandas as pd
+
+# How often the store-drain wait reads /metrics, and how long it waits for a first
+# new L2 store before concluding the warm-up round stored nothing.
+STORE_DRAIN_POLL_SECONDS = 0.5
+NO_NEW_STORES_GRACE_SECONDS = 30.0
 
 # Global output filename (set in __main__)
 OUTPUT_FILE = None
@@ -521,6 +554,15 @@ async def main(args):
     prompts = repeat_prompts(warmup_prompts, args.repeat_count, mode=args.repeat_mode)
     prompts, miss_mask = add_cache_misses(prompts, args.hit_miss_ratio)
 
+    # Read after the pre-warm-up prompts, so the drain wait covers only the stores
+    # that the warm-up round itself submits.
+    lmcache_fetch = None
+    store_baseline = 0.0
+    if args.lmcache_url:
+        lmcache_fetch = functools.partial(fetch_metrics, args.lmcache_url)
+        baseline = await asyncio.to_thread(read_store_snapshot, lmcache_fetch)
+        store_baseline = baseline.submitted
+
     write_resp("------warm up round------\n")
     warmup_start_time = time.time()
     warmup_request_stats = await test_long_document_qa(
@@ -538,6 +580,37 @@ async def main(args):
         write_resp(f"Sleeping for {sleep_time_after_warmup} seconds after warmup...\n")
         time.sleep(sleep_time_after_warmup)
 
+    drain_result = None
+    lookup_before = None
+    if lmcache_fetch is not None:
+        write_resp("Waiting for the warm-up round's L2 stores to finish...\n")
+        drain_result = await asyncio.to_thread(
+            wait_for_store_drain,
+            lmcache_fetch,
+            store_baseline,
+            timeout=args.store_drain_timeout,
+            poll_interval=STORE_DRAIN_POLL_SECONDS,
+            settle_seconds=args.store_drain_settle,
+            no_new_stores_grace=NO_NEW_STORES_GRACE_SECONDS,
+        )
+        write_resp(
+            f"{drain_result.reason} (waited {drain_result.waited_seconds:.1f}s)\n"
+        )
+        if not drain_result.drained:
+            print(
+                "WARNING: the warm-up round's L2 stores did not finish "
+                f"({drain_result.reason}). The query round may miss the cache and "
+                "the results may be invalid.",
+                file=sys.stderr,
+            )
+        lookup_before = await asyncio.to_thread(read_lookup_snapshot, lmcache_fetch)
+    else:
+        no_wait_warning = missing_wait_warning(
+            sleep_time_after_warmup, args.lmcache_url
+        )
+        if no_wait_warning is not None:
+            print(no_wait_warning, file=sys.stderr)
+
     benchmark_start_time = time.time()
     benchmark_request_stats = await test_long_document_qa(
         client=client,
@@ -547,6 +620,11 @@ async def main(args):
         max_inflight_requests=args.max_inflight_requests,
     )
     benchmark_end_time = time.time()
+
+    query_hit_rate = None
+    if lmcache_fetch is not None and lookup_before is not None:
+        lookup_after = await asyncio.to_thread(read_lookup_snapshot, lmcache_fetch)
+        query_hit_rate = hit_rate_between(lookup_before, lookup_after)
 
     warmup_df = pd.DataFrame([stats.__dict__ for stats in warmup_request_stats])
     relative_time(warmup_df, warmup_start_time)
@@ -581,6 +659,13 @@ async def main(args):
     )
     print(f"{CSI}35mQuery round prompt count: {len(benchmark_df)}{RESET}")
     print(f"{CSI}34mQuery round successful prompt count: {query_success_count}{RESET}")
+    if query_hit_rate is not None:
+        print(f"Query round LMCache lookup hit rate: {query_hit_rate:.1%}")
+    speedup_warning = low_speedup_warning(
+        warmup_mean_ttft, query_mean_ttft, args.warn_speedup_below
+    )
+    if speedup_warning is not None:
+        print(speedup_warning, file=sys.stderr)
 
     if visualize:
         visualize_results(warmup_df, benchmark_df)
@@ -598,6 +683,11 @@ async def main(args):
             "query_round_time_per_prompt": query_round_time_per_prompt,
             "warmup_round_time_per_prompt": warmup_round_time_per_prompt,
         }
+        if query_hit_rate is not None:
+            summary["query_lmcache_hit_rate"] = query_hit_rate
+        if drain_result is not None:
+            summary["store_drain_complete"] = drain_result.drained
+            summary["store_drain_wait_seconds"] = drain_result.waited_seconds
         print(json.dumps(summary))
 
 
@@ -697,6 +787,37 @@ def create_argument_parser():
     )
 
     parser.add_argument(
+        "--lmcache-url",
+        type=str,
+        default=None,
+        help="Base URL of the LMCache MP HTTP server (for example "
+        "http://localhost:8080). When set, wait for the warm-up round's L2 stores "
+        "to finish before the query round and report the LMCache lookup hit rate.",
+    )
+
+    parser.add_argument(
+        "--store-drain-timeout",
+        type=float,
+        default=300.0,
+        help="Seconds to wait for the warm-up round's L2 stores (needs --lmcache-url)",
+    )
+
+    parser.add_argument(
+        "--store-drain-settle",
+        type=float,
+        default=3.0,
+        help="Seconds the L2 store counters must stay unchanged before the wait ends",
+    )
+
+    parser.add_argument(
+        "--warn-speedup-below",
+        type=float,
+        default=1.2,
+        help="Warn if the query round's mean TTFT is less than this many times "
+        "lower than the warm-up round's",
+    )
+
+    parser.add_argument(
         "--output",
         type=str,
         default=None,
@@ -748,7 +869,7 @@ def create_argument_parser():
         default=0.0,
         help=(
             "Exclude the smallest and largest fraction of successful samples "
-            "before averaging. Example: 0.1 drops bottom 10% and top 10%."
+            "before averaging. Example: 0.1 drops bottom 10%% and top 10%%."
         ),
     )
 
