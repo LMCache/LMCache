@@ -414,13 +414,14 @@ def get_event_bus() -> EventBus:
 
 
 def init_event_bus(config: EventBusConfig | None = None) -> EventBus:
-    """Replace the global singleton with a new EventBus built from *config*.
+    """Replace and stop the global EventBus, then return its replacement.
+
+    The replacement is published before the previous bus is stopped so new
+    callers cannot enqueue work on the bus being drained.
 
     Also registers the ``TIMEOUT_RAISED`` publisher as the
     ``LMCacheTimeoutError`` observer, so an enabled bus reports timeouts raised
     by modules that never import MP observability.
-
-    Returns the newly created bus.
     """
     global _global_bus, _observability_enabled
     # errors imports this module, so import it at call time.
@@ -428,6 +429,8 @@ def init_event_bus(config: EventBusConfig | None = None) -> EventBus:
     from lmcache.v1.mp_observability.errors import publish_timeout
 
     register_timeout_observer(publish_timeout)
+    previous_bus = _global_bus
     _global_bus = EventBus(config)
     _observability_enabled = config.enabled if config else True
+    previous_bus.stop()
     return _global_bus
