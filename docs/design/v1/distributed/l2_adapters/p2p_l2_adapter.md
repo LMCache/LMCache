@@ -77,8 +77,12 @@ lookup-and-lock  → query (addresses)  → load (RDMA read)  → unlock
    `(shm_offset, shm_byte_length)` into transfer-channel addresses, pair them
    with the stashed remote addresses, and issue `submit_read`. `query_load_result`
    maps the read's `succeeded_mask` to a `Bitmap`.
-4. **unlock** — `P2P_UNLOCK_OBJECTS([keys])` releases the peer's read locks and
-   drops the stashed addresses. Fire-and-forget: the result future is not awaited.
+4. **unlock** — `P2P_UNLOCK_OBJECTS([keys])` releases the peer's read locks.
+   Fire-and-forget: the result future is not awaited. A stashed address is
+   counted per lookup hit and dropped when the last lookup that hit the key
+   unlocks, mirroring the peer's per-lookup read locks: two requests can look
+   up the same key, and one request's unlock must not erase the address the
+   other is about to load from.
 
 `group_layout_descs` (one `MemoryLayoutDesc` per object group) is the advisory
 hint added to the L2 lookup interface; the P2P adapter forwards the real
