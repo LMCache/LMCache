@@ -138,6 +138,8 @@ class L1MemoryManager:
         )
         if objects is None:
             return L1Error.OUT_OF_MEMORY, []
+        for obj in objects:
+            obj.metadata.fused_kv = layout_desc.fused_kv
         return L1Error.SUCCESS, objects
 
     def free(self, mem_objs: list[MemoryObj]) -> L1Error:

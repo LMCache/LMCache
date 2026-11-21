@@ -10,6 +10,7 @@ import torch
 
 # First Party
 from lmcache import device_ops
+from lmcache.v1.common.kv_format import get_spec_class
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.object_group_transfer.engines import (
@@ -73,12 +74,18 @@ def get_unfull_chunk_layout_desc(
     ].kernel_group_indices
     shapes: list[torch.Size] = []
     dtypes: list[torch.dtype] = []
+    fused_kv: list[bool] = []
     for kernel_group_id in kernel_group_ids:
         shape, dtype = cache_context.get_kernel_group_shape_dtype(
             cache_context.lmcache_tokens_per_chunk, kernel_group_id
         )
         shapes.append(shape)
         dtypes.append(dtype)
+        fused_kv.append(
+            get_spec_class(
+                cache_context.get_engine_kv_format(kernel_group_id)
+            ).is_fused_packed
+        )
     for index, kernel_group_id in enumerate(kernel_group_ids):
         if has_unfull_chunk_lead_block(cache_context, kernel_group_id):
             slots_per_block = kv_groups_manager.kernel_groups[
@@ -88,7 +95,8 @@ def get_unfull_chunk_layout_desc(
                 torch.Size((*shapes[index][:-2], slots_per_block, shapes[index][-1]))
             )
             dtypes.append(dtypes[index])
-    return MemoryLayoutDesc(shapes=shapes, dtypes=dtypes)
+            fused_kv.append(fused_kv[index])
+    return MemoryLayoutDesc(shapes=shapes, dtypes=dtypes, fused_kv=tuple(fused_kv))
 
 
 def trim_and_stage_unfull_chunk_block_ids(

@@ -11,7 +11,8 @@ Supported presets:
 - turboquant_k3v4_nc
 - turboquant_3bit_nc
 
-Input KV layout: [2, num_layers, num_tokens, hidden_dim]
+Input KV layouts: split [2, L, T, H*D] and registered fused K/V
+[1, L, T, H*2*D] or [L, T, H*2*D].
 Serialized layout: [num_layers, num_blocks, block_size, num_heads, slot_size]
 """
 
@@ -156,6 +157,23 @@ class TurboQuantSerdeConfig:
     def slot_size_aligned(self) -> int:
         s = self.slot_size
         return s + (s % 2)
+
+
+def _canonical_kv_shape(
+    shape: torch.Size, cfg: TurboQuantSerdeConfig, packed: bool
+) -> torch.Size:
+    """Return the split K/V shape for an explicitly identified fused tensor."""
+    if not packed:
+        return shape
+    if len(shape) == 4 and shape[0] == 1:
+        shape = shape[1:]
+    if len(shape) != 3 or shape[-1] % (2 * cfg.head_dim):
+        raise ValueError(
+            "Packed TurboQuant KV expects [L, T, H * 2 * head_dim], "
+            f"optionally with a leading singleton plane, got {tuple(shape)} "
+            f"with head_dim={cfg.head_dim}"
+        )
+    return torch.Size((2, shape[0], shape[1], shape[2] // 2))
 
 
 def _validate_layout_shape(
@@ -532,7 +550,8 @@ class TurboQuantSerializer(Serializer):
 
         Args:
             src: Source memory object containing a KV tensor with shape
-                ``[2, num_layers, num_tokens, hidden_dim]``.
+                ``[2, L, T, H*D]`` or packed ``[1, L, T, H*2*D]`` or
+                ``[L, T, H*2*D]``, identified by object metadata.
             dst: Destination memory object containing a ``torch.uint8`` tensor
                 used as the serialized byte buffer.
             key: Object key for this pair (unused: TurboQuant is
@@ -553,8 +572,10 @@ class TurboQuantSerializer(Serializer):
         if src_tensor is None or dst_tensor is None:
             raise ValueError("TurboQuant serde requires src and dst to have tensors")
 
+        packed = src.metadata.fused_kv[:1] == (True,)
+        canonical_shape = _canonical_kv_shape(src_tensor.shape, self._cfg, packed)
         n_bytes = _serialized_nbytes_for_shape(
-            src_tensor.shape, src_tensor.dtype, self._cfg
+            canonical_shape, src_tensor.dtype, self._cfg
         )
         if dst_tensor.numel() < n_bytes:
             raise ValueError(
@@ -569,6 +590,8 @@ class TurboQuantSerializer(Serializer):
             )
         required_cuda_bytes = n_bytes
         if not src_tensor.is_cuda:
+            required_cuda_bytes += _tensor_nbytes(src_tensor)
+        if packed:
             required_cuda_bytes += _tensor_nbytes(src_tensor)
         if not dst_tensor.is_cuda:
             required_cuda_bytes += n_bytes
@@ -588,6 +611,13 @@ class TurboQuantSerializer(Serializer):
             if src_tensor.is_cuda
             else src_tensor.clone().to(device=cuda_device)
         )
+        if packed:
+            _, layers, tokens, hidden = canonical_shape
+            src_work = (
+                src_work.reshape(layers, tokens, -1, 2, self._cfg.head_dim)
+                .permute(3, 0, 1, 2, 4)
+                .reshape(2, layers, tokens, hidden)
+            )
         dst_work = (
             dst_tensor
             if dst_tensor.is_cuda
@@ -664,9 +694,25 @@ class TurboQuantSerializer(Serializer):
         return n_bytes
 
     def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
+        """Return the compressed byte size for the configured KV layout.
+
+        Args:
+            layout_desc: KV shapes and dtypes in the configured external layout.
+
+        Returns:
+            Serialized byte count, including raw protected boundary layers.
+
+        Raises:
+            ValueError: If a shape does not match the configured KV layout.
+        """
         total = 0
-        for shape, dtype in zip(layout_desc.shapes, layout_desc.dtypes, strict=False):
-            total += _serialized_nbytes_for_shape(shape, dtype, self._cfg)
+        fused = layout_desc.fused_kv or (False,) * len(layout_desc.shapes)
+        for shape, dtype, packed in zip(
+            layout_desc.shapes, layout_desc.dtypes, fused, strict=True
+        ):
+            total += _serialized_nbytes_for_shape(
+                _canonical_kv_shape(shape, self._cfg, packed), dtype, self._cfg
+            )
         return total
 
 
@@ -683,7 +729,9 @@ class TurboQuantDeserializer(Deserializer):
             src: Source memory object containing the serialized TurboQuant
                 byte buffer as a ``torch.uint8`` tensor.
             dst: Destination memory object containing the reconstructed KV
-                tensor with shape ``[2, num_layers, num_tokens, hidden_dim]``.
+                tensor with shape ``[2, L, T, H*D]`` or packed
+                ``[1, L, T, H*2*D]`` or ``[L, T, H*2*D]``, identified by
+                object metadata.
             key: Object key for this pair (unused: TurboQuant is
                 content-agnostic).
 
@@ -700,8 +748,10 @@ class TurboQuantDeserializer(Deserializer):
         if src_tensor is None or dst_tensor is None:
             raise ValueError("TurboQuant serde requires src and dst to have tensors")
 
+        packed = dst.metadata.fused_kv[:1] == (True,)
+        canonical_shape = _canonical_kv_shape(dst_tensor.shape, self._cfg, packed)
         n_bytes = _serialized_nbytes_for_shape(
-            dst_tensor.shape, dst_tensor.dtype, self._cfg
+            canonical_shape, dst_tensor.dtype, self._cfg
         )
         if src_tensor.numel() < n_bytes:
             raise ValueError(
@@ -717,7 +767,9 @@ class TurboQuantDeserializer(Deserializer):
         required_cuda_bytes = n_bytes
         if not src_tensor.is_cuda:
             required_cuda_bytes += n_bytes
-        if not dst_tensor.is_cuda:
+        if not dst_tensor.is_cuda or packed:
+            required_cuda_bytes += _tensor_nbytes(dst_tensor)
+        if packed:
             required_cuda_bytes += _tensor_nbytes(dst_tensor)
 
         cuda_device = _select_cuda_device(
@@ -737,9 +789,9 @@ class TurboQuantDeserializer(Deserializer):
         )
         dst_work = (
             dst_tensor
-            if dst_tensor.is_cuda
+            if dst_tensor.is_cuda and not packed
             else torch.empty(
-                dst_tensor.shape,
+                canonical_shape,
                 dtype=dst_tensor.dtype,
                 device=cuda_device,
             )
@@ -866,8 +918,17 @@ class TurboQuantDeserializer(Deserializer):
             )
             dst_work[:, quant_end:].copy_(raw)
 
+        if packed:
+            _, layers, tokens, hidden = canonical_shape
+            dst_work = (
+                dst_work.reshape(2, layers, tokens, -1, self._cfg.head_dim)
+                .permute(1, 2, 3, 0, 4)
+                .reshape(dst_tensor.shape)
+            )
         if not dst_tensor.is_cuda:
             dst_tensor.copy_(dst_work.cpu())
+        elif packed:
+            dst_tensor.copy_(dst_work)
 
 
 def _create_turboquant_serde(kwargs: dict[str, object]) -> SerdeProcessor:

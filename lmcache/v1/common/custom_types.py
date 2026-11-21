@@ -201,6 +201,7 @@ class GroupLayout(msgspec.Struct):
         num_physical_slots: Physical slots stored per chunk, after windowing
             and slot compression. ``None`` retains the legacy one-slot-per-token
             layout derived from ``window_tokens``.
+        fused_kv: Whether the single plane holds interleaved K and V.
     """
 
     num_layers: int
@@ -212,6 +213,7 @@ class GroupLayout(msgspec.Struct):
     window_chunks: int = 0
     recurrent: bool = False
     num_physical_slots: int | None = None
+    fused_kv: bool = False
 
 
 class RegisterEngineDrivenContextPayload(msgspec.Struct):
@@ -225,7 +227,8 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         num_layers: Number of model layers.
         hidden_dim_size: Flattened hidden dimension per token.
         dtype_str: Torch dtype name (e.g. ``"float16"``).
-        use_mla: Whether the worker KV format is MLA.
+        use_mla: Whether storage has one KV plane.
+        fused_kv: Whether the legacy single group interleaves K and V.
         num_physical_slots: Number of physical KV slots gathered into one
             LMCache chunk. ``None`` accepts the legacy protocol, where the
             server assumed one physical slot per logical token.
@@ -245,6 +248,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     use_mla: bool
     num_physical_slots: int | None = None
     group_layouts: list[GroupLayout] = []
+    fused_kv: bool = False
 
 
 @dataclass

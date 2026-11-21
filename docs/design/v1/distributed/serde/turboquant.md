@@ -124,6 +124,14 @@ The first dimension separates key and value tensors:
 * `src[0]`: key cache
 * `src[1]`: value cache
 
+An engine format that explicitly registers interleaved K/V instead supplies
+`[1, num_layers, num_tokens, 2 * hidden_dim]` in LMCache-driven mode or
+`[num_layers, num_tokens, 2 * hidden_dim]` in engine-driven mode. The engine
+format's fused K/V metadata is carried with the object. The codec maps each
+head's K then V into separate planes before encoding and reverses the mapping
+after decoding. A single-plane tensor without fused K/V metadata is rejected,
+since MLA and other single-plane formats do not contain separate K and V.
+
 The serialized byte layout is:
 
 ```text

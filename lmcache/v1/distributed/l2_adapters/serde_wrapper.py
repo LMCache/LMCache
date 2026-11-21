@@ -627,7 +627,10 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         dtype_0 = objects[0].get_dtypes()
         temp_keys = [make_temp_key(k) for k in keys]
         layout = serialized_layout_desc(
-            MemoryLayoutDesc(shapes=shape_0, dtypes=dtype_0), self._serde
+            MemoryLayoutDesc(
+                shapes=shape_0, dtypes=dtype_0, fused_kv=objects[0].metadata.fused_kv
+            ),
+            self._serde,
         )
         results = self._l1_manager.reserve_write(
             keys=temp_keys,

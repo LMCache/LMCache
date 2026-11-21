@@ -969,6 +969,7 @@ def test_engine_driven_register_sends_num_physical_slots(
     payload = req_client.register_kv_cache_engine_driven_context.call_args.args[0]
     assert isinstance(payload, RegisterEngineDrivenContextPayload)
     assert payload.num_physical_slots == 128
+    assert payload.fused_kv
     assert (
         unregister_future
         is req_client.unregister_kv_cache_engine_driven_context.return_value
@@ -2786,3 +2787,41 @@ def test_engine_driven_context_shm_close_is_idempotent() -> None:
     finally:
         shm_munmap(addr, 4096)
         shm_unlink(shm_name)
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_register_engine_driven_propagates_fused_layout(
+    server_module_factory: ServerModuleFactory, grouped: bool
+) -> None:
+    """The server keeps the fused flag with the single-plane staging shape."""
+    # First Party
+    from lmcache.v1.common.custom_types import GroupLayout
+
+    module, _, _, ctx = server_module_factory(chunk_size=16)
+    payload = _default_register_payload(instance_id=12)
+    payload.hidden_dim_size = 512
+    payload.use_mla = True
+    if grouped:
+        payload.group_layouts = [
+            GroupLayout(
+                num_layers=2,
+                hidden_dim_size=512,
+                dtype_str=payload.dtype_str,
+                tokens_per_block=4,
+                kv_size=1,
+                fused_kv=True,
+            )
+        ]
+    else:
+        payload.fused_kv = True
+    module.register_kv_cache_engine_driven_context(payload)
+    layout: MemoryLayoutDesc | None
+    if grouped:
+        layouts = ctx.layout_desc_registry.find_group_layout_descs("m", 1)
+        assert layouts is not None
+        layout = layouts[0]
+    else:
+        layout = ctx.layout_desc_registry.find("m", 1)
+        assert layout is not None
+    assert layout.shapes == [torch.Size((2, 16, 512))]
+    assert layout.fused_kv == (True,)

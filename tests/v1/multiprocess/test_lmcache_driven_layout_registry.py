@@ -160,6 +160,54 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     assert ctx.layout_desc_registry.find("shared-model", 1) is None
 
 
+@pytest.mark.parametrize("fused_kv", [True, False])
+def test_register_lmcache_driven_preserves_fused_layout(
+    monkeypatch: pytest.MonkeyPatch, fused_kv: bool
+) -> None:
+    """Register actual layout metadata for both fused and split cache formats."""
+    # First Party
+    from lmcache.lmcache_native import EngineKVFormat
+    from lmcache.utils import EngineType
+    from lmcache.v1.common.attn_window import AttnWindowDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+    from lmcache.v1.multiprocess.modules import (
+        lmcache_driven_transfer as lmcache_driven_transfer_mod,
+    )
+
+    ctx = MagicMock(chunk_size=16, hash_algorithm_name="blake3")
+    ctx.layout_desc_registry = LayoutDescRegistry()
+    context = MagicMock(device=torch.device("cpu"), lmcache_tokens_per_chunk=16)
+    groups = context.kv_layer_groups_manager
+    groups.num_object_groups = 1
+    groups.object_groups = [types.SimpleNamespace(kernel_group_indices=[0])]
+    groups.get_attn_desc.return_value = AttnWindowDesc(num_chunks_in_sw=[-1])
+    groups.get_subchunk_sw_size_tokens.return_value = 16
+    shape = torch.Size([1, 2, 16, 256] if fused_kv else [2, 2, 16, 128])
+    context.get_kernel_group_shape_dtype.return_value = (shape, torch.float16)
+    context.get_engine_kv_format.return_value = (
+        EngineKVFormat.NL_X_NB_BS_NH_CS
+        if fused_kv
+        else EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
+    )
+    monkeypatch.setattr(
+        lmcache_driven_transfer_mod,
+        "DeviceHostFuncDispatcher",
+        _FakeDeviceHostFuncDispatcher,
+    )
+    monkeypatch.setattr(
+        lmcache_driven_transfer_mod,
+        "create_cache_context",
+        lambda *args, **kwargs: context,
+    )
+
+    module = lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx)
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [])
+    layout = ctx.layout_desc_registry.find("model", 1)
+    assert layout is not None
+    assert layout.shapes == [shape]
+    assert layout.fused_kv == (fused_kv,)
+
+
 def _layout() -> Any:
     """A minimal layout descriptor for registry tests."""
     # First Party

@@ -182,7 +182,11 @@ def test_independent_peer_channel(
 ) -> None:
     """P2P has its own port and lifetime with either worker transport."""
     keys = [ObjectKey(b"chunk", "model", 0)]
-    layouts = {0: MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])}
+    layouts = {
+        0: MemoryLayoutDesc(
+            [torch.Size([1, 1, 16, 256])], [torch.float16], fused_kv=(True,)
+        )
+    }
     addresses = [TransferChannelAddress(offset=8, size=16)]
     write_addresses = [
         TransferChannelAddress(offset=4096, size=16),

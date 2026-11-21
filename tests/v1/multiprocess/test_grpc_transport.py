@@ -36,6 +36,7 @@ from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
     CBUnifiedLookupResult,
+    GroupLayout,
     IPCCacheServerKey,
     KVEventBatch,
     KVEventRecord,
@@ -212,6 +213,11 @@ def grpc_client(
             self, payload: RegisterEngineDrivenContextPayload
         ) -> RegisterEngineDrivenContextResponse:
             assert payload.num_physical_slots == 32
+            assert payload.fused_kv
+            assert [layout.fused_kv for layout in payload.group_layouts] == [
+                True,
+                False,
+            ]
             return RegisterEngineDrivenContextResponse("shared-memory", 4096)
 
         @request_handler(HandlerType.BLOCKING)
@@ -735,6 +741,11 @@ def test_generated_grpc_services_communicate_end_to_end(
             dtype_str="float16",
             use_mla=False,
             num_physical_slots=32,
+            group_layouts=[
+                GroupLayout(32, 256, "float16", 16, fused_kv=True),
+                GroupLayout(32, 128, "float16", 16),
+            ],
+            fused_kv=True,
         )
     ).result(5)
     assert registration == RegisterEngineDrivenContextResponse("shared-memory", 4096)

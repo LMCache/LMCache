@@ -19,6 +19,7 @@ from lmcache.utils import (
 )
 from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.kv_format import get_spec_class
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.common.utils import LayoutHints
@@ -100,7 +101,14 @@ def get_layout_desc(
         for kernel_group_idx in object_group.kernel_group_indices
     ]
     shapes, dtypes = zip(*shapes_and_dtypes, strict=False)
-    return MemoryLayoutDesc(shapes=list(shapes), dtypes=list(dtypes))
+    return MemoryLayoutDesc(
+        shapes=list(shapes),
+        dtypes=list(dtypes),
+        fused_kv=tuple(
+            get_spec_class(cache_context.get_engine_kv_format(index)).is_fused_packed
+            for index in object_group.kernel_group_indices
+        ),
+    )
 
 
 def all_null_chunk_masks(

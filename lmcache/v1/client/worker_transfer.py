@@ -34,6 +34,7 @@ from lmcache.v1.common.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.kv_format import get_spec_class
 from lmcache.v1.common.utils import (
     LayoutHints,
     get_device,
@@ -1033,6 +1034,9 @@ class EngineDrivenTransferContext(TransferContext):
                         window_chunks=max(window_chunks, 0),
                         recurrent=kernel_group.recurrent_state,
                         num_physical_slots=window_slots,
+                        fused_kv=get_spec_class(
+                            kernel_group.engine_kv_format
+                        ).is_fused_packed,
                     )
                 )
                 group_states.append(
@@ -1079,6 +1083,7 @@ class EngineDrivenTransferContext(TransferContext):
                     use_mla=use_mla_flag,
                     num_physical_slots=num_physical_slots,
                     group_layouts=group_layouts,
+                    fused_kv=get_spec_class(engine_kv_format).is_fused_packed,
                 )
             )
         )
