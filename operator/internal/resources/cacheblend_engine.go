@@ -129,10 +129,12 @@ func BuildCBEngineDaemonSet(engine *lmcachev1alpha1.CacheBlendEngine) *appsv1.Da
 	engineSpec := cbSpecToEngineSpec(&engine.Spec)
 	return buildDaemonSetCore(
 		engine.Name,
+		engine.Name,
 		engine.Namespace,
 		engineSpec,
 		BuildCBEngineArgs(&engine.Spec),
 		cbDefaultImageRepo,
+		1,
 	)
 }
 

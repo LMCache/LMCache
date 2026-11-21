@@ -49,6 +49,7 @@ const (
 	ConditionAvailable         = "Available"
 	ConditionAllInstancesReady = "AllInstancesReady"
 	ConditionConfigValid       = "ConfigValid"
+	ConditionTierSchedulable   = "TierSchedulable"
 )
 
 // ImageSpec defines the container image to use.
@@ -597,6 +598,109 @@ type LMCacheEngineSpec struct {
 	// side-channel env vars into opted-in vLLM pods.
 	// +optional
 	PD *PDSpec `json:"pd,omitempty"`
+
+	// workloadAwareScheduling makes the engine DaemonSet run only on nodes
+	// that currently host at least one pod matching workloadSelector.
+	//
+	// By default (unset or enabled: false) the DaemonSet is created on every
+	// node matching spec.nodeSelector, and required pod affinity parks engine
+	// pods in Pending on nodes without the workload — on multi-model GPU
+	// pools that is one Pending pod per non-hosting node per engine, and the
+	// reverse leak persists scheduled engines forever once the workload moves
+	// (requiredDuringSchedulingIgnoredDuringExecution). Enabling this makes
+	// the operator mirror a per-engine label onto the nodes hosting matching
+	// pods and adds that label to the DaemonSet nodeSelector, so engine pods
+	// are created only where the workload runs and are removed shortly after
+	// it leaves (see releaseDelaySeconds).
+	//
+	// +optional
+	WorkloadAwareScheduling *WorkloadAwareSchedulingSpec `json:"workloadAwareScheduling,omitempty"`
+}
+
+// WorkloadAwareSchedulingSpec configures placement of engine DaemonSet pods
+// on the nodes that currently host the workload (e.g. the predictor pods of
+// an InferenceService).
+type WorkloadAwareSchedulingSpec struct {
+	// enabled turns workload-aware scheduling on. When false or the whole
+	// block is unset, behavior is identical to previous operator versions:
+	// the DaemonSet nodeSelector is spec.nodeSelector alone and the operator
+	// does not watch or label any nodes.
+	Enabled bool `json:"enabled"`
+
+	// workloadSelector selects the workload pods to follow: a pod that is
+	// bound to a node (spec.nodeName set) and not terminating makes that
+	// node eligible for this engine. Standard metav1.LabelSelector — use
+	// matchLabels for equality, matchExpressions for In/NotIn/Exists/
+	// DoesNotExist; entries are AND-ed. Required when enabled, and must not
+	// be empty: an empty LabelSelector matches every pod, which would label
+	// every node running anything.
+	//
+	// +optional
+	WorkloadSelector *metav1.LabelSelector `json:"workloadSelector,omitempty"`
+
+	// releaseDelaySeconds is how long a node keeps its engine label after
+	// the last matching pod leaves. 0 removes the label immediately on the
+	// next reconcile; larger values keep the engine (and its warm KV cache)
+	// across brief workload churn such as same-node rolling updates, at the
+	// cost of lingering engines while the workload is gone. Defaults to 300.
+	//
+	// +kubebuilder:default=300
+	// +kubebuilder:validation:Minimum=0
+	ReleaseDelaySeconds *int32 `json:"releaseDelaySeconds,omitempty"`
+
+	// dynamicResourceAllocation enables per-node tiered resource scaling
+	// on top of workload-aware scheduling: the operator derives a tier
+	// multiplier per node from the GPU requests of the matching workload
+	// pods and runs one scaled DaemonSet per active tier. See
+	// DynamicResourceAllocationSpec.
+	//
+	// +optional
+	DynamicResourceAllocation *DynamicResourceAllocationSpec `json:"dynamicResourceAllocation,omitempty"`
+}
+
+// DynamicResourceAllocationSpec configures per-node tiered resource scaling.
+// When enabled, the operator derives a tier multiplier from the GPU requests
+// of the matching workload pods on each node and runs one DaemonSet per
+// active tier: the base DaemonSet (tier 1x) plus <engine>-<N>x DaemonSets
+// for N >= 2, whose L1 size and memory requests are scaled by N.
+type DynamicResourceAllocationSpec struct {
+	// enabled turns dynamic resource allocation on. Requires
+	// workloadAwareScheduling.enabled: tier derivation reads the same
+	// workload pods that placement follows.
+	Enabled bool `json:"enabled"`
+
+	// gpusPerUnit is the number of workload GPUs per 1x tier unit. The
+	// multiplier of a node is ceil(total workload GPUs on that node /
+	// gpusPerUnit), clamped to [1, maxMultiplier]. GPU requests are read
+	// from the regular containers' resource requests for the engine's
+	// gpuVendor (nvidia.com/gpu / amd.com/gpu); init containers do not
+	// count. Default: 1.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=1
+	GPUsPerUnit *int32 `json:"gpusPerUnit,omitempty"`
+
+	// maxMultiplier is the upper bound on the tier multiplier. It must be
+	// sized so that ceil(maxMultiplier * l1.sizeGB + 5) Gi fits a node's
+	// allocatable memory: a tier whose request exceeds allocatable leaves
+	// the engine pod Pending with no further feedback. Default: 8.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=8
+	MaxMultiplier *int32 `json:"maxMultiplier,omitempty"`
+
+	// tierChangeDelaySeconds is how long a changed tier multiplier must
+	// be observed stable on a node before the node is relabeled — which
+	// restarts the engine pod there and drops its warm L1. This damps
+	// churn from workload rolling updates (surge pods transiently change
+	// the GPU sum). 0 applies changes immediately. Default: 300.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=300
+	TierChangeDelaySeconds *int32 `json:"tierChangeDelaySeconds,omitempty"`
 }
 
 // EndpointStatus represents a single LMCache instance endpoint.
@@ -630,11 +734,16 @@ type LMCacheEngineStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// desiredInstances is the number of desired instances.
+	// desiredInstances is the number of desired instances across ALL
+	// DaemonSets owned by the engine (the base DaemonSet plus any tier
+	// DaemonSets when dynamicResourceAllocation is enabled).
 	// +optional
 	DesiredInstances int32 `json:"desiredInstances,omitempty"`
 
-	// readyInstances is the number of ready instances.
+	// readyInstances is the number of ready engine pods across ALL
+	// DaemonSets owned by the engine, counted from the pod list (not from
+	// per-DaemonSet status counters, which are ambiguous under
+	// overlapping DaemonSet selectors).
 	// +optional
 	ReadyInstances int32 `json:"readyInstances,omitempty"`
 
@@ -647,6 +756,43 @@ type LMCacheEngineStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// workloadNodes lists the nodes currently labeled for this engine when
+	// workload-aware scheduling is enabled (desired set: nodes hosting
+	// bound, non-terminating pods matching spec.workloadAwareScheduling.
+	// workloadSelector, plus nodes still inside their releaseDelay window).
+	// +optional
+	WorkloadNodes []string `json:"workloadNodes,omitempty"`
+
+	// workloadLabelKey is the node label key this engine manages for
+	// workload-aware scheduling, for dashboards and debugging. The label
+	// value is the node's tier multiplier ("1" without
+	// dynamicResourceAllocation, "1".."N" with it). Empty when the
+	// feature is disabled.
+	// +optional
+	WorkloadLabelKey string `json:"workloadLabelKey,omitempty"`
+
+	// nodeTierChanges records each node's PENDING tier change: the
+	// multiplier being waited out and when it was FIRST observed. The
+	// relabel (and the engine-pod restart it causes) is applied once the
+	// pending tier has been stably observed for tierChangeDelaySeconds; a
+	// NEW target tier restarts the window (1->2 then 2->3 never applies
+	// 3 on 2's aged-out timestamp). Internal bookkeeping; entries clear
+	// when the computed tier returns to the labeled value or the node is
+	// released.
+	// +optional
+	// +kubebuilder:example={"node-a":{"tier":2,"since":"2026-10-19T09:00:00Z"}}
+	NodeTierChanges map[string]NodeTierChange `json:"nodeTierChanges,omitempty"`
+
+	// nodeAbsentSince records when a node carrying the managed label was
+	// FIRST observed without matching workload pods. The release window runs
+	// from that moment — not from when the workload was last seen — so an
+	// interrupted controller that missed the actual departure still grants
+	// the full releaseDelaySeconds. Entries clear when the workload returns
+	// to the node or the label is removed. Internal bookkeeping.
+	// +optional
+	// +kubebuilder:example={"node-a":"2026-10-19T09:00:00Z"}
+	NodeAbsentSince map[string]metav1.Time `json:"nodeAbsentSince,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -685,4 +831,14 @@ type LMCacheEngineList struct {
 
 func init() {
 	SchemeBuilder.Register(&LMCacheEngine{}, &LMCacheEngineList{})
+}
+
+// NodeTierChange is the pending tier change of one node: the target
+// multiplier and when it was first observed.
+type NodeTierChange struct {
+	// tier is the pending target multiplier.
+	Tier int32 `json:"tier"`
+
+	// since is when this target tier was first observed.
+	Since metav1.Time `json:"since"`
 }

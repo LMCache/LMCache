@@ -16,6 +16,8 @@ limitations under the License.
 
 package v1alpha1
 
+import "time"
+
 // defaultLogLevel is the log level applied when spec.logLevel is unset (it
 // mirrors the kubebuilder default on both engine kinds).
 const defaultLogLevel = "INFO"
@@ -44,6 +46,85 @@ func (e *LMCacheEngine) SetDefaults() {
 			"nvidia.com/gpu.present": labelValueTrue,
 		}
 	}
+
+	// Workload-aware scheduling: default the release delay so users enabling
+	// the feature don't have to think about rollout churn on day one. The
+	// kubebuilder schema default covers apply-time; this covers callers
+	// constructing objects in memory (controller paths, tests).
+	if w := spec.WorkloadAwareScheduling; w != nil && w.Enabled && w.ReleaseDelaySeconds == nil {
+		d := int32(defaultReleaseDelaySeconds)
+		w.ReleaseDelaySeconds = &d
+	}
+}
+
+// defaultReleaseDelaySeconds keeps the engine (and its warm KV cache) across
+// typical same-node rolling updates while still cleaning up promptly after a
+// genuine workload departure.
+const defaultReleaseDelaySeconds = 300
+
+// WorkloadReleaseDelay returns the effective workload-aware release delay
+// for an enabled engine, zero when the feature is disabled. A nil
+// ReleaseDelaySeconds falls back to defaultReleaseDelaySeconds rather than
+// silently collapsing to 0: API-created objects get the CRD default, but an
+// in-memory path that skipped SetDefaults must not land on the
+// "always rebuild cold" behavior by accident.
+func (e *LMCacheEngine) WorkloadReleaseDelay() time.Duration {
+	if w := e.Spec.WorkloadAwareScheduling; w != nil && w.Enabled {
+		if w.ReleaseDelaySeconds == nil {
+			return time.Duration(defaultReleaseDelaySeconds) * time.Second
+		}
+		return time.Duration(*w.ReleaseDelaySeconds) * time.Second
+	}
+	return 0
+}
+
+// DRA defaults mirror the kubebuilder markers (1 / 8 / 300) for in-memory
+// objects that skipped SetDefaults or CRD-defaulting.
+const (
+	defaultDRAGPUsPerUnit         = 1
+	defaultDRAMaxMultiplier       = 8
+	defaultDRATierChangeDelaySecs = 300
+)
+
+// DynamicResourceAllocationEnabled reports whether dynamic resource
+// allocation (per-node tiered DaemonSets) is on. Implies
+// WorkloadSchedulingEnabled: validation rejects the other combination.
+func (e *LMCacheEngine) DynamicResourceAllocationEnabled() bool {
+	if w := e.Spec.WorkloadAwareScheduling; w != nil && w.Enabled {
+		return w.DynamicResourceAllocation != nil && w.DynamicResourceAllocation.Enabled
+	}
+	return false
+}
+
+// EffectiveDRAGPUsPerUnit returns gpusPerUnit with its default applied.
+func (s *DynamicResourceAllocationSpec) EffectiveDRAGPUsPerUnit() int32 {
+	if s.GPUsPerUnit == nil {
+		return defaultDRAGPUsPerUnit
+	}
+	return *s.GPUsPerUnit
+}
+
+// EffectiveDRAMaxMultiplier returns maxMultiplier with its default applied.
+func (s *DynamicResourceAllocationSpec) EffectiveDRAMaxMultiplier() int32 {
+	if s.MaxMultiplier == nil {
+		return defaultDRAMaxMultiplier
+	}
+	return *s.MaxMultiplier
+}
+
+// EffectiveDRATierChangeDelay returns tierChangeDelaySeconds as a duration,
+// with its default applied.
+func (s *DynamicResourceAllocationSpec) EffectiveDRATierChangeDelay() time.Duration {
+	if s.TierChangeDelaySeconds == nil {
+		return time.Duration(defaultDRATierChangeDelaySecs) * time.Second
+	}
+	return time.Duration(*s.TierChangeDelaySeconds) * time.Second
+}
+
+// WorkloadSchedulingEnabled reports whether workload-aware scheduling is on.
+func (e *LMCacheEngine) WorkloadSchedulingEnabled() bool {
+	w := e.Spec.WorkloadAwareScheduling
+	return w != nil && w.Enabled
 }
 
 // IsolatedIPCEnabled resolves spec.isolatedIPC: an explicit value wins;

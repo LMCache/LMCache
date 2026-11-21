@@ -60,6 +60,13 @@ const (
 
 	// l2EncryptionKeyVolumeName is the pod volume name for the master-key mount.
 	l2EncryptionKeyVolumeName = "l2-master-key"
+	// TierLabelKey distinguishes tier DaemonSets under dynamic resource
+	// allocation: each DS's pod template carries TierLabelKey: <dsName>,
+	// and tier (N>=2) DS selectors require it. The base DS selector never
+	// references it — it stays SelectorLabels(engine) so enabling DRA on
+	// an existing engine only patches mutable template fields
+	// (spec.selector is immutable).
+	TierLabelKey = "lmcache.ai/dra-tier"
 )
 
 // l2EncryptionKeyPath is the in-container path of the mounted L2 encryption
@@ -86,10 +93,41 @@ func startupProbeFailureThreshold(l1SizeGB float64) int32 {
 	return startupProbeDefaultFailureThreshold
 }
 
-// BuildDaemonSet constructs a DaemonSet for the given LMCacheEngine.
-// Selector labels take precedence over additional pod labels.
+// BuildDaemonSet constructs the base (tier 1x) DaemonSet for the given
+// LMCacheEngine. Selector labels take precedence over additional pod labels.
 func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
-	return buildDaemonSetCore(engine.Name, engine.Namespace, &engine.Spec, BuildContainerArgs(&engine.Spec), "lmcache/vllm-openai")
+	return buildDaemonSetCore(engine.Name, engine.Name, engine.Namespace, &engine.Spec, BuildContainerArgs(&engine.Spec), "lmcache/vllm-openai", 1)
+}
+
+// TierDaemonSetName returns the DaemonSet name for tier N: the engine name
+// for the base tier (N=1), "<engine>-<N>x" for N >= 2.
+func TierDaemonSetName(engineName string, multiplier int32) string {
+	if multiplier <= 1 {
+		return engineName
+	}
+	return fmt.Sprintf("%s-%dx", engineName, multiplier)
+}
+
+// BuildTieredDaemonSet constructs the tier-N DaemonSet for an engine with
+// dynamic resource allocation enabled (N >= 2): L1 size, container args,
+// resource requests and the startup-probe window are scaled by N, and the
+// pod template carries TierLabelKey: <dsName> so tier DS selectors stay
+// disjoint. The template labels (instance=<engineName>) are shared with
+// the base DS so the node-local and metrics Services keep matching every
+// tier's pods; the selector adds TierLabelKey on top of SelectorLabels.
+// The base DS selector is untouched (see TierLabelKey).
+func BuildTieredDaemonSet(engine *lmcachev1alpha1.LMCacheEngine, multiplier int32) *appsv1.DaemonSet {
+	scaled := engine.Spec.DeepCopy()
+	scaled.L1.SizeGB *= float64(multiplier)
+	return buildDaemonSetCore(
+		engine.Name,
+		TierDaemonSetName(engine.Name, multiplier),
+		engine.Namespace,
+		scaled,
+		BuildContainerArgs(scaled),
+		"lmcache/vllm-openai",
+		multiplier,
+	)
 }
 
 // buildDaemonSetCore constructs the DaemonSet shared by the LMCacheEngine and
@@ -102,8 +140,19 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 // Selector labels take precedence over spec.PodLabels so the pod template
 // remains selectable by the DaemonSet and its Services.
 //
+// multiplier is the dynamic-resource-allocation tier of the DaemonSet: 1
+// for the base DS and the CacheBlendEngine DS (identical output to a
+// non-DRA build), N >= 2 for tier DSs. The caller scales spec
+// (L1 size, hence args/resources/probe) beforehand; the multiplier here
+// only routes placement (tier nodeSelector) and identification
+// (TierLabelKey on template and — for N >= 2 — the DS selector).
+//
 // Parameters:
-//   - name, namespace: the owning object's identity, used for labels and metadata.
+//   - engineName: the owning object's name, used for the shared labels
+//     (instance=<engineName>) that Services select on.
+//   - dsName: the DaemonSet's object name (engineName for the base DS,
+//     "<engineName>-<N>x" for tier DSs).
+//   - namespace: the owning object's namespace.
 //   - spec: the engine spec (LMCacheEngine and CacheBlendEngine reuse the same
 //     shared sub-structs, so callers project the CacheBlendEngine spec into an
 //     *LMCacheEngineSpec before calling).
@@ -111,14 +160,21 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 //     engine-specific flags such as --engine-type before passing them in).
 //   - defaultImageRepo: the container image repository to use when spec.Image
 //     does not set one.
+//   - multiplier: the tier (see above).
 func buildDaemonSetCore(
-	name, namespace string,
+	engineName, dsName, namespace string,
 	spec *lmcachev1alpha1.LMCacheEngineSpec,
 	containerArgs []string,
 	defaultImageRepo string,
+	multiplier int32,
 ) *appsv1.DaemonSet {
-	selectorLabels := SelectorLabels(name)
-	podLabels := MergeLabels(StandardLabels(name), spec.PodLabels, selectorLabels)
+	selectorLabels := SelectorLabels(engineName)
+	podLabels := MergeLabels(StandardLabels(engineName), spec.PodLabels, selectorLabels, map[string]string{TierLabelKey: dsName})
+	if multiplier <= 1 {
+		// Base DS: keep template and selector byte-identical to the
+		// pre-DRA build — existing engines patch only what changed.
+		podLabels = MergeLabels(StandardLabels(engineName), spec.PodLabels, selectorLabels)
+	}
 	podAnnotations := spec.PodAnnotations
 
 	gpuVendor := derefString(spec.GPUVendor, lmcachev1alpha1.GPUVendorNvidia)
@@ -191,7 +247,7 @@ func buildDaemonSetCore(
 	// The DaemonSet references the local (same-namespace) managed copy
 	// created by the controller via reconcileRESPAuthSecret.
 	if spec.L2Backend != nil && spec.L2Backend.RESP != nil && spec.L2Backend.RESP.AuthSecretRef != nil {
-		secretName := RESPAuthSecretName(name)
+		secretName := RESPAuthSecretName(engineName)
 		optional := true
 		envVars = append(envVars,
 			corev1.EnvVar{
@@ -347,13 +403,13 @@ func buildDaemonSetCore(
 
 	ds := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+			Name:      dsName,
 			Namespace: namespace,
-			Labels:    StandardLabels(name),
+			Labels:    StandardLabels(engineName),
 		},
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{
-				MatchLabels: selectorLabels,
+				MatchLabels: tierSelectorLabels(selectorLabels, dsName, multiplier),
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
@@ -366,7 +422,7 @@ func buildDaemonSetCore(
 					RuntimeClassName:   runtimeClassName,
 					ServiceAccountName: spec.ServiceAccountName,
 					PriorityClassName:  spec.PriorityClassName,
-					NodeSelector:       spec.NodeSelector,
+					NodeSelector:       tierNodeSelector(namespace, engineName, spec, multiplier),
 					Affinity:           spec.Affinity,
 					Tolerations:        spec.Tolerations,
 					ImagePullSecrets:   spec.ImagePullSecrets,
@@ -401,4 +457,28 @@ func buildDaemonSetCore(
 	}
 
 	return ds
+}
+
+// tierSelectorLabels returns the DS selector match labels: SelectorLabels
+// alone for the base DS (unchanged for existing engines — spec.selector is
+// immutable), plus TierLabelKey for tier DSs. The base selector then
+// overlaps tier pods, which is safe: the DS controller adopts only
+// orphaned pods, and tier pods carry a controller ownerRef to their tier
+// DS.
+func tierSelectorLabels(selectorLabels map[string]string, dsName string, multiplier int32) map[string]string {
+	if multiplier <= 1 {
+		return selectorLabels
+	}
+	return MergeLabels(selectorLabels, map[string]string{TierLabelKey: dsName})
+}
+
+// tierNodeSelector returns the pod-template nodeSelector: the engine's
+// effective selector (spec.nodeSelector + placement label at the base
+// value) for tier 1, or the placement label pinned to the tier value for
+// N >= 2.
+func tierNodeSelector(namespace, name string, spec *lmcachev1alpha1.LMCacheEngineSpec, multiplier int32) map[string]string {
+	if multiplier <= 1 {
+		return EffectiveNodeSelector(namespace, name, spec)
+	}
+	return TierNodeSelector(namespace, name, spec, multiplier)
 }
