@@ -273,8 +273,13 @@ class EngineDrivenContext(ABC):
         )
 
     @abstractmethod
-    def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
-        """Commit retrieve. Inline: no-op. Shm: release read locks."""
+    def commit_retrieve(
+        self, key: IPCCacheServerKey, instance_id: int, failed: bool = False
+    ) -> bool:
+        """Commit retrieve. Inline: no-op. Shm: release read locks.
+
+        ``failed`` tells the server the worker did not get or apply the data.
+        """
         ...
 
     @abstractmethod

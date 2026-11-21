@@ -293,8 +293,10 @@ class EngineDrivenContextShm(EngineDrivenContext):
             )
         return self._build_slot_tensors(slots) if slots else None
 
-    def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
-        future = self.req_client.commit_retrieve(key, instance_id)
+    def commit_retrieve(
+        self, key: IPCCacheServerKey, instance_id: int, failed: bool = False
+    ) -> bool:
+        future = self.req_client.commit_retrieve(key, instance_id, failed)
         try:
             return bool(future.result(timeout=self.mq_timeout))
         except TimeoutError:
