@@ -204,6 +204,23 @@ def test_load_keeps_a_servers_order_at_equal_timestamps(tmp_path):
     assert [r.args["seq"] for r in trace.records] == [1, 2, 3]
 
 
+def test_load_keeps_a_servers_order_across_a_clock_step(tmp_path):
+    """A wall clock that steps back mid-recording must not reorder the
+    server's batches: the coordinator drops a seq that arrives late."""
+    path = _write(
+        str(tmp_path / "a.lct"),
+        [
+            (5.0, EVENTS_TRACE_BATCH, _batch("node-a", 1, 1)),
+            (3.0, EVENTS_TRACE_BATCH, _batch("node-a", 1, 2)),
+            (4.0, EVENTS_TRACE_BATCH, _batch("node-a", 1, 3)),
+        ],
+    )
+
+    trace = EventsTrace.load([path])
+
+    assert [r.args["seq"] for r in trace.records] == [1, 2, 3]
+
+
 def test_load_refuses_a_storage_level_file(tmp_path):
     path = str(tmp_path / "storage.lct")
     StorageTraceRecorder(path).close()
