@@ -49,20 +49,10 @@ find /opt/venv/lib/python3.12/site-packages -type d -name __pycache__ \
     -exec rm -rf {} + 2>/dev/null || true
 uv cache clean 2>/dev/null || true
 
-echo "--- :python: Installing vLLM nightly (pinned to cu130 index)"
-# The base image is nvidia/cuda:13.0.2-devel-ubuntu24.04 (system nvcc 13).
-# vLLM's generic nightly index (wheels.vllm.ai/nightly/vllm/) non-deterministically
-# resolves to either a cu128 or a cu130 torch wheel depending on which wheel
-# vLLM's nightly CI happened to publish that day. When the resolver picks a
-# cu128 torch, torch.utils.cpp_extension._check_cuda_version aborts the
-# LMCache editable install with:
-#   RuntimeError: The detected CUDA version (13.0) mismatches the version
-#   that was used to compile PyTorch (12.8).
-#
-# Pin to the cu130 sub-index so torch.version.cuda is always "13.0" and
-# matches the base image. This also lets us drop the HTML-scraping + apt
-# cuda-compiler alignment dance that lived here before.
-# (See https://docs.vllm.ai/ install tips → Nightly → CUDA 13.0.)
+echo "--- :python: Installing vLLM nightly (${VLLM_CUDA_VARIANT} index)"
+# vLLM's archive variant is independent of torch.version.cuda: its cu132
+# wheel can depend on cu130 PyTorch. Keep the CUDA major at 13 to match
+# the base image's nvcc, and retain each verified pin's archive variant.
 #
 # --reinstall-package for transformers / tokenizers / huggingface-hub /
 # safetensors / vllm forces uv to uninstall-and-reinstall those packages
@@ -116,7 +106,7 @@ if [[ -n "${PINNED_VLLM_VERSION:-}" ]]; then
                 sleep 2
             done
             if [[ "${full_sha}" =~ ^[0-9a-f]{40}$ ]]; then
-                archive_url="https://wheels.vllm.ai/${full_sha}/cu130"
+                archive_url="https://wheels.vllm.ai/${full_sha}/${VLLM_CUDA_VARIANT}"
             else
                 echo "[WARN] could not resolve full SHA for ${short_sha}; pip" \
                      "may fail if the wheel has rolled off the nightly index" >&2
@@ -140,7 +130,7 @@ uv pip install -U "${VLLM_INSTALL_SPEC}" \
     --reinstall-package safetensors \
     --reinstall-package vllm \
     "${PINNED_VLLM_INDEX_ARGS[@]+"${PINNED_VLLM_INDEX_ARGS[@]}"}" \
-    --extra-index-url https://wheels.vllm.ai/nightly/cu130 \
+    --extra-index-url "https://wheels.vllm.ai/nightly/${VLLM_CUDA_VARIANT}" \
     --extra-index-url https://download.pytorch.org/whl/cu130 \
     --index-strategy unsafe-best-match
 
@@ -247,7 +237,7 @@ for i in $(seq 1 "$MAX_AUTO_INSTALL"); do
 done
 
 echo "--- :mag: Verifying torch CUDA matches system nvcc"
-# Sanity check: fail fast with a clear message if the cu130 pin above
+# Sanity check: fail fast with a clear message if the selected CUDA index
 # somehow didn't produce a cu13x torch. Previously this mismatch surfaced
 # deep inside ninja as a cryptic `cusparse.h: No such file or directory`;
 # catching it here makes the failure mode obvious.
@@ -268,7 +258,7 @@ print(f"torch.version.cuda={tc!r}; system nvcc major={sys_major!r}")
 if torch_major and sys_major and torch_major != sys_major:
     sys.exit(
         f"CUDA major mismatch: torch={torch_major} vs nvcc={sys_major}. "
-        "Check the vLLM nightly cu130 index pin in setup-env.sh."
+        "Check the vLLM nightly CUDA variant in setup-env.sh."
     )
 PY
 
@@ -317,6 +307,10 @@ else
     echo "--- Installed packages ---" >&2
     uv pip freeze >&2 || true
     exit 1
+fi
+
+if [[ "${VLLM_CUDA_VARIANT}" == "cu132" ]]; then
+    source "${REPO_ROOT}/.buildkite/k3_harness/setup-cu132-compat.sh"
 fi
 
 echo "--- :white_check_mark: Environment ready"

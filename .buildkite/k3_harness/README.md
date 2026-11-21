@@ -71,6 +71,22 @@ This installs:
 1. **vLLM** from nightly wheel
 2. **LMCache** from PR source
 
+Unpinned vLLM canaries use the `cu132` nightly index. PR builds preserve the
+CUDA variant in the verified pin's `archive_index_url`; legacy pins without
+that field use `cu130`. For a manual version override without an archive URL,
+set `VLLM_CUDA_VARIANT` explicitly when testing a cu132 wheel. Both canary
+transports must report the same wheel version and variant before the pin
+writer publishes an immutable archive URL.
+
+For cu132 on older driver branches, setup loads the pinned NVIDIA
+`cuda-compat-13-2` userspace libraries inside the pod. Native drivers at 595
+or newer retain their own libraries. Setup records the GPU and host driver,
+then executes a numerical FlashAttention 2 check before serving tests. The
+[CUDA forward-compatibility documentation](https://docs.nvidia.com/deploy/cuda-compatibility/latest/forward-compatibility.html)
+defines the supported driver branches and hardware restrictions. This CI
+path was validated on an RTX PRO 6000 Blackwell runner with driver 580.105.08;
+it does not establish support for other RTX SKUs.
+
 Each pod has its own ephemeral filesystem that is cleanly erased after being shut down — no shared pip/uv cache, no cross-pod contention.
 
 ## Shared volumes

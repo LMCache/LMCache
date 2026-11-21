@@ -157,12 +157,10 @@ def test_get_tensor_prefers_the_first_matching_name() -> None:
 
 
 def _attention_spec() -> object:
-    """Registers a fake attention spec for testing
-    attention_layer_names_from_vllm()."""
+    """Create a real attention spec on either supported vLLM API."""
     kv_iface = pytest.importorskip("vllm.v1.kv_cache_interface")
-    return kv_iface.FullAttentionSpec(
-        block_size=16, num_kv_heads=8, head_size=64, dtype=torch.bfloat16
-    )
+    spec_type = getattr(kv_iface, "FullAttentionSpec", kv_iface.AttentionSpec)
+    return spec_type(block_size=16, num_kv_heads=8, head_size=64, dtype=torch.bfloat16)
 
 
 def _caches(*names: str) -> dict[str, torch.Tensor]:

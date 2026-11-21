@@ -588,9 +588,15 @@ steps:
   - label: ":test_tube: Verify {{matrix.inference_engine}} nightly / {{matrix.request_transport}}"
     if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
     command: |
+      bash -euo pipefail <<'BASH'
+      export USE_PINNED_VLLM=false
+      source .buildkite/k3_harness/resolve-pinned-vllm.sh
       .buildkite/k3_tests/multiprocess/run.sh vllm_bench
-      python3 -c 'import vllm; print(vllm.__version__)' \
-        > "verified_vllm_{{matrix.request_transport}}.txt"
+      {
+        python3 -c 'import vllm; print(vllm.__version__)'
+        printf 'cuda_variant=%s\n' "$${VLLM_CUDA_VARIANT}"
+      } > "verified_vllm_{{matrix.request_transport}}.txt"
+      BASH
     matrix: *vllm-smoke-matrix
     env:
       INFERENCE_ENGINE: "{{matrix.inference_engine}}"
@@ -651,7 +657,8 @@ steps:
     command: |
       buildkite-agent artifact download "verified_vllm_*.txt" .
       diff -u verified_vllm_zmq.txt verified_vllm_grpc.txt
-      VLLM_VERSION="$(cat verified_vllm_grpc.txt)" \
+      VLLM_VERSION="$(head -n1 verified_vllm_grpc.txt)" \
+        VLLM_CUDA_VARIANT="$(sed -n 's/^cuda_variant=//p' verified_vllm_grpc.txt)" \
         bash .github/scripts/pin-tested-vllm.sh
     timeout_in_minutes: 10
     agents: { queue: "k8s" }
