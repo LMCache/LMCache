@@ -1,6 +1,6 @@
 # `lmcache kvcache` CLI Command Design
 
-**Status:** Proposal  |  **Date:** 2026-03-19
+**Status:** `clear` and `list` implemented; remaining commands proposed
 
 ## Why
 
@@ -13,9 +13,9 @@ it. Part of **Phase 1** of the
 
 ## Design Principles
 
-`lmcache kvcache` is a **per-request management tool**. Every sub-command
-operates on a specific request's KV cache, identified by request ID or token
-sequence.
+`lmcache kvcache` manages cache state through HTTP. `list` enumerates objects
+in one L2 adapter, and `clear` clears L1. The proposed per-request commands
+identify KV cache by request ID or token sequence.
 
 ### All management goes through HTTP
 
@@ -55,6 +55,7 @@ request ID.
 
 ```
 lmcache kvcache
+├── list           # One page of L2 object keys and sizes
 ├── info           # Per-request cache state (locations, pinned status)
 ├── clear          # Clear all cached KV data in L1 (CPU)
 ├── pin            # Pin a request's KV cache to L1/CPU (may be rejected)
@@ -63,6 +64,7 @@ lmcache kvcache
 
 | Sub-command | Target | Description |
 |------------|--------|-------------|
+| `list` | L2 adapter | List one page, optionally filtered by model |
 | `info` | instance | Show per-request cache state: which chunks, where stored, pinned status |
 | `clear` | instance | Clear all cached KV data in L1 (CPU) |
 | `pin` | instance | Pin a request's KV cache to L1/CPU; may be rejected if memory pressure is too high |
@@ -70,19 +72,72 @@ lmcache kvcache
 
 ```bash
 $ lmcache kvcache -h
-usage: lmcache kvcache [-h] {clear} ...
+usage: lmcache kvcache [-h] {clear,list} ...
 
 Manage KV cache state.
 
 subcommands:
   clear         Clear all cached KV data in L1 (CPU)
+  list          List one page of L2 cache objects
 
 # info, pin, compress will appear here once implemented
 ```
 
+Each sub-command owns the shared output options (`--format`, `--output`,
+`-q`), matching the `quota` shape: `lmcache kvcache list --format json`.
+
 ---
 
 ## Commands in Detail
+
+### `list`
+
+```bash
+lmcache kvcache list --format json --url http://localhost:8080 \
+    --adapter s3 --model-name org/model --page-size 100
+```
+
+Send one `GET /cache/objects` with `tier=l2`, `page_size` (default 500,
+range 1–5000), and any supplied `adapter`, `model_name`, and `page_token`.
+Use URL encoding for every query value so opaque cursors and model names
+survive unchanged. Adapter selection and cursor interpretation belong to
+the server; the CLI neither decodes cursors nor follows additional pages.
+
+The response is represented by the existing Metrics output system:
+
+- `metrics.adapter` and `metrics.shared` retain the server values.
+- `metrics.entries` flattens each `{key, size_bytes}` object: every wire-key
+  field (`chunk_hash_hex`, `model_name`, `kv_rank`, `object_group_id`,
+  `cache_salt`, `tags`) becomes a JSON field next to `size_bytes`.
+  `--format json` preserves the full hash and the original tags object.
+- `metrics.next_page_token` is copied unchanged, including `null` at the end.
+  Callers pass a non-null token to the next invocation's `--page-token` with
+  the same server, adapter and model filter. Empty pages remain successful.
+
+Terminal rows shorten hashes longer than 12 hex characters to the first 12
+followed by `…`. Tags appear as comma-separated `key=value` pairs sorted by
+key, or `-` for empty tags. Files saved with `--format terminal` use the same
+shortened hashes.
+
+```text
+Chunk hash     Model      Rank  Group  Salt  Tags                 Bytes
+-----------------------------------------------------------------------
+0123456789ab…  org/model     0      0        env=prod,version=v2   4096
+```
+
+Output options belong to the `list` leaf. `--quiet` suppresses stdout while
+`--output` still writes the report. HTTP/JSON failures exit 1 and report to
+stderr with the server's `detail` when available. An adapter that does not
+support listing produces `HTTP 503 from <url>: <detail>`. Invalid arguments
+exit 2 before any HTTP request.
+The command reuses `lmcache.cli.http.fetch_json` and `normalize_url`, and
+`positive_int` for the lower page-size bound. No storage implementation or
+server API is imported by the CLI.
+
+`tests/cli/commands/test_kvcache.py` exercises the public CLI against a
+loopback HTTP fixture: pagination without auto-follow, exact query encoding,
+flattened key preservation, terminal/JSON/file output, invalid sizes,
+failures with surfaced error detail, and the existing L1 `clear` request.
 
 ### `info`
 
@@ -235,10 +290,17 @@ All CLI operations target the **MP HTTP server**
 
 ## Implementation
 
-- **Single `KVCacheCommand`** (`BaseCommand` subclass) with second-level
-  argparse subparsers. File: `lmcache/cli/commands/kvcache.py`.
-- **MP HTTP only:** `_http_request()` wraps `urllib.request` (no new deps).
-  All requests target the MP HTTP server.
+- **`KVCacheCommand`** (`CompositeCommand` subclass) with auto-discovered
+  leaf commands, matching the `quota` shape. Package:
+  `lmcache/cli/commands/kvcache/` (`clear_command.py`, `list_command.py`).
+  Each leaf owns the shared output options (`--format`, `--output`, `-q`).
+  Existing `kvcache -q clear` scripts also accept these options before
+  `clear`. Explicit leaf values override group values. Only `clear` had
+  this syntax before the group became a composite.
+- **MP HTTP only:** every leaf uses the shared CLI `fetch_json()` helper
+  (GET or POST with a JSON body), which surfaces the server's
+  `detail`/`error` explanation on HTTP failures. All requests target the
+  MP HTTP server.
 - **Indexing args** for future per-request sub-commands: positional
   `request_id` + optional `--start`/`--end`, added via a shared helper.
 - **Output:** `self.create_metrics()` — use `--format json | jq` for scripting.
@@ -250,5 +312,6 @@ All CLI operations target the **MP HTTP server**
 | Phase | Work |
 |-------|------|
 | **1a** | `clear` (HTTP exists) |
+| **implemented** | `list` (L2 object listing HTTP exists) |
 | **1b** | `pin` (needs per-instance endpoint), `compress` (needs per-instance endpoint) |
 | **future** | `info` (needs further design — deferred) |
