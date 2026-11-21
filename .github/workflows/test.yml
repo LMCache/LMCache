@@ -27,6 +27,8 @@ permissions:
 
 jobs:
   frontend-rendering:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     name: Frontend Node and browser regressions
     runs-on: ubuntu-24.04
     steps:
@@ -55,6 +57,7 @@ jobs:
     permissions:
       pull-requests: read
     outputs:
+      frontend: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.frontend == 'true' }}
       lmcache: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.lmcache == 'true' }}
       raw_block: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.raw_block == 'true' }}
       hf3fs_native: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.hf3fs_native == 'true' }}
@@ -70,6 +73,10 @@ jobs:
         id: filter
         with:
           filters: |
+            frontend:
+              - 'lmcache/lmcache_frontend/**'
+              - 'tests/lmcache_frontend/**'
+              - '.github/workflows/test.yml'
             lmcache:
               - '**.py'
               - 'pyproject.toml'
