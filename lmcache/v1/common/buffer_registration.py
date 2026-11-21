@@ -2,7 +2,8 @@
 """Storage-neutral registration contract for device staging buffers."""
 
 # Standard
-from typing import Protocol, runtime_checkable
+from abc import ABC, abstractmethod
+from typing import Protocol
 
 # Third Party
 import torch
@@ -38,22 +39,29 @@ class BufferRegistration(Protocol):
         ...
 
 
-@runtime_checkable
-class SlottedBufferRegistration(BufferRegistration, Protocol):
+class SlottedBufferRegistration(BufferRegistration, ABC):
     """Registration for independently streamed, aligned staging slots."""
 
+    @abstractmethod
     def slot_alignment(self, device_type: str) -> int:
-        """Return the required alignment in bytes, or zero for ordinary staging."""
+        """Return the slot alignment in bytes, or zero for an ordinary allocation."""
         ...
 
-    def register_slots(
+    @abstractmethod
+    def register(
         self,
         buffer: torch.Tensor,
-        object_sizes: tuple[int, ...],
+        *,
+        object_sizes: tuple[int, ...] = (),
+        stream_owner: object | None = None,
     ) -> None:
-        """Register a buffer and the logical group sizes in each aligned slot."""
+        """Register logical groups and retain the owning stream until deregistration.
+
+        An empty size tuple denotes a packed fallback allocation.
+        """
         ...
 
+    @abstractmethod
     def deregister_stream(self, device: object, stream: object) -> None:
         """Drain and release a slot stream before its owning context closes."""
         ...

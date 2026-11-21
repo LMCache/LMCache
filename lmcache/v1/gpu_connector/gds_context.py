@@ -119,6 +119,7 @@ def register_gds_gpu_buffer(
     buffer: torch.Tensor,
     *,
     object_sizes: tuple[int, ...] = (),
+    stream_owner: object | None = None,
 ) -> None:
     """Register a GPU staging buffer with each live slab on its current stream.
 
@@ -129,7 +130,9 @@ def register_gds_gpu_buffer(
     with _owner_contexts_lock:
         contexts = [get_gds_context(), *_owner_contexts.values()]
     for context in contexts:
-        context.register_gpu_buffer(buffer, object_sizes=object_sizes)
+        context.register_gpu_buffer(
+            buffer, object_sizes=object_sizes, stream_owner=stream_owner
+        )
 
 
 def deregister_gds_gpu_buffer(buffer: torch.Tensor) -> None:
@@ -144,19 +147,6 @@ def deregister_gds_gpu_buffer(buffer: torch.Tensor) -> None:
         context.deregister_gpu_buffer(buffer)
 
 
-def deregister_gds_stream(device: object, stream: object) -> None:
-    """Drain and unregister an auxiliary stream from every live GDS slab.
-
-    Args:
-        device: Device owning the cache context's stream.
-        stream: Stream whose cache-context lease has been drained.
-    """
-    with _owner_contexts_lock:
-        contexts = [get_gds_context(), *_owner_contexts.values()]
-    for context in contexts:
-        context.deregister_stream(device, stream)
-
-
 class GDSBufferRegistration(SlottedBufferRegistration):
     """Connect cache-context staging buffers to the server's live GDS slabs."""
 
@@ -167,21 +157,25 @@ class GDSBufferRegistration(SlottedBufferRegistration):
             contexts = [get_gds_context(), *_owner_contexts.values()]
             return GDS_SLOT_ALIGNMENT if any(c.io_concurrency for c in contexts) else 0
 
-    def register(self, buffer: torch.Tensor) -> None:
-        register_gds_gpu_buffer(buffer)
-
-    def register_slots(
+    def register(
         self,
         buffer: torch.Tensor,
-        object_sizes: tuple[int, ...],
+        *,
+        object_sizes: tuple[int, ...] = (),
+        stream_owner: object | None = None,
     ) -> None:
-        register_gds_gpu_buffer(buffer, object_sizes=object_sizes)
+        register_gds_gpu_buffer(
+            buffer, object_sizes=object_sizes, stream_owner=stream_owner
+        )
 
     def deregister(self, buffer: torch.Tensor) -> None:
         deregister_gds_gpu_buffer(buffer)
 
     def deregister_stream(self, device: object, stream: object) -> None:
-        deregister_gds_stream(device, stream)
+        with _owner_contexts_lock:
+            contexts = [get_gds_context(), *_owner_contexts.values()]
+        for context in contexts:
+            context.deregister_stream(device, stream)
 
 
 class SlabDirection(enum.Enum):
@@ -234,7 +228,7 @@ class GDSContext:
         # ``initialized`` defaults to False via the class attribute; it is
         # flipped to True by ``initialize``.
         self._slot_io: dict[int, _SlotIO] = {}
-        self._slot_stream_alignment: dict[int, bool] = {}
+        self._slot_streams: dict[int, object] = {}
         self._slab_size = 0
         self._slab_path = ""
         self._backend = backend
@@ -249,7 +243,7 @@ class GDSContext:
         self._buffers: list[torch.Tensor] = []
         self._base_ptrs: list[int] = []
         self._nbytes: list[int] = []
-        self._registered_streams: set[int] = set()  # maintained for close()
+        self._main_streams: dict[int, object | None] = {}
         self._io_lock = threading.RLock()
         self._io_concurrency = 0
 
@@ -334,38 +328,20 @@ class GDSContext:
                 raise RuntimeError("GDS context is closed")
             yield
 
-    def register_stream(
-        self,
-        device: object,
-        stream: object,
-        *,
-        staging_buffer: torch.Tensor | None = None,
-    ) -> None:
-        """Register an auxiliary stream once, without registering its buffer again.
-
-        Args:
-            device: Device owning the stream.
-            stream: Stream retained by the cache context until its close.
-            staging_buffer: Slot group on this stream, if its layout is known.
-
-        Call while holding io_scope. Uninitialized contexts are inert, matching
-        register_gpu_buffer. Native registration errors propagate to the caller.
-        """
-        if not self.initialized:
-            return
-        raw_stream = platform_stream.stream_handle(device, stream)
+    def register_stream(self, device: object, stream: object) -> None:
+        """Register an owned aligned slot stream inside its transfer scope."""
+        raw = platform_stream.stream_handle(device, stream)
         with self._registry_lock:
-            if raw_stream not in self._registered_streams:
-                aligned = (
-                    staging_buffer is not None
-                    and staging_buffer.data_ptr() in self._slot_io
+            if raw in self._main_streams:
+                raise ValueError(
+                    "A main stream cannot be registered as an aligned slot"
                 )
-                if aligned:
-                    self.backend.register_aligned_stream(raw_stream)
-                else:
-                    self.backend.register_stream(raw_stream)
-                self._slot_stream_alignment[raw_stream] = aligned
-                self._registered_streams.add(raw_stream)
+            if raw in self._slot_streams:
+                if self._slot_streams[raw] is not stream:
+                    raise ValueError("GDS slot stream belongs to another owner")
+                return
+            self.backend.register_aligned_stream(raw)
+            self._slot_streams[raw] = stream
 
     def deregister_stream(self, device: object, stream: object) -> None:
         """Drain an auxiliary stream before releasing its native registration.
@@ -389,7 +365,7 @@ class GDSContext:
             self.synchronize_and_check(device, stream)
             raw_stream = platform_stream.stream_handle(device, stream)
             with self._registry_lock:
-                if raw_stream in self._registered_streams:
+                if raw_stream in self._slot_streams:
                     try:
                         self.backend.deregister_stream(raw_stream)
                     except RuntimeError:
@@ -397,8 +373,7 @@ class GDSContext:
                             "GDSContext: deregister_stream failed after stream drain"
                         )
                     else:
-                        self._registered_streams.remove(raw_stream)
-                        self._slot_stream_alignment.pop(raw_stream, None)
+                        del self._slot_streams[raw_stream]
 
     def synchronize_and_check(self, device: object, stream: object) -> None:
         """Drain this stream and validate every retained deferred byte count.
@@ -430,6 +405,7 @@ class GDSContext:
         buffer: torch.Tensor,
         *,
         object_sizes: tuple[int, ...] = (),
+        stream_owner: object | None = None,
     ) -> None:
         """Register a staging buffer (and its stream) with the GDS library.
 
@@ -441,9 +417,10 @@ class GDSContext:
         Args:
             buffer: Contiguous GPU staging buffer, 4 KiB-aligned in size.
             object_sizes: Logical group sizes for aligned cuFile slots, or empty.
+            stream_owner: Keeps a privately allocated main stream alive.
 
         Raises:
-            ValueError: The supplied slot stride does not partition the buffer.
+            ValueError: The supplied group sizes do not partition the buffer.
         """
         if not self.initialized:
             return
@@ -457,9 +434,19 @@ class GDSContext:
             stream_registered = False
             registered_regions: list[torch.Tensor] = []
             try:
-                if raw_stream not in self._registered_streams:
+                if raw_stream in self._slot_streams:
+                    raise ValueError(
+                        "An aligned slot cannot be registered as a main stream"
+                    )
+                if (
+                    stream_owner is not None
+                    and raw_stream in self._main_streams
+                    and self._main_streams[raw_stream] is not stream_owner
+                ):
+                    raise ValueError("GDS main stream belongs to another owner")
+                if raw_stream not in self._main_streams:
                     self.backend.register_stream(raw_stream)
-                    self._registered_streams.add(raw_stream)
+                    self._main_streams[raw_stream] = stream_owner
                     stream_registered = True
                 for region in self._buffer_regions(buffer, slot_bytes):
                     self._register_region_locked(region)
@@ -474,13 +461,7 @@ class GDSContext:
                             "GDSContext: failed to roll back buffer registration"
                         )
                 if stream_registered:
-                    try:
-                        self.backend.deregister_stream(raw_stream)
-                    except Exception:
-                        logger.exception(
-                            "GDSContext: failed to roll back stream registration"
-                        )
-                    self._registered_streams.discard(raw_stream)
+                    self._deregister_main_stream_locked(raw_stream)
                 raise
 
     def deregister_gpu_buffer(self, buffer: torch.Tensor) -> None:
@@ -502,16 +483,12 @@ class GDSContext:
                     del self._slot_io[ptr]
             start = bisect.bisect_left(self._base_ptrs, lo)
             end = bisect.bisect_left(self._base_ptrs, lo + buffer.nbytes)
+            if buffer.nbytes and (start == end or self._base_ptrs[start] != lo):
+                raise ValueError(f"GDS buffer at 0x{lo:x} is not registered")
             for region in self._buffers[start:end]:
                 self._deregister_region_locked(region)
-            if raw_stream in self._registered_streams:
-                try:
-                    self.backend.deregister_stream(raw_stream)
-                except Exception as e:
-                    logger.warning(
-                        "GDSContext.deregister_gpu_buffer: deregister_stream: %s", e
-                    )
-                self._registered_streams.discard(raw_stream)
+            if raw_stream in self._main_streams:
+                self._deregister_main_stream_locked(raw_stream)
         # Stream is synced above, so its submissions' DMAs are done -- drop them.
         with self._submissions_lock:
             self._submissions.pop(raw_stream, None)
@@ -542,7 +519,7 @@ class GDSContext:
         )
         nbytes = memory_obj.get_size()
         buf = gpu_buffer.view(torch.uint8)
-        if self._slot_stream_alignment.get(raw_stream):
+        if raw_stream in self._slot_streams:
             plan = self._slot_io.get(buf.data_ptr())
             if (
                 plan is None
@@ -609,13 +586,11 @@ class GDSContext:
             self._buffers.clear()
             self._base_ptrs.clear()
             self._nbytes.clear()
-            for raw_stream in list(self._registered_streams):
+            for raw_stream in (*self._slot_streams, *self._main_streams):
                 try:
                     self.backend.deregister_stream(raw_stream)
                 except Exception as e:
                     logger.warning("GDSContext.close: deregister_stream: %s", e)
-            self._registered_streams.clear()
-            self._slot_stream_alignment.clear()
             self._slot_io.clear()
         if self._slab_handle is not None:
             try:
@@ -628,6 +603,10 @@ class GDSContext:
                 self.backend.close_driver()
             except Exception as e:
                 logger.warning("GDSContext.close: driver close failed: %s", e)
+                if self.io_concurrency:
+                    raise
+        self._main_streams.clear()
+        self._slot_streams.clear()
         self.initialized = False
         self._io_concurrency = 0
 
@@ -707,6 +686,15 @@ class GDSContext:
             base,
             len(self._buffers),
         )
+
+    def _deregister_main_stream_locked(self, raw: int) -> None:
+        try:
+            self.backend.deregister_stream(raw)
+        except Exception:
+            logger.exception("GDS main stream deregistration failed")
+            if self._main_streams[raw] is not None:
+                return  # Retain the native owner for slab teardown.
+        del self._main_streams[raw]
 
     def _deregister_region_locked(self, buffer: torch.Tensor) -> None:
         """Deregister one region with the GDS library (caller holds the lock).
@@ -799,7 +787,7 @@ class GDSContext:
             st.uncommitted.append(sub)
             # A slot owns one bounded object and explicitly drains its segments
             # before scatter or reuse. Other streams use periodic checkpoints.
-            if raw_stream in self._slot_stream_alignment:
+            if raw_stream in self._slot_streams:
                 return
             st.ops_since_checkpoint += 1
             if st.ops_since_checkpoint >= _SUBMISSION_CHECKPOINT_EVERY:

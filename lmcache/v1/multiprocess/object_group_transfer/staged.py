@@ -399,14 +399,8 @@ def _run_gds_concurrent(
             return False
         count = min(cache_context.max_batch_size, context.io_concurrency)
         streams = [cache_context.get_gds_transfer_stream(slot) for slot in range(count)]
-        for slot, stream in enumerate(streams):
-            context.register_stream(
-                cache_context.device,
-                stream,
-                staging_buffer=cache_context.get_temp_object_group_buffer(
-                    slot, object_group_id
-                ),
-            )
+        for stream in streams:
+            context.register_stream(cache_context.device, stream)
         ready = cache_context.record_gds_transfer_ready()
         pending: deque[_GDSSlot] = deque()
 

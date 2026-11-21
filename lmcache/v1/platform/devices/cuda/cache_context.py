@@ -26,7 +26,10 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache import torch_dev
-from lmcache.v1.common.buffer_registration import BufferRegistration, SlottedBufferRegistration
+from lmcache.v1.common.buffer_registration import (
+    BufferRegistration,
+    SlottedBufferRegistration,
+)
 from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.group_view import (
     EngineGroupInfo,
@@ -124,7 +127,10 @@ class _TempGPUBuffer:
         )
         self.aligned_object_sizes: tuple[int, ...] = ()
         if sizes and all(sizes) and staging_alignment:
-            padded_bytes = sum(round_up(size, staging_alignment) for size in sizes) * max_batch_size
+            padded_bytes = (
+                sum(round_up(size, staging_alignment) for size in sizes)
+                * max_batch_size
+            )
             try:
                 backing = torch.empty(
                     padded_bytes + staging_alignment - 1,
@@ -371,6 +377,23 @@ class _TempGPUBuffer:
         )
 
 
+class _OwnedCUDAStream(torch.cuda.ExternalStream):
+    """A PyTorch view holding its privately allocated native CUDA stream."""
+
+    cupy_stream: "cupy.cuda.Stream"
+
+    @classmethod
+    def create(cls, device: torch.device) -> "_OwnedCUDAStream":
+        # Third Party
+        import cupy
+
+        with torch.cuda.device(device):
+            owner = cupy.cuda.Stream(non_blocking=True)
+            stream = cls(owner.ptr, device=device)
+            stream.cupy_stream = owner
+            return stream
+
+
 class GPUCacheContext(BaseCacheContext):
     """
     Manages the shape and pointers to vLLM GPU KV cache tensors.
@@ -493,15 +516,19 @@ class GPUCacheContext(BaseCacheContext):
             full_sw_kv=full_sw_kv,
         )
 
-        # GPU streams
-        self.cuda_stream_ = torch_dev.Stream(device=self.device_)
-
         # Third Party
         import cupy
 
-        self.cupy_stream_: "cupy.cuda.Stream" = cupy.cuda.ExternalStream(
-            self.cuda_stream_.cuda_stream, self.device_.index
-        )
+        self.cupy_stream_: "cupy.cuda.Stream"
+        if self._staging_alignment:
+            owner = _OwnedCUDAStream.create(self.device_)
+            self.cuda_stream_ = owner
+            self.cupy_stream_ = owner.cupy_stream
+        else:
+            self.cuda_stream_ = torch_dev.Stream(device=self.device_)
+            self.cupy_stream_ = cupy.cuda.ExternalStream(
+                self.cuda_stream_.cuda_stream, self.device_.index
+            )
 
         # Extra initialization
         self.cupy_stream_.launch_host_func(
@@ -546,10 +573,13 @@ class GPUCacheContext(BaseCacheContext):
             RuntimeError: If registration fails; the adapter must roll back.
         """
         with torch_dev.stream(self.cuda_stream_):
-            if self._staging_alignment and isinstance(registration, SlottedBufferRegistration):
-                registration.register_slots(
+            if self._staging_alignment and isinstance(
+                registration, SlottedBufferRegistration
+            ):
+                registration.register(
                     self._temp_buffer.buffer,
-                    self._temp_buffer.aligned_object_sizes,
+                    object_sizes=self._temp_buffer.aligned_object_sizes,
+                    stream_owner=self.cuda_stream_,
                 )
             else:
                 registration.register(self._temp_buffer.buffer)
@@ -615,7 +645,7 @@ class GPUCacheContext(BaseCacheContext):
         if not 0 <= slot < self.max_batch_size:
             raise ValueError("GDS slot is outside the staging buffer")
         if slot not in self._gds_streams:
-            self._gds_streams[slot] = torch.cuda.Stream(device=self.device_)
+            self._gds_streams[slot] = _OwnedCUDAStream.create(self.device_)
         return self._gds_streams[slot]
 
     @contextmanager

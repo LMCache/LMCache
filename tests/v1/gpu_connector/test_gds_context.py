@@ -38,6 +38,13 @@ from lmcache.v1.gpu_connector.gds_context import (
 )
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObjMetadata
 
+requires_native_cuda = pytest.mark.skipif(
+    torch_device_type != "cuda"
+    or not torch_dev.is_available()
+    or torch.version.hip is not None,
+    reason="requires CUDA",
+)
+
 
 def _fake_stream(handle: int):
     """A stand-in for a platform stream (no accelerator needed)."""
@@ -553,7 +560,7 @@ def test_l1_context_routes_by_owner_and_limits_process_slabs(monkeypatch, backen
         registration = gds_context.GDSBufferRegistration()
         registration.register(tensor)
         registration.deregister(tensor)
-        register.assert_called_once_with(tensor, object_sizes=())
+        register.assert_called_once_with(tensor, object_sizes=(), stream_owner=None)
         deregister.assert_called_once_with(tensor)
         with pytest.raises(ValueError, match="one GDS"):
             gds_context.initialize_l1_gds_context(owner + 1, config)
@@ -593,7 +600,7 @@ def test_aligned_slot_preserves_payload_and_owns_the_tail(
     )
     try:
         ctx.register_gpu_buffer(buf, object_sizes=(4097, 123))
-        ctx.register_stream(buf.device, _fake_stream(2), staging_buffer=logical)
+        ctx.register_stream(buf.device, _fake_stream(2))
         backend.register_aligned_stream.assert_called_once_with(2)
         _use_fake_stream(monkeypatch, 2)
         short = Submission(8192, 4096, 0)
@@ -650,3 +657,65 @@ def test_large_direct_cufile_groups_keep_four_aligned_slots(size, backend, monke
     for i in range(4):
         view = buf.get_temp_object_group_buffer(i, 0)
         assert view.nbytes == size and view.data_ptr() % 65536 == 0
+
+
+def test_slot_registration_rejects_main_stream_alias_in_both_orders(
+    monkeypatch, backend
+):
+    ctx = GDSContext(backend)
+    ctx.initialized = True
+    buf = torch.empty(4096, dtype=torch.uint8)
+    slot = _fake_stream(17)
+    _use_fake_stream(monkeypatch, 17)
+    ctx.register_gpu_buffer(buf)
+    with pytest.raises(ValueError, match="main stream"):
+        ctx.register_stream(buf.device, slot)
+    ctx.deregister_gpu_buffer(buf)
+    ctx.register_stream(buf.device, slot)
+    ctx.register_stream(buf.device, slot)
+    backend.register_aligned_stream.assert_called_once_with(17)
+    with pytest.raises(ValueError, match="another owner"):
+        ctx.register_stream(buf.device, _fake_stream(17))
+    with pytest.raises(ValueError, match="aligned slot"):
+        ctx.register_gpu_buffer(buf)
+
+
+@requires_native_cuda
+def test_live_owned_cuda_streams_have_distinct_handles():
+    # First Party
+    from lmcache.v1.platform.devices.cuda.cache_context import _OwnedCUDAStream
+
+    streams = [_OwnedCUDAStream.create(torch.device("cuda", 0)) for _ in range(40)]
+    assert len({s.cuda_stream for s in streams}) == len(streams)
+    assert all(s.cuda_stream == s.cupy_stream.ptr for s in streams)
+
+
+@requires_native_cuda
+def test_factory_registers_and_releases_aligned_slots(monkeypatch, backend):
+    # First Party
+    from lmcache.v1.platform.cache_context import create_cache_context
+
+    backend.name = "cufile"
+    slab = GDSContext(backend)
+    slab.initialize(GdsL1Config("/test", 1 << 30, io_concurrency=4))
+    monkeypatch.setattr(gds_context, "get_gds_context", lambda: slab)
+    kv = torch.empty(2, 4, 16, 2, 8, device="cuda")
+    wrapper = SimpleNamespace(to_tensor=lambda: kv, close=Mock())
+    try:
+        ctx = create_cache_context(
+            [wrapper], buffer_registration=gds_context.GDSBufferRegistration()
+        )
+        try:
+            for slot in range(ctx.max_batch_size):
+                assert slab.has_aligned_slot(ctx.get_temp_object_group_buffer(slot, 0))
+            stream = ctx.get_gds_transfer_stream(0)
+            slab.register_stream(ctx.device, stream)
+            main = ctx.stream.cuda_stream
+            assert main != stream.cuda_stream
+        finally:
+            ctx.close()
+        handles = [call.args[0] for call in backend.deregister_stream.call_args_list]
+        assert handles == [stream.cuda_stream, main]
+        wrapper.close.assert_called_once()
+    finally:
+        slab.close()
