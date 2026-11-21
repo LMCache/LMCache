@@ -342,6 +342,24 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         shm_name = self._shm_pool_info["shm_name"]
         pool_size = self._shm_pool_info["pool_size"]
         self._ctx.validate_chunk_size(payload.chunk_size)
+        if payload.block_size <= 0:
+            raise ValueError(f"block_size must be positive, got {payload.block_size}")
+        if payload.chunk_size % payload.block_size:
+            raise ValueError(
+                f"chunk_size {payload.chunk_size} must be a multiple of "
+                f"block_size {payload.block_size}"
+            )
+
+        num_physical_slots = payload.num_physical_slots
+        if num_physical_slots <= 0:
+            raise ValueError(
+                f"num_physical_slots must be positive, got {num_physical_slots}"
+            )
+        if not payload.group_layouts and num_physical_slots != payload.chunk_size:
+            raise ValueError(
+                f"num_physical_slots {num_physical_slots} must equal chunk_size "
+                f"{payload.chunk_size} for a single uncompressed group"
+            )
 
         now = time.monotonic()
         with self._lock:
@@ -377,12 +395,6 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 "'bfloat16' for torch.bfloat16, 'float32' for torch.float32)."
             )
 
-        num_physical_slots = payload.num_physical_slots
-        if num_physical_slots <= 0:
-            raise ValueError(
-                f"num_physical_slots must be positive, got {num_physical_slots}"
-            )
-
         shape = (
             torch.Size(
                 [payload.num_layers, num_physical_slots, payload.hidden_dim_size]
@@ -404,8 +416,6 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         "engine-driven registration"
                     )
                 g_slots = gl.num_physical_slots
-                if g_slots is None:
-                    g_slots = gl.window_tokens or payload.chunk_size
                 if g_slots <= 0:
                     raise ValueError(
                         f"Group num_physical_slots must be positive, got {g_slots}"

@@ -8,7 +8,7 @@ protocol wiring, store_q's fail-closed guards, and composition through
 # Standard
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 import contextlib
 import time
 
@@ -61,25 +61,34 @@ def _stub_registration(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     return create
 
 
-def _register(module: QStoreModule, instance_id: int = 1) -> None:
+def _register(
+    module: QStoreModule,
+    instance_id: int = 1,
+    chunk_size: int | None = None,
+) -> None:
     """Registers a Q ring with the module, using the stubbed
     create_cache_context."""
     module.register_q_cache(
-        instance_id, MagicMock(), *REGISTER_ARGS, MagicMock(), MagicMock(), []
+        instance_id,
+        MagicMock(),
+        *REGISTER_ARGS,
+        MagicMock(),
+        MagicMock(),
+        [],
+        chunk_size=chunk_size,
     )
 
 
-def test_register_inserts_unlatched_entry(monkeypatch) -> None:
-    """Checks that successful registered entries inserts an entry to be
-    tracked."""
+def test_register_inserts_effective_chunk_size(monkeypatch) -> None:
+    """Registration keeps a client size larger than the server minimum."""
     _stub_registration(monkeypatch)
     module = _module()
 
-    _register(module)
+    _register(module, chunk_size=512)
 
     assert module.tracked_instance_count() == 1
     entry = module.get_and_touch_context_entry(1)
-    assert entry is not None and entry.chunk_size == 256
+    assert entry is not None and entry.chunk_size == 512
 
 
 def test_duplicate_register_refreshes_without_rebuilding(monkeypatch) -> None:
@@ -262,7 +271,7 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
     module._q_contexts[1] = ContextEntry(
         cache_context,
         *REGISTER_ARGS,
-        256,
+        512,
         time.monotonic(),
         event_backend=stub_device,
     )
@@ -272,6 +281,7 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
     assert ok is False
     assert handle == b"event-handle"
     assert stub_device.created[0].records == 1
+    assert cache_context.calculate_num_blocks.call_args_list[0] == call(512, 0)
     cast(MagicMock, ctx.storage_manager.reserve_write).assert_not_called()
     cast(MagicMock, ctx.event_bus.publish).assert_not_called()
 
@@ -808,8 +818,10 @@ def test_lazy_l1_objects_copy_through_the_boundary_splitting_helper(
     block1_layer1, block0_layer0 = pieces[1][1], pieces[0][0]
     hosts = [(1000, 5000, 32), (1032, 5032, 16)]
     devices = [block1_layer1.data_ptr(), block0_layer0.data_ptr()]
-    for call, (host, offset, nbytes), dev in zip(calls, hosts, devices, strict=True):
-        dest, src, size, _direction, host_offset, alignment = call
+    for copy_args, (host, offset, nbytes), dev in zip(
+        calls, hosts, devices, strict=True
+    ):
+        dest, src, size, _direction, host_offset, alignment = copy_args
         assert (dest, src) == ((dev, host) if to_ring else (host, dev))
         assert (size, host_offset) == (nbytes, offset)
         assert alignment == LazyMemoryAllocator.PIN_CHUNK_SIZE

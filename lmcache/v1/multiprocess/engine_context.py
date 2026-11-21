@@ -451,12 +451,12 @@ class MPCacheServerContext:
             chunk_size: Effective logical tokens per registered chunk.
 
         Raises:
-            ValueError: If the size is below the configured server minimum.
+            ValueError: If the size is below the server chunk size.
         """
-        if chunk_size < self._configured_chunk_size:
+        if chunk_size < self._chunk_size:
             raise ValueError(
-                f"chunk_size must be at least the server minimum "
-                f"{self._configured_chunk_size}, got {chunk_size}"
+                f"chunk_size must be at least the current server chunk size "
+                f"{self._chunk_size}, got {chunk_size}"
             )
 
     def negotiate_chunk_size(self, required_alignment: int) -> int:

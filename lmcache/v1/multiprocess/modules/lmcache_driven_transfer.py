@@ -884,7 +884,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             if key.worker_id == 0 and self._ctx.event_bus.has_subscribers(
                 EventType.MP_TOKENS
             ):
-                self._publish_token_bindings(key, obj_keys_per_obj_group[0])
+                self._publish_token_bindings(key, obj_keys_per_obj_group[0], chunk_size)
 
             transfer_key = next_transfer_key(key.request_id)
             self._ctx.event_bus.publish_on_stream(
@@ -955,7 +955,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
                 if unfull_obj_keys:
                     unfull_reserved = self._store_unfull_chunk_objects(
-                        cache_context, key, unfull_obj_keys, unfull_block_ids, l1_owners
+                        cache_context,
+                        key,
+                        unfull_obj_keys,
+                        unfull_block_ids,
+                        l1_owners,
+                        chunk_size,
                     )
                     all_dict.update(unfull_reserved)
                     total_bytes += sum(
@@ -1341,6 +1346,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         ],
                         unfull_block_ids,
                         max(0, skip_first_n_tokens - num_chunks * chunk_size),
+                        chunk_size,
                     )
                     prefetched_keys.extend(unfull_retained_keys)
             except Exception:
@@ -1391,7 +1397,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         )
 
     def _publish_token_bindings(
-        self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]
+        self,
+        key: IPCCacheServerKey,
+        obj_keys: list[ObjectKey],
+        chunk_size: int,
     ) -> None:
         """Publish one ``MP_TOKENS`` event for ``key``'s chunks.
 
@@ -1405,14 +1414,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         Args:
             key: The IPC key of the store being submitted.
             obj_keys: One ObjectKey per complete chunk, in chunk order.
+            chunk_size: Effective logical tokens per registered chunk.
         """
         # Complete chunks in [key.start, key.end) paired with the absolute
         # position of each chunk's first token. Prefix-chained chunk hashes
         # imply a position without revealing it, so it is reported here. A
         # trailing partial chunk has no stored KV to bind to.
-        chunk_size = self._ctx.layout_desc_registry.get_chunk_size(
-            key.model_name, key.world_size
-        )
         token_ids = unpack_token_ids(key.token_bytes)
         effective_len = min(len(token_ids), key.end)
         num_complete = effective_len - effective_len % chunk_size
@@ -1465,6 +1472,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         obj_keys: list[ObjectKey],
         block_ids: list[list[int]],
         l1_owners: dict[ObjectKey, int],
+        chunk_size: int,
     ) -> dict[ObjectKey, MemoryObj]:
         """Reserve and copy out one object per object group for an unfull chunk.
 
@@ -1481,6 +1489,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             block_ids: The unfull chunk's block IDs per kernel group.
             l1_owners: Transaction owners, captured before each copy for abort
                 after the stream drains. Uncaptured reservations retain write TTL.
+            chunk_size: Effective logical tokens per registered chunk.
 
         Returns:
             The reserved objects, keyed by object key.
@@ -1489,9 +1498,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ValueError: If a kernel group has no block for the unfull chunk.
         """
         manager = cache_context.kv_layer_groups_manager
-        chunk_size = self._ctx.layout_desc_registry.get_chunk_size(
-            key.model_name, key.world_size
-        )
         block_ids_gpu, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
             cache_context, block_ids, key.end % chunk_size
         )
@@ -1554,6 +1560,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         obj_group_ids: list[int],
         block_ids: list[list[int]],
         skip_first_n_tokens: int,
+        chunk_size: int,
     ) -> int:
         """Copy an unfull chunk's read-locked objects into the GPU blocks.
 
@@ -1569,6 +1576,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             block_ids: The unfull chunk's block IDs per kernel group.
             skip_first_n_tokens: Leading tokens of the unfull chunk not to
                 write: the engine's prefix cache holds them in shared blocks.
+            chunk_size: Effective logical tokens per registered chunk.
 
         Returns:
             The bytes copied.
@@ -1578,9 +1586,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 buffer (a store never keeps one that does not), or a kernel
                 group has no block for the unfull chunk.
         """
-        chunk_size = self._ctx.layout_desc_registry.get_chunk_size(
-            key.model_name, key.world_size
-        )
         block_ids_gpu, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
             cache_context,
             block_ids,
