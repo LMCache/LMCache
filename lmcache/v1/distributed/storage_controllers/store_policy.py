@@ -2,16 +2,17 @@
 """
 Store policy interface and default implementation for L1-to-L2 storage decisions.
 
-The store policy makes two decisions after data is written to L1:
-1. Which L2 adapter(s) should each key be stored to?
-2. After a successful L2 store, should the key be deleted from L1?
+The store policy makes these decisions after data is written to L1:
+1. Should the key be stored to L2 at all?
+2. Which L2 adapter(s) should each key be stored to?
+3. After a successful L2 store, should the key be deleted from L1?
 """
 
 # Standard
 from abc import ABC, abstractmethod
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import UNFULL_CHUNK_ATTRIBUTE, ObjectKey
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 
@@ -21,8 +22,10 @@ class StorePolicy(ABC):
     Abstract interface for store decisions.
 
     The store policy is called by the StoreController to decide:
-    1. Which adapter(s) to store each key to (select_store_targets).
-    2. Which keys to delete from L1 after successful L2 store
+    1. Whether a key goes to L2 at all (should_store; by default every key
+       except unfull-chunk tails).
+    2. Which adapter(s) to store each key to (select_store_targets).
+    3. Which keys to delete from L1 after successful L2 store
        (select_l1_deletions).
 
     Args:
@@ -33,6 +36,25 @@ class StorePolicy(ABC):
 
     def __init__(self, l1_managers: list[L1ManagerInterface]) -> None:
         self._l1_managers = l1_managers
+
+    def should_store(self, key: ObjectKey) -> bool:
+        """
+        Decide whether a key just written to L1 is a candidate for L2.
+
+        The StoreController drops keys this returns ``False`` for before
+        they are queued, so they never reach ``select_store_targets``.
+        The default skips unfull-chunk tails (keys whose
+        ``extra_attributes`` set ``UNFULL_CHUNK_ATTRIBUTE``): lookups read
+        tails from L1 only. Override to skip by other key fields (tags,
+        cache_salt, ...) or to store tails as well.
+
+        Args:
+            key: A key that was just written to L1.
+
+        Returns:
+            Whether ``key`` may be stored to L2.
+        """
+        return not key.extra_attributes.get(UNFULL_CHUNK_ATTRIBUTE, False)
 
     @abstractmethod
     def select_store_targets(

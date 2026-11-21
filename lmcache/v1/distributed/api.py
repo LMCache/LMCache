@@ -246,6 +246,34 @@ class ObjectKeyIdentity:
         object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
 
+UNFULL_CHUNK_ATTRIBUTE = "_lmcache_internal.unfull_chunk"
+"""``ObjectKey.extra_attributes`` entry set to ``True`` on the key of an
+unfull chunk (the tail after the last full chunk). It does not change the
+key's identity; ``StorePolicy.should_store`` reads it to keep tails out of L2,
+since lookups read tails from L1 only.
+
+The name is outside the ``lmcache.`` prefix that connectors copy from
+``kv_transfer_params``, and :func:`_request_extra_attributes` drops it from
+request configs, so only the server can set it."""
+
+
+def _request_extra_attributes(
+    request_configs: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Return the ``extra_attributes`` for keys built from request configs.
+
+    Server-internal attributes (:data:`UNFULL_CHUNK_ATTRIBUTE`) are dropped,
+    so a request cannot set them.
+    """
+    if not request_configs:
+        return {}
+    return {
+        key: value
+        for key, value in request_configs.items()
+        if key != UNFULL_CHUNK_ATTRIBUTE
+    }
+
+
 @dataclass(frozen=True, init=False)
 class ObjectKey:
     """
@@ -260,7 +288,8 @@ class ObjectKey:
     """Request-scoped metadata exposed to L2 adapters.
 
     This field is excluded from equality, hashing, and ``repr``.
-    Upstream modules may enrich it before dispatch.
+    Upstream modules may enrich it before dispatch (for example
+    :data:`UNFULL_CHUNK_ATTRIBUTE`).
     L1 managers and L2 adapters should not mutate it.
     """
 
@@ -872,8 +901,9 @@ def ipc_key_to_object_keys(
     where a caller passes ``ipc_key`` but forgets the salt.
 
     ``request_configs`` is likewise read from ``ipc_key`` and exposed through
-    every produced key's ``extra_attributes`` field. Each key receives a
-    shallow copy so modules can enrich one key without affecting another.
+    every produced key's ``extra_attributes`` field, without server-internal
+    attributes. Each key receives a shallow copy so modules can enrich one key
+    without affecting another.
 
     Args:
         ipc_key: The IPC key providing model_name, world_size, worker_id,
@@ -889,9 +919,7 @@ def ipc_key_to_object_keys(
         for ``object_group_ids[i]``.
     """
     cache_salt = ipc_key.cache_salt
-    extra_attributes = (
-        ipc_key.request_configs if ipc_key.request_configs is not None else {}
-    )
+    extra_attributes = _request_extra_attributes(ipc_key.request_configs)
     tags = get_request_tags(ipc_key.request_configs)
 
     return [
@@ -960,9 +988,7 @@ def ipc_key_to_grouped_object_keys(
         configs are present.
     """
     tags = get_request_tags(ipc_key.request_configs)
-    extra_attributes = (
-        ipc_key.request_configs if ipc_key.request_configs is not None else {}
-    )
+    extra_attributes = _request_extra_attributes(ipc_key.request_configs)
     rows: list[GroupedObjectKeys] = []
     for object_group_id in object_group_ids:
         layout_desc = group_layout_descs.get(object_group_id)

@@ -21,7 +21,11 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    UNFULL_CHUNK_ATTRIBUTE,
+    MemoryLayoutDesc,
+    ObjectKey,
+)
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -68,6 +72,16 @@ def make_object_key(chunk_id: int, kv_rank: int = 0) -> ObjectKey:
         chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
         model_name="test_model",
         kv_rank=kv_rank,
+    )
+
+
+def make_unfull_chunk_key(chunk_id: int) -> ObjectKey:
+    """Create an unfull-chunk (tail) key, marked as the server marks it."""
+    return ObjectKey(
+        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+        model_name="test_model",
+        kv_rank=0,
+        extra_attributes={UNFULL_CHUNK_ATTRIBUTE: True},
     )
 
 
@@ -346,6 +360,44 @@ class TestStoreControllerSingleAdapter:
 
         assert adapter.debug_get_stored_object_count() == 0
         assert l1_manager.delete(keys)[keys[0]] == L1Error.SUCCESS
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_unfull_chunk_is_not_stored_to_l2(self, l1_manager):
+        """An unfull-chunk tail stays in L1 and never reaches the policy's
+        target selection, while a full chunk committed in the same call is
+        still stored (#6747)."""
+        seen: list[ObjectKey] = []
+
+        class RecordingPolicy(DefaultStorePolicy):
+            def select_store_targets(self, keys, adapters):
+                seen.extend(keys)
+                return super().select_store_targets(keys, adapters)
+
+        adapter = make_adapter()
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=RecordingPolicy([l1_manager]),
+        )
+        ctrl.start()
+
+        tail, full = make_unfull_chunk_key(0), make_object_key(1)
+        assert write_keys_to_l1(l1_manager, [tail, full], make_layout()) == [
+            tail,
+            full,
+        ]
+
+        assert wait_for_condition(lambda: adapter.debug_has_key(full))
+        time.sleep(0.3)
+        assert not adapter.debug_has_key(tail)
+        assert adapter.debug_get_stored_object_count() == 1
+        assert seen == [full]
+        # The tail is still resident in L1.
+        assert l1_manager.reserve_read([tail])[tail][0] == L1Error.SUCCESS
+        l1_manager.finish_read([tail])
 
         ctrl.stop()
         adapter.close()
@@ -1011,6 +1063,30 @@ class TestStoreControllerCustomPolicy:
         assert adapter.debug_get_stored_object_count() == 0, (
             "No objects should be stored when policy skips all adapters"
         )
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_policy_can_store_unfull_chunks(self, l1_manager):
+        """A policy that overrides should_store stores tails to L2 too."""
+
+        class StoreEverythingPolicy(DefaultStorePolicy):
+            def should_store(self, key):
+                return True
+
+        adapter = make_adapter()
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=StoreEverythingPolicy([l1_manager]),
+        )
+        ctrl.start()
+
+        tail = make_unfull_chunk_key(0)
+        write_keys_to_l1(l1_manager, [tail], make_layout())
+
+        assert wait_for_condition(lambda: adapter.debug_has_key(tail))
 
         ctrl.stop()
         adapter.close()

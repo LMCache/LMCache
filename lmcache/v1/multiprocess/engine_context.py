@@ -14,6 +14,7 @@ from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
+    UNFULL_CHUNK_ATTRIBUTE,
     MemoryLayoutDesc,
     ObjectKey,
     ShardReplicationDesc,
@@ -634,7 +635,9 @@ class MPCacheServerContext:
             object_group_ids: Object group ids to produce keys for.
 
         Returns:
-            One object key per entry of ``object_group_ids``, in order.
+            One object key per entry of ``object_group_ids``, in order. Each
+            key's ``extra_attributes`` sets :data:`UNFULL_CHUNK_ATTRIBUTE`, so
+            the store policy keeps it out of L2 (#6747).
 
         Raises:
             ValueError: If ``key.worker_id`` is ``None`` or ``key.end`` is
@@ -648,7 +651,7 @@ class MPCacheServerContext:
         session = self.session_manager.get_or_create(key.request_id, token_hasher)
         session.set_tokens(key.token_bytes)
         unfull_hash = TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(key.end))
-        return [
+        unfull_keys = [
             group_keys[0]
             for group_keys in ipc_key_to_object_keys(
                 key,
@@ -659,6 +662,10 @@ class MPCacheServerContext:
                 ),
             )
         ]
+        # Each key owns its extra_attributes copy, so marking it is local.
+        for unfull_key in unfull_keys:
+            unfull_key.extra_attributes[UNFULL_CHUNK_ATTRIBUTE] = True
+        return unfull_keys
 
     @staticmethod
     def _compute_shm_pool_info(

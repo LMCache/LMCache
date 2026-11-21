@@ -13,6 +13,7 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import (
+    UNFULL_CHUNK_ATTRIBUTE,
     MemoryResidency,
     MemorySegment,
     MemoryTags,
@@ -24,6 +25,7 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     DefaultStorePolicy,
     create_store_policy,
+    get_registered_store_policies,
 )
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 
@@ -262,3 +264,55 @@ class TestP2PStorePolicyDeletions:
         result = policy.select_l1_deletions(keys, adapter)
 
         assert result == (keys if deleted else [])
+
+
+# =============================================================================
+# StorePolicy.should_store Tests
+# =============================================================================
+
+
+def make_unfull_chunk_key(chunk_id: int) -> ObjectKey:
+    """Create an unfull-chunk (tail) key, marked as the server marks it."""
+    return ObjectKey(
+        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+        model_name="test_model",
+        kv_rank=0,
+        extra_attributes={UNFULL_CHUNK_ATTRIBUTE: True},
+    )
+
+
+class TestShouldStore:
+    """Test the default StorePolicy.should_store hook."""
+
+    @pytest.mark.parametrize("name", get_registered_store_policies())
+    def test_every_registered_policy_skips_unfull_chunks(self, name):
+        """Every built-in policy inherits the default: tails stay out of L2,
+        full chunks (marked False or unmarked) are candidates."""
+        l1_manager = cast(L1ManagerInterface, _StubL1(_LOCAL_DRAM, 0))
+        policy = create_store_policy(name, [l1_manager])
+
+        assert not policy.should_store(make_unfull_chunk_key(0))
+        assert policy.should_store(make_object_key(0))
+        unmarked = ObjectKey(
+            chunk_hash=ObjectKey.IntHash2Bytes(0),
+            model_name="test_model",
+            kv_rank=0,
+            extra_attributes={UNFULL_CHUNK_ATTRIBUTE: False},
+        )
+        assert policy.should_store(unmarked)
+
+    def test_mark_does_not_change_key_identity(self):
+        """The tail mark lives in extra_attributes, outside the key's
+        equality and hash, so L1 and L2 still find the object by its key."""
+        tail, plain = make_unfull_chunk_key(0), make_object_key(0)
+
+        assert tail == plain and hash(tail) == hash(plain)
+
+    def test_subclass_can_opt_back_in(self):
+        """A policy that overrides should_store decides on its own."""
+
+        class StoreEverythingPolicy(DefaultStorePolicy):
+            def should_store(self, key: ObjectKey) -> bool:
+                return True
+
+        assert StoreEverythingPolicy([]).should_store(make_unfull_chunk_key(0))

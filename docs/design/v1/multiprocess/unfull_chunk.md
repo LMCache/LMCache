@@ -110,11 +110,12 @@ Server:
 
 | Interface | Change |
 |---|---|
-| `MPCacheServerContext` | New `resolve_unfull_chunk_obj_keys(key, object_group_ids)`: the tail's object key per group. `resolve_obj_keys` is unchanged (it floors `end`). |
+| `MPCacheServerContext` | New `resolve_unfull_chunk_obj_keys(key, object_group_ids)`: the tail's object key per group, with `extra_attributes[UNFULL_CHUNK_ATTRIBUTE]` (`"_lmcache_internal.unfull_chunk"`) set to `True`. The mark is not part of the key's identity, and a request config of that name is dropped when keys are built, so clients cannot set it. `resolve_obj_keys` is unchanged (it floors `end`). |
 | `Session` | New `get_unfull_chunk_hash(boundary)`. No tail lookup state: the tail's L1 owners join the chunks' owners through the existing `record_prefetch_result`. |
 | `LookupModule.query_prefetch_status` / `wait_prefetch_status` / `free_lookup_locks` | Token reply and tail release as above. |
 | `LayoutDescRegistry.register` | New argument `group_unfull_chunk_layout_descs`. New `find_group_unfull_chunk_layout_descs()`, which falls back to the full-chunk layouts. |
 | `StorageManager` | `reserve_write` gets `is_temporary: bool = False`. |
+| `StorePolicy` | New non-abstract `should_store(key) -> bool`; the default returns `False` for keys marked as unfull chunks. `StoreController` drops rejected keys before queueing them, so tails never reach `select_store_targets`. |
 | `group_view.slice_block_ids_per_group` | New keyword `include_unfull_chunk`: `end` may be unaligned, and the slice keeps the block holding the last token (ceil instead of floor). |
 | `BaseCacheContext` (CPU, CUDA, NPU, MUSA) | New `get_temp_staging_buffer(num_bytes)`: the start of the transfer staging buffer as one flat region (GDS-registered where the buffer is), or `None` if the buffer is smaller. Tail objects with a lead block stage there. |
 | `object_group_transfer` | New functions: `has_unfull_chunk_lead_block`, `get_unfull_chunk_layout_desc`, `trim_and_stage_unfull_chunk_block_ids`, `get_unfull_chunk_staging_buffer`, `transfer_unfull_chunk`, `split_unfull_chunk_block_ids`. The CUDA copy kernel is **unchanged**. |
@@ -357,9 +358,12 @@ multiple of `T`.)
   keys of the open compression group, which vLLM keeps in a per-request ring
   (`CircularBufferSpec`) that LMCache does not store (#5042). Storing the ring
   is a follow-up.
-- Tails are served from L1 only. A persistent tail copied to L2 is not looked
-  up there, and tails are not shared over P2P L1. P2P lookup of tails is a
-  follow-up for LMCache-native PD.
+- Tails are served from L1 only, so they are never offloaded to L2: the
+  default `StorePolicy.should_store` rejects keys marked as unfull chunks
+  (#6747). A store policy that overrides `should_store` can store them, but no
+  lookup reads them there yet. Eviction treats tails like any other L1
+  object. Tails are not shared over P2P L1 either. Looking tails up in L2, and
+  P2P lookup of tails for LMCache-native PD, are follow-ups.
 - A prompt shorter than one chunk has no full chunk to look up, so its tail is
   never tried.
 - A lookup tries up to `C / g` tail lengths, one L1-only prefetch (and one

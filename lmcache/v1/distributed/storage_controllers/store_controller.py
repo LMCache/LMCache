@@ -643,7 +643,10 @@ class StoreController(StorageControllerInterface):
     def _process_new_keys(self, keys: list[ObjectKey]) -> None:
         """
         Queue a batch of newly written keys, one group per shape, then
-        submit what the budget allows (see ``_submit_queued``).
+        submit what the budget allows (see ``_submit_queued``). Keys the
+        policy's ``should_store`` rejects (by default, unfull-chunk tails)
+        are dropped first, so they take no budget and never reach
+        ``select_store_targets``.
 
         Args:
             keys (list[ObjectKey]): Keys that finished writing to L1.
@@ -651,6 +654,7 @@ class StoreController(StorageControllerInterface):
 
         # A rewritten key is deleted again once its own store finishes.
         self._deferred_l1_deletions.difference_update(keys)
+        keys = [key for key in keys if self._policy.should_store(key)]
         for group in _group_keys_by_shape(keys).values():
             self._queued.append(group)
             self._queued_keys.update(group)
