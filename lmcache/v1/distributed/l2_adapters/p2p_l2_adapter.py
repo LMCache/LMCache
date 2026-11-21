@@ -206,16 +206,13 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
 
 
 def _unregister_from_notifier(fd: int) -> None:
-    """Stop the periodic notifier from pulsing ``fd`` if it is still running.
+    """Unregister ``fd`` from the notifier, if it is still running.
 
-    The notifier is a process-wide singleton that its owner (for example the
-    storage manager) can shut down before this adapter closes. Shutdown frees
-    the native instance, so a handle saved at registration time must not be
-    used afterwards: look the singleton up again instead. A newer instance
-    that never saw ``fd`` treats the unregister as a no-op.
+    Looks the singleton up again: a saved handle dangles once ``shutdown``
+    frees the native instance.
 
     Args:
-        fd: The event fd that was registered for periodic signaling.
+        fd: The registered event fd.
     """
     notifier = PeriodicEventNotifier.get()
     if notifier is not None:

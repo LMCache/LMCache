@@ -185,9 +185,7 @@ class StorageManager:
             # active for reads, touches, status or capacity.
             self._closing_adapters: set[int] = set()
 
-            # Created before any adapter: adapters register their fds with
-            # this process-wide notifier and unregister them on close, so on
-            # an unwind the adapters must close before it shuts down.
+            # Before the adapters, so an unwind closes them first.
             PeriodicEventNotifier.create(
                 interval_ms=config.periodic_notifier_interval_ms,
                 use_eventfd=HAS_EVENTFD,
@@ -1285,9 +1283,7 @@ class StorageManager:
         Every L2 adapter is closed even if another fails. If any adapter
         fails to close, the L1 managers are left open, since that adapter
         may still access L1 buffers.
-
-        The periodic event notifier shuts down after the L2 adapters close,
-        since peer adapters unregister their event fds from it on close.
+        The periodic event notifier shuts down after the adapters close.
         """
         self._prefetch_controller.stop()
         for controller in self._store_controllers.values():
@@ -1305,8 +1301,7 @@ class StorageManager:
             except Exception:
                 logger.exception("L2 adapter %d failed to close", adapter_id)
                 close_failed = True
-        # Adapters unregister their fds from the notifier as they close, so it
-        # shuts down only after every adapter's close has run.
+        # After the adapters: they unregister from the notifier on close.
         PeriodicEventNotifier.shutdown()
         if close_failed:
             # A close-failed adapter may still read or write L1 buffers (for

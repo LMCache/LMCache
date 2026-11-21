@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Teardown order of the storage manager, its peer adapters and the notifier.
+"""Peer L2 adapters must close before ``PeriodicEventNotifier`` shuts down.
 
-Peer L2 adapters register their event fds with the process-wide
-``PeriodicEventNotifier`` and unregister them when they close. Shutting the
-notifier down frees its native instance, so an adapter that still holds it
-must close first. The native notifier has no use-after-shutdown check (the
-call is undefined behavior and can hang), so these tests swap in a
-stand-in that fails loudly instead.
+Using the native notifier after shutdown is undefined behavior (it can hang),
+so these tests use a stand-in that raises instead.
 """
 
 # Future
@@ -50,12 +46,7 @@ class _NotifierUsedAfterShutdown(RuntimeError):
 
 
 class _StrictNotifier:
-    """Stand-in for the native ``PeriodicEventNotifier`` singleton.
-
-    Mirrors its static ``create``/``get``/``shutdown`` API. Unlike the native
-    class, an instance that ``shutdown`` released raises on any later use
-    instead of touching freed memory.
-    """
+    """``PeriodicEventNotifier`` stand-in that raises when used after shutdown."""
 
     _instance: _StrictNotifier | None = None
     shutdown_count = 0
@@ -68,7 +59,7 @@ class _StrictNotifier:
 
     @classmethod
     def reset(cls) -> None:
-        """Forget any instance and shutdown history from a previous test."""
+        """Clear state left by a previous test."""
         cls._instance = None
         cls.shutdown_count = 0
         cls.fds_at_shutdown = set()
@@ -112,7 +103,7 @@ class _StrictNotifier:
 
 @pytest.fixture
 def strict_notifier() -> Iterator[type[_StrictNotifier]]:
-    """Use the strict stand-in as the notifier and fake the peer's endpoints."""
+    """Patch in the strict notifier and fake peer endpoints."""
     _StrictNotifier.reset()
     with (
         patch.object(storage_manager_mod, "PeriodicEventNotifier", _StrictNotifier),
@@ -167,9 +158,7 @@ def test_close_shuts_notifier_down_after_peer_adapters(
     monkeypatch: pytest.MonkeyPatch,
     added_at: str,
 ) -> None:
-    """Closing a storage manager that still holds a peer adapter closes the
-    adapter (unregistering its fds) before the notifier shuts down, so the
-    adapter closes cleanly and the L1 managers are released."""
+    """Peer adapters close before the notifier shuts down, and L1 closes."""
     if added_at == "construction":
         sm = StorageManager(_storage_manager_config([_peer_config()]))
     else:
@@ -191,8 +180,7 @@ def test_close_shuts_notifier_down_after_peer_adapters(
 def test_construction_failure_closes_peer_adapters_before_the_notifier(
     strict_notifier: type[_StrictNotifier],
 ) -> None:
-    """If construction fails after a peer adapter was built, the unwind closes
-    the adapter while the notifier is still running."""
+    """A failed constructor closes peer adapters before the notifier."""
     with (
         patch.object(
             storage_manager_mod,
@@ -210,8 +198,7 @@ def test_construction_failure_closes_peer_adapters_before_the_notifier(
 def test_peer_adapter_closes_after_notifier_shutdown(
     strict_notifier: type[_StrictNotifier],
 ) -> None:
-    """A peer adapter whose notifier was already shut down still closes: it
-    does not use the released notifier instance."""
+    """A peer adapter still closes after the notifier is shut down."""
     adapter = p2p_mod.P2PL2Adapter(_peer_config())
     strict_notifier.shutdown()
 
