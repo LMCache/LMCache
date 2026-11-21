@@ -172,6 +172,36 @@ def test_placeholder_is_invalid_until_bound_once() -> None:
     assert lease.releases == 1 and not obj.is_valid()
 
 
+def test_placeholder_bound_to_a_local_view_exposes_the_owners_bytes() -> None:
+    """A placeholder takes its bytes from exactly one of a read and a local
+    view; with a view it reads like a host-memory object until released."""
+    _, (obj,) = ShadowL1MemoryManager().allocate(LAYOUT, 1)
+    assert isinstance(obj, BorrowedMemoryObj)
+    owned = torch.full((PAGE,), 7, dtype=torch.uint8)
+    with pytest.raises(ValueError, match="exactly one"):
+        obj.bind(Lease().pair, address=0, source="peer")
+    with pytest.raises(ValueError, match="exactly one"):
+        obj.bind(
+            Lease().pair, read_into=_Read(), local_view=owned, address=0, source="peer"
+        )
+    with pytest.raises(ValueError, match="does not match"):
+        obj.bind(Lease().pair, local_view=owned[:-1], address=0, source="peer")
+    lease = Lease()
+    obj.bind(lease.pair, local_view=owned, address=0, source="peer")
+    assert obj.is_valid() and obj.is_local and not obj.is_remote
+    assert obj.raw_tensor is owned and obj.data_ptr == owned.data_ptr()
+    assert obj.tensor is not None and obj.tensor.shape == LAYOUT.shapes[0]
+    assert obj.get_tensor(1) is None
+    assert bytes(obj.byte_array) == bytes([7]) * PAGE
+    with pytest.raises(RuntimeError, match="read_into"):
+        obj.read_into(0, 0)
+    obj.release()
+    assert lease.releases == 1 and obj.is_local
+    assert obj.raw_tensor is None and obj.tensor is None
+    with pytest.raises(RuntimeError, match="no local bytes"):
+        _ = obj.data_ptr
+
+
 def _placeholders(count: int) -> list[BorrowedMemoryObj]:
     """Fresh placeholders straight from the shadow's memory manager."""
     _, objs = ShadowL1MemoryManager().allocate(LAYOUT, count)

@@ -6,6 +6,7 @@ from typing import cast
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.common.transfer_channel.api import CxlArenaDescriptor
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1ReconfigureError
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
@@ -16,6 +17,7 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxNotMappedError,
     DevDaxRemoveMode,
 )
+from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
@@ -52,10 +54,33 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             config.size_in_bytes,
             config.devdax_path,
             align_bytes=config.align_bytes,
+            pool_id=config.cxl_pool_id,
             offset=config.devdax_offset_in_bytes,
         )
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
+
+    @property
+    def cxl_arena(self) -> CxlArenaDescriptor | None:
+        """Return the shared-pool descriptor, or None for ordinary Device-DAX."""
+        return cast(DevDaxMemoryAllocator, self._allocator).cxl_arena
+
+    def get_cxl_offset(self, obj: MemoryObj) -> int | None:
+        """Locate an owned object in the shared slab.
+
+        Args:
+            obj: Read-reserved object to locate.
+
+        Returns:
+            Payload-relative byte offset, or None for a different backing arena.
+        """
+        if self.cxl_arena is None:
+            return None
+        allocator = cast(DevDaxMemoryAllocator, self._allocator)
+        offset = obj.data_ptr - allocator.devdax_buffer.data_ptr()
+        if offset < 0 or offset + obj.get_size() > self.cxl_arena.size:
+            return None
+        return offset
 
     def get_l1_memory_desc(self) -> L1MemoryDesc:
         """Return a descriptor for the primary arena.

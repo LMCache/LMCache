@@ -243,13 +243,13 @@ class RuntimePluginConfig:
 class P2PConfig:
     """Configuration for peer-to-peer KV transfer.
 
-    P2P is enabled when :attr:`advertise_url` is non-empty. It additionally
+    P2P is enabled by :attr:`advertise_url` or ``transfer_engine="cxl"``. It
     requires a coordinator URL for peer discovery (validated at startup).
     """
 
     advertise_url: str = ""
     """Transfer-channel server ``host:port`` this instance advertises to peers.
-    Empty disables P2P."""
+    CXL mode does not require this endpoint."""
 
     listen_url: str = ""
     """Transfer-channel server ``host:port`` to bind and listen on. Empty
@@ -267,6 +267,10 @@ class P2PConfig:
     transfer_engine: str = "nixl"
     """Transfer-channel implementation to use."""
 
+    load_mode: str = "l1"
+    """``l1`` copies a peer's objects into the DRAM L1 at lookup; ``gdr``
+    borrows them and reads each into GPU memory at retrieve (needs ``nixl``)."""
+
     enable_write: bool = False
     """Store objects into peers' L1. Enable it on only one side of a pair."""
 
@@ -281,9 +285,23 @@ class P2PConfig:
         """Validate the write settings.
 
         Raises:
-            ValueError: If the store timeout is not positive or the usage
-                threshold is outside (0, 1].
+            ValueError: If the store timeout is not positive, the usage
+                threshold is outside (0, 1], ``gdr`` load mode is combined
+                with writes or with a transfer engine other than ``nixl``, or
+                the ``cxl`` transfer engine is combined with writes.
         """
+        if self.load_mode == "gdr" and (
+            self.enable_write or self.transfer_engine != "nixl"
+        ):
+            raise ValueError(
+                "--p2p-load-mode gdr needs --p2p-transfer-engine nixl and "
+                "excludes --enable-p2p-write"
+            )
+        if self.transfer_engine == "cxl" and self.enable_write:
+            raise ValueError(
+                "--p2p-transfer-engine cxl borrows peers' objects and excludes "
+                "--enable-p2p-write"
+            )
         if self.store_timeout <= 0:
             raise ValueError(f"P2P store timeout must be > 0, got {self.store_timeout}")
         if not 0 < self.write_l1_usage_threshold <= 1:
@@ -294,8 +312,8 @@ class P2PConfig:
 
     @property
     def enabled(self) -> bool:
-        """Whether P2P is enabled (an advertise URL is configured)."""
-        return bool(self.advertise_url)
+        """Whether a transfer endpoint or shared-CXL mode enables P2P."""
+        return bool(self.advertise_url) or self.transfer_engine == "cxl"
 
     @property
     def effective_listen_url(self) -> str:
@@ -804,7 +822,7 @@ def add_p2p_args(
         "--p2p-transfer-engine",
         type=str,
         default="nixl",
-        help="Transfer-channel implementation to use. Default is nixl.",
+        help="Transfer engine: nixl, mooncake_te, or cxl (shared-pool shadows).",
     )
     group.add_argument(
         "--enable-p2p-write",
@@ -830,6 +848,17 @@ def add_p2p_args(
         default=30.0,
         help="Seconds before a store into a peer counts as a failure. Default is 30.",
     )
+    group.add_argument(
+        "--p2p-load-mode",
+        type=str,
+        choices=["l1", "gdr"],
+        default="l1",
+        help=(
+            "l1 (default): copy a peer's objects into the DRAM L1 at lookup. "
+            "gdr: borrow them and read each into GPU memory at retrieve; "
+            "requires --p2p-transfer-engine nixl, excludes --enable-p2p-write."
+        ),
+    )
     return parser
 
 
@@ -854,6 +883,7 @@ def parse_args_to_p2p_config(
         enable_write=getattr(args, "enable_p2p_write", False),
         store_timeout=getattr(args, "p2p_store_timeout", 30.0),
         write_l1_usage_threshold=getattr(args, "p2p_write_l1_usage_threshold", 0.7),
+        load_mode=getattr(args, "p2p_load_mode", "l1"),
     )
 
 

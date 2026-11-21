@@ -41,7 +41,12 @@ def _storage() -> MemoryObj:
 
 
 def _peer() -> MemoryObj:
-    return MagicMock(spec=BorrowedMemoryObj)
+    return MagicMock(spec=BorrowedMemoryObj, is_local=False)
+
+
+def _mapped_peer() -> MemoryObj:
+    """An object a peer owns whose bytes are mapped into this process."""
+    return MagicMock(spec=BorrowedMemoryObj, is_local=True)
 
 
 def _objects(pattern: str) -> list[MemoryObj | None]:
@@ -55,15 +60,16 @@ def test_engine_follows_the_object_type():
     assert select_engine(_host()) is GPU
     assert select_engine(_storage()) is NVME
     assert select_engine(_peer()) is NIC
+    assert select_engine(_mapped_peer()) is GPU
 
 
-def test_staging_an_object_a_peer_owns_is_not_implemented():
-    with pytest.raises(NotImplementedError):
+def test_storing_into_an_object_a_peer_owns_is_rejected():
+    with pytest.raises(ValueError, match="retrieved"):
         stage(
             NIC,
             [_peer()],
             [MagicMock()],
-            lmcache_native.TransferDirection.H2D,
+            lmcache_native.TransferDirection.D2H,
         )
 
 

@@ -121,6 +121,25 @@ class TransferChannelClient(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    def cancel(self, task_id: int) -> bool:
+        """Try to stop a submitted read or write that has not been reported
+        finished.
+
+        Args:
+            task_id: The task id returned by ``submit_read`` or
+                ``submit_write``.
+
+        Returns:
+            True once the transfer is stopped and no more bytes will move; the
+            task id is then forgotten. False while it is still running, or if
+            this implementation cannot stop a transfer. A caller that waits
+            for True (GPU-direct borrowing) needs an implementation that can.
+
+        Raises:
+            KeyError: ``task_id`` is unknown or was already reported finished.
+        """
+        return False
+
     @abc.abstractmethod
     def close(self) -> None:
         """Terminate in-flight requests, deregister from the server, free resources."""

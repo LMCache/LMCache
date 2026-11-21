@@ -101,6 +101,9 @@ L1 managers that own payload are `LOCAL`. The segment names the primary pool:
 | `GDS` slab | `(GDS, LOCAL)` |
 | `SHADOW` (for borrowing L2 adapters) | the borrowed segment, `SHADOW` |
 
+The `p2p_gdr` adapter wants `((DRAM, SHADOW),)`.
+The `cxl_peer` adapter wants `((CXL, SHADOW),)` and is itself `(CXL, REMOTE)`.
+
 ### L2 own tags
 
 `REMOTE` means the bytes are off this host or in a domain shared with other
@@ -114,6 +117,7 @@ reporting `REMOTE`, because a shared filesystem is visible to every peer.
 | `nixl_store`, `nixl_store_dynamic`, `nixl_native` | `POSIX`, `GDS`, `GDS_MT` backends: `(STORAGE, LOCAL)`; `REMOTE` when shared; any other backend: `(STORAGE, REMOTE)`. GDS backends still load through host L1 buffers, so they are plain storage. |
 | `mock` | `(STORAGE, LOCAL)` |
 | `p2p` | `(DRAM, REMOTE)` |
+| `cxl_peer` | `(CXL, REMOTE)`: a peer's slab in a CXL pool shared across hosts |
 | `s3`, `resp`, `valkey`, `mooncake_store`, `aerospike`, `bigtable`, `hfbucket`, `hf3fs`, `sagemaker-hyperpod`, `native_plugin` | `(STORAGE, REMOTE)` |
 | `plugin` | declared by the user's adapter class |
 | `fault_inject`, serde wrapper | forwarded from the inner adapter |
@@ -142,6 +146,10 @@ The function is pure and its inputs are fixed after startup, so
 | `DRAM a`, `DRAM b` | `a` (first in placement order) |
 | `DEVDAX` | the DEVDAX L1 (CXL fallback) |
 | `GDS` | error: no L1 has the wanted tags |
+
+`cxl_peer` overrides the default with `((CXL, SHADOW),)`: it borrows views of
+a peer's slab instead of copying, so it binds to the CXL shadow L1, whose
+placeholders hold no bytes, never to an L1 that owns payload.
 
 Consequences:
 
@@ -200,7 +208,9 @@ PrefetchTaskSpec(
 
 P2P serving passes `allowed_l1_memory_tags=frozenset({(DRAM, LOCAL)})` and
 `allowed_l2_memory_tags=frozenset()`: a peer lookup only locks what this node
-already holds in its DRAM L1, the L1 registered with the transfer channel, and
+already holds in its DRAM L1, the L1 registered with the transfer channel
+(`(CXL, LOCAL)` instead under `--p2p-transfer-engine cxl`, whose CXL L1 holds
+the slab peers borrow from; the `(CXL, SHADOW)` shadow L1 is never served), and
 never recurses into this node's L2 adapters (including its own P2P adapters). Serving peers from local L2 is a
 follow-up: it moves P2P lookups onto the asynchronous L2 path, which interacts
 with the requester-side lookup timeouts.

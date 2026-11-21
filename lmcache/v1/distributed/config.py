@@ -282,6 +282,10 @@ class L1MemoryManagerConfig:
     """ Optional Device-DAX path to use as the L1 backing arena; the whole
     pool then lives on the device. """
 
+    cxl_pool_id: str = ""
+    """Shared-pool identity. When set, the slab at ``devdax_offset_in_bytes``
+    starts with one ``align_bytes`` identity header before the payload."""
+
     devdax_offset_in_bytes: int = 0
     """ Page-aligned byte offset into ``devdax_path`` where the L1 mapping
     starts. Lets several servers share one device with disjoint ranges. """
@@ -290,6 +294,16 @@ class L1MemoryManagerConfig:
     """ mlock the L1 buffer so compaction cannot migrate it (ROCm only). """
 
     def __post_init__(self):
+        if self.cxl_pool_id:
+            if self.align_bytes < 4096 or self.align_bytes & (self.align_bytes - 1):
+                raise ValueError("CXL alignment must be a power of two >= 4096")
+            if not self.devdax_path:
+                raise ValueError("cxl-pool-id requires l1-devdax-path")
+            if self.devdax_offset_in_bytes % self.align_bytes:
+                raise ValueError(
+                    "cxl-pool-id requires l1-devdax-offset to be a multiple of "
+                    "l1-align-bytes"
+                )
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
 
         if self.devdax_path is not None:
@@ -820,6 +834,35 @@ class StorageManagerConfig:
             )
 
 
+def with_shadow_l1(
+    config: StorageManagerConfig, segment: MemorySegment
+) -> StorageManagerConfig:
+    """Return ``config`` with a shadow L1 of ``segment``, added if missing.
+
+    Args:
+        config: The storage manager configuration.
+        segment: The segment whose shadow L1 the config must have.
+
+    Returns:
+        ``config`` itself when it has one; otherwise a copy with a shadow L1
+        (tag ``shadow.<segment>``, the first L1's lock TTLs) appended.
+    """
+    if any(
+        isinstance(c, ShadowL1ManagerConfig) and c.segment is segment
+        for c in config.l1_manager_configs
+    ):
+        return config
+    first = config.l1_manager_config
+    shadow = ShadowL1ManagerConfig(
+        tag=f"shadow.{segment.value}",
+        segment=segment,
+        read_ttl_seconds=first.read_ttl_seconds,
+        write_ttl_seconds=first.write_ttl_seconds,
+        eviction=config.eviction_config,
+    )
+    return replace(config, l1_manager_configs=[*config.l1_manager_configs, shadow])
+
+
 def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     """Validate storage manager configuration.
 
@@ -896,6 +939,26 @@ def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
     if l1_config.memory_config.devdax_path:
         return False
     return True
+
+
+def l1_is_single_cxl_region(config: StorageManagerConfig) -> bool:
+    """Whether L1 is exactly one shared-CXL slab that peers can borrow from.
+
+    CXL P2P exports only the owned slab, so a second L1 manager would hold
+    objects peers can never read.
+
+    Args:
+        config: Storage manager configuration to inspect.
+
+    Returns:
+        ``True`` if exactly one L1 owns memory and it has a CXL pool id (which
+        implies a Device-DAX path); ``False`` otherwise. Shadow L1s own no
+        memory and are not counted.
+    """
+    owning = [
+        c for c in config.l1_manager_configs if not isinstance(c, ShadowL1ManagerConfig)
+    ]
+    return len(owning) == 1 and bool(owning[0].memory_config.cxl_pool_id)
 
 
 def add_storage_manager_args(
@@ -1007,6 +1070,15 @@ def add_storage_manager_args(
             "ROCm only: mlock the L1 buffer so memory compaction cannot migrate "
             "it. Requires sysctl vm.compact_unevictable_allowed=0 and an "
             "unlimited memlock ulimit (or CAP_IPC_LOCK)."
+        ),
+    )
+
+    memory_group.add_argument(
+        "--cxl-pool-id",
+        default="",
+        help=(
+            "Shared CXL pool identity. The slab at --l1-devdax-offset-gb then "
+            "starts with one alignment-sized identity header."
         ),
     )
 
@@ -1282,6 +1354,7 @@ def parse_args_to_config(
             devdax_path=args.l1_devdax_path,
             devdax_offset_in_bytes=devdax_offset,
             mlock=args.l1_mlock,
+            cxl_pool_id=getattr(args, "cxl_pool_id", ""),
         )
     else:
         memory_config = L1MemoryManagerConfig(
@@ -1294,6 +1367,7 @@ def parse_args_to_config(
             devdax_path=args.l1_devdax_path,
             devdax_offset_in_bytes=devdax_offset,
             mlock=args.l1_mlock,
+            cxl_pool_id=getattr(args, "cxl_pool_id", ""),
         )
 
     gds_l1_config: GdsL1Config | None = None

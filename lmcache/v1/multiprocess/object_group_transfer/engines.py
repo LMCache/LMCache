@@ -28,12 +28,12 @@ class TransferEngine(enum.Enum):
     """How an L1 object's bytes travel to or from GPU memory."""
 
     GPU_DMA = "gpu_dma"
-    """Host memory (DRAM, DevDAX): a host/GPU copy."""
+    """Host memory (DRAM, DevDAX, a peer's mapped CXL slab): a host/GPU copy."""
     NVME_DMA = "nvme_dma"
     """Storage-backed object: a file read or write against GPU memory."""
     NIC_DMA = "nic_dma"
-    """Object a peer owns: a transfer-channel read into GPU memory. Not
-    implemented yet."""
+    """Object a peer owns, not mapped locally: a transfer-channel read into
+    GPU memory."""
 
 
 def select_engine(memory_obj: MemoryObj) -> TransferEngine:
@@ -47,7 +47,7 @@ def select_engine(memory_obj: MemoryObj) -> TransferEngine:
     """
     if isinstance(memory_obj, GDSMemoryObject):
         return TransferEngine.NVME_DMA
-    if isinstance(memory_obj, BorrowedMemoryObj):
+    if isinstance(memory_obj, BorrowedMemoryObj) and not memory_obj.is_local:
         return TransferEngine.NIC_DMA
     return TransferEngine.GPU_DMA
 
@@ -90,8 +90,8 @@ def stage(
 ) -> None:
     """Move objects to or from their staging regions with ``engine``.
 
-    On return the copies are queued on the stream ahead of anything queued
-    later.
+    On return the bytes are in place, or the copies are queued on the
+    stream ahead of anything queued later.
 
     Args:
         engine: The engine of every object in ``memory_objs``.
@@ -100,8 +100,9 @@ def stage(
         direction: H2D fills the regions, D2H fills the objects.
 
     Raises:
-        ValueError: If a host-memory object and its region differ in size.
-        NotImplementedError: If an object is owned by a peer.
+        ValueError: If an object and its region differ in size, or a store
+            targets an object a peer owns.
+        RuntimeError: If an object a peer owns cannot be read from its peer.
     """
     _ENGINES[engine].stage(memory_objs, buffers, direction)
 

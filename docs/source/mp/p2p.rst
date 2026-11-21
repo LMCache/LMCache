@@ -49,8 +49,8 @@ Requirements
 ------------
 
 * **A coordinator.** P2P needs the coordinator for peer discovery. A server
-  started with ``--p2p-advertise-url`` but no ``--coordinator-url`` refuses to
-  start.
+  started with ``--p2p-advertise-url`` (or ``--p2p-transfer-engine cxl``) but no
+  ``--coordinator-url`` refuses to start.
 * **An RDMA-capable network** (InfiniBand / RoCE) is strongly recommended for
   production performance. By default P2P uses the ``nixl`` transfer engine,
   which ships as the optional ``lmcache[nixl]`` extra — install it with
@@ -61,10 +61,15 @@ Requirements
   (``--gds-l1-path``) and the Device-DAX L1 tier (``--l1-devdax-path``); the
   server refuses to start in those configurations.
 
+The shared CXL pool mode (see `Shared CXL pool`_) has different requirements:
+it needs a single Device-DAX L1 with ``--cxl-pool-id`` (no other L1 manager),
+and needs neither NIXL nor an RDMA network.
+
 Configuration
 -------------
 
-P2P is enabled per server by the ``--p2p-advertise-url`` flag. The relevant
+P2P is enabled per server by the ``--p2p-advertise-url`` flag, or by
+``--p2p-transfer-engine cxl`` for the shared CXL pool mode. The relevant
 ``lmcache server`` flags are:
 
 .. list-table::
@@ -91,7 +96,9 @@ P2P is enabled per server by the ``--p2p-advertise-url`` flag. The relevant
      - Deadline for a peer KV read before it counts as a failure
        (default ``30``).
    * - ``--p2p-transfer-engine ENGINE``
-     - Transfer-channel implementation (default ``nixl``).
+     - Transfer implementation (default ``nixl``); ``cxl`` borrows peers'
+       KV in place from a shared CXL pool, without a transfer-channel
+       endpoint. See :ref:`mp-p2p-cxl`.
    * - ``--enable-p2p-write``
      - Also store objects into peers' memory once the local L1 fills up, and
        drop the local copy. Off by default. See :doc:`p2p_deployment`.
@@ -101,6 +108,10 @@ P2P is enabled per server by the ``--p2p-advertise-url`` flag. The relevant
    * - ``--p2p-store-timeout SECONDS``
      - Deadline for a store into a peer before it counts as a failure
        (default ``30``). Only used with ``--enable-p2p-write``.
+   * - ``--p2p-load-mode {l1,gdr}``
+     - How a peer's KV reaches this node: ``l1`` (default) copies it into the
+       DRAM L1 at lookup time; ``gdr`` borrows it and reads it straight into
+       GPU memory at retrieve time. See :ref:`mp-p2p-gdr`.
 
 P2P also reuses the coordinator connection flags (``--coordinator-url``,
 ``--coordinator-advertise-ip``, ``--coordinator-heartbeat-interval``); the
@@ -153,6 +164,103 @@ when starting each server. For example:
 
 Replace ``mlx5_0`` with the RDMA device available on the node. Both variables
 must be set for RDMA; when they are omitted, Mooncake Transfer Engine uses TCP.
+
+.. _mp-p2p-gdr:
+
+GPU-direct borrowing (``--p2p-load-mode gdr``)
+----------------------------------------------
+
+By default a peer's chunk is copied into this node's DRAM L1 at lookup, then
+to the GPU at retrieve. With ``--p2p-load-mode gdr`` the node **borrows** it:
+the peer keeps its read lock, and the bytes move once, from the peer's DRAM
+straight into GPU memory, at retrieve.
+
+.. code-block:: bash
+
+   lmcache server <argument-list> \
+       --p2p-advertise-url 10.0.0.1:7600 --coordinator-url http://coord:8080 \
+       --p2p-transfer-engine nixl --p2p-load-mode gdr
+
+Requirements:
+
+* ``--p2p-transfer-engine nixl`` and a GPUDirect-capable fabric.
+* **The same** ``--l1-read-ttl-seconds`` **on every node.** A borrowed chunk
+  is trusted until that TTL (minus a one-second margin).
+* Not combined with ``--enable-p2p-write``.
+
+What to expect:
+
+* Borrowed chunks use no local L1 capacity. The server adds a *shadow L1*
+  (``shadow.dram``) to index them (see :doc:`multi_l1`).
+* The network read happens at retrieve, so retrieve latency depends on the
+  fabric. Measure both modes before choosing.
+* A chunk whose lease lapsed before the retrieve is a cache miss.
+* A peer that leaves while its chunks are borrowed is removed once they are
+  released.
+
+.. _mp-p2p-cxl:
+
+Shared CXL pool (``--p2p-transfer-engine cxl``)
+-----------------------------------------------
+
+Select ``--p2p-transfer-engine cxl`` when nodes map one shared CXL pool and each
+owns a disjoint slab. This mode reuses Device-DAX L1, peer discovery, and owner
+read locks. On a peer hit, the requesting node **borrows** the chunk, as
+GPU-direct borrowing does: the owner keeps its read lock and the server indexes
+the chunk in a *shadow L1* (``shadow.cxl``, added automatically; see
+:doc:`multi_l1`). Here the borrowed chunk is a view of the owner's bytes through
+the local mapping of the pool, so GPU retrieval reads it like a local chunk;
+borrowing consumes no local DRAM or CXL payload capacity. The final GPU reader
+releases the owner's reservation.
+
+Both RDMA and CXL set up peer-region access once when the peer adapter connects.
+RDMA imports the peer's registered memory; CXL maps and GPU-registers its slab.
+Per-chunk lookups reuse this setup and return region-relative offsets. Adapter
+removal releases the region after outstanding reads drain. The current server
+configuration selects one P2P mode; shared APIs do not yet enable both modes
+concurrently.
+
+Each node needs a local mapping of the entire shared pool, a matching
+``--cxl-pool-id``, its own slab offset ``--l1-devdax-offset-gb``, and a
+coordinator.
+No NIXL installation or ``--p2p-advertise-url`` is required for this mode.
+Configure alignment to match the DAX device. Each slab uses one alignment-sized
+identity header followed by ``--l1-size-gb`` of payload.
+
+Slabs must not overlap. For two 2-GiB slabs with 2-MiB alignment, each slab is
+2 GiB + 2 MiB, so use offsets ``0`` and ``2.001953125`` (GiB, that is
+2149580800 bytes); the pool must provide at least 4299161600 bytes. Run the
+following on each node with its own IP, instance ID, device path, and slab
+offset:
+
+.. code-block:: bash
+
+   lmcache server \
+       --host 0.0.0.0 --port 5555 --http-port 8080 \
+       --instance-id <NODE_ID> \
+       --l1-size-gb 2 --eviction-policy LRU \
+       --l1-devdax-path /dev/dax0.0 \
+       --l1-align-bytes 2097152 --no-l1-use-lazy --shm-name "" \
+       --l1-devdax-offset-gb <SLAB_OFFSET_GB> --cxl-pool-id shared-pool-1 \
+       --coordinator-url http://10.0.0.1:9300 \
+       --coordinator-advertise-ip <NODE_IP> \
+       --p2p-transfer-engine cxl
+
+The owner exports objects in its configured primary CXL slab. Other L1 media,
+extra DAX arenas, and borrowed views are not exported. Peer mappings must
+support the existing GPU host-registration path.
+
+``--l1-read-ttl-seconds`` bounds retrieval time and must be **the same on
+every node**. A borrower stops using a borrowed view 5 seconds (the adapter's
+``read_window_s``) plus ``min(1 s, TTL / 10)`` before that TTL ends, so a GPU
+copy started from the view finishes before the owner can reuse the bytes. A
+chunk whose lease lapsed before the retrieve is a
+cache miss. This mode is not combined with ``--enable-p2p-write`` or
+``--p2p-load-mode gdr``. Normal
+peer removal drains readers before unmapping. Slab assignment is managed by the
+deployment: configure disjoint ranges before starting servers and drain readers
+before reinitializing a slab. Cross-host hardware validation is still required
+for this initial implementation.
 
 Running a multi-node deployment
 -------------------------------

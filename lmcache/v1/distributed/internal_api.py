@@ -25,6 +25,10 @@ if TYPE_CHECKING:
 
 L1OperationResult = tuple[L1Error, "MemoryObj | None"]
 
+CXL_METADATA_KEY = "lmcache.cxl.arena"
+"""Coordinator metadata key under which an owner advertises its
+:class:`CxlArenaDescriptor` as JSON."""
+
 
 @dataclass(frozen=True)
 class L1MemoryDesc:

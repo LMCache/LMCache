@@ -16,6 +16,10 @@ from lmcache.lmcache_native import PeriodicEventNotifier
 from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
 from lmcache.v1.common.errors import LMCacheTimeoutError
+from lmcache.v1.common.transfer_channel.api import (
+    CxlArenaDescriptor,
+    TransferChannelAddress,
+)
 from lmcache.v1.distributed.api import (
     CapacitySnapshot,
     L1BackendType,
@@ -42,12 +46,19 @@ from lmcache.v1.distributed.internal_api import (
     L1OperationResult,
     L2AdapterListener,
 )
-from lmcache.v1.distributed.l1_manager import DevDaxL1Manager, create_l1_managers
+from lmcache.v1.distributed.l1_manager import (
+    DevDaxL1Manager,
+    ShadowL1Manager,
+    create_l1_managers,
+)
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     get_type_name_for_config,
+)
+from lmcache.v1.distributed.l2_adapters.cxl_peer_l2_adapter import (
+    CxlPeerL2AdapterConfig,
 )
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2DeviceOwner,
@@ -185,18 +196,19 @@ class StorageManager:
             # active for reads, touches, status or capacity.
             self._closing_adapters: set[int] = set()
 
+            # Before the adapters, so an unwind closes them first.
+            PeriodicEventNotifier.create(
+                interval_ms=config.periodic_notifier_interval_ms,
+                use_eventfd=HAS_EVENTFD,
+            )
+            cleanup.callback(PeriodicEventNotifier.shutdown)
+
             for ac in config.l2_adapter_config.adapters:
                 self._check_dax_devices_unowned(ac)
                 adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
                 cleanup.callback(adapter.close)
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
-
-            PeriodicEventNotifier.create(
-                interval_ms=config.periodic_notifier_interval_ms,
-                use_eventfd=HAS_EVENTFD,
-            )
-            cleanup.callback(PeriodicEventNotifier.shutdown)
 
             # Per-cache_salt quota registry. Shared across the L2 eviction
             # controller (reads quotas each cycle) and the HTTP quota
@@ -986,6 +998,13 @@ class StorageManager:
         self._publish_capacity_changed()
         return status
 
+    def _cxl_l1_manager(self) -> DevDaxL1Manager | None:
+        """Return the L1 that owns a shared CXL slab, or None without one."""
+        for manager in self._l1_managers:
+            if isinstance(manager, DevDaxL1Manager) and manager.cxl_arena is not None:
+                return manager
+        return None
+
     def _single_region_adapter_names(self) -> list[str]:
         """Return type names of registered L2 adapters needing one L1 region.
 
@@ -1126,6 +1145,60 @@ class StorageManager:
         self._publish_capacity_changed()
         return result
 
+    @property
+    def cxl_arena(self) -> CxlArenaDescriptor | None:
+        """Return this server's owned shared-pool slab, if configured."""
+        manager = self._cxl_l1_manager()
+        return None if manager is None else manager.cxl_arena
+
+    def get_cxl_address(self, obj: MemoryObj) -> TransferChannelAddress | None:
+        """Return the shareable address of a read-reserved owned object.
+
+        Args:
+            obj: Object protected by an L1 read reservation.
+
+        Returns:
+            Peer-addressable CXL location, or None for another backing store
+            (including a borrowed view, which lives in a shadow L1).
+        """
+        owner_id = obj.get_l1_manager()
+        owner = None if owner_id is None else self._l1_managers_by_id[owner_id]
+        if not isinstance(owner, DevDaxL1Manager):
+            return None
+        return owner.get_cxl_address(obj)
+
+    def add_cxl_peer(
+        self, arena: CxlArenaDescriptor, request_url: str, lookup_timeout: float
+    ) -> int:
+        """Validate/map a peer slab and attach its borrowing adapter.
+
+        Args:
+            arena: Descriptor advertised by the peer.
+            request_url: Its existing lookup/unlock endpoint.
+            lookup_timeout: Lookup deadline in seconds.
+
+        Returns:
+            Stable adapter ID.
+
+        Raises:
+            ValueError: If this server has no CXL slab or identity checks fail.
+        """
+        manager = self._cxl_l1_manager()
+        path = None if manager is None else manager.config.memory_config.devdax_path
+        if manager is None or manager.cxl_arena is None or path is None:
+            raise ValueError("CXL peer sharing requires a configured owned slab")
+        # The adapter's wanted L1 tags bind its views to the CXL shadow L1.
+        # Every node uses the same L1 read TTL: the local one bounds a lease.
+        config = CxlPeerL2AdapterConfig(
+            request_url,
+            path,
+            manager.cxl_arena,
+            arena,
+            lookup_timeout,
+            manager.config.read_ttl_seconds,
+        )
+        return self.add_l2_adapter(config)
+
     def add_l2_adapter(self, config: L2AdapterConfigBase) -> int:
         """Blocking function to add a new L2 adapter at runtime. Thread-safe.
 
@@ -1198,11 +1271,12 @@ class StorageManager:
             TimeoutError: If draining did not complete within ``timeout``;
                 the adapter is left active (draining) so the caller can
                 retry.
-            Exception: Whatever the adapter's ``close`` raises. By then the
-                controllers and the L2 eviction state have already dropped
-                the adapter and it is no longer active (``l2_adapters``,
-                status, touches and capacity exclude it); it stays only in
-                the registry, so a retry skips the drain and closes it again.
+            Exception: Whatever the adapter's ``close`` raises (e.g. a CXL
+                peer with live borrowed views). By then the controllers and
+                the L2 eviction state have already dropped the adapter and it
+                is no longer active (``l2_adapters``, status, touches and
+                capacity exclude it); it stays only in the registry, so a
+                retry skips the drain and closes it again.
         """
         with self._lifecycle_lock:
             if adapter_id not in self._l2_adapters:
@@ -1282,6 +1356,7 @@ class StorageManager:
         Every L2 adapter is closed even if another fails. If any adapter
         fails to close, the L1 managers are left open, since that adapter
         may still access L1 buffers.
+        The periodic event notifier shuts down after the adapters close.
         """
         self._prefetch_controller.stop()
         for controller in self._store_controllers.values():
@@ -1290,7 +1365,11 @@ class StorageManager:
             controller.stop()
         self._l2_eviction_controller.stop()
 
-        PeriodicEventNotifier.shutdown()
+        # End every borrowed view's lease while its lender is still open: a
+        # lender cannot close under a live view.
+        for manager in self._l1_managers:
+            if isinstance(manager, ShadowL1Manager):
+                manager.close()
 
         with self._adapters_lock:
             adapters = list(self._l2_adapters.items())
@@ -1301,6 +1380,8 @@ class StorageManager:
             except Exception:
                 logger.exception("L2 adapter %d failed to close", adapter_id)
                 close_failed = True
+        # After the adapters: they unregister from the notifier on close.
+        PeriodicEventNotifier.shutdown()
         if close_failed:
             # A close-failed adapter may still read or write L1 buffers (for
             # example a serde wrapper whose serializer is still running), so

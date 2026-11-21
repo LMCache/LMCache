@@ -1209,10 +1209,18 @@ class BorrowedMemoryObj(MemoryObj):
 
     :class:`ShadowL1MemoryManager` creates it as a placeholder: layout
     metadata, no bytes, no lease. A borrower's load :meth:`bind`\\ s it to a
-    lease and to a ``read_into`` that reads the bytes into a registered local
-    device region at retrieve time. The tensor accessors report no local
-    bytes. ``is_valid()`` is False before binding, after :meth:`release`, and
-    once the lease ended.
+    lease and to the bytes, in one of two ways:
+
+    - ``read_into``: the bytes are in the owner's memory and are read into a
+      registered local device region at retrieve time. The tensor accessors
+      report no local bytes.
+    - ``local_view``: the owner's bytes are mapped into this process (a
+      shared CXL slab), so the tensor accessors return that view and the
+      object is retrieved like any host-memory object. The view is dropped
+      at :meth:`release`.
+
+    ``is_valid()`` is False before binding, after :meth:`release`, and once
+    the lease ended.
     """
 
     def __init__(self, metadata: MemoryObjMetadata) -> None:
@@ -1221,6 +1229,8 @@ class BorrowedMemoryObj(MemoryObj):
         self._lock = threading.Lock()
         self._lease: Lease | None = None
         self._read_into: Callable[[int, int], PendingRead] | None = None
+        self._local_view: torch.Tensor | None = None
+        self._is_local = False
         self._source = ""
 
     @property
@@ -1230,24 +1240,35 @@ class BorrowedMemoryObj(MemoryObj):
 
     @property
     def is_remote(self) -> bool:
-        """Whether the object reads its bytes into a device region; True once
-        bound."""
+        """Whether the object reads its bytes into a device region: True once
+        bound with a ``read_into``, False when bound with a local view."""
         return self._read_into is not None
+
+    @property
+    def is_local(self) -> bool:
+        """Whether the object was bound to a local view of the owner's bytes;
+        stays True after :meth:`release` dropped the view."""
+        return self._is_local
 
     def bind(
         self,
         lease: Lease,
         *,
-        read_into: Callable[[int, int], PendingRead],
+        read_into: Callable[[int, int], PendingRead] | None = None,
+        local_view: torch.Tensor | None = None,
         address: int,
         source: str,
     ) -> None:
         """Bind the placeholder to its lease and bytes; once per object.
 
+        Exactly one of ``read_into`` and ``local_view`` gives the bytes.
+
         Args:
             lease: The owner's reservation.
             read_into: ``(region_id, offset) -> PendingRead`` starting a read
                 of the bytes into a registered device region.
+            local_view: A ``uint8`` view of the owner's bytes mapped into
+                this process, of the object's size.
             address: The owner's address of the bytes.
             source: The owner, e.g. its transfer URL. One shadow serves every
                 peer, so ``source`` and ``address`` together tell two views of
@@ -1255,13 +1276,28 @@ class BorrowedMemoryObj(MemoryObj):
 
         Raises:
             RuntimeError: If the object is already bound.
-            ValueError: If ``address`` is negative or ``source`` is empty.
+            ValueError: If ``address`` is negative or ``source`` is empty, if
+                not exactly one of ``read_into`` and ``local_view`` is given,
+                or if ``local_view`` is not the object's size in bytes.
         """
         if self._lease is not None:
             raise RuntimeError("BorrowedMemoryObj is already bound")
         if address < 0 or not source:
             raise ValueError("borrowed bytes need the owner's address and source")
+        if (read_into is None) == (local_view is None):
+            raise ValueError(
+                "borrowed bytes need exactly one of read_into and local_view"
+            )
+        if local_view is not None and (
+            local_view.dtype != torch.uint8 or local_view.numel() != self.meta.phy_size
+        ):
+            raise ValueError(
+                f"local view of {local_view.numel()} {local_view.dtype} elements "
+                f"does not match the object's {self.meta.phy_size} bytes"
+            )
         self._read_into = read_into
+        self._local_view = local_view
+        self._is_local = local_view is not None
         self.meta.address = address
         self._source = source
         self._lease = lease
@@ -1279,10 +1315,12 @@ class BorrowedMemoryObj(MemoryObj):
         self._lease = lease
 
     def release(self) -> None:
-        """Invalidate the object and end its lease; repeated calls are no-ops."""
+        """Invalidate the object, drop its local view and end its lease;
+        repeated calls are no-ops."""
         if not self.valid:
             return
         self.invalidate()
+        self._local_view = None
         if self._lease is not None:
             self._lease[1]()
 
@@ -1306,10 +1344,10 @@ class BorrowedMemoryObj(MemoryObj):
             lease has already ended.
 
         Raises:
-            RuntimeError: If the object is not bound.
+            RuntimeError: If the object is not bound to a ``read_into``.
         """
         if self._read_into is None:
-            raise RuntimeError("BorrowedMemoryObj is not bound")
+            raise RuntimeError("BorrowedMemoryObj is not bound to a read_into")
         return self._read_into(region_id, offset)
 
     # -- MemoryObj: layout and lifetime from the metadata --------------------
@@ -1410,39 +1448,68 @@ class BorrowedMemoryObj(MemoryObj):
         """Return None: no local allocator backs a borrowed object."""
         return None
 
-    # -- MemoryObj: no local bytes -------------------------------------------
+    # -- MemoryObj: the bytes, local only under a local view ------------------
 
     @property
-    def tensor(self) -> None:
-        """Return None: the bytes are not in local memory."""
-        return None
+    def tensor(self) -> Optional[torch.Tensor]:
+        """Return the first group's tensor over the local view; None when the
+        bytes are not in local memory."""
+        return self.get_tensor(0)
 
     @property
-    def raw_tensor(self) -> None:
-        """Return None: the bytes are not in local memory."""
-        return None
+    def raw_tensor(self) -> Optional[torch.Tensor]:
+        """Return the local ``uint8`` view; None when the bytes are not in
+        local memory."""
+        return self._local_view
 
-    def get_tensor(self, index: int) -> None:
-        """Return None: the bytes are not in local memory."""
-        return None
+    def get_tensor(self, index: int) -> Optional[torch.Tensor]:
+        """Return group ``index``'s tensor over the local view.
+
+        Args:
+            index: Object-group index within the object.
+
+        Returns:
+            The tensor, or None when the bytes are not in local memory or
+            ``index`` is out of range.
+        """
+        view = self._local_view
+        shapes, dtypes = self.meta.shapes, self.meta.dtypes
+        if view is None or shapes is None or dtypes is None:
+            return None
+        if index < 0 or index >= len(shapes):
+            return None
+        start = sum(
+            shape.numel() * dtype.itemsize
+            for shape, dtype in zip(shapes[:index], dtypes[:index], strict=True)
+        )
+        size = shapes[index].numel() * dtypes[index].itemsize
+        return view[start : start + size].view(dtypes[index]).view(shapes[index])
 
     @property
-    def byte_array(self) -> bytes:
-        """Raise: the bytes are not in local memory; use :meth:`read_into`.
+    def byte_array(self) -> memoryview:
+        """Return the local view's bytes.
 
         Raises:
-            RuntimeError: Always.
+            RuntimeError: If the bytes are not in local memory; use
+                :meth:`read_into`.
         """
-        raise RuntimeError("BorrowedMemoryObj has no local bytes; use read_into")
+        view = self._local_view
+        if view is None:
+            raise RuntimeError("BorrowedMemoryObj has no local bytes; use read_into")
+        return memoryview(view.numpy())
 
     @property
     def data_ptr(self) -> int:
-        """Raise: the bytes are not in local memory; use :meth:`read_into`.
+        """Return the local view's address.
 
         Raises:
-            RuntimeError: Always.
+            RuntimeError: If the bytes are not in local memory; use
+                :meth:`read_into`.
         """
-        raise RuntimeError("BorrowedMemoryObj has no local bytes; use read_into")
+        view = self._local_view
+        if view is None:
+            raise RuntimeError("BorrowedMemoryObj has no local bytes; use read_into")
+        return view.data_ptr()
 
 
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):

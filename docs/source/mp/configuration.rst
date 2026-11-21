@@ -342,8 +342,8 @@ Source: ``lmcache/v1/multiprocess/config.py``
 These flags configure peer-to-peer KV cache sharing between MP servers
 (see :doc:`p2p`). They are registered by ``add_p2p_args()`` on the
 ``lmcache server`` parser. P2P is enabled when ``--p2p-advertise-url``
-is set, which additionally requires a coordinator URL via
-``--coordinator-url`` (or ``LMCACHE_COORDINATOR_URL``).
+is set or ``--p2p-transfer-engine`` is ``cxl``; either additionally requires
+a coordinator URL via ``--coordinator-url`` (or ``LMCACHE_COORDINATOR_URL``).
 
 .. list-table::
    :header-rows: 1
@@ -374,7 +374,10 @@ is set, which additionally requires a coordinator URL via
      - Seconds before a peer load counts as a failure.
    * - ``--p2p-transfer-engine``
      - ``nixl``
-     - Transfer-channel implementation to use.
+     - ``nixl``, ``mooncake_te``, or ``cxl``. ``cxl`` reads peers' KV in
+       place from a shared CXL pool instead of copying it; it needs
+       ``--cxl-pool-id`` and ``--l1-devdax-path`` but no advertise URL, and
+       excludes ``--enable-p2p-write``.
    * - ``--enable-p2p-write``
      - off
      - Store objects into peers' L1 once the local DRAM L1 is fuller than
@@ -391,6 +394,9 @@ is set, which additionally requires a coordinator URL via
    * - ``--p2p-store-timeout``
      - ``30.0``
      - Seconds before a store into a peer counts as a failure.
+   * - ``--p2p-load-mode``
+     - ``l1``
+     - ``l1`` copies a peer's objects; ``gdr`` borrows them. See :doc:`p2p`.
 
 L1 Memory Manager
 ------------------
@@ -459,6 +465,15 @@ single-L1 interface. For placing L1 on CXL-attached memory see
      - ``False``
      - ROCm only. ``mlock`` the DRAM L1 so memory compaction cannot migrate
        it. See *Locked L1 on ROCm* below. ``--l1-manager`` key: ``mlock``.
+   * - ``--cxl-pool-id``
+     - ``""``
+     - Identity of a CXL pool shared by several servers; all servers on the
+       pool use the same value. Requires ``--l1-devdax-path`` and an
+       ``--l1-align-bytes`` that is a power of two of at least 4096. Each
+       server's slab then starts at ``--l1-devdax-offset-gb`` with one
+       alignment-sized identity header, so slabs on one pool must not
+       overlap including that header. Used by ``--p2p-transfer-engine cxl``;
+       see :doc:`p2p`.
 
 .. _mp-devdax-l1:
 
