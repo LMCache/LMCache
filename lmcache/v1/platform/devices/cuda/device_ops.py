@@ -3,8 +3,9 @@
 
 :class:`CudaDeviceOps` owns CUDA-pointer tensor construction and calls
 :meth:`bind_native` in :meth:`ensure_native` to layer the compiled CUDA
-extension on top of the torch baseline. If the extension is missing, a warning
-is logged and the instance stays on the torch fallback (soft-fail, same as XPU).
+extension on top of the torch baseline. If the extension is missing or fails to
+load, the instance stays on the torch fallback (soft-fail, same as XPU). A load
+failure, such as a torch ABI mismatch, is logged as an error with its cause.
 """
 
 # Future
@@ -19,8 +20,10 @@ import math
 import torch
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.platform.base.device_ops import DeviceOps
+from lmcache.v1.platform.base.device_ops import (
+    DeviceOps,
+    log_native_import_failure,
+)
 from lmcache.v1.platform.torch_ops._tensor_from_ptr import _get_copy_lib
 
 _DTYPE_TO_TYPESTR = {
@@ -35,8 +38,6 @@ _DTYPE_TO_TYPESTR = {
     torch.bool: "|b1",
 }
 _MEMCPY_D2D = 3
-
-logger = init_logger(__name__)
 
 
 class _CudaArrayWrapper:
@@ -124,10 +125,7 @@ class CudaDeviceOps(DeviceOps):
         try:
             # First Party
             import lmcache.cuda_ops as native
-        except ImportError:
-            logger.warning(
-                "lmcache.cuda_ops compiled extension not found; "
-                "CudaDeviceOps stays on the torch baseline for all ops."
-            )
+        except ImportError as exc:
+            log_native_import_failure("lmcache.cuda_ops", exc)
             return
         self.bind_native(native)

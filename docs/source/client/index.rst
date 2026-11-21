@@ -312,12 +312,24 @@ Importing a wheel that does not ship the compiled CUDA ops logs this once:
 
 .. code-block:: text
 
-   WARNING: lmcache.cuda_ops compiled extension not found; CudaDeviceOps stays on the torch baseline
+   WARNING: lmcache.cuda_ops is not installed; device ops stay on the torch baseline.
 
 That is expected for a plain wheel: the device ops fall back to the torch
 implementation. It matters only if you expected the native kernels, for example
 because you built with the CUDA extension profile; then check that the installed
 wheel is the one you built, as described below.
+
+If ``lmcache.cuda_ops`` is installed but cannot load, LMCache logs an error
+with the original import error instead, and the device ops also fall back to
+the slower torch baseline:
+
+.. code-block:: text
+
+   ERROR: lmcache.cuda_ops is installed but failed to load; device ops fall back to the slower torch baseline. [...] Error: .../cuda_ops...so: undefined symbol: ...
+
+An ``undefined symbol`` error usually means that the wheel was built against a
+different PyTorch version than the installed one. Use the checks in the next
+section.
 
 Native library or runtime mismatch
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -12,7 +12,10 @@ from types import ModuleType
 from typing import Any
 from unittest.mock import MagicMock
 import importlib
+import importlib.abc
+import importlib.util
 import inspect
+import logging
 import sys
 
 # Third Party
@@ -27,6 +30,7 @@ from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.devices.cpu.device_ops import CpuDeviceOps
 from lmcache.v1.platform.devices.cuda.device_ops import CudaDeviceOps
+from lmcache.v1.platform.devices.xpu.device_ops import XpuDeviceOps
 from lmcache.v1.platform.ops_types import (
     BatchStep,
     KernelGroupSpec,
@@ -293,6 +297,63 @@ def test_cuda_device_ops_loads_cuda_ops(
     ops.ensure_native()
 
     assert ops.calculate_cdf(None, 0) == "cuda-native"
+
+
+_UNDEFINED_SYMBOL = (
+    "undefined symbol: _ZN3c104cuda29c10_cuda_check_implementationEiPKcS2_jb"
+)
+
+
+class _AbiMismatchLoader(importlib.abc.Loader):
+    """Fails like an extension built against a different torch version."""
+
+    def create_module(self, spec: Any) -> None:
+        return None
+
+    def exec_module(self, module: ModuleType) -> None:
+        raise ImportError(_UNDEFINED_SYMBOL)
+
+
+@pytest.mark.parametrize(
+    ("ops_cls", "module_name"),
+    [(CudaDeviceOps, "lmcache.cuda_ops"), (XpuDeviceOps, "lmcache.xpu_ops")],
+)
+@pytest.mark.parametrize("installed", [False, True], ids=["missing", "broken"])
+def test_native_import_failure_is_reported(
+    ops_cls: type[DeviceOps],
+    module_name: str,
+    installed: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A missing extension warns; one that fails to load logs its real error."""
+    if installed:
+
+        class Finder(importlib.abc.MetaPathFinder):
+            def find_spec(self, name: str, path: Any, target: Any = None) -> Any:
+                if name != module_name:
+                    return None
+                return importlib.util.spec_from_loader(name, _AbiMismatchLoader())
+
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+        monkeypatch.setattr(sys, "meta_path", [Finder(), *sys.meta_path])
+    else:
+        monkeypatch.setitem(sys.modules, module_name, None)
+    # LMCache loggers do not propagate, so attach caplog to the logger itself.
+    base_logger = logging.getLogger("lmcache.v1.platform.base.device_ops")
+    monkeypatch.setattr(
+        base_logger, "handlers", [*base_logger.handlers, caplog.handler]
+    )
+
+    ops_cls().ensure_native()
+
+    (record,) = [r for r in caplog.records if module_name in r.getMessage()]
+    if installed:
+        assert record.levelno == logging.ERROR
+        assert _UNDEFINED_SYMBOL in record.getMessage()
+    else:
+        assert record.levelno == logging.WARNING
+        assert "not installed" in record.getMessage()
 
 
 # -- Package export --------------------------------------------------------

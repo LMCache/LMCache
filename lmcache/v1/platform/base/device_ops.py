@@ -26,6 +26,38 @@ import lmcache.lmcache_native as lmcache_native
 logger = init_logger(__name__)
 
 
+def log_native_import_failure(module_name: str, exc: ImportError) -> None:
+    """Log why a native ops extension is unavailable.
+
+    Callers fall back to the torch baseline after this call. A
+    ``ModuleNotFoundError`` for ``module_name`` itself means the extension is
+    not installed (for example a source-only build) and logs a warning. Any
+    other ``ImportError`` means the extension is installed but cannot load,
+    usually an undefined symbol because it was built against a different torch
+    version. That case logs an error with the original message, because the
+    fallback is much slower and otherwise looks like a missing extension.
+
+    Call this from the ``except`` block so the error log keeps the traceback.
+
+    Args:
+        module_name: Fully qualified name of the native extension module.
+        exc: The ``ImportError`` raised while importing ``module_name``.
+    """
+    if isinstance(exc, ModuleNotFoundError) and exc.name == module_name:
+        logger.warning(
+            "%s is not installed; device ops stay on the torch baseline.",
+            module_name,
+        )
+        return
+    logger.exception(
+        "%s is installed but failed to load; device ops fall back to the "
+        "slower torch baseline. This usually means LMCache was built against "
+        "a different torch version than the installed one. Error: %s",
+        module_name,
+        exc,
+    )
+
+
 class DeviceOps:
     """Strategy base: per-device ops resolved via normal instance MRO.
 
