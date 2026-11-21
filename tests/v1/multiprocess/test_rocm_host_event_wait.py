@@ -20,10 +20,13 @@ import torch
 from lmcache.v1.multiprocess import rocm_host_event_wait
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool, DeferredResponse
 from lmcache.v1.multiprocess.config import (
+    CoordinatorConfig,
     MPServerConfig,
     add_mp_server_args,
     parse_args_to_mp_server_config,
 )
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.engine_module import ModuleBuildContext
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
 from lmcache.v1.multiprocess.rocm_host_event_wait import (
     ROCM_HOST_EVENT_WAIT_ENV,
@@ -138,17 +141,16 @@ def _build(
             unregister=lambda *args, **kwargs: None,
         ),
     )
-    build_ctx = SimpleNamespace(
-        mp_config=SimpleNamespace(
+    build_ctx = ModuleBuildContext(
+        mp_config=MPServerConfig(
             supported_transfer_mode="lmcache_driven",
             rocm_host_event_wait=enabled,
             port=0,
         ),
-        engine_context=server_context,
+        engine_context=cast(MPCacheServerContext, server_context),
+        coordinator_config=CoordinatorConfig(),
     )
-    module: Any = lmcache_driven_transfer.LMCacheDrivenTransferModule.create(
-        cast(Any, build_ctx)
-    )
+    module: Any = lmcache_driven_transfer.LMCacheDrivenTransferModule.create(build_ctx)
     assert module is not None
     waiter = module._host_event_waiter
 

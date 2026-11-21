@@ -250,6 +250,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         module._host_event_waiter = create_host_event_waiter(
             build_ctx.mp_config.rocm_host_event_wait
         )
+        build_ctx.registration_targets["register_kv_cache"] = module
         return module
 
     def __init__(self, ctx: MPCacheServerContext, fd_socket_path: str = "") -> None:
@@ -393,13 +394,16 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         with self._lock:
             return dict(self._cache_contexts)
 
-    def touch_instance(self, instance_id: int) -> None:
+    def touch_instance(self, instance_id: int) -> bool:
         """Refresh the worker's last-seen time and mark it ping-proven.
 
         A no-op if the instance is not tracked.
 
         Args:
             instance_id: The worker instance ID.
+
+        Returns:
+            True if the registration exists, otherwise False.
         """
         now = time.monotonic()
         with self._lock:
@@ -407,6 +411,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             if entry is not None:
                 entry.last_seen = now
                 entry.has_liveness_signal = True
+            return entry is not None
 
     def tracked_instance_count(self) -> int:
         """Return the number of currently registered instances."""

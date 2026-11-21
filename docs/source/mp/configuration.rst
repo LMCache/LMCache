@@ -1087,7 +1087,10 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.heartbeat_interval``
      - ``10.0``
      - Interval (seconds) between periodic heartbeat pings sent from the
-       connector to the server.
+       connector to the server. The vLLM worker also checks that its KV
+       registration still exists. If it was reaped while the server stayed
+       reachable, cache operations degrade until re-registration succeeds.
+       Sleep-released KV caches are not re-registered until wake-up.
    * - ``lmcache.mp.nonblocking_lookup_status``
      - ``true``
      - Poll lookup-status replies without blocking the scheduler by default.

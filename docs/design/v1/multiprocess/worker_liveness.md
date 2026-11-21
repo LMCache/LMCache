@@ -149,12 +149,33 @@ lazy start on the first cache operation, while ATOM starts after successful
 KV-cache registration. The registration grace covers the lazy-start warmup
 window. Each adapter starts its heartbeat healthy, so initial work is not gated.
 A live worker then pings every interval, refreshing its server-side `last_seen`,
-so it is never reaped while alive. The recover callback re-registers only on a
-genuine recovery edge (Section 6.2). vLLM and SGLang report or return failed
-placeholders for cache work dropped while unhealthy, so their schedulers can
+so it is never reaped while alive. The recover callback re-registers after an
+outage or, for vLLM, a missing registration (Section 6.2). vLLM and SGLang report
+or return failed placeholders for cache work dropped while unhealthy, so their schedulers can
 recompute instead of hanging.
 
 ### 6.2 Recovery after a reap
+
+vLLM workers use `ping_registered(instance_id, registration_type)` after
+registration. It refreshes the same liveness targets as PING, but reports
+whether the selected primary KV registration exists. Transfer-module factories
+contribute registration RPC names and owners through `ModuleBuildContext`.
+The check and refresh share the owner's registry lock. Ordinary PING and
+other adapters keep their existing behavior.
+
+| Probe result | Worker behavior |
+|---|---|
+| `True` | Registration exists. Recover first if the worker was unhealthy. |
+| `False` | Server answered but registration is missing. Clear health, then recover. |
+| No response / RPC failure | Keep health cleared and retry on a later heartbeat. |
+
+Recovery reuses the existing chunk-size check and ACK-before-publish context
+replacement. Failure leaves the worker unhealthy and retries on the next
+reachable probe. During sleep, the worker uses ordinary PING and recovery
+respects `unregister_kv_caches()` until `restore_kv_caches()` re-backs the KV.
+The primary probe does not detect independent loss of optional QStore state.
+Upgrade client and server together to provide the new RPC; this change does
+not add reaper fencing or alter the timeout/grace policy.
 
 ```
 T0        outage begins; pings time out -> health_event cleared, traffic stops
@@ -167,6 +188,10 @@ T1        recover callback re-registers (id absent -> fresh context) before
 
 A shorter outage hits the NOOP register path, which refreshes `last_seen` and
 builds nothing — the server never asks a worker to re-register.
+
+A paused worker can also miss its reap window without observing a failed PING.
+After it resumes, ordinary PING still succeeds. The registration-aware probe
+returns `False`, triggering the same recovery before cache work resumes.
 
 ### 6.3 Shutdown
 
