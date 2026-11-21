@@ -171,8 +171,10 @@ def shm_map_readwrite(name: str, nbytes: int) -> int:
 def shm_munmap(addr: int, nbytes: int = 0) -> None:
     """Best-effort release of a previously mapped segment by address.
 
-    The underlying mmap is closed exactly once; subsequent calls with
-    the same address are no-ops.
+    The underlying mmap is closed exactly once. If exported views still
+    prevent closing it, the registry entry is retained so a later call can
+    retry after those views have been released. Calls after a successful
+    close are no-ops.
 
     Args:
         addr: The virtual address of the mapped segment.
@@ -181,21 +183,30 @@ def shm_munmap(addr: int, nbytes: int = 0) -> None:
     """
     if not addr:
         return
+
+    close_error: BufferError | ValueError | None = None
     with _REGISTRY_LOCK:
-        mm = _ADDR_TO_MMAP.pop(addr, None)
-    if mm is None:
-        return
-    try:
-        mm.close()
-    except (BufferError, ValueError) as exc:
-        # ``BufferError`` means callers still hold an exported view
-        # (e.g. a torch tensor backed by this mmap); they will release
-        # the mapping themselves on GC. ``ValueError`` means already
-        # closed -- treat both as best-effort no-ops.
+        mm = _ADDR_TO_MMAP.get(addr)
+        if mm is None:
+            return
+        try:
+            mm.close()
+        except BufferError as exc:
+            # Keep the mapping registered: once callers release their exported
+            # views, another shm_munmap call can complete the close.
+            close_error = exc
+        except ValueError as exc:
+            # An externally closed mmap no longer needs a registry lease.
+            _ADDR_TO_MMAP.pop(addr, None)
+            close_error = exc
+        else:
+            _ADDR_TO_MMAP.pop(addr, None)
+
+    if close_error is not None:
         logger.warning(
             "shm_munmap: mmap.close() skipped for addr=%#x: %s",
             addr,
-            exc,
+            close_error,
         )
 
 
