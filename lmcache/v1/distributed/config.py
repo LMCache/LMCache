@@ -385,15 +385,10 @@ class GdsL1Config:
     io_concurrency: int = 0
     """Opt-in concurrent cuFile async slots per process (0 disables, maximum 4)."""
 
-    max_inflight_bytes: int = 128 << 20
-    """Limit in-flight I/O bytes per process and staging bytes per cache context."""
-
     def __post_init__(self) -> None:
-        """Reject concurrency and byte budgets outside the supported bounds."""
+        """Validate the number of concurrent staging slots."""
         if type(self.io_concurrency) is not int or not 0 <= self.io_concurrency <= 4:
             raise ValueError("GDS io_concurrency must be an integer between 0 and 4")
-        if type(self.max_inflight_bytes) is not int or self.max_inflight_bytes <= 0:
-            raise ValueError("GDS max_inflight_bytes must be a positive integer")
 
 
 @dataclass(frozen=True)
@@ -663,7 +658,7 @@ class GDSL1ManagerConfig(L1ManagerConfig):
             defaults,
             read_ttl,
             write_ttl,
-            {"path", "backend", "direct_io", "io_concurrency", "max_inflight_bytes"},
+            {"path", "backend", "direct_io", "io_concurrency"},
         )
         if config.memory_config.align_bytes < 4096:
             raise ValueError("GDS align_bytes must be at least 4096")
@@ -677,7 +672,6 @@ class GDSL1ManagerConfig(L1ManagerConfig):
             backend,
             config.memory_config.align_bytes,
             cast(int, values.get("io_concurrency", 0)),
-            cast(int, values.get("max_inflight_bytes", 128 << 20)),
         )
         return config
 
@@ -1068,13 +1062,6 @@ def add_storage_manager_args(
         help="Opt-in concurrent cuFile async slots, reusing existing staging buffers. "
         "0 retains the original single-stream path (default); maximum 4.",
     )
-    gds_group.add_argument(
-        "--gds-l1-max-inflight-bytes",
-        type=int,
-        default=128 << 20,
-        help="Byte budget across in-flight GDS transfers and for each CUDA "
-        "context's staging allocation (default 128 MiB).",
-    )
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
         "L1 Manager TTL", "TTL configuration for L1 manager locks"
@@ -1342,7 +1329,6 @@ def parse_args_to_config(
             use_direct_io=args.gds_l1_use_direct_io,
             backend=args.gds_l1_backend,
             io_concurrency=args.gds_l1_io_concurrency,
-            max_inflight_bytes=args.gds_l1_max_inflight_bytes,
         )
 
     l1_manager_config = L1ManagerConfig(

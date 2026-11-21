@@ -113,7 +113,6 @@ class _TempGPUBuffer:
         device: torch.device,
         max_batch_size: int = 4,
         staging_alignment: int = 0,
-        staging_budget: int = 0,
     ) -> None:
         self._kv_groups_manager = kv_layer_groups_manager
         self._lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
@@ -123,26 +122,27 @@ class _TempGPUBuffer:
             self._get_size_for_object_group(i)
             for i in range(kv_layer_groups_manager.num_object_groups)
         )
-        padded_bytes = sum(round_up(size, staging_alignment or 1) for size in sizes) * max_batch_size
-        aligned_backing = padded_bytes + staging_alignment - 1
-        self.aligned_object_sizes = (
-            sizes
-            if staging_alignment and all(sizes) and aligned_backing <= staging_budget
-            else ()
-        )
-        staging_bytes = (
-            aligned_backing
-            if self.aligned_object_sizes
-            else sum(sizes) * max_batch_size
-        )
-        if staging_budget and staging_bytes > staging_budget:
-            raise ValueError(f"Staging needs {staging_bytes} bytes, exceeding {staging_budget}")
-        backing = torch.empty(staging_bytes, dtype=torch.uint8, device=device)
-        if self.aligned_object_sizes:
-            start = -backing.data_ptr() % staging_alignment
-            self._temp_buffer = backing.narrow(0, start, padded_bytes)
-        else:
-            self._temp_buffer = backing
+        self.aligned_object_sizes: tuple[int, ...] = ()
+        if sizes and all(sizes) and staging_alignment:
+            padded_bytes = sum(round_up(size, staging_alignment) for size in sizes) * max_batch_size
+            try:
+                backing = torch.empty(
+                    padded_bytes + staging_alignment - 1,
+                    dtype=torch.uint8,
+                    device=device,
+                )
+            except torch.OutOfMemoryError:
+                logger.warning(
+                    "Aligned GDS staging allocation failed; trying the packed layout"
+                )
+            else:
+                start = -backing.data_ptr() % staging_alignment
+                self._temp_buffer = backing.narrow(0, start, padded_bytes)
+                self.aligned_object_sizes = sizes
+        if not self.aligned_object_sizes:
+            self._temp_buffer = torch.empty(
+                sum(sizes) * max_batch_size, dtype=torch.uint8, device=device
+            )
 
         # Offset map: (batch_idx, object_group_idx, kernel_group_idx) ->
         # (byte offset in the temp buffer, size of the buffer in bytes)
@@ -206,11 +206,6 @@ class _TempGPUBuffer:
     def buffer(self) -> torch.Tensor:
         """The flat staging tensor (for GDS cuFile registration)."""
         return self._temp_buffer
-
-    @property
-    def slot_bytes(self) -> int:
-        """Byte stride of one slot, including all of its object groups."""
-        return self._temp_buffer.numel() // self._max_batch_size
 
     def get_temp_kernel_group_buffer(
         self, batch_idx: int, kernel_group_idx: int
@@ -398,14 +393,12 @@ class GPUCacheContext(BaseCacheContext):
         *,
         object_group_transfer: "ObjectGroupTransfer | None" = None,
         staging_alignment: int = 0,
-        staging_budget: int = 0,
     ) -> None:
         # Kept for close(): raw-IPC wrappers hold driver-level mappings
         # that pin the exporter's device memory until explicitly closed.
         self._kv_wrappers: KVCache = list(kv_caches)
         self._buffer_registration: BufferRegistration | None = None
         self._staging_alignment = staging_alignment
-        self._staging_budget = staging_budget
         self._gds_streams: dict[int, torch.cuda.Stream] = {}
         self._gds_ready_event: torch.cuda.Event | None = None
         self._gds_transfer_lock = threading.Lock()
@@ -540,7 +533,6 @@ class GPUCacheContext(BaseCacheContext):
             device=device,
             max_batch_size=max_batch_size,
             staging_alignment=self._staging_alignment,
-            staging_budget=self._staging_budget,
         )
 
     def register_staging_buffer(self, registration: BufferRegistration) -> None:
@@ -558,7 +550,6 @@ class GPUCacheContext(BaseCacheContext):
                 registration.register_slots(
                     self._temp_buffer.buffer,
                     self._temp_buffer.aligned_object_sizes,
-                    self._temp_buffer.slot_bytes,
                 )
             else:
                 registration.register(self._temp_buffer.buffer)

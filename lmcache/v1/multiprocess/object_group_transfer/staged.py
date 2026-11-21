@@ -331,16 +331,12 @@ class _GDSStream(Protocol):
 
     def wait_event(self, event: object) -> None: ...
 
-    def query(self) -> bool: ...
-
 
 @dataclass
 class _GDSSlot:
     slot: int
     object_index: int
     skip_tokens: int
-    nbytes: int
-    scatter_submitted: bool = False
 
 
 def _run_gds_concurrent(
@@ -356,8 +352,7 @@ def _run_gds_concurrent(
 ) -> bool:
     """Reap/refill at most four independent stream-ordered GDS slots.
 
-    A shared slab scope serializes groups from different cache contexts. Within
-    that scope, the pending queue bounds both operations and useful bytes. Reads
+    Slots rotate in submission order. Reads
     are validated before scatter; stores gather before I/O on the same stream.
     Every slot remains owned until its final stream wait completes. This runs on
     the existing blocking affinity handler, never the transport event loop.
@@ -397,11 +392,11 @@ def _run_gds_concurrent(
             ]
             if len(destinations) != len(set(destinations)):
                 return False
-    budget = context.max_inflight_bytes
-    if any(mo.get_size() > budget for mo in objects):
-        raise ValueError("GDS object exceeds the configured in-flight byte budget")
-
     with cache_context.gds_transfer_scope(), context.io_scope():
+        if not context.has_aligned_slot(
+            cache_context.get_temp_object_group_buffer(0, object_group_id)
+        ):
+            return False
         count = min(cache_context.max_batch_size, context.io_concurrency)
         streams = [cache_context.get_gds_transfer_stream(slot) for slot in range(count)]
         for slot, stream in enumerate(streams):
@@ -413,42 +408,26 @@ def _run_gds_concurrent(
                 ),
             )
         ready = cache_context.record_gds_transfer_ready()
-        free_slots = list(range(count))
         pending: deque[_GDSSlot] = deque()
-        inflight_bytes = 0
 
         def finish_oldest() -> int:
-            """Validate I/O and finish scatter before this slot can be reused."""
+            entry = pending[0]
+            stream = streams[entry.slot]
+            context.synchronize_and_check(cache_context.device, stream)
             if is_read:
-                for entry in pending:
-                    stream = streams[entry.slot]
-                    if entry.scatter_submitted:
-                        continue
-                    if entry is not pending[0] and not cast(_GDSStream, stream).query():
-                        continue
-                    context.synchronize_and_check(cache_context.device, stream)
-                    with torch_dev.stream(stream):
-                        _launch_batch_kernels(
-                            cache_context,
-                            block_ids_gpu,
-                            object_group_id,
-                            entry.object_index,
-                            1,
-                            entry.skip_tokens,
-                            direction,
-                            entry.slot,
-                        )
-                    entry.scatter_submitted = True
-                entry = pending[0]
-                platform_stream.synchronize_stream(
-                    cache_context.device, streams[entry.slot]
-                )
-            else:
-                entry = pending[0]
-                context.synchronize_and_check(cache_context.device, streams[entry.slot])
-            pending.popleft()
-            free_slots.append(entry.slot)
-            return entry.nbytes
+                with torch_dev.stream(stream):
+                    _launch_batch_kernels(
+                        cache_context,
+                        block_ids_gpu,
+                        object_group_id,
+                        entry.object_index,
+                        1,
+                        entry.skip_tokens,
+                        direction,
+                        entry.slot,
+                    )
+                platform_stream.synchronize_stream(cache_context.device, stream)
+            return pending.popleft().slot
 
         try:
             for index in range(skip_objects, end_chunk):
@@ -461,13 +440,10 @@ def _run_gds_concurrent(
                         raise ValueError("Missing GDS object during retrieve")
                     continue
                 assert isinstance(obj, GDSMemoryObject)  # Eligibility checked above.
-                nbytes = obj.get_size()
-                while not free_slots or inflight_bytes + nbytes > budget:
-                    inflight_bytes -= finish_oldest()
-                entry = _GDSSlot(free_slots.pop(), index, skip, nbytes)
-                # Track ownership before gather or I/O can enqueue partially and fail.
+                slot = finish_oldest() if len(pending) == count else len(pending)
+                entry = _GDSSlot(slot, index, skip)
+                # Retain ownership even if gather or I/O only partially submits.
                 pending.append(entry)
-                inflight_bytes += nbytes
                 stream = streams[entry.slot]
                 with torch_dev.stream(stream):
                     cast(_GDSStream, stream).wait_event(ready)
@@ -490,7 +466,7 @@ def _run_gds_concurrent(
                         SlabDirection.READ if is_read else SlabDirection.WRITE,
                     )
             while pending:
-                inflight_bytes -= finish_oldest()
+                finish_oldest()
         finally:
             # Keep the original error; every partially submitted owner/stream drains.
             for entry in pending:

@@ -553,8 +553,8 @@ def test_l1_context_routes_by_owner_and_limits_process_slabs(monkeypatch, backen
         registration = gds_context.GDSBufferRegistration()
         registration.register(tensor)
         registration.deregister(tensor)
-        register.assert_called_once_with(tensor, slot_bytes=None, object_sizes=())
-        deregister.assert_called_once_with(tensor, slot_bytes=None)
+        register.assert_called_once_with(tensor, object_sizes=())
+        deregister.assert_called_once_with(tensor)
         with pytest.raises(ValueError, match="one GDS"):
             gds_context.initialize_l1_gds_context(owner + 1, config)
         with pytest.raises(ValueError, match="one GDS"):
@@ -592,7 +592,7 @@ def test_aligned_slot_preserves_payload_and_owns_the_tail(
         MemoryObjMetadata(torch.Size([4097]), torch.uint8, 4096, 8192, 0)
     )
     try:
-        ctx.register_gpu_buffer(buf, slot_bytes=buf.numel(), object_sizes=(4097, 123))
+        ctx.register_gpu_buffer(buf, object_sizes=(4097, 123))
         ctx.register_stream(buf.device, _fake_stream(2), staging_buffer=logical)
         backend.register_aligned_stream.assert_called_once_with(2)
         _use_fake_stream(monkeypatch, 2)
@@ -620,3 +620,33 @@ def test_aligned_slot_preserves_payload_and_owns_the_tail(
         assert handle.read_async.call_args.args[1] == 4097
     finally:
         ctx.close()
+
+
+@pytest.mark.parametrize("size", [32 << 20, (32 << 20) + 4096, 40 << 20, 64 << 20])
+def test_large_direct_cufile_groups_keep_four_aligned_slots(size, backend, monkeypatch):
+    # First Party
+    from lmcache.v1.platform.devices.cuda.cache_context import _TempGPUBuffer
+
+    backend.name = "cufile"
+    ctx = GDSContext(backend)
+    ctx.initialize(GdsL1Config("/test", 1 << 30, io_concurrency=4))
+    monkeypatch.setattr(gds_context, "get_gds_context", lambda: ctx)
+    group = SimpleNamespace(
+        shape_desc=SimpleNamespace(kv_size=1),
+        num_layers=1,
+        hidden_dim_size=size // 256,
+        dtype=torch.uint8,
+    )
+    layout = SimpleNamespace(
+        kernel_groups=[group],
+        num_kernel_groups=1,
+        num_object_groups=1,
+        object_groups=[SimpleNamespace(kernel_group_indices=[0])],
+        get_slots_per_chunk_in_sw=lambda _: 256,
+    )
+    alignment = gds_context.GDSBufferRegistration().slot_alignment("cuda")
+    buf = _TempGPUBuffer(layout, 256, torch.device("cpu"), staging_alignment=alignment)
+    assert buf.aligned_object_sizes == (size,)
+    for i in range(4):
+        view = buf.get_temp_object_group_buffer(i, 0)
+        assert view.nbytes == size and view.data_ptr() % 65536 == 0

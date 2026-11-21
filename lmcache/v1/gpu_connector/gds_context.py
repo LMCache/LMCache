@@ -36,7 +36,8 @@ from lmcache.v1.platform import stream as platform_stream
 logger = init_logger(__name__)
 
 _GDS_ALIGNMENT = 4096
-# This is the tested GPU registration-base alignment for cuFile stream I/O.
+# LMCache layout choice for registration bases. The cuFileStreamRegister 0x8
+# contract requires 4 KiB-aligned offsets and lengths (NVIDIA cuFile API §3.4.1).
 GDS_SLOT_ALIGNMENT = 64 * 1024
 
 
@@ -114,47 +115,33 @@ def close_l1_gds_context(owner: int) -> None:
             del _owner_contexts[owner]
 
 
-def aligned_gds_staging_budget() -> int:
-    """Return the active direct cuFile slot budget in bytes, or zero."""
-    with _owner_contexts_lock:
-        contexts = [get_gds_context(), *_owner_contexts.values()]
-        return max(context.aligned_staging_budget for context in contexts)
-
-
 def register_gds_gpu_buffer(
     buffer: torch.Tensor,
     *,
-    slot_bytes: int | None = None,
     object_sizes: tuple[int, ...] = (),
 ) -> None:
     """Register a GPU staging buffer with each live slab on its current stream.
 
     Args:
         buffer: Contiguous, aligned staging buffer, after L1 initialization.
-        slot_bytes: Uniform slot stride; concurrent I/O registers slots separately.
         object_sizes: Logical bytes per group in the aligned layout, or empty.
     """
     with _owner_contexts_lock:
         contexts = [get_gds_context(), *_owner_contexts.values()]
     for context in contexts:
-        context.register_gpu_buffer(
-            buffer, slot_bytes=slot_bytes, object_sizes=object_sizes
-        )
+        context.register_gpu_buffer(buffer, object_sizes=object_sizes)
 
 
-def deregister_gds_gpu_buffer(
-    buffer: torch.Tensor, *, slot_bytes: int | None = None
-) -> None:
+def deregister_gds_gpu_buffer(buffer: torch.Tensor) -> None:
     """Drain and unregister a staging buffer from every slab before freeing it.
 
     Args:
         buffer: Buffer previously passed to register_gds_gpu_buffer.
-        slot_bytes: The same slot stride passed during registration.
     """
     with _owner_contexts_lock:
         contexts = [get_gds_context(), *_owner_contexts.values()]
     for context in contexts:
-        context.deregister_gpu_buffer(buffer, slot_bytes=slot_bytes)
+        context.deregister_gpu_buffer(buffer)
 
 
 def deregister_gds_stream(device: object, stream: object) -> None:
@@ -176,10 +163,9 @@ class GDSBufferRegistration(SlottedBufferRegistration):
     def slot_alignment(self, device_type: str) -> int:
         if device_type != "cuda":
             return 0
-        return GDS_SLOT_ALIGNMENT if self.staging_budget() else 0
-
-    def staging_budget(self) -> int:
-        return aligned_gds_staging_budget()
+        with _owner_contexts_lock:
+            contexts = [get_gds_context(), *_owner_contexts.values()]
+            return GDS_SLOT_ALIGNMENT if any(c.io_concurrency for c in contexts) else 0
 
     def register(self, buffer: torch.Tensor) -> None:
         register_gds_gpu_buffer(buffer)
@@ -188,13 +174,11 @@ class GDSBufferRegistration(SlottedBufferRegistration):
         self,
         buffer: torch.Tensor,
         object_sizes: tuple[int, ...],
-        slot_bytes: int,
     ) -> None:
-        register_gds_gpu_buffer(buffer, object_sizes=object_sizes, slot_bytes=slot_bytes)
-        self._slot_bytes = slot_bytes
+        register_gds_gpu_buffer(buffer, object_sizes=object_sizes)
 
     def deregister(self, buffer: torch.Tensor) -> None:
-        deregister_gds_gpu_buffer(buffer, slot_bytes=getattr(self, "_slot_bytes", None))
+        deregister_gds_gpu_buffer(buffer)
 
     def deregister_stream(self, device: object, stream: object) -> None:
         deregister_gds_stream(device, stream)
@@ -249,7 +233,6 @@ class GDSContext:
     def __init__(self, backend: Optional[GDSBackend] = None) -> None:
         # ``initialized`` defaults to False via the class attribute; it is
         # flipped to True by ``initialize``.
-        self._aligned_staging_budget = 0
         self._slot_io: dict[int, _SlotIO] = {}
         self._slot_stream_alignment: dict[int, bool] = {}
         self._slab_size = 0
@@ -269,7 +252,6 @@ class GDSContext:
         self._registered_streams: set[int] = set()  # maintained for close()
         self._io_lock = threading.RLock()
         self._io_concurrency = 0
-        self._max_inflight_bytes = 0
 
     def initialize(self, config: GdsL1Config) -> None:
         """Create + clear the slab and register it with the GDS library.
@@ -303,19 +285,13 @@ class GDSContext:
             except Exception as cleanup_error:
                 logger.warning("GDS driver cleanup failed: %s", cleanup_error)
             raise
-        if config.io_concurrency and self.backend.name == "cufile":
-            if (
-                config.use_direct_io
-                and config.align_bytes > 0
-                and config.align_bytes % _GDS_ALIGNMENT == 0
-            ):
-                self._aligned_staging_budget = config.max_inflight_bytes
+        if (
+            self.backend.name == "cufile"
+            and config.use_direct_io
+            and config.align_bytes > 0
+            and config.align_bytes % _GDS_ALIGNMENT == 0
+        ):
             self._io_concurrency = config.io_concurrency
-            self._max_inflight_bytes = config.max_inflight_bytes
-        elif config.io_concurrency:
-            logger.warning(
-                "Concurrent GDS streams require cuFile; retaining the default path"
-            )
         self._slab_path = self._slab_handle.path
         logger.info(
             "GDSContext: %s slab opened at %s (%.1f GiB)",
@@ -335,19 +311,12 @@ class GDSContext:
         return self._backend
 
     @property
-    def aligned_staging_budget(self) -> int:
-        """Maximum backing allocation for direct, concurrent cuFile slots."""
-        return self._aligned_staging_budget
-
-    @property
     def io_concurrency(self) -> int:
         """Return the enabled asynchronous slot count, or zero for the default path."""
         return self._io_concurrency
 
-    @property
-    def max_inflight_bytes(self) -> int:
-        """Return the byte budget for a bounded asynchronous transfer group."""
-        return self._max_inflight_bytes
+    def has_aligned_slot(self, buffer: torch.Tensor) -> bool:
+        return buffer.data_ptr() in self._slot_io
 
     @contextmanager
     def io_scope(self) -> Iterator[None]:
@@ -460,19 +429,17 @@ class GDSContext:
         self,
         buffer: torch.Tensor,
         *,
-        slot_bytes: int | None = None,
         object_sizes: tuple[int, ...] = (),
     ) -> None:
         """Register a staging buffer (and its stream) with the GDS library.
 
         Registered as contiguous <=16 MiB regions; :meth:`transfer_async`
-        splits transfers at these boundaries. When slot_bytes is supplied,
+        splits transfers at these boundaries. For an aligned layout,
         concurrent I/O also splits at slot boundaries so independently owned
         slots do not share a registered region.
 
         Args:
             buffer: Contiguous GPU staging buffer, 4 KiB-aligned in size.
-            slot_bytes: Uniform slot stride. Ignored when concurrency is disabled.
             object_sizes: Logical group sizes for aligned cuFile slots, or empty.
 
         Raises:
@@ -480,6 +447,7 @@ class GDSContext:
         """
         if not self.initialized:
             return
+        slot_bytes = sum(map(gds_group_stride, object_sizes)) or None
         plans = (
             self._plan_slot_io(buffer, slot_bytes, object_sizes) if object_sizes else {}
         )
@@ -515,14 +483,11 @@ class GDSContext:
                     self._registered_streams.discard(raw_stream)
                 raise
 
-    def deregister_gpu_buffer(
-        self, buffer: torch.Tensor, *, slot_bytes: int | None = None
-    ) -> None:
+    def deregister_gpu_buffer(self, buffer: torch.Tensor) -> None:
         """Reverse of :meth:`register_gpu_buffer`: deregister its regions + stream.
 
         Args:
             buffer: The buffer passed to :meth:`register_gpu_buffer`.
-            slot_bytes: The same slot stride passed during registration.
         """
         if not self.initialized:
             return
@@ -535,7 +500,9 @@ class GDSContext:
             for ptr in list(self._slot_io):
                 if lo <= ptr < lo + buffer.nbytes:
                     del self._slot_io[ptr]
-            for region in self._buffer_regions(buffer, slot_bytes):
+            start = bisect.bisect_left(self._base_ptrs, lo)
+            end = bisect.bisect_left(self._base_ptrs, lo + buffer.nbytes)
+            for region in self._buffers[start:end]:
                 self._deregister_region_locked(region)
             if raw_stream in self._registered_streams:
                 try:
@@ -663,7 +630,6 @@ class GDSContext:
                 logger.warning("GDSContext.close: driver close failed: %s", e)
         self.initialized = False
         self._io_concurrency = 0
-        self._aligned_staging_budget = 0
 
     # --- Internal -----------------------------------------------------
 
@@ -675,7 +641,7 @@ class GDSContext:
     ) -> dict[int, _SlotIO]:
         """Resolve the DMA segments for each group at registration."""
         if (
-            not self.aligned_staging_budget
+            not self.io_concurrency
             or not slot_bytes
             or buffer.dtype != torch.uint8
             or buffer.ndim != 1
@@ -683,7 +649,6 @@ class GDSContext:
             or buffer.data_ptr() % GDS_SLOT_ALIGNMENT
             or buffer.numel() % slot_bytes
             or any(size <= 0 for size in object_sizes)
-            or sum(gds_group_stride(size) for size in object_sizes) != slot_bytes
         ):
             raise ValueError("Invalid aligned GDS staging layout")
         plans = {}
@@ -719,9 +684,7 @@ class GDSContext:
         nbytes = buf.numel()
         if not nbytes:
             return
-        stride = (
-            slot_bytes if self.io_concurrency and slot_bytes is not None else nbytes
-        )
+        stride = slot_bytes or nbytes
         if stride <= 0 or nbytes % stride:
             raise ValueError("GDS slot stride must evenly partition the staging buffer")
         for slot_start in range(0, nbytes, stride):

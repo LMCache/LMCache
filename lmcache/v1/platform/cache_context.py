@@ -149,7 +149,6 @@ def create_cache_context(
         alignment = buffer_registration.slot_alignment(device_type)
         if alignment:
             staging_options["staging_alignment"] = alignment
-            staging_options["staging_budget"] = buffer_registration.staging_budget()
     context = spec.create_cache_context(
         kv_caches,
         lmcache_tokens_per_chunk,

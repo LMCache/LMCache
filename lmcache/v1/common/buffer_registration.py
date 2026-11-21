@@ -46,15 +46,10 @@ class SlottedBufferRegistration(BufferRegistration, Protocol):
         """Return the required alignment in bytes, or zero for ordinary staging."""
         ...
 
-    def staging_budget(self) -> int:
-        """Return the staging allocation limit in bytes."""
-        ...
-
     def register_slots(
         self,
         buffer: torch.Tensor,
         object_sizes: tuple[int, ...],
-        slot_bytes: int,
     ) -> None:
         """Register a buffer and the logical group sizes in each aligned slot."""
         ...

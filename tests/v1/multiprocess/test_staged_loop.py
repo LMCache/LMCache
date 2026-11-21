@@ -162,35 +162,34 @@ def test_resolve_chunk_range_combines_the_range_with_the_window_skip(
     assert resolve_chunk_range(8, chunk_range, window_skip) == expected
 
 
-@pytest.mark.parametrize("short_read", [False, True])
-def test_gds_streams_wait_before_scatter_and_slot_reuse(
-    harness, monkeypatch, short_read
-):
-    """All four reads may queue, but no scatter can consume a failed read."""
+@pytest.mark.parametrize("short_io", [False, True])
+@pytest.mark.parametrize("direction", [H2D, D2H])
+def test_gds_slots_complete_in_order(harness, monkeypatch, direction, short_io):
+    """Wait, check and finish a slot before reusing it, including partial failure."""
     cc, _ = harness
     cc.device = torch.device("cuda")
     cc.max_batch_size = 4
     streams = [MagicMock() for _ in range(4)]
     cc.get_gds_transfer_stream.side_effect = streams.__getitem__
     cc.get_temp_object_group_buffer.side_effect = lambda slot, group: slot
-    slab = MagicMock(io_concurrency=4, max_inflight_bytes=16)
+    slab = MagicMock(io_concurrency=4)
     monkeypatch.setattr(staged, "get_l1_gds_context", lambda owner: slab)
     monkeypatch.setattr(staged.torch_dev, "stream", lambda stream: nullcontext())
     events = []
     slab.transfer_async.side_effect = lambda obj, slot, direction: events.append(
-        ("read", slot)
+        ("io", slot)
     )
 
     def check(device, stream):
         events.append(("check", streams.index(stream)))
-        if short_read and len(events) == 5:
-            raise RuntimeError("short read")
+        if short_io and slab.synchronize_and_check.call_count == 1:
+            raise RuntimeError("short I/O")
 
     slab.synchronize_and_check.side_effect = check
     monkeypatch.setattr(
         staged,
         "_launch_batch_kernels",
-        lambda *args: events.append(("scatter", args[-1])),
+        lambda *args: events.append(("kernel", args[-1])),
     )
     monkeypatch.setattr(
         staged.platform_stream,
@@ -205,21 +204,35 @@ def test_gds_streams_wait_before_scatter_and_slot_reuse(
 
     def run(destinations):
         return staged._run_gds_concurrent(
-            cc, [], objs, 0, 0, 0, len(objs), H2D, [destinations]
+            cc, [], objs, 0, 0, 0, len(objs), direction, [destinations]
         )
 
-    assert not run([0] * len(block_ids))
-    assert events == []
-    if short_read:
-        with pytest.raises(RuntimeError, match="short read"):
+    for i, stream in enumerate(streams):
+        stream.wait_event.side_effect = lambda event, i=i: events.append(("wait", i))
+    if direction == H2D:
+        assert not run([0] * len(block_ids))
+        assert events == []
+    if short_io:
+        with pytest.raises(RuntimeError, match="short I/O"):
             run(block_ids)
-        assert all(kind != "scatter" for kind, slot in events)
+        if direction == H2D:
+            assert all(kind != "kernel" for kind, slot in events)
         assert {slot for kind, slot in events if kind == "check"} == {0, 1, 2, 3}
     else:
         assert run(block_ids)
-        assert [kind for kind, slot in events[:4]] == ["read"] * 4
+        first_check = next(i for i, event in enumerate(events) if event[0] == "check")
+        assert [slot for kind, slot in events[:first_check] if kind == "io"] == [
+            0,
+            1,
+            2,
+            3,
+        ]
+        assert [slot for kind, slot in events if kind == "check"] == [0, 1, 2, 3, 0]
         for slot in range(4):
             per_slot = [kind for kind, item in events if item == slot]
-            assert per_slot == ["read", "check", "scatter", "ready"] * per_slot.count(
-                "read"
+            expected = (
+                ["wait", "io", "check", "kernel", "ready"]
+                if direction == H2D
+                else ["wait", "kernel", "io", "check"]
             )
+            assert per_slot == expected * per_slot.count("io")
