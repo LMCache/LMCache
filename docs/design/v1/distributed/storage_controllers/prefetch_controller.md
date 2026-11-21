@@ -70,6 +70,8 @@ PrefetchController(l1_managers, l1_manager_descriptors,
 submit_prefetch_request(spec: PrefetchTaskSpec) -> PrefetchRequestId
 query_prefetch_result(request_id) -> PrefetchResult | None   # consume-once
 wait_prefetch_result(request_id, timeout) -> bool            # does not consume
+has_inflight_loads(adapter_ids) -> bool
+register_load_idle_callback(callback)
 add_adapter(adapter_id, adapter, descriptor) / request_remove_adapter(adapter_id)
 start() / stop()
 ```
