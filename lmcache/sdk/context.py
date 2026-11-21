@@ -36,8 +36,32 @@ class LMCacheSDKError(RuntimeError):
     """Raised when an SDK KV-cache operation fails."""
 
 
+class TensorDict(dict[LMCacheSDKCacheKind, torch.Tensor]):
+    """The cached tensors to be passed to modify functions, keyed by cache
+    kind.
+
+    Query tensors are only available for the tokens that just got computed
+    in the step, so they cover ``[segment_start_token_id, T)`` of the KV's
+    ``[0, T)``.
+    Later when supporting hybrid type, we will change query tensor as a
+    sliding window type, and user can specify how many windows to retrieve.
+
+    Attributes:
+        segment_start_token_id: First token the latest generate() pass
+            computed (chunk-aligned); tokens before it came from the cache.
+    """
+
+    def __init__(
+        self,
+        tensors: Mapping[LMCacheSDKCacheKind, torch.Tensor],
+        segment_start_token_id: int,
+    ) -> None:
+        super().__init__(tensors)
+        self.segment_start_token_id = segment_start_token_id
+
+
 ModifyFnType = Callable[
-    [Mapping[LMCacheSDKCacheKind, torch.Tensor], Sequence[int]],
+    [TensorDict, Sequence[int]],
     tuple[torch.Tensor, Sequence[int]],
 ]
 
@@ -481,40 +505,110 @@ class LMCacheSDKContext:
                 request_id,
             )
 
+    def _await_lookup_result(self, request_id: str) -> int:
+        """Block until a submitted LOOKUP completes and return its hit length.
+
+        Args:
+            request_id: The id the LOOKUP was submitted under.
+
+        Returns:
+            The cached prefix length in tokens.
+
+        Raises:
+            LMCacheSDKError: If the LOOKUP does not complete within mq_timeout.
+        """
+        start_time = time.time()
+        result = self.check_lookup_result(request_id)
+        while result is None:
+            if time.time() - start_time > self.mq_timeout:
+                self.end_session(request_id)
+                raise LMCacheSDKError(
+                    f"LOOKUP request timed out after {self.mq_timeout}s "
+                    f"for request_id={request_id}"
+                )
+            logger.debug("Waiting for LOOKUP result for request_id=%s...", request_id)
+            time.sleep(0.01)
+            result = self.check_lookup_result(request_id)
+        return result
+
+    def lookup(self, tokens: Sequence[int], cache_salt: str = "") -> int:
+        """Return how many chunk-aligned tokens are currently cached.
+
+        Args:
+            tokens: The full token sequence to look up, from token 0.
+            cache_salt: Optional cache salt string for the lookup.
+
+        Returns:
+            The cached prefix length in tokens; 0 when nothing is cached.
+
+        Raises:
+            LMCacheSDKError: If the LOOKUP does not complete within mq_timeout.
+        """
+        total_tokens = (len(tokens) // self.chunk_size) * self.chunk_size
+        if total_tokens == 0:
+            return 0
+        request_id = f"lookup-{uuid.uuid4().hex}"
+        self.maybe_submit_lookup_request(
+            request_id, list(tokens[:total_tokens]), cache_salt
+        )
+        try:
+            return self._await_lookup_result(request_id)
+        finally:
+            self.end_session(request_id)
+
     def retrieve(
         self,
         tokens: Sequence[int],
         cache_salt: str = "",
+        start_token_id: int = 0,
+        *,
         request_configs: dict[str, object] | None = None,
-    ) -> torch.Tensor | None:
-        """Retrieve KV cache tensors for the given token IDs.
+    ) -> tuple[torch.Tensor, None] | None:
+        """Retrieve cached KV or query tensors for the given token IDs.
 
         Args:
-            tokens: The list of token IDs to retrieve KV cache for.
+            tokens: The token IDs the cache keys are chained from, starting at
+                the chain's first token (token 0 for KV, the generate() pass's
+                first computed token for query tensors). Indices below are
+                relative to it.
             cache_salt: Optional cache salt string for the lookup.
+            start_token_id: The first token to retrieve, aligned to
+                chunk_size.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
 
         Returns:
-            A contiguous CPU tensor containing the retrieved KV cache for
-            the requested tokens.
-            None if retrieval fails or there are no tokens to retrieve.
+            ``(tensor, state)``. ``tensor`` is a contiguous CPU tensor holding
+            the cached chunks from start_token_id onwards: ``[2, L, T, D]`` K
+            and V or ``[1, L, T, D]`` query rows. It stops at the first
+            uncached chunk, so it may cover fewer tokens than requested.
+            ``state`` is reserved for a hybrid model's recurrent state and is
+            None for dense models.
+            None if retrieval fails, there are no tokens to retrieve, or
+            nothing is cached at start_token_id.
 
         Raises:
-            LMCacheSDKError: If the LOOKUP request does not complete in time,
-                or the Q ring cannot serve the transfer.
+            LMCacheSDKError: If start_token_id is not a multiple of chunk_size,
+                the LOOKUP request does not complete in time, or the Q ring
+                cannot serve the transfer.
         """
         if not tokens:
             logger.info("No tokens provided for retrieval; returning None.")
             return None
+        if start_token_id % self.chunk_size != 0:
+            raise LMCacheSDKError(
+                f"start_token_id ({start_token_id}) must be a multiple of "
+                f"chunk_size ({self.chunk_size})"
+            )
 
         # Drop tokens not fit into a whole chunk
         total_tokens = (len(tokens) // self.chunk_size) * self.chunk_size
-        if total_tokens == 0:
+        if total_tokens <= start_token_id:
             logger.info(
-                "Number of tokens (%d) is less than chunk size (%d); returning None.",
-                len(tokens),
-                self.chunk_size,
+                "Chunk-aligned token count (%d) does not exceed start_token_id "
+                "(%d); returning None.",
+                total_tokens,
+                start_token_id,
             )
             return None
 
@@ -550,36 +644,42 @@ class LMCacheSDKContext:
                 num_prefetched_tokens = self.wait_for_lookup(
                     request_id, tokens, cache_salt, request_configs, total_tokens
                 )
-                if num_prefetched_tokens <= 0:
+                if num_prefetched_tokens <= start_token_id:
                     logger.info(
-                        "No prefetched tokens found for request_id=%s; returning None.",
+                        "Cached kind %s for request_id=%s covers %d tokens, which does "
+                        "not reach start_token_id (%d); returning None.",
+                        self.kind.name,
                         request_id,
+                        num_prefetched_tokens,
+                        start_token_id,
                     )
                     self.end_session(request_id)
                     return None
 
                 # Now transfer
+                end = min(total_tokens, num_prefetched_tokens)
                 key = self._create_key(
-                    token_ids=list(tokens[:num_prefetched_tokens]),
-                    start=0,
-                    end=num_prefetched_tokens,
+                    token_ids=list(tokens[:end]),
+                    start=start_token_id,
+                    end=end,
                     request_id=request_id,
                     cache_salt=cache_salt,
                     request_configs=request_configs,
                     worker_id=0,
                 )
                 try:
-                    return self.transfer_ctx.retrieve(key, self.instance_id)
+                    tensor = self.transfer_ctx.retrieve(key, self.instance_id)
                 except RingStateError as err:
                     raise LMCacheSDKError(str(err)) from err
                 finally:
                     self.end_session(request_id)
+                return None if tensor is None else (tensor, None)
             finally:
                 try:
                     # Phase 2: Release the lock if not yet expired
                     if is_ttl_not_expired:
                         lock_key = self._create_key(
-                            list(tokens[:warm]),
+                            token_ids=list(tokens[:warm]),
                             start=0,
                             end=warm,
                             request_id=warmup_id,
