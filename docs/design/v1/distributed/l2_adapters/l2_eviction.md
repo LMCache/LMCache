@@ -190,8 +190,10 @@ To support eviction in a new adapter:
    storage (e.g., after a store task completes).
 
 3. **Fire `_notify_keys_deleted(keys)`** inside `delete()` after keys are
-   removed. Only fire for keys that were actually removed — skip keys not found
-   and keys skipped due to pinning.
+   removed. Fire for every key that is no longer in storage, including keys
+   the backend reports as not found (another instance sharing the storage may
+   have deleted them): the policy keeps selecting a key it still tracks. Skip
+   keys skipped due to pinning and keys whose delete failed.
 
 4. **Fire `_notify_keys_accessed(keys)`** when a lookup or load marks a key as
    recently used (optional — improves LRU accuracy).

@@ -354,8 +354,9 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
         Submits a batch delete to the native connector and blocks
         until the demux thread signals completion (up to 30s timeout).
-        Fires ``_notify_keys_deleted`` on success so eviction policy
-        tracking stays in sync.
+        Fires ``_notify_keys_deleted`` for each key the backend deleted.
+        If the batch succeeds, keys it reports as not found are included,
+        since they are no longer in storage.
 
         No-op if the connector does not expose ``submit_batch_delete``
         or if the key list is empty.
@@ -572,7 +573,11 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                     elif op_type == self._OP_DELETE:
                         if result_bools is not None and lookup_keys is not None:
                             for i, deleted in enumerate(result_bools):
-                                if not deleted:
+                                # In a successful batch, 0 means "not found":
+                                # the key is gone, so report it like a deletion.
+                                # A 0 from a failed batch may mean the delete
+                                # never ran.
+                                if not deleted and not ok:
                                     continue
                                 key = lookup_keys[i]
                                 # A key stored before this process started
