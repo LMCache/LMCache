@@ -116,3 +116,24 @@ def test_request_extraction_and_config_copy() -> None:
     assert spec is not None
     assert spec == TokenDropSpec("rkv", config)
     assert spec.config is not config
+
+
+def test_extract_request_configs_strips_connector_hints() -> None:
+    request = SimpleNamespace(
+        sampling_params=SimpleNamespace(
+            extra_args={
+                "kv_transfer_params": {
+                    "lmcache.token_drop": {"algorithm": "rkv", "config": {}},
+                    "lmcache.temporary_unfull_chunk": True,
+                    "lmcache.hint.unfull_chunk_grid": "x",
+                    "lmcache.hint.engine_computed_tokens": 100,
+                    "non_lmcache": "ignored",
+                }
+            }
+        )
+    )
+    configs = extract_request_configs_from_request(request)
+    assert configs == {
+        "lmcache.token_drop": {"algorithm": "rkv", "config": {}},
+        "lmcache.temporary_unfull_chunk": True,
+    }
