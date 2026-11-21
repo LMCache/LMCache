@@ -210,6 +210,11 @@ Source: ``lmcache/v1/multiprocess/config.py``
        withdraw announced CPU placements and stop reporting them; successful
        worker stores do not synthesize events. Caching continues unchanged.
        Publication while idle requires vLLM to call ``take_events()`` while idle.
+       A chunk is announced whether its L1 copy was stored by this engine or
+       loaded by one of its lookups from L2 or a P2P peer. A temporary
+       prefetch copy (``--l2-prefetch-policy skip_l1``, which
+       ``--enable-p2p-write`` selects) is removed again when its reader
+       finishes.
        Events still carry LMCache chunk hashes and chunk size; native engine
        block identities are separate work.
        With the channel enabled, Stored requires a committed L1 copy of every

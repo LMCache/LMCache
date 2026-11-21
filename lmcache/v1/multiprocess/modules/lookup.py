@@ -214,6 +214,9 @@ class LookupModule(DiscoverableModule):
         via query_prefetch_status. When the KV load policy declines the
         request, no prefetch is submitted and the job reports zero hits.
 
+        Before a prefetch that could load from an L2 adapter, publishes the
+        token bindings of the looked-up chunks for cache-event subscribers.
+
         Args:
             key: Cache key with request_id embedded.
             tp_size: Legacy wire field; ignored (kept for payload arity).
@@ -378,6 +381,38 @@ class LookupModule(DiscoverableModule):
                 probe_unfull_chunk=True,
             )
             return
+
+        # The prefetch can commit chunks to L1 that this server's engine never
+        # stored: copies loaded from a shared L2 or a P2P peer. Bind their
+        # tokens first, as STORE does, so the cache events can announce them.
+        # Without an L2 adapter nothing can be loaded.
+        if (
+            self._ctx.event_bus.has_subscribers(EventType.MP_TOKENS)
+            and self._ctx.storage_manager.l2_adapters()
+        ):
+            token_ids = unpack_token_ids(key.token_bytes)
+            token_offsets = [
+                (start_chunk + index) * chunk_size
+                for index in range(len(suffix_hashes))
+            ]
+            self._ctx.event_bus.publish(
+                Event(
+                    event_type=EventType.MP_TOKENS,
+                    session_id=key.request_id,
+                    metadata={
+                        "chunk_hashes": suffix_hashes,
+                        "token_chunks": [
+                            token_ids[offset : offset + chunk_size]
+                            for offset in token_offsets
+                        ],
+                        "token_offsets": token_offsets,
+                        "parent_hashes": [
+                            chunk_hashes[start_chunk - 1] if start_chunk else None,
+                            *suffix_hashes[:-1],
+                        ],
+                    },
+                )
+            )
 
         spec = PrefetchTaskSpec(
             key_groups=ipc_key_to_grouped_object_keys(
