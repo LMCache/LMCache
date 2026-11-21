@@ -248,6 +248,11 @@ Caveats
 - The cached pages are **byte-opaque**, so content-aware features (CacheGen
   compression, CacheBlend) do not apply, and cache entries must not be shared
   across engines with different attention backends or kernel block sizes.
+- With vLLM KV events enabled, the CPU tier announces each chunk once its
+  attention objects are stored. Recurrent state is not required, so a
+  KV-aware router can credit chunks after the last stored recurrent
+  checkpoint. The real cache hit ends at that checkpoint and the engine
+  recomputes the rest. Output is not affected.
 - Several of these models are **vision-language** (they load a vision tower).
   The validated, supported path is **text** KV caching; image/video KV caching
   is not validated.

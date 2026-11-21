@@ -572,6 +572,59 @@ def test_cpu_events_keep_tagged_and_untagged_announcements_separate(
     assert not module.read_kv_events("model", removed.next_cursor, 8).events
 
 
+def test_cpu_events_chain_attention_chunks_without_recurrent_state() -> None:
+    """Recurrent state at a checkpoint only must not break the chain from root."""
+    module, bus = _event_module()
+    registry = module.context.layout_desc_registry
+    registry.unregister("model", 1)
+    registry.register(
+        "model",
+        1,
+        MemoryLayoutDesc([torch.Size([1])], [torch.float16]),
+        chunk_size=256,
+        hash_algorithm="blake3",
+        attn_desc=AttnWindowDesc([-1, 1], group_kinds=("attention", "recurrent")),
+    )
+    attention = [_event_key(i) for i in range(1, 4)]
+    checkpoint = ObjectKey(identity=replace(attention[-1].identity, object_group_id=1))
+    _bind_kv(bus, attention)
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[checkpoint])
+    assert module.read_kv_events("model", 0, 8).events == []
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=attention)
+    stored = module.read_kv_events("model", 0, 8)
+    assert [(r.block_hashes, r.parent_block_hash) for r in stored.events] == [
+        ([attention[0].chunk_hash], None),
+        ([attention[1].chunk_hash], attention[0].chunk_hash),
+        ([attention[2].chunk_hash], attention[1].chunk_hash),
+    ]
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[checkpoint])
+    assert module.read_kv_events("model", stored.next_cursor, 8).events == []
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=attention[1:2])
+    removed = module.read_kv_events("model", stored.next_cursor, 8)
+    assert [(r.kind, r.block_hashes) for r in removed.events] == [
+        ("removed", [attention[1].chunk_hash]),
+    ]
+
+
+def test_cpu_events_need_a_non_recurrent_group() -> None:
+    """Recurrent-only geometry has no required object and announces nothing."""
+    module, bus = _event_module()
+    registry = module.context.layout_desc_registry
+    registry.unregister("model", 1)
+    registry.register(
+        "model",
+        1,
+        MemoryLayoutDesc([torch.Size([1])], [torch.float16]),
+        chunk_size=256,
+        hash_algorithm="blake3",
+        attn_desc=AttnWindowDesc([1], group_kinds=("recurrent",)),
+    )
+    key = _event_key(1)
+    _bind_kv(bus, [key])
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[key])
+    assert module.read_kv_events("model", 0, 8).events == []
+
+
 @pytest.mark.parametrize("world_size", [1, 2])
 def test_cpu_events_keep_a_chunk_until_its_required_object_loses_all_copies(
     world_size: int,

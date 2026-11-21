@@ -95,19 +95,32 @@ class CommittedKVResidency:
     def is_committed(self, key: ObjectKey) -> bool:
         """Return whether every distinct registered group shard has an L1 copy.
 
+        Recurrent-state groups are not required: they hold state snapshots only
+        at checkpoint chunks, so requiring them would announce only those
+        chunks and break the prefix chain that routers walk from the root.
+
         Args:
             key: Any object identifying the chunk's model, world, salt, tags and hash.
 
         Returns:
-            False for missing or empty registered geometry, or an
-            incomplete chunk. TP replicas require one object per DCP shard.
-            Different L1 tags may supply different required objects.
+            False for missing or empty registered geometry, a registration
+            without a non-recurrent group, or an incomplete chunk. TP replicas
+            require one object per DCP shard. Different L1 tags may supply
+            different required objects.
         """
         world_size = ObjectKey.WorldSizeFromKVRank(key.kv_rank)
         geometry = self._layouts.find_group_shard_geometry(key.model_name, world_size)
         if not world_size or geometry is None:
             return False
         groups, replication = geometry
+        try:
+            kinds = self._layouts.find_attn_desc(key.model_name, world_size).group_kinds
+        except ValueError:
+            # Unregistration can land between the two registry reads.
+            return False
+        required = [g for g in groups if not kinds or kinds[g] != "recurrent"]
+        if not required:
+            return False
         return all(
             ObjectKey(
                 identity=key.identity,
@@ -115,7 +128,7 @@ class CommittedKVResidency:
                 object_group_id=group,
             )
             in self._owners
-            for group in groups
+            for group in required
             for rank in get_kv_worker_ids(
                 world_size,
                 replication.tp_replicas(group),
