@@ -10,6 +10,7 @@ import torch
 
 # First Party
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
 from lmcache.v1.multiprocess.object_group_transfer.direct_copy import (
     batch_memcpy_available,
     direct_transfer_supported,
@@ -24,7 +25,6 @@ from lmcache.v1.multiprocess.object_group_transfer.staged import (
     run_object_group_transfer_plan,
     run_staged_loop,
 )
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
 
 

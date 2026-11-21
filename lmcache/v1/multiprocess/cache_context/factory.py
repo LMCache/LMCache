@@ -3,21 +3,22 @@
 
 The concrete implementations live in their respective sub-packages:
 
-* :class:`~lmcache.v1.platform.devices.cuda.cache_context.GPUCacheContext` --
+* :class:`~lmcache.v1.multiprocess.cache_context.cuda.GPUCacheContext` --
   CUDA-backed.
-* :class:`~lmcache.v1.platform.devices.cpu.cache_context.CPUCacheContext` --
+* :class:`~lmcache.v1.multiprocess.cache_context.cpu.CPUCacheContext` --
   CPU-only fallback (POSIX-SHM-backed KV tensors).
 
 :func:`create_cache_context` keeps the dispatch out of the call site
-in :mod:`lmcache.v1.multiprocess.server`. Selection is data-driven
-and delegated to the :class:`~lmcache.v1.platform.base.device_spec.
-DeviceSpec` registry maintained by :mod:`lmcache.v1.platform`: each built-in
-backend sub-package or external device plugin ships a ``DeviceSpec`` whose
-``create_cache_context`` hook lazy-imports and instantiates the
-matching :class:`~lmcache.v1.platform.base.cache_context.
-BaseCacheContext`. Adding a new accelerator therefore requires
-*zero* edits to this module -- implement the hook in the built-in backend or
-external plugin.
+in :mod:`lmcache.v1.multiprocess.server`. The :class:`~lmcache.v1.platform.
+base.device_spec.DeviceSpec` registry maintained by
+:mod:`lmcache.v1.platform` resolves the spec for the device type. A
+built-in backend is then mapped to its in-tree context class here, by
+``backend_name``, so that :mod:`lmcache.v1.platform` never imports this
+server-side package. Any other spec (an external device plugin) is asked
+through its ``create_cache_context`` hook, which lazy-imports and
+instantiates the matching :class:`~lmcache.v1.multiprocess.cache_context.
+base.BaseCacheContext`. An external accelerator therefore requires
+*zero* edits to this module -- implement the hook in the plugin.
 """
 
 # Future
@@ -33,12 +34,12 @@ from lmcache.v1.platform import get_device_spec
 
 if TYPE_CHECKING:
     # Standard
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     # First Party
     from lmcache.v1.common.group_view import EngineGroupInfo
     from lmcache.v1.common.utils import LayoutHints
-    from lmcache.v1.platform.base.cache_context import BaseCacheContext
+    from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
     from lmcache.v1.platform.base.ipc_wrapper import KVCache
 
 
@@ -73,6 +74,43 @@ def _detect_device_type(kv_caches: KVCache) -> str:
     return next(iter(device_types))
 
 
+def _builtin_cache_context_cls(
+    backend_name: str,
+) -> "Callable[..., BaseCacheContext] | None":
+    """Return the in-tree cache context class of a built-in backend.
+
+    Args:
+        backend_name: ``DeviceSpec.backend_name`` of the resolved spec.
+
+    Returns:
+        The context class, imported lazily because each one pulls in its
+        device runtime, or ``None`` when *backend_name* is not a built-in
+        backend that ships a cache context.
+    """
+    if backend_name == "cpu":
+        # First Party
+        from lmcache.v1.multiprocess.cache_context.cpu import CPUCacheContext
+
+        return CPUCacheContext
+    # ROCm reports ``device_type == "cuda"`` and reuses the CUDA context.
+    if backend_name in ("cuda", "rocm"):
+        # First Party
+        from lmcache.v1.multiprocess.cache_context.cuda import GPUCacheContext
+
+        return GPUCacheContext
+    if backend_name == "musa":
+        # First Party
+        from lmcache.v1.multiprocess.cache_context.musa import MUSACacheContext
+
+        return MUSACacheContext
+    if backend_name == "npu":
+        # First Party
+        from lmcache.v1.multiprocess.cache_context.npu import NpuCacheContext
+
+        return NpuCacheContext
+    return None
+
+
 def create_cache_context(
     kv_caches: KVCache,
     lmcache_tokens_per_chunk: int = 256,
@@ -89,10 +127,10 @@ def create_cache_context(
     backend.
 
     Selection is driven by ``tensor.device.type`` of *kv_caches*:
-    the platform ``DeviceSpec`` registry is consulted and the
-    matching spec's ``create_cache_context`` hook is invoked.
-    ``"cuda"``, ``"cpu"``, future ``"xpu"`` ... all resolve through
-    the same code path -- no ``isinstance`` / ``if-elif`` chain.
+    the platform ``DeviceSpec`` registry is consulted, then a built-in
+    backend gets its in-tree context class and any other spec (an
+    external device plugin) gets its ``create_cache_context`` hook
+    invoked. Both receive the same positional arguments.
 
     Args:
         kv_caches: KV cache tensor wrappers from the serving engine.
@@ -116,6 +154,8 @@ def create_cache_context(
     Raises:
         ValueError: If *kv_caches* is empty, mixes device types, or
             targets a device type with no registered backend.
+        NotImplementedError: If the resolved spec is not a built-in
+            backend and does not override ``create_cache_context``.
     """
     if not kv_caches:
         raise ValueError("create_cache_context requires a non-empty kv_caches list")
@@ -128,6 +168,17 @@ def create_cache_context(
             "Make sure a built-in backend or installed lmcache.device_plugins "
             "entry point provides a DeviceSpec whose ``create_cache_context`` "
             "hook returns a BaseCacheContext instance." % device_type
+        )
+    builtin_cls = _builtin_cache_context_cls(spec.backend_name)
+    if builtin_cls is not None:
+        return builtin_cls(
+            kv_caches,
+            lmcache_tokens_per_chunk,
+            layout_hints,
+            engine_group_infos,
+            engine_type,
+            separate_object_groups,
+            full_sw_kv,
         )
     return spec.create_cache_context(
         kv_caches,

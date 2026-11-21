@@ -10,9 +10,9 @@ import torch
 # First Party
 from lmcache.lmcache_native import EngineKVFormat
 from lmcache.utils import EngineType
+from lmcache.v1.multiprocess.cache_context.musa import MUSACacheContext
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
-from lmcache.v1.platform.devices.musa.cache_context import MUSACacheContext
 from lmcache.v1.platform.devices.musa.device_ops import MusaDeviceOps
 from lmcache.v1.platform.devices.musa.ipc_wrapper import (
     is_musa_block_transfer_available,

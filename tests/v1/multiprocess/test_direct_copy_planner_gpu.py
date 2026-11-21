@@ -32,6 +32,9 @@ from lmcache.v1.memory_allocators.lazy_memory_allocator import (  # noqa: E402
     LazyMemoryAllocator,
 )
 from lmcache.v1.memory_management import MemoryObj  # noqa: E402
+from lmcache.v1.multiprocess.cache_context.cuda import (  # noqa: E402
+    GPUCacheContext,
+)
 from lmcache.v1.multiprocess.object_group_transfer import (  # noqa: E402
     direct_transfer_supported,
     downsample_and_stage_block_ids,
@@ -43,9 +46,6 @@ from lmcache.v1.multiprocess.object_group_transfer.gpu_dma import (  # noqa: E40
 )
 from lmcache.v1.multiprocess.object_group_transfer.nvme_dma import (  # noqa: E402
     NvmeDmaEngine,
-)
-from lmcache.v1.platform.devices.cuda.cache_context import (  # noqa: E402
-    GPUCacheContext,
 )
 import lmcache.cuda_ops as cuda_ops  # noqa: E402
 import lmcache.lmcache_native as lmcache_native  # noqa: E402

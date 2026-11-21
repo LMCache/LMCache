@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""NPU cache context for LMCache-driven multiprocess transfer."""
+"""MUSA cache context for LMCache-driven multiprocess transfer."""
 
 # Future
 from __future__ import annotations
@@ -13,10 +13,10 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.lmcache_native import EngineKVFormat
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.common.group_view import engine_group_layer_indices
+from lmcache.v1.common.kv_format import get_spec_class
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache
 from lmcache.v1.common.utils import (
     LayoutHints,
@@ -24,8 +24,12 @@ from lmcache.v1.common.utils import (
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,
 )
+from lmcache.v1.gpu_connector.gds_context import (
+    deregister_gds_gpu_buffer,
+    register_gds_gpu_buffer,
+)
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
 from lmcache.v1.platform.base.ipc_wrapper import KVCache
 
 if TYPE_CHECKING:
@@ -35,31 +39,45 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class _NpuHostCallbackStream:
-    """Adapter for stream-ordered callback call sites.
+def unwrap_kv_cache_tensors(kv_caches: KVCache) -> list[torch.Tensor]:
+    """Return tensors reconstructed from MUSA IPC wrappers.
 
-    CUDA contexts expose a CuPy stream as ``cupy_stream``. torch_npu has no
-    CuPy equivalent, so this adapter provides ordered callback and
-    synchronization operations over a torch_npu stream and exposes its
-    pointer through the existing platform stream contract.
+    Args:
+        kv_caches: MUSA IPC wrappers received over the multiprocess wire.
+
+    Returns:
+        The reconstructed MUSA KV-cache tensors.
+    """
+    return [wrapper.to_tensor() for wrapper in kv_caches]
+
+
+class _MUSAHostCallbackStream:
+    """Small adapter for stream-ordered callback call sites.
+
+    CUDA contexts expose a CuPy stream as ``cupy_stream``. MUSA does not use
+    CuPy here, so this adapter provides ordered callback and synchronization
+    operations over a TorchMUSA stream and exposes its pointer through the
+    existing platform stream contract.
     """
 
     def __init__(self, stream: object) -> None:
         self._stream = stream
 
     def synchronize(self) -> None:
-        """Wait for all work submitted to the wrapped NPU stream."""
+        """Wait for all work submitted to the wrapped MUSA stream."""
         synchronize = getattr(self._stream, "synchronize", None)
         if not callable(synchronize):
-            raise RuntimeError("NPU stream does not support synchronization")
+            raise RuntimeError("MUSA stream does not support synchronization")
         synchronize()
 
     @property
     def ptr(self) -> int:
-        """Return the wrapped NPU stream pointer for platform call sites."""
-        pointer = getattr(self._stream, "npu_stream", None)
+        """Return the wrapped MUSA stream pointer for platform call sites."""
+        pointer = getattr(self._stream, "musa_stream", None)
         if pointer is None:
-            raise RuntimeError("NPU stream does not expose a stream pointer")
+            pointer = getattr(self._stream, "ptr", None)
+        if pointer is None:
+            raise RuntimeError("MUSA stream does not expose a stream pointer")
         return int(pointer)
 
     def launch_host_func(self, callback: Any, arg: Any = None) -> None:
@@ -77,8 +95,8 @@ class _NpuHostCallbackStream:
         callback(arg)
 
 
-class _TempNpuBuffer:
-    """Owns NPU staging buffers for MP block-transfer batches."""
+class _TempMUSABuffer:
+    """Owns MUSA staging buffers for MP block-transfer batches."""
 
     def __init__(
         self,
@@ -137,7 +155,7 @@ class _TempNpuBuffer:
 
     @property
     def buffer(self) -> torch.Tensor:
-        """Return the flat staging tensor."""
+        """Return the flat staging tensor (for GDS muFile registration)."""
         return self._temp_buffer
 
     def get_temp_kernel_group_buffer(
@@ -196,19 +214,21 @@ class _TempNpuBuffer:
             )
 
         group = self._kv_groups_manager.kernel_groups[kernel_group_idx]
+        sd = group.shape_desc
         num_chunks = num_tokens // self._lmcache_tokens_per_chunk
         num_slots = (
             self._kv_groups_manager.get_slots_per_chunk_in_sw(kernel_group_idx)
             * num_chunks
         )
-        if group.engine_kv_format in (
-            EngineKVFormat.NL_X_NB_BS_HS,
-            EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS,
-        ):
-            return torch.Size((group.num_layers, num_slots, group.hidden_dim_size))
-        sd = group.shape_desc
+        engine_kv_format = group.engine_kv_format
+        assert engine_kv_format is not None
         return torch.Size(
-            (sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size)
+            get_spec_class(engine_kv_format).staging_shape(
+                group.num_layers,
+                num_slots,
+                group.hidden_dim_size,
+                int(sd.kv_size),
+            )
         )
 
     def _get_size_for_kernel_group(self, kernel_group_idx: int) -> int:
@@ -233,25 +253,25 @@ class _TempNpuBuffer:
         )
 
 
-class NpuCacheContext(BaseCacheContext):
-    """Cache context for NPU-backed KV tensors in MP handle mode."""
+class MUSACacheContext(BaseCacheContext):
+    """Cache context for MUSA-backed KV tensors in MP handle mode."""
 
-    device_type = "npu"
+    device_type = "musa"
 
     def __init__(
         self,
         kv_caches: KVCache,
         lmcache_tokens_per_chunk: int = 256,
         layout_hints: LayoutHints | None = None,
-        engine_group_infos: Sequence[EngineGroupInfo] = (),
+        engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         engine_type: EngineType = EngineType.VLLM,
         separate_object_groups: bool = True,
         full_sw_kv: bool = False,
     ) -> None:
-        """Build an NPU cache context from IPC-wrapped KV tensors.
+        """Build a MUSA cache context from IPC-wrapped KV tensors.
 
         Args:
-            kv_caches: NPU IPC wrappers received during server registration.
+            kv_caches: MUSA IPC wrappers received during server registration.
             lmcache_tokens_per_chunk: Tokens per LMCache object.
             layout_hints: Optional KV layout hints from the serving engine.
             engine_group_infos: Engine-neutral group metadata.
@@ -260,9 +280,9 @@ class NpuCacheContext(BaseCacheContext):
             full_sw_kv: Whether sliding-window groups transfer their full KV.
 
         Raises:
-            ValueError: If reconstructed tensors are not NPU tensors.
+            ValueError: If reconstructed tensors are not MUSA tensors.
         """
-        self._ipc_wrappers: tuple[Any, ...] = tuple(kv_caches)
+        self._ipc_wrappers = tuple(kv_caches)
         try:
             self._initialize(
                 kv_caches,
@@ -282,32 +302,33 @@ class NpuCacheContext(BaseCacheContext):
         kv_caches: KVCache,
         lmcache_tokens_per_chunk: int,
         layout_hints: LayoutHints | None,
-        engine_group_infos: Sequence[EngineGroupInfo],
+        engine_group_infos: "Sequence[EngineGroupInfo]",
         engine_type: EngineType,
         separate_object_groups: bool,
         full_sw_kv: bool,
     ) -> None:
-        """Initialize reconstructed tensors and NPU transfer resources."""
-        unwrapped = cast(
-            DiscoverableKVCache,
-            [wrapper.to_tensor() for wrapper in kv_caches],
-        )
+        """Initialize reconstructed tensors and MUSA transfer resources."""
+        unwrapped = cast(DiscoverableKVCache, unwrap_kv_cache_tensors(kv_caches))
         discovered, engine_kv_formats = normalize_and_discover_per_layer_formats(
             unwrapped,
             engine_group_layer_indices(engine_group_infos),
             engine_type,
             layout_hints,
         )
+        # KV-list discovery returns nested ``[key_layers, value_layers]`` rather
+        # than a flat per-layer tensor list, so only require a list layout here.
         if not isinstance(discovered, list):
-            raise ValueError("NpuCacheContext requires a list-based KV layout")
-        self.device_ = get_device(discovered)
-        if self.device_.type != "npu":
+            raise ValueError("MUSACacheContext requires a list-based KV layout")
+        normalized_discoverable = cast(DiscoverableKVCache, discovered)
+        self.device_ = get_device(normalized_discoverable)
+        if self.device_.type != "musa":
             raise ValueError(
-                f"NpuCacheContext expected NPU tensors, got {self.device_.type!r}"
+                f"MUSACacheContext expected MUSA tensors, got {self.device_.type!r}"
             )
+        num_layers_val = len(engine_kv_formats)
 
         kv_layer_groups_manager = KVLayerGroupsManager(
-            discovered,
+            normalized_discoverable,
             engine_kv_formats=engine_kv_formats,
             engine_group_infos=engine_group_infos,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
@@ -322,89 +343,119 @@ class NpuCacheContext(BaseCacheContext):
             device=self.device_,
         )
 
+        # BaseCacheContext still types kv_caches as list[Tensor]; nested KV-list
+        # layouts are stored as DiscoverableKVCache and cast at the boundary.
         super().__init__(
             kv_caches=cast(list[torch.Tensor], discovered),
             device=self.device_,
-            num_layers=len(engine_kv_formats),
+            num_layers=num_layers_val,
             kv_layer_groups_manager=kv_layer_groups_manager,
             block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
         )
 
-        # CUDA-shaped device int64 pointer table per kernel group. The native
-        # object-group planner calls ``paged_ptrs.data_ptr()``; the block
-        # kernel consumes the same table. Keep kv_caches_ for IPC lifetime
-        # (it stores ``discovered`` as-is, so both name the same object).
         self.group_kv_pointers_: list[torch.Tensor] = []
-        for idx, group in enumerate(self.kv_layer_groups_manager_.kernel_groups):
-            ptrs = get_group_data_ptrs(
-                discovered,
-                self.get_engine_kv_format(idx),
+        for group_idx, group in enumerate(self.kv_layer_groups_manager_.kernel_groups):
+            pointers = get_group_data_ptrs(
+                cast(DiscoverableKVCache, self.kv_caches_),
+                self.get_engine_kv_format(group_idx),
                 group.layer_indices,
             )
             self.group_kv_pointers_.append(
-                torch.tensor(ptrs, dtype=torch.int64, device=self.device_)
+                torch.tensor(pointers, dtype=torch.int64, device=self.device_)
             )
 
-        self._temp_buffer = _TempNpuBuffer(
+        self._temp_buffer = _TempMUSABuffer(
             kv_layer_groups_manager=self.kv_layer_groups_manager_,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             device=self.device_,
             max_batch_size=4,
         )
+        self._gds_buffer_registered = False
         self.stream_ = torch_dev.Stream(device=self.device_)
-        self.host_callback_stream_ = _NpuHostCallbackStream(self.stream_)
+        self.host_callback_stream_ = _MUSAHostCallbackStream(self.stream_)
+
+        # Register the staging buffer with all active GDS L1 contexts on the
+        # context's MUSA stream (mirrors the CUDA cache context).
+        with torch_dev.stream(self.stream_):
+            register_gds_gpu_buffer(self._temp_buffer.buffer)
+        self._gds_buffer_registered = True
 
         logger.debug(
-            "NpuCacheContext: %d layers, %d blocks, dtype=%s",
+            "MUSACacheContext: %d layers, %d blocks, dtype=%s",
             self.num_layers_,
             self.num_blocks,
             self.kv_layer_groups_manager_.kernel_groups[0].dtype,
         )
 
     def close(self) -> None:
-        """Synchronize transfers and release receiver-side IPC owners."""
-        wrappers = self._ipc_wrappers
-        if not wrappers:
-            return
+        """Synchronize transfers and release receiver-side IPC owners.
 
+        Also deregisters the GDS staging buffer on the context's MUSA stream
+        before releasing IPC wrappers.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: If the MUSA stream cannot be synchronized.
+        """
         stream = getattr(self, "stream_", None)
-        synchronize = getattr(stream, "synchronize", None)
-        if callable(synchronize):
-            synchronize()
+        temp_buffer = getattr(self, "_temp_buffer", None)
+        wrappers = getattr(self, "_ipc_wrappers", ())
+        if not wrappers and not getattr(self, "_gds_buffer_registered", False):
+            return
+        try:
+            synchronize = getattr(stream, "synchronize", None)
+            if callable(synchronize):
+                synchronize()
 
-        kv_tensors = getattr(self, "kv_caches_", None)
-        if isinstance(kv_tensors, list):
-            kv_tensors.clear()
+            # Deregister only after a complete registration succeeded. A
+            # failed constructor may have created the staging buffer without
+            # owning a registration for it.
+            if (
+                getattr(self, "_gds_buffer_registered", False)
+                and temp_buffer is not None
+                and stream is not None
+            ):
+                with torch_dev.stream(stream):
+                    deregister_gds_gpu_buffer(temp_buffer.buffer)
+                self._gds_buffer_registered = False
 
-        for wrapper in wrappers:
-            close = getattr(wrapper, "close", None)
-            if callable(close):
-                close()
-        self._ipc_wrappers = ()
+            kv_tensors = getattr(self, "kv_caches_", None)
+            if isinstance(kv_tensors, list):
+                kv_tensors.clear()
+        finally:
+            # IPC owners are independent of GDS registration and must be
+            # released even when synchronization or deregistration fails.
+            try:
+                for wrapper in wrappers:
+                    close = getattr(wrapper, "close", None)
+                    if callable(close):
+                        close()
+            finally:
+                self._ipc_wrappers = ()
 
     @property
     def stream(self) -> Any:
-        """Return the NPU stream used for transfer work."""
+        """Return the MUSA stream used for transfer work."""
         return self.stream_
 
     @property
-    def cupy_stream(self) -> _NpuHostCallbackStream:
+    def cupy_stream(self) -> _MUSAHostCallbackStream:
         """Return a host-callback stream adapter for shared MP code paths."""
         return self.host_callback_stream_
 
     def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> torch.Tensor:
-        """Return the device int64 pointer table for a kernel group.
-
-        Same contract as CUDA ``GPUCacheContext``: a 1-D NPU ``int64`` tensor
-        of plane pointers (``kv_size * nl``; packed KG0 is two ptrs/layer).
-        Built at init via ``get_group_data_ptrs``.
+        """Return packed, process-local MUSA pointers for a kernel group.
 
         Args:
             kernel_group_idx: Index of the requested kernel group.
 
         Returns:
-            Device int64 pointer table for the group.
+            A one-dimensional ``int64`` tensor in kernel order. KV-list groups
+            contain key-layer pointers followed by value-layer pointers;
+            other supported layouts contain one pointer per layer.
         """
         return self.group_kv_pointers_[kernel_group_idx]
 
@@ -413,14 +464,14 @@ class NpuCacheContext(BaseCacheContext):
         batch_idx: int,
         kernel_group_idx: int,
     ) -> torch.Tensor:
-        """Return the NPU staging buffer for a batch/kernel-group pair.
+        """Return the MUSA staging buffer for a batch/kernel-group pair.
 
         Args:
             batch_idx: Index within the current transfer batch.
             kernel_group_idx: Index of the kernel group to transfer.
 
         Returns:
-            A typed view into the NPU staging allocation.
+            A typed view into the MUSA staging allocation.
         """
         return self._temp_buffer.get_temp_kernel_group_buffer(
             batch_idx,
@@ -437,14 +488,14 @@ class NpuCacheContext(BaseCacheContext):
         batch_idx: int,
         object_group_idx: int,
     ) -> torch.Tensor:
-        """Return the NPU staging buffer for a batch/object-group pair.
+        """Return the MUSA staging buffer for a batch/object-group pair.
 
         Args:
             batch_idx: Index within the current transfer batch.
             object_group_idx: Index of the object group to transfer.
 
         Returns:
-            A flat view covering the object's NPU staging allocation.
+            A flat view covering the object's MUSA staging allocation.
         """
         return self._temp_buffer.get_temp_object_group_buffer(
             batch_idx,

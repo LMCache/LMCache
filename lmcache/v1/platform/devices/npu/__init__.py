@@ -16,7 +16,7 @@ so ``import lmcache`` loads the plugin's ``c_ops`` on an NPU host.
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 # First Party
 from lmcache.v1.platform.base.device_spec import DeviceSpec
@@ -25,7 +25,6 @@ from lmcache.v1.platform.devices.npu.pin_memory import NpuPinMemoryBackend
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.platform.base.cache_context import BaseCacheContext
     from lmcache.v1.platform.base.device_ops import DeviceOps
     from lmcache.v1.platform.base.event_ipc import EventIPCBackend
     from lmcache.v1.platform.devices.npu.ipc_wrapper import NpuIPCWrapper
@@ -82,13 +81,6 @@ class NpuDeviceSpec(DeviceSpec):
     def is_lmcache_driven_available(self) -> bool:
         """Ascend NPU has the full IPC stack for LMCache-driven transfer."""
         return True
-
-    def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
-        """Create the NPU cache context for LMCache-driven transfer."""
-        # First Party
-        from lmcache.v1.platform.devices.npu.cache_context import NpuCacheContext
-
-        return NpuCacheContext(*args, **kwargs)
 
     def is_available(self) -> bool:
         """Check NPU availability without importing ``lmcache.__init__``.
