@@ -232,7 +232,7 @@ selected with `--l2-prefetch-policy`.
 
 | Event | When |
 |---|---|
-| `L2_PREFETCH_LOOKUP_SUBMITTED` | Lookup tasks submitted (once per request that looks up L2). |
+| `L2_PREFETCH_LOOKUP_SUBMITTED` | Lookup tasks submitted (once per request that looks up L2). `queue_wait_seconds` measures the monotonic interval from submission queue insertion to pending queue removal for admission. |
 | `L2_PREFETCH_LOAD_SUBMITTED` | Load tasks submitted (once per request). |
 | `L2_LOAD_TASK_SUBMITTED` / `L2_LOAD_TASK_COMPLETED` | Per adapter, per request. |
 | `L2_PREFETCH_LOAD_COMPLETED` | Per adapter, as its load is admitted. |

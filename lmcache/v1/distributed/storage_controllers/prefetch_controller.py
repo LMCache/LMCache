@@ -23,6 +23,7 @@ import enum
 import itertools
 import select
 import threading
+import time
 
 # First Party
 from lmcache.lmcache_native import Bitmap
@@ -531,6 +532,15 @@ class InFlightPrefetchRequest:
         return not self.inflight_load_tasks
 
 
+@dataclass(frozen=True, slots=True)
+class _QueuedPrefetch:
+    """A prefetch submitted to the background controller."""
+
+    request_id: PrefetchRequestId
+    spec: PrefetchTaskSpec
+    enqueued_at: float
+
+
 class PrefetchController(StorageControllerInterface):
     """
     Asynchronously prefetches data from L2 adapters into L1 memory.
@@ -614,11 +624,11 @@ class PrefetchController(StorageControllerInterface):
 
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
-        self._pending_queue: deque[tuple[PrefetchRequestId, PrefetchTaskSpec]] = deque()
+        self._pending_queue: deque[_QueuedPrefetch] = deque()
 
         # Thread-safe submission queue (external -> background)
         self._submission_lock = threading.Lock()
-        self._submission_queue: list[tuple[PrefetchRequestId, PrefetchTaskSpec]] = []
+        self._submission_queue: list[_QueuedPrefetch] = []
         self._next_request_id: PrefetchRequestId = 0
         self._submission_efd = create_event_notifier()
 
@@ -710,6 +720,7 @@ class PrefetchController(StorageControllerInterface):
             ``allowed_l2_memory_tags``), or no L2 adapter is attached, the
             request is served from L1 on the calling thread and its result
             is queryable via query_prefetch_result once this returns.
+            Queued requests that look up L2 report their wait until admission.
         """
         with self._submission_lock:
             request_id = self._next_request_id
@@ -724,7 +735,9 @@ class PrefetchController(StorageControllerInterface):
             return request_id
 
         with self._submission_lock:
-            self._submission_queue.append((request_id, spec))
+            self._submission_queue.append(
+                _QueuedPrefetch(request_id, spec, time.monotonic())
+            )
             self._submission_efd.notify()
         return request_id
 
@@ -1132,13 +1145,15 @@ class PrefetchController(StorageControllerInterface):
 
     def _start_pending_requests(self) -> None:
         """Start pending requests in arrival order while L1 can admit the
-        head of the queue (see ``_can_admit_new_prefetch``)."""
+        head of the queue, measuring each wait when admission succeeds."""
         while self._pending_queue and self._can_admit_new_prefetch(
-            self._pending_queue[0][1]
+            self._pending_queue[0].spec
         ):
-            request_id, spec = self._pending_queue.popleft()
+            queued = self._pending_queue.popleft()
+            request_id = queued.request_id
+            queue_wait_seconds = time.monotonic() - queued.enqueued_at
             try:
-                self._start_lookup_phase(request_id, spec)
+                self._start_lookup_phase(request_id, queued.spec, queue_wait_seconds)
             except Exception:
                 logger.exception("Failed starting prefetch request %d", request_id)
                 request = self._in_flight_requests.get(request_id)
@@ -1196,8 +1211,15 @@ class PrefetchController(StorageControllerInterface):
         self,
         request_id: PrefetchRequestId,
         spec: PrefetchTaskSpec,
+        queue_wait_seconds: float,
     ) -> None:
-        """Create the in-flight prefetch request and start the lookup phase"""
+        """Start an admitted request and attach its queue wait to the L2 event.
+
+        Args:
+            request_id: ID assigned at submission.
+            spec: The prefetch request inputs.
+            queue_wait_seconds: Time between submission and admission.
+        """
         request = _build_request(request_id, spec)
         self._in_flight_requests[request_id] = request
         flattened_keys = request.get_flattened_keys()
@@ -1243,6 +1265,7 @@ class PrefetchController(StorageControllerInterface):
                     "request_id": request_id,
                     "key_count": len(flattened_keys),
                     "adapter_count": len(request.inflight_lookup_tasks),
+                    "queue_wait_seconds": queue_wait_seconds,
                     "key_count_per_salt": Counter(k.cache_salt for k in flattened_keys),
                 },
             )

@@ -23,6 +23,7 @@ from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.subscribers.metrics.l2 import (
     L2MetricsSubscriber,
 )
+from tests.v1.mp_observability.subscribers.metrics.otel_setup import histogram_count
 from tests.v1.mp_observability.subscribers.metrics.otel_setup import reader as _reader
 
 # Time for the drain thread to process queued events.
@@ -239,6 +240,8 @@ class TestL2StoreMetrics:
 
 class TestL2PrefetchMetrics:
     def test_lookup_submitted_counts(self, bus, subscriber, snapshot):
+        metric = "lmcache_mp.l2_prefetch_queue_wait"
+        before = histogram_count(metric)
         bus.start()
         keys = _make_keys(12)
         bus.publish(
@@ -248,12 +251,13 @@ class TestL2PrefetchMetrics:
                     "request_id": 1,
                     "key_count": 12,
                     "adapter_count": 2,
+                    "queue_wait_seconds": 0.25,
                     "key_count_per_salt": _salt_counts(keys),
                 },
             )
         )
-        time.sleep(_DRAIN_WAIT)
         bus.stop()
+        assert histogram_count(metric) - before == 1
 
         delta = snapshot()
         assert delta["lmcache_mp.l2_prefetch_lookup"] == 1
