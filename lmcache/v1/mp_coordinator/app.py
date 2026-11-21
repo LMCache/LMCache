@@ -204,8 +204,18 @@ def create_app(
         cadence is the only sensible cost. Operator intent is written when
         it changes instead (see ``MetadataPersister``). A failed write
         raises, so the loop counts the pass as failed and keeps its error.
+
+        Cancellation drains the save, including its write metrics, before
+        teardown and the final checkpoint can start.
         """
-        checkpoint_write = await _save_checkpoint()
+        writing = asyncio.create_task(_save_checkpoint())
+        try:
+            checkpoint_write = await asyncio.shield(writing)
+        except asyncio.CancelledError:
+            # Cancelling to_thread's awaiter cannot stop its thread. Drain
+            # the whole save so record_write also runs before cancellation.
+            await writing
+            raise
         if checkpoint_write.error is not None:
             raise CheckpointWriteError(checkpoint_write.error)
 
@@ -275,8 +285,8 @@ def create_app(
                 controller_status.mark_up(type(controller).__name__)
             await event_source.start()
             stack.push_async_callback(event_source.stop)
-            # Nested, so they stop before the stack unwinds. Awaited too:
-            # ``save_checkpoint`` runs in a thread a cancel cannot reach.
+            # Nested, so they stop before the stack unwinds. The checkpoint
+            # timer drains its in-flight save before teardown continues.
             timers = [asyncio.create_task(event_loop_monitor.run())]
             if config.checkpoint_path and config.checkpoint_interval > 0:
                 timers.append(
