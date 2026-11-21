@@ -16,9 +16,11 @@ depend on any one of them. See
 from __future__ import annotations
 
 # Standard
-from collections import deque
+from collections import OrderedDict, deque
 from typing import Protocol, runtime_checkable
 import inspect
+import os
+import threading
 
 # First Party
 from lmcache import torch_dev, torch_device_type
@@ -165,6 +167,16 @@ class EventIPCBackend(Protocol):
 # won't access the dangling references to the events.
 _EXPORTED_EVENT_RING_SIZE = 2048
 
+# Event reuse: a consumer opens each IPC handle once instead of per transfer.
+IPC_EVENT_POOL_ENV = "LMCACHE_IPC_EVENT_POOL"
+_EVENT_POOL_SIZE = 256  # per device
+IMPORTED_EVENT_CACHE_SIZE = 8192
+
+
+def ipc_event_pool_enabled() -> bool:
+    """Whether events are reused and imports cached (``LMCACHE_IPC_EVENT_POOL``)."""
+    return os.environ.get(IPC_EVENT_POOL_ENV, "1") != "0"
+
 
 class DefaultEventIPCBackend(EventIPCBackend):
     """CUDA-style event IPC backend over an injectable event module.
@@ -190,6 +202,11 @@ class DefaultEventIPCBackend(EventIPCBackend):
         self._event_module = event_module if event_module is not None else torch_dev
         self.device_type = device_type if device_type is not None else torch_device_type
         self._exported_events: deque[object] = deque(maxlen=_EXPORTED_EVENT_RING_SIZE)
+        self._reuse = ipc_event_pool_enabled()
+        self._lock = threading.Lock()
+        self._pools: dict[str, list[object]] = {}
+        self._pool_next: dict[str, int] = {}
+        self._imported: OrderedDict[tuple[bytes, str], object] = OrderedDict()
 
     def check_event_support(self, device: object) -> None:
         """Raise ``RuntimeError`` if interprocess events are unsupported.
@@ -220,6 +237,22 @@ class DefaultEventIPCBackend(EventIPCBackend):
 
     def create_event(self, device: object) -> object:
         """Create a new interprocess-capable event."""
+        if not self._reuse:
+            return self._new_event()
+        key = str(device)
+        with self._lock:
+            pool = self._pools.setdefault(key, [])
+            if len(pool) < _EVENT_POOL_SIZE:
+                pool.append(self._new_event())
+                return pool[-1]
+            slot = self._pool_next.get(key, 0)
+            self._pool_next[key] = (slot + 1) % _EVENT_POOL_SIZE
+            # Reuse only finished events: a consumer must not see a later record.
+            if not pool[slot].query():  # type: ignore[attr-defined]
+                pool[slot] = self._new_event()
+            return pool[slot]
+
+    def _new_event(self) -> object:
         return self._event_module.Event(interprocess=True)  # type: ignore[union-attr]
 
     def export_event(self, event: object, device: object) -> bytes:
@@ -239,9 +272,24 @@ class DefaultEventIPCBackend(EventIPCBackend):
 
     def import_event(self, handle: bytes, device: object) -> object:
         """Reconstruct an event from an IPC handle on ``device``."""
-        return self._event_module.Event.from_ipc_handle(  # type: ignore[union-attr]
+        if not self._reuse:
+            return self._event_module.Event.from_ipc_handle(  # type: ignore[union-attr]
+                device, handle
+            )
+        key = (bytes(handle), str(device))
+        with self._lock:
+            event = self._imported.get(key)
+            if event is not None:
+                self._imported.move_to_end(key)
+                return event
+        event = self._event_module.Event.from_ipc_handle(  # type: ignore[union-attr]
             device, handle
         )
+        with self._lock:
+            self._imported[key] = event
+            while len(self._imported) > IMPORTED_EVENT_CACHE_SIZE:
+                self._imported.popitem(last=False)
+        return event
 
     def record_event(self, event: object, stream: object) -> None:
         """Record ``event`` on ``stream``."""
