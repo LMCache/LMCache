@@ -225,7 +225,7 @@ func postCompletion(ctx context.Context, baseURL, model, prompt string) error {
 // lmcacheStoredLine matches the LMCache MP server's stdout INFO line
 // emitted on every successful STORE, e.g.
 //
-//	[2026-05-13 23:21:02,989] LMCache INFO: Stored 1152 tokens in 0.003 seconds
+//	[2026-05-13 23:21:02,989] LMCache INFO: Stored 1152 tokens in 3.000 ms
 //
 // The leading bracketed timestamp + log-level prefix may be coloured
 // with ANSI escapes in TTY mode; we don't bother stripping those

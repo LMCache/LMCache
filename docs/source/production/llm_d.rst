@@ -256,8 +256,8 @@ shows the retrieve operation of the second request:
 
    kubectl -n llm-d logs -l app.kubernetes.io/instance=lmcache-engine --tail=200 \
      | grep -E "Stored|Retrieved"
-   # Stored 1280 tokens in 0.003 seconds
-   # Retrieved 1280 tokens in 0.002 seconds
+   # Stored 1280 tokens in 3.000 ms
+   # Retrieved 1280 tokens in 2.000 ms
 
 A ``Registered KV cache for GPU ID`` line in the same log shows that the
 CUDA IPC handshake with vLLM is complete.
@@ -500,8 +500,8 @@ Then examine each part of the path:
    # The prefill pod stored the prefix. Then it read the prefix for the second request.
    kubectl -n llm-d logs -l app.kubernetes.io/instance=lmcache-engine --tail=200 \
      | grep -E "Stored|Retrieved"
-   # Stored 1280 tokens in 0.004 seconds
-   # Retrieved 1280 tokens in 0.001 seconds
+   # Stored 1280 tokens in 4.000 ms
+   # Retrieved 1280 tokens in 1.000 ms
 
    # Each pod served the two requests (vLLM request counters).
    for r in prefill:8000 decode:8200; do
