@@ -153,7 +153,8 @@ def test_l1_dax_add_and_remove_forward_offset() -> None:
         ("remove", (_PRIMARY, DevDaxRemoveMode.DRAIN, 512 << 30)),
     ]
 
-    for bad in (-1, "zero", True):
+    # A superscript digit used to reach ``Decimal`` and raise a 500.
+    for bad in (-1, "zero", True, "\u00b2GiB"):
         response = client.post(
             "/reconfigure/dax/l1/add",
             json={"device_path": _PRIMARY, "size": "4KiB", "offset": bad},
