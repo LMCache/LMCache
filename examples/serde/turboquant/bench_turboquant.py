@@ -7,7 +7,15 @@ import json
 import time
 
 # Third Party
+from benchmark_tensor_utils import tensor_error_metrics
+from benchmark_utils import (
+    non_negative_int,
+    positive_int,
+    resolve_num_tokens,
+    summarize_timings,
+)
 import torch
+import triton
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
@@ -29,17 +37,6 @@ def sync() -> None:
         torch.cuda.synchronize()
 
 
-def corrcoef(a: torch.Tensor, b: torch.Tensor) -> float:
-    a = a.float().flatten()
-    b = b.float().flatten()
-    a = a - a.mean()
-    b = b - b.mean()
-    denom = torch.linalg.norm(a) * torch.linalg.norm(b)
-    if denom.item() == 0:
-        return float("nan")
-    return ((a @ b) / denom).item()
-
-
 def benchmark_one(
     preset: str,
     shape: torch.Size,
@@ -49,14 +46,16 @@ def benchmark_one(
     iters: int,
     head_dim: int,
     block_size: int,
-) -> dict[str, float | str]:
+    seed: int,
+    metric_chunk_elements: int,
+) -> dict[str, float | int | str]:
     cfg = TurboQuantSerdeConfig(
         preset=preset,
         head_dim=head_dim,
         block_size=block_size,
     )
 
-    torch.manual_seed(2026)
+    torch.manual_seed(seed)
     original = torch.randn(shape, dtype=dtype, device=device)
 
     serializer = TurboQuantSerializer(cfg)
@@ -102,9 +101,23 @@ def benchmark_one(
         decode_times.append((t2 - t1) * 1000)
 
     raw_bytes = original.numel() * original.element_size()
+    encode_summary = summarize_timings(encode_times, raw_bytes)
+    decode_summary = summarize_timings(decode_times, raw_bytes)
 
-    orig_f = original.float()
-    rec_f = recovered.float()
+    error_metrics = tensor_error_metrics(
+        original,
+        recovered,
+        chunk_elements=metric_chunk_elements,
+    )
+
+    if device.type == "cuda":
+        device_name = torch.cuda.get_device_name(device)
+        compute_capability = ".".join(
+            map(str, torch.cuda.get_device_capability(device))
+        )
+    else:
+        device_name = str(device)
+        compute_capability = "n/a"
 
     return {
         "preset": preset,
@@ -113,11 +126,25 @@ def benchmark_one(
         "raw_MB": raw_bytes / 1024 / 1024,
         "compressed_MB": n_bytes / 1024 / 1024,
         "compression_ratio": raw_bytes / n_bytes,
-        "encode_ms": sum(encode_times) / len(encode_times),
-        "decode_ms": sum(decode_times) / len(decode_times),
-        "corr": corrcoef(orig_f, rec_f),
-        "mean_abs_err": torch.mean(torch.abs(orig_f - rec_f)).item(),
-        "max_abs_err": torch.max(torch.abs(orig_f - rec_f)).item(),
+        "encode_ms": encode_summary.mean_ms,
+        "encode_p50_ms": encode_summary.p50_ms,
+        "encode_p95_ms": encode_summary.p95_ms,
+        "encode_raw_GiB_s": encode_summary.raw_gib_per_s,
+        "decode_ms": decode_summary.mean_ms,
+        "decode_p50_ms": decode_summary.p50_ms,
+        "decode_p95_ms": decode_summary.p95_ms,
+        "decode_raw_GiB_s": decode_summary.raw_gib_per_s,
+        "corr": error_metrics.corr,
+        "mean_abs_err": error_metrics.mean_abs_err,
+        "max_abs_err": error_metrics.max_abs_err,
+        "warmup": warmup,
+        "iterations": iters,
+        "seed": seed,
+        "metric_chunk_elements": metric_chunk_elements,
+        "device_name": device_name,
+        "compute_capability": compute_capability,
+        "torch_version": torch.__version__,
+        "triton_version": triton.__version__,
     }
 
 
@@ -127,13 +154,23 @@ def main() -> None:
     parser.add_argument(
         "--dtype", default="bfloat16", choices=["float16", "bfloat16", "float32"]
     )
-    parser.add_argument("--layers", type=int, default=24)
-    parser.add_argument("--blocks", type=int, default=4096)
-    parser.add_argument("--block-size", type=int, default=16)
-    parser.add_argument("--kv-heads", type=int, default=2)
-    parser.add_argument("--head-dim", type=int, default=64)
-    parser.add_argument("--warmup", type=int, default=3)
-    parser.add_argument("--iters", type=int, default=10)
+    parser.add_argument("--layers", type=positive_int, default=24)
+    parser.add_argument("--blocks", type=positive_int, default=4096)
+    parser.add_argument("--block-size", type=positive_int, default=16)
+    parser.add_argument(
+        "--tokens",
+        type=positive_int,
+        default=None,
+        help="logical token count; overrides --blocks * --block-size",
+    )
+    parser.add_argument("--kv-heads", type=positive_int, default=2)
+    parser.add_argument("--head-dim", type=positive_int, default=64)
+    parser.add_argument("--warmup", type=non_negative_int, default=3)
+    parser.add_argument("--iters", type=positive_int, default=10)
+    parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument(
+        "--metric-chunk-elements", type=positive_int, default=16 * 1024 * 1024
+    )
     parser.add_argument(
         "--presets",
         nargs="+",
@@ -156,7 +193,7 @@ def main() -> None:
     }[args.dtype]
 
     device = torch.device(args.device)
-    num_tokens = args.blocks * args.block_size
+    num_tokens = resolve_num_tokens(args.blocks, args.block_size, args.tokens)
     hidden_dim = args.kv_heads * args.head_dim
 
     # Direct serde layout used by tests:
@@ -173,6 +210,8 @@ def main() -> None:
             iters=args.iters,
             head_dim=args.head_dim,
             block_size=args.block_size,
+            seed=args.seed,
+            metric_chunk_elements=args.metric_chunk_elements,
         )
         for preset in args.presets
     ]
@@ -186,7 +225,13 @@ def main() -> None:
         "compressed_MB",
         "compression_ratio",
         "encode_ms",
+        "encode_p50_ms",
+        "encode_p95_ms",
+        "encode_raw_GiB_s",
         "decode_ms",
+        "decode_p50_ms",
+        "decode_p95_ms",
+        "decode_raw_GiB_s",
         "corr",
         "mean_abs_err",
         "max_abs_err",
@@ -202,7 +247,13 @@ def main() -> None:
                     f"{r['compressed_MB']:.2f}",
                     f"{r['compression_ratio']:.2f}",
                     f"{r['encode_ms']:.3f}",
+                    f"{r['encode_p50_ms']:.3f}",
+                    f"{r['encode_p95_ms']:.3f}",
+                    f"{r['encode_raw_GiB_s']:.2f}",
                     f"{r['decode_ms']:.3f}",
+                    f"{r['decode_p50_ms']:.3f}",
+                    f"{r['decode_p95_ms']:.3f}",
+                    f"{r['decode_raw_GiB_s']:.2f}",
                     f"{r['corr']:.6f}",
                     f"{r['mean_abs_err']:.6f}",
                     f"{r['max_abs_err']:.6f}",
