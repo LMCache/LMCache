@@ -217,6 +217,27 @@ def test_unhealthy_drain_receipts_all_outstanding_stores() -> None:
     assert adapter.get_failed_store_requests() == {"req"}
 
 
+def test_failed_retrieve_is_reported_once_with_its_blocks() -> None:
+    """A retrieve the scheduler flagged as failed is never submitted. It must
+    still be reported finished exactly once (or the request waits forever in
+    WAITING_FOR_REMOTE_KVS), with its blocks reported as load errors so vLLM
+    fails or recomputes the request instead of reading unloaded KV.
+    """
+    adapter = _make_worker_adapter()
+    _prepare_for_get_finished(adapter)
+    adapter._failed_request_ids = set()
+
+    adapter.fail_retrieve_request("req", _make_op())
+
+    assert adapter.retrieve_futures == {}
+    _stores, retrieves = adapter.get_finished_with_lazy_offload()
+    assert retrieves == {"req"}
+    assert adapter.get_block_ids_with_load_errors() == {1, 2}
+    # Exactly once.
+    _stores, retrieves = adapter.get_finished_with_lazy_offload()
+    assert retrieves == set()
+
+
 def test_get_finished_with_lazy_offload_requires_lazy_mode() -> None:
     adapter = _make_worker_adapter(lazy_offload=False)
     with pytest.raises(ValueError, match="lazy offload"):

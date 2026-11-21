@@ -1367,9 +1367,10 @@ class LMCacheMPWorkerAdapter:
         self.error_block_ids: set[int] = set()
         self._failed_request_ids: set[str] = set()
 
-        # Retrieve request ids dropped by the unhealthy early-return of
-        # submit_retrieve_request. get_finished must still report each id
-        # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
+        # Retrieve request ids never submitted (fail_retrieve_request, e.g.
+        # the unhealthy early-return of submit_retrieve_request). get_finished
+        # must still report each id exactly once, or async loads hang in
+        # WAITING_FOR_REMOTE_KVS.
         self._dropped_retrieves: set[str] = set()
 
         # The store requests that have finished execution in LMCache
@@ -1880,6 +1881,21 @@ class LMCacheMPWorkerAdapter:
         if event is not None:
             self.store_events[request_id] = event
 
+    def fail_retrieve_request(self, request_id: str, op: LoadStoreOp) -> None:
+        """Report a retrieve as failed without submitting it.
+
+        Its blocks and request ID are flagged for vLLM recovery, and
+        ``get_finished`` reports the receive exactly once, so the request
+        does not wait in WAITING_FOR_REMOTE_KVS.
+
+        Args:
+            request_id: The ID of the request.
+            op: The retrieve's LoadStoreOp; its blocks are the failed ones.
+        """
+        self.error_block_ids.update(op.flat_block_ids)
+        self._failed_request_ids.add(request_id)
+        self._dropped_retrieves.add(request_id)
+
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
         self,
@@ -1912,9 +1928,7 @@ class LMCacheMPWorkerAdapter:
         self._ensure_heartbeat_started()
 
         if not self.is_healthy:
-            self.error_block_ids.update(op.flat_block_ids)
-            self._failed_request_ids.add(request_id)
-            self._dropped_retrieves.add(request_id)
+            self.fail_retrieve_request(request_id, op)
             return
 
         key = self._create_key(

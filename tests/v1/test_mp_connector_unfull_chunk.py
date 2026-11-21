@@ -19,9 +19,13 @@ from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     LMCacheMPConnector,
 )
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
+    LMCacheMPConnectorMetadata,
     LMCacheMPRequestMetadata,
     LMCacheMPRequestState,
     LMCacheMPRequestTracker,
+)
+from lmcache.integration.vllm.vllm_multi_process_adapter import (  # noqa: E402
+    LoadStoreOp,
 )
 
 CHUNK = 128
@@ -207,6 +211,145 @@ def test_retrieve_of_a_tail_vllm_partly_holds_skips_vllms_tokens():
         TAIL_BOUNDARY,
         288 - 2 * CHUNK,
     )
+
+
+@pytest.mark.parametrize(
+    ("prompt", "hit", "need"),
+    [
+        # The tail is the prompt's last token alone (P = 1 mod chunk).
+        (2 * CHUNK + 1, 2 * CHUNK, 2 * CHUNK),
+        # The last token starts a block inside the tail (P = 1 mod block).
+        (2 * CHUNK + GRID + 1, 2 * CHUNK, 2 * CHUNK),
+        # The last token shares a block with the one before: the tail loads.
+        (2 * CHUNK + 20, 2 * CHUNK + 20, 2 * CHUNK + 19),
+    ],
+)
+def test_full_prompt_tail_hit_retrieve_fits_the_blocks_vllm_allocates(
+    prompt: int, hit: int, need: int
+):
+    """vLLM recomputes the last prompt token and allocates blocks for the
+    tokens before it only. When that token starts a new block, the exact
+    tail a ``max_tokens=1`` request stored has no block for its last token:
+    the hit falls back to the full chunks (#6751)."""
+    connector, _ = _connector(lookup_hit=prompt)
+    connector._group_tokens_per_block = [GRID]
+    connector._prefix_replay_tokens = 0
+
+    assert connector.get_num_new_matched_tokens(
+        _request(prompt_tokens=prompt, max_tokens=1), 0
+    ) == (need, True)
+
+    tracker = connector.request_trackers["req-0"]
+    assert tracker.num_lmcache_hit_tokens == hit
+    assert tracker.num_stored_tokens == 2 * CHUNK
+    # LMCache holds the tail either way, so it is not stored again.
+    assert tracker.unfull_chunk_boundaries == {prompt}
+
+    # vLLM allocates blocks for the tokens it was told to load.
+    tracker.append_block_ids((list(range(-(-need // GRID))),))
+    tracker.state = LMCacheMPRequestState.WAITING_FOR_LOAD
+    meta = LMCacheMPRequestMetadata.GetRetrieveMetadata(tracker, CHUNK, [GRID])
+
+    assert meta is not None
+    assert not meta.fail_load
+    assert (meta.op.start, meta.op.end) == (0, hit)
+    assert meta.op.block_ids == [list(range(-(-hit // GRID)))]
+
+
+@pytest.mark.parametrize(
+    ("prompt", "hit", "need"),
+    [
+        # Only the 16-token group starts a block at the last token.
+        (2 * CHUNK + GRID + 1, 2 * CHUNK, 2 * CHUNK),
+        # Both groups do.
+        (2 * CHUNK + 2 * GRID + 1, 2 * CHUNK, 2 * CHUNK),
+        # Neither does: the tail loads.
+        (2 * CHUNK + 20, 2 * CHUNK + 20, 2 * CHUNK + 19),
+    ],
+)
+def test_full_prompt_tail_hit_trims_when_any_group_lacks_the_last_block(
+    prompt: int, hit: int, need: int
+):
+    """Each group gets its own blocks: one group short of the last token's
+    block is enough to make the tail unloadable. A scratch group (0 tokens
+    per block) takes no part."""
+    group_tokens_per_block = [2 * GRID, 0, GRID]
+    connector, _ = _connector(lookup_hit=prompt)
+    connector._group_tokens_per_block = group_tokens_per_block
+    connector._prefix_replay_tokens = 0
+
+    assert connector.get_num_new_matched_tokens(
+        _request(prompt_tokens=prompt, max_tokens=1), 0
+    ) == (need, True)
+
+    tracker = connector.request_trackers["req-0"]
+    assert tracker.num_lmcache_hit_tokens == hit
+    tracker.append_block_ids(
+        tuple(
+            list(range(-(-need // span))) if span else []
+            for span in group_tokens_per_block
+        )
+    )
+    tracker.state = LMCacheMPRequestState.WAITING_FOR_LOAD
+    meta = LMCacheMPRequestMetadata.GetRetrieveMetadata(
+        tracker, CHUNK, group_tokens_per_block
+    )
+
+    assert meta is not None
+    assert not meta.fail_load
+    assert (meta.op.start, meta.op.end) == (0, hit)
+    assert meta.op.block_ids == [
+        list(range(-(-hit // span))) if span else [] for span in group_tokens_per_block
+    ]
+
+
+def test_retrieve_past_the_allocated_blocks_is_reported_as_a_failed_load():
+    """A retrieve the allocated blocks cannot hold must not load a shorter
+    block list (the tail's KV would land in the wrong blocks) nor raise in
+    the scheduler (that kills the engine core): the load is flagged failed,
+    so vLLM fails or recomputes this request alone."""
+    prompt = 2 * CHUNK + GRID + 1
+    allocated = list(range((prompt - 1) // GRID))
+    tracker = LMCacheMPRequestTracker(_request(prompt_tokens=prompt))
+    tracker.append_block_ids((allocated,))
+    tracker.num_lmcache_hit_tokens = prompt
+    tracker.state = LMCacheMPRequestState.WAITING_FOR_LOAD
+
+    meta = LMCacheMPRequestMetadata.GetRetrieveMetadata(tracker, CHUNK, [GRID])
+
+    assert meta is not None
+    assert meta.fail_load
+    # The failure names every block vLLM allocated for the load.
+    assert meta.op.block_ids == [allocated]
+
+
+def test_worker_reports_a_flagged_retrieve_as_failed_instead_of_loading_it():
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._delay_free_req_ids = set()
+    connector.worker_adapter = MagicMock()
+    metadata = LMCacheMPConnectorMetadata()
+    failed, loaded = (
+        LMCacheMPRequestMetadata(
+            request_id=request_id,
+            direction="RETRIEVE",
+            op=LoadStoreOp(token_bytes=b"", block_ids=[[1]], start=0, end=CHUNK),
+            fail_load=fail_load,
+        )
+        for request_id, fail_load in (("req-failed", True), ("req-loaded", False))
+    )
+    metadata.add_request_metadata(failed)
+    metadata.add_request_metadata(loaded)
+    connector._get_connector_metadata = lambda: metadata
+
+    connector.start_load_kv(MagicMock())
+
+    connector.worker_adapter.fail_retrieve_request.assert_called_once_with(
+        "req-failed", failed.op
+    )
+    (request_ids, ops, _event), _ = (
+        connector.worker_adapter.batched_submit_retrieve_requests.call_args
+    )
+    assert (request_ids, ops) == (["req-loaded"], [loaded.op])
 
 
 def test_boundary_state_block_is_pinned_until_the_request_is_sent():
