@@ -667,6 +667,8 @@ def test_launcher_starts_command_and_waits_until_healthy(monkeypatch) -> None:
         "5555",
         "--http-host",
         "localhost",
+        "--transport",
+        "zmq",
     ]
 
 
