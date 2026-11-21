@@ -49,6 +49,22 @@ def unwrap_request_payloads(
     return decoded_payloads
 
 
+def _error_response_frames(prefix_frames: list[bytes], error: Exception) -> list[bytes]:
+    """Build the reply that fails the client's request with ``error``."""
+    return prefix_frames[:2] + [
+        encode_operation(ZMQ_ERROR_OPERATION),
+        encode_error_response(
+            ZmqErrorResponse(
+                code="invalid_argument"
+                if isinstance(error, ValueError)
+                else "handler_error",
+                operation=decode_operation(prefix_frames[2]),
+                message=str(error),
+            )
+        ),
+    ]
+
+
 ResponseType = TypeVar("ResponseType", covariant=True)
 StateType = TypeVar("StateType", covariant=True)
 
@@ -204,14 +220,20 @@ class MessageQueueServer(RequestServer):
             payloads (list[bytes]): The payloads of the request.
             prefix_frames (list[bytes]): The prefix frames to send back.
         """
-        response = handler_entry(payloads)
-        if isinstance(response, MessagingStream):
-            self._start_stream(
-                response, handler_entry.get_response_class(), prefix_frames
-            )
+        try:
+            response = handler_entry(payloads)
+            if isinstance(response, MessagingStream):
+                self._start_stream(
+                    response, handler_entry.get_response_class(), prefix_frames
+                )
+                return
+            response_cls = handler_entry.get_response_class()
+            b_response = msgspec_encode(response, cls=response_cls)
+        except Exception as exc:
+            operation = decode_operation(prefix_frames[2])
+            logger.exception("Error in serialized handler %s", operation)
+            self.socket.send_multipart(_error_response_frames(prefix_frames, exc))
             return
-        response_cls = handler_entry.get_response_class()
-        b_response = msgspec_encode(response, cls=response_cls)
         if response is not None:
             self.socket.send_multipart(prefix_frames + [b_response])
         else:
@@ -285,24 +307,7 @@ class MessageQueueServer(RequestServer):
             except Exception as exc:
                 operation = decode_operation(prefix_frames[2])
                 logger.exception("Error in blocking handler %s", operation)
-                error_code = (
-                    "invalid_argument"
-                    if isinstance(exc, ValueError)
-                    else "handler_error"
-                )
-                self.output_queue.put(
-                    prefix_frames[:2]
-                    + [
-                        encode_operation(ZMQ_ERROR_OPERATION),
-                        encode_error_response(
-                            ZmqErrorResponse(
-                                code=error_code,
-                                operation=operation,
-                                message=str(exc),
-                            )
-                        ),
-                    ]
-                )
+                self.output_queue.put(_error_response_frames(prefix_frames, exc))
                 self._output_efd.notify()
 
         future.add_done_callback(_notify_response)
