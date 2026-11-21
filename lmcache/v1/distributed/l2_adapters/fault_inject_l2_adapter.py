@@ -48,6 +48,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
+from lmcache.v1.distributed.l2_adapters.health import HealthProbe
 
 logger = init_logger(__name__)
 
@@ -422,6 +423,24 @@ class FaultInjectL2Adapter(L2AdapterInterface):
             "gap_tail_ratios": list(self._gap_tail_ratios),
         }
         return status
+
+    @property
+    def supports_health_probe(self) -> bool:
+        """Whether the inner adapter implements ``probe_health``."""
+        return self._inner.supports_health_probe
+
+    def probe_health(self, timeout_s: float) -> HealthProbe:
+        """Probe the inner adapter's backend."""
+        return self._inner.probe_health(timeout_s)
+
+    @property
+    def supports_reconnect(self) -> bool:
+        """Whether the inner adapter implements ``reconnect``."""
+        return self._inner.supports_reconnect
+
+    def reconnect(self) -> None:
+        """Reconnect the inner adapter's backend."""
+        self._inner.reconnect()
 
     def get_memory_tags(self) -> MemoryTags:
         """Return the inner adapter's memory tags."""

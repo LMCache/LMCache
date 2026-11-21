@@ -134,8 +134,9 @@ Health-monitoring event for the L2 prefetch path. See LM-291.
 | EventType | Metadata keys | Types | Vocabulary |
 |---|---|---|---|
 | `L2_PREFETCH_FAILED` | `reason`, `keys` | `str`, `list[ObjectKey]` | `reason` ∈ {`l1_oom`, `l1_contended`, `not_found`} |
+| `L2_ADAPTER_HEALTH_CHANGED` | `adapter_index`, `l2_name`, `old_state`, `new_state`, `reason` | `int`, `str`, `str`, `str`, `str` | `old_state`/`new_state` ∈ {`healthy`, `unavailable`, `recovering`}; `reason` is the probe's or the reconnect's failure text, empty on recovery |
 
-Producers (all in `PrefetchController`):
+Producers of `L2_PREFETCH_FAILED` (all in `PrefetchController`):
 - `reason=l1_oom` — emitted when `reserve_write` of a load's L1 staging buffer returns `OUT_OF_MEMORY`. The affected cells drop their L2 lock and the request is re-planned on what was reserved.
 - `reason=l1_contended` — emitted when `reserve_write` returns `KEY_NOT_WRITABLE` because the key is resident in the adapter's affinity L1 and the request may not read that L1. The cell is treated like an out-of-memory cell. A key that lands in a readable L1 during the lookup is loaded again instead and is not reported.
 - `reason=not_found` — emitted in `_poll_load_results` for keys reserved in L1 but missing from the adapter's load bitmap (L2 reported the key present at lookup but produced no data).
@@ -144,6 +145,10 @@ The third reason `serde_failure` will be added as an additive, non-breaking
 extension once the serde PR lands and adapters can distinguish
 deserialization errors from missing objects. No dashboard migration
 needed when that happens.
+
+Producer of `L2_ADAPTER_HEALTH_CHANGED`: `L2HealthMonitor`
+(`lmcache/v1/distributed/l2_health_monitor.py`), once per state change of an
+adapter that supports `probe_health`.
 
 ---
 

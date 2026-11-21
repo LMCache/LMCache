@@ -55,6 +55,7 @@ from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
 )
+from lmcache.v1.distributed.l2_adapters.health import HealthProbe
 from lmcache.v1.distributed.serde import (
     SerdeProcessor,
     SerdeTaskId,
@@ -353,6 +354,24 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     def report_status(self) -> dict:
         inner_status = self._inner.report_status()
         return {**inner_status, "serde_wrapped": True}
+
+    @property
+    def supports_health_probe(self) -> bool:
+        """Whether the inner adapter implements ``probe_health``."""
+        return self._inner.supports_health_probe
+
+    def probe_health(self, timeout_s: float) -> HealthProbe:
+        """Probe the inner adapter's backend."""
+        return self._inner.probe_health(timeout_s)
+
+    @property
+    def supports_reconnect(self) -> bool:
+        """Whether the inner adapter implements ``reconnect``."""
+        return self._inner.supports_reconnect
+
+    def reconnect(self) -> None:
+        """Reconnect the inner adapter's backend."""
+        self._inner.reconnect()
 
     # ------------------------------------------------------------------
     # Lifecycle

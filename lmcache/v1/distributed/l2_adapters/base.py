@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.l2_adapters.health import HealthProbe
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 
@@ -612,6 +613,93 @@ class L2AdapterInterface(ABC):
                 # view is fully detached from the adapter's live state.
                 bytes_by_cache_salt=MappingProxyType(per_salt_snapshot),
             )
+
+    #####################
+    # Health Interface
+    #####################
+
+    # Opt-in. Whether an adapter can tell that its backend is gone, and can
+    # re-establish its connection when the backend returns, depends on the
+    # backend. The framework (``L2HealthMonitor``) only manages adapters that
+    # declare support; for every other adapter nothing changes: it stays
+    # routable and ``reconnect`` is never called.
+
+    @property
+    def supports_health_probe(self) -> bool:
+        """Whether :meth:`probe_health` is implemented.
+
+        When ``True``, the health monitor probes this adapter periodically,
+        stops routing new work to it while its backend is down, and resumes
+        routing once a probe succeeds.
+        """
+        return False
+
+    def probe_health(self, timeout_s: float) -> HealthProbe:
+        """Check whether the backend is alive and this adapter can use it.
+
+        Called from the monitor's thread, never concurrently with another
+        ``probe_health`` or with :meth:`reconnect` on the same adapter, but
+        concurrently with ``submit_*``. It must not read or write any L1
+        buffer.
+
+        The probe must exercise the same path real traffic takes, so it
+        reports a broken adapter as well as a dead backend. A backend that
+        answers while the adapter's own connection is broken is
+        ``ProbeStatus.RECONNECT_NEEDED``, not ``OK``.
+
+        Args:
+            timeout_s: The budget for the whole probe, whatever steps it has.
+                The monitor treats a probe that has not returned shortly after
+                that as ``UNREACHABLE``, so waiting longer is wasted.
+
+        Returns:
+            What the probe found.
+
+        Raises:
+            NotImplementedError: ``supports_health_probe`` is ``False``.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement probe_health"
+        )
+
+    @property
+    def supports_reconnect(self) -> bool:
+        """Whether :meth:`reconnect` is implemented.
+
+        An adapter whose connection recovers by itself once the backend is
+        back (for example, one that opens a connection per operation) needs no
+        reconnect: a successful probe is enough to resume routing.
+        """
+        return False
+
+    def reconnect(self) -> None:
+        """Re-establish the connection to the backend without a restart.
+
+        Called by the monitor when :meth:`probe_health` reports
+        ``RECONNECT_NEEDED``, never concurrently with another ``reconnect`` or
+        ``probe_health`` on the same adapter.
+
+        On normal return:
+
+        * New tasks work. The adapter has verified that, for example by
+          running a probe on the new connection.
+        * Every task submitted before the call is in one of two states: it has
+          a result that the usual ``query_*``/``pop_*`` calls return, with its
+          event fd signaled (a task that could not finish gets a failure
+          result: store unsuccessful, empty bitmap), or its backend I/O is
+          still running and will report by itself.
+
+        An adapter must not report a task as finished while its backend I/O
+        can still touch the task's L1 buffer: it ends that I/O first, for
+        example by closing the old client. If it can neither end nor wait for
+        the I/O, it raises, and the controllers keep the buffers pinned.
+
+        Raises:
+            L2ReconnectError: The connection could not be restored. The
+                monitor retries on a later cycle.
+            NotImplementedError: ``supports_reconnect`` is ``False``.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement reconnect")
 
     #####################
     # Cleanup Interface

@@ -66,6 +66,9 @@ class EventType(Enum):
     # L2 failure events (LM-291 health monitoring)
     L2_PREFETCH_FAILED = "l2.prefetch.failed"
 
+    # L2 adapter backend availability changed (see L2HealthMonitor).
+    L2_ADAPTER_HEALTH_CHANGED = "l2.adapter.health_changed"
+
     # MP Server request-level events (start/end pairs)
     MP_STORE_START = "mp.store.start"
     MP_STORE_END = "mp.store.end"
