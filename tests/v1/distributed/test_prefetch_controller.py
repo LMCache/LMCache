@@ -12,6 +12,7 @@ the full integration without mocking internals.
 
 # Standard
 from collections.abc import Sequence
+from pathlib import Path
 from threading import Event
 from unittest.mock import patch
 import time
@@ -41,11 +42,15 @@ from lmcache.v1.distributed.config import (
     ShadowL1ManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1ManagerInterface
+from lmcache.v1.distributed.internal_api import L1ManagerInterface, L2StoreResult
 from lmcache.v1.distributed.l1_manager import DramL1Manager, ShadowL1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
     FaultInjectL2Adapter,
+)
+from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
+    FSL2Adapter,
+    FSL2AdapterConfig,
 )
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
@@ -70,6 +75,7 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     L2AdapterDescriptor,
 )
 from lmcache.v1.memory_management import (
+    MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
@@ -1361,17 +1367,272 @@ class TestSlidingWindowRows:
 
 
 class LookupCountingAdapter(MockL2Adapter):
-    """MockL2Adapter that counts the lookup tasks submitted to it."""
+    """MockL2Adapter that records submitted lookup batches."""
 
     def __init__(self) -> None:
         super().__init__(MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0))
         self.lookup_count = 0
+        self.lookup_keys: list[list[ObjectKey]] = []
 
     def submit_lookup_and_lock_task(
         self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
     ) -> L2TaskId:
+        """Record the public lookup input before submitting the task."""
         self.lookup_count += 1
+        self.lookup_keys.append(list(keys))
         return super().submit_lookup_and_lock_task(keys, group_layout_descs)
+
+
+class TestPartialL2Lookup:
+    @pytest.mark.parametrize("fetching_policy", ["prefix", "full", "whole_chunk"])
+    @pytest.mark.parametrize(
+        "resident_columns",
+        [
+            ([], []),
+            ([0, 1, 2], [0, 1, 2]),
+            ([0, 2, 4], [0, 2, 4]),
+            ([0, 1, 2, 3], [0, 2]),
+        ],
+        ids=["cold", "prefix", "holes", "different_rows"],
+    )
+    def test_lookup_omits_only_complete_l1_columns(
+        self,
+        l1_manager: DramL1Manager,
+        fetching_policy: FetchingPolicy,
+        resident_columns: tuple[list[int], list[int]],
+    ) -> None:
+        """L2 receives a rectangular subset; results retain original positions."""
+        adapter = LookupCountingAdapter()
+        rows = [[make_object_key(i, gid=gid) for i in range(5)] for gid in range(2)]
+        keys = [key for row in rows for key in row]
+        store_keys_in_l2(adapter, keys, make_layout())
+        resident = [
+            row[i]
+            for row, columns in zip(rows, resident_columns, strict=True)
+            for i in columns
+        ]
+        if resident:
+            write_keys_to_l1(l1_manager, resident, make_layout())
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+        try:
+            request_id = ctrl.submit_prefetch_request(
+                make_spec(
+                    [make_group(row, gid=gid) for gid, row in enumerate(rows)],
+                    fetching_policy=fetching_policy,
+                )
+            )
+            result = wait_for_result(ctrl, request_id)
+            skipped = set(resident_columns[0]) & set(resident_columns[1])
+            assert adapter.lookup_keys == [
+                [key for row in rows for i, key in enumerate(row) if i not in skipped]
+            ]
+            assert row_bits(result, 0) == list(range(5))
+            assert row_bits(result, 1) == list(range(5))
+            assert hit_counts(result) == (len(resident), len(keys) - len(resident))
+            assert result is not None and result.found_cells is not None
+            assert [row.get_indices_list() for row in result.found_cells] == [
+                list(range(5)),
+                list(range(5)),
+            ]
+            assert_read_locked(l1_manager, keys)
+            assert_l2_unlocked(adapter)
+            l1_manager.finish_read(keys)
+        finally:
+            ctrl.stop()
+            adapter.close()
+
+    @pytest.mark.parametrize("dram_only", [False, True])
+    def test_lookup_uses_only_allowed_l1_managers(
+        self, l1_manager: DramL1Manager, dram_only: bool
+    ) -> None:
+        """Filtering uses the union of allowed L1 tiers, never excluded tiers."""
+        adapter = LookupCountingAdapter()
+        cxl = DramL1Manager(make_l1_config())
+        keys = [make_object_key(i) for i in range(5)]
+        write_keys_to_l1(l1_manager, [keys[0], keys[2]], make_layout())
+        write_keys_to_l1(cxl, [keys[1], keys[4]], make_layout())
+        store_keys_in_l2(adapter, keys, make_layout())
+        ctrl = make_dram_cxl_controller(l1_manager, cxl, [adapter])
+        ctrl.start()
+        try:
+            spec = single_row_spec(
+                keys,
+                allowed_l1_memory_tags=frozenset({DRAM_TAGS}) if dram_only else None,
+            )
+            result = wait_for_result(ctrl, ctrl.submit_prefetch_request(spec))
+            assert adapter.lookup_keys == [
+                [keys[1], keys[3], keys[4]] if dram_only else [keys[3]]
+            ]
+            assert row_bits(result) == list(range(5))
+            assert hit_counts(result) == ((2, 3) if dram_only else (4, 1))
+            assert_l2_unlocked(adapter)
+            if dram_only:
+                assert cxl.is_key_evictable(keys[1])
+                assert cxl.is_key_evictable(keys[4])
+                l1_manager.finish_read(keys)
+            else:
+                l1_manager.finish_read([keys[0], keys[2], keys[3]])
+                cxl.finish_read([keys[1], keys[4]])
+        finally:
+            ctrl.stop()
+            adapter.close()
+            cxl.close()
+
+    def test_sparse_results_from_multiple_adapters_keep_their_columns(
+        self, l1_manager: DramL1Manager
+    ) -> None:
+        """Disjoint compact results merge before the policy computes a prefix."""
+        adapters = [LookupCountingAdapter(), LookupCountingAdapter()]
+        keys = [make_object_key(i) for i in range(6)]
+        write_keys_to_l1(l1_manager, [keys[0], keys[2], keys[4]], make_layout())
+        store_keys_in_l2(adapters[0], [keys[1], keys[5]], make_layout())
+        store_keys_in_l2(adapters[1], [keys[3]], make_layout())
+        ctrl = make_controller(l1_manager, adapters)
+        ctrl.start()
+        try:
+            result = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
+            )
+            assert row_bits(result) == list(range(6))
+            assert hit_counts(result) == (3, 3)
+            for adapter in adapters:
+                assert adapter.lookup_keys == [[keys[1], keys[3], keys[5]]]
+                assert_l2_unlocked(adapter)
+            l1_manager.finish_read(keys)
+        finally:
+            ctrl.stop()
+            for adapter in adapters:
+                adapter.close()
+
+    @pytest.mark.parametrize(
+        "lock_mode", [PrefetchLockMode.LOCK, PrefetchLockMode.NO_LOCK]
+    )
+    def test_filesystem_load_preserves_bytes_and_releases_locks(
+        self,
+        l1_manager: DramL1Manager,
+        tmp_path: Path,
+        lock_mode: PrefetchLockMode,
+    ) -> None:
+        """Real disk loads preserve key/data pairing through a sparse lookup."""
+        adapter = FSL2Adapter(FSL2AdapterConfig(base_path=str(tmp_path)))
+        keys = [make_object_key(i) for i in range(6)]
+        written = l1_manager.reserve_write(
+            keys, is_temporary=[False] * len(keys), layout_desc=make_layout()
+        )
+        objects: list[MemoryObj] = []
+        expected: dict[ObjectKey, bytes] = {}
+        for i, key in enumerate(keys):
+            error, obj = written[key]
+            assert error == L1Error.SUCCESS and obj is not None
+            expected[key] = bytes([i + 1]) * obj.get_size()
+            tensor = obj.tensor
+            assert tensor is not None
+            tensor.view(torch.uint8).fill_(i + 1)
+            objects.append(obj)
+        task_id = adapter.submit_store_task(keys, objects)
+        completed: dict[L2TaskId, L2StoreResult] = {}
+
+        def store_finished() -> bool:
+            completed.update(adapter.pop_completed_store_tasks())
+            return task_id in completed
+
+        assert wait_for_condition(store_finished)
+        assert completed[task_id].is_successful()
+        l1_manager.finish_write(keys)
+        l1_manager.delete([keys[1], keys[3], keys[5]])
+        ctrl = make_controller(l1_manager, [adapter], policy=DefaultPrefetchPolicy())
+        ctrl.start()
+        try:
+            with patch.object(
+                adapter,
+                "submit_lookup_and_lock_task",
+                wraps=adapter.submit_lookup_and_lock_task,
+            ) as lookup:
+                spec = single_row_spec(keys, lock_mode=lock_mode)
+                result = wait_for_result(ctrl, ctrl.submit_prefetch_request(spec))
+                lookup.assert_called_once()
+                assert lookup.call_args.args[0] == [keys[1], keys[3], keys[5]]
+            assert row_bits(result) == list(range(6))
+            assert hit_counts(result) == (3, 3)
+            if lock_mode == PrefetchLockMode.NO_LOCK:
+                assert all(l1_manager.is_key_evictable(key) for key in keys)
+                readable = l1_manager.reserve_read(keys)
+            else:
+                readable = l1_manager.unsafe_read(keys)
+            for key in keys:
+                error, obj = readable[key]
+                assert error == L1Error.SUCCESS and obj is not None
+                assert bytes(obj.byte_array) == expected[key]
+            l1_manager.finish_read(keys)
+            assert l1_manager.get_staging_memory_usage() == 0
+            assert all(l1_manager.is_key_evictable(key) for key in keys)
+        finally:
+            ctrl.stop()
+            adapter.close()
+
+    def test_compacted_lookup_preserves_a_missing_middle_chunk(
+        self, l1_manager: DramL1Manager
+    ) -> None:
+        """An L2 miss is scattered to its original column before prefix folding."""
+        adapter = LookupCountingAdapter()
+        keys = [make_object_key(i) for i in range(6)]
+        write_keys_to_l1(l1_manager, [keys[0], keys[2], keys[4]], make_layout())
+        store_keys_in_l2(adapter, [keys[1], keys[5]], make_layout())
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+        try:
+            result = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
+            )
+            assert adapter.lookup_keys == [[keys[1], keys[3], keys[5]]]
+            assert row_bits(result) == [0, 1, 2]
+            assert hit_counts(result) == (2, 1)
+            assert result is not None and result.found_cells is not None
+            assert result.found_cells[0].get_indices_list() == [0, 1, 2, 4, 5]
+            assert_l2_unlocked(adapter)
+            assert l1_manager.is_key_evictable(keys[4])
+            l1_manager.finish_read(keys[:3])
+        finally:
+            ctrl.stop()
+            adapter.close()
+
+
+@pytest.mark.parametrize("window, expected_probes", [(2, 46), (8, 34)])
+def test_window_tail_only_trims_columns_warm_in_both_rows(
+    l1_manager: DramL1Manager, window: int, expected_probes: int
+) -> None:
+    """Windowed rows with a cold new tail share only part of their L1 overlap."""
+    adapter = LookupCountingAdapter()
+    full = [make_object_key(i, gid=0) for i in range(25)]
+    sliding = [make_object_key(i, gid=1) for i in range(25)]
+    layout = make_layout()
+    store_keys_in_l2(adapter, full + sliding, layout)
+    write_keys_to_l1(l1_manager, full[:-1] + sliding[-window - 1 : -1], layout)
+    ctrl = make_controller(l1_manager, [adapter])
+    ctrl.start()
+    try:
+        result = wait_for_result(
+            ctrl,
+            ctrl.submit_prefetch_request(
+                make_spec(
+                    [make_group(full, gid=0), make_group(sliding, gid=1, window=window)]
+                )
+            ),
+        )
+        assert len(adapter.lookup_keys) == 1
+        expected = (
+            full[: -window - 1] + full[-1:] + sliding[: -window - 1] + sliding[-1:]
+        )
+        assert len(expected) == expected_probes
+        assert adapter.lookup_keys[0] == expected
+        assert row_bits(result, 0) == list(range(25))
+        assert row_bits(result, 1) == list(range(25 - window, 25))
+        assert_l2_unlocked(adapter)
+        l1_manager.finish_read(full + sliding[-window:])
+    finally:
+        ctrl.stop()
+        adapter.close()
 
 
 class TestL1ServesWholeRequest:
