@@ -178,6 +178,8 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
        Returns a ``RegisterEngineDrivenContextResponse`` carrying the
        SHM segment name and pool size when the SHM path is in use
        (empty for the inline path).
+       If registration is rejected, the worker can correct the request
+       and retry with the same instance ID.
    * - ``UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT``
      - SERIALIZED
      - Unregister an engine-driven KV cache context.
