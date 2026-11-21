@@ -860,6 +860,53 @@ def test_store_omits_skip_mask_when_disabled_or_nothing_cached(enabled, chunks):
     assert "skip_chunks" not in call.kwargs
 
 
+def _engine_with_layout(group_kinds):
+    eng = _store_hook_engine([True, True])
+    entry = MagicMock()
+    entry.cache_context.kv_layer_groups_manager.get_attn_desc.return_value = MagicMock(
+        num_object_groups=len(group_kinds), group_kinds=group_kinds
+    )
+    # No stream: fingerprint jobs go to the plain queue. A mock stream would
+    # submit them to the process-global CUDA completion recorder on a GPU
+    # host, leaking completions into later tests that drain it.
+    entry.cache_context.cupy_stream = None
+    eng._transfer_module.get_and_touch_context_entry.return_value = entry
+    return eng
+
+
+def test_store_fingerprints_on_the_groups_a_blend_reads():
+    """Align-mode Mamba stores recurrent state for the checkpoint chunk only;
+    fingerprinting must not wait for that group, which a blend never reads."""
+    eng = _engine_with_layout(("attention", "recurrent", "aux"))
+
+    eng.store(
+        _store_hook_key(2), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+
+    call = eng._transfer_module.store_with_chunk_mask.call_args
+    assert call.kwargs["mask_object_groups"] == (0, 2)
+
+
+def test_store_checks_every_group_without_a_blend_read_set():
+    """Unregistered instance, or a layout with no attention group: the mask
+    keeps checking every object group."""
+    eng = _engine_with_layout(("recurrent", "aux"))
+    eng.store(
+        _store_hook_key(2), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+    assert "mask_object_groups" not in (
+        eng._transfer_module.store_with_chunk_mask.call_args.kwargs
+    )
+
+    eng._transfer_module.get_and_touch_context_entry.return_value = None
+    eng.store(
+        _store_hook_key(2), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+    assert "mask_object_groups" not in (
+        eng._transfer_module.store_with_chunk_mask.call_args.kwargs
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fingerprint eviction on storage key events
 # ---------------------------------------------------------------------------

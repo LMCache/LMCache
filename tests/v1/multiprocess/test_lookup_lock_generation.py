@@ -94,6 +94,8 @@ def lookup(
         ctx = MagicMock()
         ctx.chunk_size = 4
         ctx.token_hasher = TokenHasher(chunk_size=4, hash_algorithm="blake3")
+        ctx.layout_desc_registry.get_chunk_size.return_value = 4
+        ctx.layout_desc_registry.get_token_hasher.return_value = ctx.token_hasher
         ctx.session_manager = SessionManager(ctx.token_hasher, cleanup_interval=None)
         ctx.event_bus.has_subscribers.return_value = False
         layout = MemoryLayoutDesc([torch.Size([4])], [torch.float32])

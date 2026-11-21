@@ -139,9 +139,11 @@ def _make_free_locks_ctx(
     """
     ctx = MagicMock()
     ctx.get_read_owners.return_value = None
-    ctx.chunk_size = 256
-    ctx.token_hasher.chunk_size = 256
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    token_hasher = MagicMock()
+    token_hasher.chunk_size = 256
+    token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    ctx.layout_desc_registry.get_chunk_size.return_value = 256
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=windows, world_size=world_size
     )
@@ -286,7 +288,8 @@ def test_server_free_lookup_locks_floors_release_to_the_lookup_start():
     released = _released_chunks(ctx.session_manager.get.return_value.claim_free_reads)
     assert released == {(0, b"h2"), (0, b"h3")}
     # The range was floored before hashing: [512, 1024), not [0, 1024).
-    hash_call = ctx.token_hasher.compute_packed_chunk_hashes.call_args
+    token_hasher = ctx.layout_desc_registry.get_token_hasher.return_value
+    hash_call = token_hasher.compute_packed_chunk_hashes.call_args
     assert hash_call.kwargs["start"] == 512
 
 
@@ -302,16 +305,17 @@ def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
     # First Party
     from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
-    hashes = [b"h2", b"h3"]  # the stale range [2, 4)
-    ctx = _make_free_locks_ctx(hashes, windows=[2, 1], hit_chunks=8)
     old = _free_locks_key(1024, start=512, end=1024)
-    session = Session(
-        old.request_id, TokenHasher(chunk_size=256, hash_algorithm="blake3")
+    hasher = TokenHasher(chunk_size=256, hash_algorithm="blake3")
+    h2, h3 = hasher.compute_packed_chunk_hashes(
+        old.token_bytes, start=old.start, end=old.end
     )
+    ctx = _make_free_locks_ctx([], windows=[2, 1], hit_chunks=8)
+    session = Session(old.request_id, hasher)
     kv_rank = ObjectKey.ComputeKVRank(1, 0, 1, 0)
     original_generations = {
         ObjectKey(chunk, "testmodel", kv_rank, group): 11
-        for group, chunk in ((0, b"h3"), (1, b"h2"), (1, b"h3"))
+        for group, chunk in ((0, h3), (1, h2), (1, h3))
     }
     original_owners = {key: 0 for key in original_generations}
     original_counts = {
@@ -328,6 +332,8 @@ def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
     session.begin_lookup(_free_locks_key(1024, start=0, end=1024), (2, 1))
     session.record_prefetch_result(8, (0, 1), read_counts={})
     ctx.session_manager.get.return_value = session
+    ctx.layout_desc_registry.get_chunk_size.side_effect = KeyError("unregistered")
+    ctx.layout_desc_registry.get_token_hasher.side_effect = KeyError("unregistered")
     ctx.layout_desc_registry.find_shard_replication_desc.side_effect = AssertionError(
         "Abandoned reads must use their original object identities"
     )
@@ -346,7 +352,7 @@ def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
     released = {(claim.key.object_group_id, claim.key.chunk_hash) for claim in claims}
     # Window 1 with hit=4 (the range end): only chunk 3; full attention:
     # chunks 2-3 (floored to the range start).
-    assert released == {(0, b"h3"), (1, b"h2"), (1, b"h3")}
+    assert released == {(0, h3), (1, h2), (1, h3)}
 
 
 def test_server_free_lookup_locks_without_result_releases_nothing():
@@ -396,6 +402,7 @@ def test_server_free_lookup_locks_consumes_pending_result_first():
         row_windows=(-1,),
         request_id="req-sw",
         requested_tokens=768,
+        chunk_size=256,
     )
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
@@ -442,13 +449,16 @@ def test_server_free_lookup_locks_while_prefetch_running_releases_nothing():
         row_windows=(-1,),
         request_id="req-sw",
         requested_tokens=768,
+        chunk_size=256,
     )
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
 
     ctx.storage_manager.finish_read_reservations.assert_not_called()
     assert "req-sw" in module._prefetch_jobs
-    ctx.session_manager.get_or_create.return_value.record_prefetch_result.assert_not_called()
+    (
+        ctx.session_manager.get_or_create.return_value.record_prefetch_result
+    ).assert_not_called()
 
 
 def test_server_free_lookup_locks_no_matching_chunks():
@@ -477,6 +487,22 @@ def test_server_free_lookup_locks_no_matching_chunks():
     module.free_lookup_locks(key, 1)
 
     module.context.storage_manager.finish_read_reservations.assert_not_called()
+
+
+def test_late_free_after_model_unregistration() -> None:
+    """An ended session can receive a late FREE after its model was removed."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    ctx = _make_free_locks_ctx([b"hash"], windows=[-1], hit_chunks=1)
+    ctx.session_manager.get.return_value = None
+    ctx.layout_desc_registry.get_token_hasher.side_effect = KeyError("unregistered")
+    ctx.layout_desc_registry.get_chunk_size.side_effect = KeyError("unregistered")
+
+    LookupModule(ctx).free_lookup_locks(_free_locks_key(256, start=0, end=256), 1)
+
+    ctx.session_manager.get_or_create.assert_not_called()
+    ctx.storage_manager.finish_read_reservations.assert_not_called()
 
 
 def test_server_handler_registered():

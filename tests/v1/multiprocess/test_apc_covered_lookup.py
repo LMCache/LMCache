@@ -81,9 +81,12 @@ def _make_key(n_chunks: int, start_chunks: int = 0) -> IPCCacheServerKey:
 def _ctx_with_hashes(n_chunks: int) -> MagicMock:
     ctx = MagicMock()
     ctx.chunk_size = CHUNK_SIZE
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = [
+    token_hasher = MagicMock()
+    token_hasher.compute_packed_chunk_hashes.return_value = [
         bytes([i]) * 4 for i in range(n_chunks)
     ]
+    ctx.layout_desc_registry.get_chunk_size.return_value = CHUNK_SIZE
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     return ctx
 
 
