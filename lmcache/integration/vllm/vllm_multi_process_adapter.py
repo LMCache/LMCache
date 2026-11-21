@@ -601,6 +601,8 @@ class LMCacheMPSchedulerAdapter:
         # once resolved, so repeated checks return the same value after the
         # server has handed the hit count over (exactly once).
         self._lookups: dict[str, LookupState] = {}
+        # FREEs each server must handle before the request's END_SESSION to it.
+        self._frees_before_end: dict[str, dict[str, MessagingFuture[Any]]] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
@@ -874,6 +876,25 @@ class LMCacheMPSchedulerAdapter:
             self._mark_lookup_timed_out(url)
         return lookup.get_result()
 
+    def peek_lookup_result(self, request_id: str) -> int | None:
+        """Return a lookup's result if it already arrived, sending nothing.
+
+        Unlike :meth:`check_lookup_result`, this never advances the lookup
+        (no re-sent status query, no timeout handling), so it is safe while
+        tearing a request down.
+
+        Args:
+            request_id: The ID passed to `maybe_submit_lookup_request`.
+
+        Returns:
+            The matched token count once every server has reported, else None
+            (still running, never submitted, or a server is unhealthy).
+        """
+        lookup = self._lookups.get(request_id)
+        if lookup is None or not self.is_healthy:
+            return None
+        return lookup.get_result()
+
     def num_blocks_per_chunk(self) -> int:
         """
         Returns:
@@ -971,6 +992,7 @@ class LMCacheMPSchedulerAdapter:
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
         extra_ranges: tuple[tuple[int, int], ...] = (),
+        before_end_session: bool = False,
     ) -> None:
         """Release read locks acquired during lookup without a full retrieve.
 
@@ -997,6 +1019,10 @@ class LMCacheMPSchedulerAdapter:
             extra_ranges: Lock ranges left by this request's earlier,
                 abandoned lookups, as ``(start, end)`` token pairs ending at
                 that lookup's hit boundary. Released in the same RPC.
+            before_end_session: Make :meth:`end_session` for this request
+                send each server's END_SESSION only once that server handled
+                this FREE (an error reply counts as handled), so it cannot
+                overtake the FREE. Neither call blocks.
         """
         if not self.is_healthy:
             return
@@ -1010,10 +1036,14 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         ).no_worker_id_version()
-        for url in self._server_urls:
-            self.req_clients[url].free_lookup_locks(
+        futures = {
+            url: self.req_clients[url].free_lookup_locks(
                 base_key, self.tp_size, extra_ranges
             )
+            for url in self._server_urls
+        }
+        if before_end_session:
+            self._frees_before_end[request_id] = futures
 
     def end_session(self, request_id: str) -> None:
         """
@@ -1024,9 +1054,13 @@ class LMCacheMPSchedulerAdapter:
         flight complete, so their handlers cannot recreate the session after
         END_SESSION.
 
+        A FREE sent with ``before_end_session`` delays the END_SESSION to its
+        server until that server answers it, without blocking the caller.
+
         Args:
             request_id: The ID of the finished request.
         """
+        frees = self._frees_before_end.pop(request_id, {})
         if not self.is_healthy:
             return
 
@@ -1038,7 +1072,18 @@ class LMCacheMPSchedulerAdapter:
                 return
 
         for url in self._server_urls:
-            self.req_clients[url].end_session(request_id)
+            client = self.req_clients[url]
+            free = frees.get(url)
+            if free is None:
+                client.end_session(request_id)
+            else:
+                # Runs on the receive thread; sending only enqueues.
+                def send_end(
+                    _: MessagingFuture[Any], client: RequestClient = client
+                ) -> None:
+                    client.end_session(request_id)
+
+                free.add_done_callback(send_end)
 
     def report_block_allocations(
         self,

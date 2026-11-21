@@ -4,6 +4,7 @@
 #   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
 #              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
 #              | restart_recovery | lazy_offload | sleep_mode | gds_smoke
+#              | abort_lookup_locks
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -121,6 +122,16 @@ elif [ "$TEST_NAME" = "deadlock" ]; then
     export CHUNK_SIZE=256
     export CPU_BUFFER_SIZE=50
     export MAX_WORKERS=2
+elif [ "$TEST_NAME" = "abort_lookup_locks" ]; then
+    # TP=2 on both GPUs through the shared launcher. A small block pool keeps
+    # most requests WAITING after their lookups hit, which is what the abort
+    # must release.
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
+    export TENSOR_PARALLEL_SIZE=2
+    export GPU_FOR_ENGINE="0,1"
+    export ENGINE_USE_ALL_DEVICES=true
+    export NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-1024}"
+    export MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 elif [ "$TEST_NAME" = "lazy_offload" ]; then
     # The shared GPU launcher includes these values in the real vLLM
     # kv-transfer configuration only for this integration test.
@@ -210,10 +221,13 @@ echo "============================================"
 echo "=== Running test: ${TEST_NAME} ==="
 echo "============================================"
 
-if ! "$exec_script"; then
-    echo "${TEST_NAME} test failed"
-    exit 1
-fi
+# Pass the workload's exit status through: a pipeline step may retry only
+# specific codes (abort_lookup_locks exits 75 for a known vLLM engine crash).
+"$exec_script" || {
+    status=$?
+    echo "${TEST_NAME} test failed (exit ${status})"
+    exit "$status"
+}
 
 echo ""
 echo "============================================"
