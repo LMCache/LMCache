@@ -232,6 +232,10 @@ def _make_connector() -> _Harness:
     connector._save_decode_cache = False
     connector._save_unfull_chunk = False
     connector._mamba_relocation_window = 0
+    # To make transfer_intermediate_tensors False and turn off Q tensor capture
+    connector._vllm_config = _make_vllm_config(
+        lazy_offload=True, enable_prefix_caching=False
+    )
     return _Harness(connector, manager, adapter)
 
 
