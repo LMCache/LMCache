@@ -1218,6 +1218,20 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 (instance_id, import_token),
             )
 
+            # A full-prompt hit vLLM cut back to a chunk boundary (e.g. it
+            # recomputed the prompt's exact tail locally) allocates GPU
+            # blocks for only the num_chunks full chunks, none for the
+            # trailing unfull chunk. There is then nothing to load that
+            # chunk's object into; skip it below instead of failing the
+            # whole retrieve. A group with blocks while another has none is
+            # a real inconsistency and is left to raise in
+            # trim_and_stage_unfull_chunk_block_ids. So is a tail-only
+            # retrieve (num_chunks == 0): with no full chunk loaded either,
+            # skipping would report success while copying nothing.
+            unfull_chunk_missing_blocks = (
+                bool(unfull_obj_keys) and num_chunks > 0 and not any(unfull_block_ids)
+            )
+
             # Per object group, the prefetch only locked the in-window suffix
             # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
             # attention, where the value is < 0). Read and transfer only those.
@@ -1291,18 +1305,30 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     )
                     prefetched_keys.extend(in_window_keys)
                 if retrieve_succeeded and unfull_retained_keys:
-                    total_bytes += self._retrieve_unfull_chunk_objects(
-                        cache_context,
-                        key,
-                        unfull_retained_keys,
-                        [
-                            group
-                            for group in range(num_object_groups)
-                            if group not in skipped_groups
-                        ],
-                        unfull_block_ids,
-                        max(0, skip_first_n_tokens - num_chunks * self._ctx.chunk_size),
-                    )
+                    if unfull_chunk_missing_blocks:
+                        logger.debug(
+                            "No GPU blocks allocated for request %s's unfull "
+                            "chunk; skipping it and keeping the %d full "
+                            "chunks already retrieved.",
+                            key.request_id,
+                            num_chunks,
+                        )
+                    else:
+                        total_bytes += self._retrieve_unfull_chunk_objects(
+                            cache_context,
+                            key,
+                            unfull_retained_keys,
+                            [
+                                group
+                                for group in range(num_object_groups)
+                                if group not in skipped_groups
+                            ],
+                            unfull_block_ids,
+                            max(
+                                0,
+                                skip_first_n_tokens - num_chunks * self._ctx.chunk_size,
+                            ),
+                        )
                     prefetched_keys.extend(unfull_retained_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
@@ -1317,7 +1343,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     )
                 num_tokens = (
                     num_chunks * self._ctx.chunk_size
-                    + (key.end % self._ctx.chunk_size if unfull_obj_keys else 0)
+                    + (
+                        key.end % self._ctx.chunk_size
+                        if unfull_obj_keys and not unfull_chunk_missing_blocks
+                        else 0
+                    )
                     if len(prefetched_keys) == expected_retained
                     else 0
                 )
@@ -1327,7 +1357,15 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         event_type=EventType.MP_RETRIEVE_END,
                         session_id=key.request_id,
                         metadata={
-                            "retrieved_count": len(prefetched_keys),
+                            # prefetched_keys keeps a skipped unfull chunk so the
+                            # all-retained check above holds, but nothing was
+                            # copied for it, so do not report it as retrieved.
+                            "retrieved_count": len(prefetched_keys)
+                            - (
+                                len(unfull_retained_keys)
+                                if unfull_chunk_missing_blocks
+                                else 0
+                            ),
                             "device": str(cache_context.device),
                             "engine_id": instance_id,
                             "model_name": model_name,

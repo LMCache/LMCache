@@ -620,6 +620,86 @@ def test_retrieve_of_only_an_unfull_chunk_skips_aux_groups(monkeypatch):
     assert unfull_transfers == [0, 1]
 
 
+def test_retrieve_skips_unfull_chunk_with_no_allocated_blocks(monkeypatch):
+    """A full-prompt hit vLLM cut back to a chunk boundary (its own cache
+    recomputed the prompt's exact tail locally) allocates GPU blocks for the
+    full chunks only. The retrieve must not fail: there is nothing to load
+    the unfull chunk's object into, so it is skipped instead of raising
+    (regression test for #6751)."""
+    module, read_calls, transfer_calls = _make_module(
+        monkeypatch, 1, num_chunks_in_sw=[-1]
+    )
+    module.context.resolve_unfull_chunk_obj_keys.return_value = ["g0u"]
+    trim_calls: list[Any] = []
+    monkeypatch.setattr(
+        mod,
+        "trim_and_stage_unfull_chunk_block_ids",
+        lambda *a, **k: trim_calls.append(a) or (a[1], [0], [0]),
+    )
+    unfull_transfers: list[int] = []
+    monkeypatch.setattr(
+        mod,
+        "transfer_unfull_chunk",
+        lambda cc, block_ids, skips, leads, memory_obj, group, buffer, direction: (
+            unfull_transfers.append(group)
+        ),
+    )
+
+    # Capture the MP_RETRIEVE_END metadata the retrieve publishes.
+    published: list[Any] = []
+    module.context.event_bus.publish_on_stream.side_effect = lambda _stream, event: (
+        published.append(event)
+    )
+    event_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(mod, "Event", lambda **kw: event_calls.append(kw) or kw)
+
+    # Exactly 1 block == num_chunks(1) * blocks_per_chunk(1): no extra block
+    # was allocated for the trailing unfull chunk.
+    _handle, ok = module.retrieve(_unfull_key(), 1, [[7]], b"x")
+
+    assert ok is True
+    # The skipped tail is neither counted as a retrieved object nor as tokens:
+    # only the one full chunk was actually copied.
+    end = next(
+        e["metadata"]
+        for e in event_calls
+        if e["event_type"] == mod.EventType.MP_RETRIEVE_END
+    )
+    assert end["retrieved_count"] == 1
+    assert end["num_tokens"] == 256
+    # Only the full chunk is read and transferred; the unfull chunk's
+    # object is never read or transferred, and trim_and_stage is never
+    # reached (it would have raised "unfull chunk has no block for group").
+    assert read_calls == [["g0c0"]]
+    assert [g for g, _ in transfer_calls] == [0]
+    assert trim_calls == []
+    assert unfull_transfers == []
+
+
+def test_retrieve_of_only_an_unfull_chunk_with_no_blocks_still_raises(monkeypatch):
+    """With no full chunk to load either (a tail-only retrieve), skipping the
+    unfull chunk would report success while copying nothing. That stays the
+    inconsistency it was before #6751's fix and fails the retrieve."""
+    module, read_calls, transfer_calls = _make_module(
+        monkeypatch, 0, num_chunks_in_sw=[-1]
+    )
+    module.context.resolve_obj_keys.return_value = [[]]
+    module.context.resolve_unfull_chunk_obj_keys.return_value = ["g0u"]
+    trim_calls: list[Any] = []
+
+    def raising_trim(*args, **kwargs):
+        trim_calls.append(args)
+        raise ValueError("unfull chunk has no block for group 0")
+
+    monkeypatch.setattr(mod, "trim_and_stage_unfull_chunk_block_ids", raising_trim)
+
+    _handle, ok = module.retrieve(_unfull_key(), 1, [[]], b"x")
+
+    assert ok is False
+    assert len(trim_calls) == 1
+    assert transfer_calls == []
+
+
 def _no_unfull(chunk_size: int) -> bool:
     """``has_unfull_chunk`` of a key double that addresses full chunks only."""
     return False
