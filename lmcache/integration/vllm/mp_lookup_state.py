@@ -133,6 +133,11 @@ class LookupState:
         # Guards ``_servers`` and ``_result``; every send happens under it.
         self._lock = threading.Lock()
 
+    @property
+    def key(self) -> IPCCacheServerKey:
+        """The LOOKUP key, including the looked-up ``[start, end)`` range."""
+        return self._key
+
     def submit(self) -> None:
         """Send LOOKUP to every server."""
         deadline = time.monotonic() + self._timeout
