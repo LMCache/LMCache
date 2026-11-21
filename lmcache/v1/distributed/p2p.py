@@ -33,6 +33,13 @@ from lmcache.v1.transport.grpc.utils import GRPC_CHANNEL_OPTIONS, request_error
 from lmcache.v1.transport.rpc import rpc_method
 
 T = TypeVar("T")
+# Deadline of a lookup or probe call. Lookups and queries also fail fast
+# instead of waiting for a connection, so no request waits on a peer that is
+# down. A lookup queued behind a down peer is dropped at the deadline instead
+# of being sent, and read-locking keys, when the peer comes back. The query
+# has no deadline: the peer hands out a result once, so a reply that came
+# after a deadline would be lost; the lookup deadline bounds the wait.
+LOOKUP_RPC_TIMEOUT_S = 3.0
 _lookup_request, _ = compile_request_codec_for_types(
     pb.P2pLookupAndLockRequest, (list[ObjectKey], dict[int, MemoryLayoutDesc])
 )
@@ -105,7 +112,8 @@ class P2PClient:
         """Submit peer keys and group layouts; return the lookup task ID."""
         return _future(
             self._stub.P2PLookupAndLock.future(
-                _lookup_request((keys, group_layout_descs), {}), wait_for_ready=True
+                _lookup_request((keys, group_layout_descs), {}),
+                timeout=LOOKUP_RPC_TIMEOUT_S,
             ),
             lambda reply: int(reply.task_id),
         )
@@ -117,7 +125,7 @@ class P2PClient:
         """Poll the task; None means pending, a list contains peer addresses."""
         return _future(
             self._stub.P2PQueryLookupResults.future(
-                pb.P2pQueryLookupResultsRequest(task_id=task_id), wait_for_ready=True
+                pb.P2pQueryLookupResultsRequest(task_id=task_id)
             ),
             _query_result,
         )
@@ -154,6 +162,27 @@ class P2PClient:
                 _finish_write_request((keys, succeeded), {}), wait_for_ready=True
             ),
             _finish_write_result,
+        )
+
+    def probe(self) -> MessagingFuture[None]:
+        """Check that the peer answers, with an unlock of no keys.
+
+        Unlike a lookup, the call waits for a connection, up to the lookup
+        deadline, so a peer that is down is probed at most once per deadline.
+        An answer shows that the peer's RPC server is up, not that its lookup
+        path works.
+
+        Returns:
+            A future that completes when the peer answers, or fails with the
+            call's error.
+        """
+        return _future(
+            self._stub.P2PUnlockObjects.future(
+                _unlock_request(([],), {}),
+                wait_for_ready=True,
+                timeout=LOOKUP_RPC_TIMEOUT_S,
+            ),
+            lambda _reply: None,
         )
 
     def close(self) -> None:

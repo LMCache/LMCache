@@ -69,9 +69,10 @@ lookup-and-lock  → query (addresses)  → load (RDMA read)  → unlock
 1. **lookup-and-lock** — send `P2P_LOOKUP_AND_LOCK([keys, group_layout_descs])` to the
    peer; it read-locks every L1-resident key (sparse; gaps allowed) and
    returns a task id.
-2. **query** — poll `P2P_QUERY_LOOKUP_RESULTS(task_id)`; once ready the peer
-   returns one `TransferChannelAddress` per key (invalid offset for keys it did
-   not lock). The adapter stashes the valid addresses keyed by `ObjectKey` and
+2. **query** — `P2P_QUERY_LOOKUP_RESULTS(task_id)`, sent as soon as the
+   lookup is acknowledged; once ready the peer returns one
+   `TransferChannelAddress` per key (invalid offset for keys it did not
+   lock). The adapter stashes the valid addresses keyed by `ObjectKey` and
    reports a found/not-found `Bitmap` to the prefetch controller.
 3. **load** — for the found keys, translate the local destination objects'
    `(shm_offset, shm_byte_length)` into transfer-channel addresses, pair them
@@ -84,32 +85,83 @@ lookup-and-lock  → query (addresses)  → load (RDMA read)  → unlock
 hint added to the L2 lookup interface; the P2P adapter forwards the real
 descriptors verbatim so the peer can size objects.
 
-## Why the periodic notifier
+## Completion signaling
 
-Neither the lookup RPC nor the transfer-channel read exposes a completion fd:
-the request response resolves asynchronously in the selected transport, and
-the RDMA read completes inside the transfer engine. So the adapter registers
-its lookup and load event fds with the `PeriodicEventNotifier` singleton, which
-pulses them every few milliseconds. Each pulse drives the prefetch controller
-to re-poll `query_lookup_and_lock_result` / `query_load_result`, which in turn
-check the in-flight RPC / transfer state. With writes disabled the store fd is
-not pulsed; the no-op store signals it directly on submit. With writes enabled
-the store fd is pulsed too, so the store controller keeps calling
-`pop_completed_store_tasks` to notice finished transfers and expired stores
-(see *Store* below).
+The lookup is driven by RPC completions, not by polling. The lookup and query
+RPC futures run a done-callback on the gRPC channel's thread (or on the
+sending thread when the call is already done):
 
-Both RPCs are non-blocking handlers, so the adapter uses **submit-then-wait**:
-`submit_lookup_and_lock_task` submits the lookup and waits (hard-coded ~3 s) for
-the task id; each `query_lookup_and_lock_result` pulse submits
-`P2P_QUERY_LOOKUP_RESULTS` and waits — `None` means not ready (re-queried on the
-next pulse), addresses mean ready.
+```
+submit_lookup_and_lock_task ──► P2P_LOOKUP_AND_LOCK ──ack──► P2P_QUERY_LOOKUP_RESULTS
+  (returns at once)                                              │ addresses
+                                                                 ▼
+                                     store addresses, signal the lookup event fd
+```
+
+`submit_lookup_and_lock_task` returns immediately, so the prefetch loop never
+blocks on a peer, and a completed lookup is picked up on the next prefetch-loop
+wakeup instead of the next periodic pulse (one pulse is up to
+`--periodic-notifier-interval-ms`, 5 ms by default). The lookup task state is
+shared with those callbacks and guarded by a lock. Failures stay bounded:
+
+- an ack that does not arrive within ~3 s, or a failed ack, is a miss;
+- an unanswered result query is not sent again: the lookup and query calls
+  fail fast when the peer is not connected, and the lookup deadline
+  (`lookup_timeout_s`) bounds a query that is never answered. The query has
+  no gRPC deadline of its own: the peer returns a result only once, so a
+  reply that arrived after a deadline would be lost with its read locks;
+- a failed query is retried once, and a second failure is a miss;
+- the lookup deadline (`lookup_timeout_s`) still bounds the whole lookup;
+- a lookup acknowledgement that fails because the peer is down
+  (`UNAVAILABLE` or `CANCELLED` at once) or past the ~3 s lookup deadline (a
+  frozen peer), or a single query RPC unanswered for ~3 s, marks the
+  peer unresponsive; other ack errors are only a miss. A stalled query's
+  late answer is still used by its lookup. While marked, lookups to the peer
+  are a miss at once, without an RPC. Recovery is checked one step at a
+  time. First the adapter sends a probe, an unlock of no keys, that no
+  request waits on; it waits for a connection, up to the same deadline, so a
+  peer that is down is probed at most once per deadline. An answered probe
+  only shows that the peer's RPC server is up, so the next lookup then goes
+  out as a canary while the others still miss. The mark is cleared only when
+  the canary completes; if its ack or query fails or stalls, the next lookup
+  probes again; a check that has not ended within `lookup_timeout_s` (for
+  example a canary whose request was dropped) is given up and the next
+  lookup probes again. Only a query sent after the mark was last cleared
+  can set it again. A peer whose RPC server answers but whose lookups stall thus
+  costs one waiting request per check instead of every request. The
+  trade-off: a peer that stalls past the deadline and recovers misses hits
+  until a probe and a canary complete.
+
+The lookup deadline also stops lookups from piling up behind a peer that is
+down: without it, lookups waiting for a connection were all sent, and
+read-locked their keys until the peer's read TTL, when the peer came back.
+It does not stop a peer from running a lookup that it received in time but
+handled after the deadline (for example while its handler threads were
+busy): the requester has dropped it by then, so its read locks last until the
+TTL.
+
+The transfer-channel read exposes no completion fd: the RDMA read completes
+inside the transfer engine. So the adapter also registers its lookup and load
+event fds with the `PeriodicEventNotifier` singleton, which pulses them every
+few milliseconds. Each pulse drives the prefetch controller to re-poll
+`query_load_result` (and a lookup whose result was not ready yet). With writes
+disabled the store fd is not pulsed; the no-op store signals it directly on
+submit. With writes enabled the store fd is pulsed too, so the store controller
+keeps calling `pop_completed_store_tasks` to notice finished transfers and
+expired stores (see *Store* below).
 
 ## Timeouts
 
 P2P is error-prone, so both queries are bounded by a per-task deadline
 (`lookup_timeout_s` / `load_timeout_s`). A lookup past its deadline returns an
-all-zero `Bitmap` (treated as a miss); a load past its deadline returns an
-all-zero `Bitmap` (treated as a failure). The prefetch controller then trims
+all-zero `Bitmap` (treated as a miss) unless its result already arrived, in
+which case the result is used so the peer's read locks are released normally
+(a reply arriving after the expiring poll is dropped, and those locks expire
+with the peer's lock TTL). The same holds whenever the peer may have locked
+keys the requester never learns: an ack that lands after its deadline, or a
+lookup whose result query failed twice. The requester cannot unlock keys it
+does not know were locked, so those locks also expire by TTL. A load past its deadline returns an all-zero
+`Bitmap` (treated as a failure). The prefetch controller then trims
 those keys as if the peer never had them.
 
 On the owner, `P2P_LOOKUP_AND_LOCK` drops finished lookups older than
