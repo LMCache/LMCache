@@ -32,7 +32,7 @@ import threading
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, MemoryTags, ObjectKey
-from lmcache.v1.distributed.internal_api import L2StoreResult
+from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.distributed.key_codec import encode_storage_key
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -140,6 +140,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         type_name: str = "",
         extra_status: dict[str, Any] | None = None,
         pad_buffers_to_alignment: bool = False,
+        recovered_entries: list[tuple[ObjectKey, int]] | None = None,
     ) -> None:
         """Initialize the adapter over a native connector client.
 
@@ -160,6 +161,10 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 native connectors whose I/O path requires aligned buffer
                 lengths (e.g. O_DIRECT file storage). See
                 ``_obj_to_memoryview``.
+            recovered_entries: ``(key, size_bytes)`` pairs already on the
+                storage medium when the adapter starts, oldest first. They
+                count toward usage and are replayed to each listener on
+                registration, so the eviction policy can evict them.
         """
         super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
         self._client = native_client
@@ -203,6 +208,9 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         # sizes) so we can pass them to ``_notify_keys_deleted``. Aggregate
         # and per-user totals live in the base class — see ``get_usage``.
         self._key_sizes: dict[ObjectKey, int] = {}
+        # Keys found on the storage medium at startup, oldest first.
+        self._recovered_keys: list[ObjectKey] = []
+        self._seed_recovered_entries(recovered_entries or [])
         # Pending store sizes: native future_id -> (keys, per_key_sizes).
         # Bridges the async store submit → demux completion gap so the
         # demux thread can fire ``_notify_keys_stored(keys, sizes)``.
@@ -222,6 +230,46 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             name="l2-adapter-demux",
         )
         self._demux_thread.start()
+
+    def _seed_recovered_entries(self, entries: list[tuple[ObjectKey, int]]) -> None:
+        """Count entries that existed before this adapter started.
+
+        The byte totals are seeded directly instead of through
+        ``_notify_keys_stored``: no listener is registered yet, and this
+        process did not store these keys. ``register_listener`` replays them.
+        """
+        total = 0
+        by_salt: dict[str, int] = {}
+        for key, size in entries:
+            if key in self._key_sizes:
+                continue
+            self._key_sizes[key] = size
+            self._recovered_keys.append(key)
+            total += size
+            by_salt[key.cache_salt] = by_salt.get(key.cache_salt, 0) + size
+        if not self._recovered_keys:
+            return
+        with self._usage_lock:
+            self._total_bytes_used += total
+            for salt, size in by_salt.items():
+                self._bytes_by_cache_salt[salt] = (
+                    self._bytes_by_cache_salt.get(salt, 0) + size
+                )
+
+    def register_listener(self, listener: L2AdapterListener) -> None:
+        """Register a listener and replay the keys recovered at startup."""
+        super().register_listener(listener)
+        with self._lock:
+            keys = [k for k in self._recovered_keys if k in self._key_sizes]
+            sizes = [self._key_sizes[k] for k in keys]
+        if not keys:
+            return
+        try:
+            listener.on_l2_keys_stored(keys, sizes)
+        except Exception as e:
+            logger.warning(
+                "%s listener recovery bootstrap failed: %s", self._type_name, e
+            )
 
     # ---------------------------------------------------------------
     # Event Fd Interface

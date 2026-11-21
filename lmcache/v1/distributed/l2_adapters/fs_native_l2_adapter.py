@@ -11,6 +11,7 @@ from __future__ import annotations
 
 # Standard
 from typing import TYPE_CHECKING, Optional
+import os
 
 if TYPE_CHECKING:
     from lmcache.v1.distributed.internal_api import (
@@ -19,7 +20,13 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import MemoryResidency, MemorySegment, MemoryTags
+from lmcache.v1.distributed.api import (
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
+from lmcache.v1.distributed.key_codec import decode_fs_filename
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
 )
@@ -194,6 +201,53 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
         )
 
 
+def _scan_persisted_entries(
+    base_path: str,
+) -> tuple[list[tuple[ObjectKey, int]], int]:
+    """Find the cache files a previous server left in ``base_path``.
+
+    Only the top level is scanned, so the temporary-file subdirectory is not
+    counted. ``.data`` files whose names do not decode as cache keys, or that
+    cannot be read, are skipped.
+
+    Args:
+        base_path: The adapter's cache directory.
+
+    Returns:
+        ``(entries, skipped)``: ``(key, size_bytes)`` pairs sorted oldest
+        first by modification time, and the number of skipped ``.data`` files.
+    """
+    found: list[tuple[int, ObjectKey, int]] = []
+    skipped = 0
+    try:
+        with os.scandir(base_path) as it:
+            for entry in it:
+                if not entry.name.endswith(".data"):
+                    continue
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    key = decode_fs_filename(entry.name)
+                    st = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except (ValueError, OSError):
+                    skipped += 1
+                    continue
+                found.append((st.st_mtime_ns, key, st.st_size))
+    except FileNotFoundError:
+        return [], 0
+    except OSError as e:
+        logger.warning(
+            "fs_native: could not scan %s for existing cache files: %s",
+            base_path,
+            e,
+        )
+        return [], 0
+    found.sort(key=lambda item: item[0])
+    return [(key, size) for _, key, size in found], skipped
+
+
 def _create_fs_native_l2_adapter(
     config: L2AdapterConfigBase,
     l1_memory_desc: "Optional[L1MemoryDesc]" = None,
@@ -228,16 +282,28 @@ def _create_fs_native_l2_adapter(
         config.read_max_bytes_in_flight,
     )
     effective_read_budget = native_client.read_budget_bytes()
+    # Files in a shared base_path may belong to other instances, so only an
+    # unshared directory is recovered.
+    recovered: list[tuple[ObjectKey, int]]
+    skipped: int
+    if config.shared:
+        recovered, skipped = [], 0
+    else:
+        recovered, skipped = _scan_persisted_entries(config.base_path)
     logger.info(
         "Created FS native L2 adapter: %s (workers=%d, odirect=%s, "
         "read_ahead=%s, num_read_workers=%d, "
-        "read_max_bytes_in_flight=%d)",
+        "read_max_bytes_in_flight=%d, recovered_files=%d, "
+        "recovered_bytes=%d, skipped_files=%d)",
         config.base_path,
         config.num_workers,
         config.use_odirect,
         config.read_ahead_size,
         config.num_read_workers,
         effective_read_budget,
+        len(recovered),
+        sum(size for _, size in recovered),
+        skipped,
     )
     residency = MemoryResidency.REMOTE if config.shared else MemoryResidency.LOCAL
     memory_tags = MemoryTags(MemorySegment.STORAGE, residency)
@@ -247,6 +313,7 @@ def _create_fs_native_l2_adapter(
         max_capacity_gb=config.max_capacity_gb,
         type_name="FSNativeL2Adapter",
         pad_buffers_to_alignment=config.use_odirect,
+        recovered_entries=recovered,
         extra_status={
             "base_path": config.base_path,
             "use_odirect": config.use_odirect,
