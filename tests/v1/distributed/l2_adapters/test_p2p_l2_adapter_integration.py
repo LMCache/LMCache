@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import cast
 import itertools
+import os
 import time
 
 # Third Party
@@ -133,13 +134,18 @@ def _local_memory_obj(buffer: torch.Tensor, offset: int) -> MemoryObj:
 
 
 def _make_storage_manager(
-    size_bytes: int, write_ttl_seconds: int = 600, store_policy: str = "default"
+    size_bytes: int,
+    *,
+    shm_name: str,
+    write_ttl_seconds: int = 600,
+    store_policy: str = "default",
 ) -> StorageManager:
     memory_config = L1MemoryManagerConfig(
         size_in_bytes=size_bytes,
         use_lazy=False,
         init_size_in_bytes=size_bytes,
         align_bytes=_PAGE,
+        shm_name=shm_name,
     )
     l1_config = L1ManagerConfig(
         memory_config=memory_config,
@@ -223,7 +229,11 @@ def _peer_side(
         l1_pages: Size of the peer's L1 in pages.
         write_ttl_seconds: Write TTL of the peer's L1.
     """
-    peer_sm = _make_storage_manager(l1_pages * _PAGE, write_ttl_seconds)
+    peer_sm = _make_storage_manager(
+        l1_pages * _PAGE,
+        shm_name=f"{os.getpid()}_peer",
+        write_ttl_seconds=write_ttl_seconds,
+    )
     peer_tc_ctx = None
     request_server: GrpcMultiprocessServerBase | None = None
     try:
@@ -476,7 +486,11 @@ def test_p2p_store_policy_keeps_objects_local_until_the_usage_threshold() -> Non
     spilled_values = list(range(11, 19))
 
     with _peer_side() as peer:
-        main_sm = _make_storage_manager(main_pages * _PAGE, store_policy="p2p")
+        main_sm = _make_storage_manager(
+            main_pages * _PAGE,
+            shm_name=f"{os.getpid()}_main",
+            store_policy="p2p",
+        )
         adapter_id = None
         try:
             main_l1 = main_sm.get_l1_manager_by_tags(

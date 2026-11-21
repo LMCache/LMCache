@@ -222,6 +222,14 @@ Verifying it is working
 Using the Operator
 ------------------
 
+.. warning::
+
+   The LMCache Kubernetes operator (``operator/``) is deprecated and no
+   longer maintained. It is expected to be removed from this repository in
+   2027Q1. Existing release artifacts (e.g. ``operator-v*`` ``install.yaml``)
+   will not receive fixes or updates.
+   Do not build new deployments on it.
+
 For Kubernetes deployments, the operator can manage the ``LMCacheEngine`` CRs
 for both the prefiller and decoder roles and automatically inject the
 ``MultiConnector`` config and NIXL env vars into opted-in vLLM pods.  See
