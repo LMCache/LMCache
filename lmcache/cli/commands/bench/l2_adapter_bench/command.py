@@ -464,11 +464,11 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
     def _load_objs(_r: int) -> list[list]:
         nonlocal load_obj_batches
-        if load_obj_batches is None:
-            load_obj_batches = _build_round_objs(
-                keys_per_round * data_size,
-                fill_offset=1,
-            )
+        # A successful warmup must not hide an unwritten measured destination.
+        load_obj_batches = _build_round_objs(
+            keys_per_round * data_size,
+            fill_offset=1,
+        )
         return load_obj_batches
 
     results: list = []
@@ -481,11 +481,8 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
     try:
         if profiler is not None:
-            # Pre-build the payload buffers before the recorder starts so
-            # the one-time tensor allocation + fill (benchmark harness work,
-            # not the adapter) is kept out of the flame graph. The batches
-            # are reused across rounds, so this is the only build; warming
-            # it here keeps the recording focused on adapter I/O.
+            # Warm buffer setup before recording. Load views are rebuilt and
+            # re-filled each round for verification, outside the timed interval.
             if args.only is None or args.only == "store":
                 _store_objs(0)
             if args.only is None or args.only == "load":
