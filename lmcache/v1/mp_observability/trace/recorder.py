@@ -31,7 +31,10 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.config import StorageManagerConfig
+from lmcache.v1.distributed.config import (
+    StorageManagerConfig,
+    is_generated_l1_pool_shm_name,
+)
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 from lmcache.v1.mp_observability.trace import codecs
@@ -297,6 +300,12 @@ def safe_storage_config_dict(config: StorageManagerConfig) -> dict[str, Any]:
     serializable.  The result is used only for the header digest and
     human inspection — it does not need to be replay-faithful.
 
+    Auto-generated L1 pool SHM names (``lmcache_l1_pool_<uuid hex>``)
+    are redacted to ``"<generated>"`` because they are drawn fresh per
+    config instance: two semantically identical configs must produce
+    the same digest on the record and replay sides.  Pinned names and
+    ``""`` (SHM disabled) are preserved verbatim.
+
     Exposed publicly so that the replay driver can compute a digest
     of its *own* config using the same algorithm the recorder used,
     for mismatch detection.
@@ -309,10 +318,51 @@ def safe_storage_config_dict(config: StorageManagerConfig) -> dict[str, Any]:
     """
     if is_dataclass(config):
         try:
-            return _coerce_jsonable(asdict(config))
+            return _coerce_jsonable(_redact_generated_shm_names(asdict(config)))
         except Exception:
             pass
     return {"repr": str(config)}
+
+
+_GENERATED_SHM_NAME_PLACEHOLDER = "<generated>"
+
+
+def _redact_generated_shm_names(obj: Any) -> Any:
+    """Recursively replace generated L1 pool SHM names with a placeholder.
+
+    See :func:`safe_storage_config_dict` for why the digest must not
+    depend on the per-instance random token.  Only values matching the
+    generated pattern are redacted, keyed on the ``shm_name`` field.
+
+    Args:
+        obj: A value produced by ``dataclasses.asdict`` (nested dicts,
+            lists/tuples, and scalars).
+
+    Returns:
+        ``obj`` with generated ``shm_name`` values replaced by
+        ``"<generated>"``.
+    """
+    if isinstance(obj, dict):
+        return {
+            str(key): (
+                _GENERATED_SHM_NAME_PLACEHOLDER
+                if _is_generated_shm_name_value(key, value)
+                else _redact_generated_shm_names(value)
+            )
+            for key, value in obj.items()
+        }
+    if isinstance(obj, (list, tuple)):
+        return [_redact_generated_shm_names(item) for item in obj]
+    return obj
+
+
+def _is_generated_shm_name_value(key: Any, value: Any) -> bool:
+    """Return whether *value* is an auto-generated L1 pool SHM name."""
+    return (
+        key == "shm_name"
+        and isinstance(value, str)
+        and is_generated_l1_pool_shm_name(value)
+    )
 
 
 def _coerce_jsonable(obj: Any) -> Any:

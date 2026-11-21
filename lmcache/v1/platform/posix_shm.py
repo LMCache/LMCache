@@ -34,15 +34,33 @@ from __future__ import annotations
 # Standard
 import atexit
 import ctypes
+import errno
+import fcntl
 import logging
 import mmap as _mmap
 import os
+import sys
 import threading
 
 # Third Party
 import _posixshmem  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
+
+# Maximum byte length of a POSIX SHM name passed to shm_open(), including the
+# required leading '/'.
+#
+# macOS: PSHMNAMLEN = 31 (sys/posix_shm.h), but XNU's shm_open checks
+#   `namelen >= PSHMNAMLEN` (strictly-greater-or-equal), so the effective
+#   maximum is PSHMNAMLEN - 1 = 30 characters.
+# Linux: shm_open() resolves through /dev/shm; effective limit is NAME_MAX =
+#   255 (one path-component, not counting the '/dev/shm/' directory prefix).
+#
+# We use 30 on Darwin (one below PSHMNAMLEN to satisfy the `>=` check) and
+# 255 on other non-Darwin POSIX targets we test in CI (a conservative default;
+# other kernels may allow longer names). Callers derive token lengths from
+# this constant so generated names fit on Darwin and Linux.
+POSIX_SHM_MAX_NAME_LEN: int = 30 if sys.platform == "darwin" else 255
 
 
 def _strip_leading_slash(name: str) -> str:
@@ -223,6 +241,82 @@ def shm_unlink(name: str) -> None:
             sm_name,
             exc_info=True,
         )
+
+
+def is_shm_name_collision(exc: BaseException) -> bool:
+    """Return ``True`` when *exc* signals a POSIX ``O_CREAT|O_EXCL`` name collision.
+
+    ``shm_open(O_CREAT|O_EXCL)`` raises ``FileExistsError`` (a subclass of
+    ``OSError``) on Linux and macOS; some implementations raise ``OSError``
+    directly with ``errno.EEXIST``.  Callers that need to distinguish a name
+    collision from other I/O errors should use this predicate rather than
+    catching ``FileExistsError`` alone.
+
+    Args:
+        exc: The exception to test.
+
+    Returns:
+        ``True`` if *exc* is a name-collision error, ``False`` otherwise.
+    """
+    if isinstance(exc, FileExistsError):
+        return True
+    return isinstance(exc, OSError) and exc.errno == errno.EEXIST
+
+
+def shm_acquire_liveness_lock(name: str) -> int | None:
+    """Hold the advisory liveness lock for an existing SHM segment.
+
+    The returned fd must stay open for as long as the segment is
+    mapped; closing it — or the death of the process — releases the
+    lock. ``alloc_shm_pinned_ptr`` holds this lock so
+    ``shm_segment_is_live`` can tell a live pool from a crashed one.
+
+    Args:
+        name: Segment name, with or without a leading ``/``.
+
+    Returns:
+        The locked fd, or ``None`` when the kernel rejects ``flock``
+        on SHM fds (macOS raises ``EOPNOTSUPP``) and no liveness
+        signal can exist.
+    """
+    fd = _posixshmem.shm_open(_slashed(name), os.O_RDWR, mode=0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # flock is rejected on SHM fds on this kernel (macOS raises
+        # EOPNOTSUPP): no liveness signal exists, so stale-segment
+        # probes fall back to reclaiming by name.
+        os.close(fd)
+        return None
+    return fd
+
+
+def shm_segment_is_live(name: str) -> bool:
+    """Return whether a live process holds the segment's liveness lock.
+
+    Args:
+        name: Segment name, with or without a leading ``/``.
+
+    Returns:
+        ``True`` when a live holder's lock blocks the probe. ``False``
+        when the segment is missing, unlocked (stale — e.g. its holder
+        crashed and the kernel released the lock), or the kernel
+        cannot express liveness for SHM segments at all.
+    """
+    try:
+        fd = _posixshmem.shm_open(_slashed(name), os.O_RDWR, mode=0o600)
+    except FileNotFoundError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        return False
+    finally:
+        os.close(fd)
 
 
 def _atexit_cleanup() -> None:

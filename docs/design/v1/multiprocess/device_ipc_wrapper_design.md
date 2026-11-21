@@ -54,6 +54,10 @@ transport shares:
 | `CpuShmTensorWrapper` | `cpu` | POSIX `shm_open` | `mmap` same segment |
 | `MusaIPCWrapper` | `musa` | TorchMUSA IPC API | `torch.musa.ipc.export_tensor` + `open_tensor` |
 
+CPU SHM segment **names** are host-global and UUID-derived; see
+`docs/design/v1/platform/devices/cpu/shm.md` for the naming contract and
+lifetime rules.
+
 ## Platform registration
 
 The factory lookup (`platform.resolve_kv_wrapper_factory`) keys on
