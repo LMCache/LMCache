@@ -243,6 +243,8 @@ Node Management uses **Is Proxy Node** to register a proxy. To add a child,
 leave that box unchecked and enter its parent proxy's name in **Proxy ID**.
 The table labels the proxy flag and parent ID separately. **Edit** retains
 the original node identity, so changing **Node Name** renames that entry.
+The management table lists proxies followed by their child nodes. A child's
+**Proxy ID** identifies its parent, and **Edit** fills the child's details.
 
 
 - **Node tree view** — shows all proxies and their child nodes in a
