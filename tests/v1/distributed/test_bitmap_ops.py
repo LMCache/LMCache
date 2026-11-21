@@ -443,6 +443,59 @@ def _expected_retained_indices(hit, num_chunks, num_ranks, group_windows):
     return sorted(indices)
 
 
+@pytest.mark.parametrize("num_chunks", [0, 1, 9, 65])
+@pytest.mark.parametrize("num_ranks", [1, 2, 3, 8])
+@pytest.mark.parametrize("group_windows", [[-1], [0, -7], [0, -1, -2]])
+def test_full_attention_first_missing_shard(
+    num_chunks: int, num_ranks: int, group_windows: list[int]
+) -> None:
+    stride = len(group_windows) * num_ranks
+    num_keys = num_chunks * stride
+    gaps = (
+        range(num_keys + 1)
+        if num_chunks <= 9
+        else {
+            0,
+            1,
+            7,
+            8,
+            63,
+            64,
+            stride - 1,
+            stride,
+            num_keys // 2,
+            num_keys - 1,
+            num_keys,
+        }
+    )
+    for gap in gaps:
+        found = Bitmap(num_keys, num_keys)
+        found.clear(gap)
+        expected = _fold_python(found, num_chunks, num_ranks, group_windows)
+        actual = fold(found, num_chunks, num_ranks, group_windows)
+        assert actual.get_indices_list() == expected.get_indices_list()
+        hit, retained = fold_unfold_ranked(found, num_chunks, num_ranks, group_windows)
+        assert hit == gap // stride
+        assert retained.get_indices_list() == list(range(hit * stride))
+        assert found.popcount() == num_keys - (gap < num_keys)
+
+
+@pytest.mark.parametrize("num_ranks", [1, 2, 3])
+@pytest.mark.parametrize("group_windows", [[0, 4], [4, 0], [2, -1, 3]])
+def test_full_attention_gap_caps_windowed_prefixes(
+    num_ranks: int, group_windows: list[int]
+) -> None:
+    num_chunks = 9
+    num_keys = num_chunks * len(group_windows) * num_ranks
+    for gap in range(num_keys + 1):
+        found = Bitmap(num_keys, num_keys)
+        found.clear(gap)
+        expected = _fold_python(found, num_chunks, num_ranks, group_windows)
+        actual = fold(found, num_chunks, num_ranks, group_windows)
+        assert actual.get_indices_list() == expected.get_indices_list()
+        assert found.popcount() == num_keys - (gap < num_keys)
+
+
 class TestEndToEndAgainstVllmStyleReference:
     """Drive the full fold/highest_set_bit/unfold pipeline and compare the
     hit length and retain mask against an independent vLLM-style oracle."""
@@ -585,6 +638,53 @@ def _rows_from_flat(flat: Bitmap, num_chunks: int, num_ranks: int, num_groups: i
 def _row_windows(group_windows, num_ranks: int) -> list[int]:
     """Each (group, rank) row carries its group's window."""
     return [w for w in group_windows for _ in range(num_ranks)]
+
+
+@pytest.mark.parametrize("num_chunks", [0, 1, 7, 8, 9, 17, 65])
+@pytest.mark.parametrize("windows", [[-1, 2], [2, -1], [0, 3, -2], [1, 4]])
+@pytest.mark.parametrize("missing", [None, -1, 0, 7, 8])
+def test_grouped_prefix_gaps_and_row_order(
+    num_chunks: int, windows: list[int], missing: int | None
+) -> None:
+    """Check servable prefixes and retained rows against the window contract."""
+    present = [[True] * num_chunks for _ in windows]
+    for row_index, row in enumerate(present):
+        if missing == -1:
+            row[:] = [False] * num_chunks
+        elif missing is not None and missing + row_index < num_chunks:
+            row[missing + row_index] = False
+
+    rows = [Bitmap(num_chunks) for _ in windows]
+    for bitmap, row in zip(rows, present, strict=True):
+        bitmap.batched_set([j for j, value in enumerate(row) if value])
+    before = [row.get_indices_list() for row in rows]
+    expected = [
+        length - 1
+        for length in range(1, num_chunks + 1)
+        if all(
+            all(row[0 if window <= 0 else max(0, length - window) : length])
+            for row, window in zip(present, windows, strict=True)
+        )
+    ]
+    hit = max(expected, default=-1) + 1
+    retained = [
+        list(range(0 if window <= 0 else max(0, hit - window), hit))
+        for window in windows
+    ]
+
+    for order in [list(range(len(rows))), list(reversed(range(len(rows))))]:
+        ordered_rows = [rows[i] for i in order]
+        ordered_windows = [windows[i] for i in order]
+        servable = fold_grouped(ordered_rows, ordered_windows)
+        actual_hit, masks = fold_unfold_grouped(ordered_rows, ordered_windows)
+        assert len(servable) == num_chunks
+        assert servable.get_indices_list() == expected
+        assert actual_hit == hit
+        assert [mask.get_indices_list() for mask in masks] == [
+            retained[i] for i in order
+        ]
+        assert all(len(mask) == num_chunks for mask in masks)
+        assert [row.get_indices_list() for row in rows] == before
 
 
 class TestGroupedMatchesFlat:
