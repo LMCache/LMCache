@@ -596,7 +596,9 @@ else
   fi
 fi
 
-lmcache server "${LMCACHE_ARGS[@]}" \
+# LMCACHE_SERVER_VENV: the server's own venv with the full wheel, while vLLM
+# runs the lmcache-client wheel (install_lmcache_cpu.sh).
+"${LMCACHE_SERVER_VENV:+${LMCACHE_SERVER_VENV}/bin/}lmcache" server "${LMCACHE_ARGS[@]}" \
   >"${LMCACHE_LOG}" 2>&1 &
 LMCACHE_PID=$!
 echo "LMCache server started (PID=${LMCACHE_PID})"
@@ -695,6 +697,18 @@ if ! echo "${completion_response}" | grep -q "${VLLM_MODEL_ID}"; then
   false
 fi
 echo "✅ E2E request validation passed"
+
+if [ -n "${LMCACHE_SERVER_VENV:-}" ]; then
+  # Nothing but vLLM uses its environment, and the checkout has no built
+  # lmcache_native, so this proves vLLM imported lmcache from the client wheel.
+  client_native="$(cd /tmp && python3 -I -c 'import importlib.metadata as md
+print(md.distribution("lmcache-client").locate_file("lmcache/lmcache_native"))')"
+  if ! grep -qsF "${client_native}" /proc/[0-9]*/maps; then
+    echo "❌ No process loaded ${client_native}*.so from the lmcache-client wheel"
+    false
+  fi
+  echo "✅ vLLM runs lmcache from the lmcache-client wheel (${client_native%/*})"
+fi
 
 # Verify transport mode (logged after vLLM connects to LMCache server)
 echo "[Phase 2 / Step 5.5] Verifying transport mode: expecting '${EXPECTED_TRANSPORT}'"
