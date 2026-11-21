@@ -12,7 +12,7 @@ import inspect
 import json
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.multiprocess.engine_module import DiscoverableModule, EngineModule
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.transport.server_module import (

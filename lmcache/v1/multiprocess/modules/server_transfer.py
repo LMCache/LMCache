@@ -11,7 +11,6 @@ import abc
 import torch
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.client.transfer_context.base import EngineDrivenContextMetadata
 from lmcache.v1.client.transfer_context.shm import ShmSlotDescriptor
 from lmcache.v1.client.transfer_context.tensor_wire import (
@@ -25,6 +24,7 @@ from lmcache.v1.common.custom_types import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
 )
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.storage_manager import l1_owners_of
 

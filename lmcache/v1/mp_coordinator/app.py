@@ -28,7 +28,7 @@ from fastapi import FastAPI
 import httpx
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.mp_coordinator.background_loops import (
     BackgroundLoops,
