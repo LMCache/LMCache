@@ -143,6 +143,7 @@ def _build(
             supported_transfer_mode="lmcache_driven",
             rocm_host_event_wait=enabled,
             port=0,
+            release_stuck_timeout_seconds=0.0,
         ),
         engine_context=server_context,
     )

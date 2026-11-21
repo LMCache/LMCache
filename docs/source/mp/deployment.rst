@@ -283,6 +283,11 @@ instead.  Use the ``/healthcheck`` endpoint:
       initialDelaySeconds: 5
       periodSeconds: 10
 
+``/healthcheck`` also answers 503 while a GPU is quarantined because a KV
+cache release on it has been stuck for longer than
+``--release-stuck-timeout-seconds``; the liveness probe then restarts the
+server, which is the only way to reclaim that GPU memory.
+
 Monitoring Integration
 ~~~~~~~~~~~~~~~~~~~~~~
 

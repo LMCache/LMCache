@@ -230,6 +230,17 @@ Source: ``lmcache/v1/multiprocess/config.py``
        adapter's ``lmcache.mp.heartbeat_interval`` (default 10s) so a few
        missed pings never reap a live worker; the adapter warns at startup
        if its interval is raised without raising this.
+   * - ``--release-stuck-timeout-seconds``
+     - ``120.0``
+     - Seconds a KV cache context release (stream drain and IPC unmap after
+       an UNREGISTER or a reap) may run before its device is quarantined. A
+       release that long is waiting on a stream that will not drain, usually
+       one queued behind the event of a worker that died, and only a server
+       restart reclaims the memory it holds. While a device is quarantined,
+       REGISTER on it fails at once, ``/status`` lists it under
+       ``quarantined_devices`` and ``/healthcheck`` answers 503, so a liveness
+       probe restarts the server. The quarantine lifts if the release finishes
+       after all. ``0`` disables quarantine.
    * - ``--worker-registration-grace-seconds``
      - ``3600.0``
      - Silence budget (seconds) for a worker that registered but has never

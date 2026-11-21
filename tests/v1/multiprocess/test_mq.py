@@ -828,6 +828,41 @@ def test_unregistered_operation_returns_remote_error() -> None:
         server.close()
 
 
+def test_serialized_handler_error_returns_remote_error() -> None:
+    """A failing SERIALIZED handler (e.g. a refused REGISTER) must fail the
+    request promptly instead of leaving the client to time out."""
+
+    def refuse() -> int:
+        raise RuntimeError("refused for the test")
+
+    server_url = f"tcp://127.0.0.1:{_unused_tcp_port()}"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    server.add_handler("get_chunk_size", HandlerType.SERIALIZED, refuse)
+    add_handler_helper(server, "noop", test_mq_handler_helpers.noop_handler)
+    server.start()
+
+    client = MessageQueueClient(server_url, context)
+    try:
+        refused: MessagingFuture[int] | MessagingStream[int] = client.submit_request(
+            "get_chunk_size", []
+        )
+        assert isinstance(refused, MessagingFuture)
+        with pytest.raises(
+            MPRequestError, match="handler_error.*get_chunk_size.*refused for the test"
+        ):
+            refused.result(timeout=1)
+
+        healthy: MessagingFuture[str] | MessagingStream[str] = client.submit_request(
+            "noop", []
+        )
+        assert isinstance(healthy, MessagingFuture)
+        assert healthy.result(timeout=1) == "NOOP_OK"
+    finally:
+        client.close()
+        server.close()
+
+
 def test_blocking_handler_value_error_returns_remote_error() -> None:
     """A rejected request must fail promptly without poisoning later requests."""
 
