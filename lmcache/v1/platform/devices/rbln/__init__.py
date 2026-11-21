@@ -23,15 +23,73 @@ See ``docs/design/v1/platform/devices/rbln/README.md`` for the full contract.
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, cast
 
 # First Party
+from lmcache.utils import EngineType
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 
 if TYPE_CHECKING:
+    # Third Party
+    import torch
+
     # First Party
     from lmcache.v1.platform.base.device_ops import DeviceOps
     from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
+
+
+def warm_up_kv_transfer(
+    kv_caches: Mapping[str, torch.Tensor], engine_type: EngineType = EngineType.VLLM
+) -> None:
+    """Prepare transfers of an engine's KV caches, building what they need here.
+
+    For engines driving LMCache's engine-driven MP connector on RBLN. Call it
+    once, on the thread that runs the model, after the KV caches handed to
+    ``register_kv_caches`` are final and before the first request; vLLM-RBLN
+    does so after its model warm-up, before it sizes its KV cache. Every
+    cache layout gets its device staging allocated here, and HND caches their
+    swap programs built and kept (see
+    :meth:`RblnDeviceOps.prepare_kv_transfer`), so transfers never allocate
+    staging or build a program. Without it, every transfer fails before
+    copying: stores are dropped and restores miss. Calling it again for the
+    same caches does nothing.
+
+    Caches are grouped by shape and dtype, so each group has one layout, and
+    each group is prepared as one KV cache group the way a single-group
+    engine transfers it. Caches of one shape that LMCache splits into several
+    groups (a hybrid model's groups of one layout) are not prepared per group.
+
+    Args:
+        kv_caches: Layer name to KV tensor, as passed to ``register_kv_caches``.
+        engine_type: The engine whose layout the caches use, as passed to the
+            engine-driven registration.
+
+    Raises:
+        ValueError: If a group's layout is one RBLN cannot transfer; its
+            transfers would fail the same way.
+        RuntimeError: If allocating staging or building a swap fails,
+            including for HND caches that are not bf16 with a head size a
+            multiple of 64, which torch-rbln builds no swap program for.
+    """
+    # Imported here, not at module scope: ``lmcache.v1.common.utils`` reads
+    # ``lmcache.device_ops``, which device detection is still resolving
+    # through this module while ``lmcache`` initializes on an RBLN host.
+    # First Party
+    from lmcache.v1.common.utils import normalize_kv_and_discover_format
+    from lmcache.v1.platform import resolve_device_ops
+    from lmcache.v1.platform.devices.rbln.device_ops import RblnDeviceOps
+
+    groups: dict[tuple[tuple[int, ...], torch.dtype], list[torch.Tensor]] = {}
+    for tensor in kv_caches.values():
+        groups.setdefault((tuple(tensor.shape), tensor.dtype), []).append(tensor)
+    ops = cast("RblnDeviceOps", resolve_device_ops("rbln"))
+    for tensors in groups.values():
+        engine_kv_format, normalized = normalize_kv_and_discover_format(
+            tensors, engine_type
+        )
+        ops.prepare_kv_transfer(normalized, engine_kv_format)
+
 
 # ---------------------------------------------------------------------------
 # Device detection registry entry
