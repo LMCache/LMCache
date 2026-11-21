@@ -11,6 +11,7 @@ import torch
 # First Party
 from lmcache import device_ops
 from lmcache.logging import init_logger
+from lmcache.v1.common.attn_window import recalculate_blocks_to_skip
 from lmcache.v1.gpu_connector.gpu_ops import build_staging_copies
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
@@ -25,7 +26,6 @@ from lmcache.v1.multiprocess.object_group_transfer.engines import (
 )
 from lmcache.v1.multiprocess.object_group_transfer.planning import (
     batched_iteration_with_skip,
-    recalculate_blocks_to_skip,
     resolve_chunk_range,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext

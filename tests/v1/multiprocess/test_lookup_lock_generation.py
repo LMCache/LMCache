@@ -92,6 +92,8 @@ def lookup(
         ctx.chunk_size = ctx.token_hasher.chunk_size = 4
         ctx.token_hasher.compute_packed_chunk_hashes.return_value = [b"chunk"]
         ctx.token_hasher.hash_packed_chunk.return_value = b"chunk"
+        ctx.layout_desc_registry.get_chunk_size.return_value = 4
+        ctx.layout_desc_registry.get_token_hasher.return_value = ctx.token_hasher
         ctx.session_manager = SessionManager(ctx.token_hasher, cleanup_interval=None)
         ctx.event_bus.has_subscribers.return_value = False
         layout = MemoryLayoutDesc([torch.Size([4])], [torch.float32])

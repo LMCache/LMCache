@@ -67,7 +67,8 @@ covers, `request_id` (session tracking), and `worker_id` (TP rank).
   the standard LOOKUP would report) and `non_prefix_segments` (fingerprint
   matches beyond the prefix, `cur_st` order, each
   `(old_st, old_ed, cur_st, cur_ed, hash)`) — already sparse-prefetched,
-  so the retrieve set equals this set.
+  so the retrieve set equals this set. A chunk repeated in the prompt yields
+  one segment per non-overlapping occurrence, so segments may share a `hash`.
 - Side effects: sparse read locks taken and stashed on the session for the
   retrieve.
 
@@ -209,6 +210,11 @@ mappings; work encoded as numpy int64 tables) enqueued in a single
 the retrieve fails cleanly and the client degrades that request to full
 recompute.
 
+A chunk matched at several positions is staged from host once per step:
+the planner groups its copies, and later copies in a step are
+device-to-device staging rows (`host_offset = -1`) from the first copy's
+slot, run before re-RoPE rewrites it.
+
 The scatter is **all-or-nothing** — never partial. Zero-work returns are
 reported with a fixed reason code on `CB_RETRIEVE_NOOP`:
 
@@ -276,7 +282,8 @@ Sparse-prefetch read locks follow one rule: exactly one owner releases each
 reservation. The retrieve releases applied ranges stream-ordered after the
 scatter, releases lookup-stash orphans it will never read, and leaves
 beyond-slot-bound ranges locked for the follow-up call; anything never
-consumed by a retrieve is released on session destruction.
+consumed by a retrieve is released on session destruction. Segments sharing
+a `hash` share one lock per key, released once all of them are applied.
 
 ## Observability
 
