@@ -126,6 +126,9 @@ class SerdeProcessor(abc.ABC):
     ``Serializer`` / ``Deserializer`` and wrap with ``AsyncSerdeProcessor``.
     """
 
+    # Opt-in: decoder validates the complete frame against the bytes received.
+    framed_variable_length: bool = False
+
     # ----- Event fds -----
 
     @abc.abstractmethod

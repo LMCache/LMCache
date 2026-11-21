@@ -30,6 +30,7 @@ invariants don't need to change.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Callable
 from dataclasses import dataclass, field
 import enum
 import select
@@ -123,6 +124,22 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         super().__init__()
         self._inner = inner
         self._serde = serde
+        self._submit_inner_load: Callable[[list[ObjectKey], list[MemoryObj]], L2TaskId]
+        self._submit_inner_load = inner.submit_load_task
+        if serde.framed_variable_length:
+            bounded_load = inner.get_bounded_load_submitter()
+            if bounded_load is None:
+                # As on close(), the wrapper owns both resources. No poller or
+                # wrapper notifiers have started yet.
+                try:
+                    inner.close()
+                finally:
+                    serde.close()
+                raise ValueError(
+                    f"{type(inner).__name__} does not support bounded framed-record "
+                    "reads with the selected configuration"
+                )
+            self._submit_inner_load = bounded_load
         self._l1_manager = l1_manager
 
         # Our own notifiers for store/load completion. Lookup passes the
@@ -292,7 +309,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         try:
             with self._lock:
                 self._load_tasks[wrapped_id] = state
-                inner_task_id = self._inner.submit_load_task(keys, temp_objs)
+                inner_task_id = self._submit_inner_load(keys, temp_objs)
                 self._inner_to_load[inner_task_id] = wrapped_id
         except Exception:
             logger.exception(
