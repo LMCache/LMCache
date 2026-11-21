@@ -3,6 +3,7 @@
 
 # Standard
 from collections.abc import Callable
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 import threading
 
@@ -598,3 +599,32 @@ def test_server_checksum_failure_does_not_hide_local_roundtrip(
     assert result.checks["warm.server_checksum_match"] == [False]
     assert not result.succeeded
     assert any("SERVER CHECKSUM FAIL" in message for message in messages)
+
+
+def test_baseline_visibility_timeout_log_does_not_claim_store_is_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [0.0]
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    monkeypatch.setattr(
+        baseline_module, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=sleep)
+    )
+    client = _client("same", "same")
+    client.lookup.side_effect = [LookupResult(0, 1, 1.0)] * 100
+    client.retrieve.side_effect = [None, None]
+    client.store.side_effect = [_transfer("store"), _transfer("store")]
+    messages: list[str] = []
+
+    result = BaselineBenchCase(sequence_count=1, interval_seconds=0, num_tokens=1).run(
+        client, messages.append
+    )
+
+    assert result.checks["warm_full_hit"] == [False]
+    assert client.release_request.call_count == 2
+    assert any("still not visible" in message for message in messages)
+    assert not any(
+        "until the cold STORE was visible" in message for message in messages
+    )

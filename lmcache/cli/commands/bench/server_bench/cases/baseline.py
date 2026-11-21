@@ -338,8 +338,15 @@ class BaselineBenchCase:
             lookup = client.lookup(request)
             retries += 1
         if retries and log is not None:
-            log(
-                "  [seq %d/warm] LOOKUP retried %d time(s) until the cold "
-                "STORE was visible" % (request.sequence_id, retries)
-            )
+            if lookup.is_full_miss:
+                log(
+                    "  [seq %d/warm] LOOKUP retried %d time(s); cold STORE "
+                    "still not visible after retry budget"
+                    % (request.sequence_id, retries)
+                )
+            else:
+                log(
+                    "  [seq %d/warm] LOOKUP retried %d time(s) until the cold "
+                    "STORE was visible" % (request.sequence_id, retries)
+                )
         return lookup
