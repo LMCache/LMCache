@@ -30,6 +30,7 @@ from types import ModuleType
 from typing import TypeAlias
 from unittest.mock import patch
 import importlib
+import math
 import sys
 
 # Third Party
@@ -213,26 +214,37 @@ def _mamba_kv_cache(
     return [conv_state, ssm_state], elems_per_page * elem, storage
 
 
-def _slice_strided_mamba_kv_cache() -> tuple[list[torch.Tensor], int]:
-    """A Mamba ``[conv_state, ssm_state]`` pair with slice-sized block strides.
+def _slice_strided_mamba_kv_cache(
+    slices: tuple[tuple[tuple[int, ...], torch.dtype], ...] | None = None,
+    *,
+    num_blocks: int = NUM_LOGICAL_BLOCKS,
+    pad_bytes: int = 32,
+) -> tuple[list[torch.Tensor], int]:
+    """Mamba state slices with slice-sized block strides.
 
-    Returns the pair and a hybrid ``page_size_bytes`` for the spec (conv + ssm
-    + pad) that is larger than either slice. Each state is a dense contiguous
-    view: stepping along dim-0 advances only that state's bytes, which is what
-    vLLM-Ascend <= v0.29 registers. That layout matches
-    ``_MambaSlicePlaneEdit`` and must not match ``_MambaPageViewEdit``.
+    Returns the state list and a hybrid ``page_size_bytes`` for the spec
+    (sum of payloads + ``pad_bytes``) that exceeds the first slice's stride.
+    Each state is a dense contiguous view: stepping along dim-0 advances only
+    that state's bytes (e.g. vLLM-Ascend <= v0.29 conv/ssm slices or Qwen4
+    PLE's private conv bank). That layout matches ``_MambaSlicePlaneEdit``
+    and must not match ``_MambaPageViewEdit``.
     """
-    elem = torch.finfo(torch.bfloat16).bits // 8
-    conv_nbytes = LOGICAL_BLOCK_SIZE
-    ssm_nbytes = 2 * LOGICAL_BLOCK_SIZE
-    page_bytes = conv_nbytes + ssm_nbytes + 32
-    conv_elems = conv_nbytes // elem
-    ssm_elems = ssm_nbytes // elem
-    conv_storage = torch.arange(NUM_LOGICAL_BLOCKS * conv_elems, dtype=torch.bfloat16)
-    conv_state = conv_storage.view(NUM_LOGICAL_BLOCKS, conv_elems)
-    ssm_storage = torch.arange(NUM_LOGICAL_BLOCKS * ssm_elems, dtype=torch.bfloat16)
-    ssm_state = ssm_storage.view(NUM_LOGICAL_BLOCKS, ssm_elems)
-    return [conv_state, ssm_state], page_bytes
+    if slices is None:
+        elem = torch.finfo(torch.bfloat16).bits // 8
+        slices = (
+            ((LOGICAL_BLOCK_SIZE // elem,), torch.bfloat16),
+            ((2 * LOGICAL_BLOCK_SIZE // elem,), torch.bfloat16),
+        )
+    states = [
+        torch.arange(num_blocks * math.prod(shape), dtype=torch.int64)
+        .to(dtype)
+        .reshape(num_blocks, *shape)
+        for shape, dtype in slices
+    ]
+    payload_bytes = sum(
+        int(state[0].numel()) * int(state.element_size()) for state in states
+    )
+    return states, payload_bytes + pad_bytes
 
 
 def _hybrid_config(
@@ -483,18 +495,21 @@ def test_mamba_slice_planes_on_slice_strided_list(edits):
     assert len(planes) == 2
     widths = [int(plane.shape[-1]) for plane in planes]
     assert widths[0] != widths[1]
-    for plane in planes:
+    for plane, state in zip(planes, caches, strict=True):
         assert plane.dtype == torch.uint8
         assert plane.ndim == 4
         assert int(plane.shape[2]) == 1
+        payload = int(state[0].numel()) * int(state.element_size())
+        assert int(plane.stride(0)) == payload
+        assert int(plane.reshape(plane.shape[0], -1).shape[1]) == payload
 
 
 def test_mamba_slice_planes_skip_indivisible_slice(edits):
-    """Non-divisible per-block bytes must not match the slice-plane edit.
+    """A coprime block size must not match the slice-plane edit.
 
-    ``_MambaSlicePlaneEdit`` requires ``nbytes_per_block % block_size == 0``
-    so ``width`` is integral. An off-by-one ``block_size`` must leave the
-    cache unchanged through the public entry point.
+    Shared factors of the scheduler block and the payloads may compress the
+    slot count. An off-by-one ``block_size`` shares no factor greater than 1,
+    so the cache stays unchanged through the public entry point.
     """
     caches, page_bytes = _slice_strided_mamba_kv_cache()
     spec = _mamba_spec(page_bytes)
@@ -505,6 +520,64 @@ def test_mamba_slice_planes_skip_indivisible_slice(edits):
     )
     edited = edits.apply_kv_cache_group_edits(config, {"mamba.0": caches}, {})
     assert edited["mamba.0"] is caches
+
+
+@pytest.mark.parametrize(
+    ("block_size", "slices", "num_slots", "widths"),
+    [
+        # Qwen4 PLE (184320 B): divisible at 512, gcd-compressed to 128 at 896/1664.
+        (512, (((9, 10240), torch.bfloat16),), 512, (360,)),
+        (896, (((9, 10240), torch.bfloat16),), 128, (1440,)),
+        (1664, (((9, 10240), torch.bfloat16),), 128, (1440,)),
+        # Two slices sharing gcd < block_size (Qwen3.5-4B bs=640; MTP conv bs=1536).
+        (
+            640,
+            (((3, 8192), torch.bfloat16), ((32, 128, 128), torch.float32)),
+            128,
+            (384, 16_384),
+        ),
+        (
+            1536,
+            (((4, 10240), torch.bfloat16), ((24, 128, 128), torch.float32)),
+            512,
+            (160, 3072),
+        ),
+        # Non-32B-aligned 35000-byte row (70000 B / 2 slots). The view only
+        # requires an integer width; the Ascend kernel gates 32B alignment and
+        # per-row UB staging limits (which rule out slots_per_block == 1 on
+        # 184320-byte PLE and 384 KiB--2 MiB SSM slices).
+        (6, (((70_000,), torch.uint8),), 2, (35_000,)),
+    ],
+)
+def test_mamba_slice_planes_gcd_slot_compression(
+    edits, block_size, slices, num_slots, widths
+):
+    """Non-divisible slices sharing ``gcd > 1`` with ``block_size`` compress slots.
+
+    Each slice becomes ``[num_blocks, num_slots, 1, width]`` uint8 over its
+    dense payload without padding; row alignment is left to the kernel.
+    """
+    num_blocks = 2
+    caches, page_bytes = _slice_strided_mamba_kv_cache(slices, num_blocks=num_blocks)
+    spec = _mamba_spec(page_bytes)
+    spec.block_size = block_size
+    assert not edits._MambaPageViewEdit().matches(spec, caches)
+    assert edits._MambaSlicePlaneEdit().matches(spec, caches)
+
+    config = _Config(
+        kv_cache_groups=[_Group(layer_names=["mamba.0"], kv_cache_spec=spec)]
+    )
+    planes = edits.apply_kv_cache_group_edits(config, {"mamba.0": caches}, {})[
+        "mamba.0"
+    ]
+    assert len(planes) == len(caches)
+    assert block_size % num_slots == 0
+    for plane, state, width in zip(planes, caches, widths, strict=True):
+        payload = int(state[0].numel()) * int(state.element_size())
+        assert plane.dtype == torch.uint8
+        assert tuple(plane.shape) == (num_blocks, num_slots, 1, width)
+        assert int(plane.stride(0)) == payload
+        assert torch.equal(plane.reshape(-1), state.view(torch.uint8).reshape(-1))
 
 
 def test_mamba_page_view_applies_on_packed_page(edits):
