@@ -1,0 +1,60 @@
+name: Cancel Buildkite builds on draft
+
+# Converting a PR back to draft cancels its in-flight GitHub runs through the
+# workflows' concurrency groups; this does the same for its scheduled and
+# running Buildkite builds (unit, multiprocess and the label-gated lanes), so a
+# draft stops holding GPUs. Pipelines that filter out drafts (k3-unit-tests and
+# the multiprocess pipelines, see their BK_WEB_SETUP.md) start nothing new until
+# the PR is ready for review again.
+#
+# pull_request_target supplies the Buildkite token for PRs from forks as well.
+# Nothing is checked out and no PR code runs: the job only reads the event's
+# PR number and head commit.
+
+on:
+  pull_request_target:
+    types: [converted_to_draft]
+    branches:
+      - dev
+      - "release-**"
+
+permissions: {}
+
+jobs:
+  cancel:
+    name: Cancel this PR's Buildkite builds
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: true
+          egress-policy: audit
+
+      - name: Cancel scheduled and running builds of this PR
+        env:
+          BUILDKITE_API_TOKEN: ${{ secrets.BUILD_KITE_API_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Forks of the repository run this workflow without the secret.
+          if [[ -z "${BUILDKITE_API_TOKEN}" ]]; then
+            echo "::notice::BUILD_KITE_API_TOKEN is not set; no Buildkite builds to cancel."
+            exit 0
+          fi
+          api=https://api.buildkite.com/v2/organizations/lmcache
+          auth=(-H "Authorization: Bearer ${BUILDKITE_API_TOKEN}")
+          # Matching the PR number too keeps a dev build of the same commit.
+          curl -fsSL -g -G "${auth[@]}" "${api}/builds" \
+              --data-urlencode "commit=${HEAD_SHA}" \
+              --data-urlencode "state[]=scheduled" \
+              --data-urlencode "state[]=running" \
+              --data-urlencode "per_page=100" \
+            | jq -r --arg pr "${PR_NUMBER}" \
+                '.[] | select(.pull_request.id == $pr) | "\(.pipeline.slug) \(.number)"' \
+            | while read -r pipeline number; do
+                curl -fsS -X PUT "${auth[@]}" -o /dev/null \
+                  "${api}/pipelines/${pipeline}/builds/${number}/cancel"
+                echo "Cancelled ${pipeline} #${number}"
+              done

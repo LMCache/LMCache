@@ -1,8 +1,19 @@
 name: Code Quality
 
+# PR CI runs in tiered layers:
+#   Draft    test.yml on Python 3.12 only.
+#   Ready    L1: pre-commit first, then
+#            L2: test.yml (Python versions) + cpu_device.yml (OSes) from PR
+#                template's "CI scope" checklist (none ticked / full = all),
+#            Buildkite k3-unit-tests (1-GPU) builds ready-for-review commits
+#                in parallel with this workflow; see its BK_WEB_SETUP.md.
+# converted_to_draft starts a run that does nothing, so the concurrency group
+# below cancels the in-flight ready-for-review run.
+# PR-only: publish.yml runs the same pre-commit job from pre_commit.yml, so it
+# does not inherit the permissions this layering needs.
 on:
-  workflow_call:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
 
 # Cancel older in-flight runs on the same PR / branch.
 concurrency:
@@ -15,6 +26,7 @@ permissions:
 jobs:
   pre-commit:
     name: Check code quality
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -26,14 +38,7 @@ jobs:
           disable-sudo-and-containers: true
           egress-policy: audit
 
-      - name: Checkout changes
-        if: github.event_name == 'push'
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          fetch-depth: 2
-
       - name: Detect changes
-        if: github.event_name == 'push' || github.event_name == 'pull_request'
         id: filter
         uses: dorny/paths-filter@v3
         with:
@@ -44,14 +49,14 @@ jobs:
               - '!.github/workflows/operator_*.yml'
 
       - name: Checkout code
-        if: github.event_name == 'release' || steps.filter.outputs.lmcache == 'true'
+        if: steps.filter.outputs.lmcache == 'true'
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           # for setuptools-scm
           fetch-depth: 0
 
       - name: Setup Python 3.12 and 3.13
-        if: github.event_name == 'release' || steps.filter.outputs.lmcache == 'true'
+        if: steps.filter.outputs.lmcache == 'true'
         uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
         with:
           python-version: |
@@ -59,12 +64,114 @@ jobs:
             3.13
 
       - name: Add mypy matcher
-        if: github.event_name == 'release' || steps.filter.outputs.lmcache == 'true'
+        if: steps.filter.outputs.lmcache == 'true'
         run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
 
       - name: Run code quality checks - lint, format, spell, & static checks
-        if: github.event_name == 'release' || steps.filter.outputs.lmcache == 'true'
+        if: steps.filter.outputs.lmcache == 'true'
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
         with:
           extra_args: --all-files
 
+  scope:
+    name: Resolve CI scope
+    if: >-
+      github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft &&
+      (github.base_ref == 'dev' || startsWith(github.base_ref, 'release-'))
+    runs-on: ubuntu-24.04
+    outputs:
+      python_versions: ${{ steps.scope.outputs.python_versions }}
+      cpu_os: ${{ steps.scope.outputs.cpu_os }}
+      rust: ${{ steps.scope.outputs.rust }}
+      gpu_devices: ${{ steps.scope.outputs.gpu_devices }}
+      gpu_full: ${{ steps.scope.outputs.gpu_full }}
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: true
+          egress-policy: audit
+
+      - name: Checkout scope script
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          sparse-checkout: .github/scripts/pr-ci-scope.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Read the CI scope checklist
+        id: scope
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: bash .github/scripts/pr-ci-scope.sh
+
+  # Reusable workflows called from here, since GitHub has no needs: across
+  # workflows. Drafts skip pre-commit and scope, so the draft leg needs
+  # !cancelled() to run past those skipped jobs; it passes an empty
+  # python_versions and test.yml falls back to 3.12.
+  test:
+    name: Test
+    needs: [pre-commit, scope]
+    if: >-
+      !cancelled() &&
+      github.event_name == 'pull_request' &&
+      github.event.action != 'converted_to_draft' &&
+      (github.base_ref == 'dev' || startsWith(github.base_ref, 'release-')) &&
+      (github.event.pull_request.draft ||
+        (needs.pre-commit.result == 'success' && needs.scope.result == 'success'))
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/test.yml
+    with:
+      python_versions: ${{ needs.scope.outputs.python_versions }}
+      force_rust: ${{ needs.scope.outputs.rust == 'true' }}
+
+  cpu-device:
+    name: CPU device
+    needs: [pre-commit, scope]
+    if: >-
+      !cancelled() &&
+      github.event_name == 'pull_request' &&
+      !github.event.pull_request.draft &&
+      github.event.action != 'converted_to_draft' &&
+      (github.base_ref == 'dev' || startsWith(github.base_ref, 'release-')) &&
+      needs.pre-commit.result == 'success' &&
+      needs.scope.result == 'success'
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/cpu_device.yml
+    with:
+      os: ${{ needs.scope.outputs.cpu_os }}
+    secrets:
+      hf_token: ${{ secrets.HF_TOKEN }}
+
+  # When the CPU unit tests fail, cancel this run so the CPU device legs free
+  # their runners. Not the other way round: CPU device failures are often lost
+  # runners that cpu_device_rerun.yml reruns, which needs the rest of the run
+  # intact. PRs from forks get a read-only token, so they skip this.
+  stop-cpu-device-on-test-failure:
+    name: Stop CPU device (Test failed)
+    needs: test
+    if: >-
+      failure() &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: true
+          egress-policy: audit
+
+      - name: Cancel this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: gh run cancel "${RUN_ID}" --repo "${REPO}"

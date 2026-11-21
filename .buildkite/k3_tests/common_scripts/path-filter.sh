@@ -110,6 +110,12 @@ _path_filter_should_skip_for_pipeline() {
             ;;
         multiprocess)
             case "$changed_file" in
+                tests/v1/platform/devices/musa/*|tests/v1/platform/devices/rbln/*|tests/v1/platform/devices/xpu/*|tests/v1/platform/devices/rocm/*)
+                    return 0
+                    ;;
+                lmcache/v1/platform/devices/musa/*|lmcache/v1/platform/devices/rbln/*|lmcache/v1/platform/devices/xpu/*|lmcache/v1/platform/devices/rocm/*)
+                    return 0
+                    ;;
                 benchmarks/long_doc_qa/*|.buildkite/k3_tests/multiprocess/*)
                     return 1
                     ;;
@@ -124,6 +130,12 @@ _path_filter_should_skip_for_pipeline() {
             ;;
         blend)
             case "$changed_file" in
+                tests/v1/platform/devices/musa/*|tests/v1/platform/devices/rbln/*|tests/v1/platform/devices/xpu/*|tests/v1/platform/devices/rocm/*)
+                    return 0
+                    ;;
+                lmcache/v1/platform/devices/musa/*|lmcache/v1/platform/devices/rbln/*|lmcache/v1/platform/devices/xpu/*|lmcache/v1/platform/devices/rocm/*)
+                    return 0
+                    ;;
                 .buildkite/k3_harness/setup-blend-env.sh|.buildkite/k3_tests/blend/*)
                     return 1
                     ;;
@@ -155,6 +167,9 @@ _path_filter_should_skip_for_pipeline() {
             # Keep the platform kind explicit for future CI extension.
             return 1
             ;;
+        metax)
+            return 1
+            ;;
         rbln)
             if declare -F "_path_filter_rbln_should_skip" >/dev/null 2>&1; then
                 _path_filter_rbln_should_skip "$changed_file"
@@ -180,10 +195,11 @@ _path_filter_should_skip_for_pipeline() {
 _path_filter_pipeline_kind() {
     case "$1" in
         *k3_tests/unit/pipeline.yml) echo unit ;;
-        *k3_tests/multiprocess/pipeline.yml) echo multiprocess ;;
+        *k3_tests/multiprocess/pipeline.yml|*k3_tests/multiprocess/smoke-pipeline.yml) echo multiprocess ;;
         *k3_tests/blend/pipeline.yml) echo blend ;;
         *k3_tests/xpu/*/pipeline.yml) echo xpu ;;
-        *k3_tests/musa/pipeline.yml) echo musa ;;
+        *k3_tests/musa/pipeline.yml|*k3_tests/musa/unit-pipeline.yml) echo musa ;;
+        *metax/pipeline.yml) echo metax ;;
         *k3_tests/rbln/pipeline.yml) echo rbln ;;
         *k3_tests/amd/pipeline.yml) echo amd ;;
         *) echo generic ;;
@@ -253,6 +269,73 @@ _path_filter_get_changed_files() {
     return 1
 }
 
+_path_filter_gpu_device_for_pipeline() {
+    case "${1:-}" in
+        unit|multiprocess|blend) echo cuda ;;
+        amd) echo rocm ;;
+        xpu) echo xpu ;;
+        musa) echo musa ;;
+        rbln) echo rbln ;;
+        metax) echo metax ;;
+        *) echo "" ;;
+    esac
+}
+
+_path_filter_parse_gpu_devices_from_body() {
+    printf '%s\n' "${1:-}" | tr -d '\r' \
+      | sed -nE 's/^[[:space:]]*[-*] \[[xX]\] `(cuda|rocm|xpu|musa|rbln|full)`.*/\1/p' \
+      | sort -u \
+      | paste -sd, -
+}
+
+_path_filter_selected_gpu_devices() {
+    if [[ -n "${BUILDKITE_GPU_DEVICES:-}" ]]; then
+        echo "${BUILDKITE_GPU_DEVICES}" | tr ' ' ',' | sed 's/,,*/,/g; s/^,//; s/,$//'
+        return 0
+    fi
+
+    if [[ -z "${BUILDKITE_PULL_REQUEST:-}" || "${BUILDKITE_PULL_REQUEST:-}" == "false" ]]; then
+        return 0
+    fi
+
+    local repo="LMCache/LMCache"
+    if [[ "${BUILDKITE_REPO:-}" =~ github\.com[:/]([^/]+/[^/.]+)(\.git)?$ ]]; then
+        repo="${BASH_REMATCH[1]}"
+    fi
+
+    local -a auth_header=()
+    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        auth_header=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+    fi
+
+    local pr_json=""
+    if command -v curl >/dev/null 2>&1; then
+        pr_json=$(curl -fsSL --max-time 5 \
+            -H "Accept: application/vnd.github+json" \
+            "${auth_header[@]}" \
+            "https://api.github.com/repos/${repo}/pulls/${BUILDKITE_PULL_REQUEST}" 2>/dev/null || true)
+    else
+        echo "path-filter: warning: curl not found; falling back to path auto-detect" >&2
+        return 0
+    fi
+    if [[ -z "$pr_json" ]]; then
+        echo "path-filter: warning: failed to fetch PR #${BUILDKITE_PULL_REQUEST} body from ${repo}; falling back to path auto-detect" >&2
+        return 0
+    fi
+
+    local pr_body=""
+    if command -v jq >/dev/null 2>&1; then
+        pr_body=$(printf '%s' "$pr_json" | jq -r '.body // ""' 2>/dev/null || true)
+    elif command -v python3 >/dev/null 2>&1; then
+        pr_body=$(printf '%s' "$pr_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("body") or "")' 2>/dev/null || true)
+    else
+        echo "path-filter: warning: neither jq nor python3 found; falling back to path auto-detect" >&2
+        return 0
+    fi
+
+    _path_filter_parse_gpu_devices_from_body "$pr_body"
+}
+
 # ── Public entry point ────────────────────────────────────────
 
 # Returns 0 if the build can be safely skipped, non-zero otherwise.
@@ -260,6 +343,8 @@ _path_filter_get_changed_files() {
 should_skip_ci() {
     local pipeline_file="${1:-}"
     local pipeline_kind
+    local pipeline_device
+    local selected_gpu_devices
 
     # PR label opt-out: adding "force-ci" on GitHub forces a full run.
     if [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",force-ci,"* ]]; then
@@ -273,6 +358,10 @@ should_skip_ci() {
         return 1
     fi
 
+    pipeline_kind="$(_path_filter_pipeline_kind "$pipeline_file")"
+    pipeline_device="$(_path_filter_gpu_device_for_pipeline "$pipeline_kind")"
+    selected_gpu_devices="$(_path_filter_selected_gpu_devices)"
+
     local changed_files
     if ! changed_files=$(_path_filter_get_changed_files); then
         echo "path-filter: could not determine changed files → not skipping" >&2
@@ -284,7 +373,6 @@ should_skip_ci() {
         return 1
     fi
 
-    pipeline_kind="$(_path_filter_pipeline_kind "$pipeline_file")"
     _path_filter_load_device_filter "$pipeline_kind"
 
     local has_non_trivial=0
@@ -313,6 +401,17 @@ should_skip_ci() {
     done <<< "$changed_files"
 
     echo "path-filter: ${total} files changed (${trivial_count} trivial)" >&2
+
+    if [[ "$has_non_trivial" -eq 1 && -n "$selected_gpu_devices" ]]; then
+        if [[ ",${selected_gpu_devices}," == *",full,"* ]]; then
+            echo "path-filter: PR GPU scope includes 'full' with non-trivial changes → not skipping" >&2
+            return 1
+        fi
+        if [[ -n "$pipeline_device" && ",${selected_gpu_devices}," == *",${pipeline_device},"* ]]; then
+            echo "path-filter: PR GPU scope (${selected_gpu_devices}) selects ${pipeline_device} (${pipeline_kind}) → not skipping" >&2
+            return 1
+        fi
+    fi
 
     if [[ "$has_non_trivial" -eq 1 ]]; then
         if [[ "$has_relevant_change" -eq 1 ]]; then
