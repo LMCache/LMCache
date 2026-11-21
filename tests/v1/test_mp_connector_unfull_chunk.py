@@ -17,6 +17,7 @@ from vllm.v1.utils import ConstantList  # noqa: E402
 # First Party
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     LMCacheMPConnector,
+    validate_unfull_chunk_spec_decode,
 )
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPRequestMetadata,
@@ -72,6 +73,68 @@ def test_prompt_ending_request_also_stores_its_exact_tail():
         # The running Mamba block holds the state at P: nothing runs after.
         (PROMPT, MAMBA_BLOCKS[2:]),
     ]
+
+
+def test_exact_tail_is_not_stored_under_spec_decode():
+    """Draft rows sit past the prompt end, so only grid tails read from
+    boundary-state snapshots are stored."""
+    tracker = _tracker(max_tokens=1)
+    tracker.increase_num_scheduled_tokens(PROMPT)
+
+    stores = LMCacheMPRequestMetadata.GetUnfullChunkStoreMetadata(
+        tracker,
+        CHUNK,
+        GROUP_TOKENS_PER_BLOCK,
+        GRID,
+        {TAIL_BOUNDARY: {1: BOUNDARY_STATE_BLOCK}},
+        (1,),
+        store_exact_tail=False,
+    )
+
+    assert [(meta.op.end, meta.op.block_ids[1]) for meta, _ in stores] == [
+        (TAIL_BOUNDARY, [BOUNDARY_STATE_BLOCK]),
+    ]
+
+
+class MambaSpec:
+    """Stand-in matched by class name, like vLLM's spec."""
+
+    def __init__(self, mamba_cache_mode: str) -> None:
+        self.mamba_cache_mode = mamba_cache_mode
+
+
+def _kv_cache_config(*specs: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec) for spec in specs]
+    )
+
+
+def test_unfull_chunk_without_spec_decode_stores_exact_tails():
+    assert validate_unfull_chunk_spec_decode(True, False, None)
+
+
+def test_spec_decode_without_unfull_chunk_is_allowed():
+    assert not validate_unfull_chunk_spec_decode(False, True, None)
+
+
+def test_spec_decode_unfull_chunk_needs_align_mode_mamba():
+    attention_only = _kv_cache_config(SimpleNamespace())
+    with pytest.raises(ValueError, match="speculative decoding"):
+        validate_unfull_chunk_spec_decode(True, True, attention_only)
+    with pytest.raises(ValueError, match="speculative decoding"):
+        validate_unfull_chunk_spec_decode(
+            True, True, _kv_cache_config(MambaSpec("all"))
+        )
+
+
+def test_spec_decode_unfull_chunk_with_boundary_states_skips_exact_tail():
+    # Third Party
+    from vllm.v1.core.sched.output import SchedulerOutput
+
+    if "kv_connector_block_state" not in SchedulerOutput.__dataclass_fields__:
+        pytest.skip("vLLM does not hand boundary states to connectors")
+    config = _kv_cache_config(SimpleNamespace(), MambaSpec("align"))
+    assert not validate_unfull_chunk_spec_decode(True, True, config)
 
 
 def test_exact_tail_waits_for_the_whole_prompt():
