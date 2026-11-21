@@ -3,7 +3,11 @@
 
 # Standard
 from unittest.mock import AsyncMock, MagicMock
+import asyncio
 import queue
+
+# Third Party
+import pytest
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.config import WarmupPolicy
@@ -180,3 +184,83 @@ class TestBaseWorkloadWarmupPolicy:
         w.run(WarmupPolicy.SKIP)
         messages = [call.args[0] for call in monitor.log_message.call_args_list]
         assert "Skipping warmup phase, starting benchmark" in messages
+
+
+# ---------------------------------------------------------------------------
+# Task tracking and bounded dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestBaseWorkloadTaskTracking:
+    @pytest.mark.asyncio
+    async def test_create_tracked_task(self) -> None:
+        w = _make_stub()
+
+        async def _sample() -> str:
+            await asyncio.sleep(0.01)
+            return "done"
+
+        task = w._create_tracked_task(_sample())
+        assert task in w._pending_tasks
+
+        await task
+        # Done callback removes task from _pending_tasks
+        assert task not in w._pending_tasks
+
+    @pytest.mark.asyncio
+    async def test_on_task_done_logs_exception(self) -> None:
+        w = _make_stub()
+
+        async def _failing() -> None:
+            raise RuntimeError("test failure")
+
+        task = w._create_tracked_task(_failing())
+        with pytest.raises(RuntimeError, match="test failure"):
+            await task
+
+        messages = [
+            call.args[0]
+            for call in w._progress_monitor.log_message.call_args_list  # type: ignore[attr-defined]
+        ]
+        assert any("Dispatch task failed: test failure" in msg for msg in messages)
+
+    @pytest.mark.asyncio
+    async def test_on_task_done_ignores_cancelled_task(self) -> None:
+        w = _make_stub()
+
+        async def _long_sleep() -> None:
+            await asyncio.sleep(10.0)
+
+        task = w._create_tracked_task(_long_sleep())
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert task not in w._pending_tasks
+        messages = [
+            call.args[0]
+            for call in w._progress_monitor.log_message.call_args_list  # type: ignore[attr-defined]
+        ]
+        assert not any("Dispatch task failed" in msg for msg in messages)
+
+
+class TestBaseWorkloadWaitForPendingTasks:
+    @pytest.mark.asyncio
+    async def test_wait_for_pending_tasks_empty(self) -> None:
+        w = _make_stub()
+        res = await w._wait_for_pending_tasks()
+        assert res == -1.0
+
+    @pytest.mark.asyncio
+    async def test_wait_for_pending_tasks_waits_and_returns_zero(self) -> None:
+        w = _make_stub()
+
+        async def _quick() -> None:
+            await asyncio.sleep(0.01)
+
+        w._create_tracked_task(_quick())
+        res = await w._wait_for_pending_tasks()
+        assert res == 0.0
+        assert len(w._pending_tasks) == 0

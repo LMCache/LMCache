@@ -3,7 +3,6 @@
 
 # Standard
 from dataclasses import dataclass, field
-import asyncio
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
@@ -169,7 +168,6 @@ class MultiRoundChatWorkload(BaseWorkload):
         self._global_index = 0
         self._interval = 1.0 / config.qps
         self._pending_info: dict[str, tuple[int, str]] = {}
-        self._pending_tasks: set[asyncio.Task] = set()
 
     def log_config(self) -> None:
         """Log key workload config before the benchmark starts."""
@@ -271,13 +269,7 @@ class MultiRoundChatWorkload(BaseWorkload):
         """
         # Check duration — stop dispatching new requests
         if time_offset >= self._config.duration:
-            if self._pending_tasks:
-                await asyncio.wait(
-                    self._pending_tasks,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                return 0.0
-            return -1.0
+            return await self._wait_for_pending_tasks()
 
         # Find ready session via round-robin
         target_idx = self._global_index % len(self._sessions)
@@ -299,11 +291,9 @@ class MultiRoundChatWorkload(BaseWorkload):
             f"Session {session.session_id} dispatched request {self._global_index}"
         )
 
-        task = asyncio.create_task(
+        self._create_tracked_task(
             self._dispatch(request_id, messages),
         )
-        self._pending_tasks.add(task)
-        task.add_done_callback(self._on_task_done)
 
         self._global_index += 1
         return self._global_index * self._interval
@@ -319,14 +309,6 @@ class MultiRoundChatWorkload(BaseWorkload):
             messages,
             max_tokens=self._config.output_length,
         )
-
-    def _on_task_done(self, task: asyncio.Task) -> None:
-        """Clean up completed tasks and log unexpected errors."""
-        self._pending_tasks.discard(task)
-        if not task.cancelled():
-            exc = task.exception()
-            if exc is not None:
-                self._progress_monitor.log_message(f"Dispatch task failed: {exc}")
 
     def on_request_finished(self, request_id: str, output: str) -> None:
         """Record the response in the session's conversation history."""
