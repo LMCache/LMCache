@@ -79,6 +79,9 @@ def waiters():
 @pytest.fixture(autouse=True)
 def _no_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(ROCM_HOST_EVENT_WAIT_ENV, raising=False)
+    # Fake handles must never reach a real HIP runtime.
+    monkeypatch.setattr(rocm_host_event_wait, "_hip", None)
+    monkeypatch.setattr(rocm_host_event_wait, "_hip_unavailable", True)
 
 
 def _poller_threads() -> int:
@@ -740,3 +743,111 @@ def test_affinity_pool_completes_future_from_deferred_response() -> None:
             second.result(timeout=5)
     finally:
         pool.shutdown()
+
+
+class _FakeHip:
+    """ctypes HIP stand-in: hipIpcOpenEventHandle, hipEventQuery, last error."""
+
+    NOT_READY = 600
+
+    def __init__(self, open_rc: int = 0) -> None:
+        self.open_rc = open_rc
+        self.ready: set[int] = set()
+        self.opened: list[bytes] = []
+        self.destroyed: list[int] = []
+        self.cleared = 0
+        self.devices: list[int] = []
+
+    def hipSetDevice(self, index: int) -> int:
+        self.devices.append(index)
+        return 0
+
+    def hipIpcOpenEventHandle(self, ptr: Any, raw: Any) -> int:
+        if self.open_rc:
+            return self.open_rc
+        self.opened.append(bytes(bytearray(raw)))
+        ptr._obj.value = len(self.opened)
+        return 0
+
+    def hipEventQuery(self, ptr: Any) -> int:
+        value = ptr if isinstance(ptr, int) else ptr.value
+        return 0 if value in self.ready else self.NOT_READY
+
+    def hipEventDestroy(self, ptr: Any) -> int:
+        self.destroyed.append(ptr if isinstance(ptr, int) else ptr.value)
+        return 0
+
+    def hipGetLastError(self) -> int:
+        self.cleared += 1
+        return 0
+
+
+@pytest.fixture
+def hip(monkeypatch: pytest.MonkeyPatch) -> _FakeHip:
+    fake = _FakeHip()
+    monkeypatch.setattr(rocm_host_event_wait, "_hip", fake)
+    monkeypatch.setattr(rocm_host_event_wait, "_hip_unavailable", False)
+    return fake
+
+
+def _handle(tag: bytes) -> bytes:
+    return tag.ljust(64, b"\0")
+
+
+def test_hip_import_runs_without_torch_import_or_device_wait(
+    waiters: Any, hip: _FakeHip
+) -> None:
+    waiter = waiters()
+    backend = _Backend()
+    entry = _Entry(
+        event_backend=waiter.wrap(backend), cache_context=SimpleNamespace(device=3)
+    )
+    handle = _handle(b"s")
+
+    def run() -> str:
+        event = entry.event_backend.import_event(handle, 3)
+        entry.event_backend.wait_event(event, "stream")
+        return "ran"
+
+    response = waiter.submit_after_event(1, entry, handle, run, lambda: "failed")
+    assert isinstance(response, DeferredResponse)
+    assert hip.cleared >= 1  # not-ready query clears HIP's last error
+    hip.ready.add(1)
+    assert response.result(timeout=5) == "ran"
+    assert hip.opened == [handle]  # passed by value, all 64 bytes
+    assert hip.devices == [3]
+    assert not [c for c in backend.calls if c[0] in ("import", "wait", "query")]
+    assert waiter.stats()["device_waits"] == 0
+
+
+def test_hip_open_failure_clears_error_and_falls_back_to_torch(
+    waiters: Any, hip: _FakeHip
+) -> None:
+    hip.open_rc = 1
+    waiter = waiters()
+    backend = _Backend()
+    backend.done.add(_handle(b"s"))
+    entry = _Entry(
+        event_backend=waiter.wrap(backend), cache_context=SimpleNamespace(device=0)
+    )
+    result = waiter.submit_after_event(
+        1, entry, _handle(b"s"), lambda: "ran", lambda: "x"
+    )
+    assert result == "ran"
+    assert hip.cleared == 1
+    assert _kinds(backend) == ["import", "query"]
+
+
+def test_hip_event_is_destroyed_and_converted_for_stream_waits(
+    waiters: Any, hip: _FakeHip
+) -> None:
+    waiter = waiters()
+    backend = _Backend()
+    wrapped = waiter.wrap(backend)
+    event = wrapped.import_event(_handle(b"r"), 2)
+    assert isinstance(event, rocm_host_event_wait._HipIpcEvent)
+    wrapped.wait_event(event, "stream")
+    assert _kinds(backend) == ["import", "wait"]
+    del event
+    gc.collect()
+    assert hip.destroyed == [1]
