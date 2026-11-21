@@ -213,8 +213,8 @@ def grpc_client(
             self, payload: RegisterEngineDrivenContextPayload
         ) -> RegisterEngineDrivenContextResponse:
             assert payload.num_physical_slots == 32
-            assert payload.is_fused_packed
-            assert [layout.is_fused_packed for layout in payload.group_layouts] == [
+            assert payload.fused_kv
+            assert [layout.fused_kv for layout in payload.group_layouts] == [
                 True,
                 False,
             ]
@@ -742,10 +742,10 @@ def test_generated_grpc_services_communicate_end_to_end(
             use_mla=False,
             num_physical_slots=32,
             group_layouts=[
-                GroupLayout(32, 256, "float16", 16, is_fused_packed=True),
+                GroupLayout(32, 256, "float16", 16, fused_kv=True),
                 GroupLayout(32, 128, "float16", 16),
             ],
-            is_fused_packed=True,
+            fused_kv=True,
         )
     ).result(5)
     assert registration == RegisterEngineDrivenContextResponse("shared-memory", 4096)

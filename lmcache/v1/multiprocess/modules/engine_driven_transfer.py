@@ -382,7 +382,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             )
         )
         layout_desc = MemoryLayoutDesc(
-            shapes=[shape], dtypes=[dtype], fused_kv=(payload.is_fused_packed,)
+            shapes=[shape], dtypes=[dtype], fused_kv=(payload.fused_kv,)
         )
         group_layouts: list[MemoryLayoutDesc] | None = None
         if payload.group_layouts:
@@ -414,7 +414,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     MemoryLayoutDesc(
                         shapes=[g_shape],
                         dtypes=[g_dtype],
-                        fused_kv=(gl.is_fused_packed,),
+                        fused_kv=(gl.fused_kv,),
                     )
                 )
         group_windows: list[int] | None = None

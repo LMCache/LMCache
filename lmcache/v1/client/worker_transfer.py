@@ -1034,7 +1034,7 @@ class EngineDrivenTransferContext(TransferContext):
                         window_chunks=max(window_chunks, 0),
                         recurrent=kernel_group.recurrent_state,
                         num_physical_slots=window_slots,
-                        is_fused_packed=get_spec_class(
+                        fused_kv=get_spec_class(
                             kernel_group.engine_kv_format
                         ).is_fused_packed,
                     )
@@ -1083,7 +1083,7 @@ class EngineDrivenTransferContext(TransferContext):
                     use_mla=use_mla_flag,
                     num_physical_slots=num_physical_slots,
                     group_layouts=group_layouts,
-                    is_fused_packed=get_spec_class(engine_kv_format).is_fused_packed,
+                    fused_kv=get_spec_class(engine_kv_format).is_fused_packed,
                 )
             )
         )

@@ -969,7 +969,7 @@ def test_engine_driven_register_sends_num_physical_slots(
     payload = req_client.register_kv_cache_engine_driven_context.call_args.args[0]
     assert isinstance(payload, RegisterEngineDrivenContextPayload)
     assert payload.num_physical_slots == 128
-    assert payload.is_fused_packed
+    assert payload.fused_kv
     assert (
         unregister_future
         is req_client.unregister_kv_cache_engine_driven_context.return_value
@@ -2809,11 +2809,11 @@ def test_register_engine_driven_propagates_fused_layout(
                 dtype_str=payload.dtype_str,
                 tokens_per_block=4,
                 kv_size=1,
-                is_fused_packed=True,
+                fused_kv=True,
             )
         ]
     else:
-        payload.is_fused_packed = True
+        payload.fused_kv = True
     module.register_kv_cache_engine_driven_context(payload)
     layout: MemoryLayoutDesc | None
     if grouped:

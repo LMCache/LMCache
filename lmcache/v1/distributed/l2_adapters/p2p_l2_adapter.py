@@ -551,7 +551,9 @@ class P2PL2Adapter(PeerL2AdapterBase):
                 return task_id
 
             layout_desc = MemoryLayoutDesc(
-                shapes=objects[0].get_shapes(), dtypes=objects[0].get_dtypes()
+                shapes=objects[0].get_shapes(),
+                dtypes=objects[0].get_dtypes(),
+                fused_kv=objects[0].metadata.fused_kv,
             )
             reserve_future = self._req_client.p2p_reserve_write(keys, layout_desc)
             self._store_tasks[task_id] = _StoreTask(

@@ -73,13 +73,16 @@ def _answered(outcome) -> MessagingFuture:
     return future
 
 
-def _store_objects(count: int) -> list[MagicMock]:
-    """Local objects of ``_STORE_LAYOUT`` at distinct offsets."""
+def _store_objects(
+    count: int, layout: MemoryLayoutDesc = _STORE_LAYOUT
+) -> list[MagicMock]:
+    """Local objects of the given layout at distinct offsets."""
     objects = []
     for i in range(count):
         obj = MagicMock(shm_offset=1000 * (i + 1), shm_byte_length=10)
-        obj.get_shapes.return_value = _STORE_LAYOUT.shapes
-        obj.get_dtypes.return_value = _STORE_LAYOUT.dtypes
+        obj.get_shapes.return_value = layout.shapes
+        obj.get_dtypes.return_value = layout.dtypes
+        obj.metadata.fused_kv = layout.fused_kv
         objects.append(obj)
     return objects
 
@@ -609,6 +612,20 @@ def test_store_completes_immediately_without_leaking():
 
 # Store with writes enabled
 # ---------------------------------------------------------------------------
+
+
+def test_store_reservation_preserves_fused_kv_layout() -> None:
+    """The destination needs the layout flag to serialize the received KV."""
+    keys = [_key(0)]
+    layout = MemoryLayoutDesc(
+        shapes=[torch.Size([1, 1, 16, 256])],
+        dtypes=[torch.float16],
+        fused_kv=(True,),
+    )
+    with _adapter(write_enabled=True) as (adapter, req_client, _, _, _):
+        req_client.p2p_reserve_write.return_value = _answered([_NOT_RESERVED])
+        adapter.submit_store_task(keys, _store_objects(1, layout))
+        req_client.p2p_reserve_write.assert_called_once_with(keys, layout)
 
 
 def test_store_writes_to_peer_and_succeeds_only_after_commit():
