@@ -42,6 +42,9 @@ try:
     from lmcache.v1.distributed.memory_manager import (
         L1MemoryManager,
     )
+    from lmcache.v1.memory_allocators.lazy_memory_allocator import (
+        LazyMemoryAllocator,
+    )
 except ImportError:
     # Skip the tests if the L1MemoryManager cannot be imported
     pytest.skip("L1MemoryManager could not be imported", allow_module_level=True)
@@ -589,6 +592,16 @@ def test_use_hugepages_rejects_lazy_allocation():
             use_lazy=True,
             shm_name="",
             use_hugepages=True,
+        )
+
+
+def test_lazy_allocator_rejects_alignment_above_pin_chunk():
+    """Lazy L1 grows its address space by whole pin chunks; an alignment
+    above PIN_CHUNK_SIZE would round a growth step past the buffer's end."""
+    chunk = LazyMemoryAllocator.PIN_CHUNK_SIZE
+    with pytest.raises(ValueError, match="PIN_CHUNK_SIZE"):
+        LazyMemoryAllocator(
+            init_size=chunk, final_size=3 * chunk, align_bytes=2 * chunk
         )
 
 
