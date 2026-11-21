@@ -24,8 +24,8 @@ import sys
 
 # First Party
 from lmcache.tools.cache_simulator.simulator import (
-    compute_kv_bytes_per_chunk,
     load_lookup_events,
+    resolve_kv_bytes_per_chunk,
     simulate,
 )
 
@@ -112,7 +112,7 @@ def add_sweep_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="BYTES",
         help=(
             "Bytes consumed by one cached chunk.  "
-            "Auto-computed from the first event's shapes/dtypes if omitted."
+            "By default all selected events must have the same inferred byte size."
         ),
     )
     parser.add_argument(
@@ -145,17 +145,7 @@ def run_sweep(args: argparse.Namespace) -> None:
         print("No events to process.")
         sys.exit(0)
 
-    kv_bpc = args.kv_bytes_per_chunk
-    if kv_bpc is None:
-        kv_bpc = compute_kv_bytes_per_chunk(events[0])
-        if kv_bpc == 0:
-            print(
-                "Error: could not determine kv_bytes_per_chunk from the first event "
-                "(shapes/dtypes are empty).  Pass --kv-bytes-per-chunk explicitly.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        print(f"Auto-detected kv_bytes_per_chunk = {kv_bpc:,} bytes")
+    kv_bpc = resolve_kv_bytes_per_chunk(events, args.kv_bytes_per_chunk)
 
     chunk_size = events[0].get("chunk_size", "?")
     model_label = args.model or "all models"
