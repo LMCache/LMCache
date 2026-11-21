@@ -352,6 +352,50 @@ def test_flat_tables_alternate_disjoint_slot_halves():
 
 
 @native_retrieve_plan_required
+def test_flat_plan_stages_a_repeated_chunk_from_host_once():
+    """Copies of a stored chunk are grouped into one step: the first stages
+    from host, the others are D2D rows (host_offset -1) from its slot, and
+    every copy still ropes and scatters at its own position."""
+    # Third Party
+    import numpy as np
+
+    eng, gpu_context, rope_state, obj_bytes = _build_plan_engine_and_context(
+        max_batch=8
+    )
+    a, b, c = (_lazy_memory_obj(obj_bytes, address=x) for x in (1000, 2000, 3000))
+
+    def pair(cur_st, old_st, obj):
+        r = SimpleNamespace(cur_st=cur_st, cur_ed=cur_st + 4, old_st=old_st)
+        return (r, (obj,))
+
+    # A document (a, b) at two positions, then c.
+    runs = [
+        [pair(0, 100, a), pair(4, 104, b)],
+        [pair(12, 100, a), pair(16, 104, b), pair(20, 200, c)],
+    ]
+    cpu_block_tables = [
+        (np.arange(8, dtype=np.int64), 4),
+        (np.arange(8, dtype=np.int64) + 100, 4),
+    ]
+    plan = eng._build_cb_retrieve_plan_flat(
+        gpu_context, rope_state, cpu_block_tables, runs, max_batch=8
+    )
+    assert plan is not None
+    _specs, (staging, ropes, scatters, step_offsets), _keep = plan
+
+    # Wave 4: a, a, b, b in step 0 (across both runs), c in step 1.
+    assert step_offsets[:, 0].tolist() == [4, 5]
+    assert staging[:, 3].tolist() == [1000, -1, 2000, -1, 3000]
+    assert staging[1, 1] == staging[0, 0] and staging[3, 1] == staging[2, 0]
+    assert staging[0, 1] == a.data_ptr and staging[4, 1] == c.data_ptr
+    # Each copy keeps its own position and slot-mapping offset.
+    g0 = scatters[:, 0] == 0
+    assert scatters[g0][:, 2].tolist() == [0, 8, 4, 12, 16]
+    assert ropes[ropes[:, 0] == 0][:, 3].tolist() == [0, 12, 4, 16, 20]
+    assert len(set(staging[:, 0].tolist())) == 5
+
+
+@native_retrieve_plan_required
 def test_native_plan_falls_back_for_non_lazy_objects():
     """A non-lazy-allocator memory object disables the native plan."""
     # Third Party

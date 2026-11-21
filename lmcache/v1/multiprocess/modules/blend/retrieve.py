@@ -95,6 +95,8 @@ class _DeviceEvent(Protocol):
 # numpy int64 tables, one pybind crossing). Only retrieve path — if no plan
 # can be built the retrieve fails and the client degrades to full recompute.
 _HAS_NATIVE_RETRIEVE_PLAN = hasattr(device_ops, "execute_cb_retrieve_plan_flat")
+# Staging-row host_offset for a device-to-device copy (see blend_kernels.cuh).
+_CB_D2D_ROW = -1
 
 
 class RetrieveMixin:
@@ -446,13 +448,28 @@ class RetrieveMixin:
             spec.slot_mapping_capacity = n_pos
         # The device staging must outlive the native call.
         keepalive = [dev_buf]
+        # Slot-mapping offset of each chunk, in request order.
+        tok_off = np.cumsum(cur_ed - cur_st) - (cur_ed - cur_st)
+
+        # Copies of a repeated chunk share one host object. Group them
+        # into one run so the copies sharing a step stage from host once.
+        keys = [tuple(row) for row in src.tolist()]
+        first_of: "dict[tuple[int, ...], int]" = {}
+        first = [first_of.setdefault(k, i) for i, k in enumerate(keys)]
+        run_lens = [len(run) for run in runs]
+        if len(first_of) < n:
+            order = np.argsort(first, kind="stable")
+            keys, run_lens = [keys[i] for i in order], [n]
+            pos_table, tok_off = pos_table[order], tok_off[order]
+            src, nbytes, host_off = src[order], nbytes[order], host_off[order]
+            cur_st, cur_ed, old_st = pos_table[:, 0], pos_table[:, 1], pos_table[:, 2]
+
         # Waves of `wave` chunks per run, alternating slot halves.
         slot_of = np.empty(n, dtype=np.int64)
         slot_arange = np.arange(wave, dtype=np.int64)
         step_lens: list[int] = []
         i0 = 0
-        for run in runs:
-            m = len(run)
+        for m in run_lens:
             for w0 in range(0, m, wave):
                 batch_len = min(wave, m - w0)
                 slot_base = (len(step_lens) % 2) * wave
@@ -463,8 +480,6 @@ class RetrieveMixin:
         n_steps = len(step_lens)
 
         n_tok = cur_ed - cur_st
-        tok_off = np.zeros(n, dtype=np.int64)
-        np.cumsum(n_tok[:-1], out=tok_off[1:])
 
         # One staging row per (chunk, read object group), chunk-major; row
         # counts feed step_offsets column 0 (staging_end * n_read).
@@ -473,6 +488,13 @@ class RetrieveMixin:
             dtype=np.int64,
         )
         dest = obj_buf_ptrs[slot_of]  # (n, n_read)
+        step_of_chunk = np.repeat(np.arange(n_steps, dtype=np.int64), chunks_per_step)
+        head = 0  # later copies in a step copy its first copy's slot (D2D)
+        for i in range(1, n):
+            if keys[i] != keys[i - 1] or step_of_chunk[i] != step_of_chunk[i - 1]:
+                head = i
+            else:
+                src[i], host_off[i] = dest[head], _CB_D2D_ROW
         staging = np.stack(
             [dest.ravel(), src.ravel(), nbytes.ravel(), host_off.ravel()], axis=1
         )
@@ -503,7 +525,6 @@ class RetrieveMixin:
         )
 
         staging_end = np.cumsum(chunks_per_step)
-        step_of_chunk = np.repeat(np.arange(n_steps, dtype=np.int64), chunks_per_step)
         shifted_per_step = np.bincount(
             step_of_chunk[shifted], minlength=n_steps
         ).astype(np.int64, copy=False)
