@@ -50,7 +50,7 @@ As on GPUs, start an LMCache server and point vLLM-RBLN at it with
 
    lmcache server --port 6555 --l1-size-gb 8 --eviction-policy LRU \
        --chunk-size N --supported-transfer-mode engine_driven \
-       --shm-name lmcache-rbln --no-l1-use-lazy
+       --shm-name lmcache-rbln
 
    vllm serve <model> \
        --model-impl vllm \
@@ -65,11 +65,12 @@ As on GPUs, start an LMCache server and point vLLM-RBLN at it with
            }
        }'
 
-Use named SHM for RBLN MP. Without ``--shm-name``, the server uses
-anonymous L1 and transfers chunks inline, which adds serialization and
-copies. Check for ``SHM pinned=True`` in the worker log after startup.
+With ``--shm-name``, the worker registers its mapping of the server's pool
+with its NPU (torch-rbln 0.12.1a0 and later), so transfers copy to and from
+the pool directly. The pool must fit the device's host registration budget
+(16 GiB for a pool on ordinary 4 KiB pages).
 
-These settings configure the server and worker for RBLN.
+Three settings are specific to RBLN:
 
 * ``--supported-transfer-mode engine_driven`` on the server. The server
   defaults to ``lmcache_driven``, which does not register the engine-driven
@@ -92,29 +93,6 @@ can be opened. To pin the backend, set:
 Pinning is recommended. Without it, a process that cannot open an NPU (for
 example, because another process holds the device) falls back to the CPU stub
 without an error. With it, startup fails instead.
-
-Shared memory registration
---------------------------
-
-With a named SHM pool, the worker registers its mapping with the local
-NPU. The server allocates eager L1 and leaves its own SHM mapping
-unregistered, preserving registration capacity for the worker.
-
-Registration uses the public ``host_register`` and ``host_unregister``
-APIs (torch-rbln 0.12.1a0 and later). The whole mapping must fit in the device's
-registration budget, which is shared with other live registrations on that
-device. If it does not fit, the worker warns and continues unpinned. The
-worker log reports the result as ``SHM pinned=True`` or
-``SHM pinned=False``. torch-rbln splits a large registration into several
-native registrations, and a copy that crosses one of their boundaries takes
-the ordinary path, so a few chunks of a large pool are not copied directly.
-
-Registering commits the pool's pages at worker startup. Bind the worker's
-CPUs to the NPU's NUMA node to reduce startup and transfer costs. Read the
-node from ``/sys/class/rebellions/rblnN/device/numa_node``, replacing
-``N`` with the physical NPU index. Closing the transfer context drains its
-copies and requests unregister. Any registration left after a shutdown
-failure is left to process teardown.
 
 Supported KV cache layouts
 --------------------------

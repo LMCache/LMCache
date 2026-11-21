@@ -10,7 +10,7 @@ Rebellions NPUs. The engine is
 |---|---|---|
 | multiprocess, engine-driven | yes | `gather_paged_kv_to_cpu` / `scatter_cpu_to_paged_kv`, dispatching to `RblnDeviceOps.multi_layer_block_kv_transfer` |
 | multiprocess, LMCache-driven | **no** | refused up front |
-| in-process | outside this repository | MP is the in-tree RBLN serving path |
+| in-process | not yet | `CreateGPUConnector` still raises for `rbln`; a follow-up adds the connector |
 
 Multiprocess is the mode that matters first, and it is self-contained: the MP
 path builds no GPU connector at all, resolving layouts through
@@ -30,52 +30,6 @@ instead of crashing later on an attribute lookup. `mp_transfer_mode=auto`
 resolves to the device spec's declared default, which `RblnDeviceSpec`
 derives from that `False` capability as engine-driven, so the default
 needs no special casing.
-
-## Shared memory registration
-
-With `--shm-name`, the server creates and advertises a named SHM pool to
-engine-driven workers. Without a name, the server uses anonymous L1 and
-transfers chunks inline. SHM is the recommended RBLN MP transport because
-inline transfer adds serialization and copies.
-
-RBLN uses eager L1 and leaves Device-DAX arenas unregistered. The server
-allocates the SHM pool without registering it on an NPU. The worker
-registers its own mapping on its local NPU when opening the transfer
-context. This leaves registration capacity for the process that moves KV.
-
-The backend uses the public `torch.rbln.host_register` and `host_unregister`
-APIs (torch-rbln 0.12.1a0 and later). LMCache does not probe for them.
-Registration is subject to a per-device budget
-shared by every live registration on that device; torch-rbln documents its
-limits under "Host memory registration" in `docs/CONFIGURATION.md`. The
-request must fit as a whole. When it cannot, the worker logs a warning and
-continues unpinned. Check `SHM pinned=True` or `SHM pinned=False` in the
-worker log. A direct transfer also needs a page-aligned host address and a
-range contained in a single native registration.
-
-torch-rbln registers a large range as several native registrations: a
-separate leading fragment when the range starts off a 2 MiB boundary, then
-units of at most 1 GiB with the default registration profile. A chunk whose
-copy crosses one of those boundaries takes the ordinary path, so a few chunks
-of a large pool are copied as if unregistered. The kernel chooses where the
-worker maps the pool, and the pool keeps ordinary pages: a tmpfs file gets
-huge pages only if its mount allows it, and LMCache does not change the
-host's mount policy.
-
-Registration commits the pool's pages up front, so worker startup takes
-longer as the pool grows. Size the pool within the device's available
-registration budget: the runtime attempts the whole registration first and
-rolls it back when the pool does not fit, so an oversized pool also delays
-startup before the worker falls back to unpinned SHM. Bind the worker's
-CPUs to the NPU's NUMA node, as reported by
-`/sys/class/rebellions/rblnN/device/numa_node`; registration and copies are
-both slower when the worker runs on the other node.
-
-On orderly shutdown, closing the worker context drains its copies and
-requests unregister before unmapping. If unregister fails, the RBLN
-backend logs the failure and keeps its ownership record. The worker still
-closes its mapping, leaving any outstanding registration to process
-teardown.
 
 ## The 6-D KV cache
 
