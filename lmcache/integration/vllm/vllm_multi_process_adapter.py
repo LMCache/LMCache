@@ -646,12 +646,10 @@ class LMCacheMPSchedulerAdapter:
             ev.set()
             self._health_events[url] = ev
 
-        # Event subscriptions need heartbeats before the first lookup.
+        # Event subscriptions start heartbeats during initialization. Otherwise,
+        # one heartbeat per server starts lazily on the first lookup request.
         self._heartbeat_interval = heartbeat_interval
-        # ``None`` distinguishes "not started" from a populated per-server
-        # heartbeat map.  An empty map cannot be used as the sentinel because
-        # it is also the natural initial value before any heartbeat is made.
-        self._heartbeats: dict[str, HeartbeatThread] | None = None
+        self._heartbeats: dict[str, HeartbeatThread] = {}
         self._heartbeat_lock = threading.Lock()
 
         # For TP/PP: track partial store completions across steps.
@@ -711,14 +709,11 @@ class LMCacheMPSchedulerAdapter:
         return all(ev.is_set() for ev in self._health_events.values())
 
     def _ensure_heartbeat_started(self) -> None:
-        """Lazily start the heartbeat thread on first use."""
-        if self._heartbeats is not None:
-            return
+        """Start one heartbeat per configured server, retrying missing heartbeats."""
         with self._heartbeat_lock:
-            if self._heartbeats is not None:
-                return
-            heartbeats: dict[str, HeartbeatThread] = {}
             for url, client in self.req_clients.items():
+                if url in self._heartbeats:
+                    continue
                 hb = HeartbeatThread(
                     req_client=client,
                     health_event=self._health_events[url],
@@ -733,8 +728,7 @@ class LMCacheMPSchedulerAdapter:
 
                 hb.register_recover_callback(recover)
                 hb.start()
-                heartbeats[url] = hb
-            self._heartbeats = heartbeats
+                self._heartbeats[url] = hb
 
     def _recover_server_chunk_size(
         self, server_url: str, req_client: RequestClient
@@ -937,10 +931,15 @@ class LMCacheMPSchedulerAdapter:
         """Join event receivers, stop heartbeats, then close borrowed clients."""
         for subscriber in self._kv_event_subscriptions.values():
             subscriber.close()
+        stop_timeout = max(5.0, self._heartbeat_interval + 1.0)
         with self._heartbeat_lock:
-            if self._heartbeats is not None:
-                for hb in self._heartbeats.values():
-                    hb.stop()
+            heartbeats = tuple(self._heartbeats.values())
+            for hb in heartbeats:
+                hb.stop(timeout=stop_timeout)
+            for hb in heartbeats:
+                # ``stop`` has a bounded join timeout. Keep request clients
+                # open until any heartbeat that outlived that timeout exits.
+                hb.wait_for_stop()
         for client in self.req_clients.values():
             client.close()
 

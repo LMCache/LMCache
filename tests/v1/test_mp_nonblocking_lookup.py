@@ -53,8 +53,12 @@ class NoopHeartbeatThread:
     def start(self) -> None:
         """Do not start a thread in a synchronous polling test."""
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 5.0) -> None:
         """Match the scheduler shutdown interface."""
+
+    def wait_for_stop(self, timeout: float | None = None) -> bool:
+        """Report that the no-op heartbeat has no live thread to join."""
+        return True
 
 
 class Client:
