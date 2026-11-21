@@ -355,11 +355,6 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             raise ValueError(
                 f"num_physical_slots must be positive, got {num_physical_slots}"
             )
-        if not payload.group_layouts and num_physical_slots != payload.chunk_size:
-            raise ValueError(
-                f"num_physical_slots {num_physical_slots} must equal chunk_size "
-                f"{payload.chunk_size} for a single uncompressed group"
-            )
 
         now = time.monotonic()
         with self._lock:
