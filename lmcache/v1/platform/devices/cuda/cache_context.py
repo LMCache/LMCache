@@ -8,9 +8,11 @@ This module provides GPU-side KV cache management functionality, including:
 """
 
 # Standard
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 import array
+import threading
 
 # Third Party
 import torch
@@ -34,8 +36,13 @@ from lmcache.v1.common.utils import (
     normalize_and_discover_per_layer_formats,
 )
 from lmcache.v1.gpu_connector.gds_context import (
+    GDS_SLOT_ALIGNMENT,
+    aligned_gds_staging_budget,
     deregister_gds_gpu_buffer,
+    deregister_gds_stream,
+    gds_group_stride,
     register_gds_gpu_buffer,
+    validate_gds_staging_size,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
@@ -114,11 +121,29 @@ class _TempGPUBuffer:
         self._lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
         self._max_batch_size = max_batch_size
 
-        self._temp_buffer = torch.empty(
-            self._get_size_for_single_batch() * max_batch_size,
-            dtype=torch.uint8,
-            device=device,
+        sizes = tuple(
+            self._get_size_for_object_group(i)
+            for i in range(kv_layer_groups_manager.num_object_groups)
         )
+        padded_bytes = sum(gds_group_stride(size) for size in sizes) * max_batch_size
+        aligned_backing = padded_bytes + GDS_SLOT_ALIGNMENT - 1
+        self.aligned_object_sizes = (
+            sizes
+            if all(sizes) and aligned_backing <= aligned_gds_staging_budget()
+            else ()
+        )
+        staging_bytes = (
+            aligned_backing
+            if self.aligned_object_sizes
+            else sum(sizes) * max_batch_size
+        )
+        validate_gds_staging_size(staging_bytes)
+        backing = torch.empty(staging_bytes, dtype=torch.uint8, device=device)
+        if self.aligned_object_sizes:
+            start = -backing.data_ptr() % GDS_SLOT_ALIGNMENT
+            self._temp_buffer = backing.narrow(0, start, padded_bytes)
+        else:
+            self._temp_buffer = backing
 
         # Offset map: (batch_idx, object_group_idx, kernel_group_idx) ->
         # (byte offset in the temp buffer, size of the buffer in bytes)
@@ -157,6 +182,11 @@ class _TempGPUBuffer:
                     object_group_size,
                 )
 
+                if self.aligned_object_sizes:
+                    offset = object_group_start_offset + gds_group_stride(
+                        object_group_size
+                    )
+
         # Shape/dtype cache for kernel groups
         self._shape_cache_kernel_group: dict[int, tuple[torch.Size, torch.dtype]] = {}
         for kernel_group_idx in range(self._kv_groups_manager.num_kernel_groups):
@@ -177,6 +207,11 @@ class _TempGPUBuffer:
     def buffer(self) -> torch.Tensor:
         """The flat staging tensor (for GDS cuFile registration)."""
         return self._temp_buffer
+
+    @property
+    def slot_bytes(self) -> int:
+        """Byte stride of one slot, including all of its object groups."""
+        return self._temp_buffer.numel() // self._max_batch_size
 
     def get_temp_kernel_group_buffer(
         self, batch_idx: int, kernel_group_idx: int
@@ -451,11 +486,19 @@ class GPUCacheContext(BaseCacheContext):
 
         # GPU streams
         self.cuda_stream_ = torch_dev.Stream(device=self.device_)
+        self._gds_streams: dict[int, torch.cuda.Stream] = {}
+        self._gds_ready_event: torch.cuda.Event | None = None
+        self._gds_transfer_lock = threading.Lock()
+        self._gds_closed = False
 
         # Register the staging buffer with the GDS cuFile context on the
         # context's CUDA stream.
         with torch_dev.stream(self.cuda_stream_):
-            register_gds_gpu_buffer(self._temp_buffer.buffer)
+            register_gds_gpu_buffer(
+                self._temp_buffer.buffer,
+                slot_bytes=self._temp_buffer.slot_bytes,
+                object_sizes=self._temp_buffer.aligned_object_sizes,
+            )
 
         # Third Party
         import cupy
@@ -507,10 +550,16 @@ class GPUCacheContext(BaseCacheContext):
         afterwards -- the caller (``_release_entries``) drops the context
         right after this call.
         """
-        self.cuda_stream_.synchronize()
-        with torch_dev.stream(self.cuda_stream_):
-            deregister_gds_gpu_buffer(self._temp_buffer.buffer)
-        self._close_kv_wrappers()
+        with self._gds_transfer_lock:
+            self._gds_closed = True
+            self.cuda_stream_.synchronize()
+            for stream in self._gds_streams.values():
+                deregister_gds_stream(self.device_, stream)
+            with torch_dev.stream(self.cuda_stream_):
+                deregister_gds_gpu_buffer(
+                    self._temp_buffer.buffer, slot_bytes=self._temp_buffer.slot_bytes
+                )
+            self._close_kv_wrappers()
 
     def _close_kv_wrappers(self) -> None:
         """Close every KV wrapper, continuing past per-wrapper failures."""
@@ -527,6 +576,54 @@ class GPUCacheContext(BaseCacheContext):
         Returns the GPU stream for KV cache operations
         """
         return self.cuda_stream_
+
+    def get_gds_transfer_stream(self, slot: int) -> torch.cuda.Stream:
+        """Return a persistent stream for one existing staging slot.
+
+        Args:
+            slot: Staging index in ``[0, max_batch_size)``.
+
+        Returns:
+            Stream on this context's device, created on first use.
+
+        Raises:
+            ValueError: The staging slot does not exist.
+
+        Called only by the context's serialized affinity handler, before
+        dispatching slot work. No new staging allocation is made.
+        """
+        if not 0 <= slot < self.max_batch_size:
+            raise ValueError("GDS slot is outside the staging buffer")
+        if slot not in self._gds_streams:
+            self._gds_streams[slot] = torch.cuda.Stream(device=self.device_)
+        return self._gds_streams[slot]
+
+    @contextmanager
+    def gds_transfer_scope(self) -> Iterator[None]:
+        """Lease staging and engine mappings until all slot streams drain.
+
+        Serializes concurrent transfers with unregister/reaping. Raises RuntimeError
+        if close has already started; the caller must not submit slot work then.
+        """
+        with self._gds_transfer_lock:
+            if self._gds_closed:
+                raise RuntimeError("GPU cache context is closed")
+            yield
+
+    def record_gds_transfer_ready(self) -> torch.cuda.Event:
+        """Record the persistent input event on this context's original stream.
+
+        Returns:
+            The recorded event for the current slot-work generation.
+
+        The caller holds ``gds_transfer_scope`` until all slot waits finish.
+        That lease makes re-recording safe and keeps the event out of the engine
+        IPC handoff protocol, which continues to use its own recorded events.
+        """
+        if self._gds_ready_event is None:
+            self._gds_ready_event = torch.cuda.Event()
+        self._gds_ready_event.record(self.cuda_stream_)
+        return self._gds_ready_event
 
     @property
     def cupy_stream(self) -> "cupy.cuda.Stream":

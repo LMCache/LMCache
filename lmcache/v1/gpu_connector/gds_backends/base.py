@@ -79,6 +79,10 @@ class GDSBackend(ABC):
     def register_stream(self, raw_stream: int) -> None:
         """Prepare a native stream handle for IO without taking ownership of it."""
 
+    def register_aligned_stream(self, raw_stream: int) -> None:
+        """Register a dedicated stream for aligned I/O when supported by the backend."""
+        raise NotImplementedError("Aligned slot streams require cuFile")
+
     @abstractmethod
     def deregister_stream(self, raw_stream: int) -> None:
         """Release registration after IO completes, leaving the stream alive."""

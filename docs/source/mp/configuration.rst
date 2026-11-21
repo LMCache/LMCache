@@ -661,6 +661,14 @@ verify the installation.
      - ``True``
      - Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on
        ext4). Ignored by ``ugds``, whose IO bypasses the kernel entirely.
+   * - ``--gds-l1-io-concurrency``
+     - ``0``
+     - Use up to four slot streams for LMCache-driven cuFile transfers. Zero
+       keeps single-stream scheduling. Direct I/O can use aligned slots.
+   * - ``--gds-l1-max-inflight-bytes``
+     - ``134217728``
+     - Byte limit for a concurrent transfer group and for the staging
+       allocation of each participating cache context.
 
 L1 Manager TTLs
 ----------------
