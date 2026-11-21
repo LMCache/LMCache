@@ -597,13 +597,11 @@ in-flight L2 store / prefetch-load queues.  These metrics are useful for
 capacity planning, sizing L1, watching L2 fullness, and spotting
 backpressure on individual L2 adapters.
 
-All five metrics are OTel `ObservableGauge` instruments registered via the
-shared `register_gauge` helper.  At scrape time, OTel invokes the
-registered callback, which iterates the controller's live state and
-returns one observation per adapter (for `l2_usage_bytes`, one per
-configured adapter; for the in-flight gauges, only adapters with work).
-Adapters with no in-flight work emit no datapoint for the three
-in-flight gauges.
+These metrics are OTel `ObservableGauge` instruments registered via the
+shared `register_gauge` helper. At scrape time, each L1 gauge returns one
+observation per live manager, labeled by `l1_tag` and `backend`.
+`l2_usage_bytes` returns one observation per configured adapter. The three
+in-flight gauges report only adapters with work.
 
 `lmcache_mp.l2_usage_bytes` carries a single `l2_name` attribute — the
 adapter's registered type name (e.g. `"fs"`, `"mock"`,
@@ -622,6 +620,8 @@ the same backend type — same shape as the existing
 |---|---|---|---|---|
 | `lmcache_mp.l1_memory_usage_bytes` | `lmcache_mp_l1_memory_usage_bytes` | ObservableGauge | `BaseL1Manager.get_memory_usage()` | Bytes currently held in L1 at scrape time |
 | `lmcache_mp.l1_staging_bytes` | `lmcache_mp_l1_staging_bytes` | ObservableGauge | `BaseL1Manager.get_staging_memory_usage()` | Bytes held by L1 staging objects (write-reserved, not yet admitted: in-flight stores and L2 prefetch loads) at scrape time; a subset of `l1_memory_usage_bytes` |
+| `lmcache_mp.l1_largest_free_block_bytes` | `lmcache_mp_l1_largest_free_block_bytes` | ObservableGauge | `BaseL1Manager.get_fragmentation_stats()[0]` | Largest contiguous free block in the L1 address space at scrape time; the ceiling on a single first-fit allocation. Each gauge samples independently; `0` also for tiers whose allocator has no address-space stats |
+| `lmcache_mp.l1_free_block_count` | `lmcache_mp_l1_free_block_count` | ObservableGauge | `BaseL1Manager.get_fragmentation_stats()[1]` | Number of free blocks in the L1 address space at scrape time; paged allocators report page-granular counts |
 | `lmcache_mp.l2_usage_bytes` | `lmcache_mp_l2_usage_bytes` | ObservableGauge (attr: `l2_name`) | `StorageManager.get_l2_usages()` (calls `L2AdapterInterface.get_usage().total_bytes_used`) | Per-adapter bytes currently held in L2 at scrape time; one observation per configured adapter.  Adapters whose `get_usage()` raises are skipped silently. |
 | `lmcache_mp.num_inflight_l2_stores` | `lmcache_mp_num_inflight_l2_stores` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `StoreController.get_inflight_count_by_adapter()` | Snapshot of in-flight L2 store tasks grouped by adapter |
 | `lmcache_mp.num_inflight_l2_loads` | `lmcache_mp_num_inflight_l2_loads` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `PrefetchController.get_inflight_load_state_by_adapter()` | Per-adapter count from the same snapshot |
@@ -636,6 +636,33 @@ that have not landed yet? A high or climbing value means many concurrent
 stores / prefetch loads (input for in-flight prefetch planning); a value
 that never returns to zero means abandoned reservations waiting for their
 write TTL to expire. See `../distributed/l1_manager/staging-and-write-tags.md`.
+
+**What `l1_largest_free_block_bytes` / `l1_free_block_count` answer:** How
+much of the free L1 space can serve an allocation?
+
+1. Read `F bytes free` from the allocation failure log or estimate free
+   bytes from `/status` as `memory_total_bytes − memory_used_bytes`. On a
+   lazy tier, `memory_total_bytes` is the current heap, which grows toward
+   the configured capacity.
+2. Compare free bytes with the aligned request size, or with
+   `batch_size × aligned_size` for a batch. Fewer free bytes indicate
+   exhaustion. If one block holds all the free bytes, the space is contiguous.
+3. With enough total free bytes, a single first-fit allocation fails from
+   external fragmentation when the largest block is smaller than the aligned
+   object. A batch can use several blocks. Each free block contributes
+   `floor(block_size / aligned_size)` whole objects. On failure,
+   `short by N blocks` gives the batch size minus the sum of those slots.
+   Even if the largest block fits one object, the batch can still fall short.
+
+The gauges sample independently, so their values can come from different
+instants. One `AddressManager.get_fragmentation_stats()` call returns both
+values from the same locked snapshot. For a first-fit allocator, each gauge
+or L1 status read walks the free segments while holding the allocator lock.
+The cost is linear in the number of segments. Reading memory usage alone
+still uses the existing size counters. Paged allocators report the page size
+and the free-page count while pages are available. Every free page can serve
+one object, so external fragmentation cannot occur. Exhausted tiers and tiers
+without address-space stats (such as a shadow L1) both report `(0, 0)`.
 
 **What `l2_usage_bytes` answers:** How full is each L2 backend? Lets
 operators query how much each L2 tier currently holds, decide whether

@@ -1285,3 +1285,99 @@ def _no_overlap(allocations: List[Tuple[int, int]]) -> bool:
             return False
 
     return True
+
+
+class TestFragmentationSignal:
+    """The external-fragmentation signal from issue #6724."""
+
+    def test_fragmentation_stats_waits_for_allocator_lock(self) -> None:
+        """A reader waits for the allocator lock before returning its snapshot."""
+        manager = AddressManager(4096)
+        started = threading.Event()
+        returned = threading.Event()
+        stats: tuple[int, int] | None = None
+
+        def read_stats() -> None:
+            nonlocal stats
+            started.set()
+            stats = manager.get_fragmentation_stats()
+            returned.set()
+
+        worker = threading.Thread(target=read_stats, daemon=True)
+        with manager._lock:
+            worker.start()
+            assert started.wait(timeout=5), "reader did not start"
+            assert not returned.wait(timeout=0.2), "reader returned with the lock held"
+
+        worker.join(timeout=5)
+        assert not worker.is_alive(), "reader did not finish after lock release"
+        assert stats == (4096, 1)
+
+    @pytest.mark.parametrize(
+        "batched", [False, True], ids=["allocate", "batched_allocate"]
+    )
+    def test_allocation_failure_hint_does_not_deadlock(self, batched: bool) -> None:
+        """Both allocation paths can report free space while holding the lock."""
+        manager = AddressManager(4096)
+        message = ""
+
+        def attempt_allocation() -> None:
+            nonlocal message
+            try:
+                if batched:
+                    manager.batched_allocate(4096, 2)
+                else:
+                    manager.allocate(8192)
+            except RuntimeError as exc:
+                message = str(exc)
+
+        worker = threading.Thread(target=attempt_allocation, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive(), "allocation deadlocked while reporting free space"
+        assert "4096 bytes free" in message
+
+    def test_fresh_address_space_is_one_free_block(self) -> None:
+        """A pristine space reports one block spanning the whole arena."""
+        manager = AddressManager(4096 * 10)
+        assert manager.get_fragmentation_stats() == (4096 * 10, 1)
+
+    def test_exhausted_address_space_reports_no_free_blocks(self) -> None:
+        """A fully allocated space reports no free blocks."""
+        manager = AddressManager(4096 * 4)
+        manager.batched_allocate(4096 * 4, 1)
+        assert manager.get_fragmentation_stats() == (0, 0)
+
+    def test_interleaved_free_leaves_sub_aligned_holes(self) -> None:
+        """Freeing every other object leaves holes no single block fits."""
+        object_size = 1179648  # 288 * 4096, one L1 object from issue #6724
+        hole_size = object_size // 2
+        objects = 8
+        manager = AddressManager(objects * (object_size + hole_size))
+
+        handles: List[Tuple[int, int]] = []
+        for _ in range(objects):
+            handles.append(manager.allocate(object_size))
+            handles.append(manager.allocate(hole_size))
+        for address, size in handles[1::2]:
+            manager.free(address, size)
+
+        assert manager.get_fragmentation_stats() == (hole_size, objects)
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                r"short by 2 blocks, 589824 bytes in the largest of 8 free "
+                r"blocks \(4718592 bytes free\)"
+            ),
+        ):
+            manager.batched_allocate(object_size, 2)
+
+    def test_allocate_failure_message_reports_free_space(self) -> None:
+        """Single allocations report the same free-space hint on failure."""
+        manager = AddressManager(4096 * 2)
+        manager.allocate(4096 * 2)
+        with pytest.raises(
+            RuntimeError,
+            match=r"no memory is available \(0 bytes in the largest of 0 free blocks",
+        ):
+            manager.allocate(4096)

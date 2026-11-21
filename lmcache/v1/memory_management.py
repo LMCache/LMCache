@@ -1690,14 +1690,16 @@ class AddressManager:
             if block.size >= aligned_size:
                 break
         else:
+            hint = self._free_space_hint()
             logger.warning(
                 "Failed to allocate memory block of size %d "
-                "because no memory is available",
+                "because no memory is available (%s)",
                 size,
+                hint,
             )
             raise RuntimeError(
                 f"Failed to allocate memory block of size {size} "
-                "because no memory is available"
+                f"because no memory is available ({hint})"
             )
 
         self._explicit_list.remove(block)
@@ -1778,16 +1780,19 @@ class AddressManager:
 
         if remaining > 0:
             # Not enough memory; free list is untouched, no rollback needed
+            hint = self._free_space_hint()
             logger.warning(
                 "Failed to batched allocate %d memory blocks of size %d "
-                "because no enough memory is available (short by %d blocks)",
+                "because no enough memory is available (short by %d blocks, %s)",
                 batch_size,
                 size,
                 remaining,
+                hint,
             )
             raise RuntimeError(
                 f"Failed to batched allocate {batch_size} memory blocks "
-                f"of size {size} because no enough memory is available"
+                f"of size {size} because no enough memory is available "
+                f"(short by {remaining} blocks, {hint})"
             )
 
         # Allocation succeeded; batch-update the free list
@@ -1862,6 +1867,54 @@ class AddressManager:
             The total free size in bytes.
         """
         return self._size - self.total_allocated_size
+
+    def _free_space_snapshot_locked(self) -> tuple[int, int, int]:
+        """Compute the free-list snapshot; the caller must hold ``_lock``.
+
+        Returns:
+            ``(free_bytes, largest_free_block_bytes, free_block_count)``
+            describing one free-list state. Zero-length placeholder blocks
+            are ignored, so an empty or exhausted space reports ``(0, 0)``.
+        """
+        largest = 0
+        count = 0
+        for block in self._explicit_list:
+            if block.size <= 0:
+                continue
+            if block.size > largest:
+                largest = block.size
+            count += 1
+        free_bytes = self._size - self.total_allocated_size
+        return free_bytes, largest, count
+
+    @_lmcache_nvtx_annotate
+    @synchronized("_lock")
+    def get_fragmentation_stats(self) -> tuple[int, int]:
+        """
+        Get the external-fragmentation signal for this address space.
+
+        Together with ``get_free_size`` this distinguishes a genuine byte
+        deficit from a chopped-up free list: allocation can fail with plenty
+        of free bytes once no single free block satisfies the aligned size.
+
+        Returns:
+            A tuple containing the largest free block in bytes and the
+            number of free blocks.
+        """
+        _, largest, count = self._free_space_snapshot_locked()
+        return largest, count
+
+    def _free_space_hint(self) -> str:
+        """Render the free-list snapshot for OOM diagnostics.
+
+        The caller must already hold ``_lock``: the allocation failure
+        paths invoke this from inside their critical section.
+        """
+        free_bytes, largest, count = self._free_space_snapshot_locked()
+        return (
+            f"{largest} bytes in the largest of {count} free blocks "
+            f"({free_bytes} bytes free)"
+        )
 
     def check_consistency(self) -> bool:
         """

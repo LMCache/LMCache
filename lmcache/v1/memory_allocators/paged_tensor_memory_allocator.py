@@ -36,6 +36,17 @@ class PagedAddressManager:
         """Get the total free size in bytes."""
         return len(self._allocator.free_blocks) * self._allocator.align_bytes
 
+    def get_fragmentation_stats(self) -> tuple[int, int]:
+        """Return the fragmentation signal for the paged tier.
+
+        Pages are all one chunk-sized unit, so external fragmentation
+        cannot occur: while any page is free it is allocatable, making
+        the page size the largest usable free block.
+        """
+        free_pages = len(self._allocator.free_blocks)
+        page_size = self._allocator.align_bytes
+        return (page_size if free_pages else 0, free_pages)
+
 
 class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     """
@@ -67,6 +78,10 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         )
 
         self.paged_buffers = torch.split(self.buffer, self.align_bytes, dim=0)
+        # torch.split leaves a single zero-length slice for an empty buffer;
+        # it is not a page, or the pool would report free bytes it cannot
+        # hand out.
+        self.paged_buffers = tuple(buf for buf in self.paged_buffers if buf.numel() > 0)
 
         # NOTE: deque is used since thread-safety is not a concern here as
         # is implemented in C under the hood (in CPython), and operations
@@ -332,3 +347,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     def __del__(self) -> None:
         # FIXME: NIXL-related memory leak should be handled somewhere (else).
         del self.buffer
+
+    def get_fragmentation_stats(self) -> tuple[int, int]:
+        """Return the largest free block in bytes and the free-block count."""
+        return self.address_manager.get_fragmentation_stats()
