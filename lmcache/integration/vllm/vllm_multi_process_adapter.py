@@ -20,6 +20,7 @@ import zmq
 from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.integration.vllm.experimental import dispatch
+from lmcache.integration.vllm.kv_cache_groups import expand_block_ids_to_kernel_pages
 from lmcache.integration.vllm.mp_lookup_state import LookupState
 from lmcache.integration.vllm.mp_server_launcher import (
     maybe_start_mp_server_from_url,
@@ -1336,6 +1337,9 @@ class LMCacheMPWorkerAdapter:
         self.kv_caches: dict[str, torch.Tensor] = {}
         self._layout_hints: "LayoutHints | None" = None
         self.engine_group_infos: list[EngineGroupInfo] = []
+        # Tensor pages per vLLM block ID, one per engine group info; empty
+        # when every group pages at its block size.
+        self._kernel_pages_per_block: list[int] = []
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
         # Publishing a freshly registered context and shutdown() both take
@@ -1487,11 +1491,27 @@ class LMCacheMPWorkerAdapter:
         """Whether this rank is the keyed rank of a registered group."""
         return is_kv_writer(self.engine_group_infos, self.worker_id)
 
+    @property
+    def transfer_blocks_in_chunk(self) -> int:
+        """Block IDs per chunk in the units the transfer context receives.
+
+        Equals :meth:`num_blocks_per_chunk` (vLLM blocks, what the scheduler
+        sees) except for a single kernel-paged group, whose chunk is counted
+        in page IDs because the single-group transfer path sizes its buffers
+        from this count. Multi-group contexts derive a per-group count from
+        ``tokens_per_block`` and ignore it.
+        """
+        if len(self._kernel_pages_per_block) == 1:
+            (pages_per_block,) = self._kernel_pages_per_block
+            return self.blocks_in_chunk * pages_per_block
+        return self.blocks_in_chunk
+
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         layout_hints: "LayoutHints | None" = None,
+        kernel_pages_per_block: Sequence[int] = (),
     ) -> None:
         """
         Register the kv caches with LMCache server.
@@ -1502,15 +1522,29 @@ class LMCacheMPWorkerAdapter:
             engine_group_infos: LMCache-owned engine KV cache group metadata.
             layout_hints: Engine layout hints forwarded to the server; built
                 here from the ambient vLLM config when not provided.
+            kernel_pages_per_block: Tensor pages per vLLM block ID, one per
+                ``engine_group_infos`` entry (see
+                ``create_engine_group_infos_from_vllm``). Store and
+                retrieve expand each group's block IDs to page IDs by it.
+                Empty means one page per block ID for every group.
 
         Raises:
             ConnectionError: if the server does not respond within
                 mq_timeout.
             ValueError: if the LMCache chunk size is not a multiple of an
                 engine group's ``tokens_per_block`` (chunk boundaries would
-                not align with that group's paged-chunk boundaries).
+                not align with that group's paged-chunk boundaries), or
+                ``kernel_pages_per_block`` is non-empty and does not have one
+                entry per engine group info.
         """
         logger.info("Registering kv caches")
+        if kernel_pages_per_block and len(kernel_pages_per_block) != len(
+            engine_group_infos
+        ):
+            raise ValueError(
+                f"got {len(kernel_pages_per_block)} kernel page counts for "
+                f"{len(engine_group_infos)} engine group infos"
+            )
         for info in engine_group_infos:
             if (
                 info.tokens_per_block > 0
@@ -1523,6 +1557,7 @@ class LMCacheMPWorkerAdapter:
                 )
         self.kv_caches = kv_caches
         self.engine_group_infos = list(engine_group_infos)
+        self._kernel_pages_per_block = list(kernel_pages_per_block)
         # Reused when heartbeat recovery re-registers.
         self._layout_hints = (
             layout_hints if layout_hints is not None else vllm_layout_hints()
@@ -1594,7 +1629,16 @@ class LMCacheMPWorkerAdapter:
                 self._kv_caches_released = False
 
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
-        return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
+        """Block IDs per LMCache group, as page IDs for kernel-paged groups."""
+        per_group = expand_engine_block_ids(self.engine_group_infos, op.block_ids)
+        if not self._kernel_pages_per_block:
+            return per_group
+        return [
+            expand_block_ids_to_kernel_pages(block_ids, pages_per_block)
+            for block_ids, pages_per_block in zip(
+                per_group, self._kernel_pages_per_block, strict=True
+            )
+        ]
 
     def _create_transfer_context(self, kv_caches: dict) -> TransferContext:
         """Build the worker-side transfer context; subclasses swap transports."""
@@ -1639,7 +1683,7 @@ class LMCacheMPWorkerAdapter:
                 kv_caches,
                 self.model_name,
                 self.world_size,
-                self.blocks_in_chunk,
+                self.transfer_blocks_in_chunk,
                 self._mq_timeout,
                 layout_hints=layout_hints,
                 engine_group_infos=self.engine_group_infos,
@@ -1874,7 +1918,7 @@ class LMCacheMPWorkerAdapter:
             self.kv_caches,
             self._block_ids_per_group(op),
             event,
-            self.blocks_in_chunk,
+            self.transfer_blocks_in_chunk,
         )
         self.store_futures[request_id] = future
         if event is not None:
@@ -1932,7 +1976,7 @@ class LMCacheMPWorkerAdapter:
             self.kv_caches,
             self._block_ids_per_group(op),
             event,
-            self.blocks_in_chunk,
+            self.transfer_blocks_in_chunk,
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
         self.retrieve_futures[request_id] = (future, op.flat_block_ids)
