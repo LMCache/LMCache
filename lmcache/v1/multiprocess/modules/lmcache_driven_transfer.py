@@ -512,15 +512,24 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         return status
 
     def close(self) -> None:
-        """Release GPU resources owned by this module."""
+        """Drain submitted transfers and callbacks before releasing GPU resources.
+
+        Request handlers must have stopped submitting work before this call.
+        Synchronization errors propagate without releasing contexts or stopping
+        the dispatcher, since device work may still be outstanding.
+        """
         if self._host_event_waiter is not None:
             self._host_event_waiter.stop()
-        # Stop the drain thread before storage_manager.close() so any
-        # in-flight completions reach a live storage manager.
+        with self._lock:
+            entries = list(self._cache_contexts.values())
+        # A stream callback may reach the native queue only during synchronization.
+        for entry in entries:
+            entry.cache_context.stream.synchronize()
+            del entry
+        # Deliver completions while contexts and the storage manager are live.
         self._device_host_func_dispatcher.stop()
 
         with self._lock:
-            entries = list(self._cache_contexts.values())
             self._cache_contexts.clear()
         self._release_entries(entries)
         if self._fd_channel is not None:
