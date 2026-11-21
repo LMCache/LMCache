@@ -31,6 +31,7 @@ from lmcache.v1.distributed.api import (
     Tier,
 )
 from lmcache.v1.distributed.config import (
+    DevDaxL1ManagerConfig,
     EvictionConfig,
     StorageManagerConfig,
     requires_single_l1_memory_region,
@@ -1600,9 +1601,19 @@ class StorageManager:
             instance, and ``descriptor`` is its descriptor carrying that id.
 
         Raises:
-            ValueError: If no L1 has the memory tags the adapter wants.
+            ValueError: If no L1 has the memory tags the adapter wants, or the
+                adapter would bind to a shared Device-DAX L1.
         """
         manager = self._l1_by_tag[resolve_l1_affinity(config, self._l1_by_tag)]
+        if (
+            isinstance(manager.config, DevDaxL1ManagerConfig)
+            and manager.config.shared is not None
+        ):
+            raise ValueError(
+                f"L2 adapter {get_type_name_for_config(config)!r} resolves to "
+                f"shared Device-DAX L1 {manager.config.tag!r}; L2 adapters can "
+                "bind only to private L1s"
+            )
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1
         adapter: L2AdapterInterface = create_l2_adapter(

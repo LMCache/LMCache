@@ -10,7 +10,7 @@ they share is in [staging-and-write-tags.md](staging-and-write-tags.md).
 |---|---|---|---|---|
 | `base.py` | `BaseL1Manager` | (abstract) | abstract | abstract |
 | `dram.py` | `DramL1Manager` | pinned host DRAM (`L1MemoryManager`) | `DRAM` | `(DRAM, LOCAL)` |
-| `devdax.py` | `DevDaxL1Manager` | Device-DAX arenas (`DevDaxL1MemoryManager`) | `DEVDAX` | `(CXL, LOCAL)` |
+| `devdax.py` | `DevDaxL1Manager` | Device-DAX arenas (`DevDaxL1MemoryManager`) | `DEVDAX` | `(CXL, LOCAL)`; `(CXL, REMOTE)` when `shared` |
 | `gds.py` | `GdsL1Manager` | NVMe slab via GPUDirect Storage (`GDSL1MemoryManager`) | `GDS` | `(GDS, LOCAL)` |
 | `shadow.py` | `ShadowL1Manager` | none: borrowed views of a peer's bytes (`ShadowL1MemoryManager`) | the borrowed segment's | the borrowed segment, `SHADOW` |
 | `factory.py` | `create_l1_manager`, `create_l1_managers` | picks the subclass from `L1ManagerConfig` | | |
@@ -54,6 +54,10 @@ every medium. Each medium now says once what it is:
     overrides `get_capacity_bytes()` with the live sum of ACTIVE arenas and
     `get_l1_memory_desc()` with the primary-arena warning; see
     [../memory_manager/device-dax-l1.md](../memory_manager/device-dax-l1.md).
+    With a `shared` object in its config it instead joins a region that a
+    memory orchestrator owns and routes every lifecycle method to
+    `OrchestratedObjectState`, outside `_lock`; see the Shared Mode section
+    there.
   - `GdsL1Manager` initializes the process-wide GDS context for its slab in
     its constructor and closes it in `close()`; its `get_l1_memory_desc()` is
     `None` (slab offsets, no host buffer).
@@ -145,7 +149,8 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
 controller resolves `(DRAM, LOCAL)` this way and registers that manager's
 `get_l1_memory_desc()` with the transfer channel; the `/reconfigure/dax/l1/*`
 routes resolve `(CXL, LOCAL)` and narrow it to `DevDaxL1Manager` (`409` when
-there is no Device-DAX L1 or more than one). See
+there is no Device-DAX L1 or more than one; a shared region reports `REMOTE`,
+so the routes never reach it). See
 [../memory_tags.md](../memory_tags.md).
 
 ## Tests
@@ -163,3 +168,20 @@ adapter checks, hot-plug through the `/reconfigure/dax/l1/*` routes),
 controller with the `borrowing_mock` adapter), `test_runtime_adapters.py`
 (borrowers added and removed under a configured shadow) and
 `test_multi_l1_serving.py` (the `SHADOW` configuration).
+
+## Orchestrator-owned Device-DAX regions
+
+A Device-DAX manager configured with `shared` joins the orchestrator's region
+and reports `(CXL, REMOTE)`. The orchestrator owns the extents and decides
+which keys are readable. A manager maps them through `SharedDevDaxRegion`,
+tracks write grants by key and writer tag, and holds a lease for each reader.
+It publishes completed writes before committing them and acquires visibility
+before returning a read view. An RPC outage makes new reads miss and writes
+fail. An epoch mismatch disables the manager until restart.
+
+A shared region exposes neither local eviction nor arena hot-plug. After
+copies drain, closing the manager retires its client and releases the mapping.
+Exported views must be released before the mapping can finish closing.
+The prefetch controller checks the peer layout after recording the read leases,
+so a mismatch releases every lease acquired by the request. The MP server
+requires LMCache-driven transfers. See the [shared L1 guide](../../../../source/mp/shared_l1.rst).
