@@ -125,7 +125,8 @@ def _build(
         chunk_size=1,
         hash_algorithm_name="blake3",
         null_block_id=0,
-        storage_manager=_FakeStorageManager(),
+        storage_manager=_FakeStorageManager({}),
+        session_manager=SimpleNamespace(get=lambda _request_id: None),
         get_read_owners=lambda request_id: None,
         event_bus=SimpleNamespace(
             publish=lambda event: None,

@@ -188,6 +188,12 @@ resident and evictable. Which locked cells are in the hit is the policy's
 decision: under `prefix` the fold, under `full` every locked cell, under
 `whole_chunk` the columns locked in every row.
 
+For retained locks, `PrefetchResult` carries the original owner, generation
+and `read_counts` for each key. Counts come from the submitted key group,
+so TP-replicated groups can retain different numbers of readers in one
+request. RETRIEVE claims one share per worker; FREE releases only unclaimed
+shares from this receipt, without recomputing ownership from a later lookup.
+
 **Errors.** Any exception while advancing a request aborts it
 (`_abort_request`): the three maps are walked to return L2 locks, delete
 staging buffers and release L1 read locks, an all-zero result is published,
