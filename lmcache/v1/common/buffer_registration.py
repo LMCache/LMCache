@@ -2,7 +2,7 @@
 """Storage-neutral registration contract for device staging buffers."""
 
 # Standard
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 # Third Party
 import torch
@@ -35,4 +35,30 @@ class BufferRegistration(Protocol):
         Raises:
             RuntimeError: If the registration cannot be released safely.
         """
+        ...
+
+
+@runtime_checkable
+class SlottedBufferRegistration(BufferRegistration, Protocol):
+    """Registration for independently streamed, aligned staging slots."""
+
+    def slot_alignment(self, device_type: str) -> int:
+        """Return the required alignment in bytes, or zero for ordinary staging."""
+        ...
+
+    def staging_budget(self) -> int:
+        """Return the staging allocation limit in bytes."""
+        ...
+
+    def register_slots(
+        self,
+        buffer: torch.Tensor,
+        object_sizes: tuple[int, ...],
+        slot_bytes: int,
+    ) -> None:
+        """Register a buffer and the logical group sizes in each aligned slot."""
+        ...
+
+    def deregister_stream(self, device: object, stream: object) -> None:
+        """Drain and release a slot stream before its owning context closes."""
         ...

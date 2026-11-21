@@ -4,6 +4,7 @@ kernel launch gets, and the order of staging and kernels. The engine and
 the kernel are faked, so these run without CUDA."""
 
 # Standard
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -12,7 +13,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.multiprocess.object_group_transfer import staged
 from lmcache.v1.multiprocess.object_group_transfer.engines import TransferEngine
 from lmcache.v1.multiprocess.object_group_transfer.planning import (
@@ -159,3 +160,66 @@ def test_resolve_chunk_range_combines_the_range_with_the_window_skip(
     chunk_range, window_skip, expected
 ):
     assert resolve_chunk_range(8, chunk_range, window_skip) == expected
+
+
+@pytest.mark.parametrize("short_read", [False, True])
+def test_gds_streams_wait_before_scatter_and_slot_reuse(
+    harness, monkeypatch, short_read
+):
+    """All four reads may queue, but no scatter can consume a failed read."""
+    cc, _ = harness
+    cc.device = torch.device("cuda")
+    cc.max_batch_size = 4
+    streams = [MagicMock() for _ in range(4)]
+    cc.get_gds_transfer_stream.side_effect = streams.__getitem__
+    cc.get_temp_object_group_buffer.side_effect = lambda slot, group: slot
+    slab = MagicMock(io_concurrency=4, max_inflight_bytes=16)
+    monkeypatch.setattr(staged, "get_l1_gds_context", lambda owner: slab)
+    monkeypatch.setattr(staged.torch_dev, "stream", lambda stream: nullcontext())
+    events = []
+    slab.transfer_async.side_effect = lambda obj, slot, direction: events.append(
+        ("read", slot)
+    )
+
+    def check(device, stream):
+        events.append(("check", streams.index(stream)))
+        if short_read and len(events) == 5:
+            raise RuntimeError("short read")
+
+    slab.synchronize_and_check.side_effect = check
+    monkeypatch.setattr(
+        staged,
+        "_launch_batch_kernels",
+        lambda *args: events.append(("scatter", args[-1])),
+    )
+    monkeypatch.setattr(
+        staged.platform_stream,
+        "synchronize_stream",
+        lambda device, stream: events.append(("ready", streams.index(stream))),
+    )
+    objs = [MagicMock(spec=GDSMemoryObject) for _ in range(5)]
+    for obj in objs:
+        obj.get_size.return_value = 4
+        obj.get_l1_manager.return_value = 1
+    block_ids = list(range(5 * BLOCKS_PER_CHUNK))
+
+    def run(destinations):
+        return staged._run_gds_concurrent(
+            cc, [], objs, 0, 0, 0, len(objs), H2D, [destinations]
+        )
+
+    assert not run([0] * len(block_ids))
+    assert events == []
+    if short_read:
+        with pytest.raises(RuntimeError, match="short read"):
+            run(block_ids)
+        assert all(kind != "scatter" for kind, slot in events)
+        assert {slot for kind, slot in events if kind == "check"} == {0, 1, 2, 3}
+    else:
+        assert run(block_ids)
+        assert [kind for kind, slot in events[:4]] == ["read"] * 4
+        for slot in range(4):
+            per_slot = [kind for kind, item in events if item == slot]
+            assert per_slot == ["read", "check", "scatter", "ready"] * per_slot.count(
+                "read"
+            )

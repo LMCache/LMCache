@@ -208,3 +208,15 @@ def test_io_submission_error_propagates(bindings: Mock, backend: CuFileBackend) 
     bindings.libcufile.cuFileReadAsync.return_value = _Error(err=5, cu_err=700)
     with pytest.raises(RuntimeError, match="cuFileReadAsync"):
         handle.read_async(0x1000, 4096, 0, 0, 7)
+
+
+def test_only_aligned_stream_promises_page_alignment(
+    bindings: Mock, backend: CuFileBackend
+) -> None:
+    """The default stream can issue arbitrary I/O; slot streams promise alignment."""
+    backend.register_stream(2)
+    backend.register_aligned_stream(3)
+    assert [
+        (c.args[0].value, c.args[1])
+        for c in bindings.libcufile.cuFileStreamRegister.call_args_list
+    ] == [(2, 7), (3, 15)]
