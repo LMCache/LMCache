@@ -8,6 +8,7 @@ Configuration for distributed storage manager
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, TypeVar, cast
 import argparse
+import itertools
 import json
 import math
 import mmap
@@ -254,6 +255,11 @@ def _check_hugepage_availability(size_in_bytes: int) -> None:
         )
 
 
+# Monotonic per-instance sequence for default L1 shm segment names, so
+# managers coexisting in one process never share a segment name.
+_L1_SHM_NAME_SEQ = itertools.count(1)
+
+
 @dataclass
 class L1MemoryManagerConfig:
     """
@@ -272,8 +278,19 @@ class L1MemoryManagerConfig:
     align_bytes: int = field(default=0x1000)
     """ The alignment size in bytes. Default is 4KB. """
 
-    shm_name: str = field(default_factory=lambda: f"lmcache_l1_pool_{os.getpid()}")
-    """ POSIX shared-memory segment name for L1 pool. Empty disables SHM. """
+    shm_name: str = field(
+        default_factory=lambda: (
+            f"lmcache_l1_pool_{os.getpid()}_{next(_L1_SHM_NAME_SEQ)}"
+        )
+    )
+    """ POSIX shared-memory segment name for L1 pool. Empty disables SHM.
+
+    The default's per-instance sequence keeps pools of coexisting managers
+    (tests, in-process helpers) distinct, so the alloc-time stale-segment
+    cleanup in ``torch_ops.mem_alloc`` cannot unlink a live pool's segment
+    (whose teardown would then raise ``FileNotFoundError`` on the second
+    unlink). The resolved name still travels via the serialized config for
+    cross-process attach. """
 
     use_hugepages: bool = False
     """ Allocate the L1 pool from the pre-allocated 2 MiB hugepage pool. """

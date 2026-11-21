@@ -68,6 +68,11 @@ def _make_sm_config() -> StorageManagerConfig:
         use_lazy=_should_use_lazy(),
         init_size_in_bytes=32 * 1024 * 1024,
         align_bytes=0x1000,
+        # Pin an explicit name: the recorder and the replay driver each
+        # build a config through this helper, and the record/replay
+        # config-digest check requires the two to serialize identically.
+        # The per-instance default would give them distinct names.
+        shm_name="lmcache_l1_pool_trace_driver_test",
     )
     l1 = L1ManagerConfig(
         memory_config=memory,
