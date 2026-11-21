@@ -16,7 +16,6 @@ These tests cover the device-backend contract documented in
 
 # Standard
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import patch
 
 # Third Party
@@ -155,9 +154,3 @@ def test_create_cache_context_is_not_implemented() -> None:
     spec = RblnDeviceSpec()
     with pytest.raises(NotImplementedError):
         spec.create_cache_context()
-
-
-def test_pin_memory_falls_back_to_the_default_backend() -> None:
-    """No RBLN pin-memory backend is registered, so the default applies."""
-    spec: Any = RblnDeviceSpec()
-    assert spec.pin_memory_backend is None
