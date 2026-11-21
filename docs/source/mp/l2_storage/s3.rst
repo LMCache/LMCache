@@ -7,18 +7,48 @@ S3-compatible endpoint (MinIO, Ceph RGW, etc.).
 
 **Required fields:**
 
-- ``s3_endpoint``: Bucket URL -- either ``"s3://<bucket>"`` or the bare host form
-  (used for non-AWS endpoints).
+Choose one addressing mode:
+
+- ``s3_endpoint``: Legacy virtual-hosted bucket endpoint, either
+  ``"s3://<bucket>.<host>"`` or ``"<bucket>.<host>"``. Requests use this
+  host and ``/<object-key>``; existing configurations are unchanged.
+- ``s3_endpoint_url`` and ``s3_bucket``: Path-style endpoint URL and separate
+  bucket. Both are required together and are mutually exclusive with
+  ``s3_endpoint``. The URL includes ``http://`` or ``https://``, an optional
+  port, and an optional base path. For example,
+  ``http://proxy.local:39999/api/v1/s3/`` with bucket ``kvbench-demo`` routes
+  objects to ``/api/v1/s3/kvbench-demo/<object-key>`` and listings to
+  ``/api/v1/s3/kvbench-demo/?list-type=2&...``. The complete host (including
+  port), path and query are constructed before SigV4 signing.
+
+URLs and bucket names must be unescaped: percent-encoded base paths/buckets,
+userinfo, query strings, fragments, and dot path segments are rejected.
+Object names retain the shared ObjectKey codec, including model slashes,
+rank, group, hash, salt and identity tags; transport escaping is applied once.
+The URL scheme controls TLS in path-style mode; ``disable_tls=true`` conflicts
+with an HTTPS URL.
 - ``s3_region``: AWS region string (e.g. ``"us-west-2"``).
 
 **Optional fields:**
 
+- ``s3_integrity_mode`` (string, default ``"none"``): Set
+  ``"singlepart_etag_md5"`` only for services whose single-part ETag is the
+  quoted MD5 of the complete object. Writes accept 1 byte through 64 MiB,
+  use a single CRT ``DEFAULT`` / ``PutObject`` request and send ``Content-MD5``;
+  the service must validate that header. Oversized or empty writes fail before
+  dispatch. Loads check exact length and the complete destination's MD5 against
+  the ETag after I/O completion, before reporting a hit. Missing, malformed,
+  multipart or mismatching ETags produce a miss and integrity diagnostic.
+  This mode adds a full hashing pass on write and read without an extra payload
+  copy. It detects accidental corruption; a malicious server can forge both
+  data and digest. It does not support multipart or opaque/encrypted ETags.
+  ``"none"`` preserves legacy transfer and length-only validation behavior.
 - ``s3_num_io_threads`` (int, default ``64``): Number of CRT I/O threads.
 - ``s3_prefer_http2`` (bool, default ``true``): Negotiate HTTP/2 via ALPN.
 - ``s3_enable_s3express`` (bool, default ``false``): Enable S3 Express signing
   for S3 Express One Zone buckets.
 - ``disable_tls`` (bool, default ``false``): Bypass TLS when pointing at a
-  plain-HTTP endpoint (e.g. a local MinIO).
+  plain-HTTP endpoint in legacy mode (e.g. a local MinIO).
 - ``aws_access_key_id`` / ``aws_secret_access_key`` (string): Static
   credentials; omit both to use the AWS default credential provider chain
   (environment, EC2 instance profile, etc.).
@@ -47,3 +77,6 @@ therefore miss on every load through this adapter.
 
     # Local MinIO over plain HTTP
     --l2-adapter '{"type": "s3", "s3_endpoint": "minio.local:9000", "s3_region": "us-east-1", "disable_tls": true, "aws_access_key_id": "minio", "aws_secret_access_key": "minio123"}'
+
+    # Path-style S3-compatible service; provision the bucket separately
+    --l2-adapter '{"type": "s3", "s3_endpoint_url": "http://proxy.local:39999/api/v1/s3/", "s3_bucket": "kvbench-demo", "s3_region": "us-east-1", "s3_prefer_http2": false}'
