@@ -101,6 +101,10 @@ P2P is enabled per server by the ``--p2p-advertise-url`` flag. The relevant
    * - ``--p2p-store-timeout SECONDS``
      - Deadline for a store into a peer before it counts as a failure
        (default ``30``). Only used with ``--enable-p2p-write``.
+   * - ``--p2p-load-mode {l1,gdr}``
+     - How a peer's KV reaches this node: ``l1`` (default) copies it into the
+       DRAM L1 at lookup time; ``gdr`` borrows it and reads it straight into
+       GPU memory at retrieve time. See :ref:`mp-p2p-gdr`.
 
 P2P also reuses the coordinator connection flags (``--coordinator-url``,
 ``--coordinator-advertise-ip``, ``--coordinator-heartbeat-interval``); the
@@ -153,6 +157,39 @@ when starting each server. For example:
 
 Replace ``mlx5_0`` with the RDMA device available on the node. Both variables
 must be set for RDMA; when they are omitted, Mooncake Transfer Engine uses TCP.
+
+.. _mp-p2p-gdr:
+
+GPU-direct borrowing (``--p2p-load-mode gdr``)
+----------------------------------------------
+
+By default a peer's chunk is copied into this node's DRAM L1 at lookup, then
+to the GPU at retrieve. With ``--p2p-load-mode gdr`` the node **borrows** it:
+the peer keeps its read lock, and the bytes move once, from the peer's DRAM
+straight into GPU memory, at retrieve.
+
+.. code-block:: bash
+
+   lmcache server <argument-list> \
+       --p2p-advertise-url 10.0.0.1:7600 --coordinator-url http://coord:8080 \
+       --p2p-transfer-engine nixl --p2p-load-mode gdr
+
+Requirements:
+
+* ``--p2p-transfer-engine nixl`` and a GPUDirect-capable fabric.
+* **The same** ``--l1-read-ttl-seconds`` **on every node.** A borrowed chunk
+  is trusted until that TTL (minus a one-second margin).
+* Not combined with ``--enable-p2p-write``.
+
+What to expect:
+
+* Borrowed chunks use no local L1 capacity. The server adds a *shadow L1*
+  (``shadow.dram``) to index them (see :doc:`multi_l1`).
+* The network read happens at retrieve, so retrieve latency depends on the
+  fabric. Measure both modes before choosing.
+* A chunk whose lease lapsed before the retrieve is a cache miss.
+* A peer that leaves while its chunks are borrowed is removed once they are
+  released.
 
 Running a multi-node deployment
 -------------------------------

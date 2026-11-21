@@ -343,7 +343,7 @@ def run_staged_loop(
 
     Raises:
         ValueError: If a None entry is found on retrieve.
-        NotImplementedError: If an object is owned by a peer.
+        RuntimeError: If an object a peer owns cannot be read from its peer.
     """
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
     kv_groups_manager = cache_context.kv_layer_groups_manager

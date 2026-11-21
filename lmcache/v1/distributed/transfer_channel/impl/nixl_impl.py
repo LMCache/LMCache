@@ -191,6 +191,34 @@ class NixlTransferChannelClient(TransferChannelClient):
             finished=True, succeeded_mask=[False] * len(remote_addresses)
         )
 
+    def cancel(self, task_id: int) -> bool:
+        """Try to stop a task; see the base class.
+
+        Releasing an active nixl transfer asks nixl to cancel it, and raises
+        while it cannot be cancelled yet.
+
+        Args:
+            task_id: The ID of the transfer task to stop.
+
+        Returns:
+            True once the transfer is stopped and released; False while it is
+            still running.
+
+        Raises:
+            KeyError: ``task_id`` is unknown or was already reported finished.
+        """
+        with self._lock:
+            if task_id not in self._tasks:
+                raise KeyError(f"Unknown transfer task id: {task_id}")
+            handle = self._tasks[task_id][0]
+        try:
+            self._ctx.agent.release_xfer_handle(handle)
+        except Exception:  # noqa: BLE001 - nixl raises while the transfer runs
+            return False
+        with self._lock:
+            self._tasks.pop(task_id, None)
+        return True
+
     def close(self) -> None:
         """
         Close the transfer channel, releasing any pending tasks and the remote handle.

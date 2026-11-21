@@ -173,7 +173,10 @@ class BorrowingMockL2Adapter(PeerL2AdapterBase):
         self._lookup_efd.notify()
 
     def _process_lookup_result(
-        self, keys: list[ObjectKey], addresses: list[TransferChannelAddress]
+        self,
+        keys: list[ObjectKey],
+        addresses: list[TransferChannelAddress],
+        started_at: float,
     ) -> Bitmap:
         bitmap = Bitmap(len(keys))
         for i, (key, address) in enumerate(zip(keys, addresses, strict=True)):
