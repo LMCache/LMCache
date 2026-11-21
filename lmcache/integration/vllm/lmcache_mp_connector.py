@@ -847,6 +847,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # Requests whose request_finished returned True, sent to the
             # workers with the next step's metadata.
             self._delay_free_req_ids: set[str] = set()
+            # Finished eager requests awaiting all workers' final STORE reports.
+            self._pending_eager_session_ends: set[str] = set()
 
             # Align-mode Mamba keeps one speculative block per draft token at
             # the tail of a request's block list.
@@ -1325,11 +1327,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     def shutdown(self) -> None:
         """
-        Shutdown the connector. This is called when the owning process
-        (worker or scheduler) is shutting down to ensure that all the async
-        operations are completed and the connector is cleaned up properly.
+        Release resources owned by the worker or scheduler as it shuts down.
         On the scheduler side it also logs the lazy-offload counter ledger
         so the drop rate is auditable from the log.
+
+        Scheduler shutdown does not establish that remote STORE handlers have
+        stopped. It therefore does not end pending eager sessions without an
+        aggregated completion report; doing so could recreate the session race.
         """
         if hasattr(self, "worker_adapter"):
             self.worker_adapter.shutdown()
@@ -1727,9 +1731,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         return metadata
 
-    def update_connector_output(self, connector_output: KVConnectorOutput):
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """
-        Update KVConnector state from worker-side connectors output.
+        Update KVConnector state from aggregated worker-side output.
+
+        Successful or aborted eager requests end their sessions only after all workers
+        report finished_sending. Lazy offload retains its own receipt lifecycle.
+        A STORE returning False still reports completion. A missing worker
+        report retains the pending entry and lookup state for the connector's
+        lifetime; this path does not implement timeout or worker-loss recovery.
 
         Args:
             connector_output (KVConnectorOutput): the worker-side
@@ -1740,6 +1750,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._release_boundary_state_blocks(request_id)
 
         if not self.lazy_offload:
+            for request_id in self._pending_eager_session_ends.intersection(
+                connector_output.finished_sending or ()
+            ):
+                self.scheduler_adapter.end_session(request_id)
+                self.scheduler_adapter.cleanup_lookup_result(request_id)
+                self._pending_eager_session_ends.remove(request_id)
             return
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, LMCacheMPWorkerMetadata):
@@ -1762,6 +1778,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         The connector may assumes responsibility for freeing the blocks
         asynchronously by returning True.
+
+        A successful or aborted eager request with pending STORE keeps its LMCache
+        session until the aggregated finished_sending report.
 
         Returns:
             True if the request is being saved/sent asynchronously and blocks
@@ -1788,39 +1807,44 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "num_lmcache_extra_cached_tokens": max(0, num_lmcache - num_vllm),
             }
 
-        # Keep the blocks only while a store may still read them. A preempted
-        # request starts over with a new tracker on its next lookup.
-        tracker = self.request_trackers.get(request.request_id)
-        delay_free = tracker is not None and tracker.store_scheduled
+        request_id = request.request_id
+        tracker = self.request_trackers.get(request_id)
+        # Pinned boundary blocks may still be held by a store from before
+        # preemption even if the resumed request scheduled no more stores.
+        delay_free = not self.lazy_offload and (
+            (tracker is not None and tracker.store_scheduled)
+            or request_id in self._pinned_boundary_state_blocks
+        )
 
         # Clean up request tracker to prevent memory leak
-        self._cleanup_request_tracker(request.request_id)
+        self._cleanup_request_tracker(request_id)
+
+        if delay_free:
+            self._delay_free_req_ids.add(request_id)
+            if request.status in (
+                RequestStatus.FINISHED_STOPPED,
+                RequestStatus.FINISHED_LENGTH_CAPPED,
+                RequestStatus.FINISHED_ABORTED,
+            ):
+                self._pending_eager_session_ends.add(request_id)
+                return True, (return_params or None)
 
         # Drop lookup state for a request aborted before its lookup was
         # consumed (update_state_after_alloc never ran for it). Both the eager
         # and the lazy path need this, so it runs before they diverge.
-        self.scheduler_adapter.cleanup_lookup_result(request.request_id)
+        self.scheduler_adapter.cleanup_lookup_result(request_id)
 
         if self.lazy_offload:
             # Blocks return to the free queue (False) and remain observable;
             # the manager ends the LMCache session after all deferred stores
             # have either completed or been dropped.
-            actions = self._lazy_offload_manager.on_request_finished(request.request_id)
-            for request_id in actions.sessions_to_end:
-                self.scheduler_adapter.end_session(request_id)
+            actions = self._lazy_offload_manager.on_request_finished(request_id)
+            for session_id in actions.sessions_to_end:
+                self.scheduler_adapter.end_session(session_id)
             return False, (return_params or None)
 
-        # A request preempted after an unfull-chunk store may store nothing
-        # after it resumes. Its boundary-state blocks stay pinned until it is
-        # reported in finished_sending, so it still delays.
-        delay_free = (
-            delay_free or request.request_id in self._pinned_boundary_state_blocks
-        )
-
         # Notify LMCache to end the session for this request
-        self.scheduler_adapter.end_session(request.request_id)
-        if delay_free:
-            self._delay_free_req_ids.add(request.request_id)
+        self.scheduler_adapter.end_session(request_id)
         return delay_free, (return_params or None)
 
     def request_finished_all_groups(

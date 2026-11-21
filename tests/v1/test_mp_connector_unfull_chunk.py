@@ -278,7 +278,9 @@ def test_pinned_boundary_state_block_is_released_after_a_preemption():
         connector._add_unfull_chunk_stores(scheduler_output, tracker, MagicMock())
 
     assert not tracker.store_scheduled
+    request.status = RequestStatus.FINISHED_STOPPED
     assert connector.request_finished(request, []) == (True, None)
+    scheduler_adapter.end_session.assert_not_called()
     connector.update_connector_output(
         SimpleNamespace(
             kv_cache_events=None,
@@ -287,6 +289,7 @@ def test_pinned_boundary_state_block_is_released_after_a_preemption():
         )
     )
     pool.free_blocks.assert_called_once_with(["boundary-state-block"])
+    scheduler_adapter.end_session.assert_called_once_with(request.request_id)
 
 
 def _connector(lookup_hit: int) -> tuple[LMCacheMPConnector, MagicMock]:
@@ -302,6 +305,7 @@ def _connector(lookup_hit: int) -> tuple[LMCacheMPConnector, MagicMock]:
     connector._unfull_chunk_grid = GRID
     connector._connector_stats = MagicMock()
     connector.lazy_offload = False
+    connector._pending_eager_session_ends = set()
     return connector, scheduler_adapter
 
 
