@@ -64,7 +64,13 @@ def _decode_legacy_tags(encoded: str) -> dict[str, str]:
     payload = base64.b64decode(
         encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True
     )
-    return msgspec.json.decode(payload, type=dict[str, str])
+    try:
+        return msgspec.json.decode(payload, type=dict[str, str])
+    except Exception as exc:
+        # msgspec's error hierarchy differs between versions (DecodeError is a
+        # ValueError in some, not in others); this function's contract is
+        # ValueError, so normalise rather than leak the dependency's type.
+        raise ValueError("invalid identity tags token") from exc
 
 
 def decode_tags(token: str) -> Mapping[str, str]:
@@ -78,8 +84,16 @@ def decode_tags(token: str) -> Mapping[str, str]:
         payload = base64.b64decode(
             encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True
         )
-        pairs = msgspec.msgpack.decode(payload)
-        decoded = {_tag_name_from_item(name): value for name, value in pairs}
+        try:
+            pairs = msgspec.msgpack.decode(payload)
+        except Exception as exc:
+            raise ValueError("invalid identity tags token") from exc
+        if not isinstance(pairs, list):
+            raise ValueError("invalid identity tags token")
+        try:
+            decoded = {_tag_name_from_item(name): value for name, value in pairs}
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid identity tags token") from exc
     else:
         raise ValueError("unsupported identity tags version")
     if not decoded:
