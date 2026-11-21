@@ -23,10 +23,14 @@ PYBIND11_MODULE(lmcache_mooncake, m) {
       .def(py::init([](lmcache::connector::ConfigDict config, int num_workers,
                        lmcache::connector::L1RegistrationConfig l1_registration,
                        py::object per_op_workers) {
+             auto worker_config =
+                 lmcache::connector::pybind_utils::parse_per_op_workers(
+                     per_op_workers);
+             // SDK setup may block; Python argument parsing requires the GIL.
+             py::gil_scoped_release release;
              return new lmcache::connector::MooncakeConnector(
                  std::move(config), num_workers, l1_registration,
-                 lmcache::connector::pybind_utils::parse_per_op_workers(
-                     per_op_workers));
+                 std::move(worker_config));
            }),
            py::arg("config"), py::arg("num_workers"),
            py::arg("l1_registration") =
