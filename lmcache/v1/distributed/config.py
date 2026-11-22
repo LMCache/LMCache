@@ -738,6 +738,38 @@ class ShadowL1ManagerConfig(L1ManagerConfig):
 
 
 @dataclass
+class L2HealthConfig:
+    """Settings for the monitor that probes L2 adapters' backends.
+
+    The monitor only acts on adapters that implement
+    ``L2AdapterInterface.probe_health``; for all others these settings have no
+    effect.
+    """
+
+    check_interval_s: float = 5.0
+    """Seconds between probe rounds. ``0`` disables the monitor."""
+
+    probe_timeout_s: float = 2.0
+    """Seconds a probe may take before it counts as a failure."""
+
+    failure_threshold: int = 3
+    """Consecutive failed probes before a healthy adapter is marked
+    unavailable."""
+
+    def __post_init__(self) -> None:
+        if self.check_interval_s < 0:
+            raise ValueError(
+                f"check_interval_s must be >= 0, got {self.check_interval_s}"
+            )
+        if self.probe_timeout_s <= 0:
+            raise ValueError(f"probe_timeout_s must be > 0, got {self.probe_timeout_s}")
+        if self.failure_threshold < 1:
+            raise ValueError(
+                f"failure_threshold must be >= 1, got {self.failure_threshold}"
+            )
+
+
+@dataclass
 class StorageManagerConfig:
     """
     The configuration for the distributed storage manager.
