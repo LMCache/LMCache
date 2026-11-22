@@ -11,6 +11,7 @@ name encodes all key fields so it can be reversed on startup.
 from __future__ import annotations
 
 # Standard
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 import asyncio
@@ -33,6 +34,7 @@ import aiofiles.os
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
+from lmcache.v1.common.errors import LMCacheTimeoutError
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -56,6 +58,7 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
+_CLOSE_TIMEOUT_SECONDS = 5.0
 
 # errnos with which a filesystem or device refuses O_DIRECT, at open() or
 # at the transfer itself. Any of these means "use buffered I/O instead",
@@ -314,7 +317,10 @@ class FSL2Adapter(L2AdapterInterface):
         self._lock = threading.Lock()
 
         # Background asyncio event loop
+        self._io_executor = ThreadPoolExecutor(thread_name_prefix="lmcache-fs-io")
+        self._executor_drain: threading.Thread | None = None
         self._loop = asyncio.new_event_loop()
+        self._loop.set_default_executor(self._io_executor)
         self._loop_thread = threading.Thread(target=self._run_event_loop, daemon=True)
         self._loop_thread.start()
 
@@ -483,7 +489,14 @@ class FSL2Adapter(L2AdapterInterface):
         return MemoryTags(MemorySegment.STORAGE, residency)
 
     def close(self) -> None:
-        async def _stop_tasks():
+        """Stop issuing work and wait for workers to release their buffers.
+
+        Raises:
+            LMCacheTimeoutError: I/O still owns buffers. The storage manager must
+                retain the allocator and may retry close after I/O resumes.
+        """
+
+        async def _stop_tasks() -> None:
             tasks = [
                 t
                 for t in asyncio.all_tasks(self._loop)
@@ -494,20 +507,29 @@ class FSL2Adapter(L2AdapterInterface):
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-        if self._loop.is_running():
-            fut = asyncio.run_coroutine_threadsafe(_stop_tasks(), self._loop)
+        if self._executor_drain is None:
             try:
-                fut.result(timeout=5)
-            except Exception:
-                pass
-            self._loop.call_soon_threadsafe(self._loop.stop)
+                fut = asyncio.run_coroutine_threadsafe(_stop_tasks(), self._loop)
+                fut.result(timeout=_CLOSE_TIMEOUT_SECONDS)
+            finally:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+                self._loop_thread.join()
+                self._loop.close()
+                self._store_efd.close()
+                self._lookup_efd.close()
+                self._load_efd.close()
+                # asyncio's executor shutdown waits for its join thread even
+                # after cancellation on Python 3.10 through 3.12.
+                self._executor_drain = threading.Thread(
+                    target=self._io_executor.shutdown,
+                    kwargs={"wait": True, "cancel_futures": True},
+                    daemon=True,
+                )
+                self._executor_drain.start()
 
-        self._loop_thread.join()
-        self._loop.close()
-
-        self._store_efd.close()
-        self._lookup_efd.close()
-        self._load_efd.close()
+        self._executor_drain.join(timeout=_CLOSE_TIMEOUT_SECONDS)
+        if self._executor_drain.is_alive():
+            raise LMCacheTimeoutError("Filesystem workers still own cache buffers")
         logger.info("FSL2Adapter closed")
 
     # ------------------------------------------------------------------
