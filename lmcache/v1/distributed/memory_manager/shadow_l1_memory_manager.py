@@ -43,6 +43,7 @@ class ShadowL1MemoryManager:
                     ref_count=0,
                     shapes=list(layout_desc.shapes),
                     dtypes=list(layout_desc.dtypes),
+                    fused_kv=layout_desc.fused_kv,
                 )
             )
             for _ in range(count)

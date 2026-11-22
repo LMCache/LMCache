@@ -79,6 +79,10 @@ TurboQuant serde can be enabled by setting ``"type": "turboquant"`` in the
 adapter serde config. If ``preset`` is omitted, TurboQuant serde defaults to
 ``turboquant_k8v4``.
 
+TurboQuant accepts separate K/V planes and interleaved K/V heads when the
+registered engine format reports a fused K/V layout. This works with both
+LMCache-driven and engine-driven transfer.
+
 .. code-block:: bash
 
     lmcache server \

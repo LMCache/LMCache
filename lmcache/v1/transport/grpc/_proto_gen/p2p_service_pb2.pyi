@@ -26,12 +26,14 @@ class TensorShape(_message.Message):
     def __init__(self, dims: _Optional[_Iterable[int]] = ...) -> None: ...
 
 class MemoryLayoutDesc(_message.Message):
-    __slots__ = ("shapes", "dtypes")
+    __slots__ = ("shapes", "dtypes", "fused_kv")
     SHAPES_FIELD_NUMBER: _ClassVar[int]
     DTYPES_FIELD_NUMBER: _ClassVar[int]
+    FUSED_KV_FIELD_NUMBER: _ClassVar[int]
     shapes: _containers.RepeatedCompositeFieldContainer[TensorShape]
     dtypes: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, shapes: _Optional[_Iterable[_Union[TensorShape, _Mapping]]] = ..., dtypes: _Optional[_Iterable[str]] = ...) -> None: ...
+    fused_kv: _containers.RepeatedScalarFieldContainer[bool]
+    def __init__(self, shapes: _Optional[_Iterable[_Union[TensorShape, _Mapping]]] = ..., dtypes: _Optional[_Iterable[str]] = ..., fused_kv: _Optional[_Iterable[bool]] = ...) -> None: ...
 
 class TransferChannelAddress(_message.Message):
     __slots__ = ("offset", "size")

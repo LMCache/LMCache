@@ -381,7 +381,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 [2, payload.num_layers, num_physical_slots, payload.hidden_dim_size]
             )
         )
-        layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
+        layout_desc = MemoryLayoutDesc(
+            shapes=[shape], dtypes=[dtype], fused_kv=(payload.fused_kv,)
+        )
         group_layouts: list[MemoryLayoutDesc] | None = None
         if payload.group_layouts:
             group_layouts = []
@@ -409,7 +411,11 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     else torch.Size([2, gl.num_layers, g_slots, gl.hidden_dim_size])
                 )
                 group_layouts.append(
-                    MemoryLayoutDesc(shapes=[g_shape], dtypes=[g_dtype])
+                    MemoryLayoutDesc(
+                        shapes=[g_shape],
+                        dtypes=[g_dtype],
+                        fused_kv=(gl.fused_kv,),
+                    )
                 )
         group_windows: list[int] | None = None
         if payload.group_layouts:
