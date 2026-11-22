@@ -16,6 +16,11 @@ a workload owns its requests and assertions.
   `/metrics` snapshot and a per-check summary in `RESULTS_DIR`, and it runs
   on CPU with stub inputs (`tests/tools/test_long_doc_qa_l2_verify.py`).
 - `restart-recovery.sh`: LMCache server restart and worker re-registration.
+- `fault-tolerance.sh`: vLLM and SGLang fallback when the MP server dies.
+  The wrapper pauses `RETRIEVE` in LMCache-driven mode or `PREPARE_RETRIEVE`
+  in engine-driven mode, before the worker can use the cached KV. The workload
+  kills the server at that point, compares the original request's output to the
+  cold baseline, then sends a fresh request while LMCache remains offline.
 - `http-api.sh`: LMCache HTTP API and CLI coverage with a live engine.
 
 `verification/` contains shared assertions and request helpers that are sourced

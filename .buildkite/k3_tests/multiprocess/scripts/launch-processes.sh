@@ -43,6 +43,7 @@ lmcache_args=(
     --eviction-policy LRU
     --max-workers "$MAX_WORKERS"
     --port "$LMCACHE_PORT"
+    --http-port "${LMCACHE_HTTP_PORT:-8080}"
     --supported-transfer-mode "${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
 )
 
@@ -75,11 +76,16 @@ if [[ "${ENGINE_USE_ALL_DEVICES:-false}" != "true" ]]; then
 fi
 engine_add_lmcache_server_environment server_environment
 
+server_command=(lmcache)
+if [[ -n "${LMCACHE_RETRIEVE_FAULT_DIR:-}" ]]; then
+    server_command=(python3 "${SCRIPT_DIR}/retrieve-fault-server.py" "$LMCACHE_RETRIEVE_FAULT_DIR")
+fi
+
 > "$PID_FILE"
 echo "=== Launching LMCache MP server ==="
 echo "Port: $LMCACHE_PORT"
 env "${server_environment[@]}" \
-    lmcache "${lmcache_args[@]}" \
+    "${server_command[@]}" "${lmcache_args[@]}" \
     > "/tmp/build_${BUILD_ID}_lmcache.log" 2>&1 &
 LMCACHE_PID=$!
 echo "$LMCACHE_PID" >> "$PID_FILE"
