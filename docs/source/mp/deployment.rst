@@ -401,20 +401,20 @@ server offers workers one of two engine-driven transports:
 
        Creating EngineDrivenContextShm (shm_name=lmcache_l1_pool_lmcache_pool, pool_size=...)
 
-   If the SHM segment cannot be attached (for example the worker container
-   lacks ``--ipc host`` or ``/dev/shm`` is too small) the worker falls back
-   at this point and logs:
+   If the worker cannot attach to the SHM segment (for example, it runs in a
+   container with a separate ``/dev/shm`` mount), it registers again and
+   requests inline transfer. The worker logs:
 
    .. code-block:: text
 
-       Failed to initialize SHM context (shm_name=...), falling back to inline tensor transport
+       Cannot attach to SHM pool .... Requesting inline mode
        Creating EngineDrivenContextInline
 
-   ``Creating EngineDrivenContextInline`` without a preceding SHM line means
-   the server advertised no pool (``--shm-name`` unset or lazy allocation
-   on).  Check these lines rather than the ``mode=`` field of the later
-   ``Worker engine-driven context registered (...)`` message, which reflects
-   what the server advertised, not whether SHM attachment succeeded.
+   The worker starts inline transfers only after the server confirms the new
+   registration. A server that still advertises a SHM pool after the retry
+   causes registration to fail. The ``mode=`` field in the
+   ``Worker engine-driven context registered (...)`` message shows the active
+   transport.
 
 The typed inline protocol is not compatible with older workers or servers.
 Upgrade both sides together; payloads from the previous untyped protocol are
