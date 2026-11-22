@@ -16,9 +16,11 @@ merge_pr_base_branch
 # nightly's source revision and install that exact commit instead.
 source "${REPO_ROOT}/.buildkite/k3_harness/resolve-pinned-sglang.sh"
 
-echo "--- :wrench: System tools (rustup, protoc, libnuma1)"
+echo "--- :wrench: System tools (rustup, protoc, cmake, libnuma1)"
 # rustup: sglang-grpc needs Rust 1.85+ (apt's rustc is too old).
 # protoc: sglang-grpc's prost-build shells out to it.
+# cmake: SGLang's Rust extension builds native dependencies such as
+# turbojpeg-sys from source when prebuilt wheels are unavailable.
 # libnuma1: sgl_kernel's sm100 .so dynamically links to libnuma.so.1.
 if ! command -v rustc >/dev/null 2>&1; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
@@ -30,12 +32,14 @@ rustc --version
 
 APT_NEEDED=()
 command -v protoc >/dev/null 2>&1 || APT_NEEDED+=("protobuf-compiler")
+command -v cmake >/dev/null 2>&1 || APT_NEEDED+=("cmake")
 [[ -e /usr/lib/x86_64-linux-gnu/libnuma.so.1 || -e /lib/x86_64-linux-gnu/libnuma.so.1 ]] || APT_NEEDED+=("libnuma1")
 if [[ ${#APT_NEEDED[@]} -gt 0 ]]; then
     apt-get update
     apt-get install -y --no-install-recommends "${APT_NEEDED[@]}"
 fi
 protoc --version
+cmake --version
 
 echo "--- :package: SGLang + LMCache install"
 SGLANG_INDEX_ARGS=()

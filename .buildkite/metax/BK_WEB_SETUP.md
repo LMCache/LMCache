@@ -3,7 +3,7 @@
 **Steps editor**: paste the contents of `buildkite-pipeline.yml`.
 
 **GitHub trigger settings**:
-- Filter: `build.pull_request.labels includes "maca" || build.pull_request.labels includes "full" || build.branch == 'dev'`
+- Filter: `build.pull_request.labels includes "maca" || build.pull_request.labels includes "full"`
 - Rebuild on PR label change: Yes
 - Skip queued / cancel running branch builds: Yes
 
@@ -20,7 +20,6 @@ there's no second job it could run in parallel with.
 |-----------|--------|
 | PR label includes `maca` | upload the MetaX pipeline |
 | PR label includes `full` | upload the MetaX pipeline |
-| branch is `dev` | upload the MetaX pipeline |
 | any docs/asset-only change | path filter skips upload |
 | any change under `.buildkite/` | path filter forces upload |
 
@@ -37,8 +36,8 @@ If you need the MetaX pipeline to run for a docs/asset-only PR, add the
 Label-gating (rather than running on every PR unconditionally, as the
 sglang lane does) matches the majority convention here because this queue's
 capacity is a single shared GPU/host, same constraint as AMD/XPU/MUSA.
-Starting conservative (opt-in via label, or automatic on `dev`) is the
-safer default; revisit as this queue's real usage patterns become clear.
+Starting conservative with opt-in labels is the safer default; revisit as this
+queue's real usage patterns become clear.
 
 ## Required host setup
 
@@ -63,10 +62,10 @@ Buildkite pipeline configuration.
 
 - PR builds run `run-smoke-tests.sh`: a fast, small subset of `tests/v1/`
   covering core compute/platform/native-extension paths.
-- Builds on `dev` (post-merge) run `run-unit-tests.sh`: pytest's default
-  collection (not scoped to `tests/v1/` -- covers the whole `tests/` tree
-  except what's explicitly ignored/deselected), matching the scope of the
-  main CUDA "Unit Tests" step.
+- Manually triggered non-PR builds can run `run-unit-tests.sh`: pytest's
+  default collection (not scoped to `tests/v1/` -- covers the whole `tests/`
+  tree except what's explicitly ignored/deselected), matching the scope of
+  the main CUDA "Unit Tests" step.
 - Both scripts delete the entire workspace (`sudo rm -rf`) after the test run
   completes, matching the main `pipeline.yml`'s own convention, so the next
   build starts from a fresh checkout rather than accumulating build

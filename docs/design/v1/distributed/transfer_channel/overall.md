@@ -122,6 +122,22 @@ peers store its reverse client under). `l1_memory_desc` is an
 `L1MemoryDesc(ptr, size, align_bytes)` (`distributed/internal_api.py`),
 typically obtained from `L1MemoryManager.get_l1_memory_desc()`.
 
+### Extra memory regions
+
+L1 is registered once and is the only memory peers see. To read into other
+local memory (e.g. GPU memory), register it on the same context:
+
+```python
+region = ctx.register_memory_region(ptr, size, device_id)  # GPU index; None = host
+local = ctx.get_transfer_channel_address(addrs, region=region)
+client.submit_read(local, remote, local_region=region)
+ctx.deregister_memory_region(region)
+```
+
+Without `region`, calls use L1. One read targets one region, and a
+region's size must be a multiple of the L1 alignment. Only `nixl` supports
+extra regions, and only for reads: `submit_write` always sends from L1.
+
 ## How a read flows
 
 1. **Register.** Each peer builds a context, which registers its whole L1 buffer

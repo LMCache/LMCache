@@ -6,10 +6,10 @@
 # that would justify the k3_harness setup used for the other vendors.
 # Hardware is provided and self-managed by MetaX.
 #
-# Split into a fast PR smoke test and a full post-merge suite so a PR gets
-# MACA feedback in minutes instead of waiting on the full-suite run (several
-# thousand tests across the whole tests/ tree, not just tests/v1/; takes on
-# the order of an hour on this single GPU). Each step
+# Split into a fast PR smoke test and a manually triggered full suite so a PR
+# gets MACA feedback in minutes instead of waiting on the full-suite run
+# (several thousand tests across the whole tests/ tree, not just tests/v1/;
+# takes on the order of an hour on this single GPU). Each step
 # guards on BUILDKITE_PULL_REQUEST itself and no-ops for the wrong trigger
 # type, matching the existing convention in
 # .buildkite/k3_tests/common_scripts/path-filter.sh rather than introducing
@@ -31,14 +31,14 @@ steps:
       fi
       bash .buildkite/metax/run-smoke-tests.sh
 
-  - label: "MetaX MACA Unit Tests (post-merge)"
+  - label: "MetaX MACA Unit Tests (manual)"
     key: "metax_maca_unit_tests"
     agents:
       queue: "metax-maca"
     timeout_in_minutes: 60
     command: |
       if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
-        echo "PR build (BUILDKITE_PULL_REQUEST=${BUILDKITE_PULL_REQUEST}) -- skipping full suite, smoke tests run instead."
+        echo "PR build (BUILDKITE_PULL_REQUEST=${BUILDKITE_PULL_REQUEST}) -- skipping manual full suite, smoke tests run instead."
         exit 0
       fi
       bash .buildkite/metax/run-unit-tests.sh

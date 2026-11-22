@@ -309,7 +309,7 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
     register-time ``wrap_kv_caches`` loop wraps sequentially.
     """
     # First Party
-    from lmcache.v1.gpu_connector.kv_format.contiguity import (
+    from lmcache.v1.common.kv_format.contiguity import (
         attempt_permute_to_contiguous_view,
     )
 

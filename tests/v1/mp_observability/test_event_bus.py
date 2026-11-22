@@ -535,7 +535,7 @@ class TestBlockAllocationEvent:
         bus.start()
 
         # First Party
-        from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
+        from lmcache.v1.common.custom_types import BlockAllocationRecord
 
         records = [
             BlockAllocationRecord(

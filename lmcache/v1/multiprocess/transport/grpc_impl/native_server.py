@@ -24,11 +24,6 @@ from lmcache.v1.mp_observability.otel_init import (
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.auth import AUTHENTICATION_ERROR
-from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
-    ServiceBinding,
-    get_service_bindings,
-    message_class,
-)
 from lmcache.v1.multiprocess.transport.grpc_impl.native_metrics import (
     native_metrics_source,
 )
@@ -40,6 +35,11 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     GrpcRequestHandler,
 )
 from lmcache.v1.transport.futures import MessagingStream
+from lmcache.v1.transport.grpc.descriptors import (
+    ServiceBinding,
+    get_service_bindings,
+    message_class,
+)
 from lmcache.v1.transport.grpc.endpoint import (
     CLIENT_ID_METADATA_KEY,
     parse_grpc_target,
@@ -135,6 +135,7 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
         max_gpu_workers: int,
         grpc_server_workers: int,
         authentication: APIKeyVerifier | None = None,
+        rpc_client: type | None = None,
     ) -> None:
         try:
             # Third Party
@@ -150,12 +151,13 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
             max_gpu_workers,
             grpc_server_workers,
             authentication,
+            rpc_client,
         )
         self._event_cancel = EVENT_CANCEL
         self._methods: list[_NativeMethod | None] = []
         self._method_ids: dict[str, int] = {}
         paths: list[tuple[str, bool]] = []
-        for binding in get_service_bindings().values():
+        for binding in get_service_bindings(self._rpc_client).values():
             service = binding.descriptor.full_name
             for method in binding.descriptor.methods:
                 self._method_ids[method.full_name] = len(paths)
@@ -448,10 +450,10 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
                     break
             else:
                 front.stream_end(call_id)
-        except Exception as exc:
+        except Exception:
             if front.stream_open(call_id):
                 logger.exception("Error in streaming handler %s", registered.operation)
-                front.fail(call_id, _INTERNAL, str(exc))
+                front.stream_end(call_id)
         finally:
             self._close_stream(call_id)
             stream.close()

@@ -3,7 +3,7 @@
 **Steps editor**: paste the contents of `buildkite-pipeline.yml`.
 
 **GitHub trigger settings**:
-- Filter: `build.pull_request.labels includes "amd" || build.pull_request.labels includes "full" || build.branch == 'dev'`
+- Filter: `build.pull_request.labels includes "amd" || build.pull_request.labels includes "full"`
 - Rebuild on PR label change: Yes
 - Skip queued / cancel running branch builds: Yes
 
@@ -16,7 +16,6 @@ opt-in so AMD capacity is only consumed when requested.
 |-----------|--------|
 | PR label includes `amd` | upload the AMD pipeline |
 | PR label includes `full` | upload the AMD pipeline |
-| branch is `dev` | upload the AMD pipeline |
 | any docs/asset-only change | path filter skips upload |
 | any change under `.buildkite/` | path filter forces upload |
 
