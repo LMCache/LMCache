@@ -67,11 +67,13 @@ class MPServerConfig:
     grpc_server_workers: int = 32
     """Worker threads for gRPC request dispatch. Only used by gRPC transport."""
 
-    grpc_server_mode: Literal["sync", "aio", "native"] = "sync"
+    grpc_server_mode: Literal["auto", "sync", "aio", "native"] = "auto"
     """gRPC server implementation. ``aio`` receives requests on one event loop
     and hands only the handlers to worker threads. ``native`` does the HTTP/2
     and gRPC framing in Rust, off the GIL, and needs the
-    ``pygrpc-native`` package. Only used by gRPC transport."""
+    ``pygrpc-native`` package. ``auto`` picks ``native`` when that package is
+    installed and ``aio`` otherwise. Used by gRPC transport and by the P2P
+    listener."""
 
     api_key_files: list[str] = field(default_factory=list)
     """Key files shared by authentication-enabled HTTP and request entry points."""
@@ -496,13 +498,15 @@ def add_mp_server_args(
     )
     mp_group.add_argument(
         "--grpc-server-mode",
-        choices=("sync", "aio", "native"),
-        default="sync",
+        choices=("auto", "sync", "aio", "native"),
+        default="auto",
         help="gRPC server implementation. aio receives requests on one event "
         "loop and hands only the handlers to worker threads. native does the "
         "HTTP/2 and gRPC framing in Rust, off the GIL, and needs the "
-        "pygrpc-native package. Only used by --transport grpc. "
-        "Default is sync.",
+        "pygrpc-native package. auto picks native when pygrpc-native is "
+        "installed and aio otherwise. Used by --transport grpc and by the "
+        "P2P listener. "
+        "Default is auto.",
     )
     mp_group.add_argument(
         "--hash-algorithm",
