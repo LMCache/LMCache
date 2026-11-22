@@ -290,6 +290,15 @@ With ``LMCACHE_LOG_LEVEL=DEBUG``, each server logs ``Added P2P adapter ... for
 peer <instance-id>`` when it connects to a peer, and ``Removed P2P adapter ...``
 when a peer leaves.
 
+A peer that restarts at the same addresses (for example with a pinned
+``--p2p-rpc-port`` and ``--p2p-advertise-url``) is reconnected at the next
+poll: each server registers with a random per-process incarnation token, and
+its peers rebuild the connection when the token changes. A peer that restarts
+under a new ``--instance-id`` replaces the older registration at the same
+transfer URL. A peer running a release that sends no token and restarted under
+the same ``--instance-id`` is reconnected only when one of its addresses
+changes.
+
 Using the agent skills
 ----------------------
 

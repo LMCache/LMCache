@@ -9,12 +9,14 @@ the coordinator is unreachable.
 # Standard
 import asyncio
 import contextlib
+import json
 
 # Third Party
 import httpx
 
 # First Party
 from lmcache.v1.mp_coordinator.registrar import keep_registered, register
+from lmcache.v1.mp_coordinator.schemas import INCARNATION_METADATA_KEY
 
 _BASE = "http://coord:9300"
 
@@ -157,6 +159,37 @@ def test_keep_registered_reregisters_on_404():
 
     asyncio.run(run())
     assert calls["register"] >= 2  # initial + at least one re-register after 404
+
+
+def test_keep_registered_sends_one_incarnation_per_call():
+    """Re-registrations of one server repeat its incarnation; a new call
+    (a restarted server) draws a different one."""
+    tokens: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            metadata = json.loads(request.content)["metadata"]
+            tokens.append(metadata[INCARNATION_METADATA_KEY])
+            return httpx.Response(
+                200, json={"instance_id": "i1", "re_registered": False}
+            )
+        if request.method == "PUT":
+            return httpx.Response(404, json={"error": "unknown"})
+        return httpx.Response(204)
+
+    async def run():
+        async with _client(handler) as client:
+            await _run_loop_briefly(client, instance_id="i1")
+            first_run = len(tokens)
+            await _run_loop_briefly(client, instance_id="i1")
+            return first_run
+
+    first_run = asyncio.run(run())
+    assert first_run >= 2
+    assert all(tokens[:first_run])
+    assert len(set(tokens[:first_run])) == 1
+    assert len(set(tokens[first_run:])) == 1
+    assert tokens[0] != tokens[-1]
 
 
 def test_keep_registered_keeps_id_on_transient_heartbeat_failure():

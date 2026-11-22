@@ -16,6 +16,7 @@ logged and retried, and it never takes the MP server down.
 from collections.abc import Callable
 import asyncio
 import contextlib
+import uuid
 
 # Third Party
 from pydantic import ValidationError
@@ -23,7 +24,11 @@ import httpx
 
 # First Party
 from lmcache.v1.common.logging import init_logger
-from lmcache.v1.mp_coordinator.schemas import RegisterRequest, RegisterResponse
+from lmcache.v1.mp_coordinator.schemas import (
+    INCARNATION_METADATA_KEY,
+    RegisterRequest,
+    RegisterResponse,
+)
 from lmcache.v1.rpc_utils import get_ip
 
 logger = init_logger(__name__)
@@ -42,6 +47,7 @@ async def register(
     p2p_advertised_url: str = "",
     mq_port: int = 0,
     chunk_size: int | None = None,
+    incarnation: str = "",
 ) -> str:
     """Register an MP server with the coordinator and return its id.
 
@@ -56,6 +62,9 @@ async def register(
         mq_port: Port of this server's P2P gRPC listener for P2P lookup
             RPCs. 0 when P2P is disabled.
         chunk_size: This MP server's configured chunk size.
+        incarnation: Token of this server process, sent as registration
+            metadata; empty sends none.
+
     Returns:
         The registered instance id (coordinator-assigned if ``instance_id`` was
         empty).
@@ -70,6 +79,7 @@ async def register(
         p2p_advertised_url=p2p_advertised_url,
         mq_port=mq_port,
         chunk_size=chunk_size,
+        metadata={INCARNATION_METADATA_KEY: incarnation} if incarnation else {},
     )
     response = await client.post(
         f"{base_url}/instances", json=body.model_dump(mode="json")
@@ -97,7 +107,9 @@ async def keep_registered(
     shutdown. Resilient: transient failures (network blips, 5xx, malformed or
     version-skewed responses) are logged and retried on the next tick while the
     current identity is kept, so a down coordinator never stops the MP server
-    and never spawns a duplicate registration. The identity is rebuilt only on
+    and never spawns a duplicate registration. Every registration carries one
+    random incarnation token drawn per call, so peers can tell a restarted
+    server from a re-registered one. The identity is rebuilt only on
     an explicit ``404`` (the coordinator forgot us) or after a failed initial
     registration.
 
@@ -122,6 +134,8 @@ async def keep_registered(
     """
     base_url = coordinator_url.rstrip("/")
     ip = advertise_ip or get_ip()
+    # Kept across re-registrations: only a new process draws a new one.
+    incarnation = uuid.uuid4().hex
     assigned_id: str | None = None
     try:
         while True:
@@ -135,6 +149,7 @@ async def keep_registered(
                         instance_id=instance_id,
                         p2p_advertised_url=p2p_advertised_url,
                         mq_port=mq_port,
+                        incarnation=incarnation,
                         chunk_size=chunk_size,
                     )
                     logger.info("Registered with coordinator as %s", assigned_id)
