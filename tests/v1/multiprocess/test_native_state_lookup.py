@@ -18,6 +18,8 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap, EngineKVFormat
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
@@ -31,12 +33,10 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import (
     LayoutDescRegistry,
     MPCacheServerContext,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import all_null_chunk_masks
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.session import SessionManager
@@ -233,7 +233,13 @@ def _lookup(
         for gid, group in enumerate(manager.object_groups)
     }
     registry.register(
-        "native-state", world_size, layouts[0], manager.get_attn_desc(), layouts
+        "native-state",
+        world_size,
+        layouts[0],
+        chunk_size=CHUNK,
+        hash_algorithm="blake3",
+        attn_desc=manager.get_attn_desc(),
+        group_layout_descs=layouts,
     )
     storage = _PresenceStorage(present)
     ctx = SimpleNamespace(

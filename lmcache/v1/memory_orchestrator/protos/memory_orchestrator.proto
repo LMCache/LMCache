@@ -10,7 +10,8 @@ package lmcache.memory_orchestrator.v1;
 import "p2p_service.proto";
 
 service MemoryOrchestrator {
-  // Committed objects are immutable here; eviction and extent reuse are follow-ups.
+  // Committed objects are immutable until deleted; deleting one never reuses
+  // its extent. Eviction and extent reuse are follow-ups.
   rpc DescribeRegion (Envelope)              returns (RegionContract);
   rpc RegisterClient (RegisterClientRequest) returns (RegisterClientReply);
   rpc ReserveWrite   (ReserveWriteRequest)   returns (ReserveWriteReply);
@@ -20,6 +21,8 @@ service MemoryOrchestrator {
   rpc FinishRead     (TokenBatch)            returns (ResultBatch);
   rpc Usage          (Envelope)              returns (RegionUsage);
   rpc CloseClient    (Envelope)              returns (CloseClientReply);
+  rpc DeleteObjects   (DeleteObjectsRequest) returns (DeleteObjectsReply);
+  rpc DeletePublished (Envelope)             returns (DeletePublishedReply);
 }
 
 message Envelope {
@@ -142,4 +145,25 @@ message RegionUsage {
 message CloseClientReply {
   uint32 aborted_writes = 1;
   uint32 released_leases = 2;
+}
+
+// Committed objects to make unreadable for every client. Their extents stay
+// consumed, and leases already issued on them remain releasable.
+message DeleteObjectsRequest {
+  Envelope env = 1;
+  repeated lmcache.mp.ObjectKey keys = 2;
+}
+
+message DeleteObjectsReply {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    DELETED = 1;
+    MISS = 2;
+    BUSY_WRITING = 3;  // a WRITING object is left to its writer
+  }
+  repeated Status results = 1;  // key order
+}
+
+message DeletePublishedReply {
+  uint32 deleted = 1;  // VALID objects written under this client_id, now deleted
 }

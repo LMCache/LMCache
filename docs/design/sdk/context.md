@@ -66,17 +66,22 @@ model name is suffixed `##query`):
    `q_context_meta` / `q_ring_layout` for query) and qstore's `object_layouts`: per object
    group, its kind, window, and one chunk's tensor shapes and dtypes.
 3. Check the layout is dense: one kernel group, one full-attention object group without a
-   window, uncompressed and chunk-aligned; KV at `world_size == 1`.
-4. `GET_Q_RING` → per rank, the ring's instance ID, IPC handles, used blocks and `num_alloc`;
-   map the handles (`RingMapping`).
+   window, uncompressed and chunk-aligned; `world_size == 1` (TP 1).
+4. `GET_Q_RING` → the ring's instance ID, IPC handles, used blocks and `num_alloc`; map the
+   handles (`RingMapping`).
 
 ## Flows
 
 **retrieve**:
-- Phase 0: `LOOKUP` + poll `QUERY_PREFETCH_STATUS` until non-`None`; if 0 → `None`. 
-- Phase 1, holding the ring lock: read the ring state; split the range into piece size,
-`SDK_RETRIEVE` (the server waits on the SDK's event, copies the objects into the given pieces,
-returns its completion event), then gather each object from its pieces into CPU rows.
+- Phase 0: warm-up `LOOKUP` (pins the chunks); if 0 → `None`.
+- Phase 1: (1) re-`LOOKUP` for fresh read locks, (2) per batch, reserve free ring pieces for
+  as many whole chunks as are free (`RingMapping.reserve`; concurrent transfers of the process
+  use disjoint pieces, so they run at the same time), (3) per batch
+  `SDK_RETRIEVE` (copies the objects into the given QRingBuffer pieces), then copy each object
+  into staging buffer, then the contiguous CPU tensors. The extra copy is done to avoid
+  per-object `.to("cpu")` then `torch.cat` which slows down Ring --> SDK transfer.
+- Phase 2: free the warm-up's read locks if it was still within the L1 read TTL when the
+  re-lookup was issued.
 
 **store** — validate `len(tokens) == kv.shape[2]`, truncate to whole chunks; per batch,
 encode each chunk's object into free pieces, then `SDK_STORE` (the server reserves the objects
@@ -117,7 +122,7 @@ end=<chunk-aligned>, request_id, cache_salt)`. The server resolves it to per-chu
 ## Constraints & known gaps
 
 - **Dense models only**: a single full-attention kernel group, no sliding window.
-- **KV at `world_size == 1`**; query tensors at any TP (read-only).
+- **TP 1 only** (`world_size == 1`). Query tensors are read-only.
 - **The ring bounds a batch**: a transfer needs free blocks for at least one chunk's objects
   (`lmcache.q.ring_blocks`).
 - **Model must be pre-registered** by a vLLM instance with query transfer enabled, and the

@@ -43,8 +43,8 @@ def make_config(extra_config: dict[str, Any], module_path: str | None = None) ->
 @pytest.mark.parametrize(
     "extra_config, expected",
     [
-        ({}, "LEGACY_IPC"),
-        ({"lmcache.mp.isolated_ipc": True}, "LEGACY_IPC"),
+        ({}, "EXPORTS_FD"),
+        ({"lmcache.mp.isolated_ipc": True}, "EXPORTS_FABRIC"),
         ({"lmcache.mp.use_vmm_api": False}, "LEGACY_IPC"),
         ({"lmcache.mp.use_vmm_api": True}, "EXPORTS_FD"),
         (
@@ -93,7 +93,7 @@ def test_vllm_resolves_access_from_module_path(
     # Third Party
     from vllm.config import KVTransferConfig
 
-    extra_config = {"lmcache.mp.use_vmm_api": True}
+    extra_config: dict[str, Any] = {}
     if wrap_in_multi_connector:
         config = KVTransferConfig(
             kv_connector="MultiConnector",

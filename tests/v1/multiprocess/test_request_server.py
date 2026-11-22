@@ -17,8 +17,8 @@ from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import EngineModule
 from lmcache.v1.multiprocess.request_handler import request_handler
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
+from lmcache.v1.transport.request_client import RequestClient
 
 # Test helpers
 from tests.v1.multiprocess.transport_test_utils import (

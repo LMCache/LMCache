@@ -60,7 +60,7 @@ candidate under the reference's name (vLLM: `--served-model-name`).
 - **Reasoning models:** pass `--template-kwargs reasoning_effort=low` (or the model's
   equivalent), and leave `--max-output-tokens` (default 2048) room for the reasoning.
 - **Blend server settings** are not visible to the bench, so record the ones that change
-  what is measured: `--enable-dedup-content`, `--enable-blend-reorder`,
+  what is measured: `--enable-dedup-content-fingerprint`, `--enable-blend-reorder`,
   `--enable-segmented-prefix`, and the chunk size. Ask the user if you do not know them.
 
 ## 2. Preflight (before spending GPU time)
@@ -257,7 +257,7 @@ Expected reused tokens {reuse.expected_tokens}; observed {reuse.observed_tokens}
 |---|---|---|---|---|
 {one row per arm}
 
-- Blend server flags: {chunk size, --enable-dedup-content, --enable-blend-reorder, --enable-segmented-prefix \| n/a \| unknown}
+- Blend server flags: {chunk size, --enable-dedup-content-fingerprint, --enable-blend-reorder, --enable-segmented-prefix \| n/a \| unknown}
 - Evidence sources: dataset {n}, answer_string {n}, none {n}
 - Padding: {padding.filler}, {padding.share} of measured prompt tokens
 - plan_fingerprint `{plan_fingerprint}`

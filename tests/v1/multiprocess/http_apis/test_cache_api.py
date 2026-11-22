@@ -19,9 +19,8 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.common.attn_window import DEFAULT_ATTN_WINDOW_DESC, AttnWindowDesc
 from lmcache.v1.distributed.api import (
-    DEFAULT_ATTN_WINDOW_DESC,
-    AttnWindowDesc,
     KeyEntry,
     KeyListPage,
     ObjectKey,
@@ -461,6 +460,9 @@ class _FakeLayoutRegistry:
         if self.layout is None:
             raise ValueError(f"no shard replication descriptor for {model_name!r}")
         return ShardReplicationDesc()
+
+    def get_token_hasher(self, model_name: str, world_size: int) -> "_FakeTokenHasher":
+        return _FakeTokenHasher()
 
 
 class _PrefetchHandle:

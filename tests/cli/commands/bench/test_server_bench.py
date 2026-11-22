@@ -44,9 +44,9 @@ from lmcache.v1.kv_layer_groups import (
     KVLayerGroupInfo,
     parse_kvcache_shape_spec,
 )
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 from lmcache.v1.transport.futures import MessagingFuture
+from lmcache.v1.transport.request_client import RequestClient
 from lmcache.v1.transport.zmq.wire import decode_operation
 
 

@@ -18,6 +18,10 @@ blend/
 ├── retrieve.py          RetrieveMixin — CB_RETRIEVE_PRE_COMPUTED: planning
 │                        section (invariant specs + flat int64 work tables)
 │                        first, then the handler
+├── fingerprint_eviction.py
+│                        FingerprintEvictionMixin — storage key events from
+│                        the event bus; pure: FingerprintEvictionTracker
+│                        (which chunks lost a key for good)
 ├── matcher.py           pure: BlendTokenRangeMatcher (fingerprint index)
 ├── reorder.py           pure: PromptStore + plan() — the CB_REORDER_PLAN
 │                        planner (opt-in)
@@ -63,7 +67,8 @@ covers, `request_id` (session tracking), and `worker_id` (TP rank).
   the standard LOOKUP would report) and `non_prefix_segments` (fingerprint
   matches beyond the prefix, `cur_st` order, each
   `(old_st, old_ed, cur_st, cur_ed, hash)`) — already sparse-prefetched,
-  so the retrieve set equals this set.
+  so the retrieve set equals this set. A chunk repeated in the prompt yields
+  one segment per non-overlapping occurrence, so segments may share a `hash`.
 - Side effects: sparse read locks taken and stashed on the session for the
   retrieve.
 
@@ -90,6 +95,13 @@ success)`**
   (`submit_callback_to_stream`, kind `"cb_fingerprints"`) — stream-ordered
   after the L1 commit, so a fingerprint becomes matchable only once its
   chunk is readable. Fingerprint failures are logged, never raised.
+- Which chunks count as committed: those worker 0's store committed in
+  every blend read group whose objects worker 0 writes alone
+  (`_per_rank_read_groups`: one kv reader per object). An object shared by
+  several TP ranks (MLA latents) is written by whichever of them reserves
+  it first, so worker 0's result cannot vouch for it; the lookup still
+  checks it is loaded. A chunk the store skipped (cached under another
+  prefix, `--enable-dedup-content-kv`) never counts.
 - Side effect (reorder enabled, worker 0, a store that committed KV): the
   request's prompt is recorded in the `PromptStore` (below).
 
@@ -117,14 +129,81 @@ The two legs trim opposite ways:
 | | Prefix leg (`PREFIX` / `SEGMENTED_PREFIX`) | Non-prefix leg (`SPARSE`) |
 |---|---|---|
 | Keys | contiguous chunk-hash chain from 0, over `prefix_gids` (attention + recurrent) | matched chunks anywhere, over blend `gids` (attention + aux) |
-| Result | leading-ones count via the window-aware fold — truncate at the first gap; `SEGMENTED_PREFIX` additionally retains fully-loaded post-gap chunks (off for recurrent registrations) | keep every chunk whose **entire (read-group × rank) key set** loaded; no contiguity |
+| Result | leading-ones count via the window-aware fold — truncate at the first gap; `SEGMENTED_PREFIX` additionally retains fully-loaded post-gap chunks (off when any prefix group is windowed: recurrent state or sliding-window attention) | keep every chunk whose **entire (read-group × rank) key set** loaded; no contiguity |
 | Why | vLLM consumes the prefix as one `num_computed_tokens`; recurrent state needs unbroken history | chunks relocate independently; the forward recomputes the holes |
 
+**Read sets by group kind** (`read_set.py`). Each object group of a
+registration has a kind: `attention`, `recurrent`, or `aux`. The read sets are
+derived from the kinds alone:
+
+| Kind | Count allowed | Prefix leg | Non-prefix leg |
+|---|---|---|---|
+| `attention` | one or more | read | read |
+| `recurrent` | any | read | never |
+| `aux` | at most one | never | read |
+
 A chunk missing **any** rank's or **any** read group's key is dropped whole
-and takes a stale strike (evicted from the matcher at the strike threshold);
+and takes a stale strike (evicted from the matcher at the strike threshold;
+see [Fingerprint eviction](#fingerprint-eviction));
 the rest of the request proceeds. The found set's object keys are stashed in
 `Session.extras` for the retrieve; whatever no retrieve consumes is released
 by the session-destroy listener.
+
+## Fingerprint eviction
+
+A fingerprint whose chunk can no longer be loaded whole only produces
+misses, so it has to leave the matcher. Two paths remove it:
+
+- **Stale strikes** (`_sparse_classify`), always on. A lookup that finds a
+  matched chunk absent from storage strikes it; the second strike removes
+  the fingerprint. It costs two wasted sparse prefetches per chunk.
+- **Storage key events** (`fingerprint_eviction.py`), when the event bus is
+  enabled. The module subscribes to `L1_WRITE_FINISHED`,
+  `L1_WRITE_FINISHED_AND_READ_RESERVED`, `L1_KEYS_EVICTED`, `L2_KEYS_STORED`
+  and `L2_KEYS_DELETED`, and removes a fingerprint as soon as one key of its
+  chunk has no copy left, before any lookup misses on it.
+
+Removing a fingerprint clears its table slot only when the slot still maps
+to that chunk's hash. A slot holds one chunk, so when the same text is
+stored behind several prefixes (or two chunks collide), evicting a copy that
+does not hold the slot leaves the holder matchable. A shadowed chunk is not
+restored when the slot holder is removed.
+
+`FingerprintEvictionTracker` decides when a key has no copy left. It keeps
+the L1 copies it was told about (key → L1 tags) and the keys L2 deleted
+while L1 still held them:
+
+| L2 adapters | `L1_KEYS_EVICTED` of a key's last L1 copy | `L2_KEYS_DELETED` |
+|---|---|---|
+| none | chunk is gone | — |
+| one | gone only if L2 deleted the key earlier | gone if L1 does not hold the key; otherwise remembered until L1 evicts it |
+| several | kept: no L2 delete is ever remembered | ignored: the event does not name the adapter, and another may still hold the key |
+
+One key is enough: every key of a chunk carries the same `chunk_hash`, which
+is the matcher's key, so the tracker needs no knowledge of ranks or object
+groups. Example with one L2 adapter and a chunk of two keys `k0`, `k1`:
+
+```text
+L1_WRITE_FINISHED [k0, k1]   L1 copies: k0, k1
+L2_KEYS_STORED    [k0, k1]
+L1_KEYS_EVICTED   [k1]       L2 still serves k1        -> keep
+L2_KEYS_DELETED   [k0]       L1 still holds k0         -> remember k0
+L1_KEYS_EVICTED   [k0]       k0 has no copy left       -> remove fingerprint
+```
+
+The events are a best-effort signal, so every gap falls back to the stale
+strikes:
+
+- The handlers run on the bus's drain thread, after the storage operation.
+  A lookup in between still matches the chunk and takes one ordinary miss.
+- A fingerprint whose registration is still queued (`_pending_fp_hashes`) is
+  spared, as in the strike path: its store has just written the chunk, and
+  the event may describe the copy that store replaced.
+- When the bus drops events the tracker is cleared. A key whose L1 commit
+  was forgotten can then be reported gone while L1 still holds it; the
+  chunk loses one reuse and its next store registers the fingerprint again.
+- Loss the server never sees (backend expiry, another node deleting from a
+  shared L2, adapters that publish no delete) produces no event.
 
 ## Retrieve (plan-then-execute, all-or-nothing)
 
@@ -137,6 +216,11 @@ mappings; work encoded as numpy int64 tables) enqueued in a single
 `cuda_ops` call. There is no fallback path: when the plan cannot be built
 the retrieve fails cleanly and the client degrades that request to full
 recompute.
+
+A chunk matched at several positions is staged from host once per step:
+the planner groups its copies, and later copies in a step are
+device-to-device staging rows (`host_offset = -1`) from the first copy's
+slot, run before re-RoPE rewrites it.
 
 The scatter is **all-or-nothing** — never partial. Zero-work returns are
 reported with a fixed reason code on `CB_RETRIEVE_NOOP`:
@@ -205,7 +289,8 @@ Sparse-prefetch read locks follow one rule: exactly one owner releases each
 reservation. The retrieve releases applied ranges stream-ordered after the
 scatter, releases lookup-stash orphans it will never read, and leaves
 beyond-slot-bound ranges locked for the follow-up call; anything never
-consumed by a retrieve is released on session destruction.
+consumed by a retrieve is released on session destruction. Segments sharing
+a `hash` share one lock per key, released once all of them are applied.
 
 ## Observability
 
