@@ -85,11 +85,18 @@ def _split_staging(first: torch.Tensor, rows: int) -> tuple[torch.Tensor, torch.
     return head, tokens
 
 
-def _kept_program(src: torch.Tensor, dst: torch.Tensor) -> Callable[..., object]:
-    """Run the swap from ``src`` into ``dst`` once and return its program's run.
+def _kept_program(
+    src: torch.Tensor, dst: torch.Tensor
+) -> tuple[Callable[..., object], torch.dtype]:
+    """Run the swap from ``src`` into ``dst`` once and keep its program.
 
-    The swap runs inside ``torch.rbln.capture_programs()``, and the built
-    program's ``runtime.run`` is returned.
+    The swap runs inside ``torch.rbln.capture_programs()``. A torch-rbln that
+    takes KV other than bf16 builds the swap on the same bytes read as bf16,
+    and the program's run rejects arguments of any other dtype, so callers
+    view the staging as the program's dtype.
+
+    Returns:
+        The built program's ``runtime.run`` and the dtype it moves.
 
     Raises:
         RuntimeError: If the swap does not build exactly one program. torch-rbln
@@ -107,7 +114,8 @@ def _kept_program(src: torch.Tensor, dst: torch.Tensor) -> Callable[..., object]
         )
     if len(built) > 1:
         raise RuntimeError(f"RBLN HND swap built {len(built)} programs; expected one")
-    return built[0].runtime.run
+    (program,) = built
+    return program.runtime.run, program.input_specs[0].dtype
 
 
 def _chunk_pairs(
@@ -161,19 +169,30 @@ class HndTransfer:
         self._staging = {store: _split_staging(first, rows) for store in (True, False)}
         store_head, store_tokens = self._staging[True]
         restore_head, restore_tokens = self._staging[False]
-        store_run = _kept_program(store_head, store_tokens)
+        store_run, store_dtype = _kept_program(store_head, store_tokens)
         # With NH == BS both swaps have one shape and torch-rbln serves the
         # restore swap from the store's program, so the two directions share
         # that program and must share its lock.
         shared = num_heads == block_size
         if shared:
-            restore_run = store_run
-            restore_run(restore_tokens, out=[restore_head])
+            restore_run, restore_dtype = store_run, store_dtype
+            restore_run(
+                restore_tokens.view(restore_dtype),
+                out=[restore_head.view(restore_dtype)],
+            )
         else:
-            restore_run = _kept_program(restore_tokens, restore_head)
+            restore_run, restore_dtype = _kept_program(restore_tokens, restore_head)
         self._swaps = {
-            True: functools.partial(store_run, store_head, out=[store_tokens]),
-            False: functools.partial(restore_run, restore_tokens, out=[restore_head]),
+            True: functools.partial(
+                store_run,
+                store_head.view(store_dtype),
+                out=[store_tokens.view(store_dtype)],
+            ),
+            False: functools.partial(
+                restore_run,
+                restore_tokens.view(restore_dtype),
+                out=[restore_head.view(restore_dtype)],
+            ),
         }
         store_lock = threading.Lock()
         self._locks = {

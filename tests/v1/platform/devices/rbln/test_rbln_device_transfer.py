@@ -488,17 +488,18 @@ def test_prepared_geometries_are_kept_on_device() -> None:
 
 @pytest.mark.parametrize(
     "dtype,head_size",
-    [(torch.float16, HEAD_SIZE), (DTYPE, 32)],
-    ids=["fp16", "head-size-32"],
+    [(torch.uint8, HEAD_SIZE), (DTYPE, 32)],
+    ids=["uint8-head-size-64", "head-size-32"],
 )
 def test_kv_without_a_swap_program_fails_at_warm_up(
     dtype: torch.dtype, head_size: int
 ) -> None:
     """KV torch-rbln builds no swap program for fails before serving.
 
-    HND needs bf16 KV with a head size a multiple of 64. For other KV the
-    swap builds no program, so warm-up raises, and transfers of that KV keep
-    failing before any copy instead of building on a commit worker.
+    No torch-rbln builds the swap for a head size under 128 bytes, and
+    releases that build it only for bf16 build none for uint8 KV at all. For
+    such KV warm-up raises, and transfers of it keep failing before any copy
+    instead of building on a commit worker.
     """
     shape = (NUM_BLOCKS, 2, NUM_HEADS, 1, BLOCK_SIZE, head_size)
     layers = [
