@@ -67,6 +67,7 @@ class LazyOffloadRequestRegistry:
     def __init__(self) -> None:
         """Create an empty registry, holding no request id."""
         self._slots: dict[str, RequestSlot] = {}
+        self._in_flight_ids: set[str] | None = None
 
     ####
     # Update internal states
@@ -134,6 +135,8 @@ class LazyOffloadRequestRegistry:
                 f"request {request_id!r} already has an in-flight store batch"
             )
         slot.in_flight = SubmittedStoreBatch(tuple(block_ids))
+        if self._in_flight_ids is not None:
+            self._in_flight_ids.add(request_id)
 
     def complete_batch(self, request_id: str) -> SubmittedStoreBatch:
         """Clear the in-flight batch and return it.
@@ -153,6 +156,8 @@ class LazyOffloadRequestRegistry:
             raise KeyError(request_id)
         batch = slot.in_flight
         slot.in_flight = None
+        if self._in_flight_ids is not None:
+            self._in_flight_ids.remove(request_id)
         return batch
 
     def session_ended(self, request_id: str) -> None:
@@ -233,17 +238,19 @@ class LazyOffloadRequestRegistry:
             slot is not None and slot.in_flight is not None and slot.in_flight.orphaned
         )
 
+    def index_in_flight_requests(self) -> None:
+        """Track blocked writers incrementally once the indexed policy binds."""
+        self._in_flight_ids = self.in_flight_request_ids()
+
     def in_flight_request_ids(self) -> set[str]:
         """The ids that must stay buffered because a batch is open.
 
         Returns:
             One drain signal's worth of blocked ids, as a new set.
         """
-        return {
-            request_id
-            for request_id, slot in self._slots.items()
-            if slot.in_flight is not None
-        }
+        if self._in_flight_ids is not None:
+            return self._in_flight_ids.copy()
+        return {rid for rid, slot in self._slots.items() if slot.in_flight is not None}
 
     def can_end_session(self, request_id: str) -> bool:
         """Whether manager-owned state permits session teardown.

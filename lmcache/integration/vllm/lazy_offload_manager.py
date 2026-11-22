@@ -230,6 +230,8 @@ class LazyOffloadManager:
             )
         self._gpu_block_pool = gpu_block_pool
         self._policy = create_offload_policy(self._configs, gpu_block_pool)
+        if self._policy.uses_prefix_index:
+            self._requests.index_in_flight_requests()
 
     def add_store_candidate(self, metadata: LMCacheMPRequestMetadata) -> None:
         """Buffer one STORE metadata produced by the request tracker.
@@ -454,7 +456,8 @@ class LazyOffloadManager:
                 has a store batch in flight, which would make the worker's
                 receipts ambiguous.
         """
-        drain = self._require_policy().drain(
+        policy = self._require_policy()
+        drain = policy.drain(
             DrainSignals(
                 new_blocks_allocated=_new_blocks(scheduler_output),
                 # A scratch group (span 0) holds one block per request for
@@ -464,7 +467,11 @@ class LazyOffloadManager:
                     for tokens_per_block in self._group_tokens_per_block
                     if tokens_per_block > 0
                 ),
-                finished_request_ids=self._requests.finished_request_ids(),
+                finished_request_ids=(
+                    set()
+                    if policy.uses_prefix_index
+                    else self._requests.finished_request_ids()
+                ),
                 blocked_request_ids=self._requests.in_flight_request_ids(),
             )
         )

@@ -114,6 +114,11 @@ class OffloadPolicy(ABC):
     connector side effect and calls these from the scheduler thread only.
     """
 
+    @property
+    def uses_prefix_index(self) -> bool:
+        """Whether drain can discover its candidates from block events."""
+        return False
+
     @abstractmethod
     def add(
         self,
