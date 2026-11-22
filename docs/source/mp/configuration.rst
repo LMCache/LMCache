@@ -1078,6 +1078,14 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
      - Single-server deployment: port of the LMCache MP server. Must
        match the server's ``--port``. Ignored when
        ``lmcache.mp.server_urls`` is set.
+   * - ``lmcache.mp.api_key_file``
+     - *(unset)*
+     - File holding the API key this engine sends to the LMCache server. Use it
+       when the server requires a key and the engine should not hold the fleet
+       key: the inbound key set this server accepts is a different trust domain
+       from the key a caller presents. The file must hold exactly one non-empty
+       line. When unset, the request clients keep their ``LMCACHE_API_KEY`` /
+       ``LMCACHE_API_KEY_FILE`` fallback.
    * - ``lmcache.mp.mq_timeout``
      - ``300.0``
      - Timeout (seconds) for blocking message-queue requests, including
