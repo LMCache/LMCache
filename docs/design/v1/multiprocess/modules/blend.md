@@ -95,6 +95,13 @@ success)`**
   (`submit_callback_to_stream`, kind `"cb_fingerprints"`) — stream-ordered
   after the L1 commit, so a fingerprint becomes matchable only once its
   chunk is readable. Fingerprint failures are logged, never raised.
+- Which chunks count as committed: those worker 0's store committed in
+  every blend read group whose objects worker 0 writes alone
+  (`_per_rank_read_groups`: one kv reader per object). An object shared by
+  several TP ranks (MLA latents) is written by whichever of them reserves
+  it first, so worker 0's result cannot vouch for it; the lookup still
+  checks it is loaded. A chunk the store skipped (cached under another
+  prefix, `--enable-dedup-content-kv`) never counts.
 - Side effect (reorder enabled, worker 0, a store that committed KV): the
   request's prompt is recorded in the `PromptStore` (below).
 
