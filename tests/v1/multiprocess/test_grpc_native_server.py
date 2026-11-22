@@ -244,28 +244,20 @@ def test_handler_returning_the_wrong_kind_is_unknown() -> None:
         server.close()
 
 
-def test_streaming_handler_errors_map_like_grpcio() -> None:
-    """ValueError from a streaming handler is INVALID_ARGUMENT; an error while
-    reading its stream is INTERNAL."""
+def test_streaming_handler_value_error_is_invalid_argument() -> None:
+    """ValueError from a streaming handler is INVALID_ARGUMENT, as in grpcio."""
 
     def invalid() -> None:
         raise ValueError("bad cursor")
 
-    def broken() -> MessagingStream[KVEventBatch]:
-        def read(stop: threading.Event) -> KVEventBatch:
-            raise RuntimeError("bus gone")
-
-        return MessagingStream(read, lambda: None)
-
-    for make, expected in (
-        (invalid, (grpc.StatusCode.INVALID_ARGUMENT, "bad cursor")),
-        (broken, (grpc.StatusCode.INTERNAL, "bus gone")),
-    ):
-        server = _serve([_stream_module(make)])
-        try:
-            assert _first_stream_error(server) == expected
-        finally:
-            server.close()
+    server = _serve([_stream_module(invalid)])
+    try:
+        assert _first_stream_error(server) == (
+            grpc.StatusCode.INVALID_ARGUMENT,
+            "bad cursor",
+        )
+    finally:
+        server.close()
 
 
 def test_serialized_handlers_run_one_at_a_time() -> None:

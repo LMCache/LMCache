@@ -1,5 +1,16 @@
-Kubernetes Operator
-===================
+Kubernetes Operator (Deprecated)
+================================
+
+.. warning::
+
+   The LMCache Kubernetes operator (``operator/``) is **deprecated and no
+   longer maintained**. It is expected to be removed from this repository in
+   **2027Q1**. Existing release artifacts (e.g. ``operator-v*``
+   ``install.yaml``) will not receive fixes or updates.
+
+   Do not build new deployments on it. If you keep using an existing release,
+   pin to that version at your own risk. For new Kubernetes deployments,
+   follow the manual DaemonSet setup in the :doc:`deployment` guide.
 
 The LMCache Kubernetes operator automates the deployment and lifecycle
 management of LMCache multiprocess servers.  Instead of hand-writing
