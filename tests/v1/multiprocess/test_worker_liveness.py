@@ -23,6 +23,7 @@ import zmq
 # First Party
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.periodic_thread import PeriodicThreadRegistry
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     MemoryLayoutDesc,
@@ -49,7 +50,6 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
-from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 

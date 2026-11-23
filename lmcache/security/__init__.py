@@ -1,2 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared authentication primitives for LMCache services."""
+"""Starlette API-key middleware for LMCache HTTP services.
+
+The transport-neutral primitives live in :mod:`lmcache.v1.common.security`.
+"""

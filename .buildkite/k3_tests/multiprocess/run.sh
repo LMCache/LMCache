@@ -45,6 +45,13 @@ if resolve_engine_workload "$TEST_NAME" "${SCRIPT_DIR}/scripts" \
 else
     status=$?
     if [[ "$status" -eq "$WORKLOAD_UNSUPPORTED_STATUS" ]]; then
+        # The job still passes, so record the skip where the weekly full
+        # build's gate reads it; an unexpected skip must fail the weekly run.
+        if [[ "${CI_WEEKLY_FULL:-0}" == "1" ]] && command -v buildkite-agent >/dev/null 2>&1; then
+            buildkite-agent annotate --style warning \
+                --context "weekly-skip-${BUILDKITE_JOB_ID:-unknown}" \
+                "Skipped as unsupported: \`${BUILDKITE_LABEL:-$TEST_NAME}\`" || true
+        fi
         exit 0
     fi
     exit "$status"

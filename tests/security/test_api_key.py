@@ -8,7 +8,7 @@ import hashlib
 import pytest
 
 # First Party
-from lmcache.security.api_key import APIKeyVerifier
+from lmcache.v1.common.security.api_key import APIKeyVerifier
 
 
 @pytest.mark.parametrize("token", [None, "wrong", "wrong-\u00e9"])

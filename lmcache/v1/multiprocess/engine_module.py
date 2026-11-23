@@ -298,7 +298,7 @@ def _module_sort_key(
 def discover_modules() -> list[type[DiscoverableModule]]:
     """Discover concrete modules under the built-in modules package."""
     # First Party
-    from lmcache.v1.utils.subclass_discovery import discover_subclasses
+    from lmcache.v1.common.subclass_discovery import discover_subclasses
 
     return list(
         discover_subclasses(
