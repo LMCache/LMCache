@@ -618,8 +618,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       False. A request whose ``kv_transfer_params`` set
       ``lmcache.temporary_unfull_chunk`` stores it read-once. A model with
       per-request ring state (``CircularBufferSpec``) also stores its ring
-      blocks with the unfull chunk; not yet supported with prefill-context
-      parallelism. See ``docs/design/v1/multiprocess/unfull_chunk.md``.
+      blocks with an unfull chunk ending off the prefix-cache grid; not yet
+      supported with prefill-context parallelism. See
+      ``docs/design/v1/multiprocess/unfull_chunk.md``.
     """
 
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
@@ -1998,6 +1999,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 lmcache_tokens_per_chunk,
                 group_tokens_per_block=self._group_tokens_per_block,
                 ring_group_ids=self._ring_group_ids,
+                tail_grid_tokens=self._unfull_chunk_grid,
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)

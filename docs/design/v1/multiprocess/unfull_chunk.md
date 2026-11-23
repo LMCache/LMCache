@@ -106,7 +106,7 @@ Wire / IPC:
 | STORE / RETRIEVE on the LMCache-driven path | An unaligned `end` now also stores or loads the tail `[kC, end)`; its block IDs follow the full chunks' in every group. vLLM, SGLang, TensorRT-LLM, the SDK and the bench send aligned ends unless they mean a tail; ATOM's ranges come from ATOM. |
 | FREE_LOOKUP_LOCKS | An unaligned `end` also frees the tail ending exactly there, if this request's lookup locked it. |
 | REGISTER_KV_CACHE layout hints | New key `per_request_ring_hints`: `[{"engine_group_id", "layer_indices"}]`, sent when `save_unfull_chunk` is on. The ring layers stay in no KV group. |
-| STORE / RETRIEVE block IDs | A transfer ending with a tail appends the request's ring block per ring group after the KV groups' lists. |
+| STORE / RETRIEVE block IDs | A transfer ending with a tail off the prefix-cache grid appends the request's ring block per ring group after the KV groups' lists. |
 
 Server:
 
@@ -361,13 +361,19 @@ r = 2, exact tail B = P = 301
   ring             row 300      token 300 (open)   only in the ring block
 ```
 
-- **Which tails need it**: the exact tail of a P/D prefill. A chunk or grid
-  boundary closes every group (vLLM resumes its own prefix-cache hits there
-  without the ring), so the rows copied with a grid tail are never read.
-  Copying the ring with every tail keeps one layout per object group.
+- **Which tails carry it**: only a tail ending off the prefix-cache grid
+  `g`, i.e. an exact tail with `B % g != 0`. vLLM requires `g` to be a
+  multiple of every compression ratio, so a grid boundary closes every
+  group and a grid tail needs no ring. The tail key hashes its token count,
+  so the layout is a function of `B` and a key never has two layouts. On
+  DeepSeek-V4.1-Flash (3 ring layers × 32 KB) the ring would add about 21%
+  to every tail object under SWA bounded replay (it rides with the
+  compressed and indexer caches there), all of it unread on grid tails.
 - **Layout**: object group 0's tail object appends one
   `(1, layers, 1, page_bytes)` byte region per ring group, after the lead
-  regions, so the object stages at the start of the staging buffer.
+  regions, so the object stages at the start of the staging buffer. A
+  retrieve whose object size does not match the layout (stored under a
+  different grid) fails instead of writing stale bytes into the ring.
 - **Copy**: the request's ring block of every layer is copied element by
   element through that layer's block view (a ring block may be padded
   inside), on the transfer stream. Retrieve writes the decode request's own
@@ -376,9 +382,10 @@ r = 2, exact tail B = P = 301
   in its slot. The decode recomputes token `P - 1` and rewrites its row with
   the same value.
 - **Block IDs**: the connector slices a ring group's blocks only for a
-  range ending with a tail; the worker appends the groups named in
-  `per_request_ring_hints` after the KV groups' lists; the server splits
-  them off before the tail's block fitting.
+  range ending with a tail off the grid; the worker appends the groups named
+  in `per_request_ring_hints` after the KV groups' lists when they are
+  non-empty; the server splits them off before the tail's block fitting and
+  picks the layout with rings when there are any.
 - **Which models read it today** (vLLM 0.33): DeepSeek-V4.1 with
   `--no-swa-bounded-replay`. Under SWA bounded replay (its default) a
   full-prompt hit is floored to a chunk, so the exact tail is dropped and

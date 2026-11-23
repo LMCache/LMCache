@@ -35,6 +35,9 @@ TAIL_BOUNDARY = (PROMPT - 1) // GRID * GRID
 GROUP_TOKENS_PER_BLOCK = [16, CHUNK]
 MAMBA_BLOCKS = [500, 501, 502]
 BOUNDARY_STATE_BLOCK = 900
+# Engine group 1 as a per-request ring: a scratch group with one block.
+RING_GROUP_TOKENS_PER_BLOCK = [16, 0]
+RING_BLOCK = 42
 
 
 def test_mamba_tail_boundary_is_where_vllm_offered_a_boundary_state():
@@ -158,6 +161,40 @@ def test_unaligned_hit_retrieves_the_unfull_chunk():
     assert meta is not None
     assert (meta.op.start, meta.op.end) == (0, TAIL_BOUNDARY)
     assert meta.op.block_ids == [list(range(21)), MAMBA_BLOCKS]
+
+
+def test_only_a_tail_off_the_grid_carries_the_ring_block():
+    """A grid boundary closes every compression group, so the grid tail's
+    ring list stays empty; the exact tail off the grid carries the ring."""
+    tracker = _ring_tracker()
+    tracker.increase_num_scheduled_tokens(PROMPT)
+
+    stores = LMCacheMPRequestMetadata.GetUnfullChunkStoreMetadata(
+        tracker, CHUNK, RING_GROUP_TOKENS_PER_BLOCK, GRID, {}, (), {1}
+    )
+
+    assert [(meta.op.end, meta.op.block_ids[1]) for meta, _ in stores] == [
+        (TAIL_BOUNDARY, []),
+        (PROMPT, [RING_BLOCK]),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("hit_tokens", "ring_blocks"), [(TAIL_BOUNDARY, []), (PROMPT, [RING_BLOCK])]
+)
+def test_only_a_hit_off_the_grid_retrieves_the_ring_block(
+    hit_tokens: int, ring_blocks: list[int]
+):
+    tracker = _ring_tracker()
+    tracker.num_vllm_hit_tokens = 0
+    tracker.num_lmcache_hit_tokens = hit_tokens
+    tracker.state = LMCacheMPRequestState.WAITING_FOR_LOAD
+
+    meta = LMCacheMPRequestMetadata.GetRetrieveMetadata(
+        tracker, CHUNK, RING_GROUP_TOKENS_PER_BLOCK, {1}, GRID
+    )
+
+    assert meta is not None and meta.op.block_ids[1] == ring_blocks
 
 
 def test_lookup_asks_for_the_unfull_chunk_on_the_grid():
@@ -325,6 +362,13 @@ def _request(
         lora_request=None,
         sampling_params=SimpleNamespace(extra_args=None, max_tokens=max_tokens),
     )
+
+
+def _ring_tracker() -> LMCacheMPRequestTracker:
+    """A prompt-ending request of an attention group and a ring group."""
+    tracker = LMCacheMPRequestTracker(_request(max_tokens=1))
+    tracker.append_block_ids((list(range(-(-PROMPT // 16))), [RING_BLOCK]))
+    return tracker
 
 
 def _tracker(

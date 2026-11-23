@@ -1525,9 +1525,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         )
         if any(null_mask[0] for null_mask in null_groups):
             return {}
+        carries_rings = bool(ring_block_ids)
         object_buffers: list[torch.Tensor] = []
         for obj_group_id in range(len(obj_keys)):
-            object_buffer = get_unfull_chunk_staging_buffer(cache_context, obj_group_id)
+            object_buffer = get_unfull_chunk_staging_buffer(
+                cache_context, obj_group_id, carries_rings
+            )
             # A tail missing in one object group is never hit, so store none.
             if object_buffer is None:
                 logger.debug(
@@ -1546,7 +1549,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         ):
             group_reserved = self._ctx.storage_manager.reserve_write(
                 [obj_key],
-                get_unfull_chunk_layout_desc(cache_context, obj_group_id),
+                get_unfull_chunk_layout_desc(
+                    cache_context, obj_group_id, carries_rings
+                ),
                 is_temporary=is_temporary,
             )
             reserved.update(group_reserved)
@@ -1616,15 +1621,33 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         found_keys, memory_objs = self._ctx.storage_manager.unsafe_read(
             obj_keys, l1_owners=self._ctx.get_read_owners(key.request_id)
         )
+        carries_rings = bool(ring_block_ids)
         object_buffers: list[torch.Tensor] = []
         for obj_group_id in obj_group_ids:
-            object_buffer = get_unfull_chunk_staging_buffer(cache_context, obj_group_id)
+            object_buffer = get_unfull_chunk_staging_buffer(
+                cache_context, obj_group_id, carries_rings
+            )
             if object_buffer is not None:
                 object_buffers.append(object_buffer)
         if found_keys != obj_keys or len(object_buffers) != len(obj_group_ids):
             raise ValueError(
                 f"unfull chunk of request {key.request_id} not found during retrieve"
             )
+        # A store under a different prefix-cache grid decides rings otherwise;
+        # copying such an object would write stale bytes into the ring.
+        for obj_group_id, memory_obj in zip(obj_group_ids, memory_objs, strict=True):
+            layout = get_unfull_chunk_layout_desc(
+                cache_context, obj_group_id, carries_rings
+            )
+            expected_bytes = sum(
+                shape.numel() * dtype.itemsize
+                for shape, dtype in zip(layout.shapes, layout.dtypes, strict=True)
+            )
+            if memory_obj.get_size() != expected_bytes:
+                raise ValueError(
+                    f"unfull chunk of request {key.request_id} was stored with "
+                    f"{memory_obj.get_size()} bytes, expected {expected_bytes}"
+                )
         for obj_group_id, memory_obj, object_buffer in zip(
             obj_group_ids, memory_objs, object_buffers, strict=True
         ):

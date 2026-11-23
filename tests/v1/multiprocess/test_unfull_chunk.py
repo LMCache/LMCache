@@ -379,20 +379,25 @@ def _ring_group(fill) -> PerRequestRingGroup:
     return PerRequestRingGroup(engine_group_idx=1, layers=layers, page_bytes=128)
 
 
-def test_unfull_layout_appends_the_ring_blocks_to_the_first_object_group() -> None:
+def test_unfull_layout_appends_the_ring_blocks_only_to_a_tail_that_carries_them() -> (
+    None
+):
+    """A tail off the grid appends the rings to object group 0; a grid tail's
+    layout is the full-chunk layout."""
     stub = _StubCacheContext(
         windows=(CHUNK_SIZE,), ring_groups=(_ring_group(torch.zeros),)
     )
     context = cast(BaseCacheContext, stub)
-
-    layout = get_unfull_chunk_layout_desc(context, 0)
-
     full_shape = context.get_kernel_group_shape_dtype(CHUNK_SIZE, 0)[0]
+
+    layout = get_unfull_chunk_layout_desc(context, 0, carries_rings=True)
+
     assert layout.shapes == [full_shape, torch.Size((1, 2, 1, 128))]
     assert layout.dtypes == [torch.float32, torch.uint8]
-    object_buffer = get_unfull_chunk_staging_buffer(context, 0)
+    object_buffer = get_unfull_chunk_staging_buffer(context, 0, carries_rings=True)
     assert object_buffer is not None
     assert object_buffer.numel() == full_shape.numel() * 4 + 2 * 128
+    assert get_unfull_chunk_layout_desc(context, 0).shapes == [full_shape]
 
 
 def test_unfull_chunk_round_trip_carries_the_ring_block(
@@ -419,7 +424,7 @@ def test_unfull_chunk_round_trip_carries_the_ring_block(
         staged, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
             context, block_ids[:1], 9
         )
-        object_buffer = get_unfull_chunk_staging_buffer(context, 0)
+        object_buffer = get_unfull_chunk_staging_buffer(context, 0, carries_rings=True)
         assert object_buffer is not None
         transfer_unfull_chunk(
             context,
@@ -436,11 +441,15 @@ def test_unfull_chunk_round_trip_carries_the_ring_block(
     manager.per_request_ring_groups = [prefill_ring]
     key = _unfull_keys(TokenHasher(chunk_size=CHUNK_SIZE), list(range(9)), 9)[0]
     reserved = storage_manager.reserve_write(
-        [key], get_unfull_chunk_layout_desc(context, 0)
+        [key], get_unfull_chunk_layout_desc(context, 0, carries_rings=True)
     )
     memory_obj = reserved[key]
     prefill = [_paged_layers(torch.randn)]
+    prefill_ring_before = [layer.clone() for layer in prefill_ring.layers]
     copy(prefill, prefill_ring, [[1, 2, 3], [5]], lmcache_native.TransferDirection.D2H)
+    # A store only reads the prefill's ring.
+    for layer, before in zip(prefill_ring.layers, prefill_ring_before, strict=True):
+        assert torch.equal(layer, before)
     decode = [_paged_layers(torch.zeros)]
     copy(decode, decode_ring, [[0, 4, 6], [2]], lmcache_native.TransferDirection.H2D)
     storage_manager.finish_write([key], l1_owners_of(reserved))
@@ -482,14 +491,14 @@ def test_unfull_chunk_of_another_object_group_leaves_the_ring_alone(
     ]
     stub.paged_layers = [_paged_layers(torch.zeros), _paged_layers(torch.randn)]
     context = cast(BaseCacheContext, stub)
-    layout = get_unfull_chunk_layout_desc(context, 1)
+    layout = get_unfull_chunk_layout_desc(context, 1, carries_rings=True)
     assert torch.uint8 not in layout.dtypes
     key = _unfull_keys(TokenHasher(chunk_size=CHUNK_SIZE), list(range(9)), 9)[0]
     reserved = storage_manager.reserve_write([key], layout)
     staged, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
         context, [[1, 2, 3], [5, 6, 7]], 9
     )
-    object_buffer = get_unfull_chunk_staging_buffer(context, 1)
+    object_buffer = get_unfull_chunk_staging_buffer(context, 1, carries_rings=True)
     assert object_buffer is not None
 
     transfer_unfull_chunk(
