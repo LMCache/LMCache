@@ -30,6 +30,7 @@ from lmcache.v1.client.transport.zmq_impl.mq_client import (
 from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
+    KVEventBatch,
 )
 from lmcache.v1.distributed.api import get_request_tags
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -823,6 +824,81 @@ def test_unregistered_operation_returns_remote_error() -> None:
         )
         assert isinstance(healthy, MessagingFuture)
         assert healthy.result(timeout=1) == "NOOP_OK"
+    finally:
+        client.close()
+        server.close()
+
+
+def test_serialized_handler_error_returns_remote_error() -> None:
+    """A failing serialized handler must fail promptly without poisoning later
+    requests."""
+
+    def failing_noop() -> str:
+        raise RuntimeError("noop exploded")
+
+    def get_chunk_size() -> int:
+        return 256
+
+    server_url = f"tcp://127.0.0.1:{_unused_tcp_port()}"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    server.add_handler("noop", HandlerType.SERIALIZED, failing_noop)
+    server.add_handler("get_chunk_size", HandlerType.SERIALIZED, get_chunk_size)
+    server.start()
+
+    client = MessageQueueClient(server_url, context)
+    try:
+        failed: MessagingFuture[str] | MessagingStream[str] = client.submit_request(
+            "noop", []
+        )
+        assert isinstance(failed, MessagingFuture)
+        with pytest.raises(MPRequestError, match="handler_error.*noop exploded"):
+            failed.result(timeout=1)
+
+        healthy: MessagingFuture[int] | MessagingStream[int] = client.submit_request(
+            "get_chunk_size", []
+        )
+        assert isinstance(healthy, MessagingFuture)
+        assert healthy.result(timeout=1) == 256
+    finally:
+        client.close()
+        server.close()
+
+
+def test_serialized_stream_handler_error_reaches_client_stream() -> None:
+    """A failing serialized stream handler must fail the client's stream
+    promptly with the handler's error instead of leaving it open."""
+
+    def failing_subscribe(
+        instance_id: int, model_name: str, cursor: int, max_events: int
+    ) -> MessagingStream[KVEventBatch]:
+        raise RuntimeError("subscribe exploded")
+
+    server_url = f"tcp://127.0.0.1:{_unused_tcp_port()}"
+    context = zmq.Context.instance()
+    server = MessageQueueServer(server_url, context)
+    server.add_handler("subscribe_kv_events", HandlerType.SERIALIZED, failing_subscribe)
+    server.start()
+
+    client = MessageQueueClient(server_url, context)
+    try:
+        stream: MessagingFuture[KVEventBatch] | MessagingStream[KVEventBatch] = (
+            client.submit_request("subscribe_kv_events", [1, "model", 0, 16])
+        )
+        assert isinstance(stream, MessagingStream)
+        outcomes: queue.Queue[KVEventBatch | Exception] = queue.Queue()
+
+        def read_next(subscription: MessagingStream[KVEventBatch]) -> None:
+            try:
+                outcomes.put(next(subscription))
+            except Exception as exc:
+                outcomes.put(exc)
+
+        threading.Thread(target=read_next, args=(stream,), daemon=True).start()
+        outcome = outcomes.get(timeout=1)
+        assert isinstance(outcome, MPRequestError), outcome
+        assert outcome.code == "handler_error"
+        assert outcome.details == "subscribe_kv_events: subscribe exploded"
     finally:
         client.close()
         server.close()
