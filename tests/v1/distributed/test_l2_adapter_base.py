@@ -246,8 +246,8 @@ class TestBaseAccounting:
 
     def test_zero_size_notify_is_listener_only(self):
         """Calling ``_notify_keys_stored`` with size=0 fires the listener
-        but leaves byte counters untouched. Used by the native connector
-        to bump LRU on a re-store without double-counting bytes."""
+        but leaves byte counters untouched, so an adapter can bump LRU on
+        a re-store without double-counting bytes."""
         a = _StubAdapter(max_capacity_bytes=10_000)
         lst = _RecordingListener()
         a.register_listener(lst)
@@ -260,6 +260,26 @@ class TestBaseAccounting:
         assert dict(u.bytes_by_cache_salt) == {"alice": 100}
         # Listener fired twice (LRU policy can move_to_end on second).
         assert lst.stored == [[k], [k]]
+
+    def test_accounting_sizes_split_from_reported_sizes(self):
+        """``accounting_sizes`` drives only the byte counters: listeners
+        still receive the full ``sizes`` on a re-store."""
+        a = _StubAdapter(max_capacity_bytes=10_000)
+        lst = _RecordingListener()
+        a.register_listener(lst)
+        k = _make_key(1, salt="alice")
+        a._notify_keys_stored([k], [100])
+        a._notify_keys_stored([k], [100], accounting_sizes=[0])
+        u = a.get_usage()
+        assert u.total_bytes_used == 100
+        assert dict(u.bytes_by_cache_salt) == {"alice": 100}
+        assert lst.stored_sizes == [[100], [100]]
+
+    def test_accounting_sizes_length_mismatch_raises(self):
+        a = _StubAdapter(max_capacity_bytes=10_000)
+        with pytest.raises(ValueError, match="accounting_sizes length"):
+            a._notify_keys_stored([_make_key(1)], [100], accounting_sizes=[0, 0])
+        assert a.get_usage().total_bytes_used == 0
 
     def test_concurrent_stores_thread_safe(self):
         """Accounting is held under ``_usage_lock``; concurrent notifies
@@ -292,11 +312,13 @@ class _RecordingListener(L2AdapterListener):
 
     def __init__(self) -> None:
         self.stored: list[list[ObjectKey]] = []
+        self.stored_sizes: list[list[int]] = []
         self.accessed: list[list[ObjectKey]] = []
         self.deleted: list[list[ObjectKey]] = []
 
     def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         self.stored.append(list(keys))
+        self.stored_sizes.append(list(sizes))
 
     def on_l2_keys_accessed(self, keys: list[ObjectKey]) -> None:
         self.accessed.append(list(keys))

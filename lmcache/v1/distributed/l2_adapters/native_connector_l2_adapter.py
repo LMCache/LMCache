@@ -482,6 +482,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             # accounting in one shot.
             keys_stored: list[ObjectKey] = []
             sizes_stored: list[int] = []
+            accounting_stored: list[int] = []
             keys_accessed: list[ObjectKey] = []
             keys_deleted: list[ObjectKey] = []
             sizes_deleted: list[int] = []
@@ -520,21 +521,23 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                         if ok and store_info is not None:
                             store_keys, sizes = store_info
                             for key, size in zip(store_keys, sizes, strict=True):
-                                # First-store wins for byte accounting:
-                                # a re-store of an existing key adds 0
-                                # bytes (the backend already holds it).
-                                # We still notify the listener for every
-                                # store so LRU policies can ``move_to_end``
-                                # on re-store — passing size=0 in that
-                                # case is a no-op for the base counters.
+                                # First-store wins for local byte
+                                # accounting: a re-store of a tracked key
+                                # adds 0 bytes to this adapter's usage. The
+                                # full size is still reported to listeners
+                                # and cache events, since the coordinator
+                                # treats a STORE size as the placement's
+                                # absolute size. A 0 here would overwrite
+                                # the real size after another node deleted
+                                # the key.
+                                keys_stored.append(key)
+                                sizes_stored.append(size)
                                 if key not in self._key_sizes:
                                     self._key_sizes[key] = size
-                                    keys_stored.append(key)
-                                    sizes_stored.append(size)
+                                    accounting_stored.append(size)
                                     task_bytes += size
                                 else:
-                                    keys_stored.append(key)
-                                    sizes_stored.append(0)
+                                    accounting_stored.append(0)
                         self._completed_stores[task_id] = L2StoreResult(ok, task_bytes)
                         self._store_efd.notify()
 
@@ -588,7 +591,11 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             # Fire listener notifications outside the lock so a slow
             # listener cannot stall further demux iterations.
             if keys_stored:
-                self._notify_keys_stored(keys_stored, sizes_stored)
+                self._notify_keys_stored(
+                    keys_stored,
+                    sizes_stored,
+                    accounting_sizes=accounting_stored,
+                )
             if keys_accessed:
                 self._notify_keys_accessed(keys_accessed)
             if keys_deleted:

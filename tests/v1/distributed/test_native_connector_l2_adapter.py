@@ -1386,6 +1386,20 @@ class TestDeleteAfterRestart:
 # =============================================================================
 
 
+class _StoreSizeRecorder(L2AdapterListener):
+    def __init__(self) -> None:
+        self.sizes: list[int] = []
+
+    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+        self.sizes.extend(sizes)
+
+    def on_l2_keys_accessed(self, keys: list[ObjectKey]) -> None:
+        pass
+
+    def on_l2_keys_deleted(self, keys: list[ObjectKey]) -> None:
+        pass
+
+
 @pytest.fixture
 def adapter_with_capacity():
     """Adapter with max_capacity_gb set for usage tracking tests."""
@@ -1489,6 +1503,25 @@ class TestUsageTracking:
         usage = adp.get_usage()
         assert usage.usage_fraction == pytest.approx(0.2)
         assert usage.total_bytes_used == 400
+
+    def test_restore_reports_full_size_to_listener(self, adapter_with_capacity):
+        """A re-store of a tracked key still reports its full size to
+        listeners, while local usage counts it once."""
+        adp = adapter_with_capacity
+        recorder = _StoreSizeRecorder()
+        adp.register_listener(recorder)
+        store_fd = adp.get_store_event_fd()
+
+        key = create_object_key(1)
+        obj = create_memory_obj(size=100, fill_value=1.0)
+
+        for _ in range(2):
+            adp.submit_store_task([key], [obj])
+            wait_for_event_fd(store_fd, timeout=5.0)
+            adp.pop_completed_store_tasks()
+
+        assert recorder.sizes == [400, 400]
+        assert adp.get_usage().total_bytes_used == 400
 
 
 # =============================================================================

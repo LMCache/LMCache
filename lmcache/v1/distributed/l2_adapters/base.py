@@ -413,20 +413,44 @@ class L2AdapterInterface(ABC):
         """
         self._notify_keys_accessed(keys)
 
-    def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+    def _notify_keys_stored(
+        self,
+        keys: list[ObjectKey],
+        sizes: list[int],
+        *,
+        accounting_sizes: list[int] | None = None,
+    ) -> None:
         """Update byte accounting and notify listeners that ``keys`` were
-        stored. ``sizes[i]`` is the byte size of ``keys[i]``.
+        stored.
+
+        ``sizes[i]`` is the full byte size of ``keys[i]``. It is forwarded
+        unchanged to listeners and cache events, which treat it as the
+        placement's absolute size. ``accounting_sizes[i]`` is the additive
+        change to this adapter's own usage counters and defaults to
+        ``sizes``. An adapter that re-stores a key it already accounts for
+        passes 0 there without erasing the size from notifications.
 
         Accounting is held under ``_usage_lock``; listener callbacks fire
         outside the lock so a slow listener cannot stall further notifies.
+
+        Raises:
+            ValueError: If ``accounting_sizes`` is given with a length that
+                differs from ``keys``.
         """
+        if accounting_sizes is None:
+            accounting_sizes = sizes
+        elif len(accounting_sizes) != len(keys):
+            raise ValueError(
+                "_notify_keys_stored: accounting_sizes length "
+                f"{len(accounting_sizes)} != keys length {len(keys)}"
+            )
         # Aggregate per-salt deltas before touching
         # ``_bytes_by_cache_salt`` — one dict read/write per unique
         # salt instead of one per key. This matters when the registry is
         # large (10k+ salts) and keys/sizes are bulky.
         delta: dict[str, int] = {}
         total_delta = 0
-        for key, size in zip(keys, sizes, strict=True):
+        for key, size in zip(keys, accounting_sizes, strict=True):
             delta[key.cache_salt] = delta.get(key.cache_salt, 0) + size
             total_delta += size
 
