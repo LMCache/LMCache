@@ -23,8 +23,9 @@ if TYPE_CHECKING:
 class ObjectGroupTransfer(Protocol):
     """Enqueue one object group's copies on the supplied context's stream.
 
-    The server supplies the default callback; device contexts may instead
-    override ``transfer_object_group`` to match their staging layout.
+    The server supplies the default callback at context construction; device
+    contexts may instead override ``transfer_object_group`` to match their
+    staging layout.
     """
 
     def __call__(

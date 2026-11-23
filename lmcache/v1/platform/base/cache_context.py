@@ -44,7 +44,10 @@ class BaseCacheContext(ABC):
 
     Subclasses call :meth:`__init__` after computing the common
     layout parameters and before setting up device-specific state.
-    All keyword arguments are required so the contract is explicit.
+    Layout keyword arguments are required. ``object_group_transfer`` is the
+    optional default copy callback, supplied at construction by server callers.
+    Contexts that only use layout helpers or override ``transfer_object_group``
+    do not need it.
 
     Concrete subclasses MUST set :attr:`device_type` to the
     ``torch.device.type`` string they handle (``"cuda"``, ``"cpu"``,
@@ -66,6 +69,7 @@ class BaseCacheContext(ABC):
         kv_layer_groups_manager: KVLayerGroupsManager,
         block_ids_buffer: torch.Tensor,
         lmcache_tokens_per_chunk: int,
+        object_group_transfer: ObjectGroupTransfer | None = None,
     ) -> None:
         self.kv_caches_ = kv_caches
         self.device_ = device
@@ -73,7 +77,7 @@ class BaseCacheContext(ABC):
         self.kv_layer_groups_manager_ = kv_layer_groups_manager
         self.block_ids_buffer_ = block_ids_buffer
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
-        self._object_group_transfer: ObjectGroupTransfer | None = None
+        self._object_group_transfer = object_group_transfer
         # Imported worker events, held until the stream wait queued on each
         # has been consumed (see hold_imported_event / release_imported_event).
         self._held_imports: dict[int, object] = {}
@@ -380,17 +384,6 @@ class BaseCacheContext(ABC):
             for i in range(len(block_ids_per_group))
         ]
 
-    def set_object_group_transfer(self, transfer: ObjectGroupTransfer) -> None:
-        """Bind the default transfer callback before serving requests.
-
-        Args:
-            transfer: Callback implementing the object-group copy contract.
-
-        Returns:
-            None. Subclass overrides of ``transfer_object_group`` remain active.
-        """
-        self._object_group_transfer = transfer
-
     def transfer_object_group(
         self,
         block_ids_gpu: list[torch.Tensor],
@@ -407,16 +400,16 @@ class BaseCacheContext(ABC):
         *memory_objs*, in either direction.
 
         A subclass that changes the staging layout can override this method.
-        The default calls the callback bound by ``set_object_group_transfer``;
+        The default calls the ``object_group_transfer`` constructor callback;
         see :class:`~lmcache.v1.common.object_group_transfer.ObjectGroupTransfer`
         for argument semantics, completion ownership and copy errors.
 
         Raises:
-            RuntimeError: If no default transfer callback has been bound.
+            RuntimeError: If no default transfer callback was supplied.
         """
         if self._object_group_transfer is None:
             raise RuntimeError(
-                "No object-group transfer callback bound to cache context"
+                "No object-group transfer callback supplied to cache context"
             )
         self._object_group_transfer(
             self,

@@ -170,7 +170,6 @@ def _build(
             ),
             calculate_num_blocks=lambda chunk_size, group_idx: 1,
             transfer_object_group=lambda *args, **kwargs: None,
-            set_object_group_transfer=lambda transfer: None,
             num_layers=1,
             close=lambda: None,
         )

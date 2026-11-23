@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
     # First Party
     from lmcache.v1.common.group_view import EngineGroupInfo
+    from lmcache.v1.common.object_group_transfer import ObjectGroupTransfer
     from lmcache.v1.common.utils import LayoutHints
     from lmcache.v1.platform.base.cache_context import BaseCacheContext
     from lmcache.v1.platform.base.ipc_wrapper import KVCache
@@ -81,6 +82,8 @@ def create_cache_context(
     engine_type: EngineType = EngineType.VLLM,
     separate_object_groups: bool = True,
     full_sw_kv: bool = False,
+    *,
+    object_group_transfer: ObjectGroupTransfer | None = None,
 ) -> BaseCacheContext:
     """Create the appropriate cache context for *kv_caches*.
 
@@ -109,6 +112,10 @@ def create_cache_context(
             per-chunk KV (no sub-chunk window cutting) so chunks stay valid for
             reuse at any position; see
             :meth:`KVLayerGroupsManager.enable_full_sw_kv`.
+        object_group_transfer: Default full-chunk copy callback, forwarded to
+            the device context constructor. Required only when invoking the
+            base ``transfer_object_group`` implementation; device overrides
+            remain active. None leaves the default transfer unavailable.
 
     Returns:
         A concrete cache context instance.
@@ -137,4 +144,5 @@ def create_cache_context(
         engine_type,
         separate_object_groups,
         full_sw_kv,
+        object_group_transfer=object_group_transfer,
     )

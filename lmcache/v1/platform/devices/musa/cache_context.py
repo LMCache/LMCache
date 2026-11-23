@@ -35,6 +35,7 @@ from lmcache.v1.platform.base.ipc_wrapper import KVCache
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.common.group_view import EngineGroupInfo
+    from lmcache.v1.common.object_group_transfer import ObjectGroupTransfer
 
 logger = init_logger(__name__)
 
@@ -267,6 +268,8 @@ class MUSACacheContext(BaseCacheContext):
         engine_type: EngineType = EngineType.VLLM,
         separate_object_groups: bool = True,
         full_sw_kv: bool = False,
+        *,
+        object_group_transfer: ObjectGroupTransfer | None = None,
     ) -> None:
         """Build a MUSA cache context from IPC-wrapped KV tensors.
 
@@ -278,6 +281,8 @@ class MUSACacheContext(BaseCacheContext):
             engine_type: Serving engine that produced the KV cache.
             separate_object_groups: Whether to split object groups by window.
             full_sw_kv: Whether sliding-window groups transfer their full KV.
+            object_group_transfer: Optional callback for the base full-chunk
+                transfer method; device overrides remain active.
 
         Raises:
             ValueError: If reconstructed tensors are not MUSA tensors.
@@ -292,6 +297,7 @@ class MUSACacheContext(BaseCacheContext):
                 engine_type,
                 separate_object_groups,
                 full_sw_kv,
+                object_group_transfer,
             )
         except BaseException:
             self.close()
@@ -306,6 +312,7 @@ class MUSACacheContext(BaseCacheContext):
         engine_type: EngineType,
         separate_object_groups: bool,
         full_sw_kv: bool,
+        object_group_transfer: ObjectGroupTransfer | None,
     ) -> None:
         """Initialize reconstructed tensors and MUSA transfer resources."""
         unwrapped = cast(DiscoverableKVCache, unwrap_kv_cache_tensors(kv_caches))
@@ -352,6 +359,7 @@ class MUSACacheContext(BaseCacheContext):
             kv_layer_groups_manager=kv_layer_groups_manager,
             block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+            object_group_transfer=object_group_transfer,
         )
 
         self.group_kv_pointers_: list[torch.Tensor] = []

@@ -40,10 +40,6 @@ class _FakeGPUContext:
     num_layers: int = 2
     kv_layer_groups_manager: _FakeKVLayerGroupsManager = _FakeKVLayerGroupsManager()
 
-    def set_object_group_transfer(self, transfer: ObjectGroupTransfer) -> None:
-        """Accept the server's default transfer callback."""
-        self.transfer = transfer
-
     def close(self) -> None:
         """No-op teardown (real GPUCacheContext.close deregisters its GDS buffer)."""
 
@@ -115,6 +111,8 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
         engine_type: object = None,
         separate_object_groups: bool = False,
         full_sw_kv: bool = False,
+        *,
+        object_group_transfer: ObjectGroupTransfer | None = None,
     ) -> _FakeGPUContext:
         """Return a fake cache context without touching CUDA or wrappers."""
         return _FakeGPUContext()

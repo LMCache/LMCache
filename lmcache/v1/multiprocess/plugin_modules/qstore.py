@@ -506,8 +506,8 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             engine_type=engine_type,
             separate_object_groups=self._ctx.separate_object_groups,
             full_sw_kv=self._ctx.full_sw_kv,
+            object_group_transfer=transfer_kv_per_object_group,
         )
-        cache_context.set_object_group_transfer(transfer_kv_per_object_group)
         layout_desc = get_layout_desc(
             cache_context, self._ctx.chunk_size, object_group_id=0
         )

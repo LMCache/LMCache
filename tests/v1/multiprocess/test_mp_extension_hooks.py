@@ -189,6 +189,7 @@ def test_default_cache_context_hook_applies_server_settings(monkeypatch):
         engine_type=engine_type,
         separate_object_groups=True,
         full_sw_kv=True,
+        object_group_transfer=mod.transfer_kv_per_object_group,
     )
 
 
