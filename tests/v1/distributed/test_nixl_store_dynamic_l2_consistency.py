@@ -204,7 +204,12 @@ class PausedDelete:
         self._restore()
 
 
-def build_adapter(tmp_dir: str, buffer: torch.Tensor, shard_dirs: bool = False):
+def build_adapter(
+    tmp_dir: str,
+    buffer: torch.Tensor,
+    shard_dirs: bool = False,
+    shared: bool = False,
+):
     l1 = L1MemoryDesc(ptr=buffer.data_ptr(), size=buffer.numel(), align_bytes=PAGE_SIZE)
     cfg = DynamicNixlStoreL2AdapterConfig(
         backend="POSIX",
@@ -216,6 +221,7 @@ def build_adapter(tmp_dir: str, buffer: torch.Tensor, shard_dirs: bool = False):
         },
     )
     cfg.persist_config = PersistConfig(persist_enabled=True)
+    cfg.shared = shared
     return DynamicNixlStoreL2Adapter(cfg, l1)
 
 
@@ -433,3 +439,52 @@ def test_u4_failed_unlink_does_not_skew_usage(env):
     # re-registers its bytes, so usage and disk agree.
     assert lookup(adpt, [bad]) == [True]
     assert_usage_matches_disk(adpt, root)
+
+
+# =============================================================================
+# U5: shared directory, lookup hit verifies the file
+# =============================================================================
+
+
+@pytest.fixture(params=[True, False], ids=["shared", "not_shared"])
+def shared_env(request):
+    tmp_dir = tempfile.mkdtemp(prefix="nixl_dyn_l2_consistency_shared_")
+    buffer = torch.empty(PAGE_SIZE * NUM_BUFFER_PAGES, dtype=torch.uint8)
+    adpt = build_adapter(tmp_dir, buffer, shared=request.param)
+    listener = _RecordingListener()
+    adpt.register_listener(listener)
+    yield adpt, buffer, Path(tmp_dir), listener, request.param
+    adpt.close()
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_u5_shared_lookup_misses_file_deleted_by_another_server(shared_env):
+    adpt, buf, root, listener, shared = shared_env
+    gone, kept = make_key(20, group=0), make_key(20, group=1)
+    assert store(adpt, [gone, kept], [make_obj(buf, i, 1.0) for i in range(2)])
+
+    file_of(root, gone).unlink()  # another server evicted it
+    hits = lookup(adpt, [gone, kept])
+
+    if shared:
+        assert hits == [False, True]
+        assert listener.deleted == [gone]
+        assert used_bytes(adpt) == PAGE_SIZE
+        assert_usage_matches_disk(adpt, root)
+    else:
+        # Single-server setups do not pay the extra stat: the stale entry is
+        # only noticed by the load (see U2).
+        assert hits == [True, True]
+        assert listener.deleted == []
+
+
+def test_u5_shared_lookup_keeps_present_files(shared_env):
+    adpt, buf, root, listener, _ = shared_env
+    key = make_key(21)
+    assert store(adpt, [key], [make_obj(buf, 0, 4.0)])
+
+    assert lookup(adpt, [key]) == [True]
+    dst = make_obj(buf, 1, 0.0)
+    assert load(adpt, [key], [dst]) == [True]
+    assert torch.all(dst.tensor == 4.0)
+    assert listener.deleted == []

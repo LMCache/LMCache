@@ -521,15 +521,29 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         recovered_keys: list[ObjectKey] = []
         recovered_sizes: list[int] = []
         missing: list[tuple[int, ObjectKey]] = []
+        hits: list[tuple[int, ObjectKey]] = []
 
         with self._lock:
             for i, key in enumerate(keys):
                 obj = self._memory_objects.get(key)
                 if obj is not None:
-                    bitmap.set(i)
                     obj.increase_pin_count()
+                    hits.append((i, key))
                 elif key not in self._deleting:
                     missing.append((i, key))
+
+        if self._config.shared:
+            # Another server sharing the directory may have deleted the file
+            # since it was indexed. Report a clean miss now instead of a load
+            # that fails with ENOENT. Single-server setups skip the extra stat.
+            gone = {
+                key for _, key in hits if self.nixl_agent.get_stored_size(key) is None
+            }
+            if gone:
+                self._drop_missing_objects(list(gone))
+                hits = [(i, key) for i, key in hits if key not in gone]
+        for i, _ in hits:
+            bitmap.set(i)
 
         # Filesystem I/O outside the lock to avoid blocking concurrent
         # store/lookup/load operations.
