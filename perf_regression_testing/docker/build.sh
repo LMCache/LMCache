@@ -21,14 +21,13 @@ print(next(t[8:] for t in tags if re.fullmatch("nightly-[0-9a-f]{40}", t)))' \
     || { echo "cannot resolve vLLM nightly" >&2; exit 1; }
 }
 
-# Newest nightly.yml run with the wheel artifact: "<run id> <commit> <created>".
+# Newest nightly.yml run with the wheel artifact $1: "<run id> <commit> <created>".
 MC_REPO=kvcache-ai/Mooncake
-MC_ARTIFACT=nightly-cuda13-x86-py312
 resolve_mooncake() {
   local id sha t
   while read -r id sha t; do
     if gh api "repos/$MC_REPO/actions/runs/$id/artifacts" \
-        --jq ".artifacts[] | select(.name == \"$MC_ARTIFACT\" and .expired == false) | .name" \
+        --jq ".artifacts[] | select(.name == \"$1\" and .expired == false) | .name" \
         | grep -q .; then
       echo "$id $sha $t"; return
     fi
@@ -74,7 +73,11 @@ case "${1:-}" in
   mooncake)
     SERVING=${2:?usage: build.sh mooncake <serving image>}
     VLLM_COMMIT=$(serving_vllm_commit "$SERVING")
-    read -r MC_RUN_ID MC_SHA MC_TIME < <(resolve_mooncake)
+    # The wheel must match the serving image's Python (vLLM moved 3.12 -> 3.14).
+    PY=$(docker run --rm --entrypoint python3 "$SERVING" -c \
+      'import sys; print(f"py{sys.version_info[0]}{sys.version_info[1]}")')
+    MC_ARTIFACT=nightly-cuda13-x86-$PY
+    read -r MC_RUN_ID MC_SHA MC_TIME < <(resolve_mooncake "$MC_ARTIFACT")
     WHEEL_DIR=$(mktemp -d)
     trap 'rm -rf "$WHEEL_DIR"' EXIT
     gh run download "$MC_RUN_ID" -R "$MC_REPO" -n "$MC_ARTIFACT" -D "$WHEEL_DIR"

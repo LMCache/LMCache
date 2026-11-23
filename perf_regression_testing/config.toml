@@ -437,7 +437,9 @@ replicas = 4
 command = ["mooncake_client"]
 # Not Mooncake's default 19300, which may be taken on a shared host.
 ready_url = "http://127.0.0.1:<19301+i>/health"
-ready_timeout_s = 600
+# Mounting its 375 GiB took 461 s with the 11-15 nightly (build 76, was seconds
+# before), and the next client missed a 600 s limit.
+ready_timeout_s = 1200
 env = { MC_ENABLE_DEST_DEVICE_AFFINITY = "1" }
 
 [deployments.vllm_mooncake.services.args]
