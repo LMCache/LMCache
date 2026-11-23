@@ -16,9 +16,9 @@ import torch
 
 # First Party
 from lmcache import torch_device_type
-from lmcache.logging import init_logger
 from lmcache.utils import get_size_bytes as get_size_bytes
 from lmcache.v1.common.kv_format.types import KVLayoutName
+from lmcache.v1.common.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party

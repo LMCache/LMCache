@@ -41,7 +41,7 @@ These docs describe LMCache's multiprocess (MP) architecture, the current recomm
 
 - [Use LMCache in Production](https://docs.lmcache.ai/production/index.html): Production deployment guidance and operational concerns.
 - [Kubernetes Deployment](https://docs.lmcache.ai/production/kubernetes_deployment.html): Running LMCache on Kubernetes.
-- [Kubernetes Operator](https://docs.lmcache.ai/mp/operator.html): The LMCache operator, including opting vLLM pods in and verifying injection.
+- [Kubernetes Operator (Deprecated)](https://docs.lmcache.ai/mp/operator.html): The LMCache operator, including opting vLLM pods in and verifying injection. Deprecated and no longer maintained; expected to be removed in 2027Q1.
 - [Docker Deployment](https://docs.lmcache.ai/production/docker_deployment.html): Container-based deployment.
 - [Dynamo Coordination](https://docs.lmcache.ai/production/dynamo_coordination.html): Coordinating with NVIDIA Dynamo.
 

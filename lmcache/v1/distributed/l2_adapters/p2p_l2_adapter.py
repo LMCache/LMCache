@@ -34,8 +34,8 @@ import time
 
 # First Party
 from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
-from lmcache.logging import init_logger
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
@@ -205,6 +205,20 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
         )
 
 
+def _unregister_from_notifier(fd: int) -> None:
+    """Unregister ``fd`` from the notifier, if it is still running.
+
+    Looks the singleton up again: a saved handle dangles once ``shutdown``
+    frees the native instance.
+
+    Args:
+        fd: The registered event fd.
+    """
+    notifier = PeriodicEventNotifier.get()
+    if notifier is not None:
+        notifier.unregister_fd(fd)
+
+
 class PeerL2AdapterBase(L2AdapterInterface):
     """Shared control plane for adapters that read one peer's region.
 
@@ -266,7 +280,7 @@ class PeerL2AdapterBase(L2AdapterInterface):
                 polled_events.append(self._store_efd)
             for event in polled_events:
                 notifier.register_fd(event.fileno())
-                resources.callback(notifier.unregister_fd, event.fileno())
+                resources.callback(_unregister_from_notifier, event.fileno())
             self._register_peer_region()
             self._resources = resources.pop_all()
 
