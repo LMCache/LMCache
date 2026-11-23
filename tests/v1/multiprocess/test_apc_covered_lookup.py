@@ -23,10 +23,10 @@ import threading
 import pytest
 
 # First Party
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC, ObjectKey
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import resolve_prefetched_obj_keys
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 # Test helpers
 from tests.v1.mp_scheduler_adapter_test_utils import (
@@ -81,9 +81,12 @@ def _make_key(n_chunks: int, start_chunks: int = 0) -> IPCCacheServerKey:
 def _ctx_with_hashes(n_chunks: int) -> MagicMock:
     ctx = MagicMock()
     ctx.chunk_size = CHUNK_SIZE
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = [
+    token_hasher = MagicMock()
+    token_hasher.compute_packed_chunk_hashes.return_value = [
         bytes([i]) * 4 for i in range(n_chunks)
     ]
+    ctx.layout_desc_registry.get_chunk_size.return_value = CHUNK_SIZE
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     return ctx
 
 
@@ -167,6 +170,7 @@ def test_covered_boundary_frozen_only_when_a_lookup_is_sent():
     connector.request_trackers = {}
     connector.scheduler_adapter = adapter
     connector._reserve_last_token_for_lookup = False
+    connector._save_unfull_chunk = False
     connector._hit_alignment_tokens = CHUNK_SIZE
     connector._connector_stats = MagicMock()
     connector.lazy_offload = False
@@ -204,6 +208,7 @@ def _shrink_connector(covered_chunks: int = 4):
     connector.request_trackers = {}
     connector.scheduler_adapter = adapter
     connector._reserve_last_token_for_lookup = False
+    connector._save_unfull_chunk = False
     connector._hit_alignment_tokens = CHUNK_SIZE
     connector._connector_stats = MagicMock()
     connector.lazy_offload = False

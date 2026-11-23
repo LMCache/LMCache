@@ -12,7 +12,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.kv_format.specs.registry import get_spec_class
+from lmcache.v1.common.kv_format.specs.registry import get_spec_class
 from lmcache.v1.platform.devices.neuron.device_ops import NeuronDeviceOps
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.torch_ops import multi_layer_block_kv_transfer

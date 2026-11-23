@@ -99,12 +99,17 @@ if find_spec("lmcache.lmcache_native") is None:
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
+    def cache_flush_range(address: int, size: int) -> None:
+        raise RuntimeError("cache_flush_range needs the native extension")
+
     fallback_module = types.ModuleType("lmcache.lmcache_native")
     fallback_module_any = cast(Any, fallback_module)
     fallback_module_any.PageBufferShapeDesc = PageBufferShapeDesc
     fallback_module_any.KernelGroupSpec = KernelGroupSpec
     fallback_module_any.Bitmap = Bitmap
     fallback_module_any.TTLLock = TTLLock
+    fallback_module_any.cache_flush_supported = lambda: False
+    fallback_module_any.cache_flush_range = cache_flush_range
     sys.modules["lmcache.lmcache_native"] = fallback_module
 
 

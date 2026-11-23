@@ -12,27 +12,35 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, get_args
 import enum
 
-# Third Party
-import torch
-
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.api import MemoryLayoutDesc as MemoryLayoutDesc
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.utils.frozen_dict import freeze_dict
 
 if TYPE_CHECKING:
     # First Party
     from lmcache.lmcache_native import Bitmap
-    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
 
-FetchingPolicy = Literal["prefix", "full"]
+_OBJECT_KEY_HASH_ATTR = "_hash_value"
+"""Instance attribute holding an ``ObjectKey``'s hash once computed."""
+
+FetchingPolicy = Literal["prefix", "full", "whole_chunk"]
 """Which found objects a prefetch loads and reports.
 
 ``"prefix"`` -- only fetch the prefix hit and discard all non-prefix hits.
 
 ``"full"`` -- fetch all of the hit chunks, no matter whether they are in the
-prefix or not.
+prefix or not. Key groups are independent: a chunk found in one key group is
+fetched even when another key group misses it.
+
+``"whole_chunk"`` -- like ``"full"``, but fetch a chunk only when every key
+group holds it. For callers that need all key groups of a chunk at once (a
+blended chunk): a chunk some key group misses, or cannot stage in L1, is
+dropped before it costs an L2 read.
 """
 
 FULL_ATTENTION_WINDOW_CHUNKS = -1
@@ -40,6 +48,25 @@ FULL_ATTENTION_WINDOW_CHUNKS = -1
 group: serving a prefix needs every chunk of it present."""
 
 _VALID_FETCHING_POLICIES = frozenset(get_args(FetchingPolicy))
+
+
+def get_kv_worker_ids(world_size: int, tp_replicas: int, dcp_shards: int) -> list[int]:
+    """Return the worker IDs that key a group's distinct KV shards.
+
+    Args:
+        world_size: Number of workers in the KV world.
+        tp_replicas: Consecutive workers sharing the group; must be positive.
+        dcp_shards: Distinct token shards within each replicated group.
+
+    Returns:
+        The first worker holding each shard, in rank order. With no replication
+        (``tp_replicas == dcp_shards == 1``), every worker keys its own object.
+    """
+    return [
+        first + shard
+        for first in range(0, world_size, tp_replicas)
+        for shard in range(dcp_shards)
+    ]
 
 
 def _lookup_kv_ranks(
@@ -60,11 +87,7 @@ def _lookup_kv_ranks(
         # For look up request, we want to expand to all workers
         # TODO (ApostaC): include local world size/rank info
         # in the future once it's in IPCCacheServerKey
-        worker_ids = [
-            first + shard
-            for first in range(0, ipc_key.world_size, tp_replicas)
-            for shard in range(dcp_shards)
-        ]
+        worker_ids = get_kv_worker_ids(ipc_key.world_size, tp_replicas, dcp_shards)
     else:
         w = ipc_key.worker_id
         worker_ids = [w - w % tp_replicas + w % dcp_shards]
@@ -143,9 +166,10 @@ class MemoryResidency(str, enum.Enum):
     REMOTE = "remote"
     """The bytes reside elsewhere, or in a domain shared with other hosts."""
 
-    DUMMY = "dummy"
-    """No bytes reside anywhere: placeholder L1 memory objects. Reserved for
-    GDS/GDR L2 adapters; nothing reports it yet."""
+    SHADOW = "shadow"
+    """The bytes reside elsewhere, owned by a remote host and leased by the
+    local host. Unlike LOCAL and REMOTE, the objects carry no tensor: readers
+    read the bytes into a device region of their own."""
 
 
 @dataclass(frozen=True)
@@ -317,6 +341,39 @@ class ObjectKey:
             "extra_attributes",
             dict(extra_attributes) if extra_attributes is not None else {},
         )
+
+    def __hash__(self) -> int:
+        """Hash the identity, computing it at most once per object.
+
+        Returns:
+            The hash of ``identity``; ``extra_attributes`` never contributes.
+
+        Note:
+            The value is kept as a non-field instance attribute, so it stays
+            out of ``repr``, equality, ``dataclasses.fields`` and msgspec
+            encoding. It is set lazily because msgspec decoding bypasses
+            ``__init__``.
+        """
+        # A miss is the common first call, so avoid raising KeyError for it.
+        value = self.__dict__.get(_OBJECT_KEY_HASH_ATTR)
+        if value is None:
+            value = hash(self.identity)
+            self.__dict__[_OBJECT_KEY_HASH_ATTR] = value
+        return value
+
+    def __getstate__(self) -> dict[str, object]:
+        """Return the pickling and copying state without the kept hash.
+
+        Returns:
+            The instance attributes except the kept hash value.
+
+        Note:
+            ``str`` and ``bytes`` hashes differ between processes, so a kept
+            hash must never travel with a pickled key.
+        """
+        state = dict(self.__dict__)
+        state.pop(_OBJECT_KEY_HASH_ATTR, None)
+        return state
 
     @property
     def chunk_hash(self) -> bytes:
@@ -529,28 +586,6 @@ class KeyListPage:
 
 
 @dataclass(frozen=True)
-class MemoryLayoutDesc:
-    """
-    Describes the layout of a memory object
-    """
-
-    shapes: list[torch.Size]
-    dtypes: list[torch.dtype]
-
-    def __post_init__(self):
-        if len(self.shapes) != len(self.dtypes):
-            raise ValueError(
-                "MemoryLayoutDesc: shapes and dtype must have the same length"
-            )
-
-
-GroupKind = Literal["attention", "recurrent", "aux"]
-"""Object-group kind label: attention KV, recurrent state pages, or a
-connector-private aux group. Derived server-side from
-``EngineGroupInfo.extra_object_group_tag``; never sent on the wire."""
-
-
-@dataclass(frozen=True)
 class ShardReplicationDesc:
     """Per object group, how one chunk's KV is spread over the kv ranks.
 
@@ -621,74 +656,6 @@ class ShardReplicationDesc:
 DEFAULT_SHARD_REPLICATION_DESC = ShardReplicationDesc()
 """Every object group stored per rank; the default when a registration
 replicates nothing."""
-
-
-@dataclass(frozen=True)
-class AttnWindowDesc:
-    """Per-object-group cross-chunk attention windows, in LMCache chunks.
-
-    ``num_chunks_in_sw[g]`` is the number of trailing prefix chunks that must
-    be present for object group ``g`` to serve a cache hit. ``-1`` means full
-    attention (the whole prefix); ``w >= 1`` is a sliding window of ``w``
-    chunks.
-    """
-
-    num_chunks_in_sw: list[int]
-
-    world_size: int = 1
-    """Number of kv_rank shards per chunk: the TP world size for
-    head-sharded models, pipeline stages times DCP size for MLA."""
-
-    group_kinds: tuple[GroupKind, ...] = ()
-    """Optional per-group kind labels parallel to ``num_chunks_in_sw``.
-    Empty when the producer predates kinds (treat every group as
-    attention)."""
-
-    _VALID_GROUP_KINDS = frozenset(get_args(GroupKind))
-
-    def __post_init__(self) -> None:
-        if self.world_size < 1:
-            raise ValueError(
-                f"AttnWindowDesc: world_size must be >= 1, got {self.world_size}"
-            )
-        for w in self.num_chunks_in_sw:
-            if w == 0 or w < -1:
-                raise ValueError(
-                    "AttnWindowDesc: each window must be -1 (full attention) "
-                    f"or >= 1 chunk, got {w}"
-                )
-        if self.group_kinds:
-            if len(self.group_kinds) != len(self.num_chunks_in_sw):
-                raise ValueError(
-                    f"AttnWindowDesc: group_kinds has {len(self.group_kinds)} "
-                    f"entries but num_chunks_in_sw has "
-                    f"{len(self.num_chunks_in_sw)}"
-                )
-            bad = set(self.group_kinds) - self._VALID_GROUP_KINDS
-            if bad:
-                raise ValueError(f"AttnWindowDesc: unknown group kinds {bad!r}")
-
-    @property
-    def num_object_groups(self) -> int:
-        """Number of object groups this descriptor covers."""
-        return len(self.num_chunks_in_sw)
-
-    def is_full_attention(self, object_group_idx: int) -> bool:
-        """Whether the object group depends on the entire prefix.
-
-        Args:
-            object_group_idx: 0-based object group index.
-
-        Returns:
-            True if the group attends to the whole prefix, False if it uses a
-            bounded sliding window.
-        """
-        return self.num_chunks_in_sw[object_group_idx] < 0
-
-
-DEFAULT_ATTN_WINDOW_DESC = AttnWindowDesc(num_chunks_in_sw=[-1])
-"""A single full-attention object group; the default when no per-object-group
-windows are supplied."""
 
 
 class PrefetchLockMode(enum.Enum):
@@ -844,8 +811,9 @@ class PrefetchResult:
         ``hit_cells``.
 
     ``found_cells`` (superset of ``hit_cells``): what existed at plan time —
-    in L1 or pinned in L2. Found-but-not-hit means "didn't fit", not
-    "evicted". ``None`` when not reported.
+    in L1 or pinned in L2, under every fetching policy. A found cell that is
+    not a hit was left out by the policy or did not fit in L1; it was not
+    evicted. ``None`` when not reported.
     """
 
     hit_cells: list["Bitmap"]

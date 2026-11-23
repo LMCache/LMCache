@@ -14,12 +14,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.posix_shm import shm_unlink
 from lmcache.v1.platform.devices.cpu.shm import (
     CpuShmTensorWrapper,
     migrate_to_shm_and_wrap,
     shm_create_readwrite,
 )
+from lmcache.v1.platform.posix_shm import shm_unlink
 
 
 def test_shm_create_unlink_roundtrip():

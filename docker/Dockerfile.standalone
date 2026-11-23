@@ -114,7 +114,7 @@ ARG nvcc_threads=auto
 ENV NVCC_THREADS=$nvcc_threads
 
 # --index-url (singular) keeps PyPI out of torch resolution so uv can't
-# pick PyPI's default cu13 wheel on a cu12.9 host.
+# pick a PyPI torch wheel built for a different CUDA version.
 RUN --mount=type=cache,target=/root/.cache/uv \
     . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \

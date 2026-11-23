@@ -64,7 +64,7 @@ spec:
   #
   #   # L2 policies
   #   storePolicy: default        # default | skip_l1 (buffer-only mode)
-  #   prefetchPolicy: default     # default
+  #   prefetchPolicy: default     # default | skip_l1 (buffer-only mode)
   #   prefetchMaxInFlight: 8      # default, max concurrent L2->L1 loads
 
   # -- Init containers (optional) --

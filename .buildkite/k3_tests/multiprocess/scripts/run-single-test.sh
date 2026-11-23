@@ -3,7 +3,7 @@
 # Usage: run-single-test.sh <test_name>
 #   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
 #              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
-#              | restart_recovery | lazy_offload | gds_smoke
+#              | restart_recovery | lazy_offload | sleep_mode | gds_smoke
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -49,7 +49,7 @@ fi
 export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-600}"
 export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
 export DEFAULT_MODEL="${DEFAULT_MODEL:-${ENGINE_DEFAULT_MODEL:-Qwen/Qwen3-14B}}"
-export LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
+export LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-grpc}"
 export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
 engine_configure_defaults
 
@@ -125,9 +125,16 @@ elif [ "$TEST_NAME" = "lazy_offload" ]; then
     # The shared GPU launcher includes these values in the real vLLM
     # kv-transfer configuration only for this integration test.
     export LMCACHE_MP_LAZY_OFFLOAD=true
-    # vLLM's default paged-block size is 16 tokens. Matching it keeps this
-    # test's expected LMCache chunk counts exact and small.
+    # Keep both sides aligned: this test counts stored chunks, while LMCache's
+    # chunk-size negotiation cannot change vLLM's paged-cache block size.
     export CHUNK_SIZE="${CHUNK_SIZE:-16}"
+    export VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-$CHUNK_SIZE}"
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
+elif [ "$TEST_NAME" = "sleep_mode" ]; then
+    # --enable-sleep-mode makes level 1 sleep move the weights to host memory.
+    # Without it /sleep still releases the KV cache but keeps the weights on
+    # the GPU, and the test's memory check expects both to be gone.
+    export VLLM_ENABLE_SLEEP_MODE=1
     export MODEL="${MODEL:-$DEFAULT_MODEL}"
 else
     export MODEL="${MODEL:-$DEFAULT_MODEL}"
@@ -160,7 +167,7 @@ echo "Results dir: $RESULTS_DIR"
 echo ""
 
 # Tests that still handle their own server lifecycle.
-SELF_CONTAINED_TESTS=" mp_autostart_tp2 p2p kimi_linear_tp dsv4_flash_tp "
+SELF_CONTAINED_TESTS=" mp_autostart_tp2 p2p p2p_write kimi_linear_tp dsv4_flash_tp "
 
 # Tests that compare against a baseline engine (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything

@@ -12,11 +12,11 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
-from lmcache.v1.multiprocess.transfer_mode import MPTransferMode
 from lmcache.v1.platform import get_device_spec, resolve_device_ops
 from lmcache.v1.platform.devices.mlu import MluDeviceSpec
 from lmcache.v1.platform.devices.mlu.device_ops import MluDeviceOps
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.platform.transfer_mode import MPTransferMode
 
 pytestmark = pytest.mark.no_shared_allocator
 

@@ -34,6 +34,9 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.platform import consume_fd
 
+# Test helpers
+from tests.v1.distributed.utils import wait_until
+
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 _TEST_BUCKET_HANDLE = "hf://buckets/test-org/test-bucket/prod"
@@ -466,14 +469,14 @@ class TestListener:
         adapter.submit_store_task([key], [create_memory_obj()])
         wait_for_event_fd(adapter.get_store_event_fd())
         adapter.pop_completed_store_tasks()
-        time.sleep(0.05)
+        # The store path calls the listener before it signals the eventfd
         assert any(key in batch for batch in listener.stored)
 
         tid = adapter.submit_lookup_and_lock_task([key], {0: _EMPTY_LAYOUT})
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         adapter.query_lookup_and_lock_result(tid)
-        time.sleep(0.05)
-        assert any(key in batch for batch in listener.accessed)
+        # The lookup path signals the eventfd before it calls the listener
+        assert wait_until(lambda: any(key in batch for batch in listener.accessed))
         accessed_count = len(listener.accessed)
 
         dst = create_memory_obj(fill_value=0.0)

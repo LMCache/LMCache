@@ -14,8 +14,8 @@ import mmap
 import os
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import L1BackendType
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.distributed.api import L1BackendType, MemorySegment
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     L2AdaptersConfig,
@@ -72,6 +72,23 @@ def _l1_offset_bytes(values: dict[str, object]) -> int:
     ):
         raise ValueError("offset_gb must be a finite non-negative number")
     return int(value * (1 << 30))
+
+
+def _parse_shared_devdax(raw: object) -> "SharedDevDaxConfig":
+    """Read the JSON ``shared`` object; ``SharedDevDaxConfig`` checks the values."""
+    if not isinstance(raw, dict):
+        raise ValueError("shared must be a JSON object")
+    fields = {"orchestrator", "region_id", "client_id", "rpc_timeout_seconds"}
+    if unknown := set(raw) - fields:
+        raise ValueError(f"Unknown shared fields: {sorted(unknown)}")
+    names = ("orchestrator", "region_id", "client_id")
+    for name in names:
+        if not isinstance(raw.get(name), str):
+            raise ValueError(f"shared.{name} must be a string")
+    return SharedDevDaxConfig(
+        **{name: raw[name] for name in names},
+        rpc_timeout_seconds=_l1_number(raw, "rpc_timeout_seconds", 5.0),
+    )
 
 
 def _parse_l1_common(
@@ -366,6 +383,36 @@ class GdsL1Config:
     """Allocation alignment; cuFile/hipFile and O_DIRECT require 4 KiB."""
 
 
+@dataclass(frozen=True)
+class SharedDevDaxConfig:
+    """The ``shared`` object of a Device-DAX L1.
+
+    A memory orchestrator owns the region's allocation and object readiness;
+    each MP server maps the region through its L1's own ``path`` and ``offset_gb``.
+    """
+
+    orchestrator: str
+    """ ``host:port`` of the region's memory orchestrator. """
+
+    region_id: str
+    """ Must equal the orchestrator's region ID. """
+
+    client_id: str
+    """ Stable identity of this MP server, unique among the region's servers. """
+
+    rpc_timeout_seconds: float = 5.0
+    """ Deadline of each orchestrator RPC attempt. """
+
+    def __post_init__(self) -> None:
+        for name in ("orchestrator", "region_id", "client_id"):
+            if not getattr(self, name).strip():
+                raise ValueError(f"shared.{name} must be a non-empty string")
+        if not (
+            math.isfinite(self.rpc_timeout_seconds) and self.rpc_timeout_seconds > 0
+        ):
+            raise ValueError("shared.rpc_timeout_seconds must be finite and positive")
+
+
 @dataclass
 class L1ManagerConfig:
     """
@@ -514,6 +561,9 @@ class DRAML1ManagerConfig(L1ManagerConfig):
 class DevDaxL1ManagerConfig(L1ManagerConfig):
     """A Device-DAX L1 whose whole pool lives on the device."""
 
+    shared: SharedDevDaxConfig | None = None
+    """ Memory orchestrator binding; None keeps the private Device-DAX L1. """
+
     @classmethod
     def from_dict(
         cls,
@@ -526,6 +576,8 @@ class DevDaxL1ManagerConfig(L1ManagerConfig):
 
         Args:
             values: JSON fields for this backend, including tag and size_gb.
+                An optional ``shared`` object binds the range to a memory
+                orchestrator; its eviction policy then defaults to ``noop``.
             defaults: Global eviction settings, or None to require a local policy.
             read_ttl: Default read-lock lifetime in seconds.
             write_ttl: Default write-lock lifetime in seconds.
@@ -536,15 +588,34 @@ class DevDaxL1ManagerConfig(L1ManagerConfig):
         Raises:
             ValueError: A field is unknown, malformed, or incompatible.
         """
+        if "shared" in values and "eviction" not in values:
+            values = {**values, "eviction": {"eviction_policy": "noop"}}
         config = _parse_l1_common(
-            cls, values, defaults, read_ttl, write_ttl, {"path", "offset_gb"}
+            cls, values, defaults, read_ttl, write_ttl, {"path", "offset_gb", "shared"}
         )
         config.memory_config = replace(
             config.memory_config,
             devdax_path=_l1_path(values),
             devdax_offset_in_bytes=_l1_offset_bytes(values),
         )
+        if "shared" in values:
+            config.shared = _parse_shared_devdax(values["shared"])
         return config
+
+
+def validate_shared_devdax_l1(config: DevDaxL1ManagerConfig) -> None:
+    """Reject a shared Device-DAX L1 this revision cannot serve, before mapping.
+
+    Args:
+        config: A Device-DAX L1 configuration with ``shared`` set.
+
+    Raises:
+        ValueError: The path is missing or the eviction policy is not ``noop``.
+    """
+    if not config.memory_config.devdax_path:
+        raise ValueError("A shared Device-DAX L1 requires a path")
+    if config.eviction is not None and config.eviction.eviction_policy != "noop":
+        raise ValueError("A shared Device-DAX L1 requires eviction_policy noop")
 
 
 @dataclass
@@ -589,6 +660,81 @@ class GDSL1ManagerConfig(L1ManagerConfig):
             config.memory_config.align_bytes,
         )
         return config
+
+
+@dataclass
+class ShadowL1ManagerConfig(L1ManagerConfig):
+    """A shadow L1: the index a borrowing L2 adapter keeps of a peer's bytes.
+
+    It owns no memory, so it needs no size and evicts nothing; configure one
+    per borrowed ``segment``, after the L1s that own memory, since the first
+    L1 receives the engine's writes.
+    """
+
+    memory_config: L1MemoryManagerConfig = field(
+        default_factory=lambda: L1MemoryManagerConfig(
+            size_in_bytes=0, use_lazy=False, shm_name=""
+        )
+    )
+
+    segment: MemorySegment = MemorySegment.DRAM
+    """The segment of the peer memory the views point into."""
+
+    @classmethod
+    def from_dict(
+        cls,
+        values: dict[str, object],
+        defaults: EvictionConfig | None,
+        read_ttl: int = 300,
+        write_ttl: int = 600,
+    ) -> "ShadowL1ManagerConfig":
+        """Parse a shadow L1: its tag, borrowed segment and lock TTLs.
+
+        Args:
+            values: JSON fields: ``tag``, ``segment`` and optional
+                ``read_ttl_seconds`` / ``write_ttl_seconds``.
+            defaults: Global eviction settings, kept for the status report.
+            read_ttl: Default read-lock lifetime in seconds.
+            write_ttl: Default write-lock lifetime in seconds.
+
+        Returns:
+            A validated ShadowL1ManagerConfig.
+
+        Raises:
+            ValueError: A field is unknown or malformed; ``size_gb`` and
+                ``eviction`` are unknown here.
+        """
+        unknown = set(values) - {
+            "type",
+            "tag",
+            "segment",
+            "read_ttl_seconds",
+            "write_ttl_seconds",
+        }
+        if unknown:
+            raise ValueError(f"Unknown shadow L1 fields: {sorted(unknown)}")
+        tag = values.get("tag")
+        if not isinstance(tag, str) or not tag.strip() or tag == "_default":
+            raise ValueError("tag must be a non-empty string other than _default")
+        segment = values.get("segment")
+        if not isinstance(segment, str):
+            raise ValueError("segment must be a string")
+        ttls = []
+        for name, default in (
+            ("read_ttl_seconds", read_ttl),
+            ("write_ttl_seconds", write_ttl),
+        ):
+            value = values.get(name, default)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+            ttls.append(value)
+        return cls(
+            tag=tag,
+            segment=MemorySegment(segment),
+            read_ttl_seconds=ttls[0],
+            write_ttl_seconds=ttls[1],
+            eviction=defaults,
+        )
 
 
 @dataclass
@@ -637,6 +783,10 @@ class StorageManagerConfig:
             raise ValueError("L1 tags must be non-empty strings")
         if len(set(tags)) != len(tags):
             raise ValueError("L1 tags must be unique")
+        if isinstance(self.l1_manager_configs[0], ShadowL1ManagerConfig):
+            raise ValueError(
+                "The first L1 receives engine writes: a shadow cannot be first"
+            )
         if sum(c.gds_l1_config is not None for c in self.l1_manager_configs) > 1:
             raise ValueError("Only one GDS L1 slab is supported per process")
         for c in self.l1_manager_configs:
@@ -648,6 +798,26 @@ class StorageManagerConfig:
                 f"{self.prefetch_inflight_watermark}"
             )
         validate_storage_manager_config(self)
+        if self.prefetch_policy == "retain":
+            logger.warning(
+                "Prefetch policy 'retain' is deprecated; use 'default', which "
+                "also keeps loaded keys in L1"
+            )
+        # Only the built-in prefetch policies are known to keep loaded keys.
+        if (
+            self.store_policy == "skip_l1"
+            and self.prefetch_policy in ("default", "retain")
+            and any(
+                (c.eviction or self.eviction_config).eviction_policy == "noop"
+                for c in self.l1_manager_configs
+            )
+        ):
+            logger.warning(
+                "Prefetch policy %r keeps loaded keys in L1, and the noop "
+                "eviction policy never frees them; use prefetch policy "
+                "'skip_l1' with store policy 'skip_l1'",
+                self.prefetch_policy,
+            )
 
 
 def validate_storage_manager_config(config: StorageManagerConfig) -> None:
@@ -661,10 +831,20 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
 
     Raises:
         ValueError: If mutually exclusive L1 tiers are both configured, DRAM
-            managers share a shared-memory name, or a ``dax`` L2 adapter
-            maps the device range of a Device-DAX L1.
+            managers share a shared-memory name, a ``dax`` L2 adapter maps
+            the device range of a Device-DAX L1, or more than one shared
+            Device-DAX L1 or an unsupported one is configured.
     """
     by_tag = {c.tag: c for c in config.l1_manager_configs}
+    shared = [
+        c
+        for c in by_tag.values()
+        if isinstance(c, DevDaxL1ManagerConfig) and c.shared is not None
+    ]
+    if len(shared) > 1:
+        raise ValueError("Only one shared Device-DAX L1 is supported per MP server")
+    for c in shared:
+        validate_shared_devdax_l1(c)
     shm_names = [
         c.memory_config.shm_name
         for c in by_tag.values()
@@ -752,8 +932,9 @@ def add_storage_manager_args(
         default=[],
         metavar="JSON",
         help=(
-            "Tagged L1 JSON: type (DRAM, DEVDAX, GDS), tag, size_gb "
-            "and backend fields. Repeat for multiple L1s."
+            "Tagged L1 JSON: type (DRAM, DEVDAX, GDS, SHADOW), tag and backend "
+            "fields. Owned L1s require size_gb; SHADOW requires segment and "
+            "must follow an owned L1. Repeat for multiple L1s."
         ),
     )
     # L1 Memory Manager Config
@@ -936,8 +1117,10 @@ def add_storage_manager_args(
         choices=get_registered_prefetch_policies(),
         default="default",
         help="L2 prefetch policy. Determines which adapter loads each key "
-        "when multiple adapters have it. "
-        "Default is 'default' (pick the first adapter by index).",
+        "when multiple adapters have it, and whether loaded keys stay in L1. "
+        "Default is 'default' (pick the first adapter by index, keep loaded "
+        "keys in L1). 'skip_l1' deletes them after the read. 'retain' is a "
+        "deprecated alias of 'default'.",
     )
     policy_group.add_argument(
         "--l2-prefetch-inflight-watermark",
@@ -1026,11 +1209,13 @@ def parse_args_to_config(
             str,
             type[DRAML1ManagerConfig]
             | type[DevDaxL1ManagerConfig]
-            | type[GDSL1ManagerConfig],
+            | type[GDSL1ManagerConfig]
+            | type[ShadowL1ManagerConfig],
         ] = {
             "DRAM": DRAML1ManagerConfig,
             "DEVDAX": DevDaxL1ManagerConfig,
             "GDS": GDSL1ManagerConfig,
+            "SHADOW": ShadowL1ManagerConfig,
         }
         l1_configs: list[L1ManagerConfig] = []
         for raw in raw_configs:
@@ -1040,7 +1225,9 @@ def parse_args_to_config(
                 or not isinstance(values.get("type"), str)
                 or values["type"] not in classes
             ):
-                raise ValueError("--l1-manager requires type DRAM, DEVDAX or GDS")
+                raise ValueError(
+                    "--l1-manager requires type DRAM, DEVDAX, GDS or SHADOW"
+                )
             l1_configs.append(
                 classes[values["type"]].from_dict(
                     values,

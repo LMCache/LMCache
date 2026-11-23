@@ -48,8 +48,9 @@ Validated models
 
       As a Mamba / linear-attention hybrid, Kimi K3 needs the same settings as
       the other KDA / GDN hybrids: the ``align`` Mamba cache mode, prefix
-      caching, and ``--separate-object-groups`` on the LMCache server. The
-      chunk size is negotiated from vLLM's *unified block size* ``N`` (see
+      caching, and object-group separation on the LMCache server (enabled by
+      default). The chunk size is negotiated from vLLM's *unified block size*
+      ``N`` (see
       :ref:`mamba-block-size`). For Kimi K3 at ``--tensor-parallel-size 8``
       the unified block size is ``N = 768``:
 
@@ -77,7 +78,6 @@ Validated models
          lmcache server \
              --port 6555 \
              --chunk-size 768 \
-             --separate-object-groups \
              --max-workers 4 \
              --l1-size-gb 100 \
              --eviction-policy LRU
@@ -113,9 +113,9 @@ Validated models
         **required**. ``align`` is the only Mamba cache mode the KDA backend
         supports, and prefix caching must be on for LMCache to store and reuse
         the recurrent state.
-      - ``--separate-object-groups`` (server) is **required** for hybrid
-        Mamba / linear-attention models: it gives the KDA layers their own
-        cache objects.
+      - Object-group separation must remain enabled on the server for hybrid
+        Mamba / linear-attention models: it gives the KDA layers their own cache
+        objects.
       - ``--chunk-size`` (server) is a minimum. The connector negotiates the
         smallest multiple of ``N`` that is at least that value. See
         :doc:`/mp/chunk_size_negotiation`.

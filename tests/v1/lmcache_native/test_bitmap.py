@@ -118,7 +118,7 @@ class TestBitmapPopcount:
         b = Bitmap(size)
         assert b.popcount() == 0
 
-    @pytest.mark.parametrize("size", [1, 7, 8, 9, 10, 15, 16, 17])
+    @pytest.mark.parametrize("size", [1, 7, 8, 9, 10, 12, 15, 16, 17])
     def test_popcount_all_ones(self, size):
         b = Bitmap(size)
         for i in range(size):
@@ -600,13 +600,6 @@ class TestBitmapNonMultipleOfEight:
             b.clear(i)
             assert not b.test(i)
             b.set(i)
-
-    @pytest.mark.parametrize("size", [9, 10, 12, 17])
-    def test_popcount_only_low_bits_counted_in_last_byte(self, size):
-        b = Bitmap(size)
-        for i in range(size):
-            b.set(i)
-        assert b.popcount() == size
 
     @pytest.mark.parametrize("size", [9, 10, 12])
     def test_clz_clo_consistent_with_test(self, size):

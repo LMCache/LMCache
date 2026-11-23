@@ -992,6 +992,7 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
             ]
         ),
         store_policy="skip_l1",
+        prefetch_policy="skip_l1",
     )
 
     layout = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])

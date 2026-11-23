@@ -107,6 +107,7 @@ def _storage_roundtrip(tmp_path: Path, dax_l1: bool) -> None:
         eviction_config=EvictionConfig(eviction_policy="noop"),
         l2_adapter_config=L2AdaptersConfig([_config(path, slot)]),
         store_policy="skip_l1",
+        prefetch_policy="skip_l1",
     )
     manager = StorageManager(config)
     key = create_object_key(40)

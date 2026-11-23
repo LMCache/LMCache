@@ -18,6 +18,7 @@ from fastapi import Request
 import httpx
 
 # First Party
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.mp_coordinator.background_loops import (
     BackgroundLoops,
     EventLoopMonitor,
@@ -32,7 +33,6 @@ from lmcache.v1.mp_coordinator.ingest.event_source import CacheEventSource
 from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
 from lmcache.v1.mp_coordinator.views.base import View
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 
 @dataclass

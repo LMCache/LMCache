@@ -75,7 +75,7 @@ class MluDeviceOps(DeviceOps):
         # The specs package reads lmcache.device_ops, so load it only after
         # device initialization, as in the shared torch and RBLN paths.
         # First Party
-        from lmcache.v1.gpu_connector.kv_format.specs.registry import get_spec_class
+        from lmcache.v1.common.kv_format.specs.registry import get_spec_class
 
         format_spec = get_spec_class(engine_kv_format)
         if (

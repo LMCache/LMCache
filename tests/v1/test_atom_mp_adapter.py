@@ -19,10 +19,10 @@ from lmcache.integration.atom.multi_process_adapter import (
     AtomMPWorkerAdapter,
 )
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format import detect_format
-from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
-from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.kv_format import detect_format
+from lmcache.v1.common.kv_format.types import DiscoverableKVCache
+from lmcache.v1.transport.futures import MessagingFuture
 import lmcache.lmcache_native as lmcache_native
 
 

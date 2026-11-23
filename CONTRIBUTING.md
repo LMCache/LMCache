@@ -69,7 +69,7 @@ Run the same checks CI runs, before you push:
 ```bash
 pre-commit run --all-files   # ruff, isort, mypy, codespell, clang-format
 
-pytest -xvs --ignore=tests/disagg \
+pytest -xvs \
   --ignore=tests/v1/multiprocess/ \
   --ignore=tests/v1/distributed/ \
   --ignore=tests/skipped
@@ -194,12 +194,12 @@ operator-only changes from everything else, so a docs-only PR still runs most of
 |---|---|---|
 | **DCO** | every PR | every commit carries a `Signed-off-by` trailer |
 | **Code Quality** | every PR outside `operator/` | `pre-commit run --all-files` — ruff, ruff-format, isort, mypy, codespell, clang-format, and the repo's local hooks (SPDX headers, banned APIs) |
-| **Test** | PRs to `dev` and `release-**` outside `operator/` | CPU-only unit tests, `pytest -m "not (cuda or musa or xpu or npu or neuron)"`, on Python 3.10–3.13 |
+| **Test** | PRs to `dev` and `release-**` outside `operator/` | CPU-only unit tests, `pytest -m "not (cuda or musa or xpu or npu or neuron)"`, on Python 3.11–3.14 |
 | **CPU device** | every PR outside `operator/` | server benchmarks and vLLM end-to-end tests on CPU, on `ubuntu-22.04` and `macos-latest` |
 | **CodeQL** | PRs to `dev` | static analysis of the Python code and the Actions workflows |
 | **Operator CI** | PRs touching `operator/` | the Go operator's own build and test suite |
 | **actionlint** | PRs touching `.github/workflows/` | workflow-file linting |
-| **PR Full Build** | PRs carrying the `full` label | builds the sdist and the CUDA, CLI, and cu129 wheels. The label is applied automatically when auto-merge is enabled on a PR, so it is normally a maintainer's doing rather than something you add |
+| **PR Full Build** | PRs carrying the `full` label | builds the sdist and the CUDA and CLI wheels. The label is applied automatically when auto-merge is enabled on a PR, so it is normally a maintainer's doing rather than something you add |
 
 GPU coverage does not run in GitHub Actions. It runs on Buildkite — unit tests on a GPU
 runner plus the vLLM integration suite — and posts its own `buildkite/...` check, so read
@@ -266,7 +266,7 @@ BUILD_WITH_HIP=1 pip install -e .
 
 ```bash
 # Run standard test suite (mirrors CI)
-pytest -xvs --ignore=tests/disagg \
+pytest -xvs \
   --ignore=tests/v1/multiprocess/ \
   --ignore=tests/v1/distributed/ \
   --ignore=tests/skipped

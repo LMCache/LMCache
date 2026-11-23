@@ -126,6 +126,11 @@ class _FakeContext(BaseCacheContext):
     ) -> torch.Tensor:  # pragma: no cover
         return torch.empty(0)
 
+    def get_temp_staging_buffer(
+        self, num_bytes: int
+    ) -> torch.Tensor | None:  # pragma: no cover
+        return torch.empty(0)
+
     def get_kernel_group_shape_dtype(
         self,
         num_tokens: int,

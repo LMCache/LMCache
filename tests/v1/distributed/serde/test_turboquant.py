@@ -403,6 +403,8 @@ def _make_turboquant_storage_manager(preset: str) -> StorageManager:
         ),
         eviction_config=EvictionConfig(eviction_policy="LRU"),
         l2_adapter_config=L2AdaptersConfig(adapters=[adapter_cfg]),
+        # The cleanup checks expect loaded keys to leave L1 after the read.
+        prefetch_policy="skip_l1",
     )
     return StorageManager(cfg)
 
@@ -640,6 +642,8 @@ def _make_turboquant_fs_storage_manager(
         ),
         eviction_config=EvictionConfig(eviction_policy="LRU"),
         l2_adapter_config=L2AdaptersConfig(adapters=[adapter_cfg]),
+        # The cleanup checks expect loaded keys to leave L1 after the read.
+        prefetch_policy="skip_l1",
     )
     return StorageManager(cfg)
 

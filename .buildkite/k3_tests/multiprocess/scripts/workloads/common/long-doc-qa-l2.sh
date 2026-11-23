@@ -124,7 +124,7 @@ env "${server_environment[@]}" lmcache server \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy noop \
     --l2-store-policy skip_l1 \
-    --l2-prefetch-policy default \
+    --l2-prefetch-policy skip_l1 \
     --l2-adapter "$L2_ADAPTER_JSON" \
     --max-workers "$MAX_WORKERS" \
     --metrics-sample-rate 1.0 \

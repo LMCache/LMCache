@@ -243,7 +243,7 @@ accounting lives in ``CacheUsageManager``; the LRU only tracks order.
 | ``DELETE`` | ``/quota/{cache_salt}`` | Remove quota |
 | ``GET`` | ``/quota/{cache_salt}`` | Quota + usage for one salt (``tier``: ``l1`` or ``l2``) |
 | ``GET`` | ``/quota`` | Quota + usage for all salts (``tier``: ``l1`` or ``l2``) |
-| ``POST`` | ``/cache/pins`` | Pin a token sequence's keys against eviction |
+| ``POST`` | ``/cache/pins`` | Pin keys against eviction, given as ``keys`` or resolved from ``token_ids`` |
 | ``DELETE`` | ``/cache/pins`` | Release them |
 | ``GET`` | ``/cache/pins`` | Page through the pin table, filterable by ``cache_salt`` / ``model_name`` |
 

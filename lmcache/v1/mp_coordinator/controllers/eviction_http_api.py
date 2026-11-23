@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse
 import httpx
 
 # First Party
-from lmcache.v1.distributed.api import Tier
+from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.http_apis.dependencies import (
     get_context,
@@ -49,6 +49,7 @@ from lmcache.v1.mp_coordinator.schemas import (
     StatusListResponse,
     StatusResponse,
 )
+from lmcache.v1.mp_coordinator.utils.http import instance_url
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
@@ -56,6 +57,7 @@ from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_ke
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.common.token_hasher import TokenHasher
     from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
         FleetEvictionController,
     )
@@ -331,33 +333,24 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
 
     @router.post("/cache/pins")
     async def request_pin(body: PinRequest, request: Request) -> PinResponse:
-        """Pin a token sequence's keys in the L2 eviction plan.
+        """Pin keys in the L2 eviction plan.
 
-        The coordinator resolves the token sequence to its object keys locally and
-        records them so they are excluded from its L2 eviction plan (fleet-wide,
-        per ``cache_salt``). No MP-server round-trip.
+        Pins the body's ``keys`` as given, or resolves its token sequence to
+        object keys locally, and records them so they are excluded from the
+        L2 eviction plan (fleet-wide, per ``cache_salt``). No MP-server
+        round-trip.
 
         Args:
-            body: model/world_size, token_ids, cache_salt.
+            body: ``keys``, or model/world_size, token_ids, cache_salt.
 
         Returns:
-            ``PinResponse`` with ``requested`` chunks and ``affected`` L2 keys pinned.
+            ``PinResponse`` with ``requested`` chunks (keys form: keys) and
+            ``affected`` L2 keys pinned.
 
         Raises:
             HTTPException: 400 if the token cap is exceeded or a key field is invalid.
         """
-        ctx = get_context(request)
-        try:
-            resolved, chunks = resolve_object_keys(
-                ctx.token_hasher,
-                body.model_name,
-                body.world_size,
-                body.token_ids,
-                body.cache_salt,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
-
+        resolved, chunks = _resolve_pin_keys(body, get_context(request).token_hasher)
         before = controller.capture()
         controller.pin(resolved)
         _save_or_undo(request, controller, before)
@@ -369,32 +362,22 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
 
     @router.delete("/cache/pins")
     async def request_unpin(body: PinRequest, request: Request) -> PinResponse:
-        """Unpin a token sequence's keys from the L2 eviction plan.
+        """Unpin keys from the L2 eviction plan.
 
-        Symmetric with pin: resolves the keys locally and releases them, making them
-        eligible for L2 eviction again.
+        Symmetric with pin: takes the same two forms and releases the keys,
+        making them eligible for L2 eviction again.
 
         Args:
-            body: model/world_size, token_ids, cache_salt.
+            body: ``keys``, or model/world_size, token_ids, cache_salt.
 
         Returns:
-            ``PinResponse`` with ``requested`` chunks and ``affected`` L2 keys unpinned.
+            ``PinResponse`` with ``requested`` chunks (keys form: keys) and
+            ``affected`` L2 keys unpinned.
 
         Raises:
             HTTPException: 400 if the token cap is exceeded or a key field is invalid.
         """
-        ctx = get_context(request)
-        try:
-            resolved, chunks = resolve_object_keys(
-                ctx.token_hasher,
-                body.model_name,
-                body.world_size,
-                body.token_ids,
-                body.cache_salt,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
-
+        resolved, chunks = _resolve_pin_keys(body, get_context(request).token_hasher)
         before = controller.capture()
         controller.unpin(resolved)
         _save_or_undo(request, controller, before)
@@ -479,6 +462,7 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
                 body.world_size,
                 body.token_ids,
                 body.cache_salt,
+                tags=body.tags,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
@@ -508,7 +492,7 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
         node_skipped = 0
         if delete_keys:
             client = get_outbound_client(request)
-            url = f"http://{target.ip}:{target.http_port}/cache/objects"
+            url = instance_url(target, "/cache/objects")
             payload = {
                 "keys": [asdict(k.to_encoded_object_key()) for k in delete_keys],
                 "tier": body.tier.value,
@@ -557,3 +541,27 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
         )
 
     return (router,)
+
+
+def _resolve_pin_keys(
+    body: PinRequest, token_hasher: TokenHasher
+) -> tuple[list[ObjectKey], int]:
+    """Return a pin body's keys and the count reported as ``requested``.
+
+    Raises:
+        HTTPException: 400 if the token cap is exceeded or a key field is
+            invalid (tokens form).
+    """
+    if body.keys:
+        return [encoded.to_object_key() for encoded in body.keys], len(body.keys)
+    try:
+        return resolve_object_keys(
+            token_hasher,
+            body.model_name,
+            body.world_size,
+            body.token_ids,
+            body.cache_salt,
+            tags=body.tags,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None

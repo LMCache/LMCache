@@ -224,10 +224,13 @@ type L2BackendSpec struct {
 	StorePolicy *string `json:"storePolicy,omitempty"`
 
 	// prefetchPolicy controls how keys flow from L2 back to L1 on
-	// cache misses. "default" picks the first adapter that has the key.
+	// cache misses. "default" picks the first adapter that has the key
+	// and keeps loaded keys in L1. "skip_l1" deletes them after the read
+	// (buffer-only mode — pair with storePolicy=skip_l1).
+	// "retain" is a deprecated alias of "default".
 	// +optional
 	// +kubebuilder:default="default"
-	// +kubebuilder:validation:Enum=default;retain
+	// +kubebuilder:validation:Enum=default;skip_l1;retain
 	PrefetchPolicy *string `json:"prefetchPolicy,omitempty"`
 
 	// prefetchMaxInFlight limits the number of concurrent prefetch

@@ -20,14 +20,14 @@ from lmcache.v1.platform.fd_channel import (
     FdChannelServer,
     fd_channel_path,
     fd_channel_path_for_url,
+    is_fd_channel_supported,
 )
 
-pytestmark = [
-    pytest.mark.no_shared_allocator,
-    pytest.mark.skipif(
-        not sys.platform.startswith("linux"), reason="AF_UNIX SOCK_SEQPACKET"
-    ),
-]
+pytestmark = pytest.mark.no_shared_allocator
+
+requires_fd_channel = pytest.mark.skipif(
+    not is_fd_channel_supported(), reason="AF_UNIX SOCK_SEQPACKET"
+)
 
 
 @pytest.fixture
@@ -59,6 +59,7 @@ def _deliver_and_drop_local_copy(client: FdChannelClient, write_fd: int) -> byte
     return export_id
 
 
+@requires_fd_channel
 def test_delivered_fd_is_claimed_once(
     server: FdChannelServer, pipe: tuple[int, int]
 ) -> None:
@@ -75,6 +76,7 @@ def test_delivered_fd_is_claimed_once(
     assert _all_copies_closed(read_fd, timeout=10)
 
 
+@requires_fd_channel
 def test_unclaimed_fds_are_closed_with_their_connection(
     server: FdChannelServer, pipe: tuple[int, int]
 ) -> None:
@@ -90,6 +92,7 @@ def test_unclaimed_fds_are_closed_with_their_connection(
         server.take(export_id)
 
 
+@requires_fd_channel
 def test_connections_scope_only_their_own_fds(server: FdChannelServer) -> None:
     """Closing one worker's connection keeps the fds another one delivered."""
     kept_read, kept_write = os.pipe()
@@ -107,6 +110,7 @@ def test_connections_scope_only_their_own_fds(server: FdChannelServer) -> None:
         os.close(dropped_read)
 
 
+@requires_fd_channel
 def test_close_drops_pending_fds_and_unlinks_the_socket(
     tmp_path: Path, pipe: tuple[int, int]
 ) -> None:
@@ -123,6 +127,7 @@ def test_close_drops_pending_fds_and_unlinks_the_socket(
         FdChannelClient(path, timeout=1)
 
 
+@requires_fd_channel
 def test_stale_socket_file_is_replaced(tmp_path: Path) -> None:
     """A socket file left behind by a killed server does not block a restart."""
     path = str(tmp_path / "fd.sock")
@@ -132,6 +137,7 @@ def test_stale_socket_file_is_replaced(tmp_path: Path) -> None:
     FdChannelServer(path).close()
 
 
+@requires_fd_channel
 def test_workers_of_other_users_can_connect(server: FdChannelServer) -> None:
     """MP containers may run the engine and the server as different users;
     connecting to a Unix socket needs write permission on it."""
@@ -139,11 +145,13 @@ def test_workers_of_other_users_can_connect(server: FdChannelServer) -> None:
     assert mode & stat.S_IWOTH and mode & stat.S_IWGRP
 
 
+@requires_fd_channel
 def test_live_server_socket_is_not_taken_over(server: FdChannelServer) -> None:
     with pytest.raises(OSError, match="another process serves"):
         FdChannelServer(server.path)
 
 
+@requires_fd_channel
 def test_malformed_message_drops_the_connection(
     server: FdChannelServer, pipe: tuple[int, int]
 ) -> None:
@@ -158,6 +166,7 @@ def test_malformed_message_drops_the_connection(
     assert _all_copies_closed(read_fd, timeout=10)
 
 
+@requires_fd_channel
 def test_client_rejects_bad_export_id(
     server: FdChannelServer, pipe: tuple[int, int]
 ) -> None:
@@ -184,3 +193,12 @@ def test_channel_path_follows_the_server_port(url: str, port: int | None) -> Non
     assert fd_channel_path_for_url(url) == expected
     if port is not None:
         assert expected == f"/dev/shm/lmcache_fd_{port}.sock"
+
+
+def test_fd_client_reports_unsupported_platform(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Explicit FD use reports the platform requirement before connecting."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    with pytest.raises(RuntimeError, match="POSIX-fd.*only supported on Linux"):
+        FdChannelClient(str(tmp_path / "fd.sock"), timeout=1)

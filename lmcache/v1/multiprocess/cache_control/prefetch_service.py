@@ -9,6 +9,7 @@ status codes. It owns the node's :class:`WarmPrefetchJobs` table.
 """
 
 # Standard
+from collections.abc import Mapping
 from typing import Any
 
 # First Party
@@ -51,6 +52,8 @@ class PrefetchService:
         cache_salt: str,
         source_tier: Tier,
         target_tier: Tier,
+        *,
+        tags: Mapping[str, str] | None = None,
     ) -> dict[str, object]:
         """Submit a warm prefetch of a token sequence's chunks from L2 into L1.
 
@@ -93,8 +96,9 @@ class PrefetchService:
             # malformed request.
             raise unregistered from None
         try:
+            token_hasher = registry.get_token_hasher(model_name, world_size)
             key_groups, chunks = resolve_grouped_object_keys(
-                ctx.token_hasher,
+                token_hasher,
                 model_name,
                 world_size,
                 token_ids,
@@ -102,6 +106,7 @@ class PrefetchService:
                 group_layout_descs,
                 attn_desc,
                 shard_replication_desc,
+                tags=tags,
             )
         except ValueError as exc:
             raise InvalidRequest(str(exc)) from None

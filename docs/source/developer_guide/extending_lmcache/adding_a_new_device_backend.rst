@@ -331,12 +331,16 @@ Verification
 Start LMCache server.  The worker below uses the engine-driven
 transfer path, which the server only loads when
 ``--supported-transfer-mode`` is ``engine_driven`` or ``auto`` (the
-default is ``lmcache_driven``):
+default is ``lmcache_driven``).  ``--shm-name`` together with
+``--no-l1-use-lazy`` gives the engine-driven path a shared-memory pool;
+without them KV chunks are serialised through the request channel, which
+is much slower (see :ref:`mp-transfer-mode`):
 
 .. code-block:: bash
 
     lmcache server --l1-size-gb 10 --eviction-policy LRU --port 5555 \
-        --supported-transfer-mode engine_driven
+        --supported-transfer-mode engine_driven \
+        --shm-name lmcache_pool --no-l1-use-lazy
 
 Run vLLM with MP connector. If you want a specific torch device category, set
 ``DEVICE_TYPE``. Backends that share one device type are selected automatically
@@ -690,5 +694,5 @@ References
    * - Reference ``DeviceOps`` (Neuron, torch baseline)
      - ``lmcache/v1/platform/devices/neuron/device_ops.py``
    * - Engine-driven call site
-     - ``lmcache/v1/multiprocess/transfer_context/worker_transfer.py``
+     - ``lmcache/v1/client/worker_transfer.py``
        (``EngineDrivenTransferContext``, ``create_transfer_context``)

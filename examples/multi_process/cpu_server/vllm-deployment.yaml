@@ -1,0 +1,83 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-cpu-server
+  namespace: multi-process-cpu-server
+spec:
+  replicas: 1
+  # A rolling surge cannot start a second Pod on the example's single GPU.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm-cpu-server
+  template:
+    metadata:
+      labels:
+        app: vllm-cpu-server
+    spec:
+      nodeSelector:
+        lmcache.ai/cpu-server-example: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      volumes:
+        - name: dev-shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+      containers:
+        - name: vllm
+          image: lmcache/vllm-openai:v0.5.6-amd64@sha256:865f575b505437ba68ea2c2a2612f47c80bc7ab0515d4e8f8f36ee1b800b6016
+          imagePullPolicy: Always
+          command:
+            - /bin/bash
+            - -c
+            - |
+              exec vllm serve Qwen/Qwen3-0.6B \
+                --host 127.0.0.1 \
+                --port 8000 \
+                --no-enable-prefix-caching \
+                --max-model-len 4096 \
+                --gpu-memory-utilization 0.85 \
+                --tensor-parallel-size 1 \
+                --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://127.0.0.1","lmcache.mp.port":6555,"lmcache.mp.mp_transfer_mode":"engine_driven"}}'
+          env:
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: PROMETHEUS_MULTIPROC_DIR
+              value: /tmp
+          volumeMounts:
+            # Private vLLM multiprocessing space; not shared with LMCache.
+            - name: dev-shm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+            limits:
+              nvidia.com/gpu: "1"
+          startupProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - |
+                  import urllib.request
+                  urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=1).close()
+            failureThreshold: 60
+            periodSeconds: 10
+            timeoutSeconds: 2
+          readinessProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - |
+                  import urllib.request
+                  urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=1).close()
+            periodSeconds: 5
+            timeoutSeconds: 2

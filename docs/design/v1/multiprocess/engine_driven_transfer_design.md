@@ -22,7 +22,7 @@ a second engine-driven path that works across non-CUDA backends.
 
 ```text
 Worker adapter (vLLM MP adapter)
-  └─ TransferContext (transfer_context/worker_transfer.py)
+  └─ TransferContext (lmcache/v1/client/worker_transfer.py)
       ├─ LMCacheDrivenTransferContext  (IPC path via stream/event)
       └─ EngineDrivenTransferContext    (data path via data copying in adapter)
           ├─ AsyncEngineDrivenTransferContext (async_engine_driven.py)
@@ -214,14 +214,14 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 - `lmcache/v1/multiprocess/modules/engine_driven_transfer.py`: `EngineDrivenTransferModule`
 - `lmcache/v1/multiprocess/modules/server_transfer.py`: `TransferStrategy`, `InlineTransferStrategy`, `ShmTransferStrategy`
-- `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`: `EngineDrivenTransferContext`, `LMCacheDrivenTransferContext`, `create_transfer_context`, `MPTransferMode`
-- `lmcache/v1/multiprocess/transfer_context/async_engine_driven.py`: `AsyncEngineDrivenTransferContext`
-- `lmcache/v1/multiprocess/transfer_context/base.py`: `EngineDrivenContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
-- `lmcache/v1/multiprocess/transfer_context/inline.py`:
+- `lmcache/v1/client/worker_transfer.py`: `EngineDrivenTransferContext`, `LMCacheDrivenTransferContext`, `create_transfer_context`, `MPTransferMode`
+- `lmcache/v1/client/async_engine_driven.py`: `AsyncEngineDrivenTransferContext`
+- `lmcache/v1/client/transfer_context/base.py`: `EngineDrivenContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
+- `lmcache/v1/client/transfer_context/inline.py`:
   `EngineDrivenContextInline` using the safe inline tensor codec
-- `lmcache/v1/multiprocess/transfer_context/tensor_wire.py`: versioned tensor
+- `lmcache/v1/client/transfer_context/tensor_wire.py`: versioned tensor
   metadata and raw-byte encoding with strict layout validation
-- `lmcache/v1/multiprocess/transfer_context/shm.py`: `EngineDrivenContextShm`
+- `lmcache/v1/client/transfer_context/shm.py`: `EngineDrivenContextShm`
 
 ## 3. Protocol & Data Flow
 
@@ -284,6 +284,29 @@ lengths, and bounded individual and cumulative sizes. Unknown versions or fields
 and payloads from the previous untyped protocol are rejected without a fallback.
 This wire change is intentionally fail closed, so workers and servers must upgrade
 together.
+
+A transfer larger than 128 MiB of tensor data is sent as pages, because gRPC
+cannot carry a message over 2 GiB and ZMQ's MessagePack framing cannot carry
+bytes over 4 GiB. `commit_store` and `prepare_retrieve` take `chunk_start` and
+`chunk_count`, chunk positions within the key; `chunk_count = 0` means through
+the last chunk, so `0, 0` is the whole range and a transfer that fits in one
+page is a single request as before. The worker cuts the positions into
+consecutive pages of at most 128 MiB (or one chunk) and sends them in order.
+The server keeps no state between store pages, and for a retrieve only where
+the unread pages start:
+
+- A store page reserves and writes only its chunks. A grouped page may carry
+  any subset of them but nothing outside its range. The store's observation
+  ends on the last page or on the first failed page, which also ends the
+  store; earlier pages stay stored.
+- A retrieve page computes each group's window over the whole key and returns
+  the part of it inside the page, all or nothing. The observation starts on
+  the first page and ends at `commit_retrieve`, or on a failed later page.
+  A failed page releases the read locks of the pages after it. If the worker
+  stops after a successful page, for example on a timeout, `commit_retrieve`
+  releases the unread pages. The worker also passes `failed` to
+  `commit_retrieve` when it did not get or apply the data, and the retrieve is
+  then recorded as failed.
 
 ```text
 Store (inline tensor)

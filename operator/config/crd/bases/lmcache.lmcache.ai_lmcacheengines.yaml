@@ -2922,9 +2922,13 @@ spec:
                     default: default
                     description: |-
                       prefetchPolicy controls how keys flow from L2 back to L1 on
-                      cache misses. "default" picks the first adapter that has the key.
+                      cache misses. "default" picks the first adapter that has the key
+                      and keeps loaded keys in L1. "skip_l1" deletes them after the read
+                      (buffer-only mode — pair with storePolicy=skip_l1).
+                      "retain" is a deprecated alias of "default".
                     enum:
                     - default
+                    - skip_l1
                     - retain
                     type: string
                   raw:

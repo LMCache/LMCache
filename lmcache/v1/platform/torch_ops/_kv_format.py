@@ -11,7 +11,7 @@ from lmcache.lmcache_native import EngineKVFormat
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
+    from lmcache.v1.common.kv_format.specs.base import KVFormatSpec
 
 __all__ = ["_blocked_scale_views", "_format_spec"]
 
@@ -65,6 +65,6 @@ def _format_spec(engine_kv_format: EngineKVFormat) -> "type[KVFormatSpec]":
     # ``lmcache.device_ops``, which is resolved only once this module (the
     # torch baseline behind it) has been imported.
     # First Party
-    from lmcache.v1.gpu_connector.kv_format.specs.registry import get_spec_class
+    from lmcache.v1.common.kv_format.specs.registry import get_spec_class
 
     return get_spec_class(engine_kv_format)

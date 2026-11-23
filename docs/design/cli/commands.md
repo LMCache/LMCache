@@ -62,7 +62,7 @@ server instances in a registry and evicts those whose heartbeats lapse.
 
 ```bash
 lmcache coordinator \
-    --host 0.0.0.0 --port 9300 \
+    --host 127.0.0.1 --port 9300 \
     --instance-timeout 30 \
     --health-check-interval 10
 ```
@@ -303,7 +303,7 @@ in `lmcache/cli/corpora/`.
 
 - **Auto-discovery (N-level):** Commands at all levels are discovered
   automatically via `discover_subclasses()` (in
-  `lmcache/v1/utils/subclass_discovery.py`). No manual registration is needed
+  `lmcache/v1/common/subclass_discovery.py`). No manual registration is needed
   — adding a new command at any depth is a single-file change.
   - **Leaf commands:** Inherit from `BaseCommand` directly.
   - **Command groups:** Inherit from `CompositeCommand(BaseCommand)`. Its
@@ -380,7 +380,7 @@ lmcache/cli/
 
 - **Entry point:** `lmcache = "lmcache.cli.main:main"` in `pyproject.toml`.
 - **Auto-discovery mechanism:** Powered by `discover_subclasses()` in
-  `lmcache/v1/utils/subclass_discovery.py`. Uses `pkgutil.iter_modules` to
+  `lmcache/v1/common/subclass_discovery.py`. Uses `pkgutil.iter_modules` to
   scan direct submodules, then `inspect.getmembers` to find concrete
   `BaseCommand` subclasses. Each subclass is yielded at most once.
 - **`CompositeCommand` pattern:** A `CompositeCommand` scans its own package

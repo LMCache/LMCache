@@ -12,21 +12,21 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
-    AttnWindowDesc,
     ObjectKey,
     PrefetchHandle,
     PrefetchResult,
     ShardReplicationDesc,
 )
 from lmcache.v1.mp_observability.event import EventType
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.rpc import get_rpc_spec
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
+from lmcache.v1.transport.rpc import get_rpc_spec
 
 # Test helpers
 from tests.v1.mp_scheduler_adapter_test_utils import (
@@ -139,9 +139,11 @@ def _make_free_locks_ctx(
     """
     ctx = MagicMock()
     ctx.get_read_owners.return_value = None
-    ctx.chunk_size = 256
-    ctx.token_hasher.chunk_size = 256
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    token_hasher = MagicMock()
+    token_hasher.chunk_size = 256
+    token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    ctx.layout_desc_registry.get_chunk_size.return_value = 256
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=windows, world_size=world_size
     )
@@ -282,7 +284,8 @@ def test_server_free_lookup_locks_floors_release_to_the_lookup_start():
     released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
     assert released == {(0, b"h2"), (0, b"h3")}
     # The range was floored before hashing: [512, 1024), not [0, 1024).
-    hash_call = ctx.token_hasher.compute_packed_chunk_hashes.call_args
+    token_hasher = ctx.layout_desc_registry.get_token_hasher.return_value
+    hash_call = token_hasher.compute_packed_chunk_hashes.call_args
     assert hash_call.kwargs["start"] == 512
 
 
@@ -357,6 +360,7 @@ def test_server_free_lookup_locks_consumes_pending_result_first():
         row_windows=(-1,),
         request_id="req-sw",
         requested_tokens=768,
+        chunk_size=256,
     )
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
@@ -392,13 +396,16 @@ def test_server_free_lookup_locks_while_prefetch_running_releases_nothing():
         row_windows=(-1,),
         request_id="req-sw",
         requested_tokens=768,
+        chunk_size=256,
     )
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
 
     ctx.storage_manager.finish_read_prefetched.assert_not_called()
     assert "req-sw" in module._prefetch_jobs
-    ctx.session_manager.get_or_create.return_value.record_prefetch_result.assert_not_called()
+    (
+        ctx.session_manager.get_or_create.return_value.record_prefetch_result
+    ).assert_not_called()
 
 
 def test_server_free_lookup_locks_no_matching_chunks():

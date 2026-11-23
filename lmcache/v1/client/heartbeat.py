@@ -6,9 +6,13 @@ from collections.abc import Callable
 import threading
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.periodic_thread import (
+    PeriodicThread,
+    ThreadLevel,
+    ThreadRunSummary,
+)
+from lmcache.v1.transport.request_client import RequestClient
 
 logger = init_logger(__name__)
 
@@ -23,8 +27,8 @@ def send_ping(
     Args:
         req_client: Request client used to send the probe.
         timeout: Maximum seconds to wait for the response.
-        instance_id: Worker instance to refresh, or ``None`` for an untracked
-            scheduler probe.
+        instance_id: Worker registration or scheduler subscription to refresh,
+            or ``None`` for an untracked probe.
 
     Returns:
         ``True`` when the server responds healthy, otherwise ``False``.
@@ -61,8 +65,8 @@ class HeartbeatThread(PeriodicThread):
             req_client: Request client used to send PING requests.
             health_event: Adapter-owned event that represents server health.
             interval: Seconds between probes and the timeout for each probe.
-            instance_id: Worker instance to refresh, or ``None`` for an
-                untracked scheduler probe.
+            instance_id: Worker registration or scheduler subscription to
+                refresh, or ``None`` for an untracked probe.
             name: Background thread name.
         """
         super().__init__(

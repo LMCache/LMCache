@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 import os
 import select
+import sys
 import uuid
 
 # Third Party
@@ -16,7 +17,7 @@ import torch
 # First Party
 from lmcache.v1.platform import kv_wrap
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
-from lmcache.v1.platform.fd_channel import FdChannelServer
+from lmcache.v1.platform.fd_channel import FdChannelServer, is_fd_channel_supported
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -138,6 +139,7 @@ def fd_channel(tmp_path: Path) -> Iterator[FdChannelServer]:
     server.close()
 
 
+@pytest.mark.skipif(not is_fd_channel_supported(), reason="AF_UNIX SOCK_SEQPACKET")
 def test_fds_stay_claimable_for_the_registration(
     fd_channel: FdChannelServer,
 ) -> None:
@@ -171,14 +173,37 @@ def test_wrappers_without_fds_need_no_channel(tmp_path: Path, path: str) -> None
         pass
 
 
-def test_fd_wrappers_without_a_channel_path_fail_and_close_their_fds() -> None:
+@pytest.mark.parametrize(
+    "platform, path, message",
+    [
+        pytest.param("linux", "", "no channel path", id="missing-channel-path"),
+        pytest.param(
+            "darwin",
+            "fd.sock",
+            "POSIX-fd.*only supported on Linux",
+            id="unsupported-platform",
+        ),
+    ],
+)
+def test_rejected_fd_registrations_close_their_fds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    platform: str,
+    path: str,
+    message: str,
+) -> None:
+    """A rejected FD registration releases its exports before returning."""
+    monkeypatch.setattr(sys, "platform", platform)
+    channel_path = str(tmp_path / path) if path else ""
     read_fd, write_fd = os.pipe()
     wrapper = _FdWrapper(write_fd)
     try:
-        with pytest.raises(RuntimeError, match="no channel path"):
-            with kv_wrap.kv_wrapper_fds_delivered([wrapper], "", timeout=1):
+        with pytest.raises(RuntimeError, match=message):
+            with kv_wrap.kv_wrapper_fds_delivered([wrapper], channel_path, timeout=1):
                 pytest.fail("entered without delivering")
         assert wrapper.fd_payload() is None
-        assert os.read(read_fd, 1) == b""
+        ready, _, _ = select.select([read_fd], [], [], 1)
+        assert ready and os.read(read_fd, 1) == b""
     finally:
+        wrapper.close()
         os.close(read_fd)

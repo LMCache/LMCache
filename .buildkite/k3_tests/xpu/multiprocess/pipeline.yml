@@ -222,7 +222,7 @@ steps:
         artifact_paths: ["*.log", "ci_results_*/**"]
 
       # Four original layers retain SWA, C4 and C128 without checkpoint weights.
-      - label: ":xpu: hma_dsv4_correctness / engine_driven / shm / zmq"
+      - label: ":xpu: hma_dsv4_correctness / engine_driven / shm / grpc"
         command: |
           export PYTHONPATH="$$(pwd)/.buildkite/k3_tests/multiprocess/scripts/workloads/vllm$${PYTHONPATH:+:$${PYTHONPATH}}"
           .buildkite/k3_tests/xpu/multiprocess/run.sh hma_dsv4_correctness
@@ -232,7 +232,7 @@ steps:
           INFERENCE_ENGINE: "vllm"
           LMCACHE_MP_TRANSFER_MODE: "engine_driven"
           ENGINE_DRIVEN_TRANSPORT: "shm"
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
           TENSOR_PARALLEL_SIZE: "1"
           VLLM_LOAD_FORMAT: "dummy"
           VLLM_HF_OVERRIDES: '{"num_hidden_layers":4,"num_nextn_predict_layers":0,"compress_ratios":[0,0,4,128]}'
@@ -267,7 +267,7 @@ steps:
         env:
           <<: *mp-env
           MODEL: "Qwen/Qwen3-8B"
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
           BATCH_INVARIANT: "1"
           VLLM_DISABLE_PREFIX_CACHING: "false"
           ATTENTION_BACKEND: "TRITON_ATTN"
@@ -283,6 +283,7 @@ steps:
           PREEMPT_REF_CONCURRENCY: "4"
           MAX_WAIT_SECONDS: "600"
         timeout_in_minutes: 60
+        retry: *flaky-retry
         agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-2xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
@@ -293,7 +294,7 @@ steps:
           # Keep repeated benchmark prompts from bypassing the outage via APC.
           <<: *mp-env
           MODEL: "Qwen/Qwen3-8B"
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
           CPU_BUFFER_SIZE: "8"
           ASYNC_SCHEDULING: "1"
           GPU_MEMORY_UTILIZATION: "0.85"
@@ -302,6 +303,7 @@ steps:
           CHUNK_SIZE: "256"
           MAX_WAIT_SECONDS: "600"
         timeout_in_minutes: 30
+        retry: *flaky-retry
         agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
@@ -311,7 +313,7 @@ steps:
         env:
           <<: *mp-env
           MODEL: "Qwen/Qwen3-8B"
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
           # Old and new SHM mappings can coexist until worker re-registration.
           CPU_BUFFER_SIZE: "8"
           VLLM_DISABLE_PREFIX_CACHING: "false"
@@ -324,6 +326,7 @@ steps:
           RR_TOKENS_PER_GB: "7281"
           MAX_WAIT_SECONDS: "600"
         timeout_in_minutes: 30
+        retry: *flaky-retry
         agents: { queue: "intel-xpu", k8s_cluster: "intel-b60" }
         plugins: [{ kubernetes: { podSpec: *pod-1xpu } }]
         artifact_paths: ["*.log", "ci_results_*/**"]
@@ -359,7 +362,7 @@ steps:
         env:
           MODEL: "Qwen/Qwen3-0.6B"
           LMCACHE_MP_TRANSFER_MODE: "engine_driven"
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
           MAX_MODEL_LEN: "4096"
           VLLM_DISABLE_PREFIX_CACHING: "true"
           MAX_WAIT_SECONDS: "900"

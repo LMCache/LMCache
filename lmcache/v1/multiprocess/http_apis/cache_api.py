@@ -29,8 +29,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 import torch
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.utils import compress_slot_mapping
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import Tier
 from lmcache.v1.multiprocess.http_apis.dependencies import get_context
 from lmcache.v1.multiprocess.http_apis.schemas import (
@@ -122,6 +122,7 @@ async def submit_prefetch(body: PrefetchRequest, request: Request) -> dict[str, 
         body.cache_salt,
         body.source_tier,
         body.target_tier,
+        tags=body.tags,
     )
 
 

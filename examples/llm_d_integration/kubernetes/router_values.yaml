@@ -1,0 +1,9 @@
+# Values for the llm-d-router-standalone chart (v1.0.0).
+router:
+  modelServers:
+    matchLabels:
+      llm-d.ai/guide: lmcache        # the label of the decode pods in decode.yaml
+    targetPorts:
+      - number: 8000                 # the vLLM port
+  epp:
+    replicas: 1

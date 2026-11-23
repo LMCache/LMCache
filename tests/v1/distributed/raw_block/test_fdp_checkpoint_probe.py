@@ -107,8 +107,7 @@ def _make_checkpoint_probe_core(
             use_uring_cmd=True,
             max_data_transfer_size=RAW_BLOCK_CI_BLOCK_ALIGN,
             meta_checkpoint_placement_id=meta_checkpoint_placement_id,
-        ),
-        key_namespace="object",
+        )
     )
 
 

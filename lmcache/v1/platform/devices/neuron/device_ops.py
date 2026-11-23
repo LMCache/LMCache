@@ -50,7 +50,7 @@ def _require_supported_layout(
     # Imported lazily, not at module scope: the specs package reads
     # ``lmcache.device_ops``, which is resolved only after this module loads.
     # First Party
-    from lmcache.v1.gpu_connector.kv_format.specs.registry import get_spec_class
+    from lmcache.v1.common.kv_format.specs.registry import get_spec_class
 
     format_spec = get_spec_class(engine_kv_format)
     supported = (
