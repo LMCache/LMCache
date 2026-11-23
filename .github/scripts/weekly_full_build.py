@@ -53,6 +53,8 @@ def api_request(
             retried because the build may exist despite a lost response.
         URLError: If the network fails three times for a GET, or once for a
             POST.
+        TimeoutError: If reading the response times out three times for a GET,
+            or once for a POST.
     """
     data = json.dumps(payload).encode() if payload is not None else None
     request = Request(
@@ -75,7 +77,7 @@ def api_request(
             if not transient or attempt == attempts - 1:
                 raise
             exc.close()
-        except URLError:
+        except (URLError, TimeoutError):
             if attempt == attempts - 1:
                 raise
         time.sleep(2**attempt * 5)

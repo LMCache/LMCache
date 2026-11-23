@@ -41,7 +41,7 @@
         " / mp_autostart_tp2 / ",
         " / p2p / ",
         " / kimi_linear_tp / ",
-        " / lm_eval_[a-z_]+ / ",
+        " / lm_eval_(?!preemption )[a-z_]+ / ",
         " / lm_eval_preemption / ",
         "preemption_correctness / ",
         " / fault_tolerance / ",

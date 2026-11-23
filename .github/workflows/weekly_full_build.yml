@@ -47,8 +47,13 @@ jobs:
       - name: Fast-forward ci-weekly-full to the tested commit
         env:
           SOURCE_COMMIT: ${{ github.sha }}
+          SOURCE_REF: ${{ github.ref }}
         run: |
           set -Eeuo pipefail
+          if [[ "${SOURCE_REF}" != "refs/heads/dev" ]]; then
+            echo "::error::Weekly full build must run from refs/heads/dev (got ${SOURCE_REF})." >&2
+            exit 1
+          fi
           if git fetch --no-tags origin \
               refs/heads/ci-weekly-full:refs/remotes/origin/ci-weekly-full; then
             if ! git merge-base --is-ancestor \

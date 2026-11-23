@@ -47,7 +47,11 @@ def _job(name: str, state: str = "passed", **fields: Any) -> dict[str, Any]:
 
 def _label_for(pattern: str) -> str:
     """Turn a required-label pattern into a label it matches."""
-    label = pattern.lstrip("^").rstrip("$").replace("[a-z_]+", "samples")
+    label = (
+        pattern.lstrip("^")
+        .rstrip("$")
+        .replace("(?!preemption )[a-z_]+", "lmcache_driven")
+    )
     return label if label.startswith(":") else f":compression: vllm{label}zmq"
 
 
@@ -264,3 +268,42 @@ def test_fetch_annotations_paginates(
         "https://api.buildkite.com/v2/b/1/annotations?per_page=100&page=1",
         "https://api.buildkite.com/v2/b/1/annotations?per_page=100&page=2",
     ]
+
+
+def test_preemption_does_not_satisfy_ordinary_lm_eval(
+    gate: ModuleType, manifest: dict
+) -> None:
+    builds = _passing_builds(manifest)
+    builds["k3-multiprocess-test"]["jobs"] = [
+        j
+        for j in builds["k3-multiprocess-test"]["jobs"]
+        if "lm_eval_lmcache_driven" not in j["name"]
+    ]
+    report = gate.evaluate(manifest, builds, {})
+    assert not report["passed"]
+    assert "missing" in _kinds(report)
+
+
+def test_api_request_retries_read_timeout(
+    gate: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts = 0
+
+    class FakeResp:
+        def __enter__(self) -> "FakeResp":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise TimeoutError("timed out")
+            return b'{"ok": true}'
+
+    monkeypatch.setattr(gate, "urlopen", lambda req, timeout=60: FakeResp())
+    monkeypatch.setattr(gate.time, "sleep", lambda _: None)
+    assert gate.api_request("https://example.test", "tok") == {"ok": True}
+    assert attempts == 3
