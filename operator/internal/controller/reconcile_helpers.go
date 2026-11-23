@@ -55,6 +55,22 @@ import (
 //
 // Returns (err, done). If done is true the caller must return.
 func (r *LMCacheEngineReconciler) handleFinalizer(ctx context.Context, engine *lmcachev1alpha1.LMCacheEngine) (error, bool) {
+	// Workload-aware engines manage cluster-scoped node labels; ownership
+	// garbage collection cannot clean them, so the finalizer strips them
+	// before the CR is allowed to go away.
+	if engine.DeletionTimestamp != nil && controllerutil.ContainsFinalizer(engine, workloadPlacementFinalizer) {
+		if err := stripWorkloadPlacementLabels(ctx, r.Client, engine); err != nil {
+			// done=true: stop reconciling a deleting CR. Continuing could
+			// re-add labels removed during a partial cleanup, and returning
+			// the error is what schedules the retry.
+			return err, true
+		}
+		controllerutil.RemoveFinalizer(engine, workloadPlacementFinalizer)
+		if err := r.Update(ctx, engine); err != nil {
+			return err, true
+		}
+	}
+
 	// On the deletion path we still need to clear the legacy finalizer
 	// if a CR created by an older operator version is being deleted,
 	// otherwise K8s would block on it forever.

@@ -366,7 +366,7 @@ func buildDaemonSetCore(
 					RuntimeClassName:   runtimeClassName,
 					ServiceAccountName: spec.ServiceAccountName,
 					PriorityClassName:  spec.PriorityClassName,
-					NodeSelector:       spec.NodeSelector,
+					NodeSelector:       EffectiveNodeSelector(namespace, name, spec),
 					Affinity:           spec.Affinity,
 					Tolerations:        spec.Tolerations,
 					ImagePullSecrets:   spec.ImagePullSecrets,

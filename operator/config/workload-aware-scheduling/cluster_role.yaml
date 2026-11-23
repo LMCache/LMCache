@@ -1,0 +1,22 @@
+# Hand-written, NOT generated: controller-gen regenerates
+# config/rbac/role.yaml wholesale from the +kubebuilder markers in the
+# controller sources, so this opt-in rule lives beside it instead. It is
+# the node permission the generated role intentionally omits — see the
+# NOTE next to the markers in internal/controller/lmcacheengine_controller.go.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: operator
+    app.kubernetes.io/managed-by: kustomize
+  name: wlas-node-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+  - patch

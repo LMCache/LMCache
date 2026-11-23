@@ -597,6 +597,55 @@ type LMCacheEngineSpec struct {
 	// side-channel env vars into opted-in vLLM pods.
 	// +optional
 	PD *PDSpec `json:"pd,omitempty"`
+
+	// workloadAwareScheduling makes the engine DaemonSet run only on nodes
+	// that currently host at least one pod matching workloadSelector.
+	//
+	// By default (unset or enabled: false) the DaemonSet is created on every
+	// node matching spec.nodeSelector, and required pod affinity parks engine
+	// pods in Pending on nodes without the workload — on multi-model GPU
+	// pools that is one Pending pod per non-hosting node per engine, and the
+	// reverse leak persists scheduled engines forever once the workload moves
+	// (requiredDuringSchedulingIgnoredDuringExecution). Enabling this makes
+	// the operator mirror a per-engine label onto the nodes hosting matching
+	// pods and adds that label to the DaemonSet nodeSelector, so engine pods
+	// are created only where the workload runs and are removed shortly after
+	// it leaves (see releaseDelaySeconds).
+	//
+	// +optional
+	WorkloadAwareScheduling *WorkloadAwareSchedulingSpec `json:"workloadAwareScheduling,omitempty"`
+}
+
+// WorkloadAwareSchedulingSpec configures placement of engine DaemonSet pods
+// on the nodes that currently host the workload (e.g. the predictor pods of
+// an InferenceService).
+type WorkloadAwareSchedulingSpec struct {
+	// enabled turns workload-aware scheduling on. When false or the whole
+	// block is unset, behavior is identical to previous operator versions:
+	// the DaemonSet nodeSelector is spec.nodeSelector alone and the operator
+	// does not watch or label any nodes.
+	Enabled bool `json:"enabled"`
+
+	// workloadSelector selects the workload pods to follow: a pod that is
+	// bound to a node (spec.nodeName set) and not terminating makes that
+	// node eligible for this engine. Standard metav1.LabelSelector — use
+	// matchLabels for equality, matchExpressions for In/NotIn/Exists/
+	// DoesNotExist; entries are AND-ed. Required when enabled, and must not
+	// be empty: an empty LabelSelector matches every pod, which would label
+	// every node running anything.
+	//
+	// +optional
+	WorkloadSelector *metav1.LabelSelector `json:"workloadSelector,omitempty"`
+
+	// releaseDelaySeconds is how long a node keeps its engine label after
+	// the last matching pod leaves. 0 removes the label immediately on the
+	// next reconcile; larger values keep the engine (and its warm KV cache)
+	// across brief workload churn such as same-node rolling updates, at the
+	// cost of lingering engines while the workload is gone. Defaults to 300.
+	//
+	// +kubebuilder:default=300
+	// +kubebuilder:validation:Minimum=0
+	ReleaseDelaySeconds *int32 `json:"releaseDelaySeconds,omitempty"`
 }
 
 // EndpointStatus represents a single LMCache instance endpoint.
@@ -647,6 +696,29 @@ type LMCacheEngineStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// workloadNodes lists the nodes currently labeled for this engine when
+	// workload-aware scheduling is enabled (desired set: nodes hosting
+	// bound, non-terminating pods matching spec.workloadAwareScheduling.
+	// workloadSelector, plus nodes still inside their releaseDelay window).
+	// +optional
+	WorkloadNodes []string `json:"workloadNodes,omitempty"`
+
+	// workloadLabelKey is the node label key this engine manages for
+	// workload-aware scheduling, for dashboards and debugging. The label
+	// value is a constant marker. Empty when the feature is disabled.
+	// +optional
+	WorkloadLabelKey string `json:"workloadLabelKey,omitempty"`
+
+	// nodeAbsentSince records when a node carrying the managed label was
+	// FIRST observed without matching workload pods. The release window runs
+	// from that moment — not from when the workload was last seen — so an
+	// interrupted controller that missed the actual departure still grants
+	// the full releaseDelaySeconds. Entries clear when the workload returns
+	// to the node or the label is removed. Internal bookkeeping.
+	// +optional
+	// +kubebuilder:example={"node-a":"2026-10-19T09:00:00Z"}
+	NodeAbsentSince map[string]metav1.Time `json:"nodeAbsentSince,omitempty"`
 }
 
 // +kubebuilder:object:root=true

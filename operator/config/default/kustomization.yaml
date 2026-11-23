@@ -232,3 +232,11 @@ replacements:
 #     fieldPath: .metadata.name
 #   targets: # Do not remove or uncomment the following scaffold marker; required to generate code for target CRD.
 # +kubebuilder:scaffold:crdkustomizecainjectionname
+
+# [WORKLOAD-AWARE SCHEDULING] To enable workload-aware engine placement
+# (spec.workloadAwareScheduling) uncomment the two lines below: the
+# component grants the opt-in node RBAC (get/list/watch/patch) and sets the
+# --enable-workload-aware-scheduling manager flag that registers the Node
+# watch. Without it the operator needs (and requests) no node permissions.
+#components:
+#- ../workload-aware-scheduling

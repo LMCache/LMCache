@@ -1,0 +1,26 @@
+# Opt-in workload-aware scheduling: node RBAC + manager flag.
+#
+# Enable by adding this component to config/default/kustomization.yaml:
+#
+#   components:
+#   - ../workload-aware-scheduling
+#
+# The node permissions (get/list/watch/patch on nodes) are deliberately NOT
+# part of the generated config/rbac/role.yaml: many clusters will not grant
+# cluster-wide node access, and the operator must start and run without them
+# when the feature is unused. Install this component only when engines use
+# spec.workloadAwareScheduling; the component also sets the
+# --enable-workload-aware-scheduling manager flag, which is what registers the
+# Node watch in the first place — a Node informer without node list/watch
+# fails manager startup, so the two must be enabled together.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+- cluster_role.yaml
+- cluster_role_binding.yaml
+
+patches:
+- path: manager_flag_patch.yaml
+  target:
+    kind: Deployment

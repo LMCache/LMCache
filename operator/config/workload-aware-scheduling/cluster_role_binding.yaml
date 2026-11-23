@@ -1,0 +1,19 @@
+# Binds the opt-in node role to the manager service account. The subject
+# name/namespace match config/rbac/service_account.yaml and are rewritten
+# by the same kustomize namePrefix/namespace transformers as
+# config/rbac/role_binding.yaml.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: operator
+    app.kubernetes.io/managed-by: kustomize
+  name: wlas-node-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: wlas-node-role
+subjects:
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: system

@@ -1,0 +1,7 @@
+# Adds the manager flag that gates the workload-aware Pod/Node watches (see
+# cmd/main.go). Pairs with the node RBAC in this component: the flag without
+# the role crash-loops the operator on Node informer cache sync, the role
+# without the flag is unused.
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --enable-workload-aware-scheduling

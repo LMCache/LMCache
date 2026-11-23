@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	metav1validation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -42,7 +43,35 @@ func (e *LMCacheEngine) ValidateSpec() field.ErrorList {
 
 	errs = append(errs, validateL2BackendSpec(spec.L2Backend)...)
 	errs = append(errs, validateCoordinatorConnectionSpec(spec.Coordinator)...)
+	errs = append(errs, validateWorkloadAwareSchedulingSpec(spec.WorkloadAwareScheduling)...)
 
+	return errs
+}
+
+// validateWorkloadAwareSchedulingSpec enforces the workload-selector contract:
+// enabled requires a non-empty, syntactically valid LabelSelector. The
+// emptiness check matters because an empty LabelSelector matches every pod —
+// one malformed CR would label every node running anything in the namespace.
+// The syntax check matters because unknown operators, missing In/NotIn values
+// and invalid label keys pass the generated CRD schema and would otherwise
+// only surface later as a per-event selector parse error in the controller,
+// bypassing the ConfigValid condition.
+func validateWorkloadAwareSchedulingSpec(w *WorkloadAwareSchedulingSpec) field.ErrorList {
+	var errs field.ErrorList
+	if w == nil || !w.Enabled {
+		return errs
+	}
+	path := field.NewPath("spec", "workloadAwareScheduling", "workloadSelector")
+	if w.WorkloadSelector == nil {
+		return append(errs, field.Required(path, "is required when workloadAwareScheduling is enabled"))
+	}
+	if len(w.WorkloadSelector.MatchLabels) == 0 && len(w.WorkloadSelector.MatchExpressions) == 0 {
+		return append(errs, field.Invalid(
+			path, w.WorkloadSelector,
+			"must not be empty when workloadAwareScheduling is enabled: an empty LabelSelector matches every pod and would label every node in the namespace"))
+	}
+	errs = append(errs, metav1validation.ValidateLabelSelector(
+		w.WorkloadSelector, metav1validation.LabelSelectorValidationOptions{}, path)...)
 	return errs
 }
 

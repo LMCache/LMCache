@@ -241,6 +241,8 @@ The operator always injects these into the pod spec:
 | `eviction.triggerWatermark` | Must be in `(0.0, 1.0]` |
 | `eviction.evictionRatio` | Must be in `(0.0, 1.0]` |
 | `server.port` | Must be in `[1024, 65535]` |
+| `workloadAwareScheduling.workloadSelector` | Required and non-empty when `workloadAwareScheduling.enabled: true` |
+| `workloadAwareScheduling.releaseDelaySeconds` | Default `300`; must be `>= 0` |
 
 ---
 
@@ -406,7 +408,7 @@ OnEvent(LMCacheEngine create/update/delete):
    - Set conditions, observedGeneration
 ```
 
-**Secondary watches:** DaemonSet, Pods (readiness changes → update endpoints), Nodes (new GPU node → DaemonSet auto-schedules)
+**Secondary watches:** DaemonSet (owned-resource changes). Pod and Node watches exist only for workload-aware placement and are registered only when the manager runs with `--enable-workload-aware-scheduling` (see Workload-Aware Placement below).
 
 **Deletion / cleanup**: every child resource the operator creates
 (DaemonSet, lookup Service, metrics Service, connection ConfigMap,
@@ -421,6 +423,154 @@ The reconciler now actively strips that legacy finalizer from any CR
 it sees, so migration from older operator versions is automatic.
 Finalizers will return when we need to clean up state K8s GC cannot
 reach (Redis L2 keys, federation deregistration, etc.).
+
+---
+
+## Workload-Aware Placement (`spec.workloadAwareScheduling`)
+
+### The problem
+
+The engine DaemonSet is created on every node matching `spec.nodeSelector`,
+and co-location with the workload is enforced by a *required* pod affinity
+(`requiredDuringSchedulingIgnored...`). On shared GPU pools this produces two
+known warts:
+
+1. **Parked Pending pods.** Every node in the pool without the workload gets
+   a Pending engine pod — on a pool hosting several models, one per
+   non-hosting node per engine. They reserve nothing, but they trip
+   pod-alerting, add `desiredNumberToSchedule` noise, and look broken.
+2. **Lingering engines.** The reverse leak: an engine that was scheduled onto
+   a node keeps running after the workload leaves (`IgnoredDuringExecution`),
+   pinning its memory — often tens of GiB of warm cache — indefinitely.
+
+Both have the same root cause: the DaemonSet placement does not know where
+the workload actually runs.
+
+### The feature
+
+```yaml
+spec:
+  workloadAwareScheduling:
+    enabled: true
+    workloadSelector:
+      matchLabels:
+        serving.kserve.io/inferenceservice: my-model
+        component: predictor
+    releaseDelaySeconds: 300
+```
+
+When enabled, the controller mirrors a per-engine label
+(`lmcache.ai/wlas-<hash>`, hash of the CR's `namespace/name`) onto every node
+currently hosting a **bound** (`spec.nodeName` set), non-terminating pod
+matching `workloadSelector`, and adds that label to the DaemonSet
+nodeSelector. Consequences:
+
+- Engine pods are only created where the workload runs — no Pending pods on
+  non-hosting nodes.
+- When the workload leaves a node, the label is removed after
+  `releaseDelaySeconds` and the DaemonSet pod there is deleted.
+
+Semantics worth knowing:
+
+- **`enabled: false` or absent = previous behavior, byte for byte.** The
+  feature is strictly opt-in; existing CRs change nothing.
+- **Bound, not Ready.** Labels apply at pod binding so the engine boots while
+  the workload still loads weights; both fit comfortably inside the KV
+  connector's server handshake timeout.
+- **`releaseDelaySeconds` defaults to 300.** A workload restart on the same
+  node (rolling update) keeps the engine and its warm KV cache; a genuine
+  departure still cleans up. `0` removes the label on the next reconcile —
+  always clean, but re-rolls rebuild the cache cold. The window runs from
+  the **first observed absence**, so a controller outage that missed the
+  actual departure still grants the full delay, and a labeled node whose
+  bookkeeping predates this operator gets one full window from its first
+  handling rather than an instant cleanup.
+- **Failure direction.** A node that must be labeled but momentarily cannot be
+  fails loudly (requeue). A node that should lose its label but cannot be is
+  just retried — sticky engines are the safe side of the asymmetry, and the
+  only side affinity-only placement ever had.
+- **Toggling rolls engine pods once.** Changing `enabled` changes the
+  DaemonSet pod template (the managed nodeSelector key appears/disappears),
+  so the DaemonSet controller performs one rolling update of all engine
+  pods — including the ones on nodes that keep their workload. CRs that
+  never enable the feature are byte-for-byte previous behavior; whether on
+  or off, the toggle itself is not cache-preserving.
+- **Disable ordering is enforced, not merely sequenced.** On the disabling
+  path the reconcile re-reads the live DaemonSet after updating it and
+  refuses to purge node labels while its nodeSelector still references the
+  managed key — so no watch race or partial reconcile can produce the
+  "selector points at a label no node carries" state that would delete
+  every engine pod. Cleanup therefore always lands after the operator
+  DaemonSet has accepted the label-free selector.
+- **Node watch.** A node losing its managed label (by anything other than
+  the operator) is repaired on the next reconcile of the owning engines;
+  the operator re-watches nodes for managed-prefix label changes so that
+  repair happens immediately instead of on the next pod event.
+- **Deletion.** Node labels are cluster-scoped, so ownership garbage
+  collection cannot clean them. While enabled, the CR carries the
+  `lmcache.ai/workload-placement-cleanup` finalizer; deletion first strips
+  every managed label, then proceeds. Disabling the feature also strips
+  residue immediately (after the label-free selector has landed, per the
+  ordering note above). **This is a deliberate trade-off:** the finalizer
+  blocks CR deletion while the operator is down or uninstalling
+  (`kubectl delete -k config/default` hangs on WLAS-enabled CRs until the
+  operator comes back and strips the labels) — the alternative is
+  leaking per-engine labels on cluster nodes, which no GC can remove.
+  Uninstall orders that delete the operator Deployment before the CRs
+  must account for it (scale the operator to zero only after the CRs are
+  gone, or strip the labels by hand).
+- **Namespace scoping.** `workloadSelector` matches pods in the ENGINE's
+  namespace only. A workload in another namespace (KServe components are
+  commonly namespaced apart) matches nothing: no node is ever labeled
+  and the engine stays Pending with no pods — the status's
+  `workloadNodes` staying empty is the signal. Deploy the engine CR in
+  the same namespace as its workload (a namespace selector is a possible
+  follow-up if this proves limiting).
+- **RBAC footprint and the feature flag.** Placement needs
+  `nodes: get, list, watch, patch`. Cluster-scoped `nodes: patch` cannot
+  be narrowed by RBAC to label keys only — the grant covers taints,
+  unschedulable and any label, not just `lmcache.ai/wlas-*` — so the
+  permission is **opt-in**: the generated `config/rbac/role.yaml` contains
+  no node verbs at all. Instead the hand-written
+  `config/workload-aware-scheduling/` kustomize component (enable it via
+  the `components:` entry in `config/default/kustomization.yaml`) grants
+  the node role and sets the `--enable-workload-aware-scheduling` manager
+  flag. The flag is also what registers the Pod and Node watches: a Node
+  informer without node `list`/`watch` fails cache sync at startup and
+  crash-loops the operator, so without the flag the operator neither
+  requests nor uses any node permission. With the flag off, an engine
+  whose spec enables the feature fails its `ConfigValid` condition
+  (reason `WorkloadAwareSchedulingDisabled`) and its phase, and no
+  DaemonSet is created for it — the alternative, a DaemonSet whose
+  nodeSelector references a label nobody maintains, would leave pods
+  Pending forever with no feedback. Turning the flag off is a planned
+  transition: disable the feature on every engine first (label cleanup
+  needs the node RBAC to run), then remove the component and the flag.
+  Clusters that care can additionally add a ValidatingAdmissionPolicy
+  restricting the operator's service account to label changes on the
+  `lmcache.ai/wlas-` prefix. On clusters with many pods, the flag-on Pod
+  informer carries the usual memory cost of caching every pod in the
+  cluster.
+
+- **Status.** `status.workloadLabelKey` names the managed key (for dashboards), `status.workloadNodes` the current labeled set, and `status.nodeAbsentSince` the release-window bookkeeping (see `releaseDelaySeconds` above for the first-observed-absence semantics).
+
+### Why a node label at all
+
+A DaemonSet's nodeSelector is the only variable that decides *where DS pods
+are created*, and it only reads node labels. Required pod affinity cannot
+prevent creation — only park it Pending, which is the original problem.
+Mirroring the workload's presence onto the node label space is the only
+bridge available without changing the engine's object form.
+
+## Validation
+
+`workloadSelector` is required when enabled, and must be non-empty and
+syntactically valid: an empty `LabelSelector` matches every pod (one
+malformed CR would label every node running anything in the namespace),
+and unknown operators or `In`-without-values are rejected at validation
+time via upstream `LabelSelector` syntax validation, surfacing as
+`ConfigValid=False` at reconcile time, rather than failing per-event
+in the controller.
 
 ---
 
