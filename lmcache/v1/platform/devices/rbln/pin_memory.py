@@ -32,17 +32,20 @@ def skip_host_registration() -> Iterator[None]:
 
 
 class RblnPinMemoryBackend(PinMemoryBackend):
-    """Own registrations by (address, device), serialized with runtime calls.
+    """Own registrations by (address, device).
 
-    The pointer-only unpin API releases every registration this backend owns
-    at that address, even when the caller has switched devices. Failed releases
-    remain owned and can be retried before the host allocation is destroyed.
+    The runtime serializes registration and refuses a range that overlaps one
+    already registered on the device, so this backend takes no lock; it only
+    records the device each registration belongs to. The pointer-only unpin
+    API releases every registration this backend owns at that address, even
+    when the caller has switched devices. Failed releases remain owned and can
+    be retried before the host allocation is destroyed. Callers must not pin
+    and unpin the same address concurrently.
     """
 
     def __init__(self) -> None:
         """Create an empty registration owner; no device is initialized."""
         self._registered: set[tuple[int, int]] = set()
-        self._lock = threading.Lock()
 
     def pin_memory(self, ptr: int, size: int, flags: int = 0) -> bool:
         """Register a host range on the current device without modifying its bytes.
@@ -53,9 +56,10 @@ class RblnPinMemoryBackend(PinMemoryBackend):
             flags: Ignored; retained for the platform interface.
 
         Returns:
-            True after registration succeeds. False for an empty range, an
-            unregistered allocation scope, a duplicate owned registration, or
-            runtime failure.
+            True after registration succeeds. False for an empty range, inside
+            ``skip_host_registration()``, or when the runtime refuses the range
+            (for example, one already registered on this device) or cannot
+            register host memory.
         """
         del flags
         if getattr(_registration_scope, "skip", False):
@@ -63,23 +67,19 @@ class RblnPinMemoryBackend(PinMemoryBackend):
         if ptr <= 0 or size <= 0:
             return False
         device = torch.rbln.current_device()
-        key = (ptr, device)
-        with self._lock:
-            if key in self._registered:
-                return False
-            try:
-                registered = torch.rbln.host_register(ptr, size, device=device)
-            except RuntimeError:
-                logger.exception(
-                    "host_register(ptr=%#x, size=%d, device=%d) failed",
-                    ptr,
-                    size,
-                    device,
-                )
-                return False
-            if not registered:
-                return False
-            self._registered.add(key)
+        try:
+            registered = torch.rbln.host_register(ptr, size, device=device)
+        except RuntimeError:
+            logger.exception(
+                "host_register(ptr=%#x, size=%d, device=%d) failed",
+                ptr,
+                size,
+                device,
+            )
+            return False
+        if not registered:
+            return False
+        self._registered.add((ptr, device))
         return True
 
     def unpin_memory(self, ptr: int) -> bool:
@@ -95,22 +95,23 @@ class RblnPinMemoryBackend(PinMemoryBackend):
             True if all registrations were released. False if none was owned or
             any release failed; a retry releases only registrations still owned.
         """
-        with self._lock:
-            keys = sorted(key for key in self._registered if key[0] == ptr)
-            if not keys:
+        # Iterate a copy: another thread may register a different address
+        # meanwhile, and a set must not change size during iteration.
+        keys = sorted(key for key in self._registered.copy() if key[0] == ptr)
+        if not keys:
+            return False
+        for key in keys:
+            _, device = key
+            try:
+                torch.rbln.host_unregister(ptr, device=device)
+            except RuntimeError:
+                logger.exception(
+                    "host_unregister(ptr=%#x, device=%d) failed; keeping ownership",
+                    ptr,
+                    device,
+                )
                 return False
-            for key in keys:
-                _, device = key
-                try:
-                    torch.rbln.host_unregister(ptr, device=device)
-                except RuntimeError:
-                    logger.exception(
-                        "host_unregister(ptr=%#x, device=%d) failed; keeping ownership",
-                        ptr,
-                        device,
-                    )
-                    return False
-                self._registered.remove(key)
+            self._registered.remove(key)
         return True
 
     @property

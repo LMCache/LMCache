@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Byte-exact transfers between an NPU and a registered SHM mapping."""
+"""Host registration on an NPU: SHM round trip and duplicate refusal."""
 
 # Standard
 from uuid import uuid4
@@ -56,3 +56,15 @@ def test_registered_shm_round_trip() -> None:
     finally:
         shm_munmap(server_addr, 2 * nbytes)
         shm_unlink(name)
+
+
+def test_duplicate_registration_is_refused() -> None:
+    """A second registration of a range returns False; the first stays owned."""
+    spec = RblnDeviceSpec()
+    host = torch.empty(2 << 20, dtype=torch.uint8)
+    ptr = host.data_ptr()
+    assert spec.pin_memory(ptr, host.numel())
+    try:
+        assert not spec.pin_memory(ptr, host.numel())
+    finally:
+        assert spec.unpin_memory(ptr)
