@@ -249,8 +249,8 @@ void execute_object_group_transfer(
   #define LMC_HAS_BATCH_MEMCPY 0
 #endif
 
-// The 2-D path (cudaMemcpy3DBatchAsync) is CUDA-only; HIP builds keep one
-// 1-D entry per layer.
+// The 2-D path (cudaMemcpy3DBatchAsync) is CUDA-only; HIP builds issue 1-D
+// entries, one per layer unless adjacent ones merge (see append_split).
 #if LMC_HAS_BATCH_MEMCPY && !defined(USE_ROCM)
   #define LMC_HAS_2D_BATCH_MEMCPY 1
 #else
@@ -352,8 +352,10 @@ inline uintptr_t select_base(const BlockAddressing& addr,
 // pin chunk is a separate cudaHostRegister region; a copy spanning two of
 // them fails with cudaErrorInvalidValue). Same arithmetic as
 // lmcache_memcpy_async.
-// `merge`: extend the previous entry when contiguous on both sides (same pin
-// chunk, same device allocation).
+// `merge`: extend the previous entry instead of appending when this range
+// starts exactly where that entry ends on both the host and the device side
+// and not on a pin-chunk boundary. The copied bytes are the same either way.
+// The caller sets it only when both ranges lie in one device allocation.
 inline void append_split(std::vector<void*>& dsts, std::vector<void*>& srcs,
                          std::vector<size_t>& sizes, uintptr_t host,
                          uintptr_t dev, size_t nbytes,
@@ -505,15 +507,6 @@ void append_2d_split(std::vector<cudaMemcpy3DBatchOp>& ops, uintptr_t host,
 
 }  // namespace
 
-// LMCACHE_DIRECT_COPY_MERGE=0 disables merging contiguous 1-D entries.
-static bool direct_copy_merge() {
-  static const bool on = [] {
-    const char* v = std::getenv("LMCACHE_DIRECT_COPY_MERGE");
-    return v == nullptr || std::string(v) != "0";
-  }();
-  return on;
-}
-
 bool batch_memcpy_supported() {
 #if LMC_HAS_BATCH_MEMCPY
   static const bool supported = [] {
@@ -598,6 +591,11 @@ size_t execute_direct_copy_transfer(
   // the engine KV cache; non-zero means one 2-D copy moves the block of every
   // layer (see uniform_layer_pitch).
   std::vector<size_t> engine_layer_pitch(group_specs.size());
+  // Whether all layers of the group lie inside one block row (non-zero
+  // uniform_layer_pitch), i.e. in one device allocation. Where the 2-D copy
+  // is unavailable, such a group's 1-D entries are merged when they are
+  // adjacent on both sides: with one block per chunk and a layer pitch equal
+  // to the block bytes, the per-layer entries of a chunk become one.
   std::vector<char> packed_rows(group_specs.size(), 0);
   for (size_t g = 0; g < group_specs.size(); ++g) {
     const DirectCopyGroupSpec& spec = group_specs[g];
@@ -620,10 +618,10 @@ size_t execute_direct_copy_transfer(
     TORCH_CHECK(spec.paged_layer_ptrs.size() >= ptrs_needed, "group ", g,
                 " has ", spec.paged_layer_ptrs.size(),
                 " paged layer pointers, needs ", ptrs_needed);
-    // Layers packed in one block row: merge contiguous 1-D entries.
-    packed_rows[g] = uniform_layer_pitch(addressing[g], spec) > 0;
+    const size_t layer_pitch = uniform_layer_pitch(addressing[g], spec);
+    packed_rows[g] = layer_pitch > 0;
   #if LMC_HAS_2D_BATCH_MEMCPY
-    engine_layer_pitch[g] = uniform_layer_pitch(addressing[g], spec);
+    engine_layer_pitch[g] = layer_pitch;
   #endif
   }
 
@@ -720,7 +718,7 @@ size_t execute_direct_copy_transfer(
             append_split(dsts, srcs, sizes, host, dev, addr.block_bytes,
                          obj.host_offset + (host - obj.host_ptr),
                          host_buffer_alignment, is_h2d,
-                         packed_rows[g] && layer > 0 && direct_copy_merge());
+                         packed_rows[g] && layer > 0);
           }
         }
       }
