@@ -11,7 +11,8 @@ import msgspec
 import zmq
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.errors import LMCacheTimeoutError
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.transfer_channel.api import (
     TransferChannelAddress,
     TransferChannelTransferResult,
@@ -25,7 +26,6 @@ from lmcache.v1.distributed.transfer_channel.abstract import (
 from lmcache.v1.distributed.transfer_channel.factory import (
     register_transfer_channel_factory,
 )
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 
 if TYPE_CHECKING:
     # Third Party

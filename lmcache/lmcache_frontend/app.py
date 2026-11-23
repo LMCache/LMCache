@@ -19,16 +19,14 @@ import httpx
 import uvicorn
 
 # First Party
-from lmcache.security.api_key import (
+from lmcache.security.http import HTTPBearerAuthenticationMiddleware
+from lmcache.v1.common.security.api_key import (
     APIKeyVerifier,
     add_api_key_args,
     load_api_keys,
     load_service_api_keys,
 )
-from lmcache.security.http import (
-    HTTPBearerAuthenticationMiddleware,
-    bearer_authorization_header,
-)
+from lmcache.v1.common.security.bearer import bearer_authorization_header
 
 _PACKAGE = "lmcache.lmcache_frontend"
 FRONTEND_BACKEND_API_KEY_ENV_VAR = "LMCACHE_FRONTEND_BACKEND_API_KEY"

@@ -18,7 +18,7 @@ import argparse
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand, CompositeCommand
-from lmcache.v1.utils.subclass_discovery import discover_subclasses
+from lmcache.v1.common.subclass_discovery import discover_subclasses
 
 ALL_COMMANDS: list[BaseCommand]
 

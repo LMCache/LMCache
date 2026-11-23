@@ -1,0 +1,317 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Typed request contract shared by multiprocess clients and servers."""
+
+# Standard
+from typing import Protocol
+
+# First Party
+from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import (
+    BlockAllocationRecord,
+    CBMatchResult,
+    CBUnifiedLookupResult,
+    IPCCacheServerKey,
+    KVEventBatch,
+    KVEventProfile,
+    PrepareRetrieveResponse,
+    PrepareStoreResponse,
+    RegisterEngineDrivenContextPayload,
+    RegisterEngineDrivenContextResponse,
+)
+from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.kv_format.types import LayoutHints
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
+from lmcache.v1.transport.qstore import QRingInfo
+from lmcache.v1.transport.rpc import rpc_method
+from lmcache.v1.transport.server_module import (
+    ServerModuleCallRequest,
+    ServerModuleCallResponse,
+)
+
+
+class RequestClient(Protocol):
+    """Typed, transport-neutral contract for multiprocess RPC clients."""
+
+    @rpc_method
+    def register_kv_cache(
+        self,
+        instance_id: int,
+        kv_cache: list[DeviceIPCWrapper],
+        model_name: str,
+        world_size: int,
+        engine_type: EngineType,
+        layout_hints: LayoutHints,
+        engine_group_infos: list[EngineGroupInfo],
+        event_profile: KVEventProfile | None,
+    ) -> MessagingFuture[KVEventProfile | None]:
+        """Register caches and return their recorded native identity profile.
+
+        ``event_profile`` is required; pass None to retain current event output.
+        The returned profile lets a caller detect an older gRPC server that
+        ignored it. Integrations begin comparing profiles when they send one.
+        A rejection raises MPRequestError with the server's reason and code
+        INVALID_ARGUMENT on gRPC or invalid_argument on ZMQ, where the details
+        include the operation name. A gRPC outage raises MPServerUnavailableError;
+        a ZMQ wait can expire with LMCacheTimeoutError, as before.
+        Profiles do not activate native event output; bindings come separately.
+        """
+        ...
+
+    @rpc_method
+    def unregister_kv_cache(self, instance_id: int) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def register_q_cache(
+        self,
+        instance_id: int,
+        q_cache: list[DeviceIPCWrapper],
+        model_name: str,
+        world_size: int,
+        engine_type: EngineType,
+        layout_hints: LayoutHints,
+        engine_group_infos: list[EngineGroupInfo],
+    ) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def unregister_q_cache(self, instance_id: int) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def store_q(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
+
+    @rpc_method
+    def report_q_ring_state(
+        self,
+        instance_id: int,
+        worker_id: int,
+        used_blocks: list[int],
+        num_alloc: int,
+    ) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def get_q_ring(
+        self, model_name: str, world_size: int
+    ) -> MessagingFuture[list[QRingInfo]]: ...
+
+    @rpc_method
+    def sdk_retrieve(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        object_group_ids: list[int],
+        piece_ids: list[int],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
+
+    @rpc_method
+    def sdk_store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        object_group_ids: list[int],
+        piece_ids: list[int],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
+
+    @rpc_method
+    def store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
+
+    @rpc_method
+    def retrieve(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+        skip_first_n_tokens: int,
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
+
+    @rpc_method
+    def lookup(self, key: IPCCacheServerKey, tp_size: int) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def query_prefetch_status(self, request_id: str) -> MessagingFuture[int | None]: ...
+
+    @rpc_method
+    def wait_prefetch_status(
+        self, request_id: str, timeout: float
+    ) -> MessagingFuture[int | None]: ...
+
+    @rpc_method
+    def free_lookup_locks(
+        self,
+        key: IPCCacheServerKey,
+        tp_size: int,
+        extra_ranges: tuple[tuple[int, int], ...] = (),
+    ) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def end_session(self, request_id: str) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def register_kv_cache_engine_driven_context(
+        self, payload: RegisterEngineDrivenContextPayload
+    ) -> MessagingFuture[RegisterEngineDrivenContextResponse]: ...
+
+    @rpc_method
+    def unregister_kv_cache_engine_driven_context(
+        self, instance_id: int
+    ) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def prepare_store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        skipped_chunks: tuple[tuple[int, ...], ...] = (),
+    ) -> MessagingFuture[PrepareStoreResponse]: ...
+
+    @rpc_method
+    def commit_store(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        data: bytes,
+        chunk_start: int = 0,
+        chunk_count: int = 0,
+    ) -> MessagingFuture[bool]: ...
+
+    @rpc_method
+    def prepare_retrieve(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        chunk_start: int = 0,
+        chunk_count: int = 0,
+    ) -> MessagingFuture[PrepareRetrieveResponse]: ...
+
+    @rpc_method
+    def commit_retrieve(
+        self, key: IPCCacheServerKey, instance_id: int, failed: bool = False
+    ) -> MessagingFuture[bool]: ...
+
+    @rpc_method
+    def clear(self, force: bool = False) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def get_chunk_size(self) -> MessagingFuture[int]: ...
+
+    @rpc_method
+    def negotiate_chunk_size(
+        self, required_chunk_alignment: int
+    ) -> MessagingFuture[int]: ...
+
+    @rpc_method
+    def ping(self, instance_id: int | None) -> MessagingFuture[bool]: ...
+
+    @rpc_method
+    def report_block_allocation(
+        self,
+        instance_id: int,
+        model_name: str,
+        records: list[BlockAllocationRecord],
+    ) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def noop(self) -> MessagingFuture[str]: ...
+
+    @rpc_method
+    def cb_register_rope(
+        self,
+        instance_id: int,
+        cos_sin_caches_ipc: list[DeviceIPCWrapper],
+        head_size: int,
+        is_neox_style: bool,
+        group_to_cache: list[int],
+        group_rot: list[list[int]],
+        group_head_size: list[int],
+        kv_quant: str = "",
+    ) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def cb_unregister_rope(self, instance_id: int) -> MessagingFuture[None]: ...
+
+    @rpc_method
+    def cb_retrieve_pre_computed(
+        self,
+        key: IPCCacheServerKey,
+        match_results: list[CBMatchResult],
+        block_ids: list[list[int]],
+        instance_id: int,
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
+
+    @rpc_method
+    def cb_unified_lookup(
+        self, key: IPCCacheServerKey, tp_size: int
+    ) -> MessagingFuture[CBUnifiedLookupResult | None]: ...
+
+    @rpc_method
+    def cb_reorder_plan(
+        self,
+        key: IPCCacheServerKey,
+        keep_prefix: int,
+        budget_ms: int,
+    ) -> MessagingFuture[list[int]]: ...
+
+    @rpc_method
+    def cb_protocol_handshake(
+        self, client_version: int
+    ) -> MessagingFuture[tuple[int, bool]]: ...
+
+    @rpc_method
+    def get_experimental(self) -> MessagingFuture[list[str]]: ...
+
+    @rpc_method
+    def subscribe_kv_events(
+        self, instance_id: int, model_name: str, cursor: int, max_events: int
+    ) -> MessagingStream[KVEventBatch]: ...
+
+    @rpc_method
+    def server_module_call(
+        self, request: ServerModuleCallRequest
+    ) -> MessagingFuture[ServerModuleCallResponse]: ...
+
+    @rpc_method
+    def server_module_affinity_call(
+        self, request: ServerModuleCallRequest
+    ) -> MessagingFuture[ServerModuleCallResponse]: ...
+
+    # Deprecated alias (#4878), frozen: new params go on cb_register_rope.
+    def cb_register_rope_v3(
+        self,
+        instance_id: int,
+        cos_sin_caches_ipc: list[DeviceIPCWrapper],
+        head_size: int,
+        is_neox_style: bool,
+        group_to_cache: list[int],
+        group_rot: list[list[int]],
+        group_head_size: list[int],
+    ) -> MessagingFuture[None]: ...
+
+    def cb_unregister_rope_v3(self, instance_id: int) -> MessagingFuture[None]: ...
+
+    def cb_retrieve_pre_computed_v3(
+        self,
+        key: IPCCacheServerKey,
+        match_results: list[CBMatchResult],
+        block_ids: list[list[int]],
+        instance_id: int,
+        event_ipc_handle: bytes,
+    ) -> MessagingFuture[tuple[bytes, bool]]: ...
+
+    def close(self) -> None:
+        """Close the client and release its transport resources."""
+        ...

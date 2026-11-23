@@ -5,8 +5,8 @@
 from typing import Any
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.transport.request_client import RequestClient
 
 logger = init_logger(__name__)
 

@@ -316,4 +316,4 @@ per reader and each worker's retrieve releases one.
 | Group metadata edits (Mamba, sub-paged attention) | `lmcache/integration/vllm/kv_cache_group_edits.py` |
 | Register / store / retrieve | `lmcache/integration/vllm/{lmcache_mp_connector,vllm_multi_process_adapter}.py` |
 | Server GPU context / transfer | `lmcache/v1/multiprocess/{gpu_context,modules/lmcache_driven_transfer}.py` |
-| Request RPC contract | `lmcache/v1/multiprocess/transport/base.py` |
+| Request RPC contract | `lmcache/v1/transport/request_client.py` |

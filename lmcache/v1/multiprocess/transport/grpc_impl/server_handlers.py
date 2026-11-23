@@ -57,38 +57,41 @@ class GrpcRequestHandler:
 
 def bind_module_handlers(
     modules: Sequence[object],
+    rpc_client: type | None = None,
 ) -> dict[str, BoundRequestHandler]:
     """Collect the decorated handlers of server modules by operation.
 
     Args:
         modules: Ordered business modules. A later module overrides an
             earlier handler for the same operation.
+        rpc_client: RPC contract to validate; defaults to RequestClient.
 
     Returns:
         The bound handlers, keyed by operation name.
     """
     handlers_by_operation: dict[str, BoundRequestHandler] = {}
     for module in modules:
-        for registered in iter_request_handlers(module):
+        for registered in iter_request_handlers(module, rpc_client):
             handlers_by_operation[registered.operation] = registered
     return handlers_by_operation
 
 
 def validate_method_handler(
-    codec: GrpcMethodCodec, handler: Callable[..., Any]
+    codec: GrpcMethodCodec, handler: Callable[..., Any], rpc_client: type | None = None
 ) -> None:
     """Validate that a service handler implements a gRPC method's contract.
 
     Args:
         codec: Compiled codec of the gRPC method the handler serves.
         handler: Bound service implementation method.
+        rpc_client: RPC contract to validate; defaults to RequestClient.
 
     Raises:
         TypeError: If request or response annotations differ from the
             annotated gRPC service contract.
     """
-    if get_rpc_spec(codec.operation).streaming:
-        validate_handler(codec.operation, handler)
+    if get_rpc_spec(codec.operation, rpc_client).streaming:
+        validate_handler(codec.operation, handler, rpc_client)
         return
     _decoder, handler_payload_types = compile_request_decoder(
         codec.request_message_class, handler
@@ -115,6 +118,7 @@ def validate_method_handler(
 def build_service_handlers(
     binding: ServiceBinding,
     handlers_by_operation: dict[str, BoundRequestHandler],
+    rpc_client: type | None = None,
 ) -> dict[str, GrpcRequestHandler]:
     """Match every method of a generated service with its module handler.
 
@@ -124,6 +128,7 @@ def build_service_handlers(
     Args:
         binding: The generated service to serve.
         handlers_by_operation: Handlers from ``bind_module_handlers``.
+        rpc_client: RPC contract to expose; defaults to RequestClient.
 
     Returns:
         The handler for every method, keyed by the method's full name.
@@ -132,12 +137,12 @@ def build_service_handlers(
         TypeError: If a module handler does not match its protocol types.
     """
     service_handlers: dict[str, GrpcRequestHandler] = {}
-    codec_registry = get_method_codec_registry()
+    codec_registry = get_method_codec_registry(rpc_client)
     for method in binding.descriptor.methods:
         method_codec = codec_registry.by_full_name[method.full_name]
         bound_handler = handlers_by_operation.get(method_codec.operation)
         if bound_handler is not None:
-            validate_method_handler(method_codec, bound_handler.handler)
+            validate_method_handler(method_codec, bound_handler.handler, rpc_client)
         service_handlers[method.full_name] = GrpcRequestHandler(
             operation=method_codec.operation,
             handler=(bound_handler.handler if bound_handler is not None else None),
