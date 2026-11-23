@@ -1258,6 +1258,53 @@ fn fail_submissions(
     shutdown.store(true, Ordering::Relaxed);
 }
 
+/// Return whether a completion result is an NVMe Unrecovered Read Error.
+///
+/// UECC is only observable on passthrough (`io_uring_cmd`) reads: plain
+/// io_uring and POSIX reads surface the kernel's `-ENODATA`/`-EIO` errno
+/// instead of the NVMe status word. `res` is the completion result, which
+/// for `io_uring_cmd` carries the NVMe status field (SCT in bits 10:8 via
+/// the masked compare, SC in bits 7:0). The `0x07ff` mask ignores the CRD,
+/// More and DNR bits, so every retry/durability variant of SCT 2 / SC 0x81
+/// counts. Every other result keeps its current handling.
+fn is_unrecovered_read_error(is_passthrough: bool, is_write: bool, res: i32) -> bool {
+    is_passthrough && !is_write && res > 0 && (res & 0x07ff) == 0x0281
+}
+
+#[cfg(test)]
+mod unrecovered_read_error_tests {
+    use super::*;
+
+    #[test]
+    fn matches_unrecovered_read_error_statuses() {
+        assert!(is_unrecovered_read_error(true, false, 0x0281));
+        // DNR set in bit 14 (0x4000) is ignored by the status mask.
+        assert!(is_unrecovered_read_error(true, false, 0x4281));
+    }
+
+    #[test]
+    fn rejects_other_statuses_and_errnos() {
+        for res in [
+            -libc::EIO,
+            -libc::ENODATA,
+            -libc::EINTR,
+            0x0081,
+            0x0282,
+            0x0287,
+        ] {
+            assert!(!is_unrecovered_read_error(true, false, res), "res={res}");
+        }
+    }
+
+    #[test]
+    fn rejects_regular_reads_and_passthrough_writes() {
+        // A non-passthrough read completing with a byte count must keep its
+        // regular-I/O handling even when the value collides with the mask.
+        assert!(!is_unrecovered_read_error(false, false, 641));
+        assert!(!is_unrecovered_read_error(true, true, 0x0281));
+    }
+}
+
 const SUBMISSION_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(1);
 const SUBMISSION_RETRY_MAX_DELAY: Duration = Duration::from_millis(100);
 const SUBMISSION_STALL_TIMEOUT: Duration = Duration::from_secs(30);
