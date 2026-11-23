@@ -1,4 +1,4 @@
-0.5.24.dev20261122+g7e62e83612
-short_sha=7e62e83612
-full_sha=7e62e8361211a3e04deb7fa6bbb31d9a58778701
+0.5.24.dev20261123+g7c21d8c701
+short_sha=7c21d8c701
+full_sha=7c21d8c7017884f613089f3e69b225534e75a6cb
 index_url=https://sgl-project.github.io/whl/cu130
