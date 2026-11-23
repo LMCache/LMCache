@@ -19,6 +19,7 @@ from lmcache.v1.distributed.config import L1ManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager.base import BaseL1Manager
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
+from lmcache.v1.memory_allocators.lazy_memory_allocator import align_to
 from lmcache.v1.memory_management import MemoryObj
 
 
@@ -50,13 +51,24 @@ class DramL1Manager(BaseL1Manager):
         return MemoryTags(segment=MemorySegment.DRAM, residency=MemoryResidency.LOCAL)
 
     def reserve_streaming_arena(self, capacity: int) -> MemoryObj:
-        """Reserve streaming bytes from DRAM before hot-cache admission."""
+        """Reserve a DRAM arena while leaving room for a resident allocation.
+
+        Args:
+            capacity: Logical window arena size in bytes.
+
+        Returns:
+            The arena owned by the streaming reader.
+
+        Raises:
+            ValueError: The reservation would leave no aligned hot L1 space.
+            RuntimeError: The L1 allocator could not reserve the arena.
+        """
+        alignment = self.config.memory_config.align_bytes
+        reserved_size = align_to(capacity, alignment)
         layout = MemoryLayoutDesc([torch.Size([capacity])], [torch.uint8])
         with self._streaming_reservation_lock:
-            if (
-                capacity
-                >= super().get_capacity_bytes() - self._streaming_reserved_bytes
-            ):
+            available = super().get_capacity_bytes() - self._streaming_reserved_bytes
+            if available - reserved_size < alignment:
                 raise ValueError("streaming reservation must leave space for hot L1")
             error, objects = self._memory_manager.allocate(layout, 1)
             if error != L1Error.SUCCESS:

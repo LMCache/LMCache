@@ -1483,6 +1483,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             time.monotonic() - tracker.lookup_started_at
         )
         tracker.lookup_started_at = None
+        tracker.pending_lookup_tail = None
 
         # Save the vLLM hit count even when LMCache misses. It is rounded
         # down to a boundary aligned for every engine group (a full-prompt
@@ -1563,7 +1564,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
                 aligned = max(0, (ret - 1) // chunk * chunk)
                 if aligned < ret:
-                    tracker.pending_free_ranges.append((aligned, ret))
+                    tracker.pending_lookup_tail = (aligned, ret)
                     tracker.num_lmcache_hit_tokens = aligned
                 need_to_load = max(0, aligned - num_computed_tokens)
             else:
@@ -1690,6 +1691,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     0,
                     free_end,
                 )
+            if tracker.pending_lookup_tail is not None:
+                # The tail belongs to the current lookup. Use the primary
+                # range so the server releases only its recorded L1 locks.
+                tail_start, tail_end = tracker.pending_lookup_tail
+                self.scheduler_adapter.free_lookup_locks(
+                    packed_token_ids=tracker.packed_token_ids(),
+                    start=tail_start,
+                    end=tail_end,
+                    request_id=request.request_id,
+                    cache_salt=tracker.cache_salt,
+                    request_configs=tracker.request_configs,
+                )
+                tracker.pending_lookup_tail = None
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput

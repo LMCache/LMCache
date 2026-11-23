@@ -43,7 +43,8 @@ Reserved FS streaming windows are available in the default MP engine with
 and the full resident L1 budget in ``engine_driven``, ``auto``, and blend mode.
 
 The server carves the reservation out of its single DRAM L1 manager at
-startup. For example, ``--l1-size-gb 2`` with a 128 MiB reservation leaves
+startup. The aligned reservation must leave room for at least one resident L1
+allocation. For example, ``--l1-size-gb 2`` with a 128 MiB reservation leaves
 1.875 GiB for resident objects. The configured streaming adapter stays attached
 until shutdown. When this unwrapped ``fs`` adapter is the sole active L2
 adapter and every object layout fits, lookup combines L1 and FS hits to find

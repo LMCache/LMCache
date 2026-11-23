@@ -933,11 +933,12 @@ def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
         if replay:
             assert (need, async_load) == (8, True)
             assert tracker.num_lmcache_hit_tokens == 8
-            assert tracker.pending_free_ranges == [(8, 12)]
+            # The scheduler can query again while waiting for free GPU blocks.
+            assert scheduler.get_num_new_matched_tokens(request, 0) == (8, True)
+            mock_io.scheduler.free_lookup_locks.assert_not_called()
         else:
             assert (need, async_load) == (11, True)
             assert tracker.num_lmcache_hit_tokens == 12
-            assert tracker.pending_free_ranges == []
         # vLLM allocates exactly the blocks it was told about (8 tokens = 2
         # blocks under replay); the retrieve must fit in them.
         n_blocks = 2 if replay else 3
@@ -954,8 +955,12 @@ def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
         assert (meta.op.start, meta.op.end) == (0, 8 if replay else 12)
         assert len(meta.op.block_ids[0]) * 4 >= meta.op.end
         if replay:
+            mock_io.scheduler.free_lookup_locks.assert_called_once()
             kwargs = mock_io.scheduler.free_lookup_locks.call_args.kwargs
-            assert kwargs["extra_ranges"] == ((8, 12),)
+            assert (kwargs["start"], kwargs["end"]) == (8, 12)
+            assert kwargs.get("extra_ranges", ()) == ()
+        else:
+            mock_io.scheduler.free_lookup_locks.assert_not_called()
     finally:
         scheduler.shutdown()
 

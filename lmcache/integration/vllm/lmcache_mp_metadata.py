@@ -128,6 +128,8 @@ class LMCacheMPRequestTracker:
 
     # Lock ranges left by abandoned lookups, released with the next FREE.
     pending_free_ranges: list[tuple[int, int]] = field(default_factory=list)
+    # The current lookup's tail omitted from a bounded SWA prefix replay.
+    pending_lookup_tail: tuple[int, int] | None = None
 
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
@@ -162,6 +164,7 @@ class LMCacheMPRequestTracker:
         self.apc_covered_tokens = 0
         self.need_full_lookup = False
         self.pending_free_ranges = []
+        self.pending_lookup_tail = None
         self.state = LMCacheMPRequestState.PREFETCHING
         self.packed_tokens = bytearray()
         self.mm_adjusted_prompt_ids = []

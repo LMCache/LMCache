@@ -32,7 +32,8 @@ lookup prefix. Tokens after the hit are computed by the inference engine.
 When the scheduler replaces a lookup, it sends the abandoned lookup's exact
 hit range for cleanup. The server releases that lookup's recorded owners,
 including its unfull L1 tail. Cleanup of the current range uses the current
-lookup's owners.
+lookup's owners. When vLLM trims the current hit for bounded SWA replay, it
+releases the omitted tail as a current lookup range.
 
 ## Buffer lifecycle
 
@@ -56,7 +57,8 @@ connector's configured failure policy can handle the missing KV.
 ## Configuration and tradeoffs
 
 `streaming_buffer_size_bytes` defaults to zero. A positive reservation must be
-4096-byte aligned and leave space for resident L1. The reservation comes from
+4096-byte aligned. Its aligned allocation must leave room for at least one
+resident L1 allocation. The reservation comes from
 the existing DRAM L1 arena and is excluded from the reported resident L1
 capacity. Any request with an object larger than the reservation uses ordinary
 prefetch. Resident L1 continues to admit stores and run its eviction policy.

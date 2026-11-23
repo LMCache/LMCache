@@ -19,6 +19,39 @@ import lmcache.v1.memory_management as memory_management
 pytestmark = pytest.mark.no_shared_allocator
 
 
+@pytest.mark.parametrize("l1_bytes", [8192, 12288, 16384])
+def test_streaming_reservation_leaves_one_aligned_hot_allocation(
+    monkeypatch: pytest.MonkeyPatch, l1_bytes: int
+) -> None:
+    monkeypatch.setattr(
+        memory_management,
+        "_allocate_cpu_memory",
+        lambda n, *a, **kw: torch.empty(n, dtype=torch.uint8),
+    )
+    monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **kw: None)
+    owner = DramL1Manager(
+        L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=l1_bytes, use_lazy=False, align_bytes=8192, shm_name=""
+            )
+        )
+    )
+    try:
+        if l1_bytes < 16384:
+            with pytest.raises(ValueError, match="leave space for hot L1"):
+                owner.reserve_streaming_arena(4096)
+            assert owner.get_memory_usage() == (0, l1_bytes)
+        else:
+            arena = owner.reserve_streaming_arena(4096)
+            try:
+                assert owner.get_memory_usage() == (0, 8192)
+            finally:
+                owner.release_streaming_arena(arena)
+            assert owner.get_memory_usage() == (0, l1_bytes)
+    finally:
+        owner.close()
+
+
 def test_reserved_window_never_becomes_hot_capacity(monkeypatch):
     monkeypatch.setattr(
         memory_management,
