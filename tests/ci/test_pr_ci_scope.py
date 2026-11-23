@@ -12,8 +12,10 @@ import sys
 # Third Party
 import pytest
 
-REPO = Path(__file__).resolve().parents[2]
-SCRIPT = REPO / ".github/scripts/pr-ci-scope.sh"
+# First Party
+from tests.import_utils import repo_path
+
+SCRIPT = repo_path(".github/scripts/pr-ci-scope.sh")
 
 
 def _find_bash() -> str | None:

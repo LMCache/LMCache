@@ -83,6 +83,7 @@ jobs:
               - 'pyproject.toml'
               - 'requirements/**.txt'
               - '.github/workflows/test.yml'
+              - '.github/scripts/pr-ci-scope.sh'
               - '!operator/**'
             raw_block:
               - 'rust/raw_block/**'
@@ -164,7 +165,7 @@ jobs:
 
   hf3fs-native-tests:
     needs: changes
-    if: needs.changes.outputs.hf3fs_native == 'true'
+    if: needs.changes.outputs.hf3fs_native == 'true' && github.event.pull_request.draft != true
     name: HF3FS connector native tests
     runs-on: ubuntu-24.04
 
@@ -186,7 +187,7 @@ jobs:
 
   token-drop-vllm-0251:
     needs: changes
-    if: needs.changes.outputs.token_drop == 'true'
+    if: needs.changes.outputs.token_drop == 'true' && github.event.pull_request.draft != true
     name: "Token-dropping tests (vLLM 0.25.1)"
     runs-on: ubuntu-24.04
     steps:
@@ -241,7 +242,7 @@ jobs:
 
   rust-unit-tests:
     needs: changes
-    if: needs.changes.outputs.raw_block == 'true'
+    if: needs.changes.outputs.raw_block == 'true' && github.event.pull_request.draft != true
     name: Rust unit tests
     runs-on: ubuntu-24.04
 
@@ -267,7 +268,7 @@ jobs:
 
   raw-block-tests:
     needs: changes
-    if: needs.changes.outputs.raw_block == 'true'
+    if: needs.changes.outputs.raw_block == 'true' && github.event.pull_request.draft != true
     name: raw-block temp-file tests
     runs-on: ubuntu-24.04
     env:
@@ -320,7 +321,7 @@ jobs:
 
   grpc-native-tests:
     needs: changes
-    if: needs.changes.outputs.lmcache == 'true'
+    if: needs.changes.outputs.lmcache == 'true' && github.event.pull_request.draft != true
     name: gRPC native server tests
     runs-on: ubuntu-latest
     env:
