@@ -4,6 +4,7 @@
 # Standard
 from dataclasses import replace
 from pathlib import Path
+import base64
 import shutil
 import subprocess
 
@@ -14,6 +15,7 @@ import pytest
 from lmcache.v1.distributed.api import ObjectKey, ObjectKeyIdentity
 from lmcache.v1.distributed.key_codec import (
     decode_storage_key,
+    decode_tags,
     encode_fs_filename,
     encode_storage_key,
     encode_tags,
@@ -173,12 +175,45 @@ def test_python_side_rejects_unknown_or_empty_tokens(token: str) -> None:
         decode_storage_key(f"model@1@0@31323334@@{token}")
 
 
-def test_a_flipped_character_breaks_canonicality() -> None:
-    """Re-encoding must reproduce the token, so payload edits cannot hide."""
-    token = encode_tags({"kv_dtype": "bf16"})
-    tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+def _tag_token(payload: bytes) -> str:
+    """Build an ``x1-`` token from raw JSON bytes, as the legacy encoding does."""
+    return "x1-" + base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [
+        {"kv_dtype": "f16"},
+        {"kv_dtype": "bf16,f8e4m3"},
+        {"kv_dtype": "bf16", "revision": "abc"},
+    ],
+)
+def test_the_token_round_trips_canonically(tags: dict[str, str]) -> None:
+    """Re-encoding a decoded token reproduces it byte for byte."""
+    token = encode_tags(tags)
+
+    assert encode_tags(decode_tags(token)) == token
+
+
+def test_a_noncanonical_token_is_rejected() -> None:
+    """A payload that decodes but is not what this codec writes is rejected.
+
+    The keys are unsorted, so the payload is valid JSON and carries the same
+    tags, but re-encoding it gives a different byte string. The canonicality
+    check runs before the result is returned, so both entry points reject it.
+    """
+    token = _tag_token(b'{"revision":"abc","kv_dtype":"bf16"}')
+
     with pytest.raises(ValueError):
-        decode_storage_key(f"model@1@0@31323334@@{tampered}")
+        decode_tags(token)
+    with pytest.raises(ValueError):
+        decode_storage_key(f"model@1@0@31323334@@{token}")
+
+
+def test_a_malformed_token_is_rejected() -> None:
+    """Bytes that are not base64 at all are rejected before parsing a payload."""
+    with pytest.raises(ValueError):
+        decode_storage_key("model@1@0@31323334@@x1-!!!!")
 
 
 @pytest.mark.parametrize(
