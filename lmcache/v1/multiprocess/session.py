@@ -66,6 +66,9 @@ class Session:
     _abandoned_streaming: list[_StreamingLookup] = field(
         default_factory=list, repr=False
     )
+    _released_abandoned_ranges: set[tuple[int, int]] = field(
+        default_factory=set, repr=False
+    )
     extras: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -217,6 +220,7 @@ class Session:
             if current is not None and not current.finished:
                 self._abandoned_streaming.append(current)
             self._streaming_lookup = None
+            self._released_abandoned_ranges.clear()
             self.lookup_ipc_key = key
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
@@ -246,17 +250,29 @@ class Session:
         with self._lock:
             self._streaming_lookup = _StreamingLookup(start, end, dict(l1_owners or {}))
 
-    def finish_current_streaming_range(self, start: int, end: int) -> None:
-        """Mark the current streaming lookup finished when its full range is done.
+    def take_current_streaming_owners(
+        self, start: int, end: int, keys: list[ObjectKey]
+    ) -> dict[ObjectKey, int] | None:
+        """Transfer ownership of the current range's still-held L1 read locks.
 
         Args:
             start: First token in the released range.
             end: Exclusive end of the released range.
+            keys: Objects the caller resolved in that range.
+
+        Returns:
+            The taken key-to-L1-owner map, or None for a non-streaming range.
         """
         with self._lock:
             current = self._streaming_lookup
-            if current is not None and start <= current.start and end >= current.end:
+            if current is None or not current.start <= start <= current.end:
+                return None
+            owners = {
+                key: current.owners.pop(key) for key in keys if key in current.owners
+            }
+            if start == current.start and end >= current.end:
                 current.finished = True
+            return owners
 
     def finish_current_streaming_retrieve(self) -> None:
         """Mark the current lookup scheduled for retrieval and lock release."""
@@ -264,36 +280,37 @@ class Session:
             if self._streaming_lookup is not None:
                 self._streaming_lookup.finished = True
 
-    def abandoned_streaming_range_owners(
+    def take_abandoned_streaming_owners(
         self, start: int, end: int
     ) -> dict[ObjectKey, int] | None:
-        """Return owners of the oldest abandoned lookup with these boundaries.
+        """Take the remaining L1 read locks of one abandoned streaming lookup.
+
+        Prefer an exact match. A multi-server caller may pass the shorter
+        common prefix ending before this server's original lookup hit.
 
         Args:
             start: First token in the abandoned range.
             end: Exclusive end of the abandoned range.
 
         Returns:
-            A copy of the retained L1 owners, or None if no range matches.
+            The owned key-to-L1-owner map, empty for an already released
+            range of this replacement lookup, or None if no range matches.
         """
         with self._lock:
-            for lookup in self._abandoned_streaming:
-                if (lookup.start, lookup.end) == (start, end):
-                    return lookup.owners.copy()
-            return None
-
-    def finish_abandoned_streaming_range(self, start: int, end: int) -> None:
-        """Forget the oldest abandoned lookup after its entire range is freed.
-
-        Args:
-            start: First token in the released range.
-            end: Exclusive end of the released range.
-        """
-        with self._lock:
+            bounds = (start, end)
+            match = None
             for index, lookup in enumerate(self._abandoned_streaming):
-                if (lookup.start, lookup.end) == (start, end):
-                    self._abandoned_streaming.pop(index)
+                if (lookup.start, lookup.end) == bounds:
+                    match = index
                     break
+                if match is None and lookup.start == start and end < lookup.end:
+                    match = index
+            if match is not None:
+                self._released_abandoned_ranges.add(bounds)
+                return self._abandoned_streaming.pop(match).owners
+            if bounds in self._released_abandoned_ranges:
+                return {}
+            return None
 
     def current_streaming_range_owners(
         self, start: int, end: int
@@ -326,12 +343,6 @@ class Session:
                 )
             current.end = end
             current.owners.update(l1_owners)
-
-    def is_current_streaming_range(self, start: int, end: int) -> bool:
-        """Return whether the latest lookup serves this range from FS windows."""
-        with self._lock:
-            current = self._streaming_lookup
-            return current is not None and current.contains(start, end)
 
 
 class SessionManager:

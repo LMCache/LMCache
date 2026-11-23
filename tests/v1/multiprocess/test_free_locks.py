@@ -155,8 +155,8 @@ def _make_free_locks_ctx(
     session = ctx.session_manager.get_or_create.return_value
     session.prefetch_hit_chunks = hit_chunks
     session.prefetch_locked_gids = tuple(locked_gids)
-    session.current_streaming_range_owners.return_value = None
-    session.abandoned_streaming_range_owners.return_value = None
+    session.take_current_streaming_owners.return_value = None
+    session.take_abandoned_streaming_owners.return_value = None
     session.lookup_ipc_key = _free_locks_key(1024, start=lookup_start, end=1024)
     return ctx
 
@@ -336,7 +336,7 @@ def test_completed_streaming_lookup_does_not_mask_later_normal_release():
 
     ctx.storage_manager.finish_read_prefetched.assert_called_once()
     assert session.current_streaming_range_owners(0, 256) is None
-    assert session.abandoned_streaming_range_owners(0, 256) is None
+    assert session.take_abandoned_streaming_owners(0, 256) is None
 
 
 def test_abandoned_streaming_range_is_released_once_after_relookup():
@@ -361,7 +361,64 @@ def test_abandoned_streaming_range_is_released_once_after_relookup():
     ctx.storage_manager.finish_read_prefetched.assert_called_once_with(
         [obj], read_locks=1, l1_owners=owners
     )
-    assert session.abandoned_streaming_range_owners(0, 256) is None
+    assert session.take_abandoned_streaming_owners(0, 256) == {}
+
+
+def test_clipped_abandoned_streaming_range_releases_only_remaining_l1_owners():
+    """A multi-server common hit can end before this server's old hit."""
+    hashes = [b"h0", b"fs", b"hot", b"tail"]
+    ctx = _make_free_locks_ctx(hashes, windows=[-1], hit_chunks=4, lookup_start=256)
+    hasher = ctx.layout_desc_registry.get_token_hasher.return_value
+    hasher.compute_packed_chunk_hashes.side_effect = (
+        lambda _tokens, *, start=0, end=1024: hashes[start // 256 : end // 256]
+    )
+    old_key = _free_locks_key(1024, 256, 1024)
+    cold, hot, tail = ipc_key_to_object_keys(
+        old_key, hashes[1:], [0], DEFAULT_SHARD_REPLICATION_DESC
+    )[0]
+    session = Session(old_key.request_id, hasher)
+    ctx.session_manager.get_or_create.return_value = session
+    session.begin_lookup(old_key)
+    session.add_streaming_range(256, 1024, {hot: 7, tail: 7})
+    session.record_prefetch_result(4, (0,), {hot: 7, tail: 7})
+    module = LookupModule(ctx)
+
+    module.free_lookup_locks(_free_locks_key(1024, 768, 1024), 1)
+    session.begin_lookup(_free_locks_key(1024, 0, 1024))
+    # The new lookup owns the block that was FS-only in the abandoned one.
+    session.record_prefetch_result(2, (0,), {cold: 7})
+    ctx.storage_manager.finish_read_prefetched.reset_mock()
+    for _ in range(2):
+        module.free_lookup_locks(
+            _free_locks_key(1024, 0, 0), 1, extra_ranges=((256, 768),)
+        )
+
+    ctx.storage_manager.finish_read_prefetched.assert_called_once_with(
+        [hot], read_locks=1, l1_owners={hot: 7}
+    )
+
+
+def test_repeated_current_streaming_free_releases_each_read_lock_once():
+    ctx = _make_free_locks_ctx([b"tail"], windows=[-1], hit_chunks=2)
+    key = _free_locks_key(512, 256, 512)
+    tail = ipc_key_to_object_keys(key, [b"tail"], [0], DEFAULT_SHARD_REPLICATION_DESC)[
+        0
+    ][0]
+    session = Session(
+        key.request_id, ctx.layout_desc_registry.get_token_hasher.return_value
+    )
+    ctx.session_manager.get_or_create.return_value = session
+    session.begin_lookup(_free_locks_key(512, 0, 512))
+    session.add_streaming_range(0, 512, {tail: 7})
+    session.record_prefetch_result(2, (0,), {tail: 7})
+    module = LookupModule(ctx)
+
+    module.free_lookup_locks(key, 1)
+    module.free_lookup_locks(key, 1)
+
+    ctx.storage_manager.finish_read_prefetched.assert_called_once_with(
+        [tail], read_locks=1, l1_owners={tail: 7}
+    )
 
 
 def test_identical_abandoned_streaming_ranges_release_in_lookup_order():
@@ -454,7 +511,7 @@ def test_retrieved_streaming_range_is_retired_at_next_lookup():
     session.finish_current_streaming_retrieve()
     session.begin_lookup(key)
     assert session.current_streaming_range_owners(0, 256) is None
-    assert session.abandoned_streaming_range_owners(0, 256) is None
+    assert session.take_abandoned_streaming_owners(0, 256) is None
 
 
 def test_freeing_exact_abandoned_range_keeps_a_shorter_prior_range():
@@ -475,8 +532,8 @@ def test_freeing_exact_abandoned_range_keeps_a_shorter_prior_range():
         _free_locks_key(512, 0, 0), 1, extra_ranges=((0, 512),)
     )
 
-    assert session.abandoned_streaming_range_owners(0, 512) is None
-    assert session.abandoned_streaming_range_owners(0, 256) == {}
+    assert session.take_abandoned_streaming_owners(0, 512) == {}
+    assert session.take_abandoned_streaming_owners(0, 256) == {}
 
 
 def test_server_free_lookup_locks_without_result_releases_nothing():

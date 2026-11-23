@@ -29,11 +29,14 @@ Retrieve reads resident objects from their owners and FS objects through the
 reserved window pool. It slices the staged block IDs for each run of
 L1 objects or FS windows, so the device sees the same object order as the
 lookup prefix. Tokens after the hit are computed by the inference engine.
-When the scheduler replaces a lookup, it sends the abandoned lookup's exact
-hit range for cleanup. The server releases that lookup's recorded owners,
-including its unfull L1 tail. Cleanup of the current range uses the current
-lookup's owners. When vLLM trims the current hit for bounded SWA replay, it
-releases the omitted tail as a current lookup range.
+When servers report unequal hits, the scheduler waits for the excess-tail
+releases to complete before exposing their common hit. When the scheduler
+replaces a lookup, it sends the abandoned lookup's range for cleanup. Its end
+can be the shorter common hit across servers. The server releases that
+lookup's remaining L1 locks, including any retained unfull L1 tail. A partial
+FREE removes only the released locks from the record. When vLLM trims the
+current hit for bounded SWA replay, it releases the omitted tail as a current
+lookup range.
 
 ## Buffer lifecycle
 

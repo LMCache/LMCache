@@ -62,6 +62,7 @@ class FakeClient:
         self.frees: list[IPCCacheServerKey] = []
         self.next_lookups: deque[MessagingFuture[Any]] = deque()
         self.next_queries: deque[MessagingFuture[Any]] = deque()
+        self.next_frees: deque[MessagingFuture[Any]] = deque()
         self.violations: list[str] = []
         self.lock = threading.Lock()
 
@@ -94,7 +95,7 @@ class FakeClient:
     ) -> MessagingFuture[Any]:
         """Record a released lock range."""
         self.frees.append(key)
-        return ready(None)
+        return self.next_frees.popleft() if self.next_frees else ready(None)
 
     def pending_query(self) -> MessagingFuture[Any] | None:
         """Return the status query in flight, if any."""
@@ -228,6 +229,36 @@ def test_unequal_hits_take_the_minimum_and_free_the_excess_tail_once() -> None:
     assert [(key.start, key.end) for key in high.frees] == [(128, 256)]
     assert high.frees[0].request_id == "r" and high.frees[0].worker_id is None
     assert not low.frees
+
+
+@pytest.mark.parametrize("outcome", ["ack", "timeout", "error"])
+def test_common_hit_waits_for_excess_tail_free(
+    clock: list[float], outcome: str
+) -> None:
+    """A replacement lookup must not race the old tail's primary FREE."""
+    state, (high, low) = make_state(2, timeout=5)
+    tail: MessagingFuture[None] = MessagingFuture()
+    high.next_frees.append(tail)
+    state.submit()
+    high.lookups[0].set_result(None)
+    low.lookups[0].set_result(None)
+    high.queries[0].set_result(4 * TOKENS_PER_CHUNK)
+    low.queries[0].set_result(2 * TOKENS_PER_CHUNK)
+
+    assert state.get_result() is None
+    assert state.on_scheduler_check() == []
+    if outcome == "ack":
+        tail.set_result(None)
+        assert state.on_scheduler_check() == []
+        assert state.get_result() == 2 * TOKENS_PER_CHUNK
+    else:
+        if outcome == "timeout":
+            clock[0] += 5
+        else:
+            tail.set_exception(RuntimeError("tail FREE failed"))
+        assert state.on_scheduler_check() == ["s0"]
+        assert state.get_result() == 0
+    assert len(high.frees) == 1
 
 
 def test_reply_handled_at_check_is_not_handled_again_by_its_callback() -> None:

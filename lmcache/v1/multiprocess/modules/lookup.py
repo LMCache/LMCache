@@ -526,10 +526,9 @@ class LookupModule(DiscoverableModule):
             key: Cache key whose read locks should be released.
             tp_size: Legacy wire field; ignored (kept for payload arity).
             extra_ranges: Lock ranges left over from this request's earlier,
-                abandoned lookups, as ``(start, end)`` token pairs. Each end
-                must be that lookup's hit boundary, so the range resolves to
-                exactly the keys it locked (sliding-window groups translate
-                from the hit).
+                abandoned lookups, as ``(start, end)`` token pairs. A
+                streaming lookup may be identified by its shorter common
+                hit across multiple servers.
         """
         if key.start >= key.end and not extra_ranges:
             return
@@ -592,22 +591,20 @@ class LookupModule(DiscoverableModule):
                 locked_keys = session.get_prefetch_owners()
                 if all(obj_key in locked_keys for obj_key in unfull_obj_keys):
                     obj_keys.extend(unfull_obj_keys)
-            owners = self._ctx.get_read_owners(key.request_id)
-            streaming_end = min(key.end, max(effective_start, hit_chunks * chunk_size))
-            streaming_owners = session.current_streaming_range_owners(
-                effective_start, streaming_end
+            streaming_owners = session.take_current_streaming_owners(
+                effective_start, key.end, obj_keys
             )
+            owners = streaming_owners
             if streaming_owners is not None:
-                owners = streaming_owners
-                obj_keys = [obj_key for obj_key in obj_keys if obj_key in owners]
+                obj_keys = list(streaming_owners)
+            else:
+                owners = self._ctx.get_read_owners(key.request_id)
             if obj_keys:
                 finish_lookup_read(self._ctx, key, obj_keys, owners)
-            if streaming_owners is not None:
-                session.finish_current_streaming_range(effective_start, key.end)
         for range_start, range_end in extra_ranges:
             if range_start >= range_end:
                 continue
-            abandoned_owners = session.abandoned_streaming_range_owners(
+            abandoned_owners = session.take_abandoned_streaming_owners(
                 range_start, range_end
             )
             if abandoned_owners is not None:
@@ -616,7 +613,6 @@ class LookupModule(DiscoverableModule):
                     finish_lookup_read(
                         self._ctx, key, list(abandoned_owners), abandoned_owners
                     )
-                session.finish_abandoned_streaming_range(range_start, range_end)
                 continue
             # An abandoned lookup's range ends at its hit boundary, so the
             # range is its own lock model: resolve with that hit, not the

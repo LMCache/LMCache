@@ -38,6 +38,9 @@ class _Phase(enum.Enum):
     RESOLVED = enum.auto()
     """The server reported its final hit."""
 
+    FREE_TAIL_IN_FLIGHT = enum.auto()
+    """The server's excess hit is being released."""
+
     TIMED_OUT = enum.auto()
     """An RPC to the server passed its deadline."""
 
@@ -51,8 +54,7 @@ class _Server:
     phase: _Phase = _Phase.LOOKUP_IN_FLIGHT
 
     future: _RpcFuture | None = None
-    """The RPC in flight, set only in LOOKUP_IN_FLIGHT and
-    QUERY_PREFETCH_STATUS_IN_FLIGHT."""
+    """The LOOKUP, QUERY_PREFETCH_STATUS, or tail FREE RPC in flight."""
 
     deadline: float = 0.0
     """``time.monotonic()`` deadline of the RPC in flight, counted from when it
@@ -74,7 +76,8 @@ class LookupState:
     as that server acknowledges the LOOKUP, re-queried while the server answers
     None. Once every server reports a hit (in tokens; it may end with an
     unfull chunk), the result is the minimum across servers; servers that
-    reported more get their excess tail locks released.
+    reported more acknowledge release of their excess tail before the
+    scheduler can start a replacement lookup.
 
     RPC completions advance the state through ``on_lookup_finished`` and
     ``on_query_prefetch_status_finished``, which run as future done-callbacks.
@@ -129,6 +132,8 @@ class LookupState:
 
         # Matched token count; None until final, then never changes.
         self._result: int | None = None
+        # Common hit calculated before any excess-tail FREEs are acknowledged.
+        self._common_hit: int | None = None
 
         # Guards ``_servers`` and ``_result``; every send happens under it.
         self._lock = threading.Lock()
@@ -154,8 +159,7 @@ class LookupState:
                 self._result = 0
 
     def drain(self) -> str | None:
-        """Close, then wait for the LOOKUP and QUERY_PREFETCH_STATUS RPCs
-        still in flight.
+        """Close, then wait for the lookup and tail-release RPCs still in flight.
 
         Each RPC is waited on until its own deadline.
 
@@ -230,12 +234,13 @@ class LookupState:
 
         Handles replies whose callbacks have not run yet, re-sends deferred
         QUERY_PREFETCH_STATUS requests, waits for the QUERY_PREFETCH_STATUS
-        replies in flight when ``blocking_lookup`` is set, and expires RPCs
-        past their deadline, which makes the result 0.
+        replies in flight when ``blocking_lookup`` is set, and handles
+        excess-tail acknowledgements. An RPC deadline or failed tail FREE
+        makes the result 0.
 
         Returns:
-            URLs of the servers whose RPC passed its deadline during this
-            call. A server is reported at most once.
+            URLs of servers with an overdue RPC or failed tail FREE.
+            A server is reported at most once.
         """
         with self._lock:
             if self._result is not None:
@@ -271,7 +276,7 @@ class LookupState:
 
             sent_queries = self._handle_completed_rpcs()
 
-            expired_urls = self._get_expired_servers(time.monotonic())
+            expired_urls = self._get_failed_servers(time.monotonic())
             for url in expired_urls:
                 self._servers[url].phase = _Phase.TIMED_OUT
                 self._servers[url].future = None
@@ -304,10 +309,16 @@ class LookupState:
 
             if server.phase is _Phase.LOOKUP_IN_FLIGHT:
                 sent_queries += self._handle_lookup_reply(url, server, future)
-            else:
+            elif server.phase is _Phase.QUERY_PREFETCH_STATUS_IN_FLIGHT:
                 sent_queries += self._handle_query_prefetch_status_reply(
                     url, server, future
                 )
+            elif (
+                server.phase is _Phase.FREE_TAIL_IN_FLIGHT and future.exception_ is None
+            ):
+                server.future = None
+                server.phase = _Phase.RESOLVED
+                self._maybe_resolve_lookup_result()
         return sent_queries
 
     def _handle_lookup_reply(
@@ -369,6 +380,9 @@ class LookupState:
         hold the lock."""
         if any(s.phase is not _Phase.RESOLVED for s in self._servers.values()):
             return
+        if self._common_hit is not None:
+            self._result = self._common_hit
+            return
 
         hit_tokens = {url: server.hit_tokens for url, server in self._servers.items()}
         common_tokens = min(hit_tokens.values())
@@ -396,20 +410,32 @@ class LookupState:
                         server.hit_tokens, num_packed_tokens(self._key.token_bytes)
                     ),
                 )
-                server.client.free_lookup_locks(tail_key, self._tp_size)
+                future = server.client.free_lookup_locks(tail_key, self._tp_size)
+                if not future.query() or future.exception_ is not None:
+                    server.future = future
+                    server.phase = _Phase.FREE_TAIL_IN_FLIGHT
+                    server.deadline = time.monotonic() + self._timeout
 
-        self._result = common_tokens
+        self._common_hit = common_tokens
+        if all(s.phase is _Phase.RESOLVED for s in self._servers.values()):
+            self._result = common_tokens
 
-    def _get_expired_servers(self, now: float) -> list[str]:
-        """Return the servers whose LOOKUP or QUERY_PREFETCH_STATUS is still
-        unanswered at its deadline; caller holds the lock."""
-        return [
-            url
-            for url, server in self._servers.items()
-            if server.future is not None
-            and not server.future.query()
-            and now >= server.deadline
-        ]
+    def _get_failed_servers(self, now: float) -> list[str]:
+        """Return servers with an overdue RPC or failing tail FREE."""
+        failed = []
+        for url, server in self._servers.items():
+            future = server.future
+            if future is None:
+                continue
+            if future.query():
+                if (
+                    server.phase is _Phase.FREE_TAIL_IN_FLIGHT
+                    and future.exception_ is not None
+                ):
+                    failed.append(url)
+            elif now >= server.deadline:
+                failed.append(url)
+        return failed
 
     def _add_query_prefetch_status_callbacks(
         self, sent_queries: list[tuple[str, _QueryPrefetchStatusFuture]]

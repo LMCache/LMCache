@@ -1254,14 +1254,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             read_owners = self._ctx.get_read_owners(key.request_id)
             session = self._ctx.session_manager.get(key.request_id)
             reader = self._ctx.streaming_reader
-            streaming = (
-                isinstance(reader, FSStreamingReader)
-                and session is not None
-                and session.is_current_streaming_range(key.start, key.end) is True
+            streaming_owners = (
+                session.current_streaming_range_owners(key.start, key.end)
+                if isinstance(reader, FSStreamingReader) and session is not None
+                else None
             )
-            if streaming:
-                assert session is not None
-                read_owners = session.get_prefetch_owners()
+            streaming = streaming_owners is not None
+            if streaming_owners is not None:
+                read_owners = streaming_owners
                 logger.info(
                     "Streaming retrieve for request %s: %d chunks",
                     key.request_id,

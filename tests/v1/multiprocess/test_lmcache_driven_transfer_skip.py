@@ -247,7 +247,7 @@ def test_streaming_retrieve_batches_windows_and_releases_on_failure(
     reader.load_many.return_value = load_success
     module._ctx.streaming_reader = reader
     session = module._ctx.session_manager.get.return_value
-    session.is_current_streaming_range.return_value = True
+    session.current_streaming_range_owners.return_value = {}
     monkeypatch.setattr(mod, "get_layout_desc", lambda *a: object())
     monkeypatch.setattr(
         mod,
@@ -305,7 +305,7 @@ def test_streaming_retrieve_leaves_timed_out_windows_with_reader(monkeypatch):
     reader.load_many.side_effect = StreamingLoadTimeout("I/O still pending")
     module._ctx.streaming_reader = reader
     session = module._ctx.session_manager.get.return_value
-    session.is_current_streaming_range.return_value = True
+    session.current_streaming_range_owners.return_value = {}
     monkeypatch.setattr(mod, "get_layout_desc", lambda *a: object())
     monkeypatch.setattr(mod, "synchronize_stream", lambda *a: None)
 
@@ -338,9 +338,8 @@ def test_mixed_streaming_reads_l1_and_fs_in_order_and_releases_l1(monkeypatch):
     reader.load_many.return_value = True
     module.context.streaming_reader = reader
     session = module.context.session_manager.get.return_value
-    session.is_current_streaming_range.return_value = True
     owners = {"g0c0": 7, "g0c2": 7}
-    session.get_prefetch_owners.return_value = owners
+    session.current_streaming_range_owners.return_value = owners
     completion = [(7, ["g0c0", "g0c2"])]
     module.context.storage_manager.prepare_read_completion.return_value = completion
     callback = MagicMock()
@@ -398,8 +397,7 @@ def test_mixed_streaming_retrieves_and_releases_unfull_l1_tail(monkeypatch):
     module.context.resolve_unfull_chunk_obj_keys.return_value = ["tail"]
     owners = {"g0c0": 7, "tail": 7}
     session = module.context.session_manager.get.return_value
-    session.is_current_streaming_range.return_value = True
-    session.get_prefetch_owners.return_value = owners
+    session.current_streaming_range_owners.return_value = owners
     tail_transfer = MagicMock(return_value=10)
     monkeypatch.setattr(module, "_retrieve_unfull_chunk_objects", tail_transfer)
     monkeypatch.setattr(mod, "get_layout_desc", lambda *a: object())
