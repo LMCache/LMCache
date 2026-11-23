@@ -4,14 +4,14 @@
 The coordinator is the fleet-level control plane: its HTTP endpoints register
 instances, mutate quotas and pins, inject cache events, and expose the key
 directory. When an operator configures an API key, every non-public route must
-present it. The shared primitives in :mod:`lmcache.security` are reused here so
+present it. Shared primitives in :mod:`lmcache.v1.common.security` are reused here so
 the coordinator, the MP HTTP frontend, and the request transports accept one
 credential set (``--api-key-file`` / ``LMCACHE_API_KEY_FILE`` /
 ``LMCACHE_API_KEY``) instead of each service growing its own.
 """
 
 # Standard
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import Path
 
 # Third Party
@@ -19,23 +19,21 @@ from starlette.types import ASGIApp
 from typing_extensions import Self
 
 # First Party
-from lmcache.security.api_key import (
+from lmcache.security.http import HTTPBearerAuthenticationMiddleware
+from lmcache.v1.common.security.api_key import (
     APIKeyVerifier,
     load_api_keys_from_files,
     load_service_api_keys,
 )
-from lmcache.security.http import (
-    HTTPBearerAuthenticationMiddleware,
-    bearer_token,
-)
+from lmcache.v1.common.security.bearer import bearer_token
 
 # Paths that stay reachable without credentials even when authentication is on.
 # ``/healthz`` is the orchestrator liveness probe: it returns only
 # ``{"status": "healthy"}`` and must not force probe configuration through the
-# fleet key. The metrics endpoint is also public so monitoring can scrape it
-# without fleet credentials, matching the MP HTTP frontend. Fleet membership,
-# quotas, events, and the key directory still require a valid API key.
-PUBLIC_COORDINATOR_PATHS = frozenset({"/healthz", "/metrics"})
+# fleet key. Everything else, ``/metrics`` included, requires a valid API key:
+# the metrics describe fleet placement and reported-byte counts. An operator who
+# wants a public metrics endpoint adds it back with ``--public-endpoint``.
+PUBLIC_COORDINATOR_PATHS = frozenset({"/healthz"})
 
 
 class CoordinatorAuthenticationConfig(APIKeyVerifier):
@@ -115,12 +113,26 @@ class CoordinatorAuthenticationConfig(APIKeyVerifier):
 
 
 class CoordinatorAuthenticationMiddleware(HTTPBearerAuthenticationMiddleware):
-    """Protect coordinator routes except its public liveness endpoint."""
+    """Protect coordinator routes except an operator-selected public list."""
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        public_paths: Collection[str] | None = None,
+    ) -> None:
         """Initialize the coordinator authentication adapter.
 
         Args:
             app: Downstream ASGI application.
+            public_paths: Exact paths that stay reachable without credentials.
+                ``None`` keeps :data:`PUBLIC_COORDINATOR_PATHS`, so a
+                deployment that never sets the option behaves as before; an
+                empty collection requires a key on every path, including the
+                liveness probe.
         """
-        super().__init__(app, public_paths=PUBLIC_COORDINATOR_PATHS)
+        super().__init__(
+            app,
+            public_paths=(
+                PUBLIC_COORDINATOR_PATHS if public_paths is None else public_paths
+            ),
+        )

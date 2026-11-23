@@ -9,8 +9,8 @@ import threading
 import grpc
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.security.api_key import APIKeyVerifier
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.security.api_key import APIKeyVerifier
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.auth import (
@@ -71,13 +71,11 @@ class _GeneratedServicer:
                     try:
                         for response in stream:
                             send(handler.response_encoder(response))
-                    except Exception as exc:
+                    except Exception:
                         if context.is_active():
                             logger.exception(
                                 "Error in streaming handler %s", handler.operation
                             )
-                            context.set_code(grpc.StatusCode.INTERNAL)
-                            context.set_details(str(exc))
                     finally:
                         stream.close()
                         send(None)
@@ -156,6 +154,7 @@ class GrpcMultiprocessServer(GrpcMultiprocessServerBase):
         max_gpu_workers: int,
         grpc_server_workers: int,
         authentication: APIKeyVerifier | None = None,
+        rpc_client: type | None = None,
     ) -> None:
         super().__init__(
             bind_url,
@@ -163,6 +162,7 @@ class GrpcMultiprocessServer(GrpcMultiprocessServerBase):
             max_gpu_workers,
             grpc_server_workers,
             authentication,
+            rpc_client,
         )
         self._normal_slots = threading.BoundedSemaphore(max_cpu_workers)
         self._affinity_submit_lock = threading.Lock()

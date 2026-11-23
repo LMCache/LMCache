@@ -15,8 +15,8 @@ import threading
 import time
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.exceptions import IrrecoverableException
+from lmcache.v1.common.errors import IrrecoverableException
+from lmcache.v1.common.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party

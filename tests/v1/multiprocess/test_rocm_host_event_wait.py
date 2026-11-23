@@ -123,6 +123,7 @@ def _build(
     monkeypatch.setattr(lmcache_driven_transfer, "fd_channel_path", lambda port: "")
     server_context = SimpleNamespace(
         chunk_size=1,
+        hash_algorithm_name="blake3",
         null_block_id=0,
         storage_manager=_FakeStorageManager(),
         get_read_owners=lambda request_id: None,

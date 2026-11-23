@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     )
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import MemoryResidency, MemorySegment, MemoryTags
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,

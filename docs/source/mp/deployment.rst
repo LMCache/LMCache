@@ -102,8 +102,8 @@ after ``lmcache.mp.mq_timeout``).
    ``hostIPC: true`` / the shared ``/dev/shm`` mount (Kubernetes) can be
    dropped. The two containers only need access to the same GPUs and
    distinct PID *values* (any regular container setup provides both).
-   The Kubernetes :doc:`operator` wires isolated IPC by default on NVIDIA
-   (``spec.isolatedIPC``).
+   The Kubernetes :doc:`operator` (deprecated; expected to be removed in
+   2027Q1) wires isolated IPC by default on NVIDIA (``spec.isolatedIPC``).
 
 Current limitations:
 
@@ -137,7 +137,8 @@ Classic GPU Operator installs register RuntimeClass ``nvidia``. CDI+NRI
 installs often have no RuntimeClass objects. On those clusters omit
 ``runtimeClassName`` on the LMCache DaemonSet and request a management CDI
 device (see *GPU Operator NRI/CDI* below). The operator path is
-:ref:`mp-operator-nri-cdi`.
+:ref:`mp-operator-nri-cdi` (the operator is deprecated and expected to be
+removed in 2027Q1).
 
 Step-by-Step
 ~~~~~~~~~~~~
@@ -332,6 +333,8 @@ headroom for the LMCache server process.
 Use ``LMCACHE_LOG_LEVEL=DEBUG`` during initial setup to verify L2 store/load
 activity.  Switch to ``INFO`` (default) for production to reduce log volume.
 
+.. _mp-transfer-mode:
+
 Transfer Mode (``--supported-transfer-mode``, ``--shm-name``)
 -------------------------------------------------------------
 
@@ -351,10 +354,67 @@ The server picks which paths to load via ``--supported-transfer-mode``:
   type can connect without manual configuration; the server has no
   upfront knowledge of the connecting worker's device.
 
-When the engine-driven path is loaded (``auto`` or ``engine_driven``),
-KV transfers between the server and vLLM workers use a typed inline tensor
-path by default.  Pass ``--shm-name`` with a segment name to create a
-shared-memory (SHM) pool instead:
+When the engine-driven path is loaded (``auto`` or ``engine_driven``), the
+server offers workers one of two engine-driven transports:
+
+- **SHM pool** -- the server backs its L1 pool with a named POSIX shared-memory
+  segment and workers copy KV chunks directly into or out of that segment.
+  This is the transport to use for any real workload.
+- **Typed inline** -- the fallback when no SHM pool is available.  Every KV
+  chunk is serialised into the request message and copied through the
+  ZMQ/gRPC request channel on each store and retrieve (and deserialised on the
+  other side), in messages of up to 128 MiB.  It only exists so that the engine-driven path still works
+  where ``/dev/shm`` is unavailable (for example Docker without
+  ``--ipc host``); it is not tuned for throughput.
+
+.. warning::
+
+   The server does **not** create an SHM pool by default: ``--shm-name``
+   defaults to ``""`` and the L1 pool defaults to lazy allocation, which also
+   disables SHM.  An engine-driven worker that connects to such a server
+   silently uses the typed inline transport.  The symptom is that
+   store/retrieve of a long prompt (a few thousand tokens) takes seconds
+   instead of milliseconds, and CPU offloading through LMCache can end up
+   slower than the inference engine's built-in CPU offloading.
+
+   To enable the SHM pool, pass **both** flags:
+
+   .. code-block:: bash
+
+       lmcache server ... --supported-transfer-mode engine_driven \
+           --shm-name lmcache_pool --no-l1-use-lazy
+
+   With the default lazy allocation (``--l1-use-lazy``) a non-empty
+   ``--shm-name`` is accepted but ignored: the server logs
+   ``--shm-name '...' is set but SHM transfer is disabled`` and workers use
+   the inline path.  ``--shm-name`` is **mutually exclusive** with
+   ``--l1-devdax-path`` and with ``--l1-use-hugepages``: either combination
+   is rejected with a ``ValueError`` during config validation, so leave
+   ``--shm-name`` at ``""`` for those backends.  See
+   :ref:`mp/configuration:L1 Memory Manager`.
+
+   Confirm the active transport in the vLLM worker log.  The worker creates
+   its transfer context right after registration and logs which
+   implementation it ended up with:
+
+   .. code-block:: text
+
+       Creating EngineDrivenContextShm (shm_name=lmcache_l1_pool_lmcache_pool, pool_size=...)
+
+   If the SHM segment cannot be attached (for example the worker container
+   lacks ``--ipc host`` or ``/dev/shm`` is too small) the worker falls back
+   at this point and logs:
+
+   .. code-block:: text
+
+       Failed to initialize SHM context (shm_name=...), falling back to inline tensor transport
+       Creating EngineDrivenContextInline
+
+   ``Creating EngineDrivenContextInline`` without a preceding SHM line means
+   the server advertised no pool (``--shm-name`` unset or lazy allocation
+   on).  Check these lines rather than the ``mode=`` field of the later
+   ``Worker engine-driven context registered (...)`` message, which reflects
+   what the server advertised, not whether SHM attachment succeeded.
 
 The typed inline protocol is not compatible with older workers or servers.
 Upgrade both sides together; payloads from the previous untyped protocol are
@@ -369,20 +429,24 @@ rejected rather than accepted as a fallback.
    * - ``""`` (empty string, default)
      - No SHM pool; KV transfer uses the typed inline path.  Works
        when ``/dev/shm`` is unavailable or when running without
-       ``--ipc host`` in Docker.
+       ``--ipc host`` in Docker, but is slow (see the warning above).
    * - ``"my_pool"`` (any non-empty name)
-     - Create a SHM pool with that exact segment name and use it for
-       KV transfers.  The deterministic, human-readable name also
-       helps with monitoring and debugging.
+     - Create a SHM pool and use it for KV transfers.  Requires
+       ``--no-l1-use-lazy``.  The segment is named
+       ``lmcache_l1_pool_<name>`` (the prefix is added when missing) so
+       stale segments can be cleaned up; the deterministic,
+       human-readable name also helps with monitoring and debugging.
 
 **Examples:**
 
 .. code-block:: bash
 
-    # Engine-driven path with typed inline transfer (no SHM) -- the default:
+    # Engine-driven path with a named SHM pool -- recommended:
+    lmcache server --l1-size-gb 60 --eviction-policy LRU \
+        --supported-transfer-mode engine_driven \
+        --shm-name "lmcache_pool" --no-l1-use-lazy
+
+    # Engine-driven path with typed inline transfer (no SHM) -- fallback for
+    # hosts without /dev/shm; expect much slower store/retrieve:
     lmcache server --l1-size-gb 60 --eviction-policy LRU \
         --supported-transfer-mode engine_driven
-
-    # Engine-driven path with a named SHM segment:
-    lmcache server --l1-size-gb 60 --eviction-policy LRU \
-        --supported-transfer-mode engine_driven --shm-name "lmcache_pool"

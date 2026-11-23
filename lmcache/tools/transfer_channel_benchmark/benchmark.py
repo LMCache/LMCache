@@ -38,11 +38,11 @@ except ImportError as err:
     ) from err
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.tools.transfer_channel_benchmark.config import (
     BenchmarkConfig,
     build_config,
 )
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error

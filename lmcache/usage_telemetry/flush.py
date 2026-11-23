@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Flush-thread scaffolding shared by the interval usage reporters.
 
-The flush threads are :mod:`lmcache.v1.periodic_thread` threads,
+The flush threads are :mod:`lmcache.v1.common.periodic_thread` threads,
 registered in the global ``PeriodicThreadRegistry``.
 """
 
@@ -13,8 +13,8 @@ from typing import Callable
 import os
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.periodic_thread import (
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.periodic_thread import (
     PeriodicThread,
     ThreadLevel,
     ThreadRunSummary,
