@@ -49,6 +49,7 @@
         " / cache_stats / ",
         " / p2p_write / ",
         " / lazy_offload / ",
+        " / eviction_aware_lazy_offload / ",
         " / sleep_mode / ",
         " / http_api / ",
         " / gds_smoke / ",
