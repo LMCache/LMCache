@@ -6,7 +6,10 @@ tracks L1 owners per `ObjectKey`. The registration's object groups and shard
 replication describe the required set: one object per distinct DCP shard in
 each TP-replicated group, or one per rank for an unreplicated group. Residency
 and lookup share `get_kv_worker_ids` to enumerate those keyed workers within
-the key's encoded world size. Neither subscriber count nor the number of ranks
+the key's encoded world size, and both skip workers outside
+`ShardReplicationDesc.storing_workers`: under pipeline parallelism a group
+registered only by the last stage (an EAGLE3 drafter) requires objects from
+that stage's workers alone. Neither subscriber count nor the number of ranks
 observed so far proves completeness.
 
 All projection and announcement changes run under the module's event lock.
