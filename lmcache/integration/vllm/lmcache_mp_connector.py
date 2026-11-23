@@ -1022,7 +1022,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         return self._connector_metadata
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
-        """Keep the latest KV tensors local until on_kv_cache_ready()."""
+        """Retain KV tensors locally until the engine signals startup readiness.
+
+        Args:
+            kv_caches: Layer names mapped to KV tensors. A later call before
+                readiness replaces the pending mapping.
+
+        Raises:
+            RuntimeError: If startup registration already completed. Use
+                unregister_kv_caches/restore_kv_caches for sleep and wake-up.
+        """
         if self._kv_cache_ready:
             raise RuntimeError(
                 "KV caches are already ready; use unregister_kv_caches and "
@@ -1034,6 +1043,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """Register after warmup/final sizing, then start heartbeat before requests.
 
         Wait for the registration ACK; errors propagate to fail startup.
+        Repeated calls after successful registration are no-ops. Sleep and
+        wake-up use unregister_kv_caches/restore_kv_caches instead.
+
+        Raises:
+            RuntimeError: If register_kv_caches has not supplied the tensors.
+            ConnectionError: If registration is not acknowledged in mq_timeout.
+            ValueError: If cache geometry or the transfer mode is invalid.
         """
         if self._kv_cache_ready:
             return

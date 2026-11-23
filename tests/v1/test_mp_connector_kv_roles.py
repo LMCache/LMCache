@@ -1054,8 +1054,28 @@ def test_startup_registration_waits_for_ready(mock_io: SimpleNamespace) -> None:
         mock_io.transfer.register.assert_not_called()
         mock_io.heartbeat.assert_not_called()
         worker.on_kv_cache_ready()
+        worker.on_kv_cache_ready()
         mock_io.transfer.register.assert_called_once()
         mock_io.heartbeat.return_value.start.assert_called_once_with()
+    finally:
+        worker.shutdown()
+
+
+def test_startup_registration_failure_does_not_start_heartbeat(
+    mock_io: SimpleNamespace,
+) -> None:
+    """A missing registration ACK fails readiness without starting heartbeat."""
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    mock_io.transfer.register.side_effect = TimeoutError("registration ACK timed out")
+    try:
+        worker.register_kv_caches(mock_io.kv_caches)
+        with pytest.raises(ConnectionError, match="register_kv_caches"):
+            worker.on_kv_cache_ready()
+        mock_io.heartbeat.assert_not_called()
+        mock_io.transfer.close.assert_called_once_with()
     finally:
         worker.shutdown()
 

@@ -123,6 +123,9 @@ CPU verification and pin reporting without rebuilding unrelated accelerators.
 CPU serving tests must set `lmcache.mp.use_vmm_api=false` in connector extra
 config: current vLLM checks the declared cache access before initializing the
 device and rejects the automatic CUDA VMM export mode on CPU.
+Streaming-session tests that bypass vLLM's `Scheduler.__init__` must supply
+`max_model_len` and `num_sampled_tokens_per_step`; current vLLM reads both
+while applying a `StreamingUpdate`.
 
 Use Python 3.12 with PyTorch and the common native extensions installed.
 A fresh worktree does not include ignored native build artifacts; build them

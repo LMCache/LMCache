@@ -1468,10 +1468,8 @@ class LMCacheMPWorkerAdapter:
         self._health_event = threading.Event()
         self._health_event.set()
 
-        # Heartbeat thread is created but NOT started yet.
-        # It will be lazily started on the first store or retrieve
-        # request, by which time vLLM is fully ready (model loaded,
-        # KV caches allocated, warmup & CUDA graph capture done).
+        # The connector starts heartbeat after startup-ready registration.
+        # Direct adapter users retain lazy start on their first transfer.
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat: HeartbeatThread | None = None
         self._heartbeat_lock = threading.Lock()
