@@ -9,9 +9,9 @@ steps of slot-half reuse where every wave writes DIFFERENT data into the same
 slots — any event-ordering bug surfaces as a bit-exact mismatch against the
 sequential tensor-op reference, not as a flake.
 
-Parameterized over both paged layouts the executor serves: the fused-packed
-HND format (K/V in the trailing 2*HS dim, kv_size 1) and the un-fused
-flash-attention format (separate K/V planes, kv_size 2).
+Parameterized over independent SGLang components, fused-packed HND
+(K/V in the trailing 2*HS dim, kv_size 1), and un-fused flash attention
+(separate K/V planes, kv_size 2).
 """
 
 # Standard
@@ -73,6 +73,13 @@ _CASES = {
         hidden=_NH * _HS,
         head_stride=_HS,
         paged_shape=(2, _NB, _NH, _BS, _HS),
+    ),
+    "component": _FmtCase(
+        fmt=lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_HS,
+        kv_size=1,
+        hidden=_NH * _HS,
+        head_stride=_HS,
+        paged_shape=(_NB, _BS, _NH, _HS),
     ),
 }
 
