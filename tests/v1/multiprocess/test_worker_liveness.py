@@ -23,6 +23,7 @@ import zmq
 # First Party
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.periodic_thread import PeriodicThreadRegistry
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     MemoryLayoutDesc,
@@ -49,7 +50,6 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
-from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 
@@ -163,7 +163,9 @@ def test_gpu_register_inserts_unlatched_entry(monkeypatch) -> None:
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     module = _bare_gpu_module()
 
-    module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
+    module.register_kv_cache(
+        1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [], event_profile=None
+    )
 
     assert module.tracked_instance_count() == 1
     entry = module.get_and_touch_context_entry(1)
@@ -182,10 +184,14 @@ def test_gpu_noop_register_refreshes_without_latching(monkeypatch) -> None:
     monkeypatch.setattr(gpu_mod, "create_cache_context", create)
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     module = _bare_gpu_module()
-    module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
+    module.register_kv_cache(
+        1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [], event_profile=None
+    )
     module._cache_contexts[1].last_seen = 0.0
 
-    module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
+    module.register_kv_cache(
+        1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [], event_profile=None
+    )
 
     assert create.call_count == 1  # not rebuilt
     assert module._cache_contexts[1].last_seen > 0.0  # refreshed

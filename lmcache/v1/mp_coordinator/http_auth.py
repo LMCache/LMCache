@@ -4,7 +4,7 @@
 The coordinator is the fleet-level control plane: its HTTP endpoints register
 instances, mutate quotas and pins, inject cache events, and expose the key
 directory. When an operator configures an API key, every non-public route must
-present it. The shared primitives in :mod:`lmcache.security` are reused here so
+present it. Shared primitives in :mod:`lmcache.v1.common.security` are reused here so
 the coordinator, the MP HTTP frontend, and the request transports accept one
 credential set (``--api-key-file`` / ``LMCACHE_API_KEY_FILE`` /
 ``LMCACHE_API_KEY``) instead of each service growing its own.
@@ -19,13 +19,13 @@ from starlette.types import ASGIApp
 from typing_extensions import Self
 
 # First Party
-from lmcache.security.api_key import (
+from lmcache.security.http import HTTPBearerAuthenticationMiddleware
+from lmcache.v1.common.security.api_key import (
     APIKeyVerifier,
     load_api_keys_from_files,
     load_service_api_keys,
 )
-from lmcache.security.bearer import bearer_token
-from lmcache.security.http import HTTPBearerAuthenticationMiddleware
+from lmcache.v1.common.security.bearer import bearer_token
 
 # Paths that stay reachable without credentials even when authentication is on.
 # ``/healthz`` is the orchestrator liveness probe: it returns only

@@ -562,7 +562,7 @@ def _connector_request_api_key(extra_config: dict[str, Any] | None) -> str | Non
         raise ValueError(f"{_API_KEY_FILE_KEY} must be a non-empty path string")
 
     # First Party
-    from lmcache.security.api_key import load_api_keys_from_files
+    from lmcache.v1.common.security.api_key import load_api_keys_from_files
 
     keys = load_api_keys_from_files([path])
     if len(keys) != 1:

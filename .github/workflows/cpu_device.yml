@@ -94,7 +94,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-latest]
-        request_transport: [zmq]
+        request_transport: [grpc]
         # Each entry is a self-contained model profile the e2e steps
         # thread through env vars. Adding a new model = adding a new
         # entry here. All models share the same downloader
@@ -133,11 +133,12 @@ jobs:
             trust_remote_code: "1"
             mla_disable: "0"
             run_engine_driven_e2e: true
-        # One representative leg for each gRPC server mode covers the CPU
-        # request path without duplicating every OS/model combination.
+        # One representative leg each for the ZMQ transport and
+        # the explicit gRPC server modes covers the CPU request path without
+        # duplicating every OS/model combination.
         include:
           - os: ubuntu-22.04
-            request_transport: grpc
+            request_transport: zmq
             model:
               name: opt-125m
               id: facebook/opt-125m

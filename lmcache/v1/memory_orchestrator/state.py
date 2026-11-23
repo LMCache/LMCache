@@ -15,7 +15,7 @@ import secrets
 import threading
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.memory_orchestrator.api import (
     MAX_UINT64,
     VISIBILITY_MODES,

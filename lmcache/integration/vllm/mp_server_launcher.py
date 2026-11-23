@@ -19,7 +19,7 @@ import time
 import zmq
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 
@@ -333,9 +333,6 @@ class MPServerAutostartConfig:
         Returns:
             Command arguments suitable for ``subprocess.Popen``.
         """
-        transport_args = (
-            [] if self.transport == "zmq" else ["--transport", self.transport]
-        )
         return [
             sys.executable,
             "-m",
@@ -346,7 +343,8 @@ class MPServerAutostartConfig:
             str(self.port),
             "--http-host",
             self.host,
-            *transport_args,
+            "--transport",
+            self.transport,
             *self.server_args,
         ]
 

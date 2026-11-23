@@ -318,7 +318,7 @@ def test_token_binding_eviction_warns(monkeypatch):
     subscriber says so."""
     monkeypatch.setattr(cache_events, "_TOKEN_BINDING_CACHE_SIZE", 2)
     warnings: list[str] = []
-    # The module logger does not propagate (see ``lmcache.logging``), so
+    # The module logger does not propagate (see ``lmcache.v1.common.logging``), so
     # record the call instead of relying on root-handler capture.
     monkeypatch.setattr(
         cache_events.logger,
