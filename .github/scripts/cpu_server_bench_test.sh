@@ -12,7 +12,7 @@
 # Environment variables (all optional, defaults shown):
 #   LMCACHE_BENCH_TRANSFER_MODE  lmcache_driven|engine_driven
 #                                (default: engine_driven)
-#   LMCACHE_REQUEST_TRANSPORT    zmq|grpc|grpc-aio|grpc-native (default: zmq)
+#   LMCACHE_REQUEST_TRANSPORT    zmq|grpc|grpc-aio|grpc-native (default: grpc)
 #   LMCACHE_HTTP_PORT            HTTP port            (default: 18080)
 #   LMCACHE_REQUEST_PORT         request RPC port     (default: 15555)
 #   LMCACHE_LOG_FILE             server log path      (default: /tmp/...)
@@ -33,7 +33,7 @@ LOG_FILE="${LMCACHE_LOG_FILE:-/tmp/cpu_server_bench_lmcache.log}"
 HEALTHCHECK_TIMEOUT="${LMCACHE_HEALTHCHECK_TIMEOUT:-60}"
 BENCH_NUM_REQUESTS="${BENCH_NUM_REQUESTS:-3}"
 BENCH_NUM_TOKENS="${BENCH_NUM_TOKENS:-512}"
-REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
+REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-grpc}"
 
 case "${TRANSFER_MODE}" in
   lmcache_driven|engine_driven) ;;

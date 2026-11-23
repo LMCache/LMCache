@@ -42,12 +42,15 @@ if [[ "${L1_USE_LAZY:-true}" == "false" ]]; then
 fi
 KV_TRANSFER_CONFIG="$(
     LMCACHE_PORT="${LMCACHE_PORT}" \
+    LMCACHE_REQUEST_SCHEME="${LMCACHE_REQUEST_SCHEME}" \
     SERVER_ARGS="${SERVER_ARGS}" \
     python3 - <<'PY'
 import json
 import os
 
+# The URL scheme picks the transport of the auto-started server.
 extra_config = {
+    "lmcache.mp.host": f"{os.environ['LMCACHE_REQUEST_SCHEME']}://localhost",
     "lmcache.mp.port": int(os.environ["LMCACHE_PORT"]),
     "lmcache.mp.mq_timeout": 60,
     "lmcache.mp.autostart": True,
@@ -121,7 +124,7 @@ if ! grep -q "LMCache MP server became healthy" "$VLLM_LOG"; then
     exit 1
 fi
 
-LMCACHE_PORT="${LMCACHE_PORT}" python3 - <<'PY'
+LMCACHE_PORT="${LMCACHE_PORT}" LMCACHE_REQUEST_SCHEME="${LMCACHE_REQUEST_SCHEME}" python3 - <<'PY'
 import os
 import sys
 
@@ -129,7 +132,7 @@ import zmq
 
 from lmcache.integration.vllm.mp_server_launcher import is_mp_server_healthy
 
-server_url = f"tcp://localhost:{os.environ['LMCACHE_PORT']}"
+server_url = f"{os.environ['LMCACHE_REQUEST_SCHEME']}://localhost:{os.environ['LMCACHE_PORT']}"
 context = zmq.Context()
 try:
     if not is_mp_server_healthy(server_url, context, timeout=5.0):
@@ -137,7 +140,7 @@ try:
         sys.exit(1)
 finally:
     context.term()
-print(f"MP server responded to ZMQ PING at {server_url}")
+print(f"MP server responded to PING at {server_url}")
 PY
 
 echo "PASS: vLLM TP=2 auto-started the LMCache MP server"

@@ -31,14 +31,14 @@ x-common-inference-engines: &common-inference-engines
   - "sglang"
 
 # Most scenarios exercise transport-independent behavior, so keep their PR
-# coverage on the default ZMQ transport.
+# coverage on gRPC.
 x-common-matrix: &common-matrix
   setup:
     inference_engine: *common-inference-engines
     request_transport:
-      - "zmq"
+      - "grpc"
 
-# Retain gRPC only for the representative GPU E2E and restart-recovery smokes.
+# Retain ZMQ only for the representative GPU E2E and restart-recovery smokes.
 x-common-smoke-matrix: &common-smoke-matrix
   setup:
     inference_engine: *common-inference-engines
@@ -52,7 +52,7 @@ x-vllm-matrix: &vllm-matrix
     inference_engine:
       - "vllm"
     request_transport:
-      - "zmq"
+      - "grpc"
 
 x-vllm-smoke-matrix: &vllm-smoke-matrix
   setup:
@@ -139,12 +139,12 @@ steps:
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("VERIFY_AND_PIN_SGLANG") !~ /true/
     steps:
       # Retain uncompressed, 4x, and 128x KV paths without loading the full model.
-      - label: ":compression: vllm / hma_dsv4_correctness / zmq"
+      - label: ":compression: vllm / hma_dsv4_correctness / grpc"
         command: .buildkite/k3_tests/multiprocess/run.sh hma_dsv4_correctness
         env:
           MODEL: "deepseek-ai/DeepSeek-V4-Flash"
           INFERENCE_ENGINE: "vllm"
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
           LMCACHE_MP_TRANSFER_MODE: "lmcache_driven"
           TENSOR_PARALLEL_SIZE: "1"
           VLLM_LOAD_FORMAT: "dummy"
@@ -187,12 +187,12 @@ steps:
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
         artifact_paths: ["*.log", "ci_results_*/hma_dsv4_correctness/**/*"]
-      - label: ":compression: sglang / hma_dsv4_correctness / zmq"
+      - label: ":compression: sglang / hma_dsv4_correctness / grpc"
         command: .buildkite/k3_tests/multiprocess/run.sh hma_dsv4_correctness
         env:
           MODEL: "deepseek-ai/DeepSeek-V4-Flash"
           INFERENCE_ENGINE: "sglang"
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
           LMCACHE_MP_TRANSFER_MODE: "lmcache_driven"
           TENSOR_PARALLEL_SIZE: "1"
           SGLANG_JSON_MODEL_OVERRIDE_ARGS: '{"num_hidden_layers":6,"num_nextn_predict_layers":0,"compress_ratios":[0,0,4,128,4,128]}'
@@ -320,7 +320,7 @@ steps:
               - "default"
               - "explicit"
             request_transport:
-              - "zmq"
+              - "grpc"
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           P2P_RPC_PORT_MODE: "{{matrix.p2p_rpc_port_mode}}"
@@ -372,7 +372,7 @@ steps:
               - "lmcache_driven"
               - "engine_driven"
             request_transport:
-              - "zmq"
+              - "grpc"
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -417,7 +417,7 @@ steps:
               - "lmcache_driven"
               - "engine_driven"
             request_transport:
-              - "zmq"
+              - "grpc"
         timeout_in_minutes: 30
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
@@ -447,7 +447,7 @@ steps:
         # Two rungs (~15 min of client time) plus two model loads.
         timeout_in_minutes: 45
         env:
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
           ASYNC_SCHEDULING: "{{matrix.async_scheduling}}"
           NUM_GPU_BLOCKS_OVERRIDE: "1024"
           MAX_MODEL_LEN: "8192"
@@ -601,7 +601,7 @@ steps:
               - "inline"
               - "server_copy"
             request_transport:
-              - "zmq"
+              - "grpc"
         env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }

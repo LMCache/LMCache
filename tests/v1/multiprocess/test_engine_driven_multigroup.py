@@ -722,10 +722,11 @@ def test_single_compressed_group_worker_server_roundtrip(
     module = EngineDrivenTransferModule(engine)
     lookup = LookupModule(engine)
     server = create_request_server(
-        [module, lookup], MPServerConfig(host="127.0.0.1", port=unused_tcp_port)
+        [module, lookup],
+        MPServerConfig(host="127.0.0.1", port=unused_tcp_port, transport="grpc"),
     )
     server.start()
-    client = RequestClientFactory.create(f"tcp://127.0.0.1:{unused_tcp_port}")
+    client = RequestClientFactory.create(f"grpc://127.0.0.1:{unused_tcp_port}")
     worker = EngineDrivenTransferContext(1, client)
     source = {
         "layer_0": torch.arange(
