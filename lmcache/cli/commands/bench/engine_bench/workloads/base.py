@@ -13,7 +13,7 @@ from lmcache.cli.commands.bench.engine_bench.config import WarmupPolicy
 from lmcache.cli.commands.bench.engine_bench.progress import ProgressMonitor
 from lmcache.cli.commands.bench.engine_bench.request_sender import RequestSender
 from lmcache.cli.commands.bench.engine_bench.stats import StatsCollector
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 

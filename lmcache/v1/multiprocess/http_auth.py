@@ -10,15 +10,13 @@ from starlette.types import ASGIApp
 from typing_extensions import Self
 
 # First Party
-from lmcache.security.api_key import (
+from lmcache.security.http import HTTPBearerAuthenticationMiddleware
+from lmcache.v1.common.security.api_key import (
     APIKeyVerifier,
     load_api_keys_from_files,
     load_service_api_keys,
 )
-from lmcache.security.http import (
-    HTTPBearerAuthenticationMiddleware,
-    bearer_token,
-)
+from lmcache.v1.common.security.bearer import bearer_token
 
 PUBLIC_HTTP_PATHS = frozenset({"/", "/healthcheck"})
 HTTP_API_KEY_ENV_VAR = "LMCACHE_HTTP_API_KEY"

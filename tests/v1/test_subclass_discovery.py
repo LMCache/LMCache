@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for ``lmcache.v1.utils.subclass_discovery``."""
+"""Unit tests for ``lmcache.v1.common.subclass_discovery``."""
 
 # Standard
 from pathlib import Path
@@ -13,7 +13,7 @@ import uuid
 import pytest
 
 # First Party
-from lmcache.v1.utils.subclass_discovery import discover_subclasses
+from lmcache.v1.common.subclass_discovery import discover_subclasses
 
 
 def _write_module(pkg_dir: Path, name: str, source: str) -> None:
@@ -342,7 +342,7 @@ class TestImportErrorHandling:
         # test to pytest's caplog interaction with the project's
         # custom logger setup.
         # First Party
-        from lmcache.v1.utils import subclass_discovery as sd
+        from lmcache.v1.common import subclass_discovery as sd
 
         warnings: List[Tuple[str, Tuple[object, ...]]] = []
         monkeypatch.setattr(

@@ -18,13 +18,13 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.logging import init_logger
 from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.common.custom_types import (
     CBMatchResult,
     CBUnifiedLookupResult,
     IPCCacheServerKey,
 )
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.distributed.api import (
     FULL_ATTENTION_WINDOW_CHUNKS,
@@ -224,7 +224,7 @@ class LookupMixin:
         handle: PrefetchHandle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchTaskSpec(
                 key_groups=key_groups,
-                fetching_policy="full",
+                fetching_policy="whole_chunk",
             ),
             external_request_id=key.request_id,
         )
@@ -294,7 +294,7 @@ class LookupMixin:
         if stale_hashes:
             with self._pending_fp_lock:
                 truly_evict: list[bytes] = []
-                for h in stale_hashes:
+                for h in dict.fromkeys(stale_hashes):
                     if h in self._pending_fp_hashes:
                         continue
                     n = self._stale_strike.get(h, 0) + 1

@@ -40,8 +40,8 @@ import torch  # noqa: F401 — must be imported before native extensions
 
 # First Party
 from lmcache import device_ops as _device_ops
-from lmcache.logging import init_logger
-from lmcache.v1.periodic_thread import (
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.periodic_thread import (
     PeriodicThread,
     PeriodicThreadRegistry,
     ThreadLevel,

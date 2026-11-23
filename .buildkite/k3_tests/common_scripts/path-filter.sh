@@ -267,6 +267,13 @@ should_skip_ci() {
         return 1
     fi
 
+    # The weekly full build must run every suite; a skip would report a
+    # passing full run that tested nothing.
+    if [[ "${CI_WEEKLY_FULL:-0}" == "1" ]]; then
+        echo "path-filter: weekly full build (CI_WEEKLY_FULL=1) → not skipping" >&2
+        return 1
+    fi
+
     # Never skip scheduled builds (e.g. nightly baselines with NEED_UPLOAD=true).
     if [[ "${BUILDKITE_SOURCE:-}" == "schedule" ]]; then
         echo "path-filter: scheduled build (BUILDKITE_SOURCE=schedule) → not skipping" >&2

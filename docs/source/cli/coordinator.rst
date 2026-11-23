@@ -20,7 +20,7 @@ Quick start
 .. code-block:: bash
 
    lmcache coordinator \
-       --host 0.0.0.0 --port 9300 \
+       --host 127.0.0.1 --port 9300 \
        --instance-timeout 30 \
        --health-check-interval 10
 

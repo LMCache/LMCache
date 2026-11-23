@@ -24,6 +24,15 @@ source "${SCRIPT_DIR}/helpers.sh"
 # shellcheck source=.buildkite/k3_tests/common_scripts/path-filter.sh
 source "${SCRIPT_DIR}/path-filter.sh"
 
+# weekly_full_build.yml pushes the tested commit to this CI-owned branch and
+# then creates the real weekly builds through the API with CI_WEEKLY_FULL=1.
+# The push itself can also start ordinary branch builds; end those green here
+# instead of spending GPUs on a duplicate, unchecked run.
+if [[ "${BUILDKITE_BRANCH:-}" == "ci-weekly-full" && "${CI_WEEKLY_FULL:-0}" != "1" ]]; then
+    echo "+++ :fast_forward: Push build on ci-weekly-full; the weekly full build runs separately"
+    exit 0
+fi
+
 case "${PIPELINE_FILE}" in
     *k3_tests/multiprocess/pipeline.yml)
         expensive_pipeline_name="multiprocess"
@@ -72,6 +81,14 @@ if [[ "${PIPELINE_FILE}" == */xpu/*/pipeline.yml ]]; then
         XPU_CI_IMAGE="${PINNED_XPU_IMAGE}"
     fi
     export XPU_CI_IMAGE
+fi
+
+if [[ "${PIPELINE_FILE}" == */rbln/pipeline.yml ]]; then
+    # The RBLN nightly lane uploads pipeline.yml itself with its candidate
+    # image; PR and dev builds run on the last image that lane verified.
+    # shellcheck source=.buildkite/k3_harness/resolve-pinned-vllm.sh
+    source "${SCRIPT_DIR}/../../k3_harness/resolve-pinned-vllm.sh"
+    export RBLN_SERVE_IMAGE="${PINNED_RBLN_IMAGE}"
 fi
 
 echo "--- :pipeline: Uploading ${PIPELINE_FILE}"

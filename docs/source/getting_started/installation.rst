@@ -335,6 +335,10 @@ runtime, see :doc:`compatibility` before installing.
                         is missing, the helper below installs a compiler matching the
                         installed runtime without upgrading it. Run the helper as root
                         in the container, or with ``sudo`` on a host.
+                        For ``intel-sycl-rt``, it prefers an exact compiler release,
+                        falling back to the newest available patch not newer than the
+                        runtime within the same major/minor release. A dpkg-managed
+                        runtime still requires an exact package version match.
 
                         .. code-block:: bash
 

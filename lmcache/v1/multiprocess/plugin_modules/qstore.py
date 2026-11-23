@@ -23,13 +23,13 @@ import torch
 
 # First Party
 from lmcache import device_ops, torch_dev
-from lmcache.logging import init_logger
 from lmcache.utils import (
     EngineType,
     _lmcache_nvtx_annotate,
 )
 from lmcache.v1.common.custom_types import TRANSFER_QUERY, IPCCacheServerKey
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.storage_manager import l1_owners_of
@@ -515,7 +515,12 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         kv_groups_manager = cache_context.kv_layer_groups_manager
         attn_desc = kv_groups_manager.get_attn_desc()
         self._ctx.layout_desc_registry.register(
-            model_name, world_size, layout_desc, attn_desc
+            model_name,
+            world_size,
+            layout_desc,
+            self._ctx.chunk_size,
+            self._ctx.hash_algorithm_name,
+            attn_desc=attn_desc,
         )
 
         with self._lock:

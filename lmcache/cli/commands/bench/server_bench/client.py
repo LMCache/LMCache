@@ -59,7 +59,7 @@ from lmcache.v1.kv_layer_groups import (
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.client.worker_transfer import IPCEvent, TransferContext
-    from lmcache.v1.multiprocess.transport.base import RequestClient
+    from lmcache.v1.transport.request_client import RequestClient
 
 
 @dataclass(frozen=True)

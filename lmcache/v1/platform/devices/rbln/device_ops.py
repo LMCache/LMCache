@@ -47,7 +47,7 @@ from typing import ClassVar, cast
 import torch
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.devices.rbln.kv_layout import (
     squeeze_singleton_axis,

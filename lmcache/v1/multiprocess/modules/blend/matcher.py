@@ -8,8 +8,8 @@ import threading
 import numpy as np
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.custom_types import CBMatchResult
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_hasher import (
     chunk_hash_windows_numba,
     rolling_hash_windows_numba,
@@ -27,7 +27,7 @@ class BlendTokenRangeMatcher:
     _TABLE_SIZE: int = 1 << _TABLE_BITS
     _BASE: np.uint64 = np.uint64(0x9E3779B97F4A7C15)  # Fibonacci-hashing const
 
-    def __init__(self, chunk_size: int = 256, dedup_content: bool = False):
+    def __init__(self, chunk_size: int = 256, dedup_content: bool = False) -> None:
         """Initialize with the chunk size (tokens per fingerprint chunk) and
         whether to skip registering already-indexed poly hashes."""
         self.chunk_size = chunk_size
@@ -37,6 +37,8 @@ class BlendTokenRangeMatcher:
         self._mask = np.uint64(self._TABLE_SIZE - 1)
         # compact_chunk_id -> caller token_hash (full bytes); None once evicted
         self._chunk_token_hash: list[bytes | None] = []
+        # Evicted IDs are reusable; the parallel lists retain their high-water mark.
+        self._free_compact_ids: list[int] = []
         # token_hash -> start position in its registered sequence
         self._token_hash_to_start: dict[bytes, int] = {}
         # compact_chunk_id -> table slot (reverse lookup for eviction)
@@ -58,6 +60,8 @@ class BlendTokenRangeMatcher:
         Already-indexed token hashes are skipped; under ``dedup_content``,
         already-indexed poly hashes are skipped too (same text behind
         different prefixes is indexed once).
+        Reuse removed compact IDs before allocating new rows. A batch that
+        exceeds the available capacity is skipped without changing the index.
 
         Args:
             token_ids: The stored sequence's token IDs.
@@ -92,24 +96,31 @@ class BlendTokenRangeMatcher:
             new_chunk_hashes = chunk_hashes[new_idxs]
 
             base_id = len(self._chunk_token_hash)
-            if base_id + n_new > self._TABLE_SIZE:
+            n_used = base_id - len(self._free_compact_ids)
+            if n_used + n_new > self._TABLE_SIZE:
                 logger.error(
                     "BlendTokenRangeMatcher compact-ID overflow: %d chunks "
                     "registered, cannot add %d more (limit %d). Skipping.",
-                    base_id,
+                    n_used,
                     n_new,
                     self._TABLE_SIZE,
                 )
                 return 0
-            if base_id + n_new > int(self._TABLE_SIZE * 0.8):
+            if n_used + n_new > int(self._TABLE_SIZE * 0.8):
                 logger.warning(
                     "BlendTokenRangeMatcher nearing capacity: %d/%d "
                     "compact IDs used. Hash collision rate is rising; "
                     "hit rate will degrade.",
-                    base_id + n_new,
+                    n_used + n_new,
                     self._TABLE_SIZE,
                 )
-            compact_ids = np.arange(base_id, base_id + n_new, dtype=np.int64)
+            n_reused = min(n_new, len(self._free_compact_ids))
+            compact_ids = np.empty(n_new, dtype=np.int64)
+            for k in range(n_reused):
+                compact_ids[k] = self._free_compact_ids.pop()
+            compact_ids[n_reused:] = np.arange(
+                base_id, base_id + n_new - n_reused, dtype=np.int64
+            )
 
             update_table_id_numba(new_chunk_hashes, self._table_id, compact_ids)
 
@@ -118,8 +129,12 @@ class BlendTokenRangeMatcher:
                 cid = int(compact_ids[k])
                 poly_hash = int(new_chunk_hashes[k])
                 slot = poly_hash & int(self._mask)
-                self._chunk_token_hash.append(th)
-                self._chunk_poly_hash.append(poly_hash)
+                if cid < base_id:
+                    self._chunk_token_hash[cid] = th
+                    self._chunk_poly_hash[cid] = poly_hash
+                else:
+                    self._chunk_token_hash.append(th)
+                    self._chunk_poly_hash.append(poly_hash)
                 self._token_hash_to_start[th] = (
                     position_offset + orig_i * self.chunk_size
                 )
@@ -148,9 +163,9 @@ class BlendTokenRangeMatcher:
         full poly-hash verify that rejects bucket collisions. Thread-safe.
 
         Returns:
-            One result per unique reused chunk (cur_st = first query
-            position, old_st = stored position); empty if the query is
-            shorter than one chunk or nothing matched.
+            One result per non-overlapping occurrence of each reused chunk
+            (old_st = stored position); empty if the query is shorter than
+            one chunk or nothing matched.
         """
         if len(token_ids) < self.chunk_size:
             return []
@@ -168,12 +183,12 @@ class BlendTokenRangeMatcher:
             cids_at_pos = self._table_id[rolling & self._mask]
             hit_positions = np.nonzero(cids_at_pos >= 0)[0]
 
-            seen_cids: set[int] = set()
+            next_free: dict[int, int] = {}  # cid -> end of its last match
             results: list[CBMatchResult] = []
             for pos in hit_positions:
                 pos = int(pos)
                 cid = int(cids_at_pos[pos])
-                if cid in seen_cids:
+                if pos < next_free.get(cid, 0):
                     continue
                 if int(rolling[pos]) != self._chunk_poly_hash[cid]:
                     continue  # bucket-only collision
@@ -183,7 +198,7 @@ class BlendTokenRangeMatcher:
                 old_st = self._token_hash_to_start.get(th)
                 if old_st is None:
                     continue
-                seen_cids.add(cid)
+                next_free[cid] = pos + self.chunk_size
                 results.append(
                     CBMatchResult(
                         old_st=old_st,
@@ -201,9 +216,19 @@ class BlendTokenRangeMatcher:
             )
             return results
 
-    def remove_chunks(self, token_hashes: list[bytes]) -> None:
-        """Evict the given chunks so later probes cannot match them.
-        Thread-safe."""
+    def remove_chunks(self, token_hashes: list[bytes]) -> int:
+        """Evict the given chunks and release their compact IDs for reuse.
+
+        A chunk's table slot is cleared only when it still maps to that
+        chunk's hash. Thread-safe.
+
+        Args:
+            token_hashes: Per-chunk content hashes; unknown ones are skipped.
+
+        Returns:
+            Number of chunks removed from the index.
+        """
+        num_removed = 0
         with self._lock:
             for th in token_hashes:
                 cid = self._token_hash_to_compact_id.get(th)
@@ -217,12 +242,17 @@ class BlendTokenRangeMatcher:
                         cid,
                     )
                     continue
-                self._table_id[slot] = -1
+                # Another chunk sharing the slot may hold it now; leave it.
+                if int(self._table_id[slot]) == cid:
+                    self._table_id[slot] = -1
                 self._compact_id_to_slot[cid] = -1
                 self._chunk_token_hash[cid] = None
                 self._chunk_poly_hash[cid] = 0
                 self._token_hash_to_start.pop(th, None)
                 del self._token_hash_to_compact_id[th]
+                self._free_compact_ids.append(cid)
+                num_removed += 1
+        return num_removed
 
 
 def merge_intervals(results: list[CBMatchResult]) -> list[tuple[int, int]]:

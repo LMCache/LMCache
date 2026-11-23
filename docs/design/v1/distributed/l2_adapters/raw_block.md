@@ -235,6 +235,12 @@ Important validation rules:
 - with `use_odirect=true`, raw-block I/O rejects offsets and total I/O lengths
   that are not aligned to `block_align`; misaligned write buffers use an
   aligned bounce buffer
+- with `io_engine="io_uring"` and `enable_zero_copy=true`, a payload that is
+  not a multiple of `block_align` (for example after AES-GCM serde) is
+  transferred straight from its L1 allocation when that allocation covers the
+  aligned length, which the L1 alignment rule above guarantees for L1 objects.
+  Writes zero the padding after the payload in place; objects without such
+  padding keep the bounce buffer
 
 ## Relationship to Non-MP Mode
 

@@ -19,7 +19,7 @@ from queue import Empty, Queue
 import threading
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.mp_coordinator.api import BlendMatch, BlendNamespace
 from lmcache.v1.mp_coordinator.schemas import encode_tokens
 

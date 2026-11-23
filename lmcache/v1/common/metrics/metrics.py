@@ -22,7 +22,7 @@ Example usage::
 from typing import Any, Optional
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.metrics.handler import FileHandler, MetricsHandler
 from lmcache.v1.common.metrics.section import Section, sections_to_dict
 
