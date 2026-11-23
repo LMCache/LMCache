@@ -70,8 +70,12 @@ def _captured_lookup_key_groups(
         num_chunks_in_sw=[-1] * num_groups
     )
     if registry is not None:
-        ctx.layout_desc_registry = registry
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+        # Real registration descriptors; the token hashes stay stubbed.
+        ctx.layout_desc_registry = MagicMock(wraps=registry)
+    token_hasher = MagicMock()
+    token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    ctx.layout_desc_registry.get_chunk_size.return_value = 16
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
 
     module = LookupModule(ctx)
     module.lookup(_lookup_key(world_size=world_size), tp_size=1)
@@ -120,6 +124,8 @@ def test_lookup_asks_only_the_workers_that_registered_a_group(
             "m",
             2,
             MagicMock(),
+            chunk_size=16,
+            hash_algorithm="blake3",
             attn_desc=AttnWindowDesc(num_chunks_in_sw=windows[worker_id]),
             worker_id=worker_id,
         )
@@ -167,7 +173,10 @@ def test_lookup_hashing_stops_at_key_end() -> None:
     ctx.chunk_size = 16
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = MagicMock()
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
+    token_hasher = MagicMock()
+    token_hasher.compute_packed_chunk_hashes.return_value = []
+    ctx.layout_desc_registry.get_chunk_size.return_value = 16
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     key = IPCCacheServerKey(
         model_name="m",
         world_size=1,
@@ -180,6 +189,6 @@ def test_lookup_hashing_stops_at_key_end() -> None:
 
     LookupModule(ctx).lookup(key, tp_size=1)
 
-    ctx.token_hasher.compute_packed_chunk_hashes.assert_called_once_with(
+    token_hasher.compute_packed_chunk_hashes.assert_called_once_with(
         pack_token_ids(range(32)), end=16
     )

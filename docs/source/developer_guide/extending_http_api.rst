@@ -85,7 +85,7 @@ An API module **should**:
 
 - guard against uninitialized state by checking ``request.app.state.engine``
   and returning ``503`` when it is ``None``;
-- use ``lmcache.logging.init_logger(__name__)`` for logging;
+- use ``lmcache.v1.common.logging.init_logger(__name__)`` for logging;
 - use ``async`` handlers and avoid blocking I/O.
 
 An API module **must not** import or mutate the ``app`` object from

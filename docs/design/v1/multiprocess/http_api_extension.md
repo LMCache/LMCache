@@ -133,7 +133,7 @@ An API module **should**:
 
 1. Guard against uninitialized engine state by checking
    `request.app.state.engine` and returning 503 if `None`.
-2. Use `lmcache.logging.init_logger(__name__)` for logging.
+2. Use `lmcache.v1.common.logging.init_logger(__name__)` for logging.
 3. Follow the project's import ordering convention
    (Standard → Third Party → First Party).
 

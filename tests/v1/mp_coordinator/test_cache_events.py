@@ -318,7 +318,7 @@ def test_token_binding_eviction_warns(monkeypatch):
     subscriber says so."""
     monkeypatch.setattr(cache_events, "_TOKEN_BINDING_CACHE_SIZE", 2)
     warnings: list[str] = []
-    # The module logger does not propagate (see ``lmcache.logging``), so
+    # The module logger does not propagate (see ``lmcache.v1.common.logging``), so
     # record the call instead of relying on root-handler capture.
     monkeypatch.setattr(
         cache_events.logger,
@@ -1039,7 +1039,10 @@ def test_no_destination_builds_no_subscriber(monkeypatch: pytest.MonkeyPatch) ->
     )
     assert (
         cache_events.maybe_create_cache_event_subscriber(
-            MPServerConfig(), HTTPFrontendConfig(), CoordinatorConfig()
+            MPServerConfig(),
+            HTTPFrontendConfig(),
+            CoordinatorConfig(),
+            mq_port=0,
         )
         is None
     )
@@ -1060,7 +1063,10 @@ def test_events_trace_alone_builds_a_subscriber_with_a_trace_sink(
     mp_config = MPServerConfig(instance_id="node-a")
 
     subscriber = cache_events.maybe_create_cache_event_subscriber(
-        mp_config, HTTPFrontendConfig(http_port=8123), CoordinatorConfig()
+        mp_config,
+        HTTPFrontendConfig(http_port=8123),
+        CoordinatorConfig(),
+        mq_port=19001,
     )
     recorder.close()
 
@@ -1074,6 +1080,7 @@ def test_events_trace_alone_builds_a_subscriber_with_a_trace_sink(
     assert records[0].args["phase"] == "start"
     assert records[0].args["instance_id"] == "node-a"
     assert records[0].args["http_port"] == 8123
+    assert records[0].args["mq_port"] == 19001
     assert records[0].args["incarnation"] == kwargs["incarnation"]
 
 
@@ -1098,6 +1105,7 @@ def test_coordinator_and_trace_together_fan_out(
         MPServerConfig(),
         HTTPFrontendConfig(),
         CoordinatorConfig(url="http://coordinator:9300", event_reporting=True),
+        mq_port=0,
     )
     recorder.close()
 
@@ -1123,6 +1131,7 @@ def test_reporting_without_http_frontend_records_only_the_trace(
         MPServerConfig(),
         None,
         CoordinatorConfig(url="http://coordinator:9300", event_reporting=True),
+        mq_port=0,
     )
     recorder.close()
 

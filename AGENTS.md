@@ -114,10 +114,25 @@ Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator 
 
 ### CPU-only connector import checks
 
+CPU nightly wheels are produced by `LMCache/vllm-cpu`; this repository verifies
+them and writes `github_nightly_tested_vllm`. Compare the wheel's build time
+with `validated_at`: repeating a passing test does not make an old build fresh.
+Current history is `tested_runtimes.jsonl`; `tested_vllm_versions.csv` is legacy.
+For recovery, dispatch `nightly_build.yml` with `cpu_verify_only=true` to run
+CPU verification and pin reporting without rebuilding unrelated accelerators.
+CPU serving tests must set `lmcache.mp.use_vmm_api=false` in connector extra
+config: current vLLM checks the declared cache access before initializing the
+device and rejects the automatic CUDA VMM export mode on CPU.
+
 Use Python 3.12 with PyTorch and the common native extensions installed.
 A fresh worktree does not include ignored native build artifacts; build them
 with `NO_GPU_EXT=1 python setup.py build_ext --inplace` before running layout
-and connector import tests. For these focused checks, use
+and connector import tests. `build_ext` does not generate the ignored gRPC
+bindings. Before running multiprocess tests in a fresh checkout, install
+`requirements/proto.txt` and run
+`python lmcache/v1/transport/grpc/_proto_gen/_generate.py` from the repo root;
+this generates both transport and memory-orchestrator bindings in dependency
+order. For these focused checks, use
 `python -m pytest --confcutdir=tests/v1 tests/v1/gpu_connector/` so the root
 `tests/conftest.py` GPU allocator fixtures are not loaded. This validates CPU
 imports and shared layout/GDS behavior, not accelerator kernel roundtrips.
@@ -125,6 +140,25 @@ When combining these tests with `tests/inprocess/`, use `--noconftest` for
 self-contained CPU checks spanning both trees; normal accelerator CI must
 retain the root fixtures. Mirrored test directories with identical module
 names need package `__init__.py` files to avoid pytest import mismatches.
+
+### Test-First Workflow
+
+Write tests before you write the implementation. The full order and its
+exemptions are in `docs/coding_standards.md` Section 5.2 ("Test-first order"):
+
+1. Design the user-facing surface: the design doc and, if there is one, the CLI
+   (commands, flags, output, exit codes).
+2. Write the **end-to-end test** against that surface before any implementation.
+3. Finalize the public interface: signatures, type hints, and docstrings, with
+   bodies that `raise NotImplementedError`.
+4. Write **unit tests** against the docstring contract before implementing.
+5. Run the new tests and confirm they fail for the expected reason.
+6. Implement until they pass. Never edit a test to fit the implementation. If
+   the contract was wrong, fix the design or docstring first and say so.
+
+Agents: if neither the user nor a design doc has fixed the CLI or the public
+interface, propose it and get the user's agreement before writing tests against
+it. Report both the failing run (step 5) and the passing run (step 6) in chat.
 
 ### Testing Practices
 
