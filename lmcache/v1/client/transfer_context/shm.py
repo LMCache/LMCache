@@ -14,13 +14,13 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.logging import init_logger
 from lmcache.v1.client.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
 )
 from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.errors import LMCacheTimeoutError
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform import current_device_spec
 from lmcache.v1.transport.request_client import RequestClient
 
@@ -293,8 +293,10 @@ class EngineDrivenContextShm(EngineDrivenContext):
             )
         return self._build_slot_tensors(slots) if slots else None
 
-    def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
-        future = self.req_client.commit_retrieve(key, instance_id)
+    def commit_retrieve(
+        self, key: IPCCacheServerKey, instance_id: int, failed: bool = False
+    ) -> bool:
+        future = self.req_client.commit_retrieve(key, instance_id, failed)
         try:
             return bool(future.result(timeout=self.mq_timeout))
         except TimeoutError:

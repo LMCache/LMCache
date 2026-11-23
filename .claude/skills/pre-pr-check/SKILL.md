@@ -80,7 +80,7 @@ These are straightforward to fix:
 3. **`Optional` usage** (Section 2.1): Where a value is always initialized, remove the `Optional` wrapper and initialize directly. Where None is genuinely possible, rewrite as `X | None`.
 4. **Bare generics** (Section 2.1): Replace bare `list`, `dict`, `tuple`, `set` in annotations with parameterized forms (`list[T]`, `dict[K, V]`).
 5. **Lazy imports** (Section 7.2): Move imports to the top of the file, under the correct section heading. Preserve `torch`-before-native-C-extension ordering.
-6. **Bare `logging.getLogger(__name__)`** (Section 7.4): Replace with `init_logger(__name__)` from `lmcache.logging`.
+6. **Bare `logging.getLogger(__name__)`** (Section 7.4): Replace with `init_logger(__name__)` from `lmcache.v1.common.logging`.
 7. **Operational logs at `INFO` level** (Section 7.4): If a log is about store/retrieve/task progress, change `logger.info(...)` to `logger.debug(...)`.
 8. **Inappropriate `WARNING`** (Section 7.4): For log messages about benign concurrent conditions (e.g., "key not found, this should not happen" in a code path documented as not holding the global lock), downgrade to `debug` and fix the misleading message.
 9. **`logger.error` inside `except` blocks** (Section 10.1): Replace with `logger.exception(...)` so the traceback is preserved, unless the exception is re-raised.

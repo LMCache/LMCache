@@ -13,7 +13,7 @@ import threading
 
 # First Party
 from lmcache.integration.request_telemetry.base import RequestTelemetry
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 

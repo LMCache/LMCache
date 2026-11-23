@@ -10,7 +10,7 @@ import torch
 
 # First Party
 from lmcache import device_ops, torch_dev, torch_device_type
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.memory_management import (
     AddressManager,

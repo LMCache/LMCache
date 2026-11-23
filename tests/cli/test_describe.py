@@ -28,6 +28,39 @@ from lmcache.cli.commands.describe import (
 # Sample /status payload
 # ---------------------------------------------------------------------------
 
+
+def _l1_status(used_bytes: int, total_bytes: int, objects: int) -> dict:
+    """One L1 entry as ``L1Manager.report_status`` reports it."""
+    return {
+        "is_healthy": True,
+        "total_object_count": objects,
+        "write_locked_count": 0,
+        "read_locked_count": 0,
+        "temporary_count": 0,
+        "staging_object_count": 0,
+        "staging_bytes": 0,
+        "memory_used_bytes": used_bytes,
+        "memory_total_bytes": total_bytes,
+        "memory_configured_bytes": total_bytes,
+        "backend": "dram",
+        "memory_usage_ratio": used_bytes / total_bytes if total_bytes > 0 else 0.0,
+        "write_ttl_seconds": 10,
+        "read_ttl_seconds": 10,
+    }
+
+
+def _eviction_status(policy: str) -> dict:
+    """One L1 eviction controller entry as the server reports it."""
+    return {
+        "is_healthy": True,
+        "thread_alive": True,
+        "eviction_policy": policy,
+        "trigger_watermark": 0.9,
+        "eviction_ratio": 0.2,
+    }
+
+
+_SINGLE_L1 = _l1_status(45_415_895_859, 64_424_509_440, 1024)  # ~42.30 / 60 GB
 SAMPLE_STATUS = {
     "is_healthy": True,
     "engine_type": "MPCacheServer",
@@ -63,31 +96,53 @@ SAMPLE_STATUS = {
         },
     },
     "active_sessions": 3,
+    # A single-L1 server sends the per-tag maps and also copies its only
+    # L1 into the single-L1 keys.
     "storage_manager": {
         "is_healthy": True,
-        "l1_manager": {
-            "is_healthy": True,
-            "total_object_count": 1024,
-            "write_locked_count": 0,
-            "read_locked_count": 0,
-            "temporary_count": 0,
-            "memory_used_bytes": 45_415_895_859,  # ~42.30 GB
-            "memory_total_bytes": 64_424_509_440,  # ~60.00 GB
-            "memory_usage_ratio": 0.705,
-            "write_ttl_seconds": 10,
-            "read_ttl_seconds": 10,
-        },
-        "store_controller": {"is_healthy": True},
+        "l1_managers": {"_default": _SINGLE_L1},
+        "store_controllers": {"_default": {"is_healthy": True}},
+        "l1_eviction_controllers": {"_default": _eviction_status("LRU")},
         "prefetch_controller": {"is_healthy": True},
-        "eviction_controller": {
-            "is_healthy": True,
-            "thread_alive": True,
-            "eviction_policy": "LRU",
-            "trigger_watermark": 0.9,
-            "eviction_ratio": 0.2,
-        },
+        "l2_eviction_controller": {"is_healthy": True, "adapters": []},
         "l2_adapters": [],
         "num_l2_adapters": 0,
+        "l1_usage": [45_415_895_859, 64_424_509_440],
+        "l1_capacity_bytes_by_backend": {"dram": 64_424_509_440},
+        "l1_manager": _SINGLE_L1,
+        "store_controller": {"is_healthy": True},
+        "l1_eviction_controller": _eviction_status("LRU"),
+    },
+}
+
+# A multi-L1 server sends only the per-tag maps; each L1 may set its own policy.
+# A shadow L1 ("peer") indexes a peer's bytes: it reports zero local memory and
+# the default eviction policy, but its objects are readable here.
+MULTI_L1_STATUS = {
+    **SAMPLE_STATUS,
+    "storage_manager": {
+        "is_healthy": True,
+        "l1_managers": {
+            "hot": _l1_status(536_870_912, 1_073_741_824, 100),  # 0.5 / 1 GB
+            "warm": _l1_status(0, 2_147_483_648, 0),  # 0 / 2 GB
+            "peer": _l1_status(0, 0, 5),
+        },
+        "store_controllers": {
+            "hot": {"is_healthy": True},
+            "warm": {"is_healthy": True},
+            "peer": {"is_healthy": True},
+        },
+        "l1_eviction_controllers": {
+            "hot": _eviction_status("LRU"),
+            "warm": _eviction_status("ARC"),
+            "peer": _eviction_status("LRU"),
+        },
+        "prefetch_controller": {"is_healthy": True},
+        "l2_eviction_controller": {"is_healthy": True, "adapters": []},
+        "l2_adapters": [],
+        "num_l2_adapters": 0,
+        "l1_usage": [536_870_912, 3_221_225_472],
+        "l1_capacity_bytes_by_backend": {"dram": 3_221_225_472},
     },
 }
 
@@ -220,6 +275,63 @@ class TestDescribeKvcacheFields:
         assert kg["attention_backend"] == "vLLM non-MLA flash attention"
         assert kg["engine_kv_shape"] == "NL x [2, NB, BS, NH, HS]"
         assert kg["engine_kv_concrete_shape"] == "32 x [2, 2048, 16, 8, 128]"
+
+        # A single L1 is fully described by the totals above.
+        assert "l1_managers" not in m
+
+    def test_multi_l1_totals_and_per_l1_sections(self):
+        """A multi-L1 server reports totals and one section per L1.
+
+        Such a server omits the single-L1 ``l1_manager`` keys, so every
+        value must come from the per-tag maps. A zero-capacity shadow L1
+        adds its objects to the total but nothing to capacity or usage.
+        """
+        # Standard
+        import io
+
+        cmd = DescribeCommand()
+        args = Namespace(
+            target="kvcache", url="http://localhost:8000", format="json", output=None
+        )
+        with patch(
+            "lmcache.cli.commands.describe.fetch_json",
+            return_value=MULTI_L1_STATUS,
+        ):
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                cmd.execute(args)
+
+        m = json.loads(buf.getvalue())["metrics"]
+        assert m["l1_capacity_gb"] == 3.0
+        assert m["l1_used_gb"] == "0.50 (16.7%)"
+        assert m["eviction_policy"] == "LRU, ARC"
+        assert m["cached_objects"] == 105
+        assert m["l1_managers"] == [
+            {
+                "tag": "hot",
+                "backend": "dram",
+                "capacity_gb": 1.0,
+                "used_gb": "0.50 (50.0%)",
+                "cached_objects": 100,
+                "eviction_policy": "LRU",
+            },
+            {
+                "tag": "warm",
+                "backend": "dram",
+                "capacity_gb": 2.0,
+                "used_gb": "0.00 (0.0%)",
+                "cached_objects": 0,
+                "eviction_policy": "ARC",
+            },
+            {
+                "tag": "peer",
+                "backend": "dram",
+                "capacity_gb": 0.0,
+                "used_gb": "0.00 (0.0%)",
+                "cached_objects": 5,
+                "eviction_policy": "LRU",
+            },
+        ]
 
     def test_unhealthy(self):
         """Verify health shows UNHEALTHY when is_healthy is False."""

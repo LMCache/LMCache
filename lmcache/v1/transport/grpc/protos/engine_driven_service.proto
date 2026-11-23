@@ -63,10 +63,14 @@ message PrepareStoreResponse {
   bytes encoded_context = 1;
 }
 
+// chunk_start/chunk_count select one page of the key's chunks; chunk_count 0
+// means through the last chunk, so 0/0 is the whole range.
 message CommitStoreRequest {
   IpcCacheServerKey key = 1;
   int64 instance_id = 2;
   bytes data = 3;
+  int64 chunk_start = 4;
+  int64 chunk_count = 5;
 }
 
 message CommitStoreResponse {
@@ -76,6 +80,8 @@ message CommitStoreResponse {
 message PrepareRetrieveRequest {
   IpcCacheServerKey key = 1;
   int64 instance_id = 2;
+  int64 chunk_start = 3;
+  int64 chunk_count = 4;
 }
 
 message PrepareRetrieveResponse {
@@ -87,6 +93,7 @@ message PrepareRetrieveResponse {
 message CommitRetrieveRequest {
   IpcCacheServerKey key = 1;
   int64 instance_id = 2;
+  bool failed = 3;
 }
 
 message CommitRetrieveResponse {

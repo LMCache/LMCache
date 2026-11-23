@@ -528,6 +528,50 @@ RetrieveResult = bool
 LookupResult = int
 
 
+# Connector extra-config key naming the file that holds the LMCache server's
+# request API key, as opposed to the key this engine accepts inbound.
+_API_KEY_FILE_KEY = "lmcache.mp.api_key_file"
+
+
+def _connector_request_api_key(extra_config: dict[str, Any] | None) -> str | None:
+    """Load the credential this connector sends to the LMCache server.
+
+    The setting exists because the inbound key and the key an engine uses to
+    call the server are different trust domains: with one shared key, every
+    engine can also authenticate to every other service. An engine that only
+    needs to read and write cache entries can therefore be given the server's
+    key alone.
+
+    Args:
+        extra_config: Connector ``kv_connector_extra_config`` mapping.
+
+    Returns:
+        The configured key, or ``None`` when the setting is absent, in which
+        case the request clients keep their environment fallback.
+
+    Raises:
+        ValueError: If the setting is not a string path, or the file does not
+            hold exactly one non-empty key.
+    """
+    if not extra_config:
+        return None
+    path = extra_config.get(_API_KEY_FILE_KEY)
+    if path is None:
+        return None
+    if not isinstance(path, str) or not path:
+        raise ValueError(f"{_API_KEY_FILE_KEY} must be a non-empty path string")
+
+    # First Party
+    from lmcache.v1.common.security.api_key import load_api_keys_from_files
+
+    keys = load_api_keys_from_files([path])
+    if len(keys) != 1:
+        raise ValueError(
+            f"{_API_KEY_FILE_KEY} must name exactly one key file, got {len(keys)}"
+        )
+    return keys[0]
+
+
 class LMCacheMPSchedulerAdapter:
     def __init__(
         self,
@@ -580,8 +624,11 @@ class LMCacheMPSchedulerAdapter:
         )
         assert len(server_urls) >= 1, "At least one server url required"
         self._server_urls: list[str] = list(server_urls)
+        request_api_key = _connector_request_api_key(extra_config)
         self.req_clients: dict[str, RequestClient] = {
-            url: RequestClientFactory.create(url, context=context)
+            url: RequestClientFactory.create(
+                url, context=context, api_key=request_api_key
+            )
             for url in self._server_urls
         }
         self._nonblocking_lookup_status = (
@@ -1291,12 +1338,14 @@ class LMCacheMPWorkerAdapter:
                     extra_config=extra_config,
                     server_url=server_url,
                     zmq_context=context,
+                    api_key=_connector_request_api_key(extra_config),
                 )
             elif supports_autostart:
                 wait_for_mp_server_from_url(
                     extra_config=extra_config,
                     server_url=server_url,
                     zmq_context=context,
+                    api_key=_connector_request_api_key(extra_config),
                 )
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
@@ -1318,7 +1367,11 @@ class LMCacheMPWorkerAdapter:
             )
         else:
             self._mp_transfer_mode = None
-        self.req_client = RequestClientFactory.create(server_url, context=context)
+        self.req_client = RequestClientFactory.create(
+            server_url,
+            context=context,
+            api_key=_connector_request_api_key(extra_config),
+        )
         self._mq_timeout = mq_timeout
         self._server_url = server_url
         self._required_chunk_alignment = required_chunk_alignment

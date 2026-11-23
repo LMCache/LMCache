@@ -49,9 +49,12 @@ RUN --mount=type=bind,source=.,target=/mnt/lmcache-source,readonly \
     cd /tmp/lmcache-source; \
     python3 -m pip install --no-cache-dir -c /tmp/sglang-constraints.txt -r requirements/build.txt; \
     python3 -m pip install --no-cache-dir --no-build-isolation -c /tmp/sglang-constraints.txt .; \
+    # `python3 -c` puts the working directory first on sys.path, so checking from
+    # the source tree would import its unbuilt lmcache package, not the install.
+    cd /; \
     test "$(python3 -c 'import importlib.metadata as m; print(m.version("lmcache"))')" = "${LMCACHE_VERSION#v}"; \
     test "$(python3 -c 'import torch; print(torch.__version__)')" = "${TORCH}"; \
-    python3 .github/scripts/assert_native_ops.py; \
+    python3 /tmp/lmcache-source/.github/scripts/assert_native_ops.py; \
     python3 -c 'import lmcache.integration.sglang.unified_lmcache_mp_connector'; \
     lmcache --help > /dev/null; \
     grep -rqs "enable_lmcache" "$(python3 -c 'import os, sglang; print(os.path.dirname(sglang.__file__))')/srt"; \

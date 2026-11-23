@@ -4,12 +4,18 @@ on:
   schedule:
     - cron: '30 7 * * *'
   workflow_dispatch:
+    inputs:
+      cpu_verify_only:
+        description: "Only verify newest CPU wheels and update their tested pins"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   nightly-wheels:
+    if: ${{ !inputs.cpu_verify_only }}
     name: Build nightly CUDA wheels (${{ matrix.arch }})
     strategy:
       fail-fast: false
@@ -117,6 +123,7 @@ jobs:
         run: gh release upload nightly dist/cu130/*.whl --clobber --repo ${{ github.repository }}
 
   resolve-xpu-nightly:
+    if: ${{ !inputs.cpu_verify_only }}
     name: Resolve vLLM XPU nightly runtime
     runs-on: ubuntu-24.04
     outputs:
@@ -307,6 +314,7 @@ jobs:
   # versioned like the CUDA nightlies (0.5.4.devN+rocm7.2) so a nightly can
   # never be mistaken for a release.
   nightly-rocm-wheel:
+    if: ${{ !inputs.cpu_verify_only }}
     name: Build ROCm nightly wheel
     uses: ./.github/workflows/build_rocm_artifacts.yml
     with:
@@ -353,6 +361,7 @@ jobs:
   # release workflow, but receives a unique development version and is
   # published to a rolling GitHub Release rather than PyPI.
   nightly-musa-wheel:
+    if: ${{ !inputs.cpu_verify_only }}
     name: Build MUSA nightly wheel
     uses: ./.github/workflows/build_musa_artifacts.yml
     with:
@@ -398,6 +407,7 @@ jobs:
   # RBLN nightly reuses the release build and smoke check with a development
   # version, published to a rolling GitHub Release rather than PyPI.
   nightly-rbln-wheel:
+    if: ${{ !inputs.cpu_verify_only }}
     name: Build RBLN nightly wheel
     uses: ./.github/workflows/build_rbln_artifacts.yml
     with:
@@ -441,6 +451,7 @@ jobs:
           asset_glob: dist/rbln/*.whl
 
   nightly-build:
+    if: ${{ !inputs.cpu_verify_only }}
     name: Build image (${{ matrix.arch }})
     strategy:
       fail-fast: false
@@ -631,7 +642,7 @@ jobs:
   nightly-pin-or-report-vllm:
     name: Pin or report vLLM
     needs: nightly-verify-cpu-vllm
-    if: always()
+    if: always() && !cancelled()
     concurrency:
       group: github-nightly-vllm-pin
       cancel-in-progress: false
