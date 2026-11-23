@@ -15,6 +15,7 @@ import msgspec
 from lmcache.integration.vllm.recurrent_allocate import allocate_recurrent_destinations
 from lmcache.integration.vllm.recurrent_destinations import RecurrentDestinations
 from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.errors import LMCacheTimeoutError
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.transport.recurrent_history import (
     HistoryCopy,
@@ -325,7 +326,7 @@ class RecurrentHistoryScheduler:
                 return None
             if not future.query():
                 if now >= when:
-                    raise TimeoutError("Recurrent history control timed out")
+                    raise LMCacheTimeoutError("Recurrent history control timed out")
                 return None
             outcome = self.adapter.read_recurrent_history(future)
             del self.controls[lease]
