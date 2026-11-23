@@ -14,6 +14,9 @@ the primary restore boundary or treats a later state as an earlier state.
 
 1. The scheduler finds already-local complete recurrent checkpoints and pins
    them while allocating destinations, so allocation cannot evict these states.
+   If every candidate is already local, it skips the history RPC and destination
+   allocation. Each request scans again; this does not cache an availability
+   result or change the primary restore.
 2. The existing server-module envelope carries an aligned prefix key and the
    already-local positions. The server resolves every earlier chunk boundary
    across all recurrent object groups and TP ranks, deduplicates object keys,
@@ -44,19 +47,28 @@ published, and their old locks must not release a later reader's reservation.
 ## Compatibility and scope
 
 The initial integration is disabled by default and supports align mode,
-TP=2/DP=1 without PP or context parallelism, one MP server and one L1 manager,
+TP shards on a single DP replica without PP or context parallelism, one MP server and one L1 manager,
 and equal hash, scheduler-page, and LMCache chunk sizes. Unsupported connector
 configurations fail before use. Multi-L1 servers return no optional plan.
 Only checkpoints already present in L1 are candidates: this change neither
 creates missing historical states nor loads them from L2. There is no change
 to the primary receive result when the optional history copy fails.
 
-The extra fence is intentionally synchronous. The first restore can be slower;
-subsequent local reuse may amortize that cost. The previously measured Ascend
-prototype results are evidence for the approach, not measurements of a new PR
-revision. Concurrency, throughput, and new hardware configurations need separate
-validation. A future asynchronous optimization must retain these ownership and
-publication conditions.
+The primary retrieve is submitted through the ordinary worker path. The scheduler can start optional planning as soon as an external hit is confirmed.
+Dispatch requires both a ready plan and the primary receive receipt. Complete
+local checkpoints and positions already covered by another plan are skipped.
+Later scheduler steps allocate private destinations and send an independent
+copy to each worker on its registered transfer path. Normal completion of the
+originating request leaves that work alive. Cancellation suppresses
+publication. Source reads and destination blocks remain reserved until
+every started device copy is fenced. Other requests follow normal local
+prefix lookup, including while a matching copy is in flight.
+
+Five paired Ascend TP=2 rounds with the compatibility harness exercised the
+independent-copy path at 32K, 64K and 128K input lengths and concurrency 1 and 8.
+At 32K and 128K the second request reused a published checkpoint in every round.
+At 64K the baseline already served the second request from local cache.
+The CPU tests additionally exercise TP=1 and TP=4 using simulated events.
 
 ## Validation
 

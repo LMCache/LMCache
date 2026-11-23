@@ -32,6 +32,7 @@ class RecurrentDestinations:
     canceled: bool = False
     released: bool = False
     receive_completed: bool = False
+    copy_submitted: bool = False
 
     def block_ids(self) -> dict[int, dict[int, int]]:
         """Return destination block IDs suitable for the worker copy request."""
@@ -54,11 +55,7 @@ class RecurrentDestinations:
         if not outcome.settled or outcome.lease != self.plan.lease:
             return False
         try:
-            if (
-                outcome.successful
-                and not self.canceled
-                and not self.request.is_finished()
-            ):
+            if outcome.successful and not self.canceled:
                 publish_recurrent_checkpoints(
                     self.pool, self.request, self.block_size, self.blocks
                 )

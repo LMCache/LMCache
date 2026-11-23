@@ -46,6 +46,7 @@ class HistoryResponse(msgspec.Struct, kw_only=True):
     groups: list[int] = []
     settled: bool = False
     successful: bool = False
+    copy_submitted: bool = False
 
 
 class HistoryCopy(msgspec.Struct, kw_only=True):

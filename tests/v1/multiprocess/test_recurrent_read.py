@@ -3,6 +3,9 @@
 # Standard
 from unittest.mock import Mock
 
+# Third Party
+import pytest
+
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.error import L1Error
@@ -11,16 +14,17 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.recurrent_read import reserve_complete_recurrent_reads
 
 
-def test_reserves_only_complete_checkpoints() -> None:
+@pytest.mark.parametrize("tp", [1, 2, 4])
+def test_reserves_only_complete_checkpoints(tp) -> None:
     manager = Mock(spec=L1ManagerInterface)
     complete = tuple(
         ObjectKey(b"complete", "model", rank, group)
-        for rank in range(2)
+        for rank in range(tp)
         for group in range(2)
     )
     partial = tuple(
         ObjectKey(b"partial", "model", rank, group)
-        for rank in range(2)
+        for rank in range(tp)
         for group in range(2)
     )
     resident = {key: Mock(spec=MemoryObj) for key in (*complete, *partial[:-1])}

@@ -281,6 +281,162 @@ def test_store_skip_chunks_drops_caller_masked_chunks(
     assert mask[1] is False
 
 
+@pytest.mark.parametrize("tp", [1, 2, 4])
+@pytest.mark.parametrize("cancel", [False, True])
+def test_primary_returns_before_history_is_published(monkeypatch, tp, cancel):
+    """Drive retrieve and publication with delayed device events."""
+    # Standard
+    from dataclasses import replace
+
+    # Third Party
+    import msgspec
+
+    # First Party
+    from lmcache.integration.vllm.recurrent_scheduler import RecurrentHistoryScheduler
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
+    from lmcache.v1.common.token_codec import pack_token_ids
+    from lmcache.v1.distributed.error import L1Error
+    from lmcache.v1.multiprocess import recurrent_copy, recurrent_receive
+    from lmcache.v1.multiprocess.recurrent_reservations import RecurrentReservations
+    from lmcache.v1.multiprocess.recurrent_server import handle_recurrent_history
+    from lmcache.v1.transport.recurrent_history import HistoryResponse
+
+    module, _, _ = _make_module(monkeypatch, 3, [-1, 1], ("attention", "recurrent"))
+    module._host_event_waiter = None
+    module._recurrent_history = RecurrentReservations()
+    context = module._ctx
+    context.chunk_size = 16
+    desc = SimpleNamespace(
+        group_kinds=["attention", "recurrent"], num_chunks_in_sw=[-1, 1]
+    )
+    context.layout_desc_registry.find_attn_desc.return_value = desc
+    context.resolve_obj_keys.side_effect = lambda key, groups: [
+        [(key.worker_id, group, index) for index in range(3)] for group in groups
+    ]
+    manager = MagicMock()
+    manager.config.read_ttl_seconds = 60
+    manager.reserve_read.side_effect = lambda keys: {
+        key: (L1Error.SUCCESS, MagicMock()) for key in keys
+    }
+    context.storage_manager.l1_managers.return_value = [manager]
+    entry = module.get_and_touch_context_entry(1)
+    entry.world_size = tp
+    cache = entry.cache_context
+    cache.lmcache_tokens_per_chunk = 16
+    cache.kv_layer_groups_manager.object_groups = [
+        SimpleNamespace(kernel_group_indices=[i]) for i in range(2)
+    ]
+    cache.kv_layer_groups_manager.kernel_groups = [
+        SimpleNamespace(
+            engine_group_idx=i, tokens_per_block=16, shape_desc=SimpleNamespace(nb=128)
+        )
+        for i in range(2)
+    ]
+    monkeypatch.setattr(
+        recurrent_copy, "downsample_and_stage_block_ids", lambda _, ids: ids
+    )
+    device = MagicMock()
+    monkeypatch.setattr(recurrent_receive, "torch_dev", device)
+    fences = [MagicMock() for _ in range(tp)]
+    for fence in fences:
+        fence.query.return_value = False
+    device.Event.side_effect = fences
+
+    pool = MagicMock(hash_block_size=16)
+    pool.get_cached_block.return_value = None
+    pool.get_num_free_blocks.return_value = 16
+    pool.get_new_blocks.return_value = [SimpleNamespace(block_id=i) for i in (80, 81)]
+    request = SimpleNamespace(request_id="A", block_hashes=[b"a", b"b", b"c"])
+    tracker = SimpleNamespace(
+        num_lmcache_hit_tokens=48,
+        request_configs=None,
+        cache_salt="",
+        packed_token_ids=lambda: pack_token_ids(range(48)),
+        is_ready_for_retrieving=lambda: True,
+    )
+
+    prepare_visible = False
+
+    def submit(operation):
+        payload = handle_recurrent_history(
+            msgspec.msgpack.encode(operation),
+            context,
+            module._recurrent_history,
+            {1: entry},
+        )
+        return SimpleNamespace(
+            query=lambda: prepare_visible or operation.action != "prepare",
+            payload=payload,
+        )
+
+    adapter = SimpleNamespace(
+        model_name="m",
+        world_size=tp,
+        _mq_timeout=3,
+        submit_recurrent_history=submit,
+        read_recurrent_history=lambda f: msgspec.msgpack.decode(
+            f.payload, type=HistoryResponse
+        ),
+    )
+    scheduler = RecurrentHistoryScheduler(pool, adapter, [1])
+    scheduler.begin_background(request, tracker)
+    scheduler.poll()
+    assert request.request_id in scheduler.planning and not scheduler.dispatch
+    key = IPCCacheServerKey("m", tp, 0, tracker.packed_token_ids(), 0, 48, "A")
+    for rank in range(tp):
+        _, ok = module.retrieve(
+            replace(key, worker_id=rank), 1, [[1, 2, 3], [0, 0, 9]], b"event"
+        )
+        assert ok
+        fences[rank].record.assert_not_called()
+    scheduler.settle("A")
+    scheduler.poll()
+    scheduler.poll()
+    assert scheduler.take_background_tasks() == []
+    assert tracker.request_configs is None and not scheduler.pending
+    if not cancel:
+        scheduler.finish_request("A", normal_finish=True)
+    prepare_visible = True
+    scheduler.poll()
+    [(owner, tokens, end, salt, copy)] = scheduler.take_background_tasks()
+    assert (owner, tokens, end, salt) == ("A", key.token_bytes, 48, tracker.cache_salt)
+    for rank in range(tp):
+        _, ok = module.retrieve(
+            replace(key, worker_id=rank, history_copy=copy), 1, [], b"event"
+        )
+        assert ok
+        fences[rank].record.assert_called_once()
+        if cancel:
+            scheduler.finish_request("A", normal_finish=False)
+            break
+    _, ok = module.retrieve(
+        replace(key, request_id="B", worker_id=0), 1, [[1, 2, 3], [0, 0, 9]], b"event"
+    )
+    assert ok
+    scheduler.poll()
+    pool.cache_full_blocks.assert_not_called()
+    manager.finish_read.assert_not_called()
+    assert "A" in scheduler.pending
+    live = fences[:1] if cancel else fences
+    for fence in live[:-1]:
+        fence.query.return_value = True
+    lease = scheduler.pending["A"].plan.lease
+    assert not module._recurrent_history.query(lease).settled
+    live[-1].query.return_value = True
+    # Advance a controlled scheduler clock past the status poll interval.
+    # First Party
+    from lmcache.integration.vllm import recurrent_scheduler
+
+    monkeypatch.setattr(
+        recurrent_scheduler, "time", SimpleNamespace(monotonic=lambda: 1e12)
+    )
+    for _ in range(4):
+        scheduler.poll()
+    assert pool.cache_full_blocks.call_count == (0 if cancel else 2)
+    manager.finish_read.assert_called_once()
+    assert not scheduler.pending and not module._recurrent_history.entries
+
+
 def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
     # Group 0 = full attention (-1): whole prefix; group 1 = mamba window 1:
     # only the last chunk.

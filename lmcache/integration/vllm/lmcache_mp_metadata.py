@@ -98,6 +98,7 @@ class LMCacheMPRequestTracker:
 
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
+    history_copy: bytes | None = None
     max_offload_tokens: int | None = None
     lookup_started_at: float | None = None
 
@@ -625,6 +626,7 @@ class LMCacheMPRequestMetadata:
                 start=start_token_idx,
                 end=end_token_idx,
                 skip_first_n_tokens=skip_first_n_tokens,
+                history_copy=tracker.history_copy,
             )
 
             ret = LMCacheMPRequestMetadata(
@@ -642,6 +644,7 @@ class LMCacheMPRequestMetadata:
 class LMCacheMPConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         super().__init__()
+        self.history_tasks = []
         self.requests: list[LMCacheMPRequestMetadata] = []
         self.need_flush_before_forward: bool = False
         # Requests whose request_finished returned True since the last step.
@@ -651,7 +654,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
         self.requests.append(request_metadata)
 
     def __len__(self):
-        return len(self.requests)
+        return len(self.requests) + len(self.history_tasks)
 
     # For debugging
     def __str__(self):

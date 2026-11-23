@@ -6,6 +6,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass, field
+from typing import Any
 import threading
 import time
 import uuid
@@ -25,9 +26,15 @@ class HistoryReservation:
     engine_groups: list[int]
     expires: float = field(default_factory=lambda: time.monotonic() + 120)
     outcome: bool | None = None
+    submitted_ranks: set[int] = field(default_factory=set)
+    fences: dict[int, tuple[Any, bool]] = field(default_factory=dict)
 
     def result(self, token: str) -> HistoryResponse:
         """Return the stable completion result and release fenced reads."""
+        for rank, (event, successful) in list(self.fences.items()):
+            if event.query():
+                self.reads.progress.finish(rank, successful)
+                del self.fences[rank]
         if self.outcome is None:
             self.outcome = self.reads.release_completed()
         return HistoryResponse(
@@ -36,6 +43,7 @@ class HistoryReservation:
             groups=self.engine_groups,
             settled=self.outcome is not None,
             successful=self.outcome is True,
+            copy_submitted=len(self.submitted_ranks) == self.key.world_size,
         )
 
 

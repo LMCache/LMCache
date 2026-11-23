@@ -72,7 +72,18 @@ def receive_recurrent_history(
             succeeded = True
     finally:
         # If the fence fails, keep the running claim and all memory references.
-        synchronize_stream(context.device, context.stream)
-        with reservations.lock:
-            entry.reads.progress.finish(rank, succeeded)
-            entry.result(copy.lease)
+        try:
+            with torch_dev.device(context.device):
+                event = torch_dev.Event()
+                event.record(context.stream)
+        except Exception:
+            # An enqueue can fail after partial submission. Fence before releasing.
+            synchronize_stream(context.device, context.stream)
+            with reservations.lock:
+                entry.reads.progress.finish(rank, succeeded)
+                entry.result(copy.lease)
+        else:
+            with reservations.lock:
+                entry.fences[rank] = (event, succeeded)
+                if succeeded:
+                    entry.submitted_ranks.add(rank)

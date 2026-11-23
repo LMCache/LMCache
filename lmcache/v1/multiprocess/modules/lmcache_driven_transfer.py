@@ -74,7 +74,6 @@ from lmcache.v1.platform.fd_channel import (
     is_fd_channel_supported,
 )
 from lmcache.v1.transport.recurrent_history import (
-    HISTORY_CONFIG,
     HISTORY_METHOD,
     HistoryCopy,
 )
@@ -1108,6 +1107,33 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         if event_backend is None:
             raise RuntimeError("Registered cache context has no event backend")
 
+        if not gpu_block_ids and getattr(key, "history_copy", None) is not None:
+            # Same worker affinity and producer-stream ordering as ordinary retrieves.
+            # The returned event belongs only to the background future.
+            with (
+                torch_dev.device(cache_context.device),
+                torch_dev.stream(cache_context.stream),
+            ):
+                producer = event_backend.import_event(
+                    event_ipc_handle, cache_context.device
+                )
+                event_backend.wait_event(producer, cache_context.stream)
+                token = cache_context.hold_imported_event(producer)
+                submit_callback_to_stream(
+                    cache_context.cupy_stream,
+                    "release_imported_event",
+                    (instance_id, token),
+                )
+                copy = msgspec.msgpack.decode(key.history_copy, type=HistoryCopy)
+                receive_recurrent_history(
+                    cache_context, self._recurrent_history, key, copy, set(), True
+                )
+                completion = event_backend.create_event(cache_context.device)
+                event_backend.record_event(completion, cache_context.stream)
+                return event_backend.export_event(
+                    completion, cache_context.device
+                ), True
+
         num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
             key, list(range(num_object_groups))
@@ -1326,14 +1352,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 ed - st,
             )
 
-        history = (key.request_configs or {}).get(HISTORY_CONFIG)
+        history = getattr(key, "history_copy", None)
         if history is not None:
             try:
                 receive_recurrent_history(
                     cache_context,
                     self._recurrent_history,
                     key,
-                    msgspec.convert(history, type=HistoryCopy),
+                    msgspec.msgpack.decode(history, type=HistoryCopy),
                     {block for row in gpu_block_ids for block in row},
                     retrieve_succeeded,
                 )
