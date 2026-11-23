@@ -51,7 +51,7 @@ resolve_engine_workload() {
     local common_workload
     local engine_workload
     local transfer_mode="${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
-    local request_transport="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
+    local request_transport="${LMCACHE_REQUEST_TRANSPORT:-grpc}"
 
     case "$transfer_mode" in
         lmcache_driven | engine_driven) ;;
