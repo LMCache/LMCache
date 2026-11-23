@@ -106,6 +106,16 @@ keeps the default below.
      - (empty)
      - File the operator-set state (L2 pins and per-``cache_salt`` quotas)
        is stored in. Empty means that state is lost on restart.
+   * - ``--public-endpoint PATH``
+     - ``/healthz``
+     - Serve ``PATH`` without credentials when API-key authentication is on.
+       Repeat the flag for several paths. The value **replaces** the default
+       list, which is ``/healthz`` alone, rather than extending it. Matching is
+       exact: no prefix or wildcard rules.
+   * - ``--no-public-endpoints``
+     - off
+     - Require a valid API key for every HTTP path, including ``/healthz``.
+       Cannot be combined with ``--public-endpoint``.
    * - ``--extra-config``
      - (empty)
      - JSON object of settings the core flags do not name, read by whichever
@@ -255,7 +265,51 @@ created:
 
 .. code-block:: bash
 
-   curl http://localhost:9300/metrics
+   curl -H "Authorization: Bearer $FLEET_KEY" http://localhost:9300/metrics
+
+``/metrics`` requires the fleet key: the gauges describe placement and
+reported-byte counts, so the coordinator does not publish them to an
+unauthenticated caller. The only path served without credentials is
+``/healthz``, the liveness probe.
+
+``--public-endpoint`` **replaces** that default rather than extending it, so a
+deployment that wants public metrics has to name the probe as well:
+
+.. code-block:: bash
+
+   lmcache coordinator --api-key-file /run/secrets/fleet-key \
+       --public-endpoint /healthz --public-endpoint /metrics
+
+Passing only ``--public-endpoint /metrics`` makes ``/healthz`` require the key,
+and an orchestrator's probe would then get 401 and restart the pod. If that is
+what you want, Kubernetes ``httpGet`` probes can send a credential:
+
+.. code-block:: yaml
+
+   livenessProbe:
+     httpGet:
+       path: /healthz
+       port: 9300
+       httpHeaders:
+         - name: Authorization
+           value: Bearer <fleet-key>
+
+``--no-public-endpoints`` goes one step further and requires a key for every
+path, including the probe.
+
+A scraper sends the credential through Prometheus' ``credentials_file``:
+
+.. code-block:: yaml
+
+   scrape_configs:
+     - job_name: lmcache-coordinator
+       authorization:
+         credentials_file: /etc/prometheus/lmcache-fleet-key
+       static_configs:
+         - targets: ["coordinator:9300"]
+
+The file must contain the raw key, which is the same value the coordinator
+accepts through ``--api-key-file``.
 
 Set ``--otlp-endpoint http://collector:4317`` to push metrics to an
 OpenTelemetry Collector instead. In OTLP push mode, and when

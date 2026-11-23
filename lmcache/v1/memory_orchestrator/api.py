@@ -62,6 +62,19 @@ class TokenStatus(enum.Enum):
     """The token is unknown, foreign, expired, retired, or used with the wrong call."""
 
 
+class DeleteStatus(enum.Enum):
+    """Per-key outcome of deleting committed objects."""
+
+    DELETED = enum.auto()
+    """The object was VALID and is now unreadable; its extent stays consumed."""
+
+    MISS = enum.auto()
+    """The object is unknown to the orchestrator."""
+
+    BUSY_WRITING = enum.auto()
+    """The object is not committed; it is left to its writer."""
+
+
 @dataclass(frozen=True)
 class WireLayout:
     """Tensor layout stored with an object and returned to its readers.
