@@ -530,6 +530,15 @@ that hook; the default ``DeviceSpec.create_cache_context`` raises
 of silently falling back.  The cache context itself manages the KV
 cache layout and pointers used for IPC transfer.
 
+The KV and Q-ring server registration paths bind their default
+``ObjectGroupTransfer`` callback with
+``BaseCacheContext.set_object_group_transfer`` before serving requests.
+``transfer_object_group`` remains the device override point for full-chunk
+copies. A custom caller using its base implementation must bind a callback;
+calling it unbound raises ``RuntimeError``. Constructing a context alone does
+not require a callback. Transfer completion and storage commit remain the
+caller's responsibility.
+
 Host-side pinning via ``pin_memory_backend`` is *optional* and only
 affects staging-buffer performance; it is not required to enable
 LMCache-driven mode.

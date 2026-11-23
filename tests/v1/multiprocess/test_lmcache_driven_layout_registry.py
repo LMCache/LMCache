@@ -11,6 +11,9 @@ import types
 import pytest
 import torch
 
+# First Party
+from lmcache.v1.common.object_group_transfer import ObjectGroupTransfer
+
 
 class _FakeKVLayerGroupsManager:
     """Minimal manager stub: one full-attention object group."""
@@ -36,6 +39,10 @@ class _FakeGPUContext:
     device: torch.device = torch.device("cpu")
     num_layers: int = 2
     kv_layer_groups_manager: _FakeKVLayerGroupsManager = _FakeKVLayerGroupsManager()
+
+    def set_object_group_transfer(self, transfer: ObjectGroupTransfer) -> None:
+        """Accept the server's default transfer callback."""
+        self.transfer = transfer
 
     def close(self) -> None:
         """No-op teardown (real GPUCacheContext.close deregisters its GDS buffer)."""

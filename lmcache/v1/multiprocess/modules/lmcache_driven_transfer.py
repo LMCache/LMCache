@@ -47,6 +47,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     get_unfull_chunk_layout_desc,
     get_unfull_chunk_staging_buffer,
     split_unfull_chunk_block_ids,
+    transfer_kv_per_object_group,
     transfer_unfull_chunk,
     trim_and_stage_unfull_chunk_block_ids,
 )
@@ -576,6 +577,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             layout_hints=layout_hints or None,
             engine_group_infos=engine_group_infos,
         )
+        cache_context.set_object_group_transfer(transfer_kv_per_object_group)
         kv_groups_manager = cache_context.kv_layer_groups_manager
         num_object_groups = kv_groups_manager.num_object_groups
         event_backend = get_event_ipc_backend(cache_context.device)

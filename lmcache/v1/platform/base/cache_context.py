@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
     # First Party
     from lmcache.v1.common.memory_management import MemoryObj
+    from lmcache.v1.common.object_group_transfer import ObjectGroupTransfer
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
     from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
@@ -72,6 +73,7 @@ class BaseCacheContext(ABC):
         self.kv_layer_groups_manager_ = kv_layer_groups_manager
         self.block_ids_buffer_ = block_ids_buffer
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        self._object_group_transfer: ObjectGroupTransfer | None = None
         # Imported worker events, held until the stream wait queued on each
         # has been consumed (see hold_imported_event / release_imported_event).
         self._held_imports: dict[int, object] = {}
@@ -378,6 +380,17 @@ class BaseCacheContext(ABC):
             for i in range(len(block_ids_per_group))
         ]
 
+    def set_object_group_transfer(self, transfer: ObjectGroupTransfer) -> None:
+        """Bind the default transfer callback before serving requests.
+
+        Args:
+            transfer: Callback implementing the object-group copy contract.
+
+        Returns:
+            None. Subclass overrides of ``transfer_object_group`` remain active.
+        """
+        self._object_group_transfer = transfer
+
     def transfer_object_group(
         self,
         block_ids_gpu: list[torch.Tensor],
@@ -393,19 +406,19 @@ class BaseCacheContext(ABC):
         """Enqueue the copy of one object group between the KV cache and
         *memory_objs*, in either direction.
 
-        The copy is defined by the staging buffers, shape descriptors and
-        KV formats this context owns, so it lives here: a subclass that
-        changes the staging layout overrides this method together with it,
-        and the two cannot disagree. The default is
-        :func:`~lmcache.v1.multiprocess.object_group_transfer.transfer_kv_per_object_group`;
-        see it for the argument semantics.
-        """
-        # First Party
-        from lmcache.v1.multiprocess.object_group_transfer import (
-            transfer_kv_per_object_group,
-        )
+        A subclass that changes the staging layout can override this method.
+        The default calls the callback bound by ``set_object_group_transfer``;
+        see :class:`~lmcache.v1.common.object_group_transfer.ObjectGroupTransfer`
+        for argument semantics, completion ownership and copy errors.
 
-        transfer_kv_per_object_group(
+        Raises:
+            RuntimeError: If no default transfer callback has been bound.
+        """
+        if self._object_group_transfer is None:
+            raise RuntimeError(
+                "No object-group transfer callback bound to cache context"
+            )
+        self._object_group_transfer(
             self,
             block_ids_gpu,
             memory_objs,
