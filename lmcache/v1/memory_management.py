@@ -16,12 +16,12 @@ from lmcache import device_ops, torch_dev
 from lmcache import torch_device_type as torch_device_type  # noqa: F401
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.common.logging import init_logger
-from lmcache.v1.common.memory import (
+from lmcache.v1.common.memory_management import (
     MemoryAllocatorInterface as MemoryAllocatorInterface,
 )
-from lmcache.v1.common.memory import MemoryFormat as MemoryFormat
-from lmcache.v1.common.memory import MemoryObj as MemoryObj
-from lmcache.v1.common.memory import MemoryObjMetadata as MemoryObjMetadata
+from lmcache.v1.common.memory_management import MemoryFormat as MemoryFormat
+from lmcache.v1.common.memory_management import MemoryObj as MemoryObj
+from lmcache.v1.common.memory_management import MemoryObjMetadata as MemoryObjMetadata
 from lmcache.v1.platform import current_device_spec as current_device_spec  # noqa: F401
 from lmcache.v1.system_detection import NUMAMapping
 
