@@ -294,7 +294,7 @@ class LookupMixin:
         if stale_hashes:
             with self._pending_fp_lock:
                 truly_evict: list[bytes] = []
-                for h in stale_hashes:
+                for h in dict.fromkeys(stale_hashes):
                     if h in self._pending_fp_hashes:
                         continue
                     n = self._stale_strike.get(h, 0) + 1

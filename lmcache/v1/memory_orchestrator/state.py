@@ -20,6 +20,7 @@ from lmcache.v1.memory_orchestrator.api import (
     MAX_UINT64,
     VISIBILITY_MODES,
     CloseResult,
+    DeleteStatus,
     Envelope,
     ExtentHandle,
     ReadGrantResult,
@@ -547,6 +548,74 @@ class RegionState:
                 released_leases,
             )
             return CloseResult(aborted_writes, released_leases)
+
+    def delete_objects(
+        self, env: Envelope, keys: list[WireObjectKey]
+    ) -> list[DeleteStatus]:
+        """Make committed objects unreadable for every client: VALID -> CONSUMED.
+
+        A deleted key may be reserved again on a new extent; the old extent is
+        never reused, and leases already issued on it stay releasable.
+
+        Args:
+            env: Envelope of a registered client incarnation.
+            keys: Keys of the objects to delete.
+
+        Returns:
+            Per key, in order: ``DELETED``, ``MISS`` when unknown, or
+            ``BUSY_WRITING`` for a WRITING object, which is left to its writer.
+
+        Raises:
+            StateError: ``FAILED_PRECONDITION`` as in ``check_client``,
+                ``RESOURCE_EXHAUSTED`` above ``max_batch_entries``.
+        """
+        with self._lock:
+            self._registered_client(env)
+            self._check_batch_size(len(keys))
+            statuses: list[DeleteStatus] = []
+            for key in keys:
+                record = self._get_object(key)
+                if record is None:
+                    statuses.append(DeleteStatus.MISS)
+                elif record.state is _ObjectState.WRITING:
+                    statuses.append(DeleteStatus.BUSY_WRITING)
+                else:
+                    self._delete_valid(key, record)
+                    statuses.append(DeleteStatus.DELETED)
+            return statuses
+
+    def delete_published(self, env: Envelope) -> int:
+        """Delete, as ``delete_objects`` does, every VALID object of ``env.client_id``.
+
+        Objects of earlier incarnations count too; WRITING objects are left to
+        their writers.
+
+        Args:
+            env: Envelope of a registered client incarnation.
+
+        Returns:
+            The number of objects deleted.
+
+        Raises:
+            StateError: ``FAILED_PRECONDITION`` as in ``check_client``.
+        """
+        with self._lock:
+            self._registered_client(env)
+            published = [
+                (key, record)
+                for key, record in self._objects.items()
+                if record.state is _ObjectState.VALID
+                and record.writer_id == env.client_id
+            ]
+            for key, record in published:
+                self._delete_valid(key, record)
+            return len(published)
+
+    def _delete_valid(self, key: WireObjectKey, record: _ObjectRecord) -> None:
+        """Drop a VALID object from the index; caller holds ``self._lock``."""
+        del self._objects[key]
+        self._valid_bytes -= record.handle.length
+        self._consumed_count += 1
 
     def _get_object(self, key: WireObjectKey) -> _ObjectRecord | None:
         """Get an object, consuming an expired write; caller holds ``self._lock``."""

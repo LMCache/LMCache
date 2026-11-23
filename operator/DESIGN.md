@@ -1,5 +1,8 @@
 # LMCache Kubernetes Operator Design
 
+> [!CAUTION]
+> **Deprecated.** The LMCache Kubernetes operator (`operator/`) is deprecated and no longer maintained. It is expected to be removed from this repository in **2027Q1**. This document is kept for reference only.
+
 ## Overview
 
 LMCache multiprocess mode runs as a separate server process that vLLM instances connect to for KV cache offloading. Today this is deployed manually via raw K8s manifests (a DaemonSet for LMCache + a Deployment for vLLM). A K8s operator would automate lifecycle management, enforce best practices (`/dev/shm` sharing for CUDA IPC, resource sizing), and expose connection info for vLLM discovery.
