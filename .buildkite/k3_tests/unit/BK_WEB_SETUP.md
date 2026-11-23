@@ -3,7 +3,7 @@
 **Steps editor**: the upload step for `.buildkite/k3_tests/unit/pipeline.yml`.
 
 **GitHub settings**:
-- Filter builds using a conditional: `build.pull_request.draft != true`
+- Filter builds using a conditional: `build.pull_request.id != null && build.pull_request.draft != true`
 - Build when pull request is opened or updated: Yes
 - Build when pull request becomes ready for review: Yes
 - Skip when pull request has existing build for commit and branch: **No**

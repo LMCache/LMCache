@@ -3,9 +3,10 @@ name: Cancel Buildkite builds on draft
 # Converting a PR back to draft cancels its in-flight GitHub runs through the
 # workflows' concurrency groups; this does the same for its scheduled and
 # running Buildkite builds (unit, multiprocess and the label-gated lanes), so a
-# draft stops holding GPUs. Pipelines that filter out drafts (k3-unit-tests and
-# the multiprocess pipelines, see their BK_WEB_SETUP.md) start nothing new until
-# the PR is ready for review again.
+# draft stops holding GPUs. Pipelines whose Buildkite trigger filter includes
+# `build.pull_request.draft != true` (k3-unit-tests, the multiprocess pipelines,
+# and any label-gated vendor lanes configured with it) start nothing new on
+# subsequent pushes until the PR is ready for review again.
 #
 # pull_request_target supplies the Buildkite token for PRs from forks as well.
 # Nothing is checked out and no PR code runs: the job only reads the event's
