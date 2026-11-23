@@ -53,7 +53,7 @@ class _FakeContext(EngineDrivenContext):
     def prepare_retrieve(self, key, instance_id):
         return None
 
-    def commit_retrieve(self, key, instance_id):
+    def commit_retrieve(self, key, instance_id, failed=False):
         return True
 
     def close(self) -> None:
