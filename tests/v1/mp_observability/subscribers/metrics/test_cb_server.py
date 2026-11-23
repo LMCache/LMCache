@@ -530,7 +530,7 @@ class TestBlendPhaseDurations:
         # First Party
         from lmcache.v1.mp_observability.subscribers.metrics import cb_server
 
-        # The module logger does not propagate (see ``lmcache.logging``), so
+        # The module logger does not propagate (see ``lmcache.v1.common.logging``), so
         # spy on it instead of relying on caplog's root-handler capture.
         warnings: list[str] = []
         monkeypatch.setattr(

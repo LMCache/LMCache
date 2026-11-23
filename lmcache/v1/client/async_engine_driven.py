@@ -11,7 +11,6 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.logging import init_logger
 from lmcache.v1.client.transfer_context.base import (
     ContextClosedError,
     EngineDrivenContext,
@@ -23,6 +22,7 @@ from lmcache.v1.client.worker_transfer import (
     IPCEvent,
     _single_group_block_ids,
 )
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.transport.futures import MessagingFuture
 from lmcache.v1.transport.request_client import RequestClient
 

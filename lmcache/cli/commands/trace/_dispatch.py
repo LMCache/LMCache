@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 

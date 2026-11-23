@@ -10,7 +10,6 @@ import torch
 
 # First Party
 from lmcache import torch_device_type
-from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.common.kv_format.detectors.base import (
     EngineDetector,
@@ -21,6 +20,7 @@ from lmcache.v1.common.kv_format.types import (
     DiscoverableKVCache,
     LayoutHints,
 )
+from lmcache.v1.common.logging import init_logger
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
