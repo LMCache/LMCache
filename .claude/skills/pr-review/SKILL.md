@@ -88,7 +88,7 @@ Review the diff against these standards (from `docs/coding_standards.md`):
 - Import ordering correct (Standard / Third Party / First Party / Local).
 - All imports at file top (no lazy imports).
 - `import torch` before native C extensions.
-- Uses `init_logger(__name__)` from `lmcache.logging`, not bare `logging.getLogger()`.
+- Uses `init_logger(__name__)` from `lmcache.v1.common.logging`, not bare `logging.getLogger()`.
 - Operational logs at DEBUG level (not INFO).
 - Log levels appropriate (no WARNING for expected concurrent conditions).
 - Module-level helpers at top; private methods at end of class.

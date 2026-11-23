@@ -8,9 +8,9 @@ from typing import TypedDict
 import threading
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.attn_window import DEFAULT_ATTN_WINDOW_DESC, AttnWindowDesc
 from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
@@ -270,6 +270,25 @@ class LayoutDescRegistry:
             if entry is None:
                 return None
             return entry.group_layout_descs
+
+    def find_group_shard_geometry(
+        self, model_name: str, world_size: int
+    ) -> tuple[tuple[int, ...], ShardReplicationDesc] | None:
+        """Read the object group IDs and shard replication from one registration.
+
+        Args:
+            model_name: Registered model name.
+            world_size: Registered KV world size.
+
+        Returns:
+            The group IDs and their replication descriptor, or None when the
+            registration is absent or has no groups.
+        """
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None or not entry.group_layout_descs:
+                return None
+            return tuple(entry.group_layout_descs), entry.shard_replication_desc
 
     def find_group_unfull_chunk_layout_descs(
         self, model_name: str, world_size: int

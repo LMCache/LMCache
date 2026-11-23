@@ -347,7 +347,7 @@ than adding Python execution machinery to cover unusual indirection.
 
 ### 7.4 Logging
 
-- Use the project's `init_logger(__name__)` from `lmcache.logging`, not bare `logging.getLogger()`.
+- Use the project's `init_logger(__name__)` from `lmcache.v1.common.logging`, not bare `logging.getLogger()`.
 - Operational logs (store/retrieve activity, background task progress) should be at `DEBUG` level, not `INFO`.
 - Log levels must be appropriate: do not use `WARNING` for conditions that are expected during normal concurrent operation (e.g., a key not found due to a benign race condition).
 - Use lazy `%`-formatting, not f-strings, in log calls so interpolation only runs when the record is emitted: `logger.info("instance %s", instance_id)`, not `logger.info(f"instance {instance_id}")`.

@@ -9,7 +9,6 @@ off to the engine's :class:`EngineDetector` to reshape and identify the format.
 import torch
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.common.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
@@ -17,6 +16,7 @@ from lmcache.v1.common.kv_format.contiguity import (
 from lmcache.v1.common.kv_format.detectors import get_detector
 from lmcache.v1.common.kv_format.specs import describe_shape
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache, LayoutHints
+from lmcache.v1.common.logging import init_logger
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)

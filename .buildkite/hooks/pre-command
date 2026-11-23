@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Checkout-hook exports do not reach Kubernetes command containers.
+export LMCACHE_PR_BASE_MERGE=never
