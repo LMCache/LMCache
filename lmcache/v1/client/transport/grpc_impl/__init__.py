@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.transport.base import RequestClient
+    from lmcache.v1.transport.request_client import RequestClient
 
 
 def create_request_client(

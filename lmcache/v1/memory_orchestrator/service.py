@@ -14,7 +14,7 @@ from google.protobuf.message import Message
 import grpc
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.memory_orchestrator import _codec as codec
 from lmcache.v1.memory_orchestrator._proto_gen import memory_orchestrator_pb2 as pb2
 from lmcache.v1.memory_orchestrator._proto_gen.memory_orchestrator_pb2_grpc import (
@@ -194,6 +194,39 @@ class OrchestratorServicer(MemoryOrchestratorServicer):
             )
 
         return self._run_mutation(env, request, context, pb2.CloseClientReply, execute)
+
+    def DeleteObjects(
+        self, request: pb2.DeleteObjectsRequest, context: grpc.ServicerContext
+    ) -> pb2.DeleteObjectsReply:
+        """Delete committed objects; see ``RegionState.delete_objects``."""
+        env = codec.envelope_from_proto(request.env)
+        try:
+            keys = codec.delete_keys_from_proto(request.keys)
+        except ValueError as exc:
+            _abort(context, grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+
+        def execute() -> pb2.DeleteObjectsReply:
+            statuses = self._state.delete_objects(env, keys)
+            return pb2.DeleteObjectsReply(
+                results=map(codec.delete_status_to_proto, statuses)
+            )
+
+        return self._run_mutation(
+            env, request, context, pb2.DeleteObjectsReply, execute
+        )
+
+    def DeletePublished(
+        self, request: pb2.Envelope, context: grpc.ServicerContext
+    ) -> pb2.DeletePublishedReply:
+        """Delete a client's committed objects; see ``RegionState.delete_published``."""
+        env = codec.envelope_from_proto(request)
+
+        def execute() -> pb2.DeletePublishedReply:
+            return pb2.DeletePublishedReply(deleted=self._state.delete_published(env))
+
+        return self._run_mutation(
+            env, request, context, pb2.DeletePublishedReply, execute
+        )
 
     def _token_batch(
         self,

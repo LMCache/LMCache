@@ -171,8 +171,8 @@ msgstr ""
 " ；"
 
 #: ../../source/developer_guide/extending_http_api.rst:88
-msgid "use ``lmcache.logging.init_logger(__name__)`` for logging;"
-msgstr "使用 ``lmcache.logging.init_logger(__name__)`` 进行日志记录；"
+msgid "use ``lmcache.v1.common.logging.init_logger(__name__)`` for logging;"
+msgstr "使用 ``lmcache.v1.common.logging.init_logger(__name__)`` 进行日志记录；"
 
 #: ../../source/developer_guide/extending_http_api.rst:89
 msgid "use ``async`` handlers and avoid blocking I/O."

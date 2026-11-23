@@ -26,7 +26,7 @@ import time
 import httpx
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import CapacitySnapshot, L1BackendType, ObjectKey, Tier
 from lmcache.v1.distributed.internal_api import L1ObjectMeta
 from lmcache.v1.mp_coordinator.api import (
@@ -832,6 +832,8 @@ def maybe_create_cache_event_subscriber(
     mp_config: MPServerConfig,
     http_config: HTTPFrontendConfig | None,
     coordinator_config: CoordinatorConfig,
+    *,
+    mq_port: int,
 ) -> CacheEventSubscriber | None:
     """Create the cache-event subscriber, or ``None`` if nothing wants the stream.
 
@@ -842,9 +844,10 @@ def maybe_create_cache_event_subscriber(
     with a ``start`` mark carrying it and the server's identity.
 
     Args:
-        mp_config: The server's identity and ports.
+        mp_config: The server's identity and event-sink configuration.
         http_config: The HTTP frontend, or ``None`` when it is not running.
         coordinator_config: Coordinator connection and event-sink settings.
+        mq_port: The bound P2P control RPC port, or ``0`` when P2P is disabled.
 
     Returns:
         The subscriber to register on the event bus, or ``None``.
@@ -874,7 +877,7 @@ def maybe_create_cache_event_subscriber(
             incarnation=incarnation,
             ip=coordinator_config.advertise_ip,
             http_port=http_config.http_port if http_config is not None else 0,
-            mq_port=mp_config.port if mp_config.p2p_config.enabled else 0,
+            mq_port=mq_port,
         )
     return CacheEventSubscriber(
         sink=sinks[0] if len(sinks) == 1 else MultiCacheEventSink(sinks),

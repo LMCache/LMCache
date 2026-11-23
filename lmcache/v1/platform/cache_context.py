@@ -27,8 +27,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform import get_device_spec
 
 if TYPE_CHECKING:
@@ -79,7 +79,7 @@ def create_cache_context(
     layout_hints: LayoutHints | None = None,
     engine_group_infos: "Sequence[EngineGroupInfo]" = (),
     engine_type: EngineType = EngineType.VLLM,
-    separate_object_groups: bool = False,
+    separate_object_groups: bool = True,
     full_sw_kv: bool = False,
 ) -> BaseCacheContext:
     """Create the appropriate cache context for *kv_caches*.
@@ -102,9 +102,9 @@ def create_cache_context(
             Forwarded verbatim to the concrete context constructor.
         engine_group_infos: Engine-neutral KV cache group metadata.
         engine_type: Which serving engine produced the caches.
-        separate_object_groups: When True, split kernel groups into
-            one object group per sliding-window size; when False (default),
-            a single full-attention object group.
+        separate_object_groups: When True (default), split kernel groups into
+            one object group per sliding-window size; when False, use a single
+            full-attention object group.
         full_sw_kv: When True, sliding-window groups store/transfer full
             per-chunk KV (no sub-chunk window cutting) so chunks stay valid for
             reuse at any position; see

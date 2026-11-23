@@ -24,9 +24,9 @@ import os
 import torch
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.common.group_view import engine_group_layer_indices
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.utils import (
     LayoutHints,
     get_group_data_ptrs,
@@ -72,7 +72,7 @@ class CPUCacheContext(BaseCacheContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         engine_type: EngineType = EngineType.VLLM,
-        separate_object_groups: bool = False,
+        separate_object_groups: bool = True,
         full_sw_kv: bool = False,
     ) -> None:
         if not kv_caches:
