@@ -26,7 +26,11 @@ from lmcache import device_ops  # noqa: F401
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_codec import pack_token_ids
-from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC, ObjectKey
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    ObjectKey,
+    ShardReplicationDesc,
+)
 from lmcache.v1.mp_coordinator.blend_client import PENDING  # noqa: F401
 from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -45,6 +49,7 @@ from lmcache.v1.multiprocess.modules.blend.module import BlendModule
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _cb_chunk_major_object_keys,
     _classify_cb_read_groups,
+    _per_rank_read_groups,
 )
 from lmcache.v1.multiprocess.modules.blend.rope import _CBRopeState
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
@@ -630,6 +635,27 @@ def test_classify_read_groups_recurrent_first_layout():
     assert read.blend_gids == (1, 2)
 
 
+@pytest.mark.parametrize(
+    ("gids", "desc", "expected"),
+    [
+        ((1, 2), DEFAULT_SHARD_REPLICATION_DESC, (1, 2)),
+        # Kimi-Linear at TP 8: group 1 (MLA latents) replicated on every rank.
+        ((1, 2), ShardReplicationDesc((1, 8, 1), (1, 1, 1)), (2,)),
+        # Under DCP 8 each rank holds its own token shard of group 1.
+        ((1, 2), ShardReplicationDesc((1, 8, 1), (1, 8, 1)), (1, 2)),
+        # Under DCP 2 four ranks share each token shard.
+        ((1, 2), ShardReplicationDesc((1, 8, 1), (1, 2, 1)), (2,)),
+        # An MLA-only model at TP 8: no group left.
+        ((0,), ShardReplicationDesc((8,), (1,)), ()),
+    ],
+    ids=["per-rank", "replicated", "dcp-shard-per-rank", "dcp-shared", "mla-only"],
+)
+def test_per_rank_read_groups(gids, desc, expected):
+    """Only groups with one kv reader per object: no other worker writes
+    them, so this worker's store result covers them."""
+    assert _per_rank_read_groups(gids, desc) == expected
+
+
 # ---------------------------------------------------------------------------
 # STORE hook: fingerprints registered only for chunks the transfer committed
 # ---------------------------------------------------------------------------
@@ -858,6 +884,101 @@ def test_store_omits_skip_mask_when_disabled_or_nothing_cached(enabled, chunks):
 
     call = eng._transfer_module.store_with_chunk_mask.call_args
     assert "skip_chunks" not in call.kwargs
+
+
+def _engine_with_layout(
+    group_kinds, shard_replication_desc=DEFAULT_SHARD_REPLICATION_DESC, num_chunks=2
+):
+    eng = _store_hook_engine([True] * num_chunks)
+    eng._ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        shard_replication_desc
+    )
+    entry = MagicMock()
+    entry.cache_context.kv_layer_groups_manager.get_attn_desc.return_value = MagicMock(
+        num_object_groups=len(group_kinds), group_kinds=group_kinds
+    )
+    # No stream: fingerprint jobs go to the plain queue. A mock stream would
+    # submit them to the process-global CUDA completion recorder on a GPU
+    # host, leaking completions into later tests that drain it.
+    entry.cache_context.cupy_stream = None
+    eng._transfer_module.get_and_touch_context_entry.return_value = entry
+    return eng
+
+
+def test_store_fingerprints_on_the_groups_a_blend_reads():
+    """Align-mode Mamba stores recurrent state for the checkpoint chunk only;
+    fingerprinting must not wait for that group, which a blend never reads."""
+    eng = _engine_with_layout(("attention", "recurrent", "aux"))
+
+    eng.store(
+        _store_hook_key(2), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+
+    call = eng._transfer_module.store_with_chunk_mask.call_args
+    assert call.kwargs["mask_object_groups"] == (0, 2)
+
+
+def test_store_checks_every_group_without_a_blend_read_set():
+    """Unregistered instance, or a layout with no attention group: the mask
+    keeps checking every object group."""
+    eng = _engine_with_layout(("recurrent", "aux"))
+    eng.store(
+        _store_hook_key(2), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+    assert "mask_object_groups" not in (
+        eng._transfer_module.store_with_chunk_mask.call_args.kwargs
+    )
+
+    eng._transfer_module.get_and_touch_context_entry.return_value = None
+    eng.store(
+        _store_hook_key(2), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+    assert "mask_object_groups" not in (
+        eng._transfer_module.store_with_chunk_mask.call_args.kwargs
+    )
+
+
+def test_store_mask_leaves_out_groups_shared_across_ranks():
+    """Kimi-Linear at TP 8: recurrent state and aux stored per rank, MLA
+    latents once for every rank by whichever worker reserves them first.
+    Checking the MLA group fingerprinted only the chunks whose shared copy
+    worker 0 happened to write, about one in eight."""
+    eng = _engine_with_layout(
+        ("recurrent", "attention", "aux"), ShardReplicationDesc((1, 8, 1), (1, 1, 1))
+    )
+
+    eng.store(
+        _store_hook_key(2), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+
+    call = eng._transfer_module.store_with_chunk_mask.call_args
+    assert call.kwargs["mask_object_groups"] == (2,)
+
+
+def test_store_skipped_chunk_stays_unregistered_with_only_shared_groups():
+    """An MLA-only model at TP 8 leaves no group to check, so the transfer
+    marks every chunk stored; a chunk the store skipped (cached under another
+    prefix) must still not be fingerprinted."""
+    eng = _engine_with_layout(
+        ("attention",), ShardReplicationDesc((8,), (1,)), num_chunks=3
+    )
+    eng._dedup_content_kv = True
+    eng.CACHED_CHUNKS_EXTRA = BlendModule.CACHED_CHUNKS_EXTRA
+    eng._ctx.session_manager.get.return_value = SimpleNamespace(
+        extras={BlendModule.CACHED_CHUNKS_EXTRA: {1}}
+    )
+
+    eng.store(
+        _store_hook_key(3), instance_id=1, gpu_block_ids=[[0]], event_ipc_handle=b""
+    )
+
+    call = eng._transfer_module.store_with_chunk_mask.call_args
+    assert call.kwargs["mask_object_groups"] == ()
+    jobs = []
+    while not eng._fingerprint_queue.empty():
+        jobs.append(eng._fingerprint_queue.get_nowait())
+    # (start position, chunks) per fingerprint job: chunk 1 left out.
+    assert [(job[2], len(job[1])) for job in jobs] == [(0, 1), (8, 1)]
 
 
 # ---------------------------------------------------------------------------

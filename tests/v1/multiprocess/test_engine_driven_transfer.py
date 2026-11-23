@@ -1525,7 +1525,6 @@ def server_module_factory(
                 return_value=mock_storage,
             )
         )
-        stack.enter_context(patch("lmcache.v1.multiprocess.engine_context.TokenHasher"))
         session_cls = stack.enter_context(
             patch("lmcache.v1.multiprocess.engine_context.SessionManager")
         )
