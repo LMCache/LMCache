@@ -33,6 +33,7 @@ from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.storage_manager import l1_owners_of
+from lmcache.v1.gpu_connector.gds_context import GDSBufferRegistration
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
@@ -507,6 +508,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             separate_object_groups=self._ctx.separate_object_groups,
             full_sw_kv=self._ctx.full_sw_kv,
             object_group_transfer=transfer_kv_per_object_group,
+            buffer_registration=GDSBufferRegistration(),
         )
         layout_desc = get_layout_desc(
             cache_context, self._ctx.chunk_size, object_group_id=0

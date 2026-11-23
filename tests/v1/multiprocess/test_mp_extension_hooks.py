@@ -29,7 +29,7 @@ change the hook deliberately and treat it as an extension-API change.
 # Standard
 from types import SimpleNamespace
 from typing import Any, Callable, cast
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 import inspect
 import threading
 
@@ -192,6 +192,10 @@ def test_default_cache_context_hook_applies_server_settings(monkeypatch):
         separate_object_groups=True,
         full_sw_kv=True,
         object_group_transfer=mod.transfer_kv_per_object_group,
+        buffer_registration=ANY,
+    )
+    assert isinstance(
+        create.call_args.kwargs["buffer_registration"], mod.GDSBufferRegistration
     )
 
 

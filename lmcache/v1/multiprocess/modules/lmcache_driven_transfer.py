@@ -28,6 +28,7 @@ from lmcache.v1.distributed.api import (
     ShardReplicationDesc,
 )
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
+from lmcache.v1.gpu_connector.gds_context import GDSBufferRegistration
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
@@ -1109,6 +1110,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             separate_object_groups=self._ctx.separate_object_groups,
             full_sw_kv=self._ctx.full_sw_kv,
             object_group_transfer=transfer_kv_per_object_group,
+            buffer_registration=GDSBufferRegistration(),
         )
 
     @request_handler(
