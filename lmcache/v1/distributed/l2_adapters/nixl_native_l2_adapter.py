@@ -118,6 +118,7 @@ class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
         max_capacity_gb: Capacity used for L2 accounting. Zero disables the
             capacity limit.
         endpoints: Optional object-store frontends for the ``OBJ`` backend.
+            Each entry must include the scheme (``http://`` or ``https://``).
             Worker ``i`` uses ``endpoints[i % len(endpoints)]`` as its
             ``endpoint_override``. This is static load spreading, not
             failover: a worker never leaves its endpoint.
@@ -208,6 +209,13 @@ class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
                     f"{num_workers}; every endpoint needs at least one worker"
                 )
             endpoints = [e.strip() for e in endpoints]
+            for endpoint in endpoints:
+                if not (
+                    endpoint.startswith("http://") or endpoint.startswith("https://")
+                ):
+                    raise ValueError(
+                        f"endpoint '{endpoint}' must include the scheme (http:// or https://)"
+                    )
 
         return cls(
             backend=backend,
@@ -227,8 +235,9 @@ class NixlNativeL2AdapterConfig(L2AdapterConfigBase):
             "FILE_SEG backends require file_path and accept use_direct_io\n"
             "- num_workers (int): worker/agent count (default 4, >0)\n"
             "- max_capacity_gb (float): accounting capacity (default 0)\n"
-            "- endpoints (list[str]): OBJ only; worker i uses endpoints[i % n] "
-            "as endpoint_override (not HA, at most num_workers entries)"
+            "- endpoints (list[str]): OBJ only; each entry must include the "
+            "scheme (http:// or https://); worker i uses endpoints[i % n] as "
+            "endpoint_override (not HA, at most num_workers entries)"
         )
 
 

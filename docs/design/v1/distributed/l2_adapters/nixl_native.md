@@ -206,14 +206,14 @@ as unsupported, its delete entry point returns a clear error, status contains
 ### Multiple endpoints
 
 The OBJ backend accepts an adapter-level `endpoints` list, for example
-`"endpoints": ["http://10.0.0.1:9020", "http://10.0.0.2:9020"]`. The adapter
-turns it into one `{"endpoint_override": <entry>}` map per entry and passes the
-list to the connector as `worker_backend_params`. The connector is generic: worker
-`i` merges `worker_backend_params[i % n]` over the shared `backend_params`
-and never interprets the keys. `endpoints` and
-`backend_params.endpoint_override` are mutually exclusive, so a plain
-`endpoint_override` keeps its original NIXL meaning (commas and empty values
-are forwarded untouched).
+`"endpoints": ["http://10.0.0.1:9020", "http://10.0.0.2:9020"]`. Each endpoint
+must include the scheme (`http://` or `https://`). The adapter turns it into
+one `{"endpoint_override": <entry>}` map per entry and passes the list to the
+connector as `worker_backend_params`. The connector is generic: worker `i`
+merges `worker_backend_params[i % n]` over the shared `backend_params` and
+never interprets the keys. `endpoints` and `backend_params.endpoint_override`
+are mutually exclusive, so a plain `endpoint_override` keeps its original NIXL
+meaning (commas and empty values are forwarded untouched).
 
 Config validation rejects `endpoints` for non-OBJ backends, empty or blank
 entries, and more entries than `num_workers` (an endpoint with no worker would

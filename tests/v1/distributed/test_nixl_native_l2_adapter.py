@@ -506,6 +506,8 @@ _ENDPOINT_BASE = {"backend": "OBJ", "backend_params": {"bucket": "b"}}
         ({"endpoints": "http://a,http://b"}, "non-empty list"),
         ({"endpoints": ["http://a", " "]}, "non-blank"),
         ({"endpoints": ["http://a", 1]}, "non-blank"),
+        ({"endpoints": ["10.0.0.1:9020"]}, "must include the scheme"),
+        ({"endpoints": ["http://a", "10.0.0.2:9020"]}, "must include the scheme"),
         (
             {
                 "endpoints": ["http://a"],
