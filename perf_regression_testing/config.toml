@@ -188,7 +188,6 @@ max-num-batched-tokens = 8192
 max-num-seqs = 256
 max-model-len = "auto"
 enable-prefix-caching = true
-disable-cascade-attn = true
 enable-prompt-tokens-details = true
 # The H200 TP8 default; unset, the API server initializes CUDA to look it up.
 compilation-config = '{"pass_config":{"fi_allreduce_fusion_max_size_mb":1}}'
