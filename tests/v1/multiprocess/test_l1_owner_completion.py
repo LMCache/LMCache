@@ -34,10 +34,12 @@ from tests.v1.distributed.utils import ROUND_ROBIN_WRITE_POLICY
 
 @pytest.mark.parametrize("owner_count", [1, 2])
 @pytest.mark.parametrize("failure", ["none", "copy"])
+@pytest.mark.parametrize("unfull", [False, True])
 def test_store_owner_callback_round_trip(
     monkeypatch: pytest.MonkeyPatch,
     owner_count: int,
     failure: Literal["none", "copy"],
+    unfull: bool,
 ) -> None:
     """Real reservations survive serialization and finish only after dispatch.
 
@@ -102,21 +104,38 @@ def test_store_owner_callback_round_trip(
     monkeypatch.setattr(transfer, "downsample_and_stage_block_ids", lambda cc, ids: ids)
     layout = MemoryLayoutDesc(shapes=[torch.Size([4096])], dtypes=[torch.uint8])
     monkeypatch.setattr(transfer, "get_layout_desc", lambda *args, **kwargs: layout)
+    monkeypatch.setattr(transfer, "get_unfull_chunk_layout_desc", lambda *args: layout)
+    monkeypatch.setattr(
+        transfer, "get_unfull_chunk_staging_buffer", lambda *args: torch.empty(4096)
+    )
+    monkeypatch.setattr(
+        transfer,
+        "trim_and_stage_unfull_chunk_block_ids",
+        lambda cc, ids, tokens: (ids, [0, 0], [0, 0]),
+    )
     copied: list[MemoryObj] = []
 
     def copy(*args: Any, **kwargs: Any) -> None:
+        if not args[1]:
+            return
         order.append("copy")
         copied.extend(args[1])
         if failure == "copy" and len(copied) == 2:
             raise RuntimeError("device copy failed")
 
+    monkeypatch.setattr(
+        transfer,
+        "transfer_unfull_chunk",
+        lambda cc, ids, skips, leads, obj, group, buffer, direction: copy(None, [obj]),
+    )
     keys = [ObjectKey(b"chunk", "model", 0, gid) for gid in range(2)]
     ctx = SimpleNamespace(
-        chunk_size=1,
+        chunk_size=2,
         null_block_id=0,
         storage_manager=storage,
         event_bus=MagicMock(),
-        resolve_obj_keys=lambda key, gids: [[k] for k in keys],
+        resolve_obj_keys=lambda key, gids: [[]] * 2 if unfull else [[k] for k in keys],
+        resolve_unfull_chunk_obj_keys=lambda key, gids: keys,
     )
     module = transfer.LMCacheDrivenTransferModule(cast(Any, ctx))
     backend = MagicMock()
@@ -142,7 +161,9 @@ def test_store_owner_callback_round_trip(
                 SimpleNamespace(
                     request_id="req",
                     worker_id=1,
-                    has_unfull_chunk=lambda chunk_size: False,
+                    has_unfull_chunk=lambda chunk_size: unfull,
+                    end=1 if unfull else 2,
+                    request_configs=None,
                 ),
             ),
             1,
@@ -167,22 +188,23 @@ def test_store_owner_callback_round_trip(
         release_kind, release_encoded = queued[0]
         assert release_kind == "release_imported_event"
         assert msgspec.msgpack.decode(release_encoded, type=tuple[int, int]) == (1, 7)
-        if failure != "none":
-            assert len(queued) == 1
-            assert order == ["callback", "copy", "copy", "record"]
+        # A failed store aborts every reservation once its copies drain,
+        # routed by the owner each reservation had before any copy ran.
+        assert order == ["callback", "copy", "copy", "record", "callback"]
+        kind, encoded = queued[1]
+        assert kind == ("finish_write" if succeeded else "abort_write")
+        payload = msgspec.msgpack.decode(encoded, type=dict[ObjectKey, int])
+        assert payload == {
+            k: managers[0 if owner_count == 1 else i].l1_manager_id
+            for i, k in enumerate(keys)
+        }
+        if not succeeded:
             assert all(obj.is_valid() for obj in copied)
-        else:
-            assert order == ["callback", "copy", "copy", "record", "callback"]
-            kind, encoded = queued[1]
-            assert kind == "finish_write"
-            payload = msgspec.msgpack.decode(encoded, type=dict[ObjectKey, int])
-            assert payload == {
-                k: managers[0 if owner_count == 1 else i].l1_manager_id
-                for i, k in enumerate(keys)
-            }
         module.close()
         cache_context.release_imported_event.assert_called_once_with(7)
         for index, manager in enumerate(managers):
+            # close() drained the queue: an aborted store left no staging behind.
+            assert manager.report_status()["staging_object_count"] == 0
             found = manager.reserve_read(keys)
             expected = (
                 [] if failure != "none" else keys if owner_count == 1 else [keys[index]]

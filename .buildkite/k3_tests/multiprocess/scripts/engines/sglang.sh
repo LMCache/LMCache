@@ -199,7 +199,8 @@ engine_launch_profile() {
                     --chunked-prefill-size "${MAX_NUM_BATCHED_TOKENS:-8192}" \
                     --max-running-requests 1 \
                     --random-seed 0 \
-                    --disable-cuda-graph
+                    --disable-decode-cuda-graph \
+                    --disable-prefill-cuda-graph
             ;;
         default)
             engine_prepare_launch "$device_index"

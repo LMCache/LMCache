@@ -213,12 +213,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
        Events still carry LMCache chunk hashes and chunk size; native engine
        block identities are separate work.
        With the channel enabled, Stored requires a committed L1 copy of every
-       registered object group on every KV rank. Evicting one of several copies
-       of an object does not remove its CPU placement; losing the final copy
-       of a required object does. Duplicate commits are suppressed while the
+       distinct shard of each registered object group, as determined by its
+       TP replication and DCP sharding, within the same salt and identity tags.
+       Evicting one of several copies of an object does not remove its CPU
+       placement; losing the final copy of a required object does.
+       Duplicate commits are suppressed while the
        Stored record remains in the replay log. A later commit refreshes an
        aged-out record. EventBus loss clears the ownership projection and
-       requires fresh commits from all ranks.
+       requires fresh commits for every required object.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at
@@ -713,6 +715,10 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--eviction-ratio``
      - ``0.2``
      - Fraction of allocated memory to evict when triggered (0.0--1.0).
+       It also sets when stores to L2 wait: new ones wait once in-flight ones
+       reach ``trigger_watermark * (1 - eviction_ratio)`` of L1, so locked data
+       cannot fill L1 and block new KV and prefetches. At ``1.0`` this is 0, so
+       they go out one batch at a time.
 
 L2 Policies
 -----------
@@ -1072,6 +1078,14 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
      - Single-server deployment: port of the LMCache MP server. Must
        match the server's ``--port``. Ignored when
        ``lmcache.mp.server_urls`` is set.
+   * - ``lmcache.mp.api_key_file``
+     - *(unset)*
+     - File holding the API key this engine sends to the LMCache server. Use it
+       when the server requires a key and the engine should not hold the fleet
+       key: the inbound key set this server accepts is a different trust domain
+       from the key a caller presents. The file must hold exactly one non-empty
+       line. When unset, the request clients keep their ``LMCACHE_API_KEY`` /
+       ``LMCACHE_API_KEY_FILE`` fallback.
    * - ``lmcache.mp.mq_timeout``
      - ``300.0``
      - Timeout (seconds) for blocking message-queue requests, including
@@ -1306,6 +1320,48 @@ Full Example
         --metrics-sample-rate 0.01 \
         --enable-tracing \
         --otlp-endpoint http://localhost:4317
+
+KV-event registration
+---------------------
+
+``register_kv_cache`` takes a required final ``event_profile`` argument and
+returns the profile recorded for the registration. Every current integration
+passes ``None``; caching and router-visible events are unchanged. There is no
+configuration knob for enabling a native profile in this PR.
+
+``KVEventProfile(profile_id, block_size)`` is an immutable contract with a
+nonempty opaque identity and a positive engine event block size. Before any
+context, layout or liveness state changes, the server validates:
+
+* positive world size and a block size that divides the server chunk size;
+* one full-attention engine block address space with the declared block size;
+* agreement across active registrations for the same model and world size,
+  including whether a profile is present;
+* no model/world change for an existing instance when a profile is involved.
+
+A rejection raises ``MPRequestError`` with the server's reason. Its code is
+``INVALID_ARGUMENT`` on gRPC and ``invalid_argument`` on ZMQ; ZMQ details also
+include the operation name. Transport failures keep their existing behavior:
+gRPC raises ``MPServerUnavailableError``, while a ZMQ wait can expire with
+``LMCacheTimeoutError``.
+
+With ``None``, gRPC's optional request field is absent and the response is
+empty, preserving both byte strings. ZMQ registration always includes one
+additional payload frame, so behavior is identical but request bytes are not.
+Its ``None`` success reply still contains no payload frame. QStore's request
+and response bytes are unchanged.
+
+* An older gRPC worker can register with a newer server: absence means ``None``.
+* A newer gRPC worker can register with an older server, but its returned
+  profile is absent. A future profile sender must compare the returned value.
+* An older ZMQ worker receives an explicit payload-count rejection from a
+  newer server. A newer worker calling an older server times out because that
+  server cannot answer the longer request. Upgrade ZMQ deployments together.
+
+There is no handshake or fallback. Profiles live until unregister, reap or
+shutdown. STORE bindings, the first integration sending and checking a
+profile, and native event records remain later steps of
+`issue #5932 <https://github.com/LMCache/LMCache/issues/5932>`_.
 
 Anonymous Usage Statistics
 --------------------------

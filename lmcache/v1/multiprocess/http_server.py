@@ -14,7 +14,7 @@ import uvicorn
 
 # First Party
 from lmcache import torch_dev
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,

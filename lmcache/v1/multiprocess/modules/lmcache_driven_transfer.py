@@ -12,13 +12,13 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.logging import init_logger
 from lmcache.utils import (
     EngineType,
     _lmcache_nvtx_annotate,
 )
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import IPCCacheServerKey, KVEventProfile
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.common.utils import LayoutHints
@@ -68,6 +68,7 @@ from lmcache.v1.platform.fd_channel import (
     fd_channel_path,
     is_fd_channel_supported,
 )
+from lmcache.v1.transport.errors import InvalidRequestError
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -209,6 +210,8 @@ class ContextEntry:
             PING. Selects the reap window (timeout vs registration grace).
             Latched only by PING, never by traffic.
         event_backend: Cached event backend selected for this context's device.
+        event_profile: Native identity contract retained until unregister, reap
+            or shutdown. None retains current event behavior.
     """
 
     cache_context: BaseCacheContext
@@ -217,6 +220,7 @@ class ContextEntry:
     last_seen: float = 0.0
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
+    event_profile: KVEventProfile | None = None
 
 
 class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
@@ -268,6 +272,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._device_host_func_dispatcher.register(
             "finish_write",
             self._finish_write,
+            payload_type=dict[ObjectKey, int],
+        )
+        self._device_host_func_dispatcher.register(
+            "abort_write",
+            self._abort_write,
             payload_type=dict[ObjectKey, int],
         )
         self._device_host_func_dispatcher.register(
@@ -328,6 +337,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._ctx.storage_manager.finish_write(
             list(l1_owners.keys()), l1_owners=l1_owners
         )
+
+    def _abort_write(self, l1_owners: dict[ObjectKey, int]) -> None:
+        """Discard a failed store's reserved objects once their copies drained.
+
+        Args:
+            l1_owners: The L1 manager that reserved each key.
+        """
+        self._ctx.storage_manager.abort_write(list(l1_owners.keys()), l1_owners)
 
     def register_host_func(self, kind: str, handler: Any, payload_type: Any) -> None:
         """Register *handler* for *kind* on the per-process device host-func
@@ -524,7 +541,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
-    ) -> None:
+        event_profile: KVEventProfile | None,
+    ) -> KVEventProfile | None:
         """Register the KV cache tensors for a given GPU instance ID.
 
         Args:
@@ -539,7 +557,39 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 GPUCacheContext for GPU KV format detection.
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
+            event_profile: Optional native identity contract. All active
+                registrations for the same model/world must agree, including
+                whether a profile is present. This does not change event output.
+
+        Returns:
+            The profile recorded for this registration, or None when absent.
+
+        Raises:
+            InvalidRequestError: If the profile conflicts with an active
+                registration, has invalid world/block geometry, or the engine
+                groups are not one full-attention block address space.
+
+        Profile validation precedes context creation, layout registration and
+        liveness refresh. Rejection leaves existing registrations untouched.
         """
+        if event_profile is not None:
+            if world_size <= 0 or self._ctx.chunk_size % event_profile.block_size:
+                raise InvalidRequestError(
+                    "KV event profile requires a positive world size and "
+                    "a block size that divides the server chunk size"
+                )
+            if not engine_group_infos or any(
+                group.engine_group_id != 0
+                or group.sw_size_tokens != -1
+                or group.recurrent_state
+                or group.extra_object_group_tag != 0
+                or group.tokens_per_block != event_profile.block_size
+                for group in engine_group_infos
+            ):
+                raise InvalidRequestError(
+                    "KV event profile requires one full-attention engine group "
+                    "with the declared block size"
+                )
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
@@ -547,13 +597,33 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # is SERIALIZED on the MQ main loop, so it is the sole inserter.
         with self._lock:
             existing = self._cache_contexts.get(instance_id)
+            for registered_id, entry in self._cache_contexts.items():
+                same_context = (entry.model_name, entry.world_size) == (
+                    model_name,
+                    world_size,
+                )
+                if same_context and entry.event_profile != event_profile:
+                    raise InvalidRequestError(
+                        f"KV event profile conflicts with registration {registered_id} "
+                        f"for model {model_name!r}, world size {world_size}"
+                    )
+            if existing is not None and (
+                event_profile is not None or existing.event_profile is not None
+            ):
+                if (existing.model_name, existing.world_size) != (
+                    model_name,
+                    world_size,
+                ):
+                    raise InvalidRequestError(
+                        "KV event registration instance context mismatch"
+                    )
             if existing is not None:
                 existing.last_seen = now
                 logger.info(
                     "Instance %d already registered; refreshing liveness",
                     instance_id,
                 )
-                return
+                return existing.event_profile
 
         # Build the context and layout descriptor outside the lock.
         cache_context = self._create_cache_context(
@@ -607,6 +677,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
+                event_profile=event_profile,
             )
 
         logger.info(
@@ -614,6 +685,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             instance_id,
             cache_context.num_layers,
         )
+        return event_profile
 
     @request_handler()
     def unregister_kv_cache(self, instance_id: int) -> None:
@@ -677,6 +749,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
         skip_chunks: list[bool] | None = None,
+        mask_object_groups: Sequence[int] | None = None,
     ) -> tuple[bytes, bool, list[bool]]:
         """Store the GPU KV cache blocks to CPU.
 
@@ -689,6 +762,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             event_ipc_handle: The IPC handle of the event to wait on.
             skip_chunks: Optional per-chunk mask; True chunks are not stored
                 (and report False in the returned mask).
+            mask_object_groups: Object groups the returned mask checks; None
+                checks every object group. A caller that reads only some
+                groups passes those.
 
         Returns:
             A tuple where the first element is the IPC handle of the event
@@ -696,8 +772,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             element indicates whether the store operation completed without a
             fatal error (not whether every requested chunk was stored; see
             Notes). The event handle is empty when no device work was submitted.
-            The third element marks per chunk whether every object group
-            committed it.
+            The third element marks per chunk whether every object group in
+            ``mask_object_groups`` (default: every object group) committed it.
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
@@ -709,9 +785,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             store is skipped and nothing is committed; a subsequent retrieve misses
             and the engine recomputes. The boolean result reports whether the
             store completed without such a failure.
-            Failed copies or completion preparation retain staging reservations
-            under the existing write-TTL rules; queued GPU writes may still
-            reference those buffers.
+            On failure, reservations whose owners were captured are aborted
+            on the copy stream after queued GPU writes drain. If owner capture
+            fails, uncaptured reservations retain their write-TTL lifetime.
             A key addressing an unfull chunk (``key.has_unfull_chunk``) also
             stores that chunk in the same transaction; its block IDs follow
             the full chunks' in every group, and its mask entry comes last.
@@ -860,6 +936,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
             reserved_dict: dict[ObjectKey, MemoryObj] = {}
             all_dict: dict[ObjectKey, MemoryObj] = {}
+            # Captured before any copy runs, so a failed store aborts per owner.
+            l1_owners: dict[ObjectKey, int] = {}
             total_bytes: int = 0
             store_succeeded = False
             try:
@@ -883,6 +961,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         keys_to_reserve, layout_desc
                     )
                     all_dict.update(reserved_dict)
+                    l1_owners.update(l1_owners_of(reserved_dict))
                     if reserved_dict:
                         total_bytes += next(
                             iter(reserved_dict.values())
@@ -909,14 +988,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
                 if unfull_obj_keys:
                     unfull_reserved = self._store_unfull_chunk_objects(
-                        cache_context, key, unfull_obj_keys, unfull_block_ids
+                        cache_context, key, unfull_obj_keys, unfull_block_ids, l1_owners
                     )
                     all_dict.update(unfull_reserved)
                     total_bytes += sum(
                         memory_obj.get_size() for memory_obj in unfull_reserved.values()
                     )
 
-                l1_owners = l1_owners_of(all_dict)
                 store_succeeded = True
             except Exception:
                 logger.exception("Cannot store keys due to exception")
@@ -933,6 +1011,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     )
                 else:
                     total_bytes = 0
+                    if l1_owners:
+                        # Abort after the partial copies drain, not at write TTL.
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream, "abort_write", l1_owners
+                        )
                 # Report only chunks that actually stored, plus the unfull
                 # chunk's tokens when every object group stored it.
                 stored_chunks = (
@@ -977,15 +1060,22 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 ed - st,
             )
 
-        # A chunk is stored only when every object group committed its key.
+        # A chunk is stored only when every checked object group committed
+        # its key.
+        mask_gids = (
+            range(num_object_groups)
+            if mask_object_groups is None
+            else [g for g in mask_object_groups if 0 <= g < num_object_groups]
+        )
         stored_mask = [
             store_succeeded
-            and all(keys[i] in all_dict for keys in obj_keys_per_obj_group)
+            and all(obj_keys_per_obj_group[g][i] in all_dict for g in mask_gids)
             for i in range(num_chunks)
         ]
         if unfull_obj_keys:
             stored_mask.append(
-                store_succeeded and all(k in all_dict for k in unfull_obj_keys)
+                store_succeeded
+                and all(unfull_obj_keys[g] in all_dict for g in mask_gids)
             )
         return (
             event_backend.export_event(event, cache_context.device),
@@ -1392,6 +1482,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         key: IPCCacheServerKey,
         obj_keys: list[ObjectKey],
         block_ids: list[list[int]],
+        l1_owners: dict[ObjectKey, int],
     ) -> dict[ObjectKey, MemoryObj]:
         """Reserve and copy out one object per object group for an unfull chunk.
 
@@ -1406,6 +1497,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             key: The store key; it addresses the unfull chunk.
             obj_keys: The unfull chunk's object key per object group.
             block_ids: The unfull chunk's block IDs per kernel group.
+            l1_owners: Transaction owners, captured before each copy for abort
+                after the stream drains. Uncaptured reservations retain write TTL.
 
         Returns:
             The reserved objects, keyed by object key.
@@ -1445,13 +1538,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         for obj_group_id, (obj_key, object_buffer) in enumerate(
             zip(obj_keys, object_buffers, strict=True)
         ):
-            reserved.update(
-                self._ctx.storage_manager.reserve_write(
-                    [obj_key],
-                    get_unfull_chunk_layout_desc(cache_context, obj_group_id),
-                    is_temporary=is_temporary,
-                )
+            group_reserved = self._ctx.storage_manager.reserve_write(
+                [obj_key],
+                get_unfull_chunk_layout_desc(cache_context, obj_group_id),
+                is_temporary=is_temporary,
             )
+            reserved.update(group_reserved)
+            l1_owners.update(l1_owners_of(group_reserved))
             memory_obj = reserved.get(obj_key)
             # Unreserved: already resident or out of memory.
             if memory_obj is None:
