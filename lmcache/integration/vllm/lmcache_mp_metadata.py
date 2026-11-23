@@ -714,10 +714,15 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             breaks the request's stored-prefix chain so later chunks are not
             stored unreachable. ``aggregate()`` unions the sets: one rank's
             failure breaks the chain even when the other ranks succeeded.
+        released_store_pins: Pinned STOREs this worker no longer reads, as
+            ``{pin key: 1}`` (``lmcache.hint.store_pin``). ``aggregate()``
+            sums the counts; the scheduler unpins a STORE's blocks once its
+            count reaches the number of workers.
     """
 
     completed_store_requests: dict[str, int]
     failed_store_requests: set[str] = field(default_factory=set)
+    released_store_pins: dict[str, int] = field(default_factory=dict)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -728,16 +733,20 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             other: The report of another rank, for the same scheduler step.
 
         Returns:
-            A new metadata whose completion counts are summed per request,
-            and whose failed-request sets are unioned.
+            A new metadata whose completion and pin-release counts are
+            summed per key, and whose failed-request sets are unioned.
         """
         assert isinstance(other, LMCacheMPWorkerMetadata)
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
+        released = dict(self.released_store_pins)
+        for k, v in other.released_store_pins.items():
+            released[k] = released.get(k, 0) + v
         return LMCacheMPWorkerMetadata(
             completed_store_requests=merged,
             failed_store_requests=(
                 self.failed_store_requests | other.failed_store_requests
             ),
+            released_store_pins=released,
         )
