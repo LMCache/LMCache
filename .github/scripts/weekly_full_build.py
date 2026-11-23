@@ -82,6 +82,29 @@ def api_request(
     raise AssertionError("unreachable")
 
 
+def fetch_annotations(build_path: str, token: str) -> list[dict[str, Any]]:
+    """Fetch all annotations for a Buildkite build across pages.
+
+    Args:
+        build_path: Buildkite REST URL for the build.
+        token: Buildkite API token.
+
+    Returns:
+        All annotation objects on the build.
+    """
+    items: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        batch = api_request(f"{build_path}/annotations?per_page=100&page={page}", token)
+        if not batch:
+            break
+        items.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+    return items
+
+
 def evaluate(
     manifest: dict[str, Any],
     builds: dict[str, dict[str, Any]],
@@ -333,9 +356,7 @@ def run(
             break
         time.sleep(60)
 
-    annotations = {
-        slug: api_request(f"{paths[slug]}/annotations", token) for slug in paths
-    }
+    annotations = {slug: fetch_annotations(paths[slug], token) for slug in paths}
     return builds, annotations, bool(pending)
 
 

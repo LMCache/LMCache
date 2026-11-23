@@ -241,3 +241,26 @@ def test_every_multiprocess_workload_is_required(manifest: dict) -> None:
     # lm_eval runs as lm_eval_<mode>; the pin canaries reuse vllm_bench/lm_eval.
     unlisted = {w for w in workloads if w not in required and f"{w}_" not in required}
     assert not unlisted, f"add these workloads to {MANIFEST.name}: {sorted(unlisted)}"
+
+
+def test_fetch_annotations_paginates(
+    gate: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pages = {
+        1: [{"id": i} for i in range(100)],
+        2: [{"id": 100}, {"id": 101}],
+    }
+    seen_urls: list[str] = []
+
+    def fake_api_request(url: str, token: str) -> list[dict[str, int]]:
+        seen_urls.append(url)
+        page = int(url.rsplit("page=", 1)[1])
+        return pages[page]
+
+    monkeypatch.setattr(gate, "api_request", fake_api_request)
+    items = gate.fetch_annotations("https://api.buildkite.com/v2/b/1", "tok")
+    assert len(items) == 102
+    assert seen_urls == [
+        "https://api.buildkite.com/v2/b/1/annotations?per_page=100&page=1",
+        "https://api.buildkite.com/v2/b/1/annotations?per_page=100&page=2",
+    ]
