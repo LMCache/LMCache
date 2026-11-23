@@ -134,6 +134,9 @@ PY
     if [[ -n "${KV_CACHE_MEMORY_BYTES:-}" ]]; then
         VLLM_MODEL_ARGS+=(--kv-cache-memory-bytes "$KV_CACHE_MEMORY_BYTES")
     fi
+    if [[ "${VLLM_ENABLE_SLEEP_MODE:-0}" == "1" ]]; then
+        VLLM_MODEL_ARGS+=(--enable-sleep-mode)
+    fi
 
     VLLM_BLOCK_ARGS=()
     if [[ -n "${VLLM_BLOCK_SIZE:-}" ]]; then
@@ -173,6 +176,8 @@ engine_kv_transfer_config() {
     LMCACHE_MP_LAZY_OFFLOAD="${LMCACHE_MP_LAZY_OFFLOAD:-false}" \
     LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD="${LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD:-2}" \
     LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT="${LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT:-1}" \
+    NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-}" \
+    KV_CACHE_MEMORY_BYTES="${KV_CACHE_MEMORY_BYTES:-}" \
         python3 - <<'PY'
 import json
 import os
@@ -182,6 +187,15 @@ extra_config = {
     "lmcache.mp.port": int(os.environ["LMCACHE_PORT"]),
     "lmcache.mp.mq_timeout": int(os.environ["LMCACHE_MP_MQ_TIMEOUT"]),
 }
+if os.environ.get("VLLM_TARGET_DEVICE") == "xpu":
+    extra_config["lmcache.mp.use_vmm_api"] = False
+# A pinned KV pool (preemption_correctness sets NUM_GPU_BLOCKS_OVERRIDE) turns
+# off vLLM's extensible (VMM) KV cache. With use_vmm_api unset the connector
+# still declares POSIX-fd export, which needs that cache, so vLLM >= 0.34.0
+# refuses to start (LMCache#6620). Use legacy CUDA IPC, which is what these
+# runs used before vLLM added that check.
+if os.environ["NUM_GPU_BLOCKS_OVERRIDE"] or os.environ["KV_CACHE_MEMORY_BYTES"]:
+    extra_config["lmcache.mp.use_vmm_api"] = False
 if os.environ["LMCACHE_MP_LAZY_OFFLOAD"].lower() in {"1", "true"}:
     extra_config.update(
         {

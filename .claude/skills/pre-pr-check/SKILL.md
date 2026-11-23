@@ -80,7 +80,7 @@ These are straightforward to fix:
 3. **`Optional` usage** (Section 2.1): Where a value is always initialized, remove the `Optional` wrapper and initialize directly. Where None is genuinely possible, rewrite as `X | None`.
 4. **Bare generics** (Section 2.1): Replace bare `list`, `dict`, `tuple`, `set` in annotations with parameterized forms (`list[T]`, `dict[K, V]`).
 5. **Lazy imports** (Section 7.2): Move imports to the top of the file, under the correct section heading. Preserve `torch`-before-native-C-extension ordering.
-6. **Bare `logging.getLogger(__name__)`** (Section 7.4): Replace with `init_logger(__name__)` from `lmcache.logging`.
+6. **Bare `logging.getLogger(__name__)`** (Section 7.4): Replace with `init_logger(__name__)` from `lmcache.v1.common.logging`.
 7. **Operational logs at `INFO` level** (Section 7.4): If a log is about store/retrieve/task progress, change `logger.info(...)` to `logger.debug(...)`.
 8. **Inappropriate `WARNING`** (Section 7.4): For log messages about benign concurrent conditions (e.g., "key not found, this should not happen" in a code path documented as not holding the global lock), downgrade to `debug` and fix the misleading message.
 9. **`logger.error` inside `except` blocks** (Section 10.1): Replace with `logger.exception(...)` so the traceback is preserved, unless the exception is re-raised.
@@ -102,17 +102,18 @@ These are judgment calls and should be reported, not auto-fixed:
 15. **Boolean parameters on public APIs** (Section 4.3).
 16. **New features without tests** (Section 5.2).
 17. **Bug fixes without regression tests** (Section 5.2).
-18. **Unbounded collection growth** (Section 7.6): A set/dict that is appended to without cleanup.
-19. **Error paths that leave state inconsistent** (Section 7.5): Exceptions that skip lock release, FD close, or pool free.
-20. **Missing design doc** for non-trivial new features (Section 5.1).
-21. **PR scope too large** (Section 1.1): If the diff touches many unrelated modules, suggest how to split.
-22. **Lock protocol violations** (Section 8): Debug methods not holding `self._lock`; shared state accessed without synchronization.
-23. **Defensive programming** (Section 10.1): Handling for failures that cannot occur — speculative `None` checks, fallback defaults, or a broad `try/except` wrapping a large block outside a thread/RPC/background-loop boundary.
-24. **AI comment/TODO violations** (Section 10.2): Comments narrating the change ("now we...", "previously..."), boilerplate docstrings restating signatures on internal helpers, or TODOs that defer required work or lack a GitHub handle.
-25. **Engine or model leakage** (Section 4.6): Inference-engine types, scheduler semantics, model-family branches, or engine-specific cache layouts outside `lmcache/integration/<engine>/`.
-26. **Middle-layer backend coupling** (Section 4.6): Orchestration code branches on concrete accelerator, storage-backend, or transport names instead of using the corresponding platform, storage, or transfer contract.
-27. **Closed extension points** (Section 4.6): Independently maintained implementations require edits to a central vendor list when a bounded registry, entry point, plugin, or subclass discovery boundary is appropriate.
-28. **Unnecessary indirection** (Section 4.6): Opaque data structures, reflection, metaprogramming, or inheritance on a non-critical path without a demonstrated extension or performance requirement.
+18. **User-facing features without an end-to-end test** (Section 5.2): a new or changed CLI command, flag, or server API that only has unit tests. Ask for a test that drives the feature through that entry point.
+19. **Unbounded collection growth** (Section 7.6): A set/dict that is appended to without cleanup.
+20. **Error paths that leave state inconsistent** (Section 7.5): Exceptions that skip lock release, FD close, or pool free.
+21. **Missing design doc** for non-trivial new features (Section 5.1).
+22. **PR scope too large** (Section 1.1): If the diff touches many unrelated modules, suggest how to split.
+23. **Lock protocol violations** (Section 8): Debug methods not holding `self._lock`; shared state accessed without synchronization.
+24. **Defensive programming** (Section 10.1): Handling for failures that cannot occur — speculative `None` checks, fallback defaults, or a broad `try/except` wrapping a large block outside a thread/RPC/background-loop boundary.
+25. **AI comment/TODO violations** (Section 10.2): Comments narrating the change ("now we...", "previously..."), boilerplate docstrings restating signatures on internal helpers, or TODOs that defer required work or lack a GitHub handle.
+26. **Engine or model leakage** (Section 4.6): Inference-engine types, scheduler semantics, model-family branches, or engine-specific cache layouts outside `lmcache/integration/<engine>/`.
+27. **Middle-layer backend coupling** (Section 4.6): Orchestration code branches on concrete accelerator, storage-backend, or transport names instead of using the corresponding platform, storage, or transfer contract.
+28. **Closed extension points** (Section 4.6): Independently maintained implementations require edits to a central vendor list when a bounded registry, entry point, plugin, or subclass discovery boundary is appropriate.
+29. **Unnecessary indirection** (Section 4.6): Opaque data structures, reflection, metaprogramming, or inheritance on a non-critical path without a demonstrated extension or performance requirement.
 
 ### Step 4 -- Apply fixes
 

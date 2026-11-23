@@ -11,19 +11,19 @@ import time
 import torch
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.client.transfer_context.base import EngineDrivenContextMetadata
 from lmcache.v1.common.attn_window import AttnWindowDesc
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
-from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.custom_types import (
     IPCCacheServerKey,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
+from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
@@ -484,12 +484,18 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 payload.model_name,
                 payload.world_size,
                 layout_desc,
+                self._ctx.chunk_size,
+                self._ctx.hash_algorithm_name,
                 attn_desc=attn_desc,
                 group_layout_descs=dict(enumerate(group_layouts)),
             )
         else:
             self._ctx.layout_desc_registry.register(
-                payload.model_name, payload.world_size, layout_desc
+                payload.model_name,
+                payload.world_size,
+                layout_desc,
+                self._ctx.chunk_size,
+                self._ctx.hash_algorithm_name,
             )
         return RegisterEngineDrivenContextResponse(
             shm_name=shm_name,

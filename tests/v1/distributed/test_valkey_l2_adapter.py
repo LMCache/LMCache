@@ -158,7 +158,11 @@ def _build_fake_glide_modules() -> dict[str, types.ModuleType]:
 
         return _ctor
 
-    fake.ServerCredentials = lambda u, p: ("creds", u, p)  # type: ignore[attr-defined]
+    fake.ServerCredentials = lambda password=None, username=None: (  # type: ignore[attr-defined]
+        "creds",
+        password,
+        username,
+    )
     fake.NodeAddress = lambda h, p: ("addr", h, p)  # type: ignore[attr-defined]
     fake.AdvancedGlideClientConfiguration = _record("adv_std")  # type: ignore[attr-defined]
     fake.AdvancedGlideClusterClientConfiguration = _record(  # type: ignore[attr-defined]

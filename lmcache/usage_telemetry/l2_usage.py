@@ -25,7 +25,6 @@ import threading
 import time
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.usage_telemetry.flush import start_usage_flush_thread
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
 from lmcache.usage_telemetry.identity import (
@@ -39,6 +38,7 @@ from lmcache.usage_telemetry.transport import (
     build_usage_payload,
     usage_server_url,
 )
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import (
     EventBus,

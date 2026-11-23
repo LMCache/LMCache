@@ -305,7 +305,7 @@ def test_raising_done_callback_is_logged_and_isolated(
 ) -> None:
     """A raising callback is logged and later callbacks and the result survive."""
     logged: list[str] = []
-    # The module logger does not propagate (see ``lmcache.logging``), so
+    # The module logger does not propagate (see ``lmcache.v1.common.logging``), so
     # record the call instead of relying on root-handler capture.
     monkeypatch.setattr(futures_module.logger, "exception", logged.append)
 

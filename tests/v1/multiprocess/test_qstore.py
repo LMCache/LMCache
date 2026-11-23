@@ -16,9 +16,9 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.common.custom_types import TRANSFER_QUERY
 from lmcache.v1.multiprocess import server as server_mod
 from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
-from lmcache.v1.multiprocess.custom_types import TRANSFER_QUERY
 from lmcache.v1.multiprocess.engine_module import discover_modules
 from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleSpec,
@@ -840,14 +840,18 @@ def test_status_reports_object_layouts_from_the_layout_registry() -> None:
         "m",
         1,
         attention,
-        AttnWindowDesc(num_chunks_in_sw=[-1], group_kinds=("attention",)),
+        chunk_size=256,
+        hash_algorithm="blake3",
+        attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1], group_kinds=("attention",)),
     )
     query = MemoryLayoutDesc([torch.Size([1, 36, 256, 4096])], [torch.bfloat16])
     ctx.layout_desc_registry.register(
         "m##query",
         1,
         query,
-        AttnWindowDesc(num_chunks_in_sw=[-1], group_kinds=("attention",)),
+        chunk_size=256,
+        hash_algorithm="blake3",
+        attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1], group_kinds=("attention",)),
     )
     kv_module = MagicMock(name="kv_module")
     kv_module.context_entries_snapshot.return_value = {

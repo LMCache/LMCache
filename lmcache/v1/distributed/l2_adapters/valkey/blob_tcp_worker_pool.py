@@ -31,7 +31,7 @@ from __future__ import annotations
 from typing import Any
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.l2_adapters.valkey.worker_pool import (
     GET_MISS,
     ValkeyWorkerPool,
