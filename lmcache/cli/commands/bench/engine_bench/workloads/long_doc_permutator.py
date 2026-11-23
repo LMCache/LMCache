@@ -43,7 +43,7 @@ from lmcache.cli.commands.bench.engine_bench.tokenizers import (
     try_load_tokenizer,
 )
 from lmcache.cli.commands.bench.engine_bench.workloads.base import BaseWorkload
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 

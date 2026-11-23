@@ -15,8 +15,8 @@ import sys
 
 # First Party
 from lmcache.cli.commands import register_commands
-from lmcache.logging import init_logger
 from lmcache.v1.common.banner import print_banner_once
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 

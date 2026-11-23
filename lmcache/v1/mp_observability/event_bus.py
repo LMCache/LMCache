@@ -15,8 +15,8 @@ import threading
 import time
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.errors import register_timeout_observer
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 

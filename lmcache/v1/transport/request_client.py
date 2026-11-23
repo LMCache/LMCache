@@ -166,17 +166,26 @@ class RequestClient(Protocol):
 
     @rpc_method
     def commit_store(
-        self, key: IPCCacheServerKey, instance_id: int, data: bytes
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        data: bytes,
+        chunk_start: int = 0,
+        chunk_count: int = 0,
     ) -> MessagingFuture[bool]: ...
 
     @rpc_method
     def prepare_retrieve(
-        self, key: IPCCacheServerKey, instance_id: int
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        chunk_start: int = 0,
+        chunk_count: int = 0,
     ) -> MessagingFuture[PrepareRetrieveResponse]: ...
 
     @rpc_method
     def commit_retrieve(
-        self, key: IPCCacheServerKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int, failed: bool = False
     ) -> MessagingFuture[bool]: ...
 
     @rpc_method

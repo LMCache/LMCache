@@ -12,8 +12,8 @@ import threading
 import time
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.periodic_thread import (
     PeriodicThread,
     PeriodicThreadRegistry,

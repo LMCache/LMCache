@@ -200,13 +200,14 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
      - BLOCKING
      - (Engine-driven path) Worker commits the chunk's serialized bytes
        (typed inline path) or releases the prepared SHM slot (SHM path) so the
-       server can persist into L1 storage.
+       server can persist into L1 storage. Inline transfers over 128 MiB are
+       committed in pages of chunks.
    * - ``PREPARE_RETRIEVE``
      - BLOCKING
      - (Engine-driven path) Worker asks the server to prepare the
        retrieval payload for a key. The typed inline path returns the bytes
-       inline; the SHM path returns slot info so the worker can read
-       from shared memory.
+       inline, in pages of chunks for transfers over 128 MiB; the SHM path
+       returns slot info so the worker can read from shared memory.
    * - ``COMMIT_RETRIEVE``
      - BLOCKING
      - (Engine-driven path) Worker acknowledges retrieval completion so

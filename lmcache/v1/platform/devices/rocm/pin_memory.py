@@ -8,7 +8,7 @@ import ctypes.util
 import functools
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform.devices.cuda.pin_memory import CudaPinMemoryBackend
 
 logger = init_logger(__name__)

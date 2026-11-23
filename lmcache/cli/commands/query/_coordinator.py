@@ -28,7 +28,7 @@ import urllib.request
 from lmcache.cli.commands.describe import fmt_bytes
 from lmcache.cli.commands.quota._helpers import escape_salt
 from lmcache.cli.http import normalize_url as normalize_url
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.metrics import Metrics
 
 logger = init_logger(__name__)

@@ -6,8 +6,8 @@ from collections.abc import Sequence
 import threading
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.custom_types import BlockAllocationRecord
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.periodic_thread import (
     PeriodicThread,
     ThreadLevel,

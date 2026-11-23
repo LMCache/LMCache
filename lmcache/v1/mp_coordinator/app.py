@@ -28,7 +28,7 @@ from fastapi import FastAPI
 import httpx
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.mp_coordinator.background_loops import (
     BackgroundLoops,
@@ -310,7 +310,12 @@ def create_app(
     app.state.http_authentication = (
         http_authentication or CoordinatorAuthenticationConfig()
     )
-    app.add_middleware(CoordinatorAuthenticationMiddleware)
+    # ``None`` keeps the historical list; a configured tuple replaces it, so
+    # an operator can require a key for /metrics or for every path.
+    app.add_middleware(
+        CoordinatorAuthenticationMiddleware,
+        public_paths=config.public_endpoints,
+    )
 
     apis_path = Path(__file__).parent / "http_apis"
     package = f"{__package__}.http_apis"
