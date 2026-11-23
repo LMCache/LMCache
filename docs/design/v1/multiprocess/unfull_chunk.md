@@ -47,6 +47,8 @@ Requirements, checked at startup:
 
 - LMCache-driven transfer mode (the CUDA default).
 - No speculative decoding, no `lmcache.mp.lazy_offload`.
+- No prefill-context parallelism for a model with a per-request ring (see
+  [Per-request ring](#per-request-ring)).
 - For Mamba hybrids, a vLLM whose `SchedulerOutput` has
   `kv_connector_block_state`.
 
@@ -384,11 +386,11 @@ r = 2, exact tail B = P = 301
   the decode looks up `P - 1`, so their exact tail is not hit until the
   prefill stops at `P - 1` (see [Which tails are stored](#which-tails-are-stored)).
   vLLM lets Step-5 use only the Mooncake or NIXL connector.
-- **Prefill-context parallelism**: only DeepSeek-V4.1 runs PCP with a ring
-  (vLLM rejects PCP for the other three ring backends). Its compressor
-  gathers each request's newest open row on every PCP rank, so every rank's
-  ring is equal and each rank's tail carries a full copy. Not yet run end to
-  end.
+- **Prefill-context parallelism**: rejected at startup with a ring until it
+  is run end to end. Only DeepSeek-V4.1 runs PCP with a ring (vLLM rejects
+  PCP for the other three ring backends). Its compressor gathers each
+  request's newest open row on every PCP rank, so every rank's ring should
+  be equal and each rank's tail carry a full copy.
 - Validated on a 4-layer DeepSeek-V4.1-Flash (dummy weights,
   `--kv-cache-dtype fp8_ds_mla --no-swa-bounded-replay`, 10,003-token
   prompt): the decode hit 10,002 tokens, and its ring block held the
@@ -407,6 +409,8 @@ r = 2, exact tail B = P = 301
 
 ## Limits
 
+- **A per-request ring model with prefill-context parallelism** is rejected
+  at startup until a PCP run validates the ring on every rank.
 - Tails are served from L1 only. A persistent tail copied to L2 is not looked
   up there, and tails are not shared over P2P L1. P2P lookup of tails is a
   follow-up for LMCache-native PD.

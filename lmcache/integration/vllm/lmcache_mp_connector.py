@@ -69,6 +69,7 @@ from lmcache.integration.vllm.kv_cache_groups import (
     group_prefix_replay_tokens,
     group_specs,
     is_align_mode_mamba_group,
+    is_per_request_ring_group,
     is_scratch_group,
     tokens_per_group_block,
 )
@@ -617,7 +618,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       False. A request whose ``kv_transfer_params`` set
       ``lmcache.temporary_unfull_chunk`` stores it read-once. A model with
       per-request ring state (``CircularBufferSpec``) also stores its ring
-      blocks with the unfull chunk. See ``docs/design/v1/multiprocess/unfull_chunk.md``.
+      blocks with the unfull chunk; not yet supported with prefill-context
+      parallelism. See ``docs/design/v1/multiprocess/unfull_chunk.md``.
     """
 
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
@@ -695,6 +697,21 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # so the state at the prompt end is not isolated.
             raise ValueError(
                 "lmcache.mp.save_unfull_chunk does not support speculative decoding"
+            )
+        if (
+            self._save_unfull_chunk
+            and kv_cache_config is not None
+            and any(
+                is_per_request_ring_group(group)
+                for group in kv_cache_config.kv_cache_groups
+            )
+            and vllm_config.parallel_config.prefill_context_parallel_size > 1
+        ):
+            # Not yet validated end to end: a wrong ring on resume is wrong
+            # output, not a cache miss.
+            raise ValueError(
+                "lmcache.mp.save_unfull_chunk does not support per-request ring "
+                "state (CircularBufferSpec) with prefill-context parallelism yet"
             )
         self._enable_kv_events = bool(
             getattr(vllm_config, "kv_events_config", None) is not None
