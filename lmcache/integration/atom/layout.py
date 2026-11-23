@@ -59,8 +59,11 @@ class AtomStoreLayout:
     Attributes:
         tensors: Named tensors ATOM registered, in registration order.
         groups: Kernel groups reading those tensors.
-        native_state: ATOM's native-state convention object, passed through
-            unread; the LMCache backend forwards it to the state path.
+        native_state: ATOM's native-state spec, carried for the transfer path.
+            The groups of the state image are ordinary ``KernelGroup`` values in
+            ``groups``, so this is not read here: one registration path covers
+            PAGE and state groups alike, and only the transfer conversion needs
+            the spec to expand per-group block ids.
     """
 
     tensors: Mapping[str, Any]

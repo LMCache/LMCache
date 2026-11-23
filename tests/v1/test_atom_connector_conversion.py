@@ -208,6 +208,37 @@ class TestEngineGroupInfos:
             )
 
 
+class TestNativeStateGroups:
+    """State image groups register the same way PAGE groups do."""
+
+    def test_state_groups_share_the_single_conversion_path(self):
+        layout = AtomStoreLayout(
+            tensors={"page.0": object(), "image.0": object()},
+            groups=(
+                AtomKernelGroup(
+                    tensor_names=("page.0",),
+                    engine_group_id=0,
+                    tokens_per_block=16,
+                    tp_replicas=2,
+                ),
+                AtomKernelGroup(
+                    tensor_names=("image.0",),
+                    engine_group_id=1,
+                    tokens_per_block=16,
+                    tp_replicas=1,
+                    dcp_shards=1,
+                ),
+            ),
+            native_state=object(),
+        )
+
+        infos = engine_group_infos_from_atom(layout)
+
+        assert [info.engine_group_id for info in infos] == [0, 1]
+        assert [info.tp_replicas for info in infos] == [2, 1]
+        assert [list(info.layer_indices) for info in infos] == [[0], [1]]
+
+
 class TestTransferSpec:
     HASHES = bytes([7]) * 64  # two chunks
 
@@ -238,6 +269,24 @@ class TestTransferSpec:
     def test_a_partial_hash_is_rejected(self):
         with pytest.raises(ValueError, match="not a multiple of 32"):
             transfer_spec_from_atom(self._request(hashes=b"x" * 40))
+
+    def test_the_hash_count_matches_the_chunk_size(self):
+        """Hashes cover ``[0, end)``; the server rejects any other count."""
+        spec = transfer_spec_from_atom(
+            self._request(hashes=bytes([7]) * 64, end=512), chunk_tokens=256
+        )
+
+        assert len(spec.chunk_hashes) == 2
+
+    def test_a_hash_count_that_does_not_match_the_range_is_rejected(self):
+        with pytest.raises(ValueError, match="chunk hash"):
+            transfer_spec_from_atom(
+                self._request(hashes=bytes([7]) * 32, end=512), chunk_tokens=256
+            )
+
+    def test_a_non_positive_chunk_size_is_rejected(self):
+        with pytest.raises(ValueError, match="must be positive"):
+            transfer_spec_from_atom(self._request(), chunk_tokens=0)
 
     def test_flat_block_ids_are_one_engine_group(self):
         spec = transfer_spec_from_atom(

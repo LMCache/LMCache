@@ -105,6 +105,7 @@ def transfer_spec_from_atom(
     request: Any,
     *,
     num_engine_groups: int | None = None,
+    chunk_tokens: int | None = None,
 ) -> AtomMPTransferSpec:
     """Build an LMCache transfer spec from an ATOM transfer request.
 
@@ -115,6 +116,10 @@ def transfer_spec_from_atom(
         num_engine_groups: Number of registered engine groups, when the caller
             knows it. Passing it turns a missing or extra block-id list into an
             error here rather than inside the adapter.
+        chunk_tokens: The server's chunk size in tokens, when the caller knows
+            it. The hash cover ``[0, end)``, so a request must carry
+            ``end // chunk_tokens`` hashes; the server rejects that mismatch
+            too, and checking it here fails the request before submission.
 
     Returns:
         The :class:`AtomMPTransferSpec` LMCache's adapter submits. ``token_ids``
@@ -137,6 +142,17 @@ def transfer_spec_from_atom(
         raise ValueError(f"transfer start must be >= 0, got {start}")
     if start > end:
         raise ValueError(f"transfer start {start} is past its end {end}")
+
+    if chunk_tokens is not None:
+        if chunk_tokens <= 0:
+            raise ValueError(f"chunk_tokens must be positive, got {chunk_tokens}")
+        expected = end // chunk_tokens
+        if len(chunk_hashes) != expected:
+            raise ValueError(
+                f"transfer ends at token {end} and carries {len(chunk_hashes)} "
+                f"chunk hash(es), but {chunk_tokens}-token chunks cover "
+                f"{expected}"
+            )
 
     block_ids = _block_id_lists(request, num_engine_groups=num_engine_groups)
     if end > start:
