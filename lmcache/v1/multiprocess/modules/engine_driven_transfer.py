@@ -23,6 +23,11 @@ from lmcache.v1.common.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.periodic_thread import (
+    ThreadLevel,
+    ThreadRunSummary,
+    create_periodic_thread,
+)
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
@@ -33,11 +38,6 @@ from lmcache.v1.multiprocess.engine_module import (
     ModuleBuildContext,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.periodic_thread import (
-    ThreadLevel,
-    ThreadRunSummary,
-    create_periodic_thread,
-)
 
 # Local
 from .server_transfer import (
