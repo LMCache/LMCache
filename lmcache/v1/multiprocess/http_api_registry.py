@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, FastAPI
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
 logger = init_logger(__name__)

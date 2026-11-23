@@ -170,6 +170,12 @@ is required for engine-driven mode because a restarted server exposes a new
 shared-memory/IPC context. Operations skipped while unhealthy return cache
 misses or failed placeholders, allowing SGLang to recompute the KV data.
 
+Recovery callbacks flag a store progress reset. `ready_prefix_count()` propagates
+the request through its existing `MIN` collective so all TP/PP ranks reset together.
+This keeps store decisions aligned. For example, if TP0 recovers after all ranks
+stored `[0, 512)`, every rank resets to zero at the next poll, allowing that range
+to be retried.
+
 ## Data model and registration
 
 ### Token, page, and chunk granularity

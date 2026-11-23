@@ -73,6 +73,11 @@ struct CBScatterVar {
   int n_tok;
 };
 
+// StagingCopy.host_offset (-1 in the int64 table) of a device-to-device row:
+// copies a slot an earlier row of the same step staged, so a chunk matched at
+// several positions crosses PCIe once.
+constexpr size_t kCBStagingD2D = static_cast<size_t>(-1);
+
 // One batch of tmp slots: H2D staging, then re-RoPE, then scatter. The order
 // is load-bearing (slots are reused by the next step).
 struct CBRetrieveStep {

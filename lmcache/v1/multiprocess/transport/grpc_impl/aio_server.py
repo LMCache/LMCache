@@ -12,8 +12,8 @@ import threading
 import grpc
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.security.api_key import APIKeyVerifier
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.security.api_key import APIKeyVerifier
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.auth import (
     GrpcAioAuthenticationInterceptor,
@@ -232,7 +232,7 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
                         registered.operation,
                         exc_info=item,
                     )
-                    await context.abort(grpc.StatusCode.INTERNAL, str(item))
+                    break
                 yield registered.response_encoder(item)
                 credits.release()
         finally:

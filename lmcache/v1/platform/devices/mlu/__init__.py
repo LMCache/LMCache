@@ -12,7 +12,7 @@ import importlib
 import torch
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 
 if TYPE_CHECKING:
