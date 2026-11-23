@@ -66,7 +66,10 @@ def _ctx() -> MagicMock:
         DEFAULT_SHARD_REPLICATION_DESC
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = CHUNK_HASHES
+    token_hasher = MagicMock()
+    token_hasher.compute_packed_chunk_hashes.return_value = CHUNK_HASHES
+    ctx.layout_desc_registry.get_chunk_size.return_value = CHUNK_SIZE
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     ctx.storage_manager.submit_prefetch_task.return_value = PrefetchHandle(
         prefetch_request_id=0,
         external_request_id="req-1",
@@ -220,6 +223,7 @@ def test_default_policy_honors_skip_load(
 @pytest.mark.parametrize("disk_hits", [2, 3])
 def test_lookup_streams_contiguous_fs_prefix(disk_hits):
     ctx = _ctx()
+    ctx.chunk_size = 2 * CHUNK_SIZE
     reader = MagicMock(spec=FSStreamingReader)
     reader.adapter = object()
     reader.can_fit.return_value = True
@@ -282,12 +286,13 @@ def test_free_mixed_lookup_only_releases_locked_l1_after_engine_prefix(monkeypat
     from lmcache.v1.multiprocess.session import Session
 
     ctx = _ctx()
-    ctx.token_hasher.compute_packed_chunk_hashes.side_effect = (
+    token_hasher = ctx.layout_desc_registry.get_token_hasher.return_value
+    token_hasher.compute_packed_chunk_hashes.side_effect = (
         lambda _tokens, start=0, end=None: CHUNK_HASHES[
             start // CHUNK_SIZE : (end // CHUNK_SIZE if end is not None else None)
         ]
     )
-    session = Session("req-1", ctx.token_hasher)
+    session = Session("req-1", token_hasher)
     ctx.session_manager.get_or_create.return_value = session
     original = _key(None, start_chunks=1)
     session.begin_lookup(original)
@@ -314,12 +319,14 @@ def test_free_past_streamed_hit_does_not_release_fs_keys(monkeypatch):
     from lmcache.v1.multiprocess.session import Session
 
     ctx = _ctx()
-    ctx.token_hasher.compute_packed_chunk_hashes.side_effect = (
+    ctx.chunk_size = len(CHUNK_HASHES) * CHUNK_SIZE
+    token_hasher = ctx.layout_desc_registry.get_token_hasher.return_value
+    token_hasher.compute_packed_chunk_hashes.side_effect = (
         lambda _tokens, start=0, end=None: CHUNK_HASHES[
             start // CHUNK_SIZE : (end // CHUNK_SIZE if end is not None else None)
         ]
     )
-    session = Session("req-1", ctx.token_hasher)
+    session = Session("req-1", token_hasher)
     ctx.session_manager.get_or_create.return_value = session
     original = _key(None, start_chunks=1)
     session.begin_lookup(original)

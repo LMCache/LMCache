@@ -13,7 +13,7 @@ from typing import Callable
 import os
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.periodic_thread import (
     PeriodicThread,
     ThreadLevel,

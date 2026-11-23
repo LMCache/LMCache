@@ -102,8 +102,8 @@ after ``lmcache.mp.mq_timeout``).
    ``hostIPC: true`` / the shared ``/dev/shm`` mount (Kubernetes) can be
    dropped. The two containers only need access to the same GPUs and
    distinct PID *values* (any regular container setup provides both).
-   The Kubernetes :doc:`operator` wires isolated IPC by default on NVIDIA
-   (``spec.isolatedIPC``).
+   The Kubernetes :doc:`operator` (deprecated; expected to be removed in
+   2027Q1) wires isolated IPC by default on NVIDIA (``spec.isolatedIPC``).
 
 Current limitations:
 
@@ -137,7 +137,8 @@ Classic GPU Operator installs register RuntimeClass ``nvidia``. CDI+NRI
 installs often have no RuntimeClass objects. On those clusters omit
 ``runtimeClassName`` on the LMCache DaemonSet and request a management CDI
 device (see *GPU Operator NRI/CDI* below). The operator path is
-:ref:`mp-operator-nri-cdi`.
+:ref:`mp-operator-nri-cdi` (the operator is deprecated and expected to be
+removed in 2027Q1).
 
 Step-by-Step
 ~~~~~~~~~~~~
@@ -362,7 +363,7 @@ server offers workers one of two engine-driven transports:
 - **Typed inline** -- the fallback when no SHM pool is available.  Every KV
   chunk is serialised into the request message and copied through the
   ZMQ/gRPC request channel on each store and retrieve (and deserialised on the
-  other side).  It only exists so that the engine-driven path still works
+  other side), in messages of up to 128 MiB.  It only exists so that the engine-driven path still works
   where ``/dev/shm`` is unavailable (for example Docker without
   ``--ipc host``); it is not tuned for throughput.
 

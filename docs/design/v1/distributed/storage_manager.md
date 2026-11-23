@@ -152,10 +152,12 @@ path keeps the same dict in its pending-write table. Existing staging and
 stream ordering retain allocations. The owner tag is neither a lifetime pin
 nor a write generation and adds no stale-callback or crash-recovery guarantee.
 
-The owners are built inside the store's failure boundary before success is
-recorded. Invalid ownership skips admission and reports `MP_STORE_END` with
-zero stored objects. As with copy failures, staging reservations retain their
-write-TTL behavior because queued device writes can still reference the buffers.
+The LMCache-driven store captures owners after each reservation, inside its
+failure boundary. A copy or ownership failure skips admission and reports
+`MP_STORE_END` with zero stored objects. The stream queues `abort_write` for
+reservations whose owners were captured, releasing them only after queued GPU
+writes drain. If `l1_owners_of` raises, reservations without captured owners
+retain their write-TTL lifetime; they cannot be safely routed for an abort.
 
 `prepare_read_completion` and `finish_read_by_owner` (typed with
 `L1WriteCompletion`) are the read-side pair from before this design. They

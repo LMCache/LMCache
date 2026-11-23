@@ -141,9 +141,11 @@ def _make_free_locks_ctx(
     """
     ctx = MagicMock()
     ctx.get_read_owners.return_value = None
-    ctx.chunk_size = 256
-    ctx.token_hasher.chunk_size = 256
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    token_hasher = MagicMock()
+    token_hasher.chunk_size = 256
+    token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    ctx.layout_desc_registry.get_chunk_size.return_value = 256
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=windows, world_size=world_size
     )
@@ -286,7 +288,8 @@ def test_server_free_lookup_locks_floors_release_to_the_lookup_start():
     released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
     assert released == {(0, b"h2"), (0, b"h3")}
     # The range was floored before hashing: [512, 1024), not [0, 1024).
-    hash_call = ctx.token_hasher.compute_packed_chunk_hashes.call_args
+    token_hasher = ctx.layout_desc_registry.get_token_hasher.return_value
+    hash_call = token_hasher.compute_packed_chunk_hashes.call_args
     assert hash_call.kwargs["start"] == 512
 
 
@@ -318,7 +321,7 @@ def test_server_free_lookup_locks_extra_range_resolves_with_its_own_hit():
 
 def test_completed_streaming_lookup_does_not_mask_later_normal_release():
     ctx = _make_free_locks_ctx([b"h0"], windows=[-1], hit_chunks=1)
-    session = Session("req-sw", ctx.token_hasher)
+    session = Session("req-sw", ctx.layout_desc_registry.get_token_hasher.return_value)
     ctx.session_manager.get_or_create.return_value = session
     key = _free_locks_key(256, 0, 256)
     session.begin_lookup(key)
@@ -338,7 +341,7 @@ def test_completed_streaming_lookup_does_not_mask_later_normal_release():
 
 def test_abandoned_streaming_range_is_released_once_after_relookup():
     ctx = _make_free_locks_ctx([b"h0"], windows=[-1], hit_chunks=1)
-    session = Session("req-sw", ctx.token_hasher)
+    session = Session("req-sw", ctx.layout_desc_registry.get_token_hasher.return_value)
     ctx.session_manager.get_or_create.return_value = session
     key = _free_locks_key(256, 0, 256)
     obj = ipc_key_to_object_keys(key, [b"h0"], [0], DEFAULT_SHARD_REPLICATION_DESC)[0][
@@ -363,7 +366,7 @@ def test_abandoned_streaming_range_is_released_once_after_relookup():
 
 def test_identical_abandoned_streaming_ranges_release_in_lookup_order():
     ctx = _make_free_locks_ctx([b"h0"], windows=[-1], hit_chunks=1)
-    session = Session("req-sw", ctx.token_hasher)
+    session = Session("req-sw", ctx.layout_desc_registry.get_token_hasher.return_value)
     ctx.session_manager.get_or_create.return_value = session
     key = _free_locks_key(256, 0, 256)
     obj = ipc_key_to_object_keys(key, [b"h0"], [0], DEFAULT_SHARD_REPLICATION_DESC)[0][
@@ -393,7 +396,9 @@ def test_current_streaming_free_uses_current_owners_when_old_range_matches() -> 
     obj = ipc_key_to_object_keys(key, [b"h0"], [0], DEFAULT_SHARD_REPLICATION_DESC)[0][
         0
     ]
-    session = Session(key.request_id, ctx.token_hasher)
+    session = Session(
+        key.request_id, ctx.layout_desc_registry.get_token_hasher.return_value
+    )
     ctx.session_manager.get_or_create.return_value = session
     session.begin_lookup(_free_locks_key(512, 0, 256))
     session.add_streaming_range(0, 256, {})
@@ -419,7 +424,9 @@ def test_abandoned_streaming_free_releases_its_unfull_tail() -> None:
     tail = ipc_key_to_object_keys(
         old_key, [b"partial"], [0], DEFAULT_SHARD_REPLICATION_DESC
     )[0][0]
-    session = Session(old_key.request_id, ctx.token_hasher)
+    session = Session(
+        old_key.request_id, ctx.layout_desc_registry.get_token_hasher.return_value
+    )
     ctx.session_manager.get_or_create.return_value = session
     session.begin_lookup(old_key)
     session.add_streaming_range(256, 512, {})
@@ -439,7 +446,7 @@ def test_abandoned_streaming_free_releases_its_unfull_tail() -> None:
 
 def test_retrieved_streaming_range_is_retired_at_next_lookup():
     ctx = _make_free_locks_ctx([b"h0"], windows=[-1], hit_chunks=1)
-    session = Session("req-sw", ctx.token_hasher)
+    session = Session("req-sw", ctx.layout_desc_registry.get_token_hasher.return_value)
     key = _free_locks_key(256, 0, 256)
     session.begin_lookup(key)
     session.add_streaming_range(0, 256, {})
@@ -452,7 +459,7 @@ def test_retrieved_streaming_range_is_retired_at_next_lookup():
 
 def test_freeing_exact_abandoned_range_keeps_a_shorter_prior_range():
     ctx = _make_free_locks_ctx([b"h0", b"h1"], windows=[-1], hit_chunks=2)
-    session = Session("req-sw", ctx.token_hasher)
+    session = Session("req-sw", ctx.layout_desc_registry.get_token_hasher.return_value)
     key = _free_locks_key(512, 0, 512)
     session.begin_lookup(key)
     session.add_streaming_range(0, 256, {})
@@ -517,6 +524,7 @@ def test_server_free_lookup_locks_consumes_pending_result_first():
         row_windows=(-1,),
         request_id="req-sw",
         requested_tokens=768,
+        chunk_size=256,
     )
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
@@ -552,13 +560,16 @@ def test_server_free_lookup_locks_while_prefetch_running_releases_nothing():
         row_windows=(-1,),
         request_id="req-sw",
         requested_tokens=768,
+        chunk_size=256,
     )
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
 
     ctx.storage_manager.finish_read_prefetched.assert_not_called()
     assert "req-sw" in module._prefetch_jobs
-    ctx.session_manager.get_or_create.return_value.record_prefetch_result.assert_not_called()
+    (
+        ctx.session_manager.get_or_create.return_value.record_prefetch_result
+    ).assert_not_called()
 
 
 def test_server_free_lookup_locks_no_matching_chunks():

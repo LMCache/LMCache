@@ -11,7 +11,7 @@ the request span when ``session_id`` matches an open one.
 from __future__ import annotations
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 from lmcache.v1.mp_observability.subscribers.tracing.span_registry import SpanRegistry

@@ -78,6 +78,9 @@ class _FakeStorageManager:
     ) -> None:
         return None
 
+    def abort_write(self, keys: list[object], l1_owners: dict[object, int]) -> None:
+        return None
+
     def finish_read_by_owner(self, batch: list[tuple[int, list[object]]]) -> None:
         return None
 
