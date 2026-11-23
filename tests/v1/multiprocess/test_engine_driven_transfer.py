@@ -1773,6 +1773,13 @@ def test_prepare_retrieve_serves_each_group_window(
     assert kwargs["group_keys"] == [keys[0], keys[1][2:], keys[2][3:]]
     assert kwargs["group_first_chunk"] == [0, 2, 3]
 
+    # A page keeps the windows of the whole key and serves its slice of each.
+    module.prepare_retrieve(_default_key(tokens=64), 1, 1, 2)
+
+    kwargs = strategy.prepare_retrieve.call_args.kwargs
+    assert kwargs["group_keys"] == [keys[0][1:3], keys[1][2:3], []]
+    assert kwargs["group_first_chunk"] == [1, 2, 3]
+
 
 def test_prepare_store_validates_skipped_chunks(
     stub_lmcache_native: Any,
@@ -2016,6 +2023,187 @@ def test_server_publishes_transfer_events(
         assert end.metadata["engine_id"] == 2
         assert end.metadata["device"] == "cpu"
     assert events[1].metadata["transfer_key"] != events[4].metadata["transfer_key"]
+
+
+def test_server_pages_inline_store_and_retrieve(
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Each page touches only its chunks, and the transfer is observed once."""
+    keys = ["obj0", "obj1", "obj2"]
+    tensors = [torch.full((2, 2, 8, 16), float(i)) for i in range(3)]
+    objects = {}
+    for key_name in keys:
+        memory_obj = MagicMock()
+        memory_obj.tensor = torch.zeros(2, 2, 8, 16)
+        objects[key_name] = memory_obj
+    storage = MagicMock()
+    storage.reserve_write.side_effect = lambda obj_keys, _layout: {
+        k: objects[k] for k in obj_keys
+    }
+
+    @contextmanager
+    def read_prefetched(
+        obj_keys: list[str], l1_owners: object = None
+    ) -> Iterator[list[MagicMock]]:
+        yield [objects[k] for k in obj_keys]
+
+    storage.read_prefetched_results.side_effect = read_prefetched
+    module, _, _, ctx = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(),
+        object_keys=keys,
+        mock_storage=storage,
+    )
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=2)
+    )
+    key = _default_key(tokens=24)
+    events: list[Event] = []
+    with patch.object(ctx.event_bus, "publish", side_effect=events.append):
+        module.prepare_store(key, 2)
+        assert module.commit_store(key, 2, encode_tensors(tensors[:2]), 0, 2)
+        assert storage.reserve_write.call_args.args[0] == keys[:2]
+        assert EventType.MP_STORE_END not in [e.event_type for e in events]
+        assert module.commit_store(key, 2, encode_tensors(tensors[2:]), 2, 0)
+        assert storage.reserve_write.call_args.args[0] == keys[2:]
+
+        pages = [
+            module.prepare_retrieve(key, 2, 0, 2),
+            module.prepare_retrieve(key, 2, 2, 0),
+        ]
+        assert module.commit_retrieve(key, 2)
+    retrieved = [
+        chunk
+        for page, count in zip(pages, (2, 1), strict=True)
+        for chunk in decode_tensors(
+            page.data,
+            expected_shape=tensors[0].shape,
+            expected_dtype=tensors[0].dtype,
+            expected_count=count,
+        )
+    ]
+    assert all(torch.equal(a, b) for a, b in zip(retrieved, tensors, strict=True))
+    assert [event.event_type for event in events] == [
+        EventType.MP_STORE_SUBMITTED,
+        EventType.MP_STORE_START,
+        EventType.MP_STORE_END,
+        EventType.MP_RETRIEVE_SUBMITTED,
+        EventType.MP_RETRIEVE_START,
+        EventType.MP_RETRIEVE_END,
+    ]
+    assert events[2].metadata["stored_count"] == 3
+    assert events[5].metadata["retrieved_count"] == 3
+    with pytest.raises(ValueError, match="outside"):
+        module.commit_store(key, 2, b"", 2, 5)
+
+
+@pytest.mark.parametrize("failure", ["miss", "raise"])
+def test_server_failed_retrieve_page_releases_later_pages(
+    server_module_factory: ServerModuleFactory, failure: str
+) -> None:
+    """A failed page ends the retrieve and releases the pages the worker skips."""
+    keys = ["obj0", "obj1", "obj2"]
+    objects = {k: MagicMock(tensor=torch.zeros(2, 2, 8, 16)) for k in keys}
+    storage = MagicMock()
+
+    @contextmanager
+    def read_prefetched(
+        obj_keys: list[str], l1_owners: object = None
+    ) -> Iterator[list[MagicMock] | None]:
+        if obj_keys == ["obj1"]:
+            if failure == "raise":
+                raise RuntimeError("read failed")
+            yield None
+            return
+        yield [objects[k] for k in obj_keys]
+
+    storage.read_prefetched_results.side_effect = read_prefetched
+    module, _, _, ctx = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(),
+        object_keys=keys,
+        mock_storage=storage,
+    )
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=2)
+    )
+    key = _default_key(tokens=24)
+    events: list[Event] = []
+    with patch.object(ctx.event_bus, "publish", side_effect=events.append):
+        assert module.prepare_retrieve(key, 2, 0, 1).success
+        if failure == "raise":
+            with pytest.raises(RuntimeError):
+                module.prepare_retrieve(key, 2, 1, 1)
+        else:
+            assert not module.prepare_retrieve(key, 2, 1, 1).success
+    released = [c.args[0] for c in storage.finish_read_prefetched.call_args_list]
+    assert released == [["obj0"], ["obj2"]]
+    assert [event.event_type for event in events] == [
+        EventType.MP_RETRIEVE_SUBMITTED,
+        EventType.MP_RETRIEVE_START,
+        EventType.MP_RETRIEVE_END,
+    ]
+    assert events[-1].metadata["retrieved_count"] == 0
+
+
+def test_server_page_without_inline_data_releases_later_pages(
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """An SHM server's answer to an inline worker's first page ends the retrieve."""
+    keys = ["obj0", "obj1", "obj2"]
+    storage = MagicMock()
+    module, _, _, _ = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(),
+        object_keys=keys,
+        mock_storage=storage,
+    )
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=2)
+    )
+    _, strategy = module._resolve_for_transfer(2)
+    shm_answer = PrepareRetrieveResponse(success=True, data=b"", context={})
+    with patch.object(strategy, "prepare_retrieve", return_value=shm_answer):
+        module.prepare_retrieve(_default_key(tokens=24), 2, 0, 1)
+    released = [c.args[0] for c in storage.finish_read_prefetched.call_args_list]
+    assert released == [["obj1", "obj2"]]
+
+
+@pytest.mark.parametrize("pages_read", [1, 3])
+def test_server_commit_after_failed_retrieve_records_failure(
+    server_module_factory: ServerModuleFactory, pages_read: int
+) -> None:
+    """A worker that fails after a page the server served, e.g. on a timeout,
+    leaves no read lock on the unread pages and the retrieve counts as failed."""
+    keys = ["obj0", "obj1", "obj2"]
+    objects = {k: MagicMock(tensor=torch.zeros(2, 2, 8, 16)) for k in keys}
+    storage = MagicMock()
+
+    @contextmanager
+    def read_prefetched(
+        obj_keys: list[str], l1_owners: object = None
+    ) -> Iterator[list[MagicMock]]:
+        yield [objects[k] for k in obj_keys]
+
+    storage.read_prefetched_results.side_effect = read_prefetched
+    module, _, _, ctx = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(),
+        object_keys=keys,
+        mock_storage=storage,
+    )
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=2)
+    )
+    key = _default_key(tokens=24)
+    events: list[Event] = []
+    with patch.object(ctx.event_bus, "publish", side_effect=events.append):
+        for page in range(pages_read):
+            assert module.prepare_retrieve(key, 2, page, 1 if page < 2 else 0).success
+        assert not module.commit_retrieve(key, 2, True)
+    released = [c.args[0] for c in storage.finish_read_prefetched.call_args_list]
+    if pages_read == 1:
+        assert released == [["obj0"], ["obj1", "obj2"]]
+    else:
+        assert released == [["obj0"], ["obj1"], ["obj2"]]
+    assert events[-1].event_type == EventType.MP_RETRIEVE_END
+    assert events[-1].metadata["retrieved_count"] == 0
 
 
 @pytest.mark.parametrize("finish", ["invalid_commit", "unregister", "reap", "close"])

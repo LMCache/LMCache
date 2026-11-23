@@ -302,6 +302,25 @@ def test_missing_periodic_notifier_unwinds_before_the_region_hook() -> None:
     context.get_transfer_channel_client.assert_not_called()
 
 
+def test_close_after_notifier_shutdown_skips_the_stale_notifier() -> None:
+    """Once the notifier is shut down, close does not use the handle saved at
+    registration, which would point at freed native memory."""
+    stale = MagicMock()
+    with (
+        patch.object(p2p_mod, "P2PClient", return_value=MagicMock(spec=P2PClient)),
+        patch.object(p2p_mod, "get_transfer_channel_context", return_value=MagicMock()),
+        patch.object(p2p_mod, "PeriodicEventNotifier") as periodic,
+    ):
+        periodic.get.return_value = stale
+        adapter = P2PL2Adapter(P2PL2AdapterConfig("grpc://peer:9555", "peer:7600"))
+        assert stale.register_fd.called
+        periodic.get.return_value = None
+
+        adapter.close()
+
+    stale.unregister_fd.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Base-class contract through a minimal subclass
 # ---------------------------------------------------------------------------

@@ -59,6 +59,7 @@ def _serve(port: int) -> None:
         mp_config=MPServerConfig(
             host="127.0.0.1",
             port=port,
+            transport="grpc",
             chunk_size=CHUNK,
             null_block_id=-1,
             separate_object_groups=True,
@@ -85,7 +86,7 @@ def native_client() -> Generator[RequestClient, None, None]:
     process = mp.get_context("spawn").Process(target=_serve, args=(port,), daemon=True)
     process.start()
     context = zmq.Context()
-    client = RequestClientFactory.create(f"tcp://127.0.0.1:{port}", context=context)
+    client = RequestClientFactory.create(f"grpc://127.0.0.1:{port}", context=context)
     try:
         deadline = time.monotonic() + TIMEOUT
         while time.monotonic() < deadline:

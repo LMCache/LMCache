@@ -26,7 +26,7 @@ from typing import cast
 import threading
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import ModuleMemoryCapacity, Tier
 from lmcache.v1.mp_coordinator.api import CacheEventBatch, CacheEventType
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
