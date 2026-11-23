@@ -298,6 +298,7 @@ def _connector(lookup_hit: int) -> tuple[LMCacheMPConnector, MagicMock]:
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = True
     connector._save_unfull_chunk = True
+    connector._ring_group_ids = frozenset()
     connector._hit_alignment_tokens = 16
     connector._unfull_chunk_grid = GRID
     connector._connector_stats = MagicMock()

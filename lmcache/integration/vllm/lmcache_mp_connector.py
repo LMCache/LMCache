@@ -932,6 +932,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if kv_cache_config is not None
             else []
         )
+        # Per-request rings travel only with unfull chunks (the worker adds
+        # them from its registration hints).
+        self._ring_group_ids = frozenset(
+            engine_group_idx
+            for engine_group_idx, group in enumerate(
+                kv_cache_config.kv_cache_groups if kv_cache_config is not None else ()
+            )
+            if self._save_unfull_chunk and is_per_request_ring_group(group)
+        )
         # Grid of unfull-chunk boundaries: boundary-state offloads lie on vLLM's
         # prefix-cache hash grid; otherwise prefix-cache hits land on the
         # scheduler block.
@@ -1988,6 +1997,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request_tracker,
                 lmcache_tokens_per_chunk,
                 group_tokens_per_block=self._group_tokens_per_block,
+                ring_group_ids=self._ring_group_ids,
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)
@@ -2283,6 +2293,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._unfull_chunk_grid,
             boundary_state_blocks,
             self._boundary_state_groups,
+            self._ring_group_ids,
         ):
             if pool is not None and boundary_state_block_ids:
                 pool.touch(

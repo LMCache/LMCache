@@ -466,6 +466,7 @@ class LMCacheMPRequestMetadata:
         tail_grid_tokens: int,
         boundary_state_blocks: Mapping[int, Mapping[int, int]],
         boundary_state_groups: Collection[int],
+        ring_group_ids: Collection[int] = (),
     ) -> list[tuple["LMCacheMPRequestMetadata", list[int]]]:
         """Generate store metadata for the prompt's newly storable unfull chunks.
 
@@ -503,6 +504,8 @@ class LMCacheMPRequestMetadata:
                 ``{boundary token: {engine group: block id}}``.
             boundary_state_groups: Engine groups whose state at a grid
                 boundary must come from ``boundary_state_blocks``.
+            ring_group_ids: Engine groups that are per-request rings; each
+                tail carries their blocks.
 
         Returns:
             One ``(metadata, boundary-state block IDs it reads)`` pair per newly
@@ -559,6 +562,7 @@ class LMCacheMPRequestMetadata:
                 chunk_start,
                 boundary,
                 include_unfull_chunk=True,
+                ring_group_ids=ring_group_ids,
             )
             if boundary_state_block_ids:
                 for group, block_id in zip(
@@ -590,6 +594,7 @@ class LMCacheMPRequestMetadata:
         tracker: LMCacheMPRequestTracker,
         lmcache_tokens_per_chunk: int,
         group_tokens_per_block: list[int],
+        ring_group_ids: Collection[int] = (),
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the retrieve metadata for the current request tracker.
@@ -602,6 +607,8 @@ class LMCacheMPRequestMetadata:
                 KV cache spec ``block_size``. Must each divide
                 ``lmcache_tokens_per_chunk`` (hybrid models can mix different
                 values); ``0`` marks a scratch group that is never retrieved.
+            ring_group_ids: Engine groups that are per-request rings; a hit
+                ending with an unfull chunk carries their blocks.
 
         Note:
             A hit that does not end on a chunk boundary ends with the unfull
@@ -633,6 +640,7 @@ class LMCacheMPRequestMetadata:
                 start_token_idx,
                 end_token_idx,
                 include_unfull_chunk=include_unfull_chunk,
+                ring_group_ids=ring_group_ids,
             )
             token_bytes = tracker.packed_token_ids()
 

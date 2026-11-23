@@ -117,7 +117,7 @@ Server:
 | `LookupModule.query_prefetch_status` / `wait_prefetch_status` / `free_lookup_locks` | Token reply and tail release as above. |
 | `LayoutDescRegistry.register` | New argument `group_unfull_chunk_layout_descs`. New `find_group_unfull_chunk_layout_descs()`, which falls back to the full-chunk layouts. |
 | `StorageManager` | `reserve_write` gets `is_temporary: bool = False`. |
-| `group_view.slice_block_ids_per_group` | New keyword `include_unfull_chunk`: `end` may be unaligned, and the slice keeps the block holding the last token (ceil instead of floor). A scratch group then keeps all its blocks (a ring's one block). |
+| `common.group_view.slice_block_ids_per_group` | New keyword `include_unfull_chunk`: `end` may be unaligned, and the slice keeps the block holding the last token (ceil instead of floor). New keyword `ring_group_ids`: with `include_unfull_chunk`, those scratch groups keep all their blocks (a ring's one block); other scratch groups stay empty. |
 | `KVLayerGroupsManager` | New argument `per_request_ring_hints` and property `per_request_ring_groups` (`PerRequestRingGroup`: engine group, layer tensors, `page_bytes`). |
 | `BaseCacheContext` (CPU, CUDA, NPU, MUSA) | New `get_temp_staging_buffer(num_bytes)`: the start of the transfer staging buffer as one flat region (GDS-registered where the buffer is), or `None` if the buffer is smaller. Tail objects with a lead block stage there. |
 | `object_group_transfer` | New functions: `has_unfull_chunk_lead_block`, `get_unfull_chunk_layout_desc`, `get_unfull_chunk_ring_groups`, `trim_and_stage_unfull_chunk_block_ids`, `get_unfull_chunk_staging_buffer`, `transfer_unfull_chunk`, `split_unfull_chunk_block_ids`. The CUDA copy kernel is **unchanged**. |
@@ -375,7 +375,7 @@ r = 2, exact tail B = P = 301
   `pos % capacity`, so the same model config on both sides puts every row
   in its slot. The decode recomputes token `P - 1` and rewrites its row with
   the same value.
-- **Block IDs**: the connector slices a scratch group's blocks only for a
+- **Block IDs**: the connector slices a ring group's blocks only for a
   range ending with a tail; the worker appends the groups named in
   `per_request_ring_hints` after the KV groups' lists; the server splits
   them off before the tail's block fitting.
