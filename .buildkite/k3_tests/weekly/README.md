@@ -8,7 +8,7 @@ commits.
 | | |
 |---|---|
 | Workflow | [`.github/workflows/weekly_full_build.yml`](../../../.github/workflows/weekly_full_build.yml) |
-| Schedule | Sunday 08:00 UTC, plus manual runs (**Actions → Weekly full build → Run workflow**, from `dev`) |
+| Schedule | Manual runs first (**Actions → Weekly full build → Run workflow**, from `dev`); `schedule` (`Sunday 08:00 UTC`) is commented out until initial runs are validated |
 | Gate | [`.github/scripts/weekly_full_build.py`](../../../.github/scripts/weekly_full_build.py) |
 | What must run | [`manifest.json`](manifest.json) |
 | Results | The workflow run: its summary links every Buildkite build; artifact `weekly-full-build-<n>` keeps `report.json`, `summary.md` and failed-job logs for 90 days |
