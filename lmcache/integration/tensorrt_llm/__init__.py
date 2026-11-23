@@ -29,7 +29,7 @@ Two modes are supported:
 
         kv_connector_config:
           connector: lmcache-mp
-          server_url: tcp://localhost:5555
+          server_url: grpc://localhost:5555
 
 Both modes can also be configured explicitly instead of via presets::
 

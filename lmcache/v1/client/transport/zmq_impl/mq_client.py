@@ -498,8 +498,7 @@ class MessageQueueClient:
                 host, port = self._peer
                 self._wrong_transport = (
                     f"The server at {self._server_url} speaks gRPC, not ZMQ. Use "
-                    f"grpc://{host}:{port}, or start the server with "
-                    "--transport zmq."
+                    f"grpc://{host}:{port}; the zmq transport is deprecated."
                 )
                 logger.error("%s", self._wrong_transport)
             self.cancel_streams(release)

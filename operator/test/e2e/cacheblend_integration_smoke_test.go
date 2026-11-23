@@ -143,11 +143,11 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 		enginePod, err := utils.WaitDaemonSetPodReady(ctx, k8sClient, key, 8*time.Minute)
 		Expect(err).NotTo(HaveOccurred(), "CacheBlend engine pod did not become Ready")
 
-		By("verifying the blend engine logged its ZMQ listening line")
+		By("verifying the blend engine logged its listening line")
 		Eventually(func() int {
 			return countLogLines(ctx, nsName, enginePod, cbServerListeningLine)
 		}, 60*time.Second, 2*time.Second).Should(BeNumerically(">=", 1),
-			"blend engine never logged 'LMCache ZMQ cache server is running' — server did not bind")
+			"blend engine never logged 'LMCache <transport> cache server is running'; server did not bind")
 
 		By("applying the vLLM Deployment that opts into CacheBlend injection")
 		vllmRaw, err := utils.LoadFixture("vllm_cacheblend_deployment.yaml")
@@ -218,8 +218,8 @@ var _ = Describe("vLLM + CacheBlendEngine integration smoke (GPU)", Ordered, fun
 })
 
 // cbServerListeningLine matches the blend engine's "server is listening" INFO
-// line (server.py), proving the lmcache server bound its ZMQ socket.
-var cbServerListeningLine = regexp.MustCompile(`LMCache ZMQ cache server is running`)
+// line (server.py), proving the lmcache server bound its request socket.
+var cbServerListeningLine = regexp.MustCompile(`LMCache (?i:zmq|grpc) cache server is running`)
 
 // cbRopeRegisteredLine matches the engine-side log emitted by
 // BlendModule.cb_register_rope on every CB_REGISTER_ROPE message

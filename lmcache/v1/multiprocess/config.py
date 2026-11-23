@@ -40,8 +40,8 @@ class _DeprecatedStoreTrue(argparse.Action):
 class MPServerConfig:
     """Configuration for the multiprocess cache server."""
 
-    transport: Literal["zmq", "grpc"] = "zmq"
-    """Request transport exposed by the cache server."""
+    transport: Literal["zmq", "grpc"] = "grpc"
+    """Request transport exposed by the cache server. ZMQ is deprecated."""
 
     host: str = "localhost"
     """Request server host."""
@@ -438,8 +438,9 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--transport",
         choices=("zmq", "grpc"),
-        default="zmq",
-        help="Request transport exposed by the cache server. Default is zmq.",
+        default="grpc",
+        help="Request transport exposed by the cache server. Default is grpc. "
+        "zmq is deprecated and will be removed in a future release.",
     )
     mp_group.add_argument(
         "--host",

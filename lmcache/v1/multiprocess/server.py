@@ -72,6 +72,7 @@ from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.ipc_policy import set_isolated_ipc
+from lmcache.v1.transport.zmq import ZMQ_MIGRATION_DOC_URL
 
 if TYPE_CHECKING:
     # First Party
@@ -486,6 +487,13 @@ def _start_cache_server(
         InitializeL1Usage(event_bus, ctx.storage_manager)
 
         transport = mp_config.transport
+        if transport == "zmq":
+            logger.warning(
+                "The zmq request transport is deprecated and will be removed "
+                "in a future release. Start the server with --transport grpc "
+                "and point clients at grpc://host:port. See %s",
+                ZMQ_MIGRATION_DOC_URL,
+            )
         server: RequestServer = create_request_server(
             modules_for_service(components.modules, "worker"),
             mp_config,

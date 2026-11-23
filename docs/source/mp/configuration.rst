@@ -70,7 +70,7 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--transport``
      - ``grpc``
      - Request transport exposed by the server. Choices: ``grpc`` or ``zmq``.
-       ``zmq`` is deprecated and removed in the next release; see
+       ``zmq`` is deprecated and will be removed in a future release; see
        :ref:`mp-migrating-from-zmq`.
    * - ``--instance-id``
      - *(unset, default UUID v4)*
@@ -904,7 +904,7 @@ data parallelism (``dp_size > 1``) are rejected with a clear error.
     vllm serve Qwen/Qwen3-14B \
         --tensor-parallel-size 4 \
         --kv-transfer-config \
-        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.server_urls": "tcp://host1:6667,tcp://host2:6667"}}'
+        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.server_urls": "grpc://host1:6667,grpc://host2:6667"}}'
 
 LoRA adapters
 ~~~~~~~~~~~~~
@@ -1062,7 +1062,7 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
      - *(unset)*
      - Multi-server deployment: list (or comma-separated string) of
        ``<transport>://<host>:<port>`` URLs, e.g.
-       ``"tcp://host1:6667,tcp://host2:6667"``. The transport prefix
+       ``"grpc://host1:6667,grpc://host2:6667"``. The transport prefix
        may be omitted -- bare ``host:port`` entries such as
        ``"host1:6667,host2:6667"`` are normalized to ``grpc://`` by the
        connector. When set, takes precedence over ``lmcache.mp.host`` /
@@ -1070,7 +1070,7 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        number of servers, and each worker connects to its
        locally-assigned server.
    * - ``lmcache.mp.host``
-     - ``tcp://localhost``
+     - ``grpc://localhost``
      - Single-server deployment: request transport and host of the LMCache MP
        server. Use ``grpc://`` for gRPC (default) or ``tcp://`` for ZMQ. A
        bare ``localhost`` / ``127.0.0.1`` is normalized to ``grpc://`` by the
