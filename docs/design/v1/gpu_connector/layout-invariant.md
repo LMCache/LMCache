@@ -6,7 +6,7 @@
 > KV-cache layout.** It also returns the canonical (post-permute) form
 > of the kv_caches alongside the format, so callers never need a
 > separate normalization step. Every other module queries KV-cache
-> information via helpers in `lmcache/v1/gpu_connector/utils.py` that
+> information via helpers in `lmcache/v1/common/utils.py` that
 > accept an `EngineKVFormat` argument.
 
 "Layout parsing" means: list-nesting depth, tensor-dimension ordering,
@@ -31,7 +31,7 @@ are responsible for unwrapping to this form before calling any helper.
 
 ## Package structure
 
-The layout logic lives in `lmcache/v1/gpu_connector/kv_format/`. The
+The layout logic lives in `lmcache/v1/common/kv_format/`. The
 public `utils.py` helpers below are a thin **facade** that delegates
 into it, so the single-source-of-truth surface is unchanged for callers.
 

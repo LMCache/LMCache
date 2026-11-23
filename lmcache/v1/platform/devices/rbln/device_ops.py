@@ -47,7 +47,7 @@ from typing import ClassVar, cast
 import torch
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.devices.rbln.kv_layout import (
     squeeze_singleton_axis,
@@ -122,8 +122,8 @@ class RblnDeviceOps(DeviceOps):
         # ``lmcache.device_ops`` -- still being resolved to this module while
         # ``lmcache`` initializes on an RBLN host (an ImportError otherwise).
         # First Party
-        from lmcache.v1.gpu_connector.kv_format.specs.base import describe_shape
-        from lmcache.v1.gpu_connector.kv_format.specs.registry import (
+        from lmcache.v1.common.kv_format.specs.base import describe_shape
+        from lmcache.v1.common.kv_format.specs.registry import (
             get_spec_class,
         )
 

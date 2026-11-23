@@ -19,7 +19,7 @@ from queue import Empty, Queue
 import threading
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.mp_coordinator.api import BlendMatch, BlendNamespace
 from lmcache.v1.mp_coordinator.schemas import encode_tokens
 
@@ -212,6 +212,7 @@ class BlendCoordinatorClient:
                     "model_name": item.namespace.model_name,
                     "cache_salt": item.namespace.cache_salt,
                     "world_size": item.namespace.world_size,
+                    "tags": dict(item.namespace.tags),
                 },
             )
             matches = [

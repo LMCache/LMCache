@@ -20,7 +20,7 @@ import httpx
 import msgspec
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import EncodedObjectKey, Tier
 from lmcache.v1.distributed.eviction import EvictionPolicy
 from lmcache.v1.distributed.eviction_policy.isolated_lru import (
@@ -37,6 +37,7 @@ from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
 )
+from lmcache.v1.mp_coordinator.utils.http import instance_url
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 from lmcache.v1.multiprocess.cache_control.object_service import (
@@ -435,7 +436,7 @@ class FleetEvictionController(Controller):
             )
             return plan
 
-        url = f"http://{target.ip}:{target.http_port}/cache/objects"
+        url = instance_url(target, "/cache/objects")
         all_keys: list[ObjectKey] = [k for keys in plan.values() for k in keys]
 
         for start in range(0, len(all_keys), MAX_DELETE_BATCH):

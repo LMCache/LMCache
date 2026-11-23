@@ -26,7 +26,7 @@ import weakref
 import torch
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform.base.ipc_wire import CpuShmIPCData, WireIPCData
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.posix_shm import (
@@ -309,7 +309,7 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
     register-time ``wrap_kv_caches`` loop wraps sequentially.
     """
     # First Party
-    from lmcache.v1.gpu_connector.kv_format.contiguity import (
+    from lmcache.v1.common.kv_format.contiguity import (
         attempt_permute_to_contiguous_view,
     )
 

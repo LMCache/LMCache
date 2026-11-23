@@ -249,6 +249,9 @@ func TestBuildContainerArgs_Defaults(t *testing.T) {
 
 	assertArg(t, args, "--host", "0.0.0.0")
 	assertArg(t, args, "--port", "5555")
+	// The operator hands vLLM a tcp:// host, so the server must keep serving
+	// ZMQ explicitly rather than following the server default (issue #6735).
+	assertArg(t, args, "--transport", "zmq")
 	assertArg(t, args, "--l1-size-gb", "10.0")
 	assertArg(t, args, "--chunk-size", "256")
 	assertArg(t, args, "--max-workers", "1")
@@ -550,14 +553,14 @@ func TestBuildContainerArgs_L2CustomPolicies(t *testing.T) {
 				Port: 6379,
 			},
 			StorePolicy:         ptr("skip_l1"),
-			PrefetchPolicy:      ptr("default"),
+			PrefetchPolicy:      ptr("skip_l1"),
 			PrefetchMaxInFlight: ptr(int32(16)),
 		},
 	}
 	args := BuildContainerArgs(spec)
 
 	assertArg(t, args, "--l2-store-policy", "skip_l1")
-	assertArg(t, args, "--l2-prefetch-policy", "default")
+	assertArg(t, args, "--l2-prefetch-policy", "skip_l1")
 	assertArg(t, args, "--l2-prefetch-max-in-flight", "16")
 }
 

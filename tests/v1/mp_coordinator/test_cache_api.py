@@ -154,6 +154,19 @@ def _resolve(
     return keys
 
 
+def _wire_key(key: ObjectKey) -> dict:
+    """A key's JSON wire form, as the pin listing returns it."""
+    encoded = key.to_encoded_object_key()
+    return {
+        "chunk_hash_hex": encoded.chunk_hash_hex,
+        "model_name": encoded.model_name,
+        "kv_rank": encoded.kv_rank,
+        "object_group_id": encoded.object_group_id,
+        "cache_salt": encoded.cache_salt,
+        "tags": dict(encoded.tags),
+    }
+
+
 def test_pin_then_unpin_tracks_l2_eviction():
     """Pin excludes the resolved keys from L2 eviction; unpin restores them."""
     with _pin_client() as client:
@@ -246,6 +259,50 @@ def test_pin_and_unpin_select_only_the_requested_tags():
         response = client.request("DELETE", "/cache/pins", json=_pin_body(tags=tags_a))
         assert response.json()["affected"] == 2
         assert client.get("/cache/pins").json()["total"] == 0
+
+
+def test_pin_by_keys_pins_only_the_named_mid_prompt_chunk():
+    """The keys form pins exactly the keys given -- here the second chunk of
+    a prompt without its prefix chunk -- and unpin by keys releases them."""
+    with _pin_client() as client:
+        ctx = client.app.state.ctx
+        second_chunk = _resolve(ctx)[1]
+        body = {"keys": [_wire_key(second_chunk)]}
+
+        resp = client.post("/cache/pins", json=body)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"requested": 1, "affected": 1, "status": "pinned"}
+        pins = client.get("/cache/pins").json()["pins"]
+        assert [p["key"]["chunk_hash_hex"] for p in pins] == [
+            second_chunk.chunk_hash.hex()
+        ]
+
+        resp = client.request("DELETE", "/cache/pins", json=body)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"requested": 1, "affected": 1, "status": "unpinned"}
+        assert client.get("/cache/pins").json() == {"total": 0, "pins": []}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"model_name": "m", "world_size": 1}, id="neither-form"),
+        pytest.param({"token_ids": [1, 2, 3, 4]}, id="tokens-without-model"),
+        pytest.param("both-forms", id="both-forms"),
+    ],
+)
+def test_pin_rejects_request_without_exactly_one_form(body: dict | str):
+    """A pin body must carry exactly one of keys / token_ids, and the tokens
+    form needs a model_name; anything else is a 422."""
+    with _pin_client() as client:
+        if body == "both-forms":
+            key = _resolve(client.app.state.ctx)[0]
+            body = {
+                **_pin_body(),
+                "keys": [_wire_key(key)],
+            }
+        assert client.post("/cache/pins", json=body).status_code == 422
+        assert client.request("DELETE", "/cache/pins", json=body).status_code == 422
 
 
 def test_list_pins_empty_table():

@@ -36,7 +36,8 @@ format:
   ext-encoded types — adding a parallel class with its own ext code
   would force a wider decoder type and break either round-trip or the
   existing `DeviceIPCWrapper` consumers.
-- The customized serializer (`_CUSTOMERIZED_SERIALIZERS`) is keyed on
+- The customized serializer (`_CUSTOMERIZED_SERIALIZERS` in
+  `lmcache/v1/transport/zmq/codec.py`) is keyed on
   `DeviceIPCWrapper` and dispatched by `isinstance`, so every subclass
   instance encodes through the same path with **ext code 1**.
 - `Serialize` emits an explicit, versioned descriptor tag. On the receiving
@@ -51,7 +52,7 @@ concrete wrappers, and `to_tensor()` does the right thing.
 ## Sender-side validation
 
 `RawCudaIPCWrapper.__init__` calls `assert_contiguous` (from
-`gpu_connector/utils.py`) instead of permuting. TRT-LLM allocates the
+`common/utils.py`) instead of permuting. TRT-LLM allocates the
 pool contiguously, so the only valid recovery from a non-contiguous
 input is "the sender did something wrong" — surface it loudly rather
 than silently `.contiguous()`-ing and copying GBs of KV cache.

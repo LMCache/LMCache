@@ -20,12 +20,12 @@ import zlib
 import torch
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     TORCH_DTYPE_TO_STR_DTYPE,
     DiskCacheMetadata,
 )
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.l2_adapters.raw_block.io_engine import (
     DEFAULT_IOURING_QUEUE_DEPTH,
     IoUringBlockIOConfig,
@@ -38,10 +38,8 @@ from lmcache.v1.distributed.l2_adapters.raw_block.io_engine import (
     normalize_raw_block_placement_ids,
 )
 from lmcache.v1.distributed.l2_adapters.raw_block.key_codec import (
-    RawBlockKeyNamespace,
     RawBlockKeySpec,
-    decode_legacy_key,
-    slot_identity_from_encoded_key,
+    object_key_slot_identity,
 )
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 
@@ -71,6 +69,22 @@ def round_up(x: int, align: int) -> int:
         ``x`` rounded up to a multiple of ``align``.
     """
     return ((x + align - 1) // align) * align
+
+
+def _allocation_span_bytes(memory_obj: MemoryObj) -> int:
+    """Return how many bytes the object's allocation spans from its data start.
+
+    Args:
+        memory_obj: Memory object whose tensor starts at its data pointer.
+
+    Returns:
+        The smaller of the backing tensor size and the physical size, or 0 when
+        the object has no local tensor.
+    """
+    tensor = memory_obj.raw_tensor
+    if tensor is None:
+        return 0
+    return min(tensor.nbytes, memory_obj.get_physical_size())
 
 
 @dataclass(frozen=True)
@@ -124,23 +138,17 @@ class RawBlockPutManyResult:
 
 class RawBlockCore:
     """
-    Shared raw-block storage engine used by both legacy non-MP and MP L2 paths.
+    Raw-block storage engine for the distributed L2 path.
 
     This class owns the raw-device I/O path, slot allocation, checkpoint/recovery,
     and lock refcounts that protect slots from deletion while in use.
     """
 
-    def __init__(
-        self,
-        config: RawBlockCoreConfig,
-        *,
-        key_namespace: RawBlockKeyNamespace,
-    ):
+    def __init__(self, config: RawBlockCoreConfig):
         """Initialize the raw-block storage engine.
 
         Args:
             config: Raw-block device, layout, I/O, and checkpoint settings.
-            key_namespace: Encoding namespace used by keys stored in this core.
 
         Raises:
             ValueError: If the supplied configuration is invalid.
@@ -184,8 +192,6 @@ class RawBlockCore:
                 "io_engine='io_uring' and use_uring_cmd=true"
             )
         self._recovery_read_threads = DEFAULT_RECOVERY_READ_THREADS
-        self.key_namespace = key_namespace
-
         if not self.device_path:
             raise ValueError("RawBlockCore requires a non-empty device_path")
         if self.block_align <= 0 or (self.block_align & (self.block_align - 1)) != 0:
@@ -554,6 +560,11 @@ class RawBlockCore:
         Batches are bounded, so a request larger than one batch can leave
         earlier batches committed while a later one rolls back.
 
+        With ``io_engine='io_uring'`` and zero-copy enabled, a payload that is
+        not block-aligned is written straight from its allocation: the padding
+        after the logical payload, up to the next block boundary, is zeroed in
+        place. The logical payload is unchanged.
+
         Args:
             keys: Ordered raw-block key specs corresponding to ``objs``.
             objs: Memory objects whose byte buffers should be written.
@@ -685,6 +696,10 @@ class RawBlockCore:
         objs: Sequence[MemoryObj],
     ) -> list[bool]:
         """Load raw-block payloads into caller-provided memory objects.
+
+        With zero-copy enabled, a read may fill the destination up to the
+        block-aligned end of the stored payload, including allocation padding
+        beyond the logical destination.
 
         Args:
             encoded_keys: Ordered encoded raw-block keys to load.
@@ -909,7 +924,6 @@ class RawBlockCore:
                 "is_healthy": not self._closed and worker_error is None,
                 "worker_error": worker_error,
                 "type": "RawBlockCore",
-                "key_namespace": self.key_namespace,
                 "device_path": self.device_path,
                 "block_align": self.block_align,
                 "header_bytes": self.header_bytes,
@@ -987,20 +1001,29 @@ class RawBlockCore:
         *,
         zero_tail: bool,
     ) -> Optional[memoryview]:
-        """Build an aligned memoryview for direct O_DIRECT I/O when possible.
+        """Build an aligned memoryview for direct block-aligned I/O when possible.
+
+        With ``io_engine='io_uring'`` (regular or io_uring_cmd), the view of a
+        padded payload extends into the object's physical allocation when that
+        allocation covers ``total_len``, so the transfer needs no bounce
+        buffer. ``[payload_len, total_len)`` is then zeroed in place when
+        ``zero_tail`` is true; the logical payload is unchanged.
 
         Args:
             memory_obj: Memory object whose backing allocation may be aligned.
             payload_len: Logical payload length in bytes.
-            total_len: I/O length after any O_DIRECT padding.
-            buffer_len: Available buffer length in bytes.
+            total_len: I/O length after block-alignment padding.
+            buffer_len: Logical buffer length exposed by the caller.
             zero_tail: Whether to zero any padded tail bytes before writing.
 
         Returns:
             A direct memoryview over the allocation, or None when the memory
             object is unsuitable for direct I/O.
         """
-        if not self.use_odirect or not self.enable_zero_copy:
+        if not self._requires_transfer_alignment or not self.enable_zero_copy:
+            return None
+        if self.use_uring_cmd and buffer_len >= total_len:
+            # io_uring_cmd already submits a full-length logical buffer as is.
             return None
 
         ptr_val = getattr(memory_obj, "data_ptr", None)
@@ -1019,6 +1042,14 @@ class RawBlockCore:
             return None
         if buffer_len < payload_len:
             return None
+        # POSIX already writes the aligned prefix directly and pads only the
+        # tail, so only io_uring gains from reaching into the allocation.
+        if (
+            buffer_len < total_len
+            and self.io_engine == "io_uring"
+            and _allocation_span_bytes(memory_obj) >= total_len
+        ):
+            buffer_len = total_len
 
         view_len = min(buffer_len, total_len)
         if view_len < payload_len:
@@ -1073,9 +1104,9 @@ class RawBlockCore:
                     f"Aligned payload {total_len} exceeds slot capacity "
                     f"{payload_capacity}"
                 )
-            # byte_array exposes only payload_len bytes, so a padded payload
-            # reaches the Rust write path shorter than total_len and is bounced
-            # there, which also zeroes [payload_len, total_len).
+            # byte_array exposes only payload_len bytes. Without a direct view
+            # covering total_len, the I/O engine bounces the payload and zeroes
+            # [payload_len, total_len) in its own buffer.
             direct_view = self._build_direct_odirect_view(
                 memory_obj=memory_obj,
                 payload_len=payload_len,
@@ -1940,10 +1971,7 @@ class RawBlockCore:
                         if cached_positions_list is not None
                         else None
                     )
-                    dtype = self._recover_checkpoint_dtype(
-                        str(encoded_key),
-                        dtype_name,
-                    )
+                    dtype = self._recover_checkpoint_dtype(dtype_name)
 
                     meta = DiskCacheMetadata(
                         path=f"{self.device_path}@{offset}",
@@ -1978,13 +2006,11 @@ class RawBlockCore:
 
     def _recover_checkpoint_dtype(
         self,
-        encoded_key: str,
         dtype_name: Any,
     ) -> torch.dtype | None:
-        """Recover checkpoint dtype from entry metadata or legacy key strings.
+        """Recover checkpoint dtype from entry metadata.
 
         Args:
-            encoded_key: Encoded raw-block key from the checkpoint entry.
             dtype_name: Raw dtype value stored in the checkpoint entry.
 
         Returns:
@@ -2005,18 +2031,7 @@ class RawBlockCore:
                 if isinstance(torch_dtype, torch.dtype):
                     return torch_dtype
 
-        if self.key_namespace != "legacy":
-            return None
-
-        try:
-            return decode_legacy_key(encoded_key).dtype
-        except Exception:
-            logger.debug(
-                "Unable to recover dtype from legacy raw-block key %s",
-                encoded_key,
-                exc_info=True,
-            )
-            return None
+        return None
 
     def _validate_loaded_entries(self) -> None:
         """Drop recovered entries whose slot headers do not match metadata."""
@@ -2181,10 +2196,7 @@ class RawBlockCore:
         if slot_hdr is None:
             return True
         try:
-            expected_identity = slot_identity_from_encoded_key(
-                encoded_key,
-                self.key_namespace,
-            )
+            expected_identity = object_key_slot_identity(encoded_key)
         except Exception:
             return True
         slot_identity, payload_len = slot_hdr

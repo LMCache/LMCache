@@ -53,7 +53,7 @@ from lmcache.cli.commands.bench.engine_bench.workloads.random_prefill import (
     RandomPrefillConfig,
     RandomPrefillWorkload,
 )
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 __all__ = [
     "DEFAULT_DOC_ALIGN_TOKENS",

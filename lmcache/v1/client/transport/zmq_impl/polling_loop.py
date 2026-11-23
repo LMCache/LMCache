@@ -13,7 +13,7 @@ from zmq.utils.monitor import recv_monitor_message
 import zmq
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform import EventNotifier, create_event_notifier
 
 logger = init_logger(__name__)
@@ -36,7 +36,10 @@ class PolledClient(Protocol):
         """Send queued requests and return whether any still wait for room."""
 
     def cancel_streams(self) -> None:
-        """Wake stream readers after the server disconnects."""
+        """Wake stream readers when the client is unregistered."""
+
+    def handle_disconnect(self) -> None:
+        """React to the server disconnecting, without blocking the loop."""
 
 
 class _OpKind(enum.Enum):
@@ -197,7 +200,7 @@ class ClientPollingLoop:
                             recv_monitor_message(sock)["event"]
                             == zmq.EVENT_DISCONNECTED
                         ):
-                            client.cancel_streams()
+                            client.handle_disconnect()
                         continue
                     owner = self._socket_to_client.get(sock)
                     if owner is not None:
