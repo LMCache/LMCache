@@ -98,6 +98,11 @@ class LMCacheMPRequestTracker:
     # Whether a STORE was sent to the workers since this tracker was created.
     store_scheduled: bool = False
 
+    # Last chunk end whose windowed objects a STORE of this request keeps
+    # under ``lmcache.mp.sparse_state_every_n_chunks``; None before the first
+    # full-chunk STORE.
+    last_kept_state_end: int | None = None
+
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
     num_vllm_hit_tokens: int = 0
     num_lmcache_hit_tokens: int = 0
@@ -153,6 +158,7 @@ class LMCacheMPRequestTracker:
         self.num_engine_computed_tokens = 0
         self.num_stored_tokens = 0
         self.store_scheduled = False
+        self.last_kept_state_end = None
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
         self.unfull_chunk_boundaries = set()

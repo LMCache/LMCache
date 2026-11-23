@@ -97,6 +97,12 @@ from lmcache.utils import CacheRemoveEvent
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.client.worker_transfer import LMCacheDrivenTransferContext
+from lmcache.v1.common.sparse_state import (
+    SPARSE_STATE_KEEP_HINT,
+    encode_kept_chunk_ends,
+    keeps_state_at,
+    kept_chunk_ends,
+)
 from lmcache.v1.transport.futures import DeviceMessagingFuture
 
 try:
@@ -625,11 +631,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       supported for models with per-request ring state
       (``CircularBufferSpec``). See
       ``docs/design/v1/multiprocess/unfull_chunk.md``.
+    - lmcache.mp.sparse_state_every_n_chunks: N > 0 stores a full chunk's
+      recurrent state (and sliding-window KV of at most one chunk) only when
+      at least N chunks passed since the request's last stored state or
+      cache hit, or the chunk is the prompt's last full chunk. 0 (default)
+      stores every chunk's. Requires the lmcache_driven transfer mode.
     """
 
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
     # appends. The scheduler role sets it from the vLLM config.
     _mamba_relocation_window: int = 0
+
+    _sparse_state_every_n: int = 0
 
     def __init__(
         self,
@@ -687,6 +700,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
         if not isinstance(self._save_decode_cache, bool):
             raise ValueError("lmcache.mp.save_decode_cache must be a boolean")
+        self._sparse_state_every_n = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.sparse_state_every_n_chunks", 0
+            )
+        )
+        if (
+            not isinstance(self._sparse_state_every_n, int)
+            or isinstance(self._sparse_state_every_n, bool)
+            or self._sparse_state_every_n < 0
+        ):
+            raise ValueError(
+                "lmcache.mp.sparse_state_every_n_chunks must be a non-negative int"
+            )
         self._save_unfull_chunk = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.save_unfull_chunk", False
         )
@@ -1084,6 +1110,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # The engine-driven server paths copy whole chunks only.
             raise ValueError(
                 "lmcache.mp.save_unfull_chunk requires the lmcache_driven transfer mode"
+            )
+        if self._sparse_state_every_n > 0 and not isinstance(
+            self.worker_adapter.transfer_ctx, LMCacheDrivenTransferContext
+        ):
+            # Only the lmcache-driven server store skips the chunks the
+            # scheduler does not keep (and does not pin).
+            raise ValueError(
+                "lmcache.mp.sparse_state_every_n_chunks requires the "
+                "lmcache_driven transfer mode"
             )
         if self.dispatcher is not None:
             dispatch(
@@ -2125,6 +2160,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 save_decode_cache=self._save_decode_cache,
             )
             if r_meta is not None:
+                # Before _pin_store_blocks: pins follow the sparse hint.
+                self._add_sparse_state_hint(r_meta, request_tracker)
+            if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
                 if self.lazy_offload:
                     self._lazy_offload_manager.add_store_candidate(r_meta)
@@ -2136,6 +2174,70 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 self._add_unfull_chunk_stores(
                     scheduler_output, request_tracker, metadata
                 )
+
+    def _add_sparse_state_hint(
+        self,
+        r_meta: LMCacheMPRequestMetadata,
+        tracker: LMCacheMPRequestTracker,
+    ) -> None:
+        """Name the chunk ends whose windowed objects a full-chunk STORE keeps.
+
+        With ``lmcache.mp.sparse_state_every_n_chunks``, the STORE's
+        ``lmcache.hint.sparse_state_keep`` lists the chunk ends that hold a
+        state (the chunk's window blocks are real) and that
+        :func:`keeps_state_at` keeps. The server skips the windowed objects
+        of the STORE's other chunks. Hints are not ``lmcache.tag.*``, so
+        object keys are unchanged.
+
+        Args:
+            r_meta: Full-chunk STORE metadata from ``GetStoreMetadata``;
+                updated in place.
+            tracker: The request's tracker; its last kept chunk end advances.
+        """
+        if self._sparse_state_every_n <= 0:
+            return
+        chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
+        # Engine groups whose window fits one chunk -> window blocks per chunk.
+        window_blocks = {
+            group: (
+                chunk // self._group_tokens_per_block[group],
+                -(-window_tokens // self._group_tokens_per_block[group]),
+            )
+            for group, window_tokens in self._windowed_group_tokens.items()
+            if window_tokens <= chunk and group < len(r_meta.op.block_ids)
+        }
+        if not window_blocks:
+            return
+        op = r_meta.op
+        last_kept = tracker.last_kept_state_end
+        if last_kept is None:
+            # The state at an LMCache hit's last full chunk is in the cache.
+            last_kept = tracker.num_lmcache_hit_tokens // chunk * chunk
+        kept: list[int] = []
+        for i in range((op.end - op.start) // chunk):
+            # vLLM leaves the null block (0) where no step ended.
+            has_state = all(
+                0
+                not in op.block_ids[group][
+                    (i + 1) * per_chunk - keep : (i + 1) * per_chunk
+                ]
+                for group, (per_chunk, keep) in window_blocks.items()
+            )
+            chunk_end = op.start + (i + 1) * chunk
+            if has_state and keeps_state_at(
+                chunk_end,
+                last_kept,
+                chunk,
+                self._sparse_state_every_n,
+                tracker.num_prompt_tokens,
+            ):
+                kept.append(chunk_end)
+                last_kept = chunk_end
+        tracker.last_kept_state_end = last_kept
+        r_meta.request_configs = {
+            **(r_meta.request_configs or {}),
+            SPARSE_STATE_KEEP_HINT: encode_kept_chunk_ends(kept),
+        }
 
     def _process_cached_requests(
         self,
@@ -2174,6 +2276,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 self._group_tokens_per_block,
                 save_decode_cache=self._save_decode_cache,
             )
+            if r_meta is not None:
+                # Before _pin_store_blocks: pins follow the sparse hint.
+                self._add_sparse_state_hint(r_meta, request_tracker)
 
             if r_meta is not None:
                 # In lazy_offload mode, add to pending queue instead of immediate store
@@ -2431,6 +2536,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         num_full_chunks = (op.end - op.start) // chunk
         has_unfull = (op.end - op.start) % chunk != 0
         block_ids: set[int] = set()
+        # Sparse stores read a one-chunk window only at the kept chunk ends.
+        kept_ends = kept_chunk_ends(r_meta.request_configs)
         for group, window_tokens in self._windowed_group_tokens.items():
             if group >= len(op.block_ids):
                 continue
@@ -2439,6 +2546,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             per_chunk = chunk // span
             keep = -(-min(chunk, window_tokens) // span)
             for i in range(num_full_chunks):
+                if (
+                    kept_ends is not None
+                    and window_tokens <= chunk
+                    and op.start + (i + 1) * chunk not in kept_ends
+                ):
+                    continue
                 block_ids.update(ids[(i + 1) * per_chunk - keep : (i + 1) * per_chunk])
             if has_unfull:
                 # Unfull window plus a lead block.

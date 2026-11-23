@@ -19,6 +19,7 @@ from lmcache.utils import (
 from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.sparse_state import kept_chunk_ends
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.common.utils import LayoutHints
@@ -148,6 +149,50 @@ def all_null_chunk_masks(
             chunk_null.append(is_null)
         masks.append(chunk_null)
     return masks
+
+
+def sparse_recurrent_chunk_masks(
+    key: IPCCacheServerKey,
+    object_groups: Sequence[ObjectGroupInfo],
+    num_chunks: int,
+    chunk_size: int,
+) -> list[list[bool]] | None:
+    """Mark, per object group, the full chunks whose windowed objects are not stored.
+
+    With ``lmcache.hint.sparse_state_keep`` in the key's request configs
+    (``lmcache.mp.sparse_state_every_n_chunks``), an object group whose window
+    is at most one chunk (recurrent state, or a sliding window of
+    ``sw_size_chunks == 1``; never aux or full attention) stores a full chunk
+    only when the hint names its end. The engine connector picks the ends
+    among the chunks that hold a state; see
+    :func:`lmcache.v1.common.sparse_state.keeps_state_at`. A longer sliding
+    window is stored for every chunk: a hit at a kept end reads the chunks
+    before it too. The window-aware lookup then serves a prefix only at a
+    kept end. Unfull chunk objects are stored separately and are not affected.
+
+    Args:
+        key: The STORE key; its full chunks start at ``key.start``
+            (chunk-aligned).
+        object_groups: The object groups, indexed by object-group id.
+        num_chunks: Number of full chunks in the STORE.
+        chunk_size: LMCache chunk size in tokens.
+
+    Returns:
+        ``mask[g][i]`` is True iff full chunk ``i`` must be skipped for object
+        group ``g``, or None when the hint is absent.
+    """
+    kept = kept_chunk_ends(getattr(key, "request_configs", None))
+    if kept is None:
+        return None
+    skipped = [key.start + (i + 1) * chunk_size not in kept for i in range(num_chunks)]
+    return [
+        (
+            list(skipped)
+            if not group.aux and (group.recurrent or group.sw_size_chunks == 1)
+            else [False] * num_chunks
+        )
+        for group in object_groups
+    ]
 
 
 def _fold_shard_replication_desc(
@@ -824,6 +869,19 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 num_chunks,
                 null_block_id,
             )
+            sparse_mask = sparse_recurrent_chunk_masks(
+                key,
+                cache_context.kv_layer_groups_manager.object_groups,
+                num_chunks,
+                self._ctx.chunk_size,
+            )
+            if sparse_mask is not None:
+                skipped_chunks = [
+                    [a or b for a, b in zip(null_row, sparse_row, strict=True)]
+                    for null_row, sparse_row in zip(
+                        skipped_chunks, sparse_mask, strict=True
+                    )
+                ]
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
