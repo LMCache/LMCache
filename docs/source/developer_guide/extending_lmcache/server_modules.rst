@@ -200,8 +200,8 @@ With ``--grpc-server-mode native`` the server is still a ``grpc.Server``, but
 it sits behind the native front on a private Unix socket: ``context.peer()``
 in its handlers is that socket, not the client.
 
-For ZMQ, register or start a package-owned ZMQ service against the concrete
-``MessageQueueServer``:
+For the deprecated ZMQ transport, register or start a package-owned ZMQ
+service against the concrete ``MessageQueueServer``:
 
 .. code-block:: python
 
@@ -214,6 +214,10 @@ For ZMQ, register or start a package-owned ZMQ service against the concrete
                bind_url="tcp://127.0.0.1:6001",
            )
            self.echo_service.start()
+
+``register_zmq_services`` is deprecated together with ZMQ. A module that
+implements only ``register_zmq_services`` exposes no services on a gRPC server,
+which is the default; the server logs a warning at startup.
 
 If a ZMQ registrar starts a sidecar socket, the module's ``close()`` method
 must stop that sidecar. Do not use

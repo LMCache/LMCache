@@ -54,8 +54,8 @@ walkthrough.
     lmcache server \
         --l1-size-gb 66 --eviction-policy LRU
 
-The request port defaults to **5555** and uses ZMQ unless ``--transport grpc``
-is selected. The HTTP frontend defaults to **8080** and is used by
+The request port defaults to **5555** and uses gRPC unless the deprecated
+``--transport zmq`` is selected. The HTTP frontend defaults to **8080** and is used by
 ``lmcache bench engine --lmcache-url``.
 
 **Start vLLM with the MP connector in a separate terminal:**

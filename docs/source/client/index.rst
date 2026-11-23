@@ -186,14 +186,15 @@ is described in detail in :doc:`../mp/sdk`.
 
    ctx = connect(
        kind=LMCacheSDKCacheKind.KV,
-       url="tcp://localhost:5555",     # multiprocess request endpoint
+       url="grpc://localhost:5555",    # multiprocess request endpoint
        http_url="http://localhost:8080",
        model_name="Qwen/Qwen2.5-0.5B-Instruct",
    )
 
-The ``url`` scheme selects the transport (``tcp://`` for ZMQ, ``grpc://`` for
-gRPC). ``model_name`` must match the name the server was started for; a
-mismatch shows up as a lookup that never resolves rather than an error.
+The ``url`` scheme selects the transport (``grpc://`` for gRPC, the default;
+``tcp://`` for the deprecated ZMQ). ``model_name`` must match the name the
+server was started for; a mismatch shows up as a lookup that never resolves
+rather than an error.
 
 Engine integrations stay at their existing import paths (``lmcache.integration``
 for vLLM, SGLang and TensorRT-LLM adapters) in both distributions. The engine
@@ -343,7 +344,9 @@ The MP transport requires the client and server to agree on the wire format and
 on the cache identity. A mismatch shows up as one of:
 
 - a handshake failure at connector or SDK startup;
-- ``tcp://`` requests that time out instead of returning a lookup result;
+- ``tcp://`` (ZMQ) requests that time out instead of returning a lookup result,
+  for example an older client pointed at a gRPC server (see
+  :ref:`mp-migrating-from-zmq`);
 - a server that stores objects but never retrieves them, because the two sides
   compute different object keys (see the cache-identity contract).
 

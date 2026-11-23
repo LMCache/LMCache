@@ -181,7 +181,7 @@ Checksum:                                OK
 ### `lmcache bench`
 
 **`bench server`** -- end-to-end sanity test for a running LMCache MP cache
-server (ZMQ + HTTP). For each sequence in ``[--start, --end)`` the tool runs a
+server (gRPC + HTTP). For each sequence in ``[--start, --end)`` the tool runs a
 cold pass (``LOOKUP`` miss → ``STORE``) and a warm pass (``LOOKUP`` hit →
 ``RETRIEVE``), then verifies the retrieved data using per-chunk checksums.
 Exercises the full RPC path
@@ -205,11 +205,11 @@ gpu→lmcache_driven, cpu→engine_driven.
 
 ```bash
 $ lmcache bench server \
-    --rpc-url tcp://localhost:5555 \
+    --rpc-url grpc://localhost:5555 \
     --url http://localhost:8080 \
     --start 0 --end 2
 
-Connecting to LMCache MP Server at tcp://localhost:5555 (mode=gpu, transfer=auto) ...
+Connecting to LMCache MP Server at grpc://localhost:5555 (mode=gpu, transfer=auto) ...
 Server chunk_size = 256
 Resolved KV shape spec: (2,1024,16,8,128):float16:32
 [seq=0] LOOKUP cold:  0/2 chunks hit (1.82 ms)

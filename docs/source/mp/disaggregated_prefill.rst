@@ -121,7 +121,7 @@ addresses and ``<model>`` with the model path (identical on both instances).
    UCX_NET_DEVICES=all NCCL_CUMEM_ENABLE=1 \
    vllm serve <model> \
        --port 8001 --tensor-parallel-size 1 \
-       --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"},{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://localhost","lmcache.mp.port":6555}}]}}'
+       --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"},{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"grpc://localhost","lmcache.mp.port":6555}}]}}'
 
 The producer advertises its NIXL side channel on ``<PREFILL_IP>:5600`` and
 offloads to the LMCache server on port ``6555``.
@@ -143,7 +143,7 @@ offloads to the LMCache server on port ``6555``.
    UCX_NET_DEVICES=all NCCL_CUMEM_ENABLE=1 \
    vllm serve <model> \
        --port 8002 --tensor-parallel-size 1 \
-       --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"},{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://localhost","lmcache.mp.port":6556}}]}}'
+       --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"},{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"grpc://localhost","lmcache.mp.port":6556}}]}}'
 
 The consumer offloads to the LMCache server on port ``6556``; its side-channel
 port (``5558``) differs from the producer's so the two can share a host.
@@ -177,7 +177,7 @@ and ``--http-port``, the vLLM ``--port``, and ``VLLM_NIXL_SIDE_CHANNEL_PORT``.
    CUDA_VISIBLE_DEVICES=6 VLLM_NIXL_SIDE_CHANNEL_HOST=127.0.0.1 VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
    UCX_NET_DEVICES=all NCCL_CUMEM_ENABLE=1 \
    vllm serve <model> --port 8001 --enforce-eager --max-model-len 16384 --gpu-memory-utilization 0.4 \
-       --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"},{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://localhost","lmcache.mp.port":6555}}]}}'
+       --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_producer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"},{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"grpc://localhost","lmcache.mp.port":6555}}]}}'
 
    lmcache server --port 6556 --http-port 8091 \
        --l1-size-gb 100 --eviction-policy LRU --chunk-size 256 --instance-id decoder
@@ -185,7 +185,7 @@ and ``--http-port``, the vLLM ``--port``, and ``VLLM_NIXL_SIDE_CHANNEL_PORT``.
    CUDA_VISIBLE_DEVICES=7 VLLM_NIXL_SIDE_CHANNEL_HOST=127.0.0.1 VLLM_NIXL_SIDE_CHANNEL_PORT=5558 \
    UCX_NET_DEVICES=all NCCL_CUMEM_ENABLE=1 \
    vllm serve <model> --port 8002 --enforce-eager --max-model-len 16384 --gpu-memory-utilization 0.4 \
-       --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"},{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://localhost","lmcache.mp.port":6556}}]}}'
+       --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"},{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"grpc://localhost","lmcache.mp.port":6556}}]}}'
 
    vllm-router --policy round_robin --vllm-pd-disaggregation \
        --prefill http://localhost:8001 --decode http://localhost:8002 --host 0.0.0.0 --port 30000

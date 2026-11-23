@@ -358,7 +358,7 @@ For `LMCacheEngine` named `production-cache`:
   "kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector",
   "kv_role": "kv_both",
   "kv_connector_extra_config": {
-    "lmcache.mp.host": "tcp://<name>.<namespace>.svc.cluster.local",
+    "lmcache.mp.host": "grpc://<name>.<namespace>.svc.cluster.local",
     "lmcache.mp.port": "<spec.server.port, default 5555>"
   }
 }
@@ -477,7 +477,7 @@ engine resource builders are the same name/spec-keyed cores used by
 
 The `<name>-connection` ConfigMap carries the **`CBKVConnector`**
 `kv-transfer-config` (vs `LMCacheMPConnector` for `LMCacheEngine`) — same node-local
-`tcp://` host/port shape, plus the `cb.*` tunables:
+`grpc://` host/port shape, plus the `cb.*` tunables:
 
 ```json
 {
@@ -485,7 +485,7 @@ The `<name>-connection` ConfigMap carries the **`CBKVConnector`**
   "kv_connector_module_path": "lmcache_cacheblend.connector",
   "kv_role": "kv_both",
   "kv_connector_extra_config": {
-    "lmcache.mp.host": "tcp://<name>.<namespace>.svc.cluster.local",
+    "lmcache.mp.host": "grpc://<name>.<namespace>.svc.cluster.local",
     "lmcache.mp.port": "<server.port>",
     "cb.check_layer": <blend.checkLayer>,
     "cb.recomp_ratio": <blend.recompRatio>,
@@ -674,7 +674,7 @@ register (unchanged behavior).
 | `lmcache/v1/distributed/config.py` | `L1MemoryManagerConfig`, `L1ManagerConfig`, `EvictionConfig`, `StorageManagerConfig`, argparse |
 | `lmcache/v1/mp_observability/config.py` | `PrometheusConfig`, `add_prometheus_args`, `parse_args_to_prometheus_config` |
 | `lmcache/v1/multiprocess/server.py` | `MPCacheServer`, server CLI entry point, argparse (lines 629–653) |
-| `lmcache/v1/multiprocess/http_server.py` | HTTP server with `/healthcheck` endpoint (FastAPI + ZMQ) |
+| `lmcache/v1/multiprocess/http_server.py` | HTTP server with `/healthcheck` endpoint (FastAPI + request server) |
 | `lmcache/v1/mp_coordinator/config.py` | `MPCoordinatorConfig` (coordinator knobs mapped by `LMCacheCoordinator`) |
 | `lmcache/cli/commands/coordinator.py` | `lmcache coordinator` CLI (flags rendered into the coordinator Deployment) |
 | `lmcache/v1/multiprocess/config.py` | `add_coordinator_args` (engine `coordinator` connection flags) |

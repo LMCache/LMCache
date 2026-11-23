@@ -54,8 +54,9 @@ The launcher uses the connector's resolved server URL. When
 `lmcache.mp.server_urls` is set, `lmcache.mp.host` and `lmcache.mp.port` are
 ignored, including during auto-start. Otherwise the connector builds the URL
 from those host/port settings.
-The URL scheme picks the server transport: `tcp://` starts a ZMQ server and
-`grpc://` starts a gRPC server (`--transport grpc`). `grpc+unix://` is not
+The URL scheme picks the server transport: `grpc://` starts a gRPC server
+(`--transport grpc`) and `tcp://` starts a deprecated ZMQ server
+(`--transport zmq`). `grpc+unix://` is not
 accepted, because auto-start binds a local TCP port.
 Only `localhost` and `127.0.0.1` are accepted. IPv6 endpoints (including `::1`)
 raise `ValueError` before probing or starting a process: the MP ZMQ transport
@@ -109,4 +110,4 @@ connect-only behavior.
 
 The Buildkite `mp_autostart_tp2` smoke test starts `vllm serve` with TP=2 and
 verifies that the MP server is not pre-existing, is autostarted by vLLM, and
-responds to an independent ZMQ PING.
+responds to an independent gRPC PING.

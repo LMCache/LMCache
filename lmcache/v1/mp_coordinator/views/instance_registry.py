@@ -45,7 +45,7 @@ class MPInstance:
         metadata: Free-form string key/value pairs supplied at registration.
         p2p_advertised_url: URL this instance advertises for peer-to-peer
             transfers. Empty when the instance does not participate in P2P.
-        mq_port: Port of the instance's ZMQ message-queue server that P2P peers
+        mq_port: Port of the instance's P2P gRPC listener that P2P peers
             send lookup/unlock RPCs to, reachable at this instance's ``ip``. 0
             when P2P is disabled.
     """

@@ -228,7 +228,7 @@ Configuration
      - off
      - Skip gRPC Python runtime metrics while keeping LMCache EventBus
        metrics enabled. By default, the MP server enables these metrics only
-       for ``--transport grpc``; ZMQ mode keeps the existing LMCache metrics
+       for ``--transport grpc``, the default transport; ZMQ mode keeps the existing LMCache metrics
        unchanged.
    * - ``--disable-logging``
      - off
