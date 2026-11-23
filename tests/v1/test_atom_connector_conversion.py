@@ -278,6 +278,15 @@ class TestTransferSpec:
 
         assert len(spec.chunk_hashes) == 2
 
+    def test_the_hash_chain_covers_the_prefix_even_when_start_is_not_zero(self):
+        """Hashes cover ``[0, end)``; ``start`` only selects the block ids."""
+        spec = transfer_spec_from_atom(
+            self._request(hashes=bytes([7]) * 64, start=256, end=512),
+            chunk_tokens=256,
+        )
+
+        assert len(spec.chunk_hashes) == 2
+
     def test_a_hash_count_that_does_not_match_the_range_is_rejected(self):
         with pytest.raises(ValueError, match="chunk hash"):
             transfer_spec_from_atom(
