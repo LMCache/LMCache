@@ -111,8 +111,10 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - ``32``
      - gRPC request-dispatch threads. Used only with ``--transport grpc``.
    * - ``--grpc-server-mode``
-     - ``sync``
-     - gRPC server implementation: ``sync``, ``aio`` or ``native``.
+     - ``auto``
+     - gRPC server implementation: ``auto``, ``sync``, ``aio`` or ``native``.
+       ``auto`` picks ``native`` when ``pygrpc-native`` is installed and
+       ``aio`` otherwise.
        ``aio`` receives requests on one event loop and hands only the
        handlers to worker threads. ``native`` does the HTTP/2 and gRPC
        framing in Rust, outside the GIL; it needs the ``pygrpc-native``
@@ -121,8 +123,8 @@ Source: ``lmcache/v1/multiprocess/config.py``
        All three serve the same clients over TCP.
        In ``native`` mode the native front reports the call count and
        duration metrics itself (pygrpc-native 0.3.0 or later), under the
-       same names, but not the message size ones. Used only with
-       ``--transport grpc``.
+       same names, but not the message size ones. Used with
+       ``--transport grpc`` and by the P2P listener.
    * - ``--hash-algorithm``
      - ``blake3``
      - Hash algorithm for token-based operations.
@@ -183,12 +185,18 @@ Source: ``lmcache/v1/multiprocess/config.py``
        execution and only enable it on a trusted network.
    * - ``--shm-name``
      - ``""``
-     - SHM segment name for non-GPU KV transfer (only used when the
-       non-GPU path is loaded, i.e. ``--supported-transfer-mode`` is
+     - SHM segment name for engine-driven KV transfer (only used when the
+       engine-driven path is loaded, i.e. ``--supported-transfer-mode`` is
        ``auto`` or ``engine_driven``).
        ``""`` (empty string, default): SHM disabled; KV transfer uses
-       the typed inline path.  Any other value: create a SHM pool and use
-       that exact name for its segment.
+       the typed inline path, which serialises every KV chunk through the
+       request channel and is much slower.  Any other value: create a SHM
+       pool named ``lmcache_l1_pool_<name>`` and use it for KV transfers.
+       **Requires** ``--no-l1-use-lazy``; with the default lazy allocation
+       the name is ignored (the server logs a warning) and SHM stays
+       disabled.  Mutually exclusive with ``--l1-devdax-path`` and
+       ``--l1-use-hugepages``: either combination is rejected with a
+       ``ValueError`` at config validation.  See :ref:`mp-transfer-mode`.
    * - ``--kv-event-log-size``
      - ``32768``
      - CPU store-completion and eviction records retained for subscriptions
@@ -205,12 +213,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
        Events still carry LMCache chunk hashes and chunk size; native engine
        block identities are separate work.
        With the channel enabled, Stored requires a committed L1 copy of every
-       registered object group on every KV rank. Evicting one of several copies
-       of an object does not remove its CPU placement; losing the final copy
-       of a required object does. Duplicate commits are suppressed while the
+       distinct shard of each registered object group, as determined by its
+       TP replication and DCP sharding, within the same salt and identity tags.
+       Evicting one of several copies of an object does not remove its CPU
+       placement; losing the final copy of a required object does.
+       Duplicate commits are suppressed while the
        Stored record remains in the replay log. A later commit refreshes an
        aged-out record. EventBus loss clears the ownership projection and
-       requires fresh commits from all ranks.
+       requires fresh commits for every required object.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at
@@ -350,6 +360,12 @@ is set, which additionally requires a coordinator URL via
      - ``""``
      - Transfer-channel server ``host:port`` to bind. Defaults to
        ``--p2p-advertise-url``.
+   * - ``--p2p-rpc-port``
+     - ``0``
+     - Independent P2P gRPC control port, bound on ``--host``. ``0`` lets the
+       OS choose a free port. Pin and allow this port when a firewall,
+       Docker port mapping, or NetworkPolicy restricts reachable ports;
+       allowing only the worker ``--port`` is insufficient.
    * - ``--p2p-lookup-timeout``
      - ``30.0``
      - Seconds before a peer lookup result counts as a miss.
@@ -359,6 +375,22 @@ is set, which additionally requires a coordinator URL via
    * - ``--p2p-transfer-engine``
      - ``nixl``
      - Transfer-channel implementation to use.
+   * - ``--enable-p2p-write``
+     - off
+     - Store objects into peers' L1 once the local DRAM L1 is fuller than
+       ``--p2p-write-l1-usage-threshold``, and drop the local copy. Use it on
+       a server whose peers extend its DRAM, on only one side of a pair.
+       Selects the ``p2p`` store policy and the ``skip_l1`` prefetch policy
+       unless ``--l2-store-policy`` or ``--l2-prefetch-policy`` is set.
+       See :doc:`p2p_deployment`.
+   * - ``--p2p-write-l1-usage-threshold``
+     - ``0.7``
+     - Used fraction of the local DRAM L1, in ``(0, 1]``, at which new objects
+       are stored into a peer instead of staying local. Keep it below
+       ``--eviction-trigger-watermark``.
+   * - ``--p2p-store-timeout``
+     - ``30.0``
+     - Seconds before a store into a peer counts as a failure.
 
 L1 Memory Manager
 ------------------
@@ -386,7 +418,9 @@ single-L1 interface. For placing L1 on CXL-attached memory see
      - ``True``
      - Enable or disable lazy allocation for L1 memory.
        Pass ``--l1-use-lazy`` to enable (default) or
-       ``--no-l1-use-lazy`` to explicitly disable.
+       ``--no-l1-use-lazy`` to explicitly disable.  Lazy allocation
+       disables the SHM transfer pool: pass ``--no-l1-use-lazy`` whenever
+       you set ``--shm-name`` for engine-driven workers.
    * - ``--l1-init-size-gb``
      - ``20``
      - Initial allocation size (GB) when using lazy allocation.
@@ -404,8 +438,10 @@ single-L1 interface. For placing L1 on CXL-attached memory see
      - Optional ``/dev/dax*`` device or mmap-able file to use as the L1
        backing arena.  When set, disable lazy allocation with
        ``--no-l1-use-lazy`` and leave ``--shm-name`` at its default ``""``
-       (SHM transfer disabled) because the L1 bytes live in the DAX
-       mapping.  A ``dax`` L2 adapter may not map the same device range;
+       because the L1 bytes live in the DAX mapping; a non-empty
+       ``--shm-name`` (or ``--l1-use-lazy``) together with this flag is
+       rejected with a ``ValueError``.  A ``dax`` L2 adapter may not map the
+       same device range;
        give the L1 and the adapter disjoint ranges. Pass the device node,
        for example
        ``--l1-devdax-path /dev/dax0.0 --l1-size-gb 512 --no-l1-use-lazy
@@ -679,6 +715,10 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--eviction-ratio``
      - ``0.2``
      - Fraction of allocated memory to evict when triggered (0.0--1.0).
+       It also sets when stores to L2 wait: new ones wait once in-flight ones
+       reach ``trigger_watermark * (1 - eviction_ratio)`` of L1, so locked data
+       cannot fill L1 and block new KV and prefetches. At ``1.0`` this is 0, so
+       they go out one batch at a time.
 
 L2 Policies
 -----------
@@ -699,7 +739,11 @@ Source: ``lmcache/v1/distributed/config.py``
        The ``default`` policy stores all keys to all adapters and keeps L1.
        The ``skip_l1`` policy stores all keys to all adapters and then
        deletes them from L1 (buffer-only mode).
-       Choices: ``default``, ``skip_l1``.
+       The ``p2p`` policy keeps keys in L1 until its usage reaches
+       ``--p2p-write-l1-usage-threshold``, then stores new keys into one P2P
+       peer and deletes them from L1; ``--enable-p2p-write`` selects it
+       automatically (see :doc:`p2p_deployment`).
+       Choices: ``default``, ``skip_l1``, ``p2p``.
    * - ``--l2-prefetch-policy``
      - ``default``
      - L2 prefetch policy.  Determines which adapter loads each key
@@ -707,7 +751,8 @@ Source: ``lmcache/v1/distributed/config.py``
        The ``default`` policy picks the first adapter (lowest index) and
        keeps prefetched keys in L1.
        The ``skip_l1`` policy uses the same load plan, but prefetched keys
-       are temporary (deleted after the reader finishes).
+       are temporary (deleted after the reader finishes);
+       ``--enable-p2p-write`` selects it automatically.
        Choices: ``default``, ``skip_l1``.  ``retain`` is a deprecated alias
        of ``default``.
    * - ``--l2-prefetch-inflight-watermark``
@@ -1033,6 +1078,14 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
      - Single-server deployment: port of the LMCache MP server. Must
        match the server's ``--port``. Ignored when
        ``lmcache.mp.server_urls`` is set.
+   * - ``lmcache.mp.api_key_file``
+     - *(unset)*
+     - File holding the API key this engine sends to the LMCache server. Use it
+       when the server requires a key and the engine should not hold the fleet
+       key: the inbound key set this server accepts is a different trust domain
+       from the key a caller presents. The file must hold exactly one non-empty
+       line. When unset, the request clients keep their ``LMCACHE_API_KEY`` /
+       ``LMCACHE_API_KEY_FILE`` fallback.
    * - ``lmcache.mp.mq_timeout``
      - ``300.0``
      - Timeout (seconds) for blocking message-queue requests, including

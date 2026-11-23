@@ -67,7 +67,8 @@ covers, `request_id` (session tracking), and `worker_id` (TP rank).
   the standard LOOKUP would report) and `non_prefix_segments` (fingerprint
   matches beyond the prefix, `cur_st` order, each
   `(old_st, old_ed, cur_st, cur_ed, hash)`) — already sparse-prefetched,
-  so the retrieve set equals this set.
+  so the retrieve set equals this set. A chunk repeated in the prompt yields
+  one segment per non-overlapping occurrence, so segments may share a `hash`.
 - Side effects: sparse read locks taken and stashed on the session for the
   retrieve.
 
@@ -94,6 +95,13 @@ success)`**
   (`submit_callback_to_stream`, kind `"cb_fingerprints"`) — stream-ordered
   after the L1 commit, so a fingerprint becomes matchable only once its
   chunk is readable. Fingerprint failures are logged, never raised.
+- Which chunks count as committed: those worker 0's store committed in
+  every blend read group whose objects worker 0 writes alone
+  (`_per_rank_read_groups`: one kv reader per object). An object shared by
+  several TP ranks (MLA latents) is written by whichever of them reserves
+  it first, so worker 0's result cannot vouch for it; the lookup still
+  checks it is loaded. A chunk the store skipped (cached under another
+  prefix, `--enable-dedup-content-kv`) never counts.
 - Side effect (reorder enabled, worker 0, a store that committed KV): the
   request's prompt is recorded in the `PromptStore` (below).
 
@@ -155,6 +163,12 @@ misses, so it has to leave the matcher. Two paths remove it:
   and `L2_KEYS_DELETED`, and removes a fingerprint as soon as one key of its
   chunk has no copy left, before any lookup misses on it.
 
+Removing a fingerprint clears its table slot only when the slot still maps
+to that chunk's hash. A slot holds one chunk, so when the same text is
+stored behind several prefixes (or two chunks collide), evicting a copy that
+does not hold the slot leaves the holder matchable. A shadowed chunk is not
+restored when the slot holder is removed.
+
 `FingerprintEvictionTracker` decides when a key has no copy left. It keeps
 the L1 copies it was told about (key → L1 tags) and the keys L2 deleted
 while L1 still held them:
@@ -202,6 +216,11 @@ mappings; work encoded as numpy int64 tables) enqueued in a single
 `cuda_ops` call. There is no fallback path: when the plan cannot be built
 the retrieve fails cleanly and the client degrades that request to full
 recompute.
+
+A chunk matched at several positions is staged from host once per step:
+the planner groups its copies, and later copies in a step are
+device-to-device staging rows (`host_offset = -1`) from the first copy's
+slot, run before re-RoPE rewrites it.
 
 The scatter is **all-or-nothing** — never partial. Zero-work returns are
 reported with a fixed reason code on `CB_RETRIEVE_NOOP`:
@@ -270,7 +289,8 @@ Sparse-prefetch read locks follow one rule: exactly one owner releases each
 reservation. The retrieve releases applied ranges stream-ordered after the
 scatter, releases lookup-stash orphans it will never read, and leaves
 beyond-slot-bound ranges locked for the follow-up call; anything never
-consumed by a retrieve is released on session destruction.
+consumed by a retrieve is released on session destruction. Segments sharing
+a `hash` share one lock per key, released once all of them are applied.
 
 ## Observability
 

@@ -27,6 +27,7 @@ from lmcache import torch_dev, torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.errors import LMCacheTimeoutError
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.config import (
@@ -36,11 +37,10 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.server import run_cache_server
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+from lmcache.v1.transport.request_client import RequestClient
 
 CHUNK = 16
 TIMEOUT = 30.0
@@ -59,6 +59,7 @@ def _serve(port: int) -> None:
         mp_config=MPServerConfig(
             host="127.0.0.1",
             port=port,
+            transport="grpc",
             chunk_size=CHUNK,
             null_block_id=-1,
             separate_object_groups=True,
@@ -85,7 +86,7 @@ def native_client() -> Generator[RequestClient, None, None]:
     process = mp.get_context("spawn").Process(target=_serve, args=(port,), daemon=True)
     process.start()
     context = zmq.Context()
-    client = RequestClientFactory.create(f"tcp://127.0.0.1:{port}", context=context)
+    client = RequestClientFactory.create(f"grpc://127.0.0.1:{port}", context=context)
     try:
         deadline = time.monotonic() + TIMEOUT
         while time.monotonic() < deadline:
