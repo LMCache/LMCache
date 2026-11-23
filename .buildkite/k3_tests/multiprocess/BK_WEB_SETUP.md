@@ -26,13 +26,15 @@ other; `upload-pipeline.sh` decides which tier runs or bypasses:
 
 | PR labels | PR-smoke | Heavy |
 |---|---|---|
-| `mp` or `full` (auto-merge adds `full`) | runs | bypassed (exits green), unless the PR changes shared CI files (`.buildkite/k3_tests/`, `.buildkite/k3_harness/`, `pyproject.toml`, `setup.py`, `requirements/`, Docker files) |
+| `mp` or `full` (auto-merge adds `full`) | runs | bypassed (exits green), unless the PR changes shared CI files (`.buildkite/k3_tests/`, `.buildkite/k3_harness/`, `pyproject.toml`, `setup.py`, `requirements/`, Docker files) or a heavy-only path: `lmcache/integration/sglang/**`, `lmcache/v1/common/kv_format/detectors/sglang.py`, `benchmarks/long_doc_qa/**` |
 | + `force-ci` | runs | runs in parallel |
 | + `skip expensive ci` | bypassed (exits green) | bypassed (exits green; `force-ci` overrides) |
 
 Setting `MP_FULL_ON_PR=true` on the heavy pipeline (including manual UI/API
-rebuilds on a PR) restores heavy on every labeled PR. Heavy still runs on
-scheduled builds and on vLLM / SGLang pin verification.
+rebuilds on a PR) restores heavy on every labeled PR. The heavy-only paths exist
+because the smoke pipeline runs vLLM only and has no `long_doc_qa` step, so
+SGLang and long-doc benchmark edits would otherwise run no matching test. Heavy
+still runs on scheduled builds and on vLLM / SGLang pin verification.
 
 **Rollout order (required to avoid an un-gated merge window):**
 1. Create `k3-multiprocess-smoke` on Buildkite with the filter above and add

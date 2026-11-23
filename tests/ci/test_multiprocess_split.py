@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for LM-1131 k3-multiprocess PR-smoke and heavy tier split.
+"""Tests for the k3-multiprocess PR-smoke and heavy tier split.
 
 Run without loading the torch-dependent tests/conftest.py:
     python -m pytest -q --confcutdir=tests/ci tests/ci/test_multiprocess_split.py
@@ -273,6 +273,26 @@ def test_upload_pipeline_parallel_labels(
     expected_uploaded: bool,
 ) -> None:
     """Verify 3-label parallel execution: full, force-ci, and skip expensive ci."""
+    _run_upload_pipeline(
+        tmp_path,
+        labels=labels,
+        source=source,
+        pipeline_rel=pipeline_rel,
+        changed_file="lmcache/v1/cache_engine.py",
+        expected_uploaded=expected_uploaded,
+    )
+
+
+def _run_upload_pipeline(
+    tmp_path: Path,
+    *,
+    labels: str,
+    source: str,
+    pipeline_rel: str,
+    changed_file: str,
+    expected_uploaded: bool,
+) -> None:
+    """Run upload-pipeline.sh with a fake git/buildkite-agent; check the upload."""
     bash = _find_bash()
     if bash is None:
         pytest.skip("Git Bash / bash not available")
@@ -305,7 +325,7 @@ def test_upload_pipeline_parallel_labels(
     fake_git.write_text(
         "#!/usr/bin/env bash\n"
         'if [[ "${1:-}" == "diff" ]]; then\n'
-        '  printf "lmcache/v1/cache_engine.py\\n"\n'
+        f'  printf "{changed_file}\\n"\n'
         "fi\n"
         "exit 0\n",
         encoding="utf-8",
@@ -362,8 +382,22 @@ exit $((r1 == 0 && r2 == 1 ? 0 : 1))
     assert proc.returncode == 0
 
 
-def test_sglang_integration_change_keeps_heavy_enabled(tmp_path: Path) -> None:
-    """PRs touching lmcache/integration/sglang/* must not bypass heavy."""
+@pytest.mark.parametrize(
+    ("changed_file", "expected_rc"),
+    [
+        ("lmcache/integration/sglang/adapter.py", 1),
+        ("lmcache/v1/common/kv_format/detectors/sglang.py", 1),
+        ("benchmarks/long_doc_qa/long_doc_qa.py", 1),
+        # Ordinary production code stays on the smoke tier (heavy bypassed).
+        ("lmcache/v1/cache_engine.py", 0),
+        ("lmcache/v1/common/kv_format/detectors/vllm.py", 0),
+        ("benchmarks/other_bench/run.py", 0),
+    ],
+)
+def test_heavy_only_paths_keep_heavy_enabled(
+    tmp_path: Path, changed_file: str, expected_rc: int
+) -> None:
+    """SGLang and long_doc_qa edits must not bypass heavy on ordinary PRs."""
     bash = _find_bash()
     if bash is None:
         pytest.skip("Git Bash / bash not available")
@@ -377,11 +411,37 @@ def test_sglang_integration_change_keeps_heavy_enabled(tmp_path: Path) -> None:
     script = f"""
 source "{clean_pf.as_posix()}"
 _path_filter_get_changed_files() {{
-    printf 'lmcache/integration/sglang/adapter.py\\n'
+    printf '%s\\n' '{changed_file}'
 }}
 should_skip_multiprocess_heavy ".buildkite/k3_tests/multiprocess/pipeline.yml"
 """
     env = os.environ.copy()
     env.update({"BUILDKITE_PULL_REQUEST": "42", "BUILDKITE_PULL_REQUEST_LABELS": ""})
     proc = subprocess.run([bash, "-c", script], env=env, check=False)
-    assert proc.returncode == 1
+    assert proc.returncode == expected_rc
+
+
+def test_mp_labeled_sglang_only_pr_uploads_heavy_without_force_ci(
+    tmp_path: Path,
+) -> None:
+    """End to end: `mp` PR touching only lmcache/integration/sglang/** uploads heavy."""
+    _run_upload_pipeline(
+        tmp_path,
+        labels="mp",
+        source="webhook",
+        pipeline_rel=".buildkite/k3_tests/multiprocess/pipeline.yml",
+        changed_file="lmcache/integration/sglang/adapter.py",
+        expected_uploaded=True,
+    )
+
+
+def test_mp_labeled_non_sglang_pr_still_bypasses_heavy(tmp_path: Path) -> None:
+    """Control: the same `mp` PR on ordinary code keeps bypassing heavy."""
+    _run_upload_pipeline(
+        tmp_path,
+        labels="mp",
+        source="webhook",
+        pipeline_rel=".buildkite/k3_tests/multiprocess/pipeline.yml",
+        changed_file="lmcache/v1/cache_engine.py",
+        expected_uploaded=False,
+    )

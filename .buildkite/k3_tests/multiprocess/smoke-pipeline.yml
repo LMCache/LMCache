@@ -1,4 +1,4 @@
-# PR-smoke multiprocess tier (LM-1131):
+# PR-smoke multiprocess tier:
 # Independent, fast 0/1-GPU representative checks that report PR status
 # without waiting on heavy 2/4-GPU jobs.
 
