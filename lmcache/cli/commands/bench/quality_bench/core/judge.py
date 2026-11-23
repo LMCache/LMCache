@@ -30,7 +30,7 @@ from lmcache.cli.commands.bench.quality_bench.core.config import JudgeSettings
 from lmcache.cli.commands.bench.quality_bench.core.plan import QualityPlan
 from lmcache.cli.commands.bench.quality_bench.core.runner import ArmRun
 from lmcache.cli.commands.bench.quality_bench.core.verdict import ScoreTable
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 

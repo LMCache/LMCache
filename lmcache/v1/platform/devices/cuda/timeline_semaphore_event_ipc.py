@@ -50,7 +50,7 @@ import threading
 import torch
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform.devices.cuda.utils import (
     _CHECK_CUDA,
     _bind_primary_context,

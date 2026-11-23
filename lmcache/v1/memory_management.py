@@ -16,8 +16,8 @@ import torch
 # First Party
 from lmcache import device_ops, torch_dev
 from lmcache import torch_device_type as torch_device_type  # noqa: F401
-from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform import current_device_spec as current_device_spec  # noqa: F401
 from lmcache.v1.system_detection import NUMAMapping
 

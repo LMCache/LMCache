@@ -12,8 +12,8 @@ import json
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.logging import init_logger
 from lmcache.security.api_key import add_api_key_args
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 

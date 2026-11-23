@@ -62,11 +62,11 @@ from lmcache.integration.vllm.kv_cache_groups import (
     group_mamba_cache_mode,
     group_specs,
 )
-from lmcache.logging import init_logger
 from lmcache.v1.common.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
 from lmcache.v1.common.kv_format.types import KV_LAYOUT_NAMES
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.utils import LayoutHints
 
 logger = init_logger(__name__)
