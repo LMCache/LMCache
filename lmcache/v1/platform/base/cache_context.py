@@ -33,8 +33,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     # First Party
+    from lmcache.v1.common.memory_management import MemoryObj
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-    from lmcache.v1.memory_management import MemoryObj
     from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
