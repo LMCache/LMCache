@@ -1555,37 +1555,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 need_to_load,
             )
 
-        # In full-prompt-hit case, we need to recompute the last token.
-        # Without this, num_computed_tokens would equal request.num_tokens,
-        # causing num_new_tokens to be 0 and triggering the
-        # `assert num_new_tokens > 0` in the scheduler.
-        if ret == len(request.all_token_ids):
-            if self._prefix_replay_tokens > 0:
-                # SWA bounded replay floors the hit to a block boundary before
-                # allocating, so give back a whole chunk instead of one token.
-                chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
-                aligned = max(0, (ret - 1) // chunk * chunk)
-                if aligned < ret:
-                    tracker.pending_free_ranges.append((aligned, ret))
-                    tracker.num_lmcache_hit_tokens = aligned
-                need_to_load = max(0, aligned - num_computed_tokens)
-            elif ret != full_chunk_tokens and any(
-                tokens_per_block > 0 and (ret - 1) % tokens_per_block == 0
-                for tokens_per_block in self._group_tokens_per_block
-            ):
-                # vLLM allocates blocks for ret - 1 tokens only. When the
-                # prompt's last token starts a new block in some group, that
-                # block is never allocated, so the unfull chunk ending at ret
-                # has no block to load its last token into. Load the full
-                # chunks only; vLLM recomputes the tail. ret stays in
-                # unfull_chunk_boundaries: LMCache already holds that tail.
-                # As in the replay branch above, the tail's lookup read lock
-                # is not freed by a range ending at ret; it expires with the
-                # read-lock TTL.
-                tracker.num_lmcache_hit_tokens = full_chunk_tokens
-                need_to_load = max(0, full_chunk_tokens - num_computed_tokens)
-            else:
-                need_to_load = max(0, need_to_load - 1)
+        # A full-prompt hit reports every prompt token, as vLLM's Offloading
+        # and Nixl connectors do. The load is always async, so vLLM allocates
+        # blocks for the whole hit and, once the load finishes, rolls
+        # num_computed_tokens back to num_tokens - 1 itself to recompute the
+        # last token. (Its `assert num_new_tokens > 0` guards sync loads only.)
+        # Holding back the last token instead left its block unallocated when
+        # that token starts a new block, while the retrieve still covered it
+        # (#6751).
+        if ret == len(request.all_token_ids) and self._prefix_replay_tokens > 0:
+            # SWA bounded replay floors the hit to a block boundary before
+            # allocating, so give back a whole chunk.
+            chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
+            aligned = max(0, (ret - 1) // chunk * chunk)
+            if aligned < ret:
+                tracker.pending_free_ranges.append((aligned, ret))
+                tracker.num_lmcache_hit_tokens = aligned
+            need_to_load = max(0, aligned - num_computed_tokens)
 
         logger.debug(
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
