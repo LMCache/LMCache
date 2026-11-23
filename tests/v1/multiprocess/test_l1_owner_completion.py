@@ -126,7 +126,9 @@ def test_store_owner_callback_round_trip(
     monkeypatch.setattr(
         transfer,
         "transfer_unfull_chunk",
-        lambda cc, ids, skips, leads, obj, group, buffer, direction: copy(None, [obj]),
+        lambda cc, ids, skips, leads, obj, group, buffer, direction, rings: copy(
+            None, [obj]
+        ),
     )
     keys = [ObjectKey(b"chunk", "model", 0, gid) for gid in range(2)]
     ctx = SimpleNamespace(
