@@ -360,3 +360,28 @@ exit $((r1 == 0 && r2 == 1 ? 0 : 1))
     env.update({"BUILDKITE_PULL_REQUEST": "42", "BUILDKITE_PULL_REQUEST_LABELS": ""})
     proc = subprocess.run([bash, "-c", script], env=env, check=False)
     assert proc.returncode == 0
+
+
+def test_sglang_integration_change_keeps_heavy_enabled(tmp_path: Path) -> None:
+    """PRs touching lmcache/integration/sglang/* must not bypass heavy."""
+    bash = _find_bash()
+    if bash is None:
+        pytest.skip("Git Bash / bash not available")
+    assert bash is not None
+
+    clean_pf = tmp_path / "path-filter.sh"
+    clean_pf.write_text(
+        PATH_FILTER_SCRIPT.read_text(encoding="utf-8").replace("\r\n", "\n"),
+        encoding="utf-8",
+    )
+    script = f"""
+source "{clean_pf.as_posix()}"
+_path_filter_get_changed_files() {{
+    printf 'lmcache/integration/sglang/adapter.py\\n'
+}}
+should_skip_multiprocess_heavy ".buildkite/k3_tests/multiprocess/pipeline.yml"
+"""
+    env = os.environ.copy()
+    env.update({"BUILDKITE_PULL_REQUEST": "42", "BUILDKITE_PULL_REQUEST_LABELS": ""})
+    proc = subprocess.run([bash, "-c", script], env=env, check=False)
+    assert proc.returncode == 1

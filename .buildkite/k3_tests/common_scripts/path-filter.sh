@@ -349,6 +349,25 @@ has_shared_ci_dependency_change() {
     return 1
 }
 
+# Returns 0 if any changed file touches SGLang integration. smoke-pipeline.yml
+# only exercises vLLM, so SGLang PRs must keep heavy multiprocess enabled.
+has_sglang_integration_change() {
+    local changed_files f
+    if ! changed_files=$(_path_filter_get_changed_files); then
+        return 0
+    fi
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        [[ "$f" == *.md ]] && continue
+        case "$f" in
+            lmcache/integration/sglang/*)
+                return 0
+                ;;
+        esac
+    done <<< "$changed_files"
+    return 1
+}
+
 # Returns 0 if the heavy multiprocess pipeline should be skipped on an ordinary PR.
 should_skip_multiprocess_heavy() {
     local pipeline_file="${1:-}"
@@ -370,7 +389,7 @@ should_skip_multiprocess_heavy() {
     if [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",force-ci,"* ]]; then
         return 1
     fi
-    if has_shared_ci_dependency_change; then
+    if has_shared_ci_dependency_change || has_sglang_integration_change; then
         return 1
     fi
     return 0
