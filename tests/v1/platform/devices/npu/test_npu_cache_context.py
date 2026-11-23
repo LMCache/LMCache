@@ -17,9 +17,9 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.utils import get_group_data_ptrs
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.platform.devices.npu import NpuDeviceSpec
 from lmcache.v1.platform.devices.npu.cache_context import (
     NpuCacheContext,

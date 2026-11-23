@@ -46,6 +46,7 @@ over gRPC / HTTP.
 |---------|-------------|----------|
 | [`sgl_integration/`](sgl_integration/) | Using LMCache with SGLang instead of vLLM (connecting to the standalone MP server). | 1 GPU |
 | [`dynamo_integration/`](dynamo_integration/) | Recipes for running NVIDIA Dynamo vLLM serving with KV cache offloaded to an LMCache MP server. | 2+ GPUs |
+| [`llm_d_integration/`](llm_d_integration/) | Kubernetes manifests for vLLM pods behind the llm-d Router with KV cache in an LMCache MP server: prefix KV reuse and P/D disaggregation. | Kubernetes cluster, 1 GPU (2 GPUs on one node for P/D) |
 
 ### SDK and Advanced Features
 

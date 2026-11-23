@@ -1,0 +1,117 @@
+name: CPU Device Tests rerun
+
+# GitHub-hosted runners occasionally disappear before any LMCache step runs,
+# which leaves a required CPU Device Tests check red and needs a maintainer to
+# rerun the job by hand. This workflow classifies such a failure and reruns
+# only the affected job, and only when the evidence is unambiguous.
+#
+# It never checks out or executes code from the pull request: the decision is
+# made from read-only API payloads, and the rerun call reuses the original
+# run's context, so no untrusted commit is built here.
+
+on:
+  workflow_run:
+    workflows: ["CPU Device Tests"]
+    types: [completed]
+
+permissions:
+  actions: write
+  checks: read
+  contents: read
+
+concurrency:
+  group: cpu-device-rerun-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  classify:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      # The default branch, never `github.event.workflow_run.head_sha`.
+      - name: Checkout the workflow sources
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Classify the failure
+        id: classify
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          workdir="$RUNNER_TEMP/rerun"
+          mkdir -p "$workdir"
+
+          gh api "repos/$REPO/actions/runs/$RUN_ID" > "$workdir/run.json"
+          gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
+            > "$workdir/jobs_raw.json"
+
+          python - "$workdir" <<'PY'
+          import json, pathlib, subprocess, sys
+
+          workdir = pathlib.Path(sys.argv[1])
+          repo = __import__("os").environ["REPO"]
+          raw = json.loads((workdir / "jobs_raw.json").read_text(encoding="utf-8"))
+          jobs = raw["jobs"] if isinstance(raw, dict) else raw
+          (workdir / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
+
+          annotations = {}
+          for job in jobs:
+              if job.get("conclusion") != "failure":
+                  continue
+              payload = subprocess.run(
+                  ["gh", "api", f"repos/{repo}/check-runs/{job['id']}/annotations"],
+                  check=True, capture_output=True, text=True,
+              ).stdout
+              parsed = json.loads(payload or "[]")
+              annotations[str(job["id"])] = (
+                  parsed.get("annotations", []) if isinstance(parsed, dict) else parsed
+              )
+          (workdir / "annotations.json").write_text(
+              json.dumps(annotations), encoding="utf-8"
+          )
+          PY
+
+          python .github/scripts/classify_runner_failure.py \
+            --run "$workdir/run.json" \
+            --jobs "$workdir/jobs.json" \
+            --annotations "$workdir/annotations.json" \
+            --decision-out "$workdir/decision.json" \
+            --summary-out "$workdir/summary.md"
+
+          cat "$workdir/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+          count=$(python -c "import json,sys;print(len(json.load(open(sys.argv[1]))['rerun_job_ids']))" "$workdir/decision.json")
+          echo "rerun_count=$count" >> "$GITHUB_OUTPUT"
+
+      - name: Rerun the classified job
+        if: steps.classify.outputs.rerun_count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          WORKDIR: ${{ runner.temp }}/rerun
+        run: |
+          set -euo pipefail
+          mapfile -t job_ids < <(python -c \
+            "import json,os;print('\n'.join(map(str,json.load(open(os.path.join(os.environ['WORKDIR'],'decision.json')))['rerun_job_ids'])))")
+          for job_id in "${job_ids[@]}"; do
+            [ -z "$job_id" ] && continue
+            echo "Rerunning job $job_id"
+            gh api -X POST "repos/$REPO/actions/jobs/$job_id/rerun" > /dev/null
+          done

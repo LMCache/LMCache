@@ -36,7 +36,7 @@ Each entry: how it shows up, how to confirm, what to do. Logs are `$P2P_HOME/log
 | reason label on `lmcache_mp_l2_prefetch_failure_chunks_total` | meaning | fix |
 |---|---|---|
 | `l1_oom` | reader could not reserve temporary L1 for the load (`Failed to batched allocate N memory blocks` warnings) | `L1_GB >= resident KV + concurrency x prompt KV`; 20 GB -> 80 GB removed it at 32 in flight |
-| `l1_contended` | the same keys were being loaded by another request on this node; the second recomputes | expected at a few % with duplicate prompts in flight; reduce duplicate concurrency or accept |
+| `l1_contended` | the key is resident in an affinity L1 the request may not read (memory-tag filtering) | check `allowed_l1_memory_tags`; duplicate in-flight loads of the same prompt show up as extra L2 load bytes, not here |
 | misses only right after the warm phase | home node still storing | longer `--gap` |
 
 ## Slow transfers

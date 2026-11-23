@@ -10,8 +10,8 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.platform import synchronize_device
 
 

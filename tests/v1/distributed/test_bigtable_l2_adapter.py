@@ -5,11 +5,9 @@ Unit tests for BigtableL2Adapter.
 
 # Standard
 from contextvars import ContextVar
-from typing import Callable
 from unittest import mock
 import asyncio
 import threading
-import time
 
 # Third Party
 from google.api_core.exceptions import DeadlineExceeded
@@ -31,6 +29,9 @@ from lmcache.v1.memory_management import (
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd
+
+# Test helpers
+from tests.v1.distributed.utils import wait_until
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -217,27 +218,6 @@ def wait_for_event(efd_fileno: int, timeout: float = 5.0) -> bool:
         consume_fd(efd_fileno)
         return True
     return False
-
-
-def wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> bool:
-    """Poll ``predicate`` until it is true or ``timeout`` seconds pass.
-
-    Background callbacks finish at a time the test cannot see, and a
-    fixed sleep is too short on a loaded CI runner.
-
-    Args:
-        predicate: Condition to check.
-        timeout: Maximum number of seconds to wait.
-
-    Returns:
-        True if ``predicate`` became true before the timeout.
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.01)
-    return predicate()
 
 
 class TestBigtableL2Adapter:

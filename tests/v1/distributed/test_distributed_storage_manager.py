@@ -1163,11 +1163,21 @@ class TestStorageManagerGroupedRows:
         assert sm.delete_l1_keys(retained) == (len(retained), 0)
         sm.close()
 
-    def test_full_policy_two_groups_whole_columns_only(
-        self, basic_storage_manager_config, basic_layout
+    @pytest.mark.parametrize(
+        ("fetching_policy", "expected_hits"),
+        [("full", [[1], [0, 2]]), ("whole_chunk", [[], []])],
+    )
+    def test_two_groups_holding_different_chunks(
+        self,
+        basic_storage_manager_config,
+        basic_layout,
+        fetching_policy,
+        expected_hits,
     ):
-        """``"full"`` counts a chunk only when every group holds it; the
-        gapped residents are reported in ``found_cells``, not as hits."""
+        """Two groups that share no chunk. ``"full"`` treats groups
+        independently: every resident key is a hit and read-locked.
+        ``"whole_chunk"`` counts a chunk only when every group holds it, so
+        nothing is a hit. Both report the residents in ``found_cells``."""
         sm = StorageManager(basic_storage_manager_config)
         g0_keys = [make_object_key(c) for c in range(3)]
         g1_keys = [make_object_key(10 + c) for c in range(3)]
@@ -1186,14 +1196,19 @@ class TestStorageManagerGroupedRows:
                         keys=g1_keys, object_group_id=1, layout_desc=basic_layout
                     ),
                 ],
-                fetching_policy="full",
+                fetching_policy=fetching_policy,
             )
         )
         found = sm.query_prefetch_status(handle)
         assert found is not None
-        assert [row.get_indices_list() for row in found.hit_cells] == [[], []]
+        assert [row.get_indices_list() for row in found.hit_cells] == expected_hits
         assert found.found_cells is not None
         assert [row.get_indices_list() for row in found.found_cells] == [[1], [0, 2]]
+
+        if fetching_policy == "full":
+            assert sm.delete_l1_keys(resident) == (0, len(resident))
+            sm.finish_read_prefetched(resident)
+        assert sm.delete_l1_keys(resident) == (len(resident), 0)
 
         sm.close()
 

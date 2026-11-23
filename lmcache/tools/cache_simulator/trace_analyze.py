@@ -36,10 +36,10 @@ import logging
 import struct
 
 # First Party
-from lmcache.cli.metrics import Metrics
 from lmcache.tools.cache_simulator.lru_cache import LRUCacheFast
+from lmcache.v1.common.custom_types import CBMatchResult
+from lmcache.v1.common.metrics import Metrics
 from lmcache.v1.common.token_hasher import TokenHasher
-from lmcache.v1.multiprocess.custom_types import CBMatchResult
 from lmcache.v1.multiprocess.modules.blend.matcher import BlendTokenRangeMatcher
 
 #: Name of the span the tracing subscriber emits per traced request.

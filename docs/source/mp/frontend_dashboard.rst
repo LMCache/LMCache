@@ -239,6 +239,12 @@ using the registered host and port allowlist.
 Dashboard Features
 ------------------
 
+Node Management uses **Is Proxy Node** to register a proxy. To add a child,
+leave that box unchecked and enter its parent proxy's name in **Proxy ID**.
+The table labels the proxy flag and parent ID separately. **Edit** retains
+the original node identity, so changing **Node Name** renames that entry.
+
+
 - **Node tree view** — shows all proxies and their child nodes in a
   collapsible tree.
 - **Metrics aggregation** — ``GET /metrics`` on the dashboard aggregates

@@ -42,7 +42,6 @@ Validated models
 
          lmcache server \
              --chunk-size 256 \
-             --separate-object-groups \
              --l1-size-gb 100 \
              --eviction-policy LRU
 
@@ -73,8 +72,8 @@ Validated models
       sliding-window groups and ``64`` for the compressed-KV / indexer group,
       so the configured minimum of ``256`` remains unchanged. See
       :doc:`/mp/chunk_size_negotiation`.
-      ``--separate-object-groups`` keeps the per-group registration explicit,
-      which is what this multi-geometry model needs.
+      Object-group separation is enabled by default and must remain enabled for
+      this multi-geometry model.
 
       ``--enable-expert-parallel`` distributes the MoE experts across the
       tensor-parallel ranks, as on :doc:`DeepSeek-V4-Flash <deepseek_v4_flash>`;

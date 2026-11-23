@@ -8,12 +8,12 @@ from typing import TypedDict
 import threading
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.attn_window import DEFAULT_ATTN_WINDOW_DESC, AttnWindowDesc
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
-    DEFAULT_ATTN_WINDOW_DESC,
     DEFAULT_SHARD_REPLICATION_DESC,
-    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     ShardReplicationDesc,
@@ -22,7 +22,6 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import SessionManager
 
 logger = init_logger(__name__)
@@ -39,6 +38,8 @@ class ShmPoolInfo(TypedDict):
 class _LayoutDescEntry:
     """Stored layout descriptor and its active registration count."""
 
+    chunk_size: int
+    token_hasher: TokenHasher
     layout_desc: MemoryLayoutDesc
     ref_count: int
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
@@ -84,13 +85,13 @@ def finish_lookup_read(
 
 
 class LayoutDescRegistry:
-    """Thread-safe registry mapping (model_name, world_size) to MemoryLayoutDesc.
+    """Registry of layouts and hashing metadata keyed by model and world size.
 
-    Modules write to this registry when KV caches are registered.
-    Consumers (e.g. LookupModule) read from it to find layout descriptors
-    for prefetch tasks. Multiple worker instances can share the same
-    ``(model_name, world_size)`` entry, so the registry keeps the descriptor
-    until the last matching registration is unregistered.
+    Modules write to this thread-safe registry when KV caches are registered.
+    Consumers read the layout, chunk size, and token hasher from the same entry
+    so object geometry and key derivation cannot diverge. Multiple worker
+    instances can share an entry, which remains until the last matching
+    registration is unregistered.
     """
 
     def __init__(self) -> None:
@@ -103,6 +104,8 @@ class LayoutDescRegistry:
         model_name: str,
         world_size: int,
         layout_desc: MemoryLayoutDesc,
+        chunk_size: int,
+        hash_algorithm: str,
         attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC,
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
         group_unfull_chunk_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
@@ -117,6 +120,8 @@ class LayoutDescRegistry:
             model_name: The model name.
             world_size: The world size.
             layout_desc: The memory layout descriptor.
+            chunk_size: Effective chunk size for this registration.
+            hash_algorithm: Hash algorithm for this registration.
             attn_desc: Cross-chunk attention windows of all object groups, in
                 object-group order. Defaults to a single full-attention group.
             group_layout_descs: Maps object_group_id to that group's layout
@@ -131,8 +136,9 @@ class LayoutDescRegistry:
                 describes every object group of ``attn_desc``.
 
         Raises:
-            ValueError: If ``shard_replication_desc`` describes a different number of
-                object groups than ``attn_desc``.
+            ValueError: If the chunk size or hash algorithm conflicts with an
+                existing registration, or ``shard_replication_desc`` describes
+                a different number of object groups than ``attn_desc``.
         """
         key = (model_name, world_size)
         attn_desc = replace(attn_desc, world_size=world_size)
@@ -153,6 +159,10 @@ class LayoutDescRegistry:
             entry = self._registry.get(key)
             if entry is None:
                 self._registry[key] = _LayoutDescEntry(
+                    chunk_size=chunk_size,
+                    token_hasher=TokenHasher(
+                        chunk_size=chunk_size, hash_algorithm=hash_algorithm
+                    ),
                     layout_desc=layout_desc,
                     ref_count=1,
                     attn_desc=attn_desc,
@@ -161,6 +171,18 @@ class LayoutDescRegistry:
                     shard_replication_desc=shard_replication_desc,
                 )
                 return
+
+            if entry.chunk_size != chunk_size:
+                raise ValueError(
+                    f"KV cache registration {key!r} already uses chunk size "
+                    f"{entry.chunk_size}; cannot register chunk size {chunk_size}"
+                )
+            if entry.token_hasher.hash_algorithm_name != hash_algorithm:
+                raise ValueError(
+                    f"KV cache registration {key!r} already uses hash algorithm "
+                    f"{entry.token_hasher.hash_algorithm_name!r}; cannot register "
+                    f"hash algorithm {hash_algorithm!r}"
+                )
 
             entry.layout_desc = layout_desc
             entry.attn_desc = attn_desc
@@ -207,6 +229,38 @@ class LayoutDescRegistry:
                 return None
             return entry.layout_desc
 
+    def get_chunk_size(self, model_name: str, world_size: int) -> int:
+        """Return the effective chunk size registered for a model and world size.
+
+        Args:
+            model_name: Registered model name.
+            world_size: Registered KV world size.
+
+        Returns:
+            The effective chunk size.
+
+        Raises:
+            ValueError: If the model and world size are not registered.
+        """
+        with self._lock:
+            return self._registered_entry(model_name, world_size).chunk_size
+
+    def get_token_hasher(self, model_name: str, world_size: int) -> TokenHasher:
+        """Return the token hasher registered for a model and world size.
+
+        Args:
+            model_name: Registered model name.
+            world_size: Registered KV world size.
+
+        Returns:
+            The registered token hasher.
+
+        Raises:
+            ValueError: If the model and world size are not registered.
+        """
+        with self._lock:
+            return self._registered_entry(model_name, world_size).token_hasher
+
     def find_group_layout_descs(
         self, model_name: str, world_size: int
     ) -> dict[int, MemoryLayoutDesc] | None:
@@ -216,6 +270,25 @@ class LayoutDescRegistry:
             if entry is None:
                 return None
             return entry.group_layout_descs
+
+    def find_group_shard_geometry(
+        self, model_name: str, world_size: int
+    ) -> tuple[tuple[int, ...], ShardReplicationDesc] | None:
+        """Read the object group IDs and shard replication from one registration.
+
+        Args:
+            model_name: Registered model name.
+            world_size: Registered KV world size.
+
+        Returns:
+            The group IDs and their replication descriptor, or None when the
+            registration is absent or has no groups.
+        """
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None or not entry.group_layout_descs:
+                return None
+            return tuple(entry.group_layout_descs), entry.shard_replication_desc
 
     def find_group_unfull_chunk_layout_descs(
         self, model_name: str, world_size: int
@@ -300,7 +373,7 @@ class MPCacheServerContext:
         hash_algorithm: Hash algorithm for token hashing.
         separate_object_groups: Whether to split kernel groups into one object
             group per sliding-window size at KV-cache registration. Default
-            False.
+            True.
         null_block_id: Engine block ID that denotes absent KV data.
         session_ttl_seconds: Idle seconds before a request session is reaped.
     """
@@ -310,7 +383,7 @@ class MPCacheServerContext:
         storage_manager_config: StorageManagerConfig,
         chunk_size: int = 256,
         hash_algorithm: str = "blake3",
-        separate_object_groups: bool = False,
+        separate_object_groups: bool = True,
         full_sw_kv: bool = False,
         null_block_id: int = 0,
         session_ttl_seconds: float = SessionManager.DEFAULT_SESSION_TTL,
@@ -499,7 +572,7 @@ class MPCacheServerContext:
 
     @property
     def layout_desc_registry(self) -> LayoutDescRegistry:
-        """Registry mapping (model_name, world_size) to MemoryLayoutDesc."""
+        """Return the registered layouts and their hashing metadata."""
         return self._layout_desc_registry
 
     def resolve_obj_keys(
@@ -524,13 +597,19 @@ class MPCacheServerContext:
             ValueError: If ``key.worker_id`` is ``None``, or no KV cache is
                 registered for the key's ``(model_name, world_size)``.
         """
-        session = self.session_manager.get_or_create(key.request_id)
+        chunk_size = self.layout_desc_registry.get_chunk_size(
+            key.model_name, key.world_size
+        )
+        token_hasher = self.layout_desc_registry.get_token_hasher(
+            key.model_name, key.world_size
+        )
+        session = self.session_manager.get_or_create(key.request_id, token_hasher)
         session.set_tokens(key.token_bytes)
         if session.lookup_ipc_key is None:
             session.lookup_ipc_key = key.no_worker_id_version()
         # A partial chunk past the last chunk boundary is not a full chunk;
         # an unfull chunk's key comes from resolve_unfull_chunk_obj_keys.
-        full_chunk_end = key.end - key.end % self.chunk_size
+        full_chunk_end = key.end - key.end % chunk_size
         chunk_hashes = [
             TokenHasher.hash_to_bytes(h)
             for h in session.get_hashes(key.start, full_chunk_end)
@@ -563,7 +642,10 @@ class MPCacheServerContext:
         """
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
-        session = self.session_manager.get_or_create(key.request_id)
+        token_hasher = self.layout_desc_registry.get_token_hasher(
+            key.model_name, key.world_size
+        )
+        session = self.session_manager.get_or_create(key.request_id, token_hasher)
         session.set_tokens(key.token_bytes)
         unfull_hash = TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(key.end))
         return [

@@ -16,7 +16,9 @@ Install the Intel DPC++ compiler matching the installed DPC++ runtime.
 Supported systems: Ubuntu/Debian on amd64 with a dpkg-managed runtime or
 the intel-sycl-rt Python package.
 The script preserves the detected runtime and does not upgrade installed
-packages. It may install compiler-required support packages.
+packages. For a Python runtime, it prefers an exact compiler release, then
+the newest available patch not newer than the runtime in the same major/minor
+release. It may install compiler-required support packages.
 
 Usage:
   sudo env PYTHON="$(command -v python)" bash .buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh
@@ -68,6 +70,32 @@ installed_version() {
         return 1
     fi
     dpkg-query -W -f='${Version}' "$package"
+}
+
+select_compiler_version() {
+    local package="$1"
+    local release="$2"
+    local release_series="$3"
+    local candidate candidate_release
+    local selected=""
+
+    while IFS= read -r candidate; do
+        candidate_release="${candidate%%-*}"
+        if [[ "$candidate_release" != "$release_series".* ]]; then
+            continue
+        fi
+        if dpkg --compare-versions "$candidate_release" le "$release" &&
+            { [[ -z "$selected" ]] ||
+                dpkg --compare-versions "$candidate" gt "$selected"; }; then
+            selected="$candidate"
+        fi
+    done < <(apt-cache madison "$package" | awk -F '|' '{
+        version = $2
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", version)
+        if (version != "") print version
+    }')
+
+    printf '%s\n' "$selected"
 }
 
 runtime_package=""
@@ -157,19 +185,10 @@ printf 'deb [arch=amd64 signed-by=%s] %s all main\n' \
 apt-get update
 
 compiler_package_version="$runtime_version"
-if [[ "$runtime_version" != *-* ]]; then
+if [[ -z "$runtime_package" ]]; then
     compiler_package_version="$(
-        apt-cache madison "$compiler_package" |
-            awk -F '|' -v prefix="${runtime_release}-" '
-                {
-                    version = $2
-                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", version)
-                    if (index(version, prefix) == 1 && result == "") {
-                        result = version
-                    }
-                }
-                END { print result }
-            '
+        select_compiler_version "$compiler_package" "$runtime_release" \
+            "${runtime_major}.${runtime_minor}"
     )"
 fi
 

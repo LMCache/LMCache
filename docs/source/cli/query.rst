@@ -164,6 +164,11 @@ APIs
      - ``/cache/prefetches/{instance}/{request_id}``
      - ``--instance`` **and** ``--request-id`` (required)
      - One warm-prefetch request's progress.
+   * - ``status``
+     - ``/status``
+     - —
+     - A debugging snapshot: event source, ingest streams, consumers,
+       heartbeats, controllers, background loops, event loop.
    * - ``metrics``
      - ``/metrics``
      - —
@@ -360,6 +365,86 @@ without a CLI change.
    The first poll that observes completion drops the job on the MP server.
    Polling the same ``--request-id`` again returns ``404`` and exits ``1``.
 
+Debugging snapshot
+~~~~~~~~~~~~~~~~~~
+
+``--api status`` renders ``GET /status``: what each coordinator component
+reports right now, from the same snapshots its metrics are read from. Use it
+when a dashboard shows something wrong and you need the per-server and
+per-loop detail behind it.
+
+.. code-block:: bash
+
+   $ lmcache query coordinator --api status
+
+   ============= Coordinator: status ==============
+   ----------------- Event source -----------------
+   Source:                                     http
+   Replay:                                     none
+   -------------------- Ingest --------------------
+   Batches applied:                               2
+   Batches duplicate:                             0
+   Batches stale:                                 0
+   Batches missing:                               1
+   Events dropped by servers:                     0
+   server  incarnation  last seq  view        missing  dropped  since event s  delivery delay s
+   --------------------------------------------------------------------------------------------
+   node-a            1         3  incomplete        1        0           0.50  N/A
+   consumer           delivered  avg apply ms  consume failures  fence failures
+   ----------------------------------------------------------------------------
+   CacheUsageManager          0           N/A                 0               0
+   KeyDirectory               4          0.50                 0               0
+   registered server  since heartbeat s
+   ------------------------------------
+   node-a                          1.25
+   controller               started
+   --------------------------------
+   FleetEvictionController  yes
+   PrefetchManager          no
+   loop          every s  ok  failed  since success s  failing  last error
+   ------------------------------------------------------------------------------------
+   checkpoint      30.00   4       0            12.50  no       --
+   eviction        30.00   0       3              N/A  yes      RuntimeError: disk full
+   health_check    30.00   4       1            12.50  no       TimeoutError: node-b
+   ------------------ Event loop ------------------
+   Blocked (s, total):                         0.75
+   ================================================
+
+How to read it:
+
+- ``view`` is ``incomplete`` once the coordinator has lost events from that
+  server (a skipped ``seq`` or events the server reported dropping). It stays
+  so until the server restarts with a new incarnation, since lost events are
+  not replayed.
+- ``delivery delay s`` is ``N/A`` until a batch carrying a send time arrives;
+  it is not zero.
+- ``avg apply ms`` is ``N/A`` for a consumer that has not been handed a batch.
+- A loop's ``last error`` stays after a later pass succeeds. ``failing`` says
+  whether the latest pass failed: in the example, ``health_check`` recovered
+  and ``eviction`` has never succeeded.
+- The ``checkpoint`` loop is absent when periodic checkpoints are off.
+
+A coordinator reading cache events from Kafka also reports what it has read,
+and one row per assigned partition:
+
+.. code-block:: text
+
+   ----------------- Event source -----------------
+   Source:                                    kafka
+   Replay:                                 seekable
+   Records applied:                             120
+   Records undecodable:                           1
+   Records failed:                                0
+   Partitions assigned:                           2
+   partition  next offset  unread
+   ------------------------------
+           2           40     N/A
+          10          300       7
+
+``next offset`` is where the next checkpoint resumes the partition, and
+``unread`` the records between it and the partition's high watermark; either
+is ``N/A`` until it is known.
+
 Prometheus metrics
 ~~~~~~~~~~~~~~~~~~
 
@@ -387,7 +472,7 @@ Options
      - Yes
      - Which API to read. One of ``usage``, ``instances``, ``health``,
        ``directory``, ``keys``, ``quota``, ``quota-config``, ``prefetch``,
-       ``metrics``.
+       ``status``, ``metrics``.
    * - ``--url URL``
      - No
      - Coordinator base URL (default: ``http://127.0.0.1:9300``). The scheme

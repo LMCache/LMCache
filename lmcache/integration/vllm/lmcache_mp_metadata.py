@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 import enum
@@ -12,6 +12,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorWorkerMetadata,
 )
 from vllm.v1.utils import ConstantList
+
+try:
+    # Third Party
+    from vllm.utils.torch_utils import token_ids_to_tensor
+except ImportError:
+    # Older vLLM versions do not provide token_ids_to_tensor.
+    token_ids_to_tensor = None  # type: ignore[assignment]
+
+# Third Party
 import torch
 
 # First Party
@@ -22,16 +31,23 @@ from lmcache.integration.vllm.utils import (
     extract_request_configs_from_request,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
+from lmcache.v1.common.group_view import slice_block_ids_per_group
 from lmcache.v1.common.token_codec import (
     TOKEN_STRIDE,
     num_packed_tokens,
     pack_token_ids,
 )
-from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
 
 if TYPE_CHECKING:
     # Third Party
     from vllm.v1.request import Request
+
+
+def _make_token_ids_tensor(token_ids: Sequence[int]) -> torch.Tensor:
+    """Convert token IDs to a tensor without unpacking supported buffers."""
+    if token_ids_to_tensor is None:
+        return torch.tensor(token_ids)
+    return token_ids_to_tensor(token_ids)
 
 
 class LMCacheMPRequestState(enum.Enum):
@@ -53,6 +69,8 @@ class LMCacheMPRequestState(enum.Enum):
 class LMCacheMPRequestTracker:
     # NOTE: this class used vLLM data structures, should be part of
     # vLLM integration code
+
+    _request: "Request"
 
     request_id: str
 
@@ -113,12 +131,13 @@ class LMCacheMPRequestTracker:
 
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
-    # Packed prefix of `get_token_ids()`, grown in place. A request emits one
-    # op per scheduler step, so repacking the whole sequence each time would
-    # put the context length back on the scheduler's critical path.
+    # Packed prefix of the logical token sequence, grown in place. A request
+    # emits one op per scheduler step, so repacking the whole sequence each
+    # time would put the context length back on the scheduler's critical path.
     packed_tokens: bytearray = field(default_factory=bytearray)
 
     def __init__(self, request: "Request"):
+        self._request = request
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
         self.request_configs = apply_lora_tag(
@@ -148,7 +167,9 @@ class LMCacheMPRequestTracker:
         self.mm_adjusted_prompt_ids = []
         mm_hashes, mm_positions = extract_mm_features(request)
         if mm_hashes and mm_positions:
-            prompt_ids = torch.tensor(request.prompt_token_ids)
+            prompt_token_ids = request.prompt_token_ids
+            assert prompt_token_ids is not None
+            prompt_ids = _make_token_ids_tensor(prompt_token_ids)
             apply_mm_hashes_to_token_ids(prompt_ids, mm_hashes, mm_positions)
             self.mm_adjusted_prompt_ids = prompt_ids.tolist()
 
@@ -242,22 +263,18 @@ class LMCacheMPRequestTracker:
             for engine_group_idx, blocks in self.allocated_block_ids.items()
         }
 
-    def get_token_ids(self) -> list[int]:
-        """Return the token ids to use for LMCache key derivation."""
-        if not self.mm_adjusted_prompt_ids:
-            # Text-only requests: one copy of the live sequence.
-            return list(self.all_token_ids)
-        return self.get_token_ids_slice(0, len(self.all_token_ids))
+    def get_token_ids(self, start: int, end: int) -> list[int]:
+        """Return token IDs used for LMCache key derivation.
 
-    def get_token_ids_slice(self, start: int, end: int) -> list[int]:
-        """Return ``get_token_ids()[start:end]`` without building the whole list.
+        Multimodal placeholder spans are replaced with values derived from
+        their multimodal identifiers. Only the requested range is built.
 
         Args:
             start: Absolute start position.
             end: Absolute end position (exclusive).
 
         Returns:
-            The token ids in ``[start, end)``.
+            The key-derivation token IDs in ``[start, end)``.
         """
         num_prompt_tokens = len(self.mm_adjusted_prompt_ids)
         if end <= num_prompt_tokens:
@@ -273,7 +290,7 @@ class LMCacheMPRequestTracker:
         """Return the whole current token sequence, packed.
 
         Returns:
-            Every token ``get_token_ids`` would return, in packed form.
+            Every current token ID in packed form.
         """
         packed_so_far = num_packed_tokens(self.packed_tokens)
         total = len(self.all_token_ids)
@@ -282,16 +299,23 @@ class LMCacheMPRequestTracker:
         # place. The boundary token also catches an equally long next turn.
         if packed_so_far and (
             total < packed_so_far
-            or self.get_token_ids_slice(packed_so_far - 1, packed_so_far)[0]
+            or self.get_token_ids(packed_so_far - 1, packed_so_far)[0]
             != int.from_bytes(self.packed_tokens[-TOKEN_STRIDE:], "big")
         ):
             self.packed_tokens = bytearray()
             packed_so_far = 0
         if total > packed_so_far:
-            self.packed_tokens += pack_token_ids(
-                self.get_token_ids_slice(packed_so_far, total)
-            )
+            self.packed_tokens += self._pack_token_ids(packed_so_far, total)
         return bytes(self.packed_tokens)
+
+    def _pack_token_ids(self, start: int, end: int) -> bytes:
+        if self.mm_adjusted_prompt_ids:
+            return pack_token_ids(self.get_token_ids(start, end))
+
+        # Old vLLM sequences use the generic path; new vLLM exposes the
+        # current prompt-and-decode TokenBuffer through prefill_token_ids.
+        token_ids = getattr(self._request, "prefill_token_ids", self.all_token_ids)
+        return pack_token_ids(token_ids, start, end)
 
     ####
     # For debugging

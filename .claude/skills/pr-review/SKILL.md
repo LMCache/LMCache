@@ -73,6 +73,8 @@ Review the diff against these standards (from `docs/coding_standards.md`):
 **New Functionality (Section 5)**:
 - Design doc present for non-trivial features.
 - Tests cover new features (error-severity if missing).
+- User-facing features (a new or changed CLI command, flag, or server API) have
+  an end-to-end test that drives that entry point (warning-severity if missing).
 - Tests verify public interface, not implementation details.
 - Tests do not access private members.
 
@@ -86,7 +88,7 @@ Review the diff against these standards (from `docs/coding_standards.md`):
 - Import ordering correct (Standard / Third Party / First Party / Local).
 - All imports at file top (no lazy imports).
 - `import torch` before native C extensions.
-- Uses `init_logger(__name__)` from `lmcache.logging`, not bare `logging.getLogger()`.
+- Uses `init_logger(__name__)` from `lmcache.v1.common.logging`, not bare `logging.getLogger()`.
 - Operational logs at DEBUG level (not INFO).
 - Log levels appropriate (no WARNING for expected concurrent conditions).
 - Module-level helpers at top; private methods at end of class.
@@ -155,6 +157,8 @@ Report findings as part of the issues list, with the path:line of the affected c
 
 - New features have tests (error-severity if missing).
 - Bug fixes have regression tests (error-severity if missing).
+- User-facing features have an end-to-end test that drives the CLI command,
+  flag, or server API the way a user would (warning-severity if missing).
 - Tests verify public API and docstring contract.
 - Tests do not access private members or test private functions directly.
 - Note what is tested and what is missing (especially failure paths and concurrent access).
@@ -183,9 +187,9 @@ Group issues by severity, following the calibration from `docs/coding_standards.
   swallows errors on a data path, defensive branch that masks real failures.
 
 **warning** (should fix):
-- Docstring could be more detailed, tests that test implementation details, naming
-  could be clearer, code could be more modular, missing `strict=True` on `zip` of
-  parallel lists, log level too high for operational messages, boilerplate
+- Docstring could be more detailed, tests that test implementation details,
+  user-facing feature with no end-to-end test, naming could be clearer, code
+  could be more modular, missing `strict=True` on `zip` of parallel lists, log level too high for operational messages, boilerplate
   docstrings, redundant guards, comments narrating the change, style inconsistent
   with the surrounding module.
 

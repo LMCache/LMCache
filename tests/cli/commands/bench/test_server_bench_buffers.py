@@ -12,8 +12,8 @@ import torch
 
 # First Party
 from lmcache.cli.commands.bench.server_bench.buffers import KVCacheBuffers
+from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.kv_layer_groups import parse_kvcache_shape_spec
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 
 def _blocks(start: int, count: int, groups: int = 2) -> tuple[tuple[int, ...], ...]:

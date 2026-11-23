@@ -18,7 +18,7 @@ from typing import BinaryIO, Iterator
 import struct
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.mp_observability.trace.format import (
     FORMAT_VERSION,
     MAGIC,

@@ -801,7 +801,7 @@ it through. Update serialization. No behavioral change with `cache_salt=""`.
 | File | Change |
 |------|--------|
 | `lmcache/v1/distributed/api.py` | `cache_salt: str = ""` on `ObjectKey` with `__post_init__` validation (`@`, `/`, `\`, NUL, length cap on `cache_salt`; `@` rejected on `model_name`); `ipc_key_to_object_keys()` reads `ipc_key.cache_salt` directly (no separate param) |
-| `lmcache/v1/multiprocess/custom_types.py` | `cache_salt: str = ""` on `IPCCacheServerKey` with `__post_init__` validation; update `no_worker_id_version()`, `from_token_ids()` |
+| `lmcache/v1/common/custom_types.py` | `cache_salt: str = ""` on `IPCCacheServerKey` with `__post_init__` validation; update `no_worker_id_version()`, `from_token_ids()` |
 | `lmcache/v1/multiprocess/server.py` | No code changes — existing `ipc_key_to_object_keys(key, chunk_hashes)` calls now carry salt automatically |
 | `lmcache/integration/vllm/vllm_multi_process_adapter.py` | Scheduler + worker `_create_key()` now forward `cache_salt` to `IPCCacheServerKey` |
 | `lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py` | `_object_key_to_string()` appends trailing `@<cache_salt>` when salted; un-salted output is unchanged |

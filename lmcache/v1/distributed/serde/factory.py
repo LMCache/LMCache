@@ -16,7 +16,7 @@ in L2 adapter configs:
 from typing import TYPE_CHECKING, Callable
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party

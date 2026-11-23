@@ -11,12 +11,9 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.common.token_hasher import TokenHasher
-from lmcache.v1.distributed.api import (
-    DEFAULT_SHARD_REPLICATION_DESC,
-    AttnWindowDesc,
-    MemoryLayoutDesc,
-)
+from lmcache.v1.distributed.api import DEFAULT_SHARD_REPLICATION_DESC, MemoryLayoutDesc
 from lmcache.v1.multiprocess.cache_control.key_resolver import (
     resolve_grouped_object_keys,
 )

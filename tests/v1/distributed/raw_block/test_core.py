@@ -41,6 +41,7 @@ from tests.v1.distributed.raw_block.test_utils import (
     RAW_BLOCK_CI_META_TOTAL_BYTES,
     RAW_BLOCK_CI_SLOT_BYTES,
     is_skip_safe_io_error,
+    make_aligned_memory_obj,
     make_empty_memory_obj,
     make_memory_obj,
     make_object_key,
@@ -220,7 +221,7 @@ def test_raw_block_core_uring_cmd_read_copyback_uses_aligned_chunks():
 def test_raw_block_core_store_load_and_exists(tmp_path):
     path = make_raw_block_file(tmp_path)
     config = make_raw_block_core_config(path)
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
 
     try:
         keys = [make_object_key(i) for i in range(3)]
@@ -296,7 +297,7 @@ def test_raw_block_core_iouring_load_batch_roundtrip(
         load_checkpoint_on_init=False,
     )
     try:
-        core = RawBlockCore(config, key_namespace="object")
+        core = RawBlockCore(config)
     except Exception as exc:
         if is_skip_safe_io_error(exc):
             pytest.skip(f"io_uring/O_DIRECT is unavailable on this runner: {exc}")
@@ -357,7 +358,7 @@ def test_raw_block_core_iouring_load_batch_roundtrip(
 def test_raw_block_core_duplicate_put_keeps_original_payload(tmp_path):
     path = make_raw_block_file(tmp_path)
     config = make_raw_block_core_config(path)
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
 
     try:
         spec = encode_object_key(make_object_key(11))
@@ -383,7 +384,7 @@ def test_raw_block_core_duplicate_put_keeps_original_payload(tmp_path):
 def test_raw_block_core_delete_and_missing_load(tmp_path):
     path = make_raw_block_file(tmp_path)
     config = make_raw_block_core_config(path)
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
 
     try:
         existing = encode_object_key(make_object_key(21))
@@ -417,7 +418,7 @@ def test_raw_block_core_rejects_checkpoint_layout_mismatch(
 ):
     path = make_raw_block_file(tmp_path)
     config = make_raw_block_core_config(path)
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
 
     try:
         state = {
@@ -466,6 +467,7 @@ class _RecordingRawDevice:
     size: int
     store: dict[int, bytes] = field(default_factory=dict)
     batched_write_calls: list[_BatchedWriteCall] = field(default_factory=list)
+    batched_read_buffer_lens: list[list[int]] = field(default_factory=list)
     wait_iouring_count: int = 0
     pwrite_count: int = 0
     write_uring_count: int = 0
@@ -553,6 +555,9 @@ class _RecordingRawDevice:
         buffers: Sequence[Buffer],
         total_lens: Sequence[int],
     ) -> int:
+        self.batched_read_buffer_lens.append(
+            [len(memoryview(buf).cast("B")) for buf in buffers]
+        )
         for off, buf, total in zip(offsets, buffers, total_lens, strict=True):
             self._copy_into(int(off), buf, int(total))
         return self._submit_batch(len(offsets))
@@ -596,12 +601,15 @@ def _make_core_with_fake(
     io_engine: str,
     capacity_bytes: int | None = None,
     use_odirect: bool = False,
+    enable_zero_copy: bool = False,
 ) -> RawBlockCore:
     """Build a RawBlockCore wired to a fake raw device for a given engine.
 
     When ``capacity_bytes`` is given it overrides the config capacity so a
     test can constrain the number of allocatable slots. When ``use_odirect``
     is set, writes are padded to ``block_align`` so payload_len < total_len.
+    ``enable_zero_copy`` lets aligned memory objects be handed to the device
+    directly, as the MP adapter does by default.
 
     The fake device is injected into the io_engine as it is constructed so
     ``RawBlockCore``'s capacity/layout pass never opens a real Rust raw-device
@@ -612,6 +620,7 @@ def _make_core_with_fake(
         io_engine=io_engine,
         load_checkpoint_on_init=False,
         use_odirect=use_odirect,
+        enable_zero_copy=enable_zero_copy,
     )
     if capacity_bytes is not None:
         config = replace(config, capacity_bytes=capacity_bytes)
@@ -650,7 +659,7 @@ def _make_core_with_fake(
         return _seed_engine(engine_cls)(cfg)
 
     with patch.object(raw_block_core, "make_raw_block_io", _make_engine):
-        core = RawBlockCore(config, key_namespace="object")
+        core = RawBlockCore(config)
     return core
 
 
@@ -874,6 +883,144 @@ def test_raw_block_core_io_uring_padded_odirect_uses_batched_write(
         load_result = core.load_many_into([spec.encoded for spec in specs], loaded)
         assert load_result == [True] * 4
         assert [memory_obj_bytes(obj) for obj in loaded] == payloads
+    finally:
+        core.close()
+
+
+def _allocation_tail_bytes(obj: TensorMemoryObj, payload_len: int) -> bytes:
+    """Return the allocation bytes between the payload end and the next block."""
+    end = raw_block_core.round_up(payload_len, RAW_BLOCK_CI_BLOCK_ALIGN)
+    return bytes(obj.raw_data[payload_len:end].tolist())
+
+
+def test_raw_block_core_padded_odirect_write_uses_physical_allocation(
+    tmp_path: Path,
+) -> None:
+    path = make_raw_block_file(tmp_path)
+    fake = _RecordingRawDevice(size=128 * 1024 * 1024)
+    core = _make_core_with_fake(
+        path, fake, io_engine="io_uring", use_odirect=True, enable_zero_copy=True
+    )
+
+    try:
+        specs = [encode_object_key(make_object_key(i)) for i in range(4)]
+        payloads = [bytes([i + 1]) * (1000 + i * 37) for i in range(4)]
+        objects = [make_aligned_memory_obj(payload) for payload in payloads]
+
+        assert core.put_many(specs, objects).results == [True] * 4
+
+        # Padded payload views cover the full transfer, so no bounce is needed.
+        call = fake.batched_write_calls[0]
+        padded = [
+            (buf_len, total_len)
+            for buf_len, payload_len, total_len in zip(
+                call.buffer_byte_lens, call.payload_lens, call.total_lens, strict=True
+            )
+            if payload_len < total_len
+        ]
+        assert len(padded) == 4
+        assert all(buf_len == total_len for buf_len, total_len in padded)
+
+        # Padding is zero-filled in the allocation; the payload is untouched.
+        for obj, payload in zip(objects, payloads, strict=True):
+            assert memory_obj_bytes(obj) == payload
+            assert _allocation_tail_bytes(obj, len(payload)) == bytes(
+                RAW_BLOCK_CI_BLOCK_ALIGN - len(payload)
+            )
+
+        loaded = [make_empty_memory_obj(len(payload)) for payload in payloads]
+        load_result = core.load_many_into([spec.encoded for spec in specs], loaded)
+        assert load_result == [True] * 4
+        assert [memory_obj_bytes(obj) for obj in loaded] == payloads
+    finally:
+        core.close()
+
+
+def test_raw_block_core_padded_odirect_load_reads_into_physical_allocation(
+    tmp_path: Path,
+) -> None:
+    path = make_raw_block_file(tmp_path)
+    fake = _RecordingRawDevice(size=128 * 1024 * 1024)
+    core = _make_core_with_fake(
+        path, fake, io_engine="io_uring", use_odirect=True, enable_zero_copy=True
+    )
+
+    try:
+        specs = [encode_object_key(make_object_key(i)) for i in range(4)]
+        payloads = [bytes([i + 1]) * (1000 + i * 37) for i in range(4)]
+        sources = [make_aligned_memory_obj(payload) for payload in payloads]
+        assert core.put_many(specs, sources).results == [True] * 4
+
+        loaded = [make_aligned_memory_obj(bytes(len(payload))) for payload in payloads]
+        load_result = core.load_many_into([spec.encoded for spec in specs], loaded)
+
+        assert load_result == [True] * 4
+        assert [memory_obj_bytes(obj) for obj in loaded] == payloads
+        # Read views extend past the logical destination to the full transfer.
+        assert fake.batched_read_buffer_lens[-1] == [RAW_BLOCK_CI_BLOCK_ALIGN] * 4
+    finally:
+        core.close()
+
+
+@pytest.mark.parametrize("span,physical", [(1000, 4096), (4096, 1000), (2000, 4096)])
+def test_raw_block_core_direct_view_stays_within_tensor_span(
+    tmp_path: Path, span: int, physical: int
+) -> None:
+    """The view never exceeds the object's tensor or its physical size."""
+    path = make_raw_block_file(tmp_path)
+    fake = _RecordingRawDevice(size=128 * 1024 * 1024)
+    core = _make_core_with_fake(
+        path, fake, io_engine="io_uring", use_odirect=True, enable_zero_copy=True
+    )
+
+    try:
+        spec = encode_object_key(make_object_key(0))
+        payload = b"x" * 1000
+        obj = make_aligned_memory_obj(payload, span_bytes=span, physical_size=physical)
+
+        assert core.put_many([spec], [obj]).results == [True]
+
+        call = fake.batched_write_calls[0]
+        padded = [
+            buf_len
+            for buf_len, payload_len, total_len in zip(
+                call.buffer_byte_lens, call.payload_lens, call.total_lens, strict=True
+            )
+            if payload_len < total_len
+        ]
+        # Without a full transfer span, the logical payload view is submitted.
+        assert padded == [len(payload)]
+        assert ctypes.string_at(
+            obj.data_ptr + len(payload), RAW_BLOCK_CI_BLOCK_ALIGN - len(payload)
+        ) == b"\xa5" * (RAW_BLOCK_CI_BLOCK_ALIGN - len(payload))
+
+        loaded = make_empty_memory_obj(len(payload))
+        assert core.load_many_into([spec.encoded], [loaded]) == [True]
+        assert memory_obj_bytes(loaded) == payload
+    finally:
+        core.close()
+
+
+def test_raw_block_core_posix_padding_does_not_modify_source(tmp_path: Path) -> None:
+    """POSIX pads in its own tail buffer and leaves the source allocation alone."""
+    fake = _RecordingRawDevice(size=128 * 1024 * 1024)
+    core = _make_core_with_fake(
+        make_raw_block_file(tmp_path),
+        fake,
+        io_engine="posix",
+        use_odirect=True,
+        enable_zero_copy=True,
+    )
+    payload = b"p" * 1000
+    source = make_aligned_memory_obj(payload)
+    spec = encode_object_key(make_object_key(900))
+    try:
+        assert core.put_many([spec], [source]).results == [True]
+        assert _allocation_tail_bytes(source, len(payload)) == b"\xa5" * 3096
+
+        loaded = make_empty_memory_obj(len(payload))
+        assert core.load_many_into([spec.encoded], [loaded]) == [True]
+        assert memory_obj_bytes(loaded) == payload
     finally:
         core.close()
 
@@ -1202,7 +1349,7 @@ def test_raw_block_core_recovers_checkpoint_from_temp_file(tmp_path):
     spec = encode_object_key(make_object_key(31))
     payload = b"recoverable-raw-block-payload"
 
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
     try:
         put_result = core.put_many([spec], [make_memory_obj(payload)])
         assert put_result.results == [True]
@@ -1210,7 +1357,7 @@ def test_raw_block_core_recovers_checkpoint_from_temp_file(tmp_path):
     finally:
         core.close()
 
-    recovered = RawBlockCore(config, key_namespace="object")
+    recovered = RawBlockCore(config)
     try:
         assert recovered.contains_key(spec.encoded) is True
         loaded = make_empty_memory_obj(len(payload))
@@ -1233,7 +1380,7 @@ def test_raw_block_core_periodic_checkpoint_runs_without_idle_gap(tmp_path):
     spec = encode_object_key(make_object_key(37))
     payload = b"checkpointed-under-load"
 
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
     try:
         assert core.put_many([spec], [make_memory_obj(payload)]).results == [True]
         deadline = time.monotonic() + 10
@@ -1242,9 +1389,7 @@ def test_raw_block_core_periodic_checkpoint_runs_without_idle_gap(tmp_path):
             time.sleep(0.1)
 
         # A second core sees the key without the first one closing.
-        recovered = RawBlockCore(
-            replace(config, meta_enable_periodic=False), key_namespace="object"
-        )
+        recovered = RawBlockCore(replace(config, meta_enable_periodic=False))
         try:
             loaded = make_empty_memory_obj(len(payload))
             assert recovered.load_many_into([spec.encoded], [loaded]) == [True]
@@ -1265,7 +1410,7 @@ def test_raw_block_core_busy_checkpoint_waits_one_interval(tmp_path):
     )
     spec = encode_object_key(make_object_key(38))
 
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
     try:
         assert core.put_many([spec], [make_memory_obj(b"busy")]).results == [True]
         # Busy and only just dirty: wait for the device to go quiet.
@@ -1294,7 +1439,7 @@ def test_raw_block_core_drops_checkpoint_entry_with_stale_slot_header(tmp_path):
     spec = encode_object_key(make_object_key(41))
     payload = b"stale-slot-header-payload"
 
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
     try:
         put_result = core.put_many([spec], [make_memory_obj(payload)])
         assert put_result.results == [True]
@@ -1308,7 +1453,7 @@ def test_raw_block_core_drops_checkpoint_entry_with_stale_slot_header(tmp_path):
         f.seek(offset)
         f.write(b"STALEHDR")
 
-    recovered = RawBlockCore(config, key_namespace="object")
+    recovered = RawBlockCore(config)
     try:
         assert recovered.contains_key(spec.encoded) is False
         loaded = make_empty_memory_obj(len(payload))
@@ -1329,7 +1474,6 @@ def test_raw_block_core_uses_bounded_posix_recovery_read_tasks(monkeypatch):
     core._meta_dirty_total = 0
     core.io_engine = "posix"
     core._recovery_read_threads = 3
-    core.key_namespace = "object"
     core._read_slot_header = lambda offset: (
         specs[(offset // 4096) - 1].slot_identity,
         7,
@@ -1381,7 +1525,6 @@ def test_raw_block_core_iouring_recovery_does_not_use_posix_threads(monkeypatch)
     core.io_engine = "io_uring"
     core.use_uring_cmd = False
     core._recovery_read_threads = 8
-    core.key_namespace = "object"
     core._read_slot_header = lambda offset: (
         specs[(offset // 4096) - 1].slot_identity,
         7,
@@ -1414,7 +1557,7 @@ def test_raw_block_core_rebuilds_missing_free_slots_from_checkpoint(tmp_path):
     existing_payload = b"already-committed"
     recovered_payload = b"recovered-hole"
 
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
     try:
         put_result = core.put_many([existing], [make_memory_obj(existing_payload)])
         assert put_result.results == [True]
@@ -1480,6 +1623,7 @@ class _FakeRawDevice:
         self.registered_bytes = 0
         self.registration_error: Exception | None = None
         self.write_uring_calls: list[tuple[int, int, int, int | None]] = []
+        self.batched_write_buffers: list[list[Any]] = []
         self._batch_results: dict[int, list[bool]] = {}
 
     def size_bytes(self) -> int:
@@ -1500,8 +1644,9 @@ class _FakeRawDevice:
         placement_ids: list[int | None] | None = None,
         payload_lens: list[int] | None = None,
     ) -> int:
-        del buffers, payload_lens
+        del payload_lens
         self.batched_write_calls.append((offsets, total_lens, placement_ids))
+        self.batched_write_buffers.append(list(buffers))
         self._batch_results[123] = [True] * len(offsets)
         return 123
 
@@ -1546,6 +1691,7 @@ def _make_fake_io_uring_core(
     max_data_transfer_size: int = 0,
     meta_checkpoint_placement_id: int | None = None,
     fdp_slot_affinity_enabled: bool = False,
+    enable_zero_copy: bool = False,
 ) -> tuple[RawBlockCore, _FakeRawDevice]:
     raw_devices: list[_FakeRawDevice] = []
     device_path = tmp_path / "ng0n1"
@@ -1583,7 +1729,7 @@ def _make_fake_io_uring_core(
             header_bytes=RAW_BLOCK_CI_HEADER_BYTES,
             slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
             use_odirect=False,
-            enable_zero_copy=False,
+            enable_zero_copy=enable_zero_copy,
             meta_total_bytes=RAW_BLOCK_CI_META_TOTAL_BYTES,
             meta_magic=b"LMCIDX01",
             meta_version=1,
@@ -1598,8 +1744,7 @@ def _make_fake_io_uring_core(
             max_data_transfer_size=max_data_transfer_size,
             meta_checkpoint_placement_id=meta_checkpoint_placement_id,
             fdp_slot_affinity_enabled=fdp_slot_affinity_enabled,
-        ),
-        key_namespace="object",
+        )
     )
     return core, raw_devices[0]
 
@@ -1836,6 +1981,103 @@ def test_raw_block_core_put_many_batches_uring_cmd_keys_into_one_submission(
         core.close()
 
 
+def test_raw_block_core_uring_cmd_padded_write_uses_physical_allocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Padded passthrough writes submit the object's memory, not a copy."""
+    core, raw_device = _make_fake_io_uring_core(
+        tmp_path,
+        monkeypatch,
+        use_uring_cmd=True,
+        max_data_transfer_size=RAW_BLOCK_CI_BLOCK_ALIGN,
+        enable_zero_copy=True,
+    )
+    spec = encode_object_key(make_object_key(520))
+    payload = b"b" * (RAW_BLOCK_CI_BLOCK_ALIGN + 904)
+    obj = make_aligned_memory_obj(payload)
+
+    try:
+        assert core.put_many([spec], [obj]).results == [True]
+
+        start = obj.data_ptr
+        end = start + 2 * RAW_BLOCK_CI_BLOCK_ALIGN
+        # Header chunks may be read-only; only writable payload views matter.
+        addresses = [
+            _buffer_address(buf)
+            for buf in raw_device.batched_write_buffers[0]
+            if not memoryview(buf).readonly
+        ]
+        assert sorted(addr for addr in addresses if start <= addr < end) == [
+            start,
+            start + RAW_BLOCK_CI_BLOCK_ALIGN,
+        ]
+        assert memory_obj_bytes(obj) == payload
+        assert _allocation_tail_bytes(obj, len(payload)) == bytes(
+            2 * RAW_BLOCK_CI_BLOCK_ALIGN - len(payload)
+        )
+    finally:
+        core.close()
+
+
+@pytest.mark.parametrize("span", [1000, 2000, 4096])
+def test_raw_block_core_uring_cmd_read_uses_physical_allocation_when_it_fits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, span: int
+) -> None:
+    """Read directly only when the allocation covers the complete transfer."""
+    core, device = _make_fake_io_uring_core(
+        tmp_path,
+        monkeypatch,
+        use_uring_cmd=True,
+        max_data_transfer_size=RAW_BLOCK_CI_BLOCK_ALIGN,
+        enable_zero_copy=True,
+    )
+    spec = encode_object_key(make_object_key(901))
+    payload = b"r" * 1000
+    destination = make_aligned_memory_obj(b"\xa5" * 1000, span_bytes=span)
+    try:
+        assert core.put_many([spec], [make_aligned_memory_obj(payload)]).results == [
+            True
+        ]
+        recorder = _RecordingUringCmdRawDevice()
+        recorder.read_data = payload + bytes(3096)
+        with (
+            patch.object(device, "batched_read", recorder.batched_read, create=True),
+            patch.object(device, "wait_iouring", recorder.wait_iouring),
+        ):
+            assert core.load_many_into([spec.encoded], [destination]) == [True]
+        assert memory_obj_bytes(destination) == payload
+        direct = _buffer_address(recorder.read_buffers[0]) == destination.data_ptr
+        assert direct == (span == 4096)
+        expected_tail = bytes(3096) if direct else b"\xa5" * 3096
+        assert ctypes.string_at(destination.data_ptr + 1000, 3096) == expected_tail
+        assert ctypes.string_at(destination.data_ptr + 4096, 16) == b"\xa5" * 16
+    finally:
+        core.close()
+
+
+def test_raw_block_core_uring_cmd_aligned_write_keeps_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An aligned payload is submitted from its own memory, unchanged."""
+    core, device = _make_fake_io_uring_core(
+        tmp_path,
+        monkeypatch,
+        use_uring_cmd=True,
+        max_data_transfer_size=RAW_BLOCK_CI_BLOCK_ALIGN,
+        enable_zero_copy=True,
+    )
+    source = make_aligned_memory_obj(b"a" * 4096)
+    try:
+        spec = encode_object_key(make_object_key(902))
+        assert core.put_many([spec], [source]).results == [True]
+        payload_view = device.batched_write_buffers[0][-1]
+        assert _buffer_address(payload_view) == source.data_ptr
+        assert bytes(payload_view) == b"a" * 4096
+        assert ctypes.string_at(source.data_ptr + 4096, 16) == b"\xa5" * 16
+    finally:
+        core.close()
+
+
 def test_raw_block_core_reuses_free_slot_with_matching_placement_id(
     tmp_path, monkeypatch
 ):
@@ -1998,7 +2240,7 @@ def test_raw_block_core_does_not_restore_slot_affinity_from_checkpoint(tmp_path)
     original = encode_object_key(make_object_key(640))
     replacement = encode_object_key(make_object_key(641))
 
-    core = RawBlockCore(config, key_namespace="object")
+    core = RawBlockCore(config)
     try:
         assert core.put_many(
             [original],
@@ -2011,7 +2253,7 @@ def test_raw_block_core_does_not_restore_slot_affinity_from_checkpoint(tmp_path)
     finally:
         core.close()
 
-    recovered = RawBlockCore(config, key_namespace="object")
+    recovered = RawBlockCore(config)
     try:
         assert recovered.delete_many([original.encoded]) == [True]
         assert recovered.put_many(
@@ -2046,7 +2288,6 @@ def _make_recovery_core(
     core.io_engine = io_engine
     core.use_uring_cmd = use_uring_cmd
     core._recovery_read_threads = 1
-    core.key_namespace = "object"
     return core
 
 

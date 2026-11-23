@@ -16,11 +16,12 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
-    AttnWindowDesc,
     MemoryLayoutDesc,
     ObjectKey,
     ipc_key_to_object_keys,
@@ -35,7 +36,6 @@ from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.kv_layer_groups import PerRequestRingGroup
 from lmcache.v1.multiprocess import object_group_transfer
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import (
     LayoutDescRegistry,
     MPCacheServerContext,
@@ -110,7 +110,13 @@ def test_server_resolves_full_chunk_keys_and_the_tail_key_of_an_unaligned_key():
         mock.patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
     ):
         ctx = MPCacheServerContext(mock.MagicMock(), chunk_size=CHUNK_SIZE)
-    ctx.layout_desc_registry.register(MODEL, 1, LAYOUT)
+    ctx.layout_desc_registry.register(
+        MODEL,
+        1,
+        LAYOUT,
+        chunk_size=CHUNK_SIZE,
+        hash_algorithm=ctx.hash_algorithm_name,
+    )
     hasher = TokenHasher(chunk_size=CHUNK_SIZE)
     tokens = list(range(2 * CHUNK_SIZE + 5))
     key = IPCCacheServerKey(
@@ -291,7 +297,7 @@ def test_unfull_chunk_round_trip_carries_the_window_lead_block(
     # The stub holds CPU tensors, which only the torch kernel accepts; a
     # native build binds the pointer-based kernel to ``device_ops``.
     monkeypatch.setattr(
-        object_group_transfer,
+        object_group_transfer.unfull_chunk,
         "device_ops",
         SimpleNamespace(
             multi_layer_block_kv_transfer=torch_ops.multi_layer_block_kv_transfer
@@ -396,7 +402,7 @@ def test_unfull_chunk_round_trip_carries_the_ring_block(
     """The prefill's ring block lands in the decode's ring block, padding
     untouched; no other ring block changes."""
     monkeypatch.setattr(
-        object_group_transfer,
+        object_group_transfer.unfull_chunk,
         "device_ops",
         SimpleNamespace(
             multi_layer_block_kv_transfer=torch_ops.multi_layer_block_kv_transfer
@@ -460,7 +466,7 @@ def test_unfull_chunk_of_another_object_group_leaves_the_ring_alone(
     """Only object group 0 carries the ring: copying object group 1 with the
     request's ring blocks writes no ring block."""
     monkeypatch.setattr(
-        object_group_transfer,
+        object_group_transfer.unfull_chunk,
         "device_ops",
         SimpleNamespace(
             multi_layer_block_kv_transfer=torch_ops.multi_layer_block_kv_transfer
@@ -507,7 +513,14 @@ def test_unfull_chunk_of_another_object_group_leaves_the_ring_alone(
 
 def test_registry_falls_back_to_full_layouts_for_unfull_chunks() -> None:
     registry = LayoutDescRegistry()
-    registry.register("m", 1, LAYOUT, group_layout_descs={0: LAYOUT})
+    registry.register(
+        "m",
+        1,
+        LAYOUT,
+        chunk_size=256,
+        hash_algorithm="blake3",
+        group_layout_descs={0: LAYOUT},
+    )
     assert registry.find_group_unfull_chunk_layout_descs("m", 1) == {0: LAYOUT}
 
     unfull = MemoryLayoutDesc(
@@ -517,6 +530,8 @@ def test_registry_falls_back_to_full_layouts_for_unfull_chunks() -> None:
         "m",
         1,
         LAYOUT,
+        chunk_size=256,
+        hash_algorithm="blake3",
         group_layout_descs={0: LAYOUT},
         group_unfull_chunk_layout_descs={0: unfull},
     )
@@ -553,6 +568,8 @@ def lookup_module(storage_manager):
     ctx.get_read_owners.return_value = None
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = LAYOUT
+    ctx.layout_desc_registry.get_chunk_size.return_value = CHUNK_SIZE
+    ctx.layout_desc_registry.get_token_hasher.return_value = hasher
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1]
     )
