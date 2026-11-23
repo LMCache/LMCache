@@ -913,10 +913,11 @@ def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
     """A full-prompt hit must not retrieve past what vLLM allocates.
 
     With SWA bounded replay vLLM floors the external hit to the scheduler
-    block boundary before allocating, so the classic ``ret - 1`` leaves the
+    block boundary before allocating, so a full hit would leave the
     retrieve one block past the allocation. Under replay the connector gives
     back the last chunk instead (retrieve end 8 of 12, lock on [8, 12)
-    released); without replay the ``ret - 1`` rule is unchanged.
+    released); without replay the whole prompt is reported and loaded, and
+    vLLM recomputes the last token after the async load.
     """
     config = _config(
         KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
@@ -935,7 +936,7 @@ def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
             assert tracker.num_lmcache_hit_tokens == 8
             assert tracker.pending_free_ranges == [(8, 12)]
         else:
-            assert (need, async_load) == (11, True)
+            assert (need, async_load) == (12, True)
             assert tracker.num_lmcache_hit_tokens == 12
             assert tracker.pending_free_ranges == []
         # vLLM allocates exactly the blocks it was told about (8 tokens = 2
