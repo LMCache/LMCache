@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 # Standard
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -235,6 +235,8 @@ class RawBlockCore:
         self._inflight: dict[str, _Inflight] = {}
 
         self._next_slot: int = 0
+        self._quarantined_slots: set[int] = set()
+        self._last_payload_uecc: str | None = None
         self._free_slots: dict[int, None] = {}
         self._free_slots_by_placement_id: dict[int, dict[int, None]] = {}
         self._slot_placement_ids: dict[int, int] = {}
@@ -246,6 +248,7 @@ class RawBlockCore:
 
         self._io_engine: Optional[RawBlockIO] = None
         self._closed = False
+        self._worker_error_logged: bool = False
 
         self._meta_seq: int = 0
         self._meta_dirty_total: int = 0
@@ -473,8 +476,14 @@ class RawBlockCore:
 
         Returns:
             Metadata for the contiguous leading hit prefix. The returned list
-            stops at the first missing key.
+            stops at the first missing key. A terminal worker failure returns
+            an empty list without locking entries.
         """
+        assert self._io_engine is not None
+        worker_error = self._io_engine.worker_error()
+        if worker_error is not None:
+            self._log_worker_error_once(worker_error)
+            return []
         with self._lock:
             metas: list[DiskCacheMetadata] = []
             for encoded_key in encoded_keys:
@@ -675,9 +684,12 @@ class RawBlockCore:
 
         Returns:
             A list of booleans aligned with ``encoded_keys``. A permanently
-            failed io_uring worker reports all misses without locking keys.
+            failed io_uring worker reports all misses without
+            locking keys.
         """
-        if self._worker_error() is not None:
+        worker_error = self._worker_error()
+        if worker_error is not None:
+            self._log_worker_error_once(worker_error)
             return [False] * len(encoded_keys)
         results: list[bool] = []
         with self._lock:
@@ -694,6 +706,8 @@ class RawBlockCore:
         self,
         encoded_keys: Sequence[str],
         objs: Sequence[MemoryObj],
+        *,
+        on_quarantine: Callable[[list[str]], None] | None = None,
     ) -> list[bool]:
         """Load raw-block payloads into caller-provided memory objects.
 
@@ -706,21 +720,28 @@ class RawBlockCore:
             objs: Destination memory objects. Buffers must remain valid until
                 this method returns. A destination shorter than its stored
                 payload is reported as an unsuccessful load.
+            on_quarantine: Called after retiring payload slots, with the encoded
+                keys removed from the index, outside the core lock.
 
         Returns:
             A list of per-key load success booleans aligned with
-            ``encoded_keys``.
+            ``encoded_keys``. A confirmed passthrough payload UECC removes its
+            slot for this open handle. Other successfully loaded keys remain
+            hits. A terminal worker failure reports all misses.
 
         Raises:
             ValueError: If either sequence is empty or the sequence lengths do
                 not match.
-            RuntimeError: If the native io_uring worker has permanently failed.
         """
         if not encoded_keys or not objs:
             raise ValueError("encoded_keys and objs must be non-empty")
         if len(encoded_keys) != len(objs):
             raise ValueError("encoded_keys and objs must have the same length")
-        self.raise_if_failed()
+        assert self._io_engine is not None
+        worker_error = self._io_engine.worker_error()
+        if worker_error is not None:
+            self._log_worker_error_once(worker_error)
+            return [False] * len(encoded_keys)
 
         with self._lock:
             items = [
@@ -782,27 +803,44 @@ class RawBlockCore:
                     logger.error("RawBlockCore load failed for %s: %s", encoded_key, e)
 
             if read_indices:
+                unrecovered_reads: dict[int, str] = {}
                 try:
-                    io_results = self._read_buffers(
+                    io_results = self._io_engine.read_buffers(
                         read_offsets,
                         read_buffers,
                         read_payload_lens,
                         read_total_lens,
+                        unrecovered_reads=unrecovered_reads,
                     )
                 except Exception as e:
                     logger.error("RawBlockCore batched load failed: %s", e)
                     io_results = [False] * len(read_indices)
 
-                for item_idx, ok in zip(read_indices, io_results, strict=True):
-                    if not ok:
-                        continue
-                    entry = items[item_idx][1]
-                    if entry is None:
-                        continue
-                    objs[
-                        item_idx
-                    ].metadata.cached_positions = entry.meta.cached_positions
-                    results[item_idx] = True
+                if unrecovered_reads:
+                    removed = []
+                    with self._lock:
+                        for read_idx, error in unrecovered_reads.items():
+                            key, entry = items[read_indices[read_idx]]
+                            assert entry is not None
+                            removed.extend(
+                                self._quarantine_slot_locked(key, entry, error)
+                            )
+                    if on_quarantine is not None:
+                        on_quarantine(removed)
+
+                worker_error = self._io_engine.worker_error()
+                if worker_error is not None:
+                    self._log_worker_error_once(worker_error)
+                    return results
+
+                with self._lock:
+                    for item_idx, ok in zip(read_indices, io_results, strict=True):
+                        key, entry = items[item_idx]
+                        if ok and entry is not None and self._index.get(key) is entry:
+                            objs[
+                                item_idx
+                            ].metadata.cached_positions = entry.meta.cached_positions
+                            results[item_idx] = True
         finally:
             with self._lock:
                 self._inflight_io_count -= 1
@@ -843,9 +881,8 @@ class RawBlockCore:
         deleted: list[bool] = []
         with self._lock:
             for encoded_key in encoded_keys:
-                entry = self._index.get(encoded_key)
                 locked = self._lock_refcnt.get(encoded_key, 0) > 0
-                if entry is not None and locked and not force:
+                if locked and not force:
                     deleted.append(False)
                     continue
 
@@ -871,7 +908,9 @@ class RawBlockCore:
             indicates that usable capacity is unknown.
         """
         with self._lock:
-            usable_capacity = self._max_slots * self.slot_bytes
+            usable_capacity = (
+                self._max_slots - len(self._quarantined_slots)
+            ) * self.slot_bytes
             if usable_capacity <= 0:
                 return (-1.0, -1.0)
             used_slots = len(self._index) + len(self._inflight)
@@ -929,7 +968,12 @@ class RawBlockCore:
                 "header_bytes": self.header_bytes,
                 "slot_bytes": self.slot_bytes,
                 "meta_total_bytes": self.meta_total_bytes,
-                "usable_capacity_bytes": self._max_slots * self.slot_bytes,
+                "usable_capacity_bytes": (
+                    self._max_slots - len(self._quarantined_slots)
+                )
+                * self.slot_bytes,
+                "quarantined_slot_count": len(self._quarantined_slots),
+                "last_payload_uecc": self._last_payload_uecc,
                 "indexed_key_count": len(self._index),
                 "inflight_key_count": len(self._inflight),
                 "locked_key_count": sum(
@@ -981,6 +1025,28 @@ class RawBlockCore:
             return None
         assert self._io_engine is not None
         return self._io_engine.worker_error()
+
+    def _log_worker_error_once(self, worker_error: str) -> None:
+        """Log the terminal worker error at ERROR the first time it is seen.
+
+        After close, ``report_status()`` reports ``worker_error: None``, so
+        this log line is what survives for operators. Called from the
+        data paths that observe the error, not from status inspection.
+
+        Args:
+            worker_error: Terminal worker error observed by the data path.
+        """
+        if self._worker_error_logged:
+            return
+        with self._lock:
+            if self._worker_error_logged:
+                return
+            self._worker_error_logged = True
+        logger.error(
+            "RawBlockCore terminal worker error on %s: %s",
+            self.device_path,
+            worker_error,
+        )
 
     def _cleanup_after_init_failure(self) -> None:
         """Close resources that may have been opened before init failed."""
@@ -1562,6 +1628,36 @@ class RawBlockCore:
         """Convert a data-slot byte offset to its slot index."""
         return (offset - self._data_base_offset) // self.slot_bytes
 
+    def _quarantine_slot_locked(
+        self, key: str, observed: _Entry, error: str
+    ) -> list[str]:
+        """Retire the failed physical slot and invalidate its current owner."""
+        slot = self._offset_to_slot(observed.offset)
+        if slot in self._quarantined_slots:
+            return []
+        self._quarantined_slots.add(slot)
+        self._last_payload_uecc = error
+        self._free_slots.pop(slot, None)
+        self._remove_slot_from_affinity_pool_locked(slot)
+        if self._index.get(key) is observed:
+            removed = [key]
+        else:
+            # A force-delete or unlocked reader can race slot reuse. Invalidate
+            # the owner at the failed offset, preserving a new copy elsewhere.
+            removed = [
+                k for k, entry in self._index.items() if entry.offset == observed.offset
+            ]
+            for pending in self._inflight.values():
+                if pending.offset == observed.offset:
+                    pending.canceled = True
+        for encoded_key in removed:
+            del self._index[encoded_key]
+        self._meta_dirty_total += len(removed)
+        logger.error(
+            "RawBlockCore quarantined slot %d on %s: %s", slot, self.device_path, error
+        )
+        return removed
+
     def _allocate_slot_locked(self, placement_id: PlacementId = None) -> int:
         """Allocate a slot offset while ``self._lock`` is held."""
         self._ensure_capacity_and_layout()
@@ -1585,6 +1681,8 @@ class RawBlockCore:
             self._set_slot_placement_id_locked(slot, placement_id)
             return self._slot_to_offset(slot)
 
+        while self._next_slot in self._quarantined_slots:
+            self._next_slot += 1
         if self._next_slot < self._max_slots:
             slot = self._next_slot
             self._next_slot += 1
@@ -1596,7 +1694,7 @@ class RawBlockCore:
         """Add a slot to the free list while ``self._lock`` is held."""
         if slot < 0 or slot >= self._max_slots:
             return
-        if slot in self._free_slots:
+        if slot in self._free_slots or slot in self._quarantined_slots:
             return
         self._free_slots[slot] = None
         if not self.fdp_slot_affinity_enabled:
@@ -1954,6 +2052,8 @@ class RawBlockCore:
                     cached_positions_list = entry.get("cached_positions")
                     dtype_name = entry.get("dtype")
 
+                    if self._offset_to_slot(offset) in self._quarantined_slots:
+                        continue
                     if not self._is_valid_checkpoint_entry(offset, size):
                         continue
 
@@ -1990,6 +2090,7 @@ class RawBlockCore:
                 self._offset_to_slot(int(entry.offset))
                 for entry in self._index.values()
             }
+            used_slots.update(self._quarantined_slots)
             # Rebuild from committed entries instead of trusting checkpoint
             # free_slots. A crash-time checkpoint can otherwise preserve a slot
             # reserved by an uncommitted in-flight write as neither used nor free.

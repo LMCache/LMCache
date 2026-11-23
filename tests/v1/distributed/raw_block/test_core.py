@@ -52,8 +52,6 @@ from tests.v1.distributed.raw_block.test_utils import (
 import lmcache.v1.distributed.l2_adapters.raw_block.core as raw_block_core
 import lmcache.v1.distributed.l2_adapters.raw_block.io_engine as raw_block_io_engine
 
-Buffer = bytes | bytearray | memoryview
-
 requires_rust_raw_block_io = pytest.mark.skipif(
     importlib.util.find_spec("lmcache_rust_raw_block_io") is None,
     reason="lmcache_rust_raw_block_io is not installed",
@@ -443,6 +441,9 @@ def test_raw_block_core_rejects_checkpoint_layout_mismatch(
         core.close()
 
 
+Buffer = bytes | bytearray | memoryview
+
+
 @dataclass
 class _BatchedWriteCall:
     """Recorded arguments of one fake ``batched_write`` invocation."""
@@ -477,6 +478,10 @@ class _RecordingRawDevice:
     batch_results: dict[int, list[bool]] = field(default_factory=dict)
     next_batch_id: int = 0
     terminal_error: str | None = None
+    # Fail one chunk of the next read without stopping the worker.
+    uecc_on_next_wait_batch: bool = False
+    last_read_offsets: list[int] = field(default_factory=list)
+    last_read_lens: list[int] = field(default_factory=list)
 
     def worker_error(self) -> str | None:
         """Return the terminal worker failure independently of per-I/O errors."""
@@ -540,13 +545,36 @@ class _RecordingRawDevice:
         return self._submit_batch(len(offsets))
 
     def wait_iouring(self, batch_id: int) -> tuple[list[bool], list[tuple[int, str]]]:
+        results, errors = self.wait_iouring_exceptions(batch_id)
+        return results, [(index, str(error)) for index, error in errors]
+
+    def wait_iouring_exceptions(
+        self, batch_id: int
+    ) -> tuple[list[bool], list[tuple[int, BaseException]]]:
         self.wait_iouring_count += 1
         results = self.batch_results.pop(batch_id)
-        errors = [
-            (index, "injected completion failure")
+        errors: list[tuple[int, BaseException]] = [
+            (index, RuntimeError("injected completion failure"))
             for index, succeeded in enumerate(results)
             if not succeeded
         ]
+        if self.uecc_on_next_wait_batch:
+            # Third Party
+            from lmcache_rust_raw_block_io import NvmeUnrecoveredReadError
+
+            self.uecc_on_next_wait_batch = False
+            chunk_index = len(results) // 2
+            results[chunk_index] = False
+            errors.append(
+                (
+                    chunk_index,
+                    NvmeUnrecoveredReadError(
+                        0x0281,
+                        f"offset={self.last_read_offsets[chunk_index]} "
+                        f"len={self.last_read_lens[chunk_index]} status=0x0281",
+                    ),
+                )
+            )
         return results, errors
 
     def batched_read(
@@ -558,6 +586,8 @@ class _RecordingRawDevice:
         self.batched_read_buffer_lens.append(
             [len(memoryview(buf).cast("B")) for buf in buffers]
         )
+        self.last_read_offsets = [int(off) for off in offsets]
+        self.last_read_lens = [int(total) for total in total_lens]
         for off, buf, total in zip(offsets, buffers, total_lens, strict=True):
             self._copy_into(int(off), buf, int(total))
         return self._submit_batch(len(offsets))
@@ -602,6 +632,7 @@ def _make_core_with_fake(
     capacity_bytes: int | None = None,
     use_odirect: bool = False,
     enable_zero_copy: bool = False,
+    **config_overrides: Any,
 ) -> RawBlockCore:
     """Build a RawBlockCore wired to a fake raw device for a given engine.
 
@@ -609,7 +640,8 @@ def _make_core_with_fake(
     test can constrain the number of allocatable slots. When ``use_odirect``
     is set, writes are padded to ``block_align`` so payload_len < total_len.
     ``enable_zero_copy`` lets aligned memory objects be handed to the device
-    directly, as the MP adapter does by default.
+    directly, as the MP adapter does by default. Any ``config_overrides``
+    are applied to the core config last, after those conveniences.
 
     The fake device is injected into the io_engine as it is constructed so
     ``RawBlockCore``'s capacity/layout pass never opens a real Rust raw-device
@@ -624,6 +656,8 @@ def _make_core_with_fake(
     )
     if capacity_bytes is not None:
         config = replace(config, capacity_bytes=capacity_bytes)
+    if config_overrides:
+        config = replace(config, **config_overrides)
 
     def _seed_engine(engine_cls: type) -> Any:
         """Return a factory that builds ``engine_cls`` from a config and injects the
@@ -691,8 +725,12 @@ def test_raw_block_core_rejects_work_after_terminal_worker_failure(
         assert core.contains_key(key.encoded) is False
         with pytest.raises(RuntimeError, match="worker submission failed"):
             core.put_many([key], [memory_obj])
-        with pytest.raises(RuntimeError, match="worker submission failed"):
-            core.load_many_into([key.encoded], [make_empty_memory_obj(14)])
+        # A latched worker reports misses instead of raising so the serving
+        # engine recomputes.
+        assert core.load_many_into([key.encoded], [make_empty_memory_obj(14)]) == [
+            False
+        ]
+        assert core.get_metadata_prefix([key.encoded], lock=True) == []
         with pytest.raises(RuntimeError, match="worker submission failed"):
             assert core._io_engine is not None
             core._io_engine._raw_device()  # type: ignore[attr-defined]
@@ -706,6 +744,168 @@ def test_raw_block_core_rejects_work_after_terminal_worker_failure(
     finally:
         core.close()
     assert core.report_status()["is_healthy"] is False
+
+
+@pytest.mark.no_shared_allocator
+@requires_rust_raw_block_io
+def test_raw_block_core_uecc_quarantines_only_the_failed_payload_slot(
+    tmp_path: Path,
+) -> None:
+    fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
+    capacity = RAW_BLOCK_CI_META_TOTAL_BYTES + 3 * RAW_BLOCK_CI_SLOT_BYTES
+    with patch.object(IoUringBlockIO, "validate_uring_cmd_device"):
+        core = _make_core_with_fake(
+            tmp_path / "raw-block",
+            fake,
+            "io_uring",
+            capacity_bytes=capacity,
+            use_uring_cmd=True,
+            max_data_transfer_size=4096,
+        )
+    a, b, c = [encode_object_key(make_object_key(i)) for i in (710, 711, 712)]
+    payloads = [b"a" * 16384, b"b" * 4096]
+    targets = [make_empty_memory_obj(len(data)) for data in payloads]
+    try:
+        assert core.put_many(
+            [a, b], [make_memory_obj(p) for p in payloads]
+        ).results == [True, True]
+        old_offset = core.entry_offset(a.encoded)
+        assert old_offset is not None
+        assert core.exists_many([a.encoded, b.encoded], lock=True) == [True, True]
+        fake.uecc_on_next_wait_batch = True
+        assert core.load_many_into([a.encoded, b.encoded], targets) == [False, True]
+        assert memory_obj_bytes(targets[1]) == payloads[1]
+        assert core.exists_many([a.encoded, b.encoded]) == [False, True]
+        assert core.get_metadata_prefix([a.encoded, b.encoded]) == []
+        assert len(core.get_metadata_prefix([b.encoded, a.encoded])) == 1
+        assert core.lock_refcount(a.encoded) == core.lock_refcount(b.encoded) == 1
+        core.unlock_many([a.encoded, b.encoded])
+        assert core.lock_refcount(a.encoded) == core.lock_refcount(b.encoded) == 0
+        assert core.load_many_into([b.encoded], targets[1:]) == [True]
+        status = core.report_status()
+        assert status["is_healthy"] and status["worker_error"] is None
+        assert status["quarantined_slot_count"] == 1
+        assert status["usable_capacity_bytes"] == 2 * core.slot_bytes
+        assert (
+            f"offset={old_offset + core.header_bytes + 8192} len=4096 status=0x0281"
+            in status["last_payload_uecc"]
+        )
+        assert core.put_many([a], [make_memory_obj(payloads[0])]).results == [True]
+        assert core.entry_offset(a.encoded) not in (None, old_offset)
+        assert core.load_many_into([a.encoded], targets[:1]) == [True]
+        assert core.put_many([c], [make_memory_obj(b"c")]).results == [False]
+        assert core.delete_many([a.encoded, b.encoded]) == [True, True]
+        assert core.put_many([c], [make_memory_obj(b"c")]).results == [True]
+        assert core.entry_offset(c.encoded) not in (None, old_offset)
+        assert core._checkpoint_once(force=False)
+        assert core.inflight_io_count() == 0
+    finally:
+        core.close()
+
+
+@pytest.mark.no_shared_allocator
+@requires_rust_raw_block_io
+@pytest.mark.parametrize(
+    "typed", [False, True], ids=["message-only-wheel", "typed-wheel"]
+)
+def test_uecc_text_alone_does_not_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, typed: bool
+) -> None:
+    fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
+    with patch.object(IoUringBlockIO, "validate_uring_cmd_device"):
+        core = _make_core_with_fake(
+            tmp_path / "raw-block",
+            fake,
+            "io_uring",
+            use_uring_cmd=True,
+            max_data_transfer_size=4096,
+        )
+    key = encode_object_key(make_object_key(715))
+    target = make_empty_memory_obj(4096)
+    wait = fake.wait_iouring_exceptions
+    message = "NvmeUnrecoveredReadError: offset=4096 len=4096 status=0x0281"
+
+    def fail_read(
+        batch_id: int,
+    ) -> tuple[list[bool], list[tuple[int, BaseException | str]]]:
+        hits, _ = wait(batch_id)
+        hits[0] = False
+        return hits, [(0, RuntimeError(message) if typed else message)]
+
+    try:
+        assert core.put_many([key], [make_memory_obj(b"x" * 4096)]).results == [True]
+        with monkeypatch.context() as m:
+            m.setattr(fake, "wait_iouring_exceptions", fail_read if typed else None)
+            if not typed:
+                m.setattr(fake, "wait_iouring", fail_read)
+            assert core.load_many_into([key.encoded], [target]) == [False]
+        assert not fake.batch_results
+        assert core.report_status()["quarantined_slot_count"] == 0
+        assert core.load_many_into([key.encoded], [target]) == [True]
+    finally:
+        core.close()
+
+
+@pytest.mark.no_shared_allocator
+@requires_rust_raw_block_io
+def test_uecc_after_slot_reuse_removes_current_owner(tmp_path: Path) -> None:
+    fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
+    with patch.object(IoUringBlockIO, "validate_uring_cmd_device"):
+        core = _make_core_with_fake(
+            tmp_path / "raw-block",
+            fake,
+            "io_uring",
+            use_uring_cmd=True,
+            max_data_transfer_size=4096,
+        )
+    old_key, new_key = [encode_object_key(make_object_key(i)) for i in (713, 714)]
+    obj = make_memory_obj(b"x" * 4096)
+    wait = fake.wait_iouring_exceptions
+
+    def finish_after_reuse(
+        batch_id: int,
+    ) -> tuple[list[bool], list[tuple[int, BaseException]]]:
+        result = wait(batch_id)
+        if result[1]:
+            assert core.delete_many([old_key.encoded]) == [True]
+            assert core.put_many([new_key, old_key], [obj, obj]).results == [True, True]
+            assert core.entry_offset(new_key.encoded) == failed_offset
+        return result
+
+    try:
+        assert core.put_many([old_key], [obj]).results == [True]
+        failed_offset = core.entry_offset(old_key.encoded)
+        fake.uecc_on_next_wait_batch = True
+        with patch.object(
+            fake, "wait_iouring_exceptions", side_effect=finish_after_reuse
+        ):
+            assert core.load_many_into(
+                [old_key.encoded], [make_empty_memory_obj(4096)]
+            ) == [False]
+        assert core.exists_many([old_key.encoded, new_key.encoded]) == [True, False]
+        assert core.report_status()["quarantined_slot_count"] == 1
+        assert core.load_many_into(
+            [old_key.encoded], [make_empty_memory_obj(4096)]
+        ) == [True]
+    finally:
+        core.close()
+
+    with patch.object(IoUringBlockIO, "validate_uring_cmd_device"):
+        reopened = _make_core_with_fake(
+            tmp_path / "raw-block",
+            fake,
+            "io_uring",
+            use_uring_cmd=True,
+            max_data_transfer_size=4096,
+            load_checkpoint_on_init=True,
+        )
+    try:
+        assert reopened.report_status()["quarantined_slot_count"] == 0
+        assert reopened.exists_many([old_key.encoded, new_key.encoded]) == [True, False]
+        assert reopened.put_many([new_key], [obj]).results == [True]
+        assert reopened.entry_offset(new_key.encoded) == failed_offset
+    finally:
+        reopened.close()
 
 
 @pytest.mark.no_shared_allocator
