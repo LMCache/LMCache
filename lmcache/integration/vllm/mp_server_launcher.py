@@ -62,8 +62,8 @@ def _build_autostart_config_from_url(
 
     Args:
         extra_config: vLLM ``kv_connector_extra_config`` mapping.
-        server_url: ``tcp://`` (ZMQ) or ``grpc://`` URL used by the connector
-            to reach the MP server.
+        server_url: ``grpc://`` or ``tcp://`` (deprecated ZMQ) URL used by the
+            connector to reach the MP server. A bare ``host:port`` is gRPC.
 
     Returns:
         Parsed ``MPServerAutostartConfig``.
@@ -80,7 +80,9 @@ def _build_autostart_config_from_url(
         )
 
     try:
-        parsed = urlparse(server_url if "://" in server_url else f"tcp://{server_url}")
+        parsed = urlparse(
+            server_url if "://" in server_url else f"grpc://{server_url}"
+        )
         if parsed.netloc.count(":") > 1:
             raise ValueError(
                 "IPv6 is not supported by MP auto-start; use localhost or 127.0.0.1"
@@ -267,7 +269,7 @@ class MPServerAutostartConfig:
     port: int
     wait_timeout: float
     server_args: tuple[str, ...]
-    transport: str = "zmq"
+    transport: str = "grpc"
 
     @classmethod
     def from_extra_config(
@@ -275,7 +277,7 @@ class MPServerAutostartConfig:
         extra_config: object | None,
         server_host: str,
         server_port: int | str,
-        transport: str = "zmq",
+        transport: str = "grpc",
     ) -> "MPServerAutostartConfig":
         """Build auto-start configuration from vLLM connector extra config.
 
@@ -284,8 +286,8 @@ class MPServerAutostartConfig:
             server_host: Local IPv4 host (localhost or 127.0.0.1), optionally
                 prefixed with tcp://, from the resolved connector endpoint.
             server_port: Port from the connector's resolved server endpoint.
-            transport: Server transport for the connector's endpoint, ``zmq``
-                for ``tcp://`` or ``grpc`` for ``grpc://``.
+            transport: Server transport for the connector's endpoint, ``grpc``
+                for ``grpc://`` or ``zmq`` for ``tcp://``.
 
         Returns:
             Parsed ``MPServerAutostartConfig``.
