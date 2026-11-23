@@ -1217,6 +1217,82 @@ class TestFSNativeL2AdapterConfig:
         finally:
             adapter.close()
 
+    @pytest.mark.parametrize(
+        ("use_odirect", "disk_block_size", "l1_ptr", "l1_align_bytes", "error"),
+        [
+            (True, 16384, 0, 4096, "requires --l1-align-bytes"),
+            (True, 1 << 20, 0, 4096, "requires --l1-align-bytes"),
+            (True, 1 << 20, 4096, 1 << 20, "L1 base address"),
+            (True, 4096, 0, 4096, None),
+            (True, 4096, 4096, 1 << 20, None),
+            (True, 1 << 20, 1 << 30, 1 << 20, None),
+            (False, 0, 4096, 4096, None),
+        ],
+    )
+    def test_factory_checks_l1_alignment_against_odirect_block_size(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        use_odirect: bool,
+        disk_block_size: int,
+        l1_ptr: int,
+        l1_align_bytes: int,
+        error: str | None,
+    ) -> None:
+        """With O_DIRECT on, an L1 arena whose base address or alignment is
+        not a multiple of the connector's block size is rejected at creation
+        and the client is closed; otherwise the adapter is created."""
+        # First Party
+        from lmcache.v1.distributed.internal_api import L1MemoryDesc
+        from lmcache.v1.distributed.l2_adapters import create_l2_adapter
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        clients = []
+
+        class _FakeFSClient:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+                self.read_fd, self.write_fd = os.pipe()
+                self.closed = False
+                clients.append(self)
+
+            def event_fd(self) -> int:
+                return self.read_fd
+
+            def read_budget_bytes(self) -> int:
+                return 0
+
+            def disk_block_size(self) -> int:
+                return disk_block_size
+
+            def close(self) -> None:
+                self.closed = True
+                os.close(self.read_fd)
+                os.close(self.write_fd)
+
+        fake_module = ModuleType("lmcache.lmcache_fs")
+        monkeypatch.setattr(
+            fake_module, "LMCacheFSClient", _FakeFSClient, raising=False
+        )
+        monkeypatch.setitem(sys.modules, "lmcache.lmcache_fs", fake_module)
+
+        config = FSNativeL2AdapterConfig.from_dict(
+            {
+                "type": "fs_native",
+                "base_path": "/tmp/lmcache_test",
+                "use_odirect": use_odirect,
+            }
+        )
+        desc = L1MemoryDesc(ptr=l1_ptr, size=1 << 30, align_bytes=l1_align_bytes)
+        if error is not None:
+            with pytest.raises(ValueError, match=error):
+                create_l2_adapter(config, desc)
+            assert clients[0].closed
+        else:
+            adapter = create_l2_adapter(config, desc)
+            adapter.close()
+
 
 # =============================================================================
 # Delete Interface Tests

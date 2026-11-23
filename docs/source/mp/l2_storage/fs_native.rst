@@ -66,6 +66,12 @@ I/O queue depth on a single Python thread.
       of silently falling back to buffered I/O.  This protects real-disk
       benchmark runs from accidentally measuring the page cache.
 
+   The block size here is ``statvfs().f_bsize`` of ``base_path``.  With
+   ``use_odirect: true`` the adapter refuses to start unless both
+   ``--l1-align-bytes`` and the L1 base address are multiples of it.  Only
+   the lazy L1 allocator (``--l1-use-lazy``, the default) aligns its base
+   to ``--l1-align-bytes``; the others guarantee page alignment only.
+
    If unsure, start with ``use_odirect: false`` and confirm correctness
    before enabling ``O_DIRECT``.
 

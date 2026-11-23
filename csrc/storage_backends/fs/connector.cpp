@@ -260,6 +260,8 @@ size_t FSConnector::read_budget_bytes() const {
   return read_max_bytes_in_flight_;
 }
 
+size_t FSConnector::disk_block_size() const { return disk_block_size_; }
+
 uint64_t FSConnector::submit_batch_get(const std::vector<std::string>& keys,
                                        const std::vector<void*>& bufs,
                                        const std::vector<size_t>& lens,
