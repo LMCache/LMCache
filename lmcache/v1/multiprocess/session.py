@@ -12,18 +12,18 @@ import threading
 import time
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.custom_types import IPCCacheServerKey
-from lmcache.v1.common.token_codec import TOKEN_STRIDE, num_packed_tokens
-from lmcache.v1.common.token_hasher import TokenHasher
-from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.periodic_thread import (
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.periodic_thread import (
     PeriodicThread,
     PeriodicThreadRegistry,
     ThreadLevel,
     ThreadRunSummary,
     create_periodic_thread,
 )
+from lmcache.v1.common.token_codec import TOKEN_STRIDE, num_packed_tokens
+from lmcache.v1.common.token_hasher import TokenHasher
+from lmcache.v1.distributed.api import ObjectKey
 
 logger = init_logger(__name__)
 
@@ -247,11 +247,15 @@ class SessionManager:
             self._cleanup_thread = self._create_cleanup_thread(cleanup_interval)
             self._cleanup_thread.start()
 
-    def get_or_create(self, request_id: str) -> Session:
+    def get_or_create(
+        self, request_id: str, hasher: TokenHasher | None = None
+    ) -> Session:
         """Get existing session or create a new one.
 
         Args:
             request_id: Unique request identifier.
+            hasher: Token hasher for a newly created session. Defaults to the
+                manager's legacy single-size hasher.
 
         Returns:
             The Session for this request_id.
@@ -259,7 +263,7 @@ class SessionManager:
         with self._lock:
             if request_id not in self._sessions:
                 self._sessions[request_id] = Session(
-                    request_id=request_id, hasher=self._hasher
+                    request_id=request_id, hasher=hasher or self._hasher
                 )
                 logger.debug("Created session for request_id=%s", request_id)
             return self._sessions[request_id]

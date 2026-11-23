@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MessagePack extension hooks for the ZMQ request transport."""
+"""MessagePack codec for the ZMQ request transport."""
 
 # Standard
 from dataclasses import dataclass
@@ -11,6 +11,7 @@ import torch
 
 # First Party
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.transport.qstore import QRingInfo
 
 
 @dataclass
@@ -64,3 +65,45 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
         )
 
     return msgspec.msgpack.Decoder(ext_hook=ext_hook, dec_hook=dec_hook, type=type)
+
+
+_SPECIAL_ENCODER_DECODERS = {
+    DeviceIPCWrapper: (
+        get_customized_encoder(DeviceIPCWrapper),
+        get_customized_decoder(DeviceIPCWrapper),
+    ),
+    list[DeviceIPCWrapper]: (
+        get_customized_encoder(list[DeviceIPCWrapper]),
+        get_customized_decoder(list[DeviceIPCWrapper]),
+    ),
+    list[QRingInfo]: (
+        get_customized_encoder(list[QRingInfo]),
+        get_customized_decoder(list[QRingInfo]),
+    ),
+}
+
+
+def msgspec_encode(obj: Any, cls: Any) -> bytes:
+    # Handle special cases
+    if cls in _SPECIAL_ENCODER_DECODERS:
+        encoder, _ = _SPECIAL_ENCODER_DECODERS[cls]
+        return encoder.encode(obj)
+    # Defensive guard: coerce obj to the declared cls so that
+    # e.g. a bool passed as int (or vice-versa) is encoded in the
+    # wire format that msgspec_decode expects for that cls.
+    if cls in (bool, int):
+        obj = cls(obj)
+    return msgspec.msgpack.encode(obj)
+
+
+def msgspec_decode(b_obj: bytes, cls: Any) -> Any:
+    # Handle special cases
+    if cls in _SPECIAL_ENCODER_DECODERS:
+        _, decoder = _SPECIAL_ENCODER_DECODERS[cls]
+        return decoder.decode(b_obj)
+    # Defensive guard: msgspec strict-validates wire format
+    # (bool ≠ int in msgpack), but runtime type may not match
+    # declared cls. Decode untyped, then coerce.
+    if cls in (bool, int):
+        return cls(msgspec.msgpack.decode(b_obj))
+    return msgspec.msgpack.decode(b_obj, type=cls)

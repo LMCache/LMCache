@@ -27,6 +27,7 @@ from lmcache.v1.client.transfer_context.base import (
 )
 from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
+from lmcache.v1.common.api import MemoryLayoutDesc
 from lmcache.v1.common.custom_types import (
     GroupLayout,
     RegisterEngineDrivenContextPayload,
@@ -38,9 +39,7 @@ from lmcache.v1.common.utils import (
     get_device,
     normalize_and_discover_per_layer_formats,
 )
-from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import (
     get_device_spec,
     resolve_kv_wrapper_factory,
@@ -53,6 +52,7 @@ from lmcache.v1.platform.base.event_ipc import (
 from lmcache.v1.platform.kv_wrap import kv_wrapper_fds_delivered, wrap_kv_caches
 from lmcache.v1.platform.transfer_mode import MPTransferMode
 from lmcache.v1.transport.futures import MessagingFuture
+from lmcache.v1.transport.request_client import RequestClient
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -620,6 +620,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                     engine_type,
                     layout_hints or {},
                     list(engine_group_infos),
+                    None,
                 )
             )
             future.result(timeout=mq_timeout)
@@ -1274,7 +1275,7 @@ class EngineDrivenTransferContext(TransferContext):
                     # releasing the SHM slot (server may immediately reuse it
                     # after commit_retrieve).
                     synchronize_device(device)
-                ctx.commit_retrieve(key, self._instance_id)
+                ctx.commit_retrieve(key, self._instance_id, not ok)
         except ContextClosedError:
             # Context is being swapped/shut down; report a miss so the
             # engine recomputes the blocks.
@@ -1557,7 +1558,9 @@ class EngineDrivenTransferContext(TransferContext):
             (state.layout_desc.shapes[0], state.layout_desc.dtypes[0], num_chunks)
             for state, (_, num_chunks) in zip(self._group_states, windows, strict=True)
         ]
-        groups = ctx.prepare_retrieve_multigroup(key, self._instance_id, expected)
+        groups = ctx.prepare_retrieve_multigroup(
+            key, self._instance_id, expected, [first for first, _ in windows]
+        )
         if groups is not None and (
             len(groups) != len(self._group_states)
             or any(
@@ -1593,7 +1596,7 @@ class EngineDrivenTransferContext(TransferContext):
                 logger.exception("Failed to scatter retrieved CPU context chunks")
                 ok = False
             synchronize_device(device)
-        ctx.commit_retrieve(key, self._instance_id)
+        ctx.commit_retrieve(key, self._instance_id, not ok)
         future.set_result(ok)
         return future
 
@@ -1651,7 +1654,7 @@ class EngineDrivenTransferContext(TransferContext):
                 ok = False
             # Complete device writes before the server may reuse the slots.
             synchronize_device(device)
-        ctx.commit_retrieve(key, self._instance_id)
+        ctx.commit_retrieve(key, self._instance_id, not ok)
         future.set_result(ok)
         return future
 

@@ -41,8 +41,8 @@ import time
 
 # First Party
 from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
-from lmcache.logging import init_logger
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
@@ -130,6 +130,8 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
     - load_timeout_s: deadline for a load before it counts as a failure.
     - write_enabled: store objects into the peer's L1; off makes stores no-ops.
     - store_timeout_s: deadline for a store before it counts as a failure.
+    - write_l1_usage_threshold: used fraction of the local DRAM L1 at which
+      the ``p2p`` store policy starts storing objects into this peer.
     """
 
     def __init__(
@@ -140,12 +142,14 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
         load_timeout_s: float = 10.0,
         write_enabled: bool = False,
         store_timeout_s: float = 10.0,
+        write_l1_usage_threshold: float = 0.7,
     ) -> None:
         super().__init__(peer_mq_server_url, lookup_timeout_s)
         self.peer_transfer_channel_server_url = peer_transfer_channel_server_url
         self.load_timeout_s = load_timeout_s
         self.write_enabled = write_enabled
         self.store_timeout_s = store_timeout_s
+        self.write_l1_usage_threshold = write_l1_usage_threshold
 
     @classmethod
     def from_dict(cls, d: dict) -> "P2PL2AdapterConfig":
@@ -173,6 +177,13 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
         store_timeout_s = d.get("store_timeout_s", 10.0)
         if not isinstance(store_timeout_s, (int, float)) or store_timeout_s <= 0:
             raise ValueError("store_timeout_s must be a positive number")
+        write_l1_usage_threshold = d.get("write_l1_usage_threshold", 0.7)
+        if (
+            not isinstance(write_l1_usage_threshold, (int, float))
+            or isinstance(write_l1_usage_threshold, bool)
+            or not 0 < write_l1_usage_threshold <= 1
+        ):
+            raise ValueError("write_l1_usage_threshold must be a number in (0, 1]")
 
         return cls(
             peer_mq_server_url=peer_mq_server_url,
@@ -181,6 +192,7 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
             load_timeout_s=float(load_timeout_s),
             write_enabled=write_enabled,
             store_timeout_s=float(store_timeout_s),
+            write_l1_usage_threshold=float(write_l1_usage_threshold),
         )
 
     @classmethod
@@ -197,8 +209,25 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
             "- write_enabled (bool): store objects into the peer's L1 "
             "(optional, default false)\n"
             "- store_timeout_s (float): store deadline in seconds "
-            "(optional, default 10)"
+            "(optional, default 10)\n"
+            "- write_l1_usage_threshold (float): used fraction of the local "
+            "DRAM L1 at which the p2p store policy stores into this peer "
+            "(optional, default 0.7)"
         )
+
+
+def _unregister_from_notifier(fd: int) -> None:
+    """Unregister ``fd`` from the notifier, if it is still running.
+
+    Looks the singleton up again: a saved handle dangles once ``shutdown``
+    frees the native instance.
+
+    Args:
+        fd: The registered event fd.
+    """
+    notifier = PeriodicEventNotifier.get()
+    if notifier is not None:
+        notifier.unregister_fd(fd)
 
 
 class PeerL2AdapterBase(L2AdapterInterface):
@@ -267,7 +296,7 @@ class PeerL2AdapterBase(L2AdapterInterface):
                 polled_events.append(self._store_efd)
             for event in polled_events:
                 notifier.register_fd(event.fileno())
-                resources.callback(notifier.unregister_fd, event.fileno())
+                resources.callback(_unregister_from_notifier, event.fileno())
             self._register_peer_region()
             self._resources = resources.pop_all()
 
@@ -671,7 +700,7 @@ class P2PL2Adapter(PeerL2AdapterBase):
         # Registered outside the lock: an already answered request runs the
         # callback right here, and the callback takes the lock.
         reserve_future.add_done_callback(
-            functools.partial(self._on_reservation_answered, task_id)
+            functools.partial(self._on_reservation_answered, task_id, keys)
         )
         return task_id
 
@@ -791,23 +820,30 @@ class P2PL2Adapter(PeerL2AdapterBase):
     def _on_reservation_answered(
         self,
         task_id: L2TaskId,
+        keys: list[ObjectKey],
         reserve_future: MessagingFuture[list[TransferChannelAddress]],
     ) -> None:
         """Start a store's transfer as soon as the peer answered its reservation.
 
         Args:
             task_id: The store the reservation belongs to.
+            keys: The keys the reservation was requested for.
             reserve_future: The answered reservation request.
 
         Note:
             Runs on the thread that completed the request, normally the
             request client's receive thread, so the store does not wait for
-            the next pulse of the store loop. A store that already failed
-            (deadline, close) is left alone.
+            the next pulse of the store loop. When the store already failed
+            at its deadline, the buffers a late answer reserved are handed
+            back to the peer at once instead of staying reserved until the
+            peer's write TTL.
         """
         with self._store_lock:
+            if self._closed:
+                return
             task = self._store_tasks.get(task_id)
-            if task is None or self._closed:
+            if task is None:
+                self._discard_late_reservation(keys, reserve_future)
                 return
             result = self._start_transfer(task, reserve_future)
             if result is None:
@@ -815,6 +851,28 @@ class P2PL2Adapter(PeerL2AdapterBase):
             del self._store_tasks[task_id]
             self._completed_store_tasks[task_id] = result
         self._store_efd.notify()
+
+    def _discard_late_reservation(
+        self,
+        keys: list[ObjectKey],
+        reserve_future: MessagingFuture[list[TransferChannelAddress]],
+    ) -> None:
+        """Tell the peer to drop the buffers of a reservation nobody will use.
+
+        Args:
+            keys: The keys the reservation was requested for.
+            reserve_future: The reservation, answered after its store failed.
+        """
+        try:
+            addresses = reserve_future.result()
+        except REQUEST_FAILURES:
+            # The request itself failed, so the peer reserved nothing.
+            return
+        reserved = [
+            key for key, addr in zip(keys, addresses, strict=True) if addr.is_valid()
+        ]
+        if reserved:
+            self._req_client.p2p_finish_write(reserved, [False] * len(reserved))
 
     def _on_commit_answered(self, commit_future: MessagingFuture[list[bool]]) -> None:
         """Wake the store loop to collect a store whose commit was answered.

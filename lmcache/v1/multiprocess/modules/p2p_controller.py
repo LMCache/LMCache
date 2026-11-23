@@ -13,7 +13,13 @@ import httpx
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.periodic_thread import (
+    PeriodicThread,
+    ThreadLevel,
+    ThreadRunSummary,
+    create_periodic_thread,
+)
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import (
     GroupedObjectKeys,
@@ -42,12 +48,6 @@ from lmcache.v1.multiprocess.engine_module import (
     ModuleBuildContext,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.periodic_thread import (
-    PeriodicThread,
-    ThreadLevel,
-    ThreadRunSummary,
-    create_periodic_thread,
-)
 
 logger = init_logger(__name__)
 
@@ -780,6 +780,9 @@ class P2PController(DiscoverableModule):
             peer_transfer_channel_server_url=inst.p2p_advertised_url,
             lookup_timeout_s=self._p2p_config.lookup_timeout,
             load_timeout_s=self._p2p_config.load_timeout,
+            write_enabled=self._p2p_config.enable_write,
+            store_timeout_s=self._p2p_config.store_timeout,
+            write_l1_usage_threshold=self._p2p_config.write_l1_usage_threshold,
         )
         try:
             adapter_id = self._ctx.storage_manager.add_l2_adapter(config)

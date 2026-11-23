@@ -17,11 +17,10 @@ import uuid
 import grpc
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.client.transport.grpc_impl.auth import (
     GrpcClientAuthenticationInterceptor,
 )
-from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 from lmcache.v1.transport.grpc.descriptors import (
     client_method_name,
@@ -36,6 +35,7 @@ from lmcache.v1.transport.grpc.method_registry import (
     get_method_codec_registry,
 )
 from lmcache.v1.transport.grpc.utils import GRPC_CHANNEL_OPTIONS, request_error
+from lmcache.v1.transport.request_client import RequestClient
 
 # A ZMQ socket greets every new connection with this 10-byte ZMTP signature.
 _ZMTP_SIGNATURE_LEN = 10

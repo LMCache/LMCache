@@ -64,7 +64,7 @@ from lmcache.cli.commands.bench.quality_bench.core.runner import (
 )
 from lmcache.cli.commands.bench.quality_bench.core.task import check_task
 from lmcache.cli.commands.bench.quality_bench.core.verdict import run_problems
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 
