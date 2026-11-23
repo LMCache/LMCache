@@ -376,9 +376,9 @@ start_vllm() {
   local kv_cache_bytes
   kv_cache_bytes="$(python3 -c "print(int(${VLLM_CPU_KVCACHE_SPACE} * 1024 * 1024 * 1024))")"
   # Tell LMCacheMPConnector where the lmcache server actually listens.
-  # Without this it falls back to tcp://localhost:5555 and dies with
-  # "Cannot reach the LMCache MP server" whenever the selected request
-  # transport or port differs from that legacy default.
+  # Without this it falls back to the connector's default endpoint and dies
+  # with "Cannot reach the LMCache MP server" whenever the selected request
+  # transport or port differs from that default.
   local kv_transfer_config
   kv_transfer_config="$(python3 -c "
 import json
