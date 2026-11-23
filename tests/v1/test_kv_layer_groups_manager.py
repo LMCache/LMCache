@@ -392,11 +392,12 @@ class TestValidateBlockChunkSizeConfig:
         with pytest.raises(ValueError, match="lmcache_tokens_per_chunk"):
             self._validate(slots=1, tokens=96, chunk=256)
 
-    def test_subchunk_window_not_block_aligned_passes(self):
-        # The window is rounded up to whole blocks when transferring.
-        self._validate(slots=16, tokens=16, sw=100)
-        # Block span (DCP-scaled) equal to the chunk, window below it.
-        self._validate(slots=1152, tokens=9216, chunk=9216, sw=2048)
+    def test_subchunk_window_not_block_aligned_raises(self):
+        # A sub-chunk window of 100 tokens does not cover whole 16-token
+        # blocks, so the transfer slot count would disagree with the kept
+        # block IDs.
+        with pytest.raises(ValueError, match="sliding window"):
+            self._validate(slots=16, tokens=16, sw=100)
 
 
 class TestKernelGroupIdentity:
@@ -727,33 +728,15 @@ class TestKernelAndObjectGroups:
         )
         assert [g.sw_size_tokens for g in manager.kernel_groups] == [-1, 64]
 
-    def test_subchunk_window_rounded_up_to_whole_blocks(self):
-        # A 64-token window over 256-token blocks (one block = the whole
-        # 256-token chunk) keeps the whole block.
+    def test_subchunk_window_not_block_aligned_rejected(self):
+        # A 64-token window over 256-slot blocks does not cover whole blocks;
+        # construction fails loudly instead of mistransferring.
         tensors = [torch.randn(2, 32, 256, 8, 64, dtype=torch.float16)]
-        manager = _build_manager(
-            tensors,
-            engine_group_infos=[EngineGroupInfo(0, (0,), sw_size_tokens=64)],
-        )
-        assert manager.get_subchunk_sw_size_tokens(0) == 256
-        assert manager.get_slots_per_chunk_in_sw(0) == 256
-        # The hit window stays one chunk.
-        assert manager.get_kernel_group_window_chunks(0) == 1
-
-    def test_subchunk_window_rounded_up_compressed_blocks(self):
-        # 32 physical slots per block covering 64 tokens (e.g. a DCP-sharded
-        # block): a 100-token window rounds up to 2 blocks = 128 tokens.
-        tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16)]
-        manager = _build_manager(
-            tensors,
-            engine_group_infos=[
-                EngineGroupInfo(0, (0,), tokens_per_block=64, sw_size_tokens=100)
-            ],
-        )
-        assert manager.get_subchunk_sw_size_tokens(0) == 128
-        assert manager.get_slots_per_chunk_in_sw(0) == 64
-        assert manager.calculate_num_blocks(0, 128) == 2
-        assert manager.get_kernel_group_window_chunks(0) == 1
+        with pytest.raises(ValueError, match="sliding window"):
+            _build_manager(
+                tensors,
+                engine_group_infos=[EngineGroupInfo(0, (0,), sw_size_tokens=64)],
+            )
 
     def test_subchunk_sw_size_tokens(self):
         # lmcache chunk size is 256 (default), 32-slot blocks. Sub-chunk
@@ -893,24 +876,6 @@ def test_object_groups_expose_their_kernel_groups_tp_replication():
     assert _fold_shard_replication_desc(
         manager.object_groups, infos
     ) == ShardReplicationDesc(group_tp_replicas=(4, 1), group_dcp_shards=(2, 1))
-
-
-def test_object_group_of_unsharded_replicated_group_is_one_shard():
-    """A replicated kernel group DCP does not shard (``dcp_shards`` 1, e.g. a
-    draft cache) is one object per TP group, next to a DCP-sharded one."""
-    tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
-    infos = [
-        EngineGroupInfo(0, (0,), tp_replicas=8, dcp_shards=8),
-        EngineGroupInfo(1, (1,), sw_size_tokens=64, tp_replicas=8, dcp_shards=1),
-    ]
-    manager = _build_manager(
-        tensors, engine_group_infos=infos, separate_object_groups=True
-    )
-    desc = _fold_shard_replication_desc(manager.object_groups, infos)
-    assert desc == ShardReplicationDesc(
-        group_tp_replicas=(8, 8), group_dcp_shards=(8, 1)
-    )
-    assert [desc.num_kv_readers(group) for group in range(2)] == [1, 8]
 
 
 def test_bundled_object_group_is_replicated_only_if_all_kernel_groups_are():
