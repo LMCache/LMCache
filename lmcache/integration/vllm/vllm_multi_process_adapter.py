@@ -898,9 +898,8 @@ class LMCacheMPSchedulerAdapter:
         replies in flight. Returns the matched token count once every server
         has reported, or None while the prefetch is in progress.
 
-        A LOOKUP or status RPC that is not answered within the MQ timeout
-        marks that server unhealthy and makes this return 0 from then on,
-        matching the behaviour of a timed-out synchronous submit.
+        An unanswered lookup RPC or a failed tail FREE marks that server
+        unhealthy and makes this return 0, as for a timed-out synchronous submit.
 
         Args:
             request_id: The ID of the lookup request submitted in
@@ -918,7 +917,7 @@ class LMCacheMPSchedulerAdapter:
             return 0
 
         for url in lookup.on_scheduler_check():
-            self._mark_lookup_timed_out(url)
+            self._mark_lookup_unhealthy(url)
         return lookup.get_result()
 
     def num_blocks_per_chunk(self) -> int:
@@ -1042,8 +1041,9 @@ class LMCacheMPSchedulerAdapter:
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
             extra_ranges: Lock ranges left by this request's earlier,
-                abandoned lookups, as ``(start, end)`` token pairs ending at
-                that lookup's hit boundary. Released in the same RPC.
+                abandoned lookups, as ``(start, end)`` token pairs. The end
+                is the lookup's common hit across servers. Released in the
+                same RPC.
         """
         if not self.is_healthy:
             return
@@ -1081,7 +1081,7 @@ class LMCacheMPSchedulerAdapter:
         if lookup is not None:
             url = lookup.drain()
             if url is not None:
-                self._mark_lookup_timed_out(url)
+                self._mark_lookup_unhealthy(url)
                 return
 
         for url in self._server_urls:
@@ -1264,12 +1264,11 @@ class LMCacheMPSchedulerAdapter:
             self._store_request_pending_counts[req_id] = total
             return False
 
-    def _mark_lookup_timed_out(self, url: str) -> None:
-        """Log and mark ``url`` unhealthy after an unanswered lookup RPC."""
+    def _mark_lookup_unhealthy(self, url: str) -> None:
+        """Log and mark ``url`` unhealthy after a failed lookup exchange."""
         logger.warning(
-            "Lookup RPC to %s timed out after %ss. Marking server as unhealthy.",
+            "Lookup exchange with %s failed. Marking server as unhealthy.",
             url,
-            self._mq_timeout,
         )
         self._health_events[url].clear()
 

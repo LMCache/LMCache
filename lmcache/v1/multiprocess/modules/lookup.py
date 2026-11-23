@@ -40,6 +40,7 @@ from lmcache.v1.multiprocess.kv_load_policy import (
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.session import Session
+from lmcache.v1.multiprocess.streaming import FSStreamingReader
 
 logger = init_logger(__name__)
 
@@ -134,6 +135,7 @@ class _PrefetchJob:
     # Names the ``lookup()`` branch that returned before submitting a prefetch
     # task; empty on the normal path.
     early_exit_reason: str = ""
+    streaming_lookup: bool = False
     # The lookup key, for the unfull-chunk stage that runs once the hit is
     # known; None on early exits, which never probe an unfull chunk.
     unfull_chunk_lookup_key: IPCCacheServerKey | None = None
@@ -389,9 +391,18 @@ class LookupModule(DiscoverableModule):
                 shard_replication_desc,
             ),
         )
+        reader = self._ctx.streaming_reader
+        adapters = self._ctx.storage_manager.l2_adapters() if reader else []
+        streaming_lookup = (
+            isinstance(reader, FSStreamingReader)
+            and len(adapters) == 1
+            and adapters[0][1] is reader.adapter
+            and reader.can_fit(spec.group_layout_descs)
+        )
+        if streaming_lookup:
+            spec = replace(spec, defer_l2_load=True)
         handle = self._ctx.storage_manager.submit_prefetch_task(
-            spec,
-            external_request_id=key.request_id,
+            spec, external_request_id=key.request_id
         )
         self._register_prefetch_job(
             _PrefetchJob(
@@ -412,6 +423,7 @@ class LookupModule(DiscoverableModule):
                 ),
                 model_name=model_name,
                 cache_salt=key.cache_salt,
+                streaming_lookup=streaming_lookup,
                 unfull_chunk_lookup_key=key,
             )
         )
@@ -493,10 +505,9 @@ class LookupModule(DiscoverableModule):
 
         Hashes are computed only for chunks in ``[start, end)`` to avoid
         unnecessary work on tokens outside that range.
-        ``start`` and ``end`` must be aligned to ``chunk_size``; it is the
-        caller's responsibility to align the boundaries as desired. An
-        unaligned ``end`` releases the full chunks below it, plus the unfull
-        chunk ending exactly there if the lookup locked it.
+        Align ``start`` to ``chunk_size``. An unaligned ``end`` releases
+        the full chunks below it, plus the unfull chunk ending exactly
+        there if the lookup locked it.
 
         Only the keys the prefetch actually read-locked are released: the
         key's range is floored to the current lookup's ``start``, and each
@@ -515,10 +526,9 @@ class LookupModule(DiscoverableModule):
             key: Cache key whose read locks should be released.
             tp_size: Legacy wire field; ignored (kept for payload arity).
             extra_ranges: Lock ranges left over from this request's earlier,
-                abandoned lookups, as ``(start, end)`` token pairs. Each end
-                must be that lookup's hit boundary, so the range resolves to
-                exactly the keys it locked (sliding-window groups translate
-                from the hit).
+                abandoned lookups, as ``(start, end)`` token pairs. A
+                streaming lookup may be identified by its shorter common
+                hit across multiple servers.
         """
         if key.start >= key.end and not extra_ranges:
             return
@@ -564,48 +574,59 @@ class LookupModule(DiscoverableModule):
         # would drop another request's lock on the shared object key.
         lookup_key = session.lookup_ipc_key
         lock_floor = lookup_key.start if lookup_key is not None else 0
-        obj_keys: list[ObjectKey] = []
-        if key.start < key.end:
+        if max(key.start, lock_floor) < key.end:
             # The lookup never locked below its own ``start``.
-            obj_keys.extend(
-                resolve_prefetched_obj_keys(
-                    self._ctx,
-                    replace(key, start=max(key.start, lock_floor)),
-                    hit_chunks,
-                    session.prefetch_locked_gids,
-                )
+            effective_start = max(key.start, lock_floor)
+            obj_keys = resolve_prefetched_obj_keys(
+                self._ctx,
+                replace(key, start=effective_start),
+                hit_chunks,
+                session.prefetch_locked_gids,
             )
+            if key.has_unfull_chunk(chunk_size):
+                unfull_obj_keys = self._all_object_keys(
+                    key,
+                    [TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(key.end))],
+                )
+                locked_keys = session.get_prefetch_owners()
+                if all(obj_key in locked_keys for obj_key in unfull_obj_keys):
+                    obj_keys.extend(unfull_obj_keys)
+            streaming_owners = session.take_current_streaming_owners(
+                effective_start, key.end, obj_keys
+            )
+            owners = streaming_owners
+            if streaming_owners is not None:
+                obj_keys = list(streaming_owners)
+            else:
+                owners = self._ctx.get_read_owners(key.request_id)
+            if obj_keys:
+                finish_lookup_read(self._ctx, key, obj_keys, owners)
         for range_start, range_end in extra_ranges:
             if range_start >= range_end:
+                continue
+            abandoned_owners = session.take_abandoned_streaming_owners(
+                range_start, range_end
+            )
+            if abandoned_owners is not None:
+                # The recorded lock set includes any unfull L1 tail.
+                if abandoned_owners:
+                    finish_lookup_read(
+                        self._ctx, key, list(abandoned_owners), abandoned_owners
+                    )
                 continue
             # An abandoned lookup's range ends at its hit boundary, so the
             # range is its own lock model: resolve with that hit, not the
             # current lookup's.
-            obj_keys.extend(
-                resolve_prefetched_obj_keys(
-                    self._ctx,
-                    replace(key, start=range_start, end=range_end),
-                    range_end // chunk_size,
-                    session.prefetch_locked_gids,
+            obj_keys = resolve_prefetched_obj_keys(
+                self._ctx,
+                replace(key, start=range_start, end=range_end),
+                range_end // chunk_size,
+                session.prefetch_locked_gids,
+            )
+            if obj_keys:
+                finish_lookup_read(
+                    self._ctx, key, obj_keys, self._ctx.get_read_owners(key.request_id)
                 )
-            )
-        # A key ending at the unfull chunk the lookup locked releases it too.
-        # The lookup's retained owners name every key it locked, so a key
-        # ending anywhere else releases no unfull chunk.
-        if key.has_unfull_chunk(chunk_size):
-            unfull_obj_keys = self._all_object_keys(
-                key,
-                [TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(key.end))],
-            )
-            locked_keys = session.get_prefetch_owners()
-            if all(obj_key in locked_keys for obj_key in unfull_obj_keys):
-                obj_keys.extend(unfull_obj_keys)
-        if not obj_keys:
-            return
-
-        finish_lookup_read(
-            self._ctx, key, obj_keys, self._ctx.get_read_owners(key.request_id)
-        )
 
     @request_handler(HandlerType.BLOCKING)
     def end_session(self, request_id: str) -> None:
@@ -764,6 +785,7 @@ class LookupModule(DiscoverableModule):
         result = self._ctx.storage_manager.query_prefetch_status(job.handle)
         if result is None:
             return None
+        is_streaming = job.streaming_lookup and result.l2_hit_count > 0
         if job.row_windows:
             found_count, _retain = fold_unfold_grouped(
                 result.hit_cells, job.row_windows
@@ -778,7 +800,13 @@ class LookupModule(DiscoverableModule):
 
         # The fold covers only the looked-up sub-range: the tier split is
         # attributed on it, so the covered prefix never counts as an L1 hit.
-        l1_chunks = min(l1_found_count, found_count)
+        if is_streaming and all(w < 0 for w in job.row_windows):
+            l1_chunks = sum(
+                all(row.test(index) for row in result.l1_hit_cells)
+                for index in range(found_count)
+            )
+        else:
+            l1_chunks = min(l1_found_count, found_count)
         l2_chunks = found_count - l1_chunks
         # The engine resolves the hit in absolute chunks; shift it back.
         found_count += job.start_chunk
@@ -790,6 +818,18 @@ class LookupModule(DiscoverableModule):
         # The unfull chunk's owners join the full chunks', so a retrieve and
         # free_lookup_locks release it on the L1 that holds its locks.
         session = self._ctx.session_manager.get_or_create(job.request_id)
+        chunk_size = job.chunk_size
+        if is_streaming:
+            logger.info(
+                "Streaming lookup selected %d FS objects for request %s",
+                result.l2_hit_count,
+                job.request_id,
+            )
+            session.add_streaming_range(
+                job.start_chunk * chunk_size,
+                found_count * chunk_size,
+                result.l1_owners,
+            )
         unfull_chunk_boundary, unfull_chunk_probes, unfull_chunk_owners = (
             self._lock_unfull_chunk(
                 job.unfull_chunk_lookup_key, found_count, job.attn_desc, session
@@ -797,13 +837,16 @@ class LookupModule(DiscoverableModule):
             if job.unfull_chunk_lookup_key is not None
             else (0, 0, {})
         )
+        if is_streaming and unfull_chunk_boundary:
+            session.extend_current_streaming_range(
+                unfull_chunk_boundary, unfull_chunk_owners
+            )
         session.record_prefetch_result(
             found_count,
             tuple(range(job.attn_desc.num_object_groups)),
             {**result.l1_owners, **unfull_chunk_owners},
         )
 
-        chunk_size = job.chunk_size
         covered_tokens = job.engine_covered_chunks * chunk_size
         hit_tokens = (l1_chunks + l2_chunks) * chunk_size
         # Prefix served by either cache: both ranges start at 0 and overlap in

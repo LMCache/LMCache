@@ -127,6 +127,8 @@ def _build(
         null_block_id=0,
         storage_manager=_FakeStorageManager(),
         get_read_owners=lambda request_id: None,
+        session_manager=SimpleNamespace(get=lambda request_id: None),
+        streaming_reader=None,
         event_bus=SimpleNamespace(
             publish=lambda event: None,
             publish_on_stream=lambda stream, event: None,

@@ -567,7 +567,7 @@ class StorageManager:
         spec: PrefetchTaskSpec,
         external_request_id: str = "",
     ) -> PrefetchHandle:
-        """Prefetch objects into L1 asynchronously.
+        """Submit an asynchronous cache lookup and prefetch task.
 
         Args:
             spec: The request (see :class:`PrefetchTaskSpec`).
@@ -577,6 +577,9 @@ class StorageManager:
             PrefetchHandle to track the task.
 
         Note:
+            A spec with ``defer_l2_load`` reports planned L2 hits for the caller
+            to load. Ordinary prefetch loads L2 hits into L1.
+
             A spec that allows no L2 adapter (an empty
             ``allowed_l2_memory_tags``) is served from L1 only, and its result
             is available as soon as this returns.
@@ -628,7 +631,7 @@ class StorageManager:
             elapsed_ms = (time.monotonic() - handle.submit_time) * 1000
             logger.info(
                 "Prefetch request completed (L1+L2): "
-                "%d/%d retained keys (%d L1, %d L2) in %.1f ms "
+                "%d/%d hit keys (%d L1, %d L2) in %.1f ms "
                 "(external_request_id=%s, prefetch_request_id=%d)",
                 total_hits,
                 handle.total_requested_keys,
@@ -1142,6 +1145,8 @@ class StorageManager:
                 more than one Device-DAX arena, or a DAX device is already
                 mapped by L1 or another L2 adapter.
         """
+        if getattr(config, "streaming_buffer_size_bytes", 0):
+            raise ValueError("streaming FS adapters must be configured at startup")
         with self._lifecycle_lock:
             # Mirror of the check in add_l1_devdax_device: a single-region
             # adapter may only be added while L1 is exactly one memory region.
@@ -1208,6 +1213,13 @@ class StorageManager:
         with self._lifecycle_lock:
             if adapter_id not in self._l2_adapters:
                 raise ValueError(f"No L2 adapter with id {adapter_id}")
+
+            if getattr(
+                self._adapter_descriptors[adapter_id].config,
+                "streaming_buffer_size_bytes",
+                0,
+            ):
+                raise ValueError("cannot remove an active streaming FS adapter")
 
             adapter = self._l2_adapters[adapter_id]
             if adapter_id not in self._closing_adapters:

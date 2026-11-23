@@ -13,7 +13,10 @@ chunk are split), ``skip_first_n_tokens`` with a batch of 4, and a Kimi-like
 """
 
 # Standard
+from concurrent.futures import ThreadPoolExecutor
 import random
+import threading
+import time
 
 # Third Party
 import pytest
@@ -28,14 +31,25 @@ pytest.importorskip("lmcache.cuda_ops", reason="Requires lmcache.cuda_ops")
 
 # First Party
 from lmcache.v1.common.kv_format.types import LayoutHints  # noqa: E402
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey  # noqa: E402
+from lmcache.v1.distributed.key_codec import encode_fs_filename  # noqa: E402
+from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (  # noqa: E402
+    FSL2Adapter,
+    FSL2AdapterConfig,
+)
 from lmcache.v1.memory_allocators.lazy_memory_allocator import (  # noqa: E402
     LazyMemoryAllocator,
 )
 from lmcache.v1.memory_management import MemoryObj  # noqa: E402
+from lmcache.v1.multiprocess.native_completion import (  # noqa: E402
+    DeviceHostFuncDispatcher,
+    submit_callback_to_stream,
+)
 from lmcache.v1.multiprocess.object_group_transfer import (  # noqa: E402
     direct_transfer_supported,
     downsample_and_stage_block_ids,
     engines,
+    slice_staged_block_ids_for_window,
     transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.object_group_transfer.gpu_dma import (  # noqa: E402
@@ -44,6 +58,7 @@ from lmcache.v1.multiprocess.object_group_transfer.gpu_dma import (  # noqa: E40
 from lmcache.v1.multiprocess.object_group_transfer.nvme_dma import (  # noqa: E402
     NvmeDmaEngine,
 )
+from lmcache.v1.multiprocess.streaming import FSStreamingReader  # noqa: E402
 from lmcache.v1.platform.devices.cuda.cache_context import (  # noqa: E402
     GPUCacheContext,
 )
@@ -270,6 +285,161 @@ def test_retrieve_direct_matches_kernel(name: str, allocator: LazyMemoryAllocato
             allocator.free(obj)
     finally:
         ctx.close()
+
+
+def test_kernel_retrieve_batches_more_objects_than_batch_size(allocator):
+    """A window larger than the GPU staging batch preserves all KV bytes."""
+    ctx, tensors = _make_context("nhd_16")
+    _, _, chunk, num_chunks = _CASES["nhd_16"]
+    objects = _allocate_objects(allocator, ctx, num_chunks, fill=True)
+    blocks = ctx.calculate_num_blocks(chunk, 0) * num_chunks
+    block_ids = [random.sample(range(ctx.num_blocks), blocks)]
+    try:
+        before = [tensor.clone() for tensor in tensors]
+        _run(ctx, block_ids, objects, H2D, "kernel", 1, 0)
+        expected = [tensor.clone() for tensor in tensors]
+        for tensor, original in zip(tensors, before, strict=True):
+            tensor.copy_(original)
+        _run(ctx, block_ids, objects, H2D, "kernel", 2, 0)
+        assert all(_bitwise_equal(a, b) for a, b in zip(tensors, expected, strict=True))
+    finally:
+        for obj in objects:
+            allocator.free(obj)
+        ctx.close()
+
+
+@pytest.mark.parametrize("num_requests", [1, 8, 32])
+def test_mixed_fs_windows_match_l1_gpu_bytes_concurrently(
+    num_requests: int, allocator: LazyMemoryAllocator, tmp_path
+):
+    """Shared FS windows and resident L1 produce identical GPU KV bytes."""
+    contexts = []
+    completion = DeviceHostFuncDispatcher()
+    adapter = FSL2Adapter(FSL2AdapterConfig(base_path=str(tmp_path)))
+    reader = None
+    owner = None
+    objs = []
+    try:
+        first_ctx, first_tensors = _make_context("nhd_16")
+        contexts.append((first_ctx, first_tensors))
+        _, _, chunk, num_chunks = _CASES["nhd_16"]
+        objs = _allocate_objects(allocator, first_ctx, num_chunks, fill=True)
+        shape, dtype = first_ctx.get_kernel_group_shape_dtype(chunk, 0)
+        layout = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
+        # First Party
+        from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+        from lmcache.v1.distributed.l1_manager.dram import DramL1Manager
+
+        capacity = 2 * objs[0].get_size()
+        owner = DramL1Manager(
+            L1ManagerConfig(
+                memory_config=L1MemoryManagerConfig(
+                    size_in_bytes=capacity * 2,
+                    use_lazy=False,
+                    align_bytes=4096,
+                    shm_name="",
+                )
+            )
+        )
+        reader = FSStreamingReader(adapter, capacity, shared_owner=owner)
+        completion.register(
+            "release_streaming_windows", reader.pool.release_completed, list[int]
+        )
+        completion.start()
+        keys = [
+            ObjectKey(chunk_hash=bytes([i]), model_name="model", kv_rank=0)
+            for i in range(1, num_chunks)
+        ]
+        for key, obj in zip(keys, objs[1:], strict=True):
+            (tmp_path / encode_fs_filename(key)).write_bytes(bytes(obj.byte_array))
+        lookup = adapter.submit_lookup_and_lock_task(keys, {0: layout})
+        deadline = time.monotonic() + 10
+        found = None
+        while found is None and time.monotonic() < deadline:
+            found = adapter.query_lookup_and_lock_result(lookup)
+            if found is None:
+                time.sleep(0.01)
+        assert found is not None and found.popcount() == len(keys)
+
+        for _ in range(num_requests - 1):
+            contexts.append(_make_context("nhd_16"))
+        prepared = []
+        for ctx, tensors in contexts:
+            blocks = ctx.calculate_num_blocks(chunk, 0) * num_chunks
+            ids = [random.sample(range(ctx.num_blocks), blocks)]
+            before = [tensor.clone() for tensor in tensors]
+            _run(ctx, ids, objs, H2D, "direct", ctx.max_batch_size, 0)
+            expected = [tensor.clone() for tensor in tensors]
+            for tensor, original in zip(tensors, before, strict=True):
+                tensor.copy_(original)
+            prepared.append((ctx, tensors, ids, expected))
+        torch_dev.synchronize(_DEVICE)
+        barrier = threading.Barrier(num_requests)
+
+        def retrieve(item):
+            ctx, tensors, ids, expected = item
+            barrier.wait(timeout=60)
+            with torch_dev.device(ctx.device), torch_dev.stream(ctx.stream):
+                staged_ids = downsample_and_stage_block_ids(ctx, ids)
+                gpu_ids, host_ids = slice_staged_block_ids_for_window(
+                    ctx, staged_ids, ids, 0, 1
+                )
+                ctx.transfer_object_group(
+                    gpu_ids,
+                    [objs[0]],
+                    object_group_id=0,
+                    batch_size=ctx.max_batch_size,
+                    skip_first_n_tokens=0,
+                    direction=H2D,
+                    transfer_key="mixed-l1",
+                    block_ids_host=host_ids,
+                )
+                for index, key in enumerate(keys, start=1):
+                    window = reader.pool.acquire(layout, timeout=60)
+                    transferred = False
+                    try:
+                        assert reader.load_many([key], [window])
+                        gpu_ids, host_ids = slice_staged_block_ids_for_window(
+                            ctx, staged_ids, ids, index, 1
+                        )
+                        ctx.transfer_object_group(
+                            gpu_ids,
+                            [window.memory_obj],
+                            object_group_id=0,
+                            batch_size=ctx.max_batch_size,
+                            skip_first_n_tokens=0,
+                            direction=H2D,
+                            transfer_key="mixed-fs",
+                            block_ids_host=host_ids,
+                        )
+                        submit_callback_to_stream(
+                            ctx.cupy_stream, "release_streaming_windows", [window.id]
+                        )
+                        transferred = True
+                    finally:
+                        if not transferred:
+                            ctx.stream.synchronize()
+                            reader.pool.release(window)
+                ctx.stream.synchronize()
+            return all(
+                _bitwise_equal(a, b) for a, b in zip(tensors, expected, strict=True)
+            )
+
+        with ThreadPoolExecutor(max_workers=num_requests) as executor:
+            assert all(executor.map(retrieve, prepared))
+    finally:
+        for ctx, _ in contexts:
+            ctx.stream.synchronize()
+        completion.stop()
+        if reader is not None:
+            reader.close()
+        if owner is not None:
+            owner.close()
+        adapter.close()
+        for ctx, _ in contexts:
+            ctx.close()
+        for obj in objs:
+            allocator.free(obj)
 
 
 def test_multi_head_hnd_is_not_direct(allocator: LazyMemoryAllocator) -> None:

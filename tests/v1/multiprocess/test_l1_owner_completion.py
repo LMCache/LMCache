@@ -133,6 +133,7 @@ def test_store_owner_callback_round_trip(
         chunk_size=2,
         null_block_id=0,
         storage_manager=storage,
+        streaming_reader=None,
         event_bus=MagicMock(),
         resolve_obj_keys=lambda key, gids: [[]] * 2 if unfull else [[k] for k in keys],
         resolve_unfull_chunk_obj_keys=lambda key, gids: keys,
