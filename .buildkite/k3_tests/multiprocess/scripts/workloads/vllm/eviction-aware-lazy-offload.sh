@@ -33,12 +33,14 @@ VLLM_LOG="${ENGINE_LOG_FILE:-/tmp/build_${BUILD_ID}_vllm.log}"
 LMCACHE_DIR="${LMCACHE_DIR:-$REPO_ROOT}"
 
 # Set by run-single-test.sh; repeated here so the script also runs by hand.
-NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-2048}"
-# vLLM's default paged-block size. The pool is this many tokens per block.
-VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-16}"
+NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-512}"
+# The paged-block size vLLM is launched with. The pool is this many tokens per
+# block. It is pinned rather than left to vLLM, whose choice varies by model
+# and attention backend; the pool size vLLM reports is checked below.
+VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-64}"
 
 # Phase 2 workload. The product below (72000 tokens) is at least twice the
-# default 32768-token pool: one pass fills it and the second forces the
+# 32768-token pool: one pass fills it and the second forces the
 # turnover the policy reacts to.
 DOCUMENT_LENGTH="${DOCUMENT_LENGTH:-8000}"
 NUM_DOCUMENTS="${NUM_DOCUMENTS:-9}"
@@ -187,6 +189,18 @@ echo "Phase 2 working set: ${working_set} tokens"
 
 if [ "${working_set}" -lt $((pool_tokens * 2)) ]; then
     echo "FAIL: the workload must be at least twice the pool or it never turns over"
+    exit 1
+fi
+
+# The arithmetic above is only as good as its inputs. Check it against the pool
+# vLLM actually allocated, so a block size or override that did not take
+# effect fails here instead of as a pool that never turns over.
+actual_pool_tokens="$(grep -oE 'GPU KV cache size: [0-9,]+ tokens' "${VLLM_LOG}" \
+    | tail -1 | grep -oE '[0-9,]+' | tr -d ',' || true)"
+echo "vLLM-reported GPU KV cache size: ${actual_pool_tokens:-unknown} tokens"
+if [ "${actual_pool_tokens}" != "${pool_tokens}" ]; then
+    echo "FAIL: vLLM allocated ${actual_pool_tokens:-an unknown number of} tokens," \
+        "not the ${pool_tokens} this workload is sized for"
     exit 1
 fi
 

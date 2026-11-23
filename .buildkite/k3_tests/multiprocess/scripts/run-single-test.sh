@@ -128,9 +128,13 @@ elif [ "$TEST_NAME" = "eviction_aware_lazy_offload" ]; then
     # This policy ranks GPU blocks by how close they are to the free queue's
     # eviction head and never drains on an idle engine, so the test is only
     # meaningful over a pool small enough that its workload turns it over.
-    # 2048 blocks of vLLM's default 16 tokens is a 32768-token pool, and
+    # Pin the block size too: the pool in tokens is blocks * block size, and
+    # vLLM's own choice is not 16 here (it picked 64 for this model, which
+    # made a 2048-block pool 131072 tokens and the workload never turned it
+    # over). 512 blocks of 64 tokens is a 32768-token pool, and
     # eviction-aware-lazy-offload.sh sends more than twice that.
-    export NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-2048}"
+    export VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-64}"
+    export NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-512}"
     # Pin the context rather than letting "auto" derive it from the overridden
     # pool; the workload's documents are 8000 tokens.
     export MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
