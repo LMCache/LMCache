@@ -62,6 +62,20 @@ class RequestClient(Protocol):
     def unregister_kv_cache(self, instance_id: int) -> MessagingFuture[None]: ...
 
     @rpc_method
+    def negotiate_event_reuse(
+        self, instance_id: int, reuse_events: bool
+    ) -> MessagingFuture[bool]:
+        """Agree with the server on reusing IPC events for ``instance_id``.
+
+        Sent once after REGISTER_KV_CACHE. ``reuse_events`` tells whether the
+        worker keeps the completion events it imports and may record its
+        producer events again; the response tells whether the server does the
+        same for this instance. A server without this RPC rejects it, and
+        both sides then keep one event per operation.
+        """
+        ...
+
+    @rpc_method
     def register_q_cache(
         self,
         instance_id: int,

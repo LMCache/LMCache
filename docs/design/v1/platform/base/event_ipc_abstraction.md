@@ -245,11 +245,30 @@ it and pass everything through when it is `1`:
 
 `LMCacheDrivenTransferContext.create_recorded_event` (every engine's producer
 event) and the server's completion events use a pool; the server's producer
-imports and the worker futures' completion imports use the cache. No message
-field announces reuse: an old worker or server simply creates an event per
-operation as before. `DefaultEventIPCBackend` takes `max_event_records` from
-its device spec (`RocmDeviceSpec`: 31; `CudaDeviceSpec`: 1, see its
-docstring); the timeline-semaphore backend exports snapshots and stays at 1.
+imports and the worker futures' completion imports use the cache.
+
+Reuse is only safe when the importing peer keeps its imports: a peer that
+imports a handle, destroys the import and later imports the same handle again
+may see the new import report an older record as complete. Workers and
+servers that predate reuse do exactly that, so the two sides agree on reuse
+once per registration with `NEGOTIATE_EVENT_REUSE`, sent by the worker right
+after `REGISTER_KV_CACHE`:
+
+| Worker | Server | Producer events | Completion events |
+| --- | --- | --- | --- |
+| offers reuse | agrees | pooled, imports kept | pooled, imports kept |
+| offers reuse | predates the RPC (rejects it) | one per operation | one per operation (imports kept) |
+| predates the RPC | supports reuse | one per operation | one per operation |
+
+The worker keeps completion imports as soon as it offers reuse, so a lost
+answer never leaves a pooling server with an importer that destroys imports.
+The decision is stored with the worker's transfer context and the server's
+per-instance entry; store and retrieve use whichever pool and backend were set
+at registration, with no per-request field or branch.
+
+`DefaultEventIPCBackend` takes `max_event_records` from its device spec
+(`RocmDeviceSpec`: 31; `CudaDeviceSpec`: 1, see its docstring); the
+timeline-semaphore backend exports snapshots and stays at 1.
 
 `DeviceMessagingFuture` is the device-neutral implementation. The old
 `CUDAMessagingFuture` name remains an alias, and `to_cuda_future()` remains an

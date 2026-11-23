@@ -21,6 +21,7 @@ from lmcache.v1.platform.base.event_ipc import (
     EventRecordPool,
     _BackgroundReleaser,
     get_event_ipc_backend,
+    supports_event_reuse,
 )
 from lmcache.v1.platform.devices.cpu import CpuDeviceSpec
 from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
@@ -410,6 +411,22 @@ def test_record_pool_without_reuse_creates_an_event_per_record():
     pool.export(events[0])
     pool.export(events[0])
     assert events[0].exports == 2
+
+
+def test_record_pool_creates_an_event_per_record_unless_the_peer_agreed():
+    """reuse=False (the importing peer did not agree) disables the pool."""
+    pool = EventRecordPool(_reusing_backend(None), "dev", slots=4, reuse=False)
+    events = [_record(pool, "s") for _ in range(3)]
+
+    assert len({id(event) for event in events}) == 3
+    assert len({pool.export(event) for event in events}) == 3
+
+
+def test_supports_event_reuse_follows_max_event_records():
+    assert supports_event_reuse(_reusing_backend(None))
+    assert supports_event_reuse(_reusing_backend(31))
+    assert not supports_event_reuse(_reusing_backend(1))
+    assert not supports_event_reuse(object())
 
 
 def test_record_pool_close_drops_its_events():

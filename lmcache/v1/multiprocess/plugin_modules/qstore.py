@@ -54,13 +54,19 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+from lmcache.v1.platform.base.event_ipc import (
+    CachedImportEventBackend,
+    get_event_ipc_backend,
+)
 from lmcache.v1.platform.base.ipc_wrapper import KVCache
 from lmcache.v1.platform.cache_context import create_cache_context
 from lmcache.v1.transport.qstore import QRingInfo
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
+
+# Producer-event imports kept per Q ring instance.
+_PRODUCER_IMPORT_CACHE = 64
 
 
 def _ring_pieces(cache_context: Any) -> list[torch.Tensor]:
@@ -512,6 +518,10 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         )
         event_backend = get_event_ipc_backend(cache_context.device)
         event_backend.check_event_support(cache_context.device)
+        # A worker whose KV registration agreed to event reuse records its
+        # producer events again; keep their imports (see
+        # LMCacheDrivenTransferModule.negotiate_event_reuse).
+        event_backend = CachedImportEventBackend(event_backend, _PRODUCER_IMPORT_CACHE)
         kv_groups_manager = cache_context.kv_layer_groups_manager
         attn_desc = kv_groups_manager.get_attn_desc()
         self._ctx.layout_desc_registry.register(

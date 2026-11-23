@@ -62,6 +62,7 @@ from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     EventRecordPool,
     get_event_ipc_backend,
+    supports_event_reuse,
 )
 from lmcache.v1.platform.base.ipc_wrapper import KVCache, set_fd_resolver
 from lmcache.v1.platform.cache_context import create_cache_context
@@ -211,11 +212,14 @@ class ContextEntry:
         has_liveness_signal: True once the instance has sent at least one
             PING. Selects the reap window (timeout vs registration grace).
             Latched only by PING, never by traffic.
-        event_backend: Cached event backend selected for this context's device.
+        event_backend: Event backend selected for this context's device.
         event_profile: Native identity contract retained until unregister, reap
             or shutdown. None retains current event behavior.
         completion_events: Completion events of this instance's transfers,
-            recorded on its stream (created from ``event_backend``).
+            recorded on its stream (created from ``event_backend``). One new
+            event per transfer until the worker agrees to reuse
+            (:meth:`LMCacheDrivenTransferModule.negotiate_event_reuse`).
+        reuses_events: Whether the worker agreed to event reuse.
     """
 
     cache_context: BaseCacheContext
@@ -226,6 +230,7 @@ class ContextEntry:
     event_backend: EventIPCBackend | None = None
     event_profile: KVEventProfile | None = None
     completion_events: EventRecordPool | None = None
+    reuses_events: bool = False
 
     def __post_init__(self) -> None:
         if self.completion_events is None and self.event_backend is not None:
@@ -233,6 +238,7 @@ class ContextEntry:
                 self.event_backend,
                 self.cache_context.device,
                 _COMPLETION_EVENT_SLOTS,
+                reuse=False,
             )
 
 
@@ -657,9 +663,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         )
         kv_groups_manager = cache_context.kv_layer_groups_manager
         num_object_groups = kv_groups_manager.num_object_groups
-        event_backend: EventIPCBackend = get_event_ipc_backend(cache_context.device)
+        event_backend = get_event_ipc_backend(cache_context.device)
         event_backend.check_event_support(cache_context.device)
-        event_backend = CachedImportEventBackend(event_backend, _PRODUCER_IMPORT_CACHE)
         if self._host_event_waiter is not None:
             event_backend = self._host_event_waiter.wrap(event_backend)
         layout_desc = get_layout_desc(
@@ -709,6 +714,47 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             cache_context.num_layers,
         )
         return event_profile
+
+    @request_handler()
+    def negotiate_event_reuse(self, instance_id: int, reuse_events: bool) -> bool:
+        """Reuse IPC events with a registered worker that offers it.
+
+        A worker that offers reuse keeps the completion events it imports, so
+        the server may record them again, and may record its producer events
+        again, so the server keeps their imports. Both happen only where the
+        device's interprocess events track later records. Workers that never
+        send this request keep one event per operation.
+
+        Args:
+            instance_id: The GPU instance ID (such as PID).
+            reuse_events: Whether the worker offers reuse.
+
+        Returns:
+            Whether events are reused for this instance from now on.
+        """
+        entry = self.get_and_touch_context_entry(instance_id)
+        if entry is None or not reuse_events:
+            return False
+        if entry.reuses_events:
+            # A recovering worker that re-registered the same instance: its
+            # earlier transfers may still be in flight, so keep their imports.
+            return True
+        device = entry.cache_context.device
+        event_backend = get_event_ipc_backend(device)
+        if not supports_event_reuse(event_backend):
+            return False
+        event_backend = CachedImportEventBackend(event_backend, _PRODUCER_IMPORT_CACHE)
+        if self._host_event_waiter is not None:
+            event_backend = self._host_event_waiter.wrap(event_backend)
+        # SERIALIZED like REGISTER, and the worker sends no transfer before
+        # the answer, so no transfer of this instance sees the swap.
+        entry.reuses_events = True
+        entry.event_backend = event_backend
+        entry.completion_events = EventRecordPool(
+            event_backend, device, _COMPLETION_EVENT_SLOTS
+        )
+        logger.info("Reusing IPC events for GPU ID %d", instance_id)
+        return True
 
     @request_handler()
     def unregister_kv_cache(self, instance_id: int) -> None:

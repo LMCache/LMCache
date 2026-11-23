@@ -289,6 +289,18 @@ def _max_event_records(backend: object) -> int | None:
     return 1
 
 
+def supports_event_reuse(backend: object) -> bool:
+    """Whether ``backend``'s exported handles track later records of an event.
+
+    Only then may a process record its exported events again
+    (:class:`EventRecordPool`) and keep the events it imported
+    (:class:`CachedImportEventBackend`). Two processes agree on both when a
+    worker registers, since a peer that imports every handle anew and
+    destroys the import afterwards must not get recorded-again events.
+    """
+    return _max_event_records(backend) != 1
+
+
 @dataclass(eq=False)
 class _PooledEvent:
     """One event of an :class:`EventRecordPool` and its export state."""
@@ -305,7 +317,8 @@ class EventRecordPool:
     every operation costs device-runtime calls in both processes, and
     destroying an imported event can block the destroying thread. Where the
     backend's exported handles track later records (``max_event_records``
-    other than ``1``), :meth:`acquire` hands out pooled events round-robin per
+    other than ``1``) and the importing peer keeps its imports (``reuse``),
+    :meth:`acquire` hands out pooled events round-robin per
     stream and :meth:`export` exports each one once.
 
     Recording an event again only moves it later on the same stream, so a
@@ -322,15 +335,24 @@ class EventRecordPool:
         device: Device that owns the events.
         slots: Pooled events per stream. An event is handed out again after
             ``slots`` further acquisitions for its stream.
+        reuse: Whether the importing peer agreed to events recorded again
+            (see :func:`supports_event_reuse`). If False, every
+            :meth:`acquire` creates a new event.
     """
 
-    def __init__(self, backend: EventIPCBackend, device: object, slots: int) -> None:
+    def __init__(
+        self,
+        backend: EventIPCBackend,
+        device: object,
+        slots: int,
+        reuse: bool = True,
+    ) -> None:
         if slots < 1:
             raise ValueError(f"slots must be positive, got {slots}")
         self._backend = backend
         self._device = device
         self._slots = slots
-        self._max_records = _max_event_records(backend)
+        self._max_records = _max_event_records(backend) if reuse else 1
         # Per stream: the pooled events and the slot handed out next.
         self._pools: dict[object, tuple[list[_PooledEvent | None], list[int]]] = {}
         # Pooled events by id(), to find an exported event's cached handle.

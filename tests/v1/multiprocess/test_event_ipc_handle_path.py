@@ -373,10 +373,30 @@ class _ReusingEventBackend(_FakeEventBackend):
         return b"handle-%d" % cast(tuple[str, int], event)[1]
 
 
-def test_worker_reuses_producer_events_and_completion_imports(
+def _negotiation_reply(server_agrees: bool | None) -> MessagingFuture[object]:
+    """Server answer to NEGOTIATE_EVENT_REUSE; ``None`` is a server without it."""
+    if server_agrees is not None:
+        return _resolved_future(server_agrees)
+    future: MessagingFuture[object] = MessagingFuture()
+    future.set_exception(RuntimeError("Operation 'negotiate_event_reuse' unknown"))
+    return future
+
+
+@pytest.mark.parametrize(
+    ("server_agrees", "producer_reused"),
+    [(True, True), (False, False), (None, False)],
+    ids=["new-server", "server-declines", "old-server"],
+)
+def test_worker_reuses_producer_events_only_if_server_agrees(
     monkeypatch: pytest.MonkeyPatch,
+    server_agrees: bool | None,
+    producer_reused: bool,
 ) -> None:
-    """A reused producer event is exported once; a completion handle imported once."""
+    """Producer events are recorded again only after the server agreed.
+
+    Completion imports are kept whenever the worker offered reuse, so a
+    server that agreed but whose answer was lost is still safe.
+    """
     # First Party
     from lmcache.v1.client import worker_transfer
 
@@ -389,40 +409,72 @@ def test_worker_reuses_producer_events_and_completion_imports(
         lambda wrappers, fd_channel_path, timeout: nullcontext(),
     )
     monkeypatch.setattr(worker_transfer.torch_dev, "current_stream", lambda: "stream")
+    monkeypatch.setattr(worker_transfer, "_PRODUCER_EVENT_SLOTS", 1)
     client = MagicMock()
-    client.register_kv_cache.return_value = _resolved_future(True)
+    client.register_kv_cache.return_value = _resolved_future(None)
+    client.negotiate_event_reuse.return_value = _negotiation_reply(server_agrees)
     client.store.side_effect = lambda *args: _resolved_future((b"completion", True))
     client.retrieve.side_effect = lambda *args: _resolved_future((b"completion", True))
 
     context = worker_transfer.LMCacheDrivenTransferContext(1, client)
     kv_caches = {"layer_0": torch.empty(1)}
     context.register(kv_caches, "model", 1, 1, 1.0)
-    event = context.create_recorded_event()
-    futures = [
-        context.submit_store("request", "key", kv_caches, [[0]], event, 1),
-        context.submit_retrieve("request", "key", kv_caches, [[0]], event, 1),
-    ]
+    futures = []
+    for _ in range(2):
+        event = context.create_recorded_event()
+        futures.append(
+            context.submit_store("request", "key", kv_caches, [[0]], event, 1)
+        )
 
+    client.negotiate_event_reuse.assert_called_once_with(1, True)
     assert all(future.query() for future in futures)
-    assert [call[0] for call in backend.calls] == [
-        "check",
-        "create",
-        "record",
-        "export",
-        "import",
-        "query",
-        "query",
-    ]
-    assert client.store.call_args.args[3] == client.retrieve.call_args.args[3]
+    ops = [call[0] for call in backend.calls]
+    assert ops.count("create") == (1 if producer_reused else 2)
+    assert ops.count("export") == (1 if producer_reused else 2)
+    # The same completion handle is imported once either way.
+    assert ops.count("import") == 1
+    producer_handles = [c.args[3] for c in client.store.call_args_list]
+    assert (producer_handles[0] == producer_handles[1]) is producer_reused
 
 
-def test_server_imports_producer_handles_once_and_reuses_completion_events(
+def test_worker_without_reusable_events_does_not_negotiate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Repeated producer handles import once; completion events are recorded again.
+    """A device whose handles do not track re-records keeps today's path."""
+    # First Party
+    from lmcache.v1.client import worker_transfer
 
-    A worker that sends a new handle per operation is still served: each new
-    handle is imported.
+    backend = _FakeEventBackend()
+    monkeypatch.setattr(worker_transfer, "get_event_ipc_backend", lambda d: backend)
+    monkeypatch.setattr(worker_transfer, "wrap_kv_caches", lambda kv: list(kv.values()))
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
+    )
+    client = MagicMock()
+    client.register_kv_cache.return_value = _resolved_future(None)
+
+    context = worker_transfer.LMCacheDrivenTransferContext(1, client)
+    context.register({"layer_0": torch.empty(1)}, "model", 1, 1, 1.0)
+
+    client.negotiate_event_reuse.assert_not_called()
+    assert context._event_backend is backend
+
+
+@pytest.mark.parametrize(
+    "worker_offers",
+    [True, False, None],
+    ids=["new-worker", "worker-declines", "old-worker"],
+)
+def test_server_reuses_events_only_for_workers_that_offered(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_offers: bool | None,
+) -> None:
+    """Producer imports are kept and completion events recorded again only
+    for a worker that offered reuse; any other worker gets one event per
+    operation and its handles imported anew. ``None`` is a worker that
+    predates the negotiation and never sends it.
     """
     # First Party
     from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
@@ -439,7 +491,16 @@ def test_server_imports_producer_handles_once_and_reuses_completion_events(
         "_create_cache_context",
         lambda *args, **kwargs: server.cache_context,
     )
-    module.register_kv_cache(1, [], "model", 1, None, None, [])
+    module.register_kv_cache(1, [], "model", 1, None, None, [], None)
+    reused = bool(worker_offers)
+    if worker_offers is not None:
+        assert module.negotiate_event_reuse(1, worker_offers) is reused
+        if reused:
+            # A recovering worker negotiates again for the same instance.
+            entry = module.get_and_touch_context_entry(1)
+            backend_before = entry.event_backend
+            assert module.negotiate_event_reuse(1, True) is True
+            assert entry.event_backend is backend_before
     key = _transfer_key()
 
     completions = [module.store(key, 1, [[]], b"reused")[0] for _ in range(3)]
@@ -448,12 +509,43 @@ def test_server_imports_producer_handles_once_and_reuses_completion_events(
     ]
 
     imported = [call[1] for call in backend.calls if call[0] == "import"]
-    assert imported == [b"reused", b"new-1", b"new-2"]
-    assert server.held[:3] == [server.held[0]] * 3
-    assert completions == [b"handle-0", b"handle-1"] * 2 + [b"handle-0"]
-    assert sum(call[0] == "create" for call in backend.calls) == 2
-    assert sum(call[0] == "export" for call in backend.calls) == 2
+    creates = sum(call[0] == "create" for call in backend.calls)
+    exports = sum(call[0] == "export" for call in backend.calls)
     assert sum(call[0] == "record" for call in backend.calls) == 5
+    if reused:
+        assert imported == [b"reused", b"new-1", b"new-2"]
+        assert server.held[:3] == [server.held[0]] * 3
+        assert completions == [b"handle-0", b"handle-1"] * 2 + [b"handle-0"]
+        assert (creates, exports) == (2, 2)
+    else:
+        assert imported == [b"reused"] * 3 + [b"new-1", b"new-2"]
+        assert completions == [b"handle-%d" % i for i in range(5)]
+        assert (creates, exports) == (5, 5)
+
+
+def test_server_declines_reuse_for_unknown_instance_or_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No registration, or a device whose handles snapshot one record: no reuse."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
+
+    backend = _FakeEventBackend()
+    monkeypatch.setattr(
+        lmcache_driven_transfer, "get_event_ipc_backend", lambda device: backend
+    )
+    server = _server_module(monkeypatch)
+    module = server.module
+    monkeypatch.setattr(
+        module,
+        "_create_cache_context",
+        lambda *args, **kwargs: server.cache_context,
+    )
+    assert module.negotiate_event_reuse(1, True) is False
+    module.register_kv_cache(1, [], "model", 1, None, None, [], None)
+    entry = module.get_and_touch_context_entry(1)
+    assert module.negotiate_event_reuse(1, True) is False
+    assert module.get_and_touch_context_entry(1).event_backend is entry.event_backend
 
 
 def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:

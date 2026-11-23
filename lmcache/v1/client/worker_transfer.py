@@ -50,6 +50,7 @@ from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     EventRecordPool,
     get_event_ipc_backend,
+    supports_event_reuse,
 )
 from lmcache.v1.platform.kv_wrap import kv_wrapper_fds_delivered, wrap_kv_caches
 from lmcache.v1.platform.transfer_mode import MPTransferMode
@@ -633,16 +634,42 @@ class LMCacheDrivenTransferContext(TransferContext):
                 )
             )
             future.result(timeout=mq_timeout)
+        # Completion imports are kept whenever this side offers reuse, so a
+        # server that agreed is safe even if its answer is lost; producer
+        # events are recorded again only once the server agreed.
+        offer_reuse = supports_event_reuse(event_backend)
+        server_reuses = offer_reuse and self._negotiate_event_reuse(mq_timeout)
         if self._is_closed():
             return
         self._device = device
-        self._event_backend = CachedImportEventBackend(
-            event_backend, _COMPLETION_IMPORT_CACHE
+        self._event_backend = (
+            CachedImportEventBackend(event_backend, _COMPLETION_IMPORT_CACHE)
+            if offer_reuse
+            else event_backend
         )
         self._producer_events = EventRecordPool(
-            event_backend, device, _PRODUCER_EVENT_SLOTS
+            event_backend, device, _PRODUCER_EVENT_SLOTS, reuse=server_reuses
         )
         self._mq_timeout = mq_timeout
+
+    def _negotiate_event_reuse(self, mq_timeout: float) -> bool:
+        """Offer IPC event reuse to the server; return whether it agreed.
+
+        A server that predates the negotiation rejects the request; this
+        worker then creates one producer event per operation.
+        """
+        try:
+            agreed = self._req_client.negotiate_event_reuse(
+                self._instance_id, True
+            ).result(timeout=mq_timeout)
+        except Exception as e:
+            logger.info(
+                "LMCache server did not agree to IPC event reuse (%s); "
+                "using one event per operation",
+                e,
+            )
+            return False
+        return bool(agreed)
 
     def create_recorded_event(self) -> IPCEvent:
         """Record an exportable event for handle-based transfer.
