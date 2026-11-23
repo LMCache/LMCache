@@ -160,6 +160,14 @@ explicit ``true``/``false`` always wins.
    event import).  Set ``spec.isolatedIPC: false`` on existing CRs **before**
    upgrading to keep the old wiring.
 
+.. warning::
+   **Upgrade note.** The operator now starts engines with ``--transport grpc``
+   and writes a ``grpc://`` host into the connection ConfigMap.  vLLM pods
+   pick up that host when they start, so pods created before the upgrade keep
+   the old ``tcp://`` host and can no longer reach the restarted engine.
+   Restart the vLLM pods after upgrading the operator.  See
+   :ref:`mp-migrating-from-zmq`.
+
 Connecting vLLM
 ---------------
 

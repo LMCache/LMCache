@@ -80,9 +80,7 @@ def _build_autostart_config_from_url(
         )
 
     try:
-        parsed = urlparse(
-            server_url if "://" in server_url else f"grpc://{server_url}"
-        )
+        parsed = urlparse(server_url if "://" in server_url else f"grpc://{server_url}")
         if parsed.netloc.count(":") > 1:
             raise ValueError(
                 "IPv6 is not supported by MP auto-start; use localhost or 127.0.0.1"

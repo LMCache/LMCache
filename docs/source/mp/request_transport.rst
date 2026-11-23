@@ -182,7 +182,9 @@ Migrate in this order:
 
    The same applies to every other path that starts a server: the vLLM
    autostart derives the transport from the connector URL, and the operator and
-   the test harnesses name theirs explicitly.
+   the test harnesses name theirs explicitly. With the operator, restart the
+   vLLM pods after upgrading it, since they keep the connector config they
+   started with.
 
 2. **Point clients at that transport.** Set the scheme in the connector URL, or
    rely on the scheme-less default, which is now gRPC:
