@@ -1393,17 +1393,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             released[pin_key] = 1
         metadata = self._connector_metadata
         self._unsubmitted_store_pins = {
-            pin_key
+            hint
             for meta in (
                 metadata.requests
                 if isinstance(metadata, LMCacheMPConnectorMetadata)
                 else ()
             )
             if meta.direction == "STORE"
-            and (pin_key := (meta.request_configs or {}).get(STORE_PIN_HINT))
-            is not None
-            and pin_key not in released
-            and pin_key not in self._pinned_store_futures
+            and (hint := (meta.request_configs or {}).get(STORE_PIN_HINT)) is not None
+            and hint not in released
+            and hint not in self._pinned_store_futures
         }
         return released
 

@@ -28,7 +28,9 @@ from vllm.v1.request import Request, RequestStatus  # noqa: E402
 
 # First Party
 from lmcache.integration.vllm import lmcache_mp_connector as connector_mod  # noqa: E402
-from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod  # noqa: E402
+from lmcache.integration.vllm import (  # noqa: E402
+    vllm_multi_process_adapter as adapter_mod,
+)
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     STORE_PIN_HINT,
     LMCacheMPConnector,
@@ -241,7 +243,8 @@ def test_worker_reports_a_pinned_store_once_its_future_ends() -> None:
     connector.wait_for_save()
     # The worker never blocks on the store.
     future.wait.assert_not_called()
-    connector.worker_adapter.transfer_ctx.flush_inflight_stores.assert_not_called()
+    transfer_ctx: Any = connector.worker_adapter.transfer_ctx
+    transfer_ctx.flush_inflight_stores.assert_not_called()
     assert _reported(connector) == {}
     assert _reported(connector) == {}
 
@@ -310,7 +313,8 @@ def test_worker_reports_a_pinned_store_it_did_not_submit() -> None:
 def test_worker_reports_pinned_stores_of_a_lost_server() -> None:
     connector, future = _worker()
     connector.wait_for_save()
-    connector.worker_adapter.is_healthy = False
+    adapter: Any = connector.worker_adapter
+    adapter.is_healthy = False
 
     assert _reported(connector) == {"req-0#0": 1}
     future.query.assert_not_called()
@@ -528,7 +532,8 @@ def test_store_blocks_stay_pinned_until_the_worker_reports_the_store(
     assert scheduler.has_pending_push_work()
     scheduler.update_connector_output(_run_worker_step(worker, metadata))
     mock_io.transfer.submit_store.assert_called_once()
-    worker.worker_adapter.transfer_ctx.flush_inflight_stores.assert_not_called()
+    transfer_ctx: Any = worker.worker_adapter.transfer_ctx
+    transfer_ctx.flush_inflight_stores.assert_not_called()
 
     # Step 2 (running request) stores chunk 1 from block 2.
     metadata = scheduler.build_connector_meta(
