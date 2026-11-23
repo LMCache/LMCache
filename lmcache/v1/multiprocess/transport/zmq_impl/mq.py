@@ -50,24 +50,30 @@ def unwrap_request_payloads(
     return decoded_payloads
 
 
-def _error_response_frames(prefix_frames: list[bytes], error: Exception) -> list[bytes]:
+def _error_response_frames(
+    identity: bytes, request_uid: bytes, operation: RpcOperation, error: Exception
+) -> list[bytes]:
     """Build the shared reply for blocking failures and explicit rejections.
 
     Args:
-        prefix_frames: Client identity, request UID and encoded operation.
+        identity: ROUTER identity of the requesting client.
+        request_uid: Encoded UID that correlates the reply with its request.
+        operation: Original RPC operation to report in the error payload.
         error: Handler or payload validation failure.
 
     Returns:
         The routing prefix and an error envelope using the existing ZMQ codes.
     """
-    return prefix_frames[:2] + [
+    return [
+        identity,
+        request_uid,
         encode_operation(ZMQ_ERROR_OPERATION),
         encode_error_response(
             ZmqErrorResponse(
                 code="invalid_argument"
                 if isinstance(error, ValueError)
                 else "handler_error",
-                operation=decode_operation(prefix_frames[2]),
+                operation=operation,
                 message=str(error),
             )
         ),
@@ -287,10 +293,10 @@ class MessageQueueServer(RequestServer):
         Args:
             handler_entry (BlockingRequestHandler[Any]): The handler entry.
             payloads (list[bytes]): The payloads of the request.
-            prefix_frames (list[bytes]): The prefix frames to send back.
-                prefix_frames[0] is the zmq identity used as affinity key.
+            prefix_frames (list[bytes]): Client identity, request UID and operation.
         """
-        affinity_key = hash(prefix_frames[0])
+        identity, request_uid, b_operation = prefix_frames
+        affinity_key = hash(identity)
         future = handler_entry(payloads, affinity_key=affinity_key)
 
         def _notify_response(fut: Future):
@@ -308,9 +314,11 @@ class MessageQueueServer(RequestServer):
                 self._output_efd.notify()
 
             except Exception as exc:
-                operation = decode_operation(prefix_frames[2])
+                operation = decode_operation(b_operation)
                 logger.exception("Error in blocking handler %s", operation)
-                self.output_queue.put(_error_response_frames(prefix_frames, exc))
+                self.output_queue.put(
+                    _error_response_frames(identity, request_uid, operation, exc)
+                )
                 self._output_efd.notify()
 
         future.add_done_callback(_notify_response)
@@ -374,7 +382,7 @@ class MessageQueueServer(RequestServer):
             except InvalidRequestError as exc:
                 logger.exception("Rejected operation %s", operation)
                 self.socket.send_multipart(
-                    _error_response_frames([identity, b_request_uid, b_operation], exc)
+                    _error_response_frames(identity, b_request_uid, operation, exc)
                 )
             except Exception:
                 logger.exception("Error handling operation %s", operation)
