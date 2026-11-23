@@ -19,7 +19,7 @@ from typing import Any
 
 # First Party
 from lmcache.v1.common.logging import init_logger
-from lmcache.v1.platform.base.event_ipc import DefaultEventIPCBackend
+from lmcache.v1.platform.devices.rocm.event_reuse import ReusingEventIPCBackend
 
 logger = init_logger(__name__)
 
@@ -60,12 +60,12 @@ def _hip_ok(hip: Any, result: tuple) -> bool:
     return False
 
 
-class RocmEventIPCBackend(DefaultEventIPCBackend):
-    """Interprocess events on ROCm.
+class RocmEventIPCBackend(ReusingEventIPCBackend):
+    """Interprocess events on ROCm: reused, and opened without the GIL.
 
     Args:
-        event_module: See :class:`DefaultEventIPCBackend`.
-        device_type: See :class:`DefaultEventIPCBackend`.
+        event_module: See :class:`ReusingEventIPCBackend`.
+        device_type: See :class:`ReusingEventIPCBackend`.
         hip_module: The ``rocm.bindings.hip`` module; imported on first use
             when omitted, injectable for testing.
     """

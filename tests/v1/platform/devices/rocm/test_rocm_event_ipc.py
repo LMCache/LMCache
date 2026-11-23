@@ -217,3 +217,16 @@ def test_rocm_device_spec_keeps_the_cuda_backend_when_isolated(
     set_isolated_ipc(True)
     backend = RocmDeviceSpec().event_ipc_backend
     assert not isinstance(backend, DefaultEventIPCBackend)
+
+
+def test_peer_view_opens_a_polled_handle_once_through_hip(
+    backend: RocmEventIPCBackend, hip: _FakeHip, torch_events: _TorchEventModule
+) -> None:
+    """With event reuse the waiter polls one cached import per handle."""
+    peer = backend.for_peer()
+    event = peer.import_event_for_query(_handle(b"s"), 0)
+    assert isinstance(event, HipIpcEvent)
+    assert peer.import_event_for_query(_handle(b"s"), 0) is event
+    assert hip.opened == [_handle(b"s")]
+    assert torch_events.imports == []
+    assert backend.for_peer().import_event_for_query(_handle(b"s"), 0) is not event
