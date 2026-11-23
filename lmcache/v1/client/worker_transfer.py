@@ -1305,7 +1305,9 @@ class EngineDrivenTransferContext(TransferContext):
     def _null_chunk_indices(self, block_ids: list[list[int]]) -> list[list[int]]:
         """Per group, the chunks that must not be stored (null window blocks).
 
-        Mirrors ``all_null_chunk_masks`` on the lmcache-driven path.
+        Mirrors ``all_null_chunk_masks`` on the lmcache-driven path: a group
+        storing only its trailing window skips a chunk when any window block
+        is null, a group storing the whole chunk only when all blocks are.
         """
         null_id = self._null_block_id
         skipped: list[list[int]] = []

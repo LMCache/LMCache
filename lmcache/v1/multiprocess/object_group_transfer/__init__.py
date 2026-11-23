@@ -32,7 +32,6 @@ __all__ = [
     "batched_iteration_with_skip",
     "direct_transfer_supported",
     "downsample_and_stage_block_ids",
-    "window_blocks_per_chunk",
     "get_unfull_chunk_layout_desc",
     "get_unfull_chunk_staging_buffer",
     "has_unfull_chunk_lead_block",
@@ -41,4 +40,5 @@ __all__ = [
     "transfer_kv_per_object_group",
     "transfer_unfull_chunk",
     "trim_and_stage_unfull_chunk_block_ids",
+    "window_blocks_per_chunk",
 ]

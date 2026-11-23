@@ -253,7 +253,10 @@ the spec and the deployment-wide `dcp_size`. DCP splits a replicated group's
 tokens across each tensor-parallel group's ranks: rank `w` holds token shard `w % dcp_size`, so
 identical bytes sit on strided ranks, not consecutive ones. The connector
 sends that too, as `EngineGroupInfo.dcp_shards = dcp_size` on a replicated
-group (1 otherwise). For TP=8 on one server:
+group (1 otherwise). A replicated group that vLLM does not shard under DCP
+(`dcp_sharded=False`, e.g. a draft model run without DCP) holds the same
+whole blocks on every rank, so it keeps `dcp_shards = 1`: one object per
+tensor-parallel group, as without DCP. For TP=8 on one server:
 
 | DCP | `max_tp_shards` on the MLA spec | `tp_replicas` sent | `dcp_shards` sent | MLA objects per chunk | readers per object |
 |---|---|---|---|---|---|

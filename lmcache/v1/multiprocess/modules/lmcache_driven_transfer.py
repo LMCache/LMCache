@@ -114,10 +114,17 @@ def all_null_chunk_masks(
 ) -> list[list[bool]]:
     """Mark, per object group, the chunks that must not be stored.
 
-    A chunk is skipped for an object group when, for a kernel group that
-    transfers only its trailing ``blocks_per_window`` blocks, any of them is
-    the null marker (e.g. a recurrent-state chunk whose chunk-end block was
-    skipped by a step); otherwise when all of its blocks are null.
+    A chunk is skipped for an object group when one of its kernel groups has
+    no valid data for it:
+
+    - A kernel group that transfers only its trailing ``blocks_per_window``
+      blocks: any of them is the null marker (e.g. a recurrent-state chunk
+      whose chunk-end block was skipped by a step). Every transferred block
+      is restored on a hit, so one null block is a null page in the object.
+    - A kernel group that transfers the whole chunk: all of its blocks are
+      null. A partly null chunk is kept: a sliding-window group that stores
+      whole chunks (window of at least one chunk, or ``full_sw_kv``) has null
+      blocks where the window slid past, and a hit still needs the rest.
 
     Args:
         block_ids: Raw per-kernel-group engine block ids (before any downsample),
@@ -146,7 +153,8 @@ def all_null_chunk_masks(
                 window = bpc if blocks_per_window is None else blocks_per_window[kg]
                 window = min(max(window, 1), bpc)
                 blocks = block_ids[kg][(i + 1) * bpc - window : (i + 1) * bpc]
-                # Windowed: one null transferred block poisons the chunk.
+                # See the docstring: any-null for a trailing window,
+                # all-null for a whole-chunk transfer.
                 check = any if window < bpc else all
                 if check(block == null_block_id for block in blocks):
                     is_null = True
@@ -181,7 +189,8 @@ def _fold_shard_replication_desc(
     )
     if not any(r > 1 for r in replicas):
         return ShardReplicationDesc()
-    # DCP is deployment-wide: every replicated kernel group carries it.
+    # One DCP-sharded kernel group makes the object differ per token shard,
+    # so the object takes the largest shard count among its kernel groups.
     return ShardReplicationDesc(
         group_tp_replicas=replicas,
         group_dcp_shards=tuple(

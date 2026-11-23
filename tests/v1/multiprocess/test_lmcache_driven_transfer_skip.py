@@ -100,6 +100,55 @@ def test_whole_chunk_transfer_skips_only_all_null_chunks():
     assert masks == [[False, True]]
 
 
+def test_multi_block_window_skipped_when_any_window_block_null():
+    # A 2-block window in a 4-block chunk (e.g. a draft model's sliding window
+    # covering 2 of 8 blocks). Chunk 0 = [5, 6, 0, 9]: a window block is null,
+    # so the object would hold a null page -> skipped, even though the other
+    # window block and the blocks before the window are real. Chunk 1 =
+    # [0, 0, 7, 8]: the window is real -> stored; the null blocks before it
+    # are not transferred.
+    masks = all_null_chunk_masks(
+        block_ids=[[5, 6, 0, 9, 0, 0, 7, 8]],
+        object_groups=[_og([0])],
+        blocks_per_chunk=[4],
+        num_chunks=2,
+        blocks_per_window=[2],
+    )
+    assert masks == [[True, False]]
+
+
+def test_whole_chunk_sliding_window_keeps_partly_null_chunk():
+    # A sliding-window group that transfers the whole chunk (window >= chunk,
+    # or full_sw_kv): the blocks that slid out of the window are null. A
+    # window of 1.5 chunks ending at the end of chunk 1 covers the second half
+    # of chunk 0, so chunk 0 = [0, 3] is partly null and a hit at the end of
+    # chunk 1 still needs it. Only an all-null chunk is skipped.
+    masks = all_null_chunk_masks(
+        block_ids=[[0, 0, 0, 3, 4, 5]],
+        object_groups=[_og([0])],
+        blocks_per_chunk=[2],
+        num_chunks=3,
+        blocks_per_window=[2],
+    )
+    assert masks == [[True, False, False]]
+
+
+def test_bundled_attention_and_state_groups_skip_chunks_without_state():
+    # Without separate object groups one object holds a full-attention kernel
+    # group (2 blocks per chunk, all real) and an align-mode state kernel
+    # group (one state block per chunk, real only where a step ended). A
+    # chunk without a state block is skipped as a whole: the object would
+    # otherwise carry a null state page for that chunk end.
+    masks = all_null_chunk_masks(
+        block_ids=[[1, 2, 3, 4, 5, 6], [0, 0, 9]],
+        object_groups=[_og([0, 1])],
+        blocks_per_chunk=[2, 1],
+        num_chunks=3,
+        blocks_per_window=[2, 1],
+    )
+    assert masks == [[True, True, False]]
+
+
 def test_two_object_groups_independent():
     # Group 0 = full attention (kernel group 0, all real); group 1 = mamba
     # (kernel group 1, null prefix). Masks are per object group.
@@ -279,6 +328,47 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
         [-1, -1, 0, 1],
         [-1, -1, 2, 3],
     ]
+
+
+def test_store_skips_chunk_with_null_block_in_multi_block_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The store path passes each kernel group's window to the null check: a
+    chunk with a null block inside a 2-of-4-block window is not reserved,
+    while null blocks before the window do not matter."""
+    module, context, _reads, _transfers = _make_checkpoint_module(monkeypatch)
+    context.lmcache_tokens_per_chunk = 4
+    module.context.chunk_size = 4
+    # Kernel group 0 (full attention) transfers the whole chunk; kernel
+    # groups 1 and 2 transfer the last 2 of their 4 blocks.
+    context.kv_layer_groups_manager.get_subchunk_sw_size_tokens = lambda group: (
+        4 if group == 0 else 2
+    )
+    key: Any = SimpleNamespace(
+        request_id="req", worker_id=1, has_unfull_chunk=_no_unfull
+    )
+
+    _handle, ok, mask = module.store_with_chunk_mask(
+        key,
+        1,
+        [
+            [0, 1, 2, 3, 4, 5, 6, 7],
+            # Chunk 0: [5, 6, null, 9] -> a window block is null.
+            # Chunk 1: [null, null, 7, 8] -> the window is real.
+            [5, 6, -1, 9, -1, -1, 7, 8],
+            [5, 6, -1, 9, -1, -1, 7, 8],
+        ],
+        b"producer",
+    )
+
+    assert ok
+    assert [
+        call.args[0]
+        for call in cast(
+            MagicMock, module.context.storage_manager.reserve_write
+        ).call_args_list
+    ] == [["g0c0", "g0c1"], ["g1c1"]]
+    assert mask == [False, True]
 
 
 def test_store_skip_chunks_drops_caller_masked_chunks(
