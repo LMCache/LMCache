@@ -38,7 +38,6 @@ time without the waiting peer), delete this module, the option and the
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
-import ctypes
 import functools
 import os
 import threading
@@ -108,100 +107,14 @@ def current_run_entry() -> Any:
     return _RELEASED if entry is None else entry
 
 
-# hipIpcEventHandle_t: 64-byte struct, passed by value.
-_HIP_IPC_HANDLE_SIZE = 64
-_HIP_SUCCESS = 0
+def _import_for_query(backend: Any, handle: bytes, device: object) -> object:
+    """Import the event the waiter polls; it is never passed to a stream wait.
 
-
-class _HipIpcHandle(ctypes.Structure):
-    _fields_ = [("reserved", ctypes.c_char * _HIP_IPC_HANDLE_SIZE)]
-
-
-class _HipIpcEvent:
-    """An IPC-imported event opened and queried through ctypes.
-
-    ctypes releases the GIL around the HIP calls; torch's
-    ``Event.from_ipc_handle`` and ``query`` keep it.
+    A backend with ``import_event_for_query`` (ROCm) opens it without holding
+    the GIL.
     """
-
-    __slots__ = ("ptr", "handle", "device", "__weakref__")
-
-    def __init__(self, ptr: ctypes.c_void_p, handle: bytes, device: object) -> None:
-        self.ptr: ctypes.c_void_p | None = ptr
-        self.handle = handle
-        self.device = device
-
-    def __del__(self) -> None:
-        lib = _hip_lib()
-        if lib is not None and self.ptr:
-            _hip_ok(lib, lib.hipEventDestroy(self.ptr))
-            self.ptr = None
-
-
-_hip: Any = None
-_hip_unavailable = False
-
-
-def _hip_lib() -> Any:
-    """Return the process's libamdhip64 via ctypes, or None if unavailable."""
-    global _hip, _hip_unavailable
-    if _hip is not None or _hip_unavailable:
-        return _hip
-    try:
-        # Same library instance torch loaded.
-        path = "libamdhip64.so"
-        with open("/proc/self/maps") as maps:
-            for line in maps:
-                if "libamdhip64.so" in line:
-                    path = line.split()[-1]
-                    break
-        lib = ctypes.CDLL(path)
-        lib.hipIpcOpenEventHandle.argtypes = [
-            ctypes.POINTER(ctypes.c_void_p),
-            _HipIpcHandle,
-        ]
-        lib.hipEventQuery.argtypes = [ctypes.c_void_p]
-        lib.hipEventDestroy.argtypes = [ctypes.c_void_p]
-        lib.hipSetDevice.argtypes = [ctypes.c_int]
-        lib.hipGetLastError.argtypes = []
-        for name in (
-            "hipIpcOpenEventHandle",
-            "hipEventQuery",
-            "hipEventDestroy",
-            "hipSetDevice",
-            "hipGetLastError",
-        ):
-            getattr(lib, name).restype = ctypes.c_int
-        _hip = lib
-    except Exception:
-        logger.warning("ctypes HIP unavailable; importing IPC events with torch")
-        _hip_unavailable = True
-    return _hip
-
-
-def _hip_ok(lib: Any, rc: int) -> bool:
-    """Return whether ``rc`` is hipSuccess; clear HIP's last error otherwise."""
-    if rc != _HIP_SUCCESS:
-        # Else torch's next error check on this thread reports it.
-        lib.hipGetLastError()
-    return rc == _HIP_SUCCESS
-
-
-def _hip_import_event(handle: bytes, device: object) -> _HipIpcEvent | None:
-    """Open ``handle`` on ``device`` without the GIL; None to fall back to torch."""
-    lib = _hip_lib()
-    if lib is None or len(handle) != _HIP_IPC_HANDLE_SIZE:
-        return None
-    index = device if isinstance(device, int) else getattr(device, "index", None)
-    if index is None:
-        return None
-    if not _hip_ok(lib, lib.hipSetDevice(int(index))):
-        return None
-    ptr = ctypes.c_void_p()
-    raw = _HipIpcHandle.from_buffer_copy(handle)
-    if not _hip_ok(lib, lib.hipIpcOpenEventHandle(ctypes.byref(ptr), raw)):
-        return None
-    return _HipIpcEvent(ptr, handle, device)
+    opener = getattr(backend, "import_event_for_query", None)
+    return (backend.import_event if opener is None else opener)(handle, device)
 
 
 class _HostWaitEventBackend:
@@ -210,8 +123,6 @@ class _HostWaitEventBackend:
     Delegates to the platform backend, except inside a transfer that the
     waiter runs after its producer event completed: there ``import_event`` of
     that handle returns the polled event and ``wait_event`` on it is a no-op.
-    On HIP, events are imported and queried through ctypes so the server
-    keeps running other handlers while an import blocks; torch otherwise.
     """
 
     def __init__(self, inner: Any, waiter: "HostEventWaiter") -> None:
@@ -225,23 +136,13 @@ class _HostWaitEventBackend:
         done = getattr(_completed, "value", None)
         if done is not None and done[0] == handle:
             return done[1]
-        event = _hip_import_event(handle, device)
-        return event if event is not None else self._inner.import_event(handle, device)
-
-    def query_event(self, event: object) -> bool:
-        if isinstance(event, _HipIpcEvent):
-            lib = _hip_lib()
-            return _hip_ok(lib, lib.hipEventQuery(event.ptr))
-        return self._inner.query_event(event)
+        return self._inner.import_event(handle, device)
 
     def wait_event(self, event: object, stream: object) -> None:
         done = getattr(_completed, "value", None)
         if done is not None and done[1] is event:
             return
         self._waiter.count("device_waits")
-        if isinstance(event, _HipIpcEvent):
-            # Stream waits need the torch event.
-            event = self._inner.import_event(event.handle, event.device)
         self._inner.wait_event(event, stream)
 
 
@@ -357,7 +258,7 @@ class HostEventWaiter:
             )
             return fail()
         backend = entry.event_backend
-        event = backend.import_event(handle, entry.cache_context.device)
+        event = _import_for_query(backend, handle, entry.cache_context.device)
         # Weak: unregistering releases the entry's IPC-imported KV memory
         # only once it holds the last reference (see _release_entries).
         entry_ref = weakref.ref(entry)
