@@ -38,7 +38,7 @@ from lmcache.v1.distributed.api import (
     PrefetchResult,
     PrefetchTaskSpec,
 )
-from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
+from lmcache.v1.distributed.bitmap_ops.fold import all_grouped, fold_unfold_grouped
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -484,6 +484,9 @@ class InFlightPrefetchRequest:
     # first load result is admitted.
     l2_loaded_cells: Bitmap2D = field(default_factory=lambda: Bitmap2D([]))
 
+    # Original grid positions of the compact, rectangular L2 lookup.
+    l2_lookup_cells: Bitmap2D = field(init=False)
+
     # Every cell an allowed L1 held or an L2 lookup pinned, recorded before
     # the plan trims anything; reported as found_cells at finish.
     found_cells: Bitmap2D = field(init=False)
@@ -504,6 +507,7 @@ class InFlightPrefetchRequest:
         self.found_cells = Bitmap2D.zeros(
             len(self.key_groups), len(self.key_groups[0].keys)
         )
+        self.l2_lookup_cells = self.found_cells.ones_like()
 
     def get_flattened_keys(self) -> list[ObjectKey]:
         """Return a flattened list of all keys in the request"""
@@ -541,7 +545,8 @@ class PrefetchController(StorageControllerInterface):
        the calling thread and is complete when the call returns.
     2. Read-locks the keys resident in the allowed L1 managers and submits
        lookup-and-lock tasks to every live, allowed L2 adapter, unless L1
-       alone serves the request; that request finishes here.
+       alone serves the request; that request finishes here. Columns held
+       in every row of L1 are omitted from L2 lookups.
     3. Plans which cells to serve from L1 and which to load from L2, and
        releases every lock outside the plan.
     4. Reserves L1 staging buffers for the L2 plan; on reservation failures
@@ -1224,12 +1229,10 @@ class PrefetchController(StorageControllerInterface):
             self._retire_request(request)
             return
 
-        # TODO(ApostaC): Here, we submit the full keys to L2 adapters.
-        # In the future, we can do `All keys - L1 hit keys` to reduce the
-        # L2 lookup overhead.
-        # However, for P2P case, this will require the storage manager to
-        # support unequal length of key groups. We left this as future refactor
-        # TODOs.
+        # P2P peers require equal-width rows. Drop a column only when every
+        # row is already read-locked in L1, keeping the remaining grid rectangular.
+        request.l2_lookup_cells -= Bitmap2D(all_grouped(request.found_cells.to_list()))
+        flattened_keys = _gather_keys(request.key_groups, request.l2_lookup_cells)
         for adapter_idx, adapter in active_adapters.items():
             task_id = adapter.submit_lookup_and_lock_task(
                 flattened_keys, spec.group_layout_descs
@@ -1349,8 +1352,6 @@ class PrefetchController(StorageControllerInterface):
             signaled_adapters: Set of adapter indices that have signaled
                 completion of lookup tasks.
         """
-        num_rows = len(request.key_groups)
-        num_cols = len(request.key_groups[0].keys)
         for adapter_idx in list(request.inflight_lookup_tasks):
             if adapter_idx not in signaled_adapters:
                 continue
@@ -1362,12 +1363,7 @@ class PrefetchController(StorageControllerInterface):
             if result is None:
                 continue
 
-            # Update the l2 locked key states
-            # NOTE: since we do full global bitmap for L2 load, we use
-            # _scatter_bitmaps_full_global instead of _scatter_bitmaps here.
-            # Will be changed in the future after we implemented partial L2
-            # lookup.
-            l2_found_bitmap = _scatter_bitmaps_full_global(result, num_rows, num_cols)
+            l2_found_bitmap = _scatter_bitmaps(request.l2_lookup_cells, result)
             request.key_states.l2_locked_keys[adapter_idx] = l2_found_bitmap
             request.found_cells += l2_found_bitmap
 

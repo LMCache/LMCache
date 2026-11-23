@@ -137,9 +137,16 @@ afterwards.
    alone serve the request (under `"prefix"` they fold to a hit over every
    chunk, under `"full"` and `"whole_chunk"` L1 holds every cell), plan from
    L1 alone and finish (steps 3 and 7 with an empty L2 map).
-   Otherwise, submit one `lookup_and_lock` task per
-   non-draining adapter, over the full key list. As each result arrives
-   (`_poll_lookup_results`) it becomes that adapter's row in `l2_locked_keys`.
+   Otherwise, omit columns already read-locked in every row across the allowed
+   L1 managers, then submit the remaining rectangular grid to each eligible
+   adapter. For example, L1 rows `[1, 1, 0, 1]` and `[1, 0, 1, 1]` leave
+   columns 1 and 2 in both lookup rows. Keeping equal-width rows preserves
+   the P2P peer contract even when individual rows have different misses.
+   As each result arrives (`_poll_lookup_results`), scatter it back to the
+   original columns before recording `l2_locked_keys`. L1 locks protect the
+   omitted columns until planning; subsequent planning and lock release use
+   the original grid. `L2_PREFETCH_LOOKUP_SUBMITTED.key_count` counts only
+   the submitted keys.
 3. **Plan** (`_plan_load`). Call `policy.plan_load` on the two maps. Release
    every L1 lock and every L2 lock outside the plan, then set both locked maps
    to the plan.
@@ -251,11 +258,13 @@ Gauges: `lmcache_mp.num_inflight_l2_loads`,
   bytes are charged in full to every L1 manager with an active L2 adapter,
   because which adapter (and so which L1) serves each cell is known only after
   planning. Exact for one L1; it under-admits with several.
-- **Full key list to L2.** Lookups are submitted with every key, not only the
-  L1 misses, because the adapter interface carries a flat key list.
-- **L2 recency skips L1-only requests.** Adapters that refresh LRU recency on
-  lookup (S3, Valkey, Bigtable, HF bucket, SageMaker HyperPod) do not see a
-  request L1 alone serves, so a chunk hot in L1 can age out of L2 first.
+- **Column-granular lookup filtering.** A column with any L1 miss is looked up
+  in every row, including rows where that column is already in L1. Filtering
+  individual cells would make row widths unequal, which P2P does not support.
+- **L2 recency skips L1-covered columns.** Adapters that refresh LRU recency
+  on lookup (S3, Valkey, Bigtable, HF bucket, SageMaker HyperPod) do not see
+  columns served entirely from L1, so a chunk hot in L1 can age out of L2
+  first.
 - **Write conflicts cost a redundant load.** A key that becomes resident in a
   readable L1 between the lookup and the reserve step is staged and loaded
   anyway, and admission keeps the resident copy. `l1_contended` reports a key
@@ -284,6 +293,9 @@ with a real `DramL1Manager` and `MockL2Adapter`:
   retrieve, `"default"` keeps them.
 - `TestSlidingWindowRows` — a windowed row keeps and loads only its trailing
   chunks; `"full"` and `"whole_chunk"` refuse windowed rows.
+- `TestPartialL2Lookup` — L1-covered columns are omitted from L2, rows stay
+  equal-width for asymmetric L1 hits, sparse results return to their original
+  positions, and cold lookups still submit every key.
 - `TestL1ServesWholeRequest` — a request L1 fully serves (a windowed row
   needs only its window) finishes with no L2 lookup; one where L1 misses a
   chunk, under `"prefix"` or `"full"`, still looks up L2.
