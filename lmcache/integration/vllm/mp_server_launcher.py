@@ -282,7 +282,8 @@ class MPServerAutostartConfig:
         Args:
             extra_config: vLLM ``kv_connector_extra_config`` mapping.
             server_host: Local IPv4 host (localhost or 127.0.0.1), optionally
-                prefixed with tcp://, from the resolved connector endpoint.
+                prefixed with grpc:// or tcp://, from the resolved connector
+                endpoint.
             server_port: Port from the connector's resolved server endpoint.
             transport: Server transport for the connector's endpoint, ``grpc``
                 for ``grpc://`` or ``zmq`` for ``tcp://``.

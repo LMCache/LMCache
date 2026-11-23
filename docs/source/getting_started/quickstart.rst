@@ -33,9 +33,9 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             :sync: mp
 
             Start the LMCache server. ``--host`` / ``--port`` set the request
-            address vLLM connects to; ``--transport`` selects ZMQ (the default)
-            or gRPC. The defaults are spelled out here so the two commands
-            line up:
+            address vLLM connects to; ``--transport`` selects gRPC (the default)
+            or the deprecated ZMQ. The defaults are spelled out here so the two
+            commands line up:
 
             .. code-block:: bash
 
@@ -178,7 +178,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          EOF
 
       ``mp_host`` and ``mp_port`` identify the standalone LMCache request
-      server. A bare host uses the default ZMQ transport.
+      server. A bare host uses the default gRPC transport.
 
       Engine-driven transfer can be selected under ``extra_config`` with the
       same name as the vLLM connector:

@@ -1116,10 +1116,11 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
      - Whether vLLM worker 0 should start a local ``lmcache server`` process
        before workers connect to it. Other local workers wait for the server to
        become reachable. Only ``localhost`` and ``127.0.0.1`` are supported.
-       The URL scheme picks the server transport: ``tcp://`` starts a ZMQ
-       server and ``grpc://`` starts a gRPC server.
+       The URL scheme picks the server transport: ``grpc://`` or a host
+       without a scheme starts a gRPC server, and ``tcp://`` starts a
+       deprecated ZMQ server.
        IPv6 endpoints, including ``::1``, raise ``ValueError`` before startup
-       because the MP ZMQ transport does not enable IPv6 sockets.
+       for either transport.
        Auto-start supports exactly one server endpoint; configuring
        multiple ``lmcache.mp.server_urls`` raises ``ValueError`` during
        connector initialization.
