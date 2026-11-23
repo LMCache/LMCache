@@ -1140,7 +1140,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         if event_backend is None:
             raise RuntimeError("Registered cache context has no event backend")
 
-        if not gpu_block_ids and getattr(key, "history_copy", None) is not None:
+        history_copy = getattr(key, "history_copy", None)
+        if not gpu_block_ids and history_copy is not None:
             # Same worker affinity and producer-stream ordering as ordinary retrieves.
             # The returned event belongs only to the background future.
             with (
@@ -1157,7 +1158,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     "release_imported_event",
                     (instance_id, token),
                 )
-                copy = msgspec.msgpack.decode(key.history_copy, type=HistoryCopy)
+                copy = msgspec.msgpack.decode(history_copy, type=HistoryCopy)
                 receive_recurrent_history(
                     cache_context, self._recurrent_history, key, copy, set(), True
                 )

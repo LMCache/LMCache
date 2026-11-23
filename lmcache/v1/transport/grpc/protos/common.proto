@@ -29,6 +29,7 @@ message IpcCacheServerKey {
   optional bytes encoded_request_configs = 9;
   reserved 10;
   reserved "num_kv_readers";
+  optional bytes history_copy = 11;
 }
 
 // Store / Retrieve and CacheBlend retrieve share this reply shape.

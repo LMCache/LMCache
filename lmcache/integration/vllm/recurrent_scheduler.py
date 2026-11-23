@@ -14,16 +14,18 @@ import msgspec
 # First Party
 from lmcache.integration.vllm.recurrent_allocate import allocate_recurrent_destinations
 from lmcache.integration.vllm.recurrent_destinations import RecurrentDestinations
-from lmcache.logging import init_logger
 from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.transport.recurrent_history import (
     HistoryCopy,
     HistoryRequest,
+    HistoryResponse,
 )
 
 if TYPE_CHECKING:
     # Third Party
     from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.core.kv_cache_utils import BlockHash
     from vllm.v1.request import Request
 
     # First Party
@@ -31,6 +33,11 @@ if TYPE_CHECKING:
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPSchedulerAdapter,
     )
+    from lmcache.v1.transport.futures import MessagingFuture
+    from lmcache.v1.transport.server_module import ServerModuleCallResponse
+
+    HistoryFuture = MessagingFuture[ServerModuleCallResponse]
+    CheckpointKey = tuple[str, int, BlockHash]
 
 logger = init_logger(__name__)
 
@@ -45,16 +52,16 @@ class RecurrentHistoryScheduler:
         self.block_size = pool.hash_block_size
         self.pending: dict[str, RecurrentDestinations] = {}
         self.enabled = True
-        self.planning = {}
-        self.plans = {}
-        self.abandoned = []
-        self.controls = {}
-        self.retiring = {}
-        self.background = {}
-        self.primary_done = set()
-        self.dispatch = []
-        self.owners = {}
-        self.owned_keys = {}
+        self.planning: dict[str, tuple[HistoryFuture, float, int]] = {}
+        self.plans: dict[str, HistoryResponse] = {}
+        self.abandoned: list[tuple[HistoryFuture, float, int]] = []
+        self.controls: dict[str, tuple[str, HistoryFuture | None, float]] = {}
+        self.retiring: dict[str, str] = {}
+        self.background: dict[str, tuple[Request, LMCacheMPRequestTracker, int]] = {}
+        self.primary_done: set[str] = set()
+        self.dispatch: list[tuple[str, bytes, int, str, bytes]] = []
+        self.owners: dict[CheckpointKey, str] = {}
+        self.owned_keys: dict[str, list[CheckpointKey]] = {}
 
     def _checkpoint_key(self, request, tracker, pos):
         return (
