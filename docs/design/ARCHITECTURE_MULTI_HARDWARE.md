@@ -99,7 +99,7 @@ multiprocess (MP) mode.
 | **Middle** ops call sites | `from lmcache import device_ops` | Direct reference to the resolved `DeviceOps` singleton. |
 | **Middle** IPC-capable / device-specific APIs | `hasattr(torch_dev, 'xxx')` guard | Graceful runtime degradation |
 | **Bottom** Transfer Context | `create_transfer_context(kv_caches, mode)` | Per-device routing. In `AUTO` mode, `DeviceSpec.default_mp_transfer_mode()` decides: devices whose spec reports `is_lmcache_driven_available() == True` default to LMCacheDriven (CUDA, NPU); opt-in-only stacks (CPU SHM, MUSA handles) and everything else stay EngineDriven and can opt in via explicit `mode=lmcache_driven`. |
-| **Bottom** Cache Context | `DeviceSpec.create_cache_context()` | Per-device cache context factory dispatched via `DeviceSpec` registry. |
+| **Bottom** Cache Context | `create_cache_context(kv_caches, ...)` | Per-device cache context factory: built-in backends by `backend_name`, external plugins via `DeviceSpec.create_cache_context()`. |
 
 ## DeviceOps Architecture
 
@@ -174,19 +174,24 @@ Override: LMCACHE_MP_TRANSFER_MODE env var or the mode argument to create_transf
 
 ## Cache Context Dispatch
 
-The `create_cache_context` factory in `lmcache.v1.platform.cache_context`
-delegates to the `DeviceSpec` registry:
+The `create_cache_context` factory in `lmcache.v1.multiprocess.cache_context.factory`
+resolves the spec through the `DeviceSpec` registry, then picks the context:
 
 ```
 create_cache_context(kv_caches, ...)
   → device_type = kv_caches[0].to_tensor().device.type
   → spec = get_device_spec(device_type)
-  → spec.create_cache_context(*args, **kwargs)
+  → built-in backend (cpu, cuda, rocm, musa, npu), by spec.backend_name:
+      lazy-import its class from lmcache.v1.multiprocess.cache_context
+  → any other spec (external device plugin):
+      spec.create_cache_context(*args, **kwargs)
 ```
 
-Each `DeviceSpec` subclass overrides `create_cache_context()` with a lazy
-import of its concrete `BaseCacheContext` implementation. The base-class
-default raises `NotImplementedError`.
+The built-in mapping lives in the factory so that `lmcache.v1.platform`
+imports no server code. An external `DeviceSpec` overrides
+`create_cache_context()` with a lazy import of its concrete
+`BaseCacheContext` implementation. The base-class default raises
+`NotImplementedError`.
 
 ## CPU-Only Stub Fallback
 

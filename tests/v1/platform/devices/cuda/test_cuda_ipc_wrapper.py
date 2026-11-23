@@ -303,7 +303,7 @@ def test_cache_context_close_closes_wrappers() -> None:
     server's _release_entries teardown relies on.
     """
     # First Party
-    from lmcache.v1.platform.cache_context import create_cache_context
+    from lmcache.v1.multiprocess.cache_context.factory import create_cache_context
 
     recorders = [_CloseRecordingWrapper(t) for t in _make_vllm_style_kv(2)]
     wrappers: list[DeviceIPCWrapper] = list(recorders)
@@ -318,7 +318,7 @@ def test_cache_context_init_failure_rolls_back_wrappers() -> None:
     it already imported instead of pinning the worker's pool.
     """
     # First Party
-    from lmcache.v1.platform.devices.cuda.cache_context import GPUCacheContext
+    from lmcache.v1.multiprocess.cache_context.cuda import GPUCacheContext
 
     good = [_CloseRecordingWrapper(t) for t in _make_vllm_style_kv(1)]
     bad = _CloseRecordingWrapper(

@@ -38,7 +38,7 @@ from lmcache.v1.gpu_connector.gds_context import (
     register_gds_gpu_buffer,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
 from lmcache.v1.platform.base.ipc_wrapper import KVCache
 
 logger = init_logger(__name__)

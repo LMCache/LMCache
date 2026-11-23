@@ -19,7 +19,7 @@ up during auto-detection -- CPU is exclusively reached through the
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 # First Party
 from lmcache.v1.platform.base.device_spec import DeviceSpec
@@ -27,7 +27,6 @@ from lmcache.v1.platform.transfer_mode import MPTransferMode
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.platform.base.cache_context import BaseCacheContext
     from lmcache.v1.platform.base.device_ops import DeviceOps
     from lmcache.v1.platform.base.event_ipc import EventIPCBackend
     from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
@@ -43,7 +42,7 @@ class CpuDeviceSpec(DeviceSpec):
     installed.
 
     Also used for ``get_device_spec("cpu")`` lookups (e.g. by
-    :func:`lmcache.v1.platform.cache_context.create_cache_context`).
+    :func:`lmcache.v1.multiprocess.cache_context.factory.create_cache_context`).
     """
 
     _event_backend_cache: "EventIPCBackend | None" = None
@@ -92,12 +91,6 @@ class CpuDeviceSpec(DeviceSpec):
         ``lmcache_driven`` explicitly.
         """
         return MPTransferMode.ENGINE_DRIVEN
-
-    def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
-        # First Party
-        from lmcache.v1.platform.devices.cpu.cache_context import CPUCacheContext
-
-        return CPUCacheContext(*args, **kwargs)
 
     @property
     def ops_cls(self) -> type[DeviceOps]:

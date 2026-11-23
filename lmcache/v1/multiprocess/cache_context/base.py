@@ -48,8 +48,8 @@ class BaseCacheContext(ABC):
     Concrete subclasses MUST set :attr:`device_type` to the
     ``torch.device.type`` string they handle (``"cuda"``, ``"cpu"``,
     ...). The platform-agnostic :func:`create_cache_context` factory
-    uses this attribute (via the platform registry) to pick the right
-    subclass without any ``isinstance`` / ``if-elif`` chain.
+    resolves the ``DeviceSpec`` for that device type through the
+    platform registry and picks the subclass from it.
     """
 
     #: ``torch.device.type`` string the subclass handles. Concrete

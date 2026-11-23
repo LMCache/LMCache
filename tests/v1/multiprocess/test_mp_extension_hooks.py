@@ -45,11 +45,11 @@ from lmcache.v1.client.worker_transfer import (
     LMCacheDrivenTransferContext,
 )
 from lmcache.v1.multiprocess import object_group_transfer
+from lmcache.v1.multiprocess.cache_context.base import BaseCacheContext
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
-from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from tests.v1.multiprocess.test_lmcache_driven_transfer_skip import (
     _make_checkpoint_module,
     _make_module,
@@ -349,7 +349,7 @@ def test_hook_signature_is_stable(hook, expected):
 def test_temp_buffer_hook_signature_is_stable():
     pytest.importorskip("cupy", reason="the CUDA cache context requires cupy")
     # First Party
-    from lmcache.v1.platform.devices.cuda.cache_context import GPUCacheContext
+    from lmcache.v1.multiprocess.cache_context.cuda import GPUCacheContext
 
     assert _shape(GPUCacheContext._make_temp_buffer) == (
         "self, kv_layer_groups_manager, lmcache_tokens_per_chunk, device, "
