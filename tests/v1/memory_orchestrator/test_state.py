@@ -13,6 +13,7 @@ import pytest
 # First Party
 from lmcache.v1.memory_orchestrator.api import (
     CloseResult,
+    DeleteStatus,
     Envelope,
     ReadGrantResult,
     ReadRequest,
@@ -95,6 +96,8 @@ def client_calls(state: RegionState, env: Envelope) -> list[Callable[[], object]
         partial(state.abort_write, env, [b"t"]),
         partial(state.reserve_read, env, [read("x")]),
         partial(state.finish_read, env, [b"t"]),
+        partial(state.delete_objects, env, [key("x")]),
+        partial(state.delete_published, env),
     ]
 
 
@@ -427,6 +430,40 @@ class TestTokens:
         assert state.reserve_read(env, [read("k")])[0].status is ReadStatus.BUSY_WRITING
         assert state.finish_write(env, [token]) == [TokenStatus.OK]
         assert state.finish_read(env, [lease]) == [TokenStatus.OK]
+
+
+class TestDeletes:
+    def test_deleted_objects_miss_and_keep_their_extents(self, state, env):
+        keys = [key(str(i)) for i in range(MAX_BATCH + 1)]
+        assert_refused("RESOURCE_EXHAUSTED", state.delete_objects, env, keys)
+        commit(state, env, "a", "b")
+        writing = state.reserve_write(env, [write("w")])[0]
+        expected = [DeleteStatus.DELETED, DeleteStatus.BUSY_WRITING, DeleteStatus.MISS]
+        assert state.delete_objects(env, [key("a"), key("w"), key("x")]) == expected
+        assert state.reserve_read(env, [read("a")])[0].status is ReadStatus.MISS
+        usage = state.usage()
+        assert (usage.allocated_bytes, usage.valid_bytes) == (3 * ALIGN, ALIGN)
+        assert (usage.valid, usage.writing, usage.consumed) == (1, 1, 1)
+        # The key may be written again, on a new extent.
+        assert state.reserve_write(env, [write("a")])[0].handle.offset == 3 * ALIGN
+        assert state.finish_write(env, [writing.token]) == [TokenStatus.OK]
+
+    def test_delete_published_takes_only_own_committed_objects(self, state, env):
+        other = register(state, "b")
+        commit(state, env, "mine")
+        commit(state, other, "theirs")
+        pending = state.reserve_write(env, [write("pending")])[0]
+        assert state.delete_published(env) == 1
+        found = state.reserve_read(
+            other, [read("mine"), read("theirs"), read("pending")]
+        )
+        expected = [ReadStatus.MISS, ReadStatus.READ_GRANTED, ReadStatus.BUSY_WRITING]
+        assert [grant.status for grant in found] == expected
+        assert state.finish_write(env, [pending.token]) == [TokenStatus.OK]
+        # A later incarnation of the client_id owns what earlier ones wrote.
+        later = replace(env, client_incarnation=2)
+        state.register_client(later, FINGERPRINT, CAPACITY, MODE)
+        assert state.delete_published(later) == 1
 
 
 class TestEnvelopes:

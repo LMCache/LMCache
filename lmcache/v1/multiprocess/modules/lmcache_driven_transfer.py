@@ -271,6 +271,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             payload_type=dict[ObjectKey, int],
         )
         self._device_host_func_dispatcher.register(
+            "abort_write",
+            self._abort_write,
+            payload_type=dict[ObjectKey, int],
+        )
+        self._device_host_func_dispatcher.register(
             "finish_read_prefetched",
             self._ctx.storage_manager.finish_read_prefetched,
             payload_type=list[ObjectKey],
@@ -328,6 +333,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._ctx.storage_manager.finish_write(
             list(l1_owners.keys()), l1_owners=l1_owners
         )
+
+    def _abort_write(self, l1_owners: dict[ObjectKey, int]) -> None:
+        """Discard a failed store's reserved objects once their copies drained.
+
+        Args:
+            l1_owners: The L1 manager that reserved each key.
+        """
+        self._ctx.storage_manager.abort_write(list(l1_owners.keys()), l1_owners)
 
     def register_host_func(self, kind: str, handler: Any, payload_type: Any) -> None:
         """Register *handler* for *kind* on the per-process device host-func
@@ -589,7 +602,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             model_name,
             world_size,
             layout_desc,
-            attn_desc,
+            self._ctx.chunk_size,
+            self._ctx.hash_algorithm_name,
+            attn_desc=attn_desc,
             group_layout_descs=group_layout_descs,
             group_unfull_chunk_layout_descs=group_unfull_chunk_layout_descs,
             shard_replication_desc=_fold_shard_replication_desc(
@@ -675,6 +690,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
         skip_chunks: list[bool] | None = None,
+        mask_object_groups: Sequence[int] | None = None,
     ) -> tuple[bytes, bool, list[bool]]:
         """Store the GPU KV cache blocks to CPU.
 
@@ -687,6 +703,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             event_ipc_handle: The IPC handle of the event to wait on.
             skip_chunks: Optional per-chunk mask; True chunks are not stored
                 (and report False in the returned mask).
+            mask_object_groups: Object groups the returned mask checks; None
+                checks every object group. A caller that reads only some
+                groups passes those.
 
         Returns:
             A tuple where the first element is the IPC handle of the event
@@ -694,8 +713,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             element indicates whether the store operation completed without a
             fatal error (not whether every requested chunk was stored; see
             Notes). The event handle is empty when no device work was submitted.
-            The third element marks per chunk whether every object group
-            committed it.
+            The third element marks per chunk whether every object group in
+            ``mask_object_groups`` (default: every object group) committed it.
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
@@ -707,9 +726,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             store is skipped and nothing is committed; a subsequent retrieve misses
             and the engine recomputes. The boolean result reports whether the
             store completed without such a failure.
-            Failed copies or completion preparation retain staging reservations
-            under the existing write-TTL rules; queued GPU writes may still
-            reference those buffers.
+            On failure, reservations whose owners were captured are aborted
+            on the copy stream after queued GPU writes drain. If owner capture
+            fails, uncaptured reservations retain their write-TTL lifetime.
             A key addressing an unfull chunk (``key.has_unfull_chunk``) also
             stores that chunk in the same transaction; its block IDs follow
             the full chunks' in every group, and its mask entry comes last.
@@ -858,6 +877,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
             reserved_dict: dict[ObjectKey, MemoryObj] = {}
             all_dict: dict[ObjectKey, MemoryObj] = {}
+            # Captured before any copy runs, so a failed store aborts per owner.
+            l1_owners: dict[ObjectKey, int] = {}
             total_bytes: int = 0
             store_succeeded = False
             try:
@@ -881,6 +902,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         keys_to_reserve, layout_desc
                     )
                     all_dict.update(reserved_dict)
+                    l1_owners.update(l1_owners_of(reserved_dict))
                     if reserved_dict:
                         total_bytes += next(
                             iter(reserved_dict.values())
@@ -907,14 +929,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
                 if unfull_obj_keys:
                     unfull_reserved = self._store_unfull_chunk_objects(
-                        cache_context, key, unfull_obj_keys, unfull_block_ids
+                        cache_context, key, unfull_obj_keys, unfull_block_ids, l1_owners
                     )
                     all_dict.update(unfull_reserved)
                     total_bytes += sum(
                         memory_obj.get_size() for memory_obj in unfull_reserved.values()
                     )
 
-                l1_owners = l1_owners_of(all_dict)
                 store_succeeded = True
             except Exception:
                 logger.exception("Cannot store keys due to exception")
@@ -931,6 +952,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     )
                 else:
                     total_bytes = 0
+                    if l1_owners:
+                        # Abort after the partial copies drain, not at write TTL.
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream, "abort_write", l1_owners
+                        )
                 # Report only chunks that actually stored, plus the unfull
                 # chunk's tokens when every object group stored it.
                 stored_chunks = (
@@ -975,15 +1001,22 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 ed - st,
             )
 
-        # A chunk is stored only when every object group committed its key.
+        # A chunk is stored only when every checked object group committed
+        # its key.
+        mask_gids = (
+            range(num_object_groups)
+            if mask_object_groups is None
+            else [g for g in mask_object_groups if 0 <= g < num_object_groups]
+        )
         stored_mask = [
             store_succeeded
-            and all(keys[i] in all_dict for keys in obj_keys_per_obj_group)
+            and all(obj_keys_per_obj_group[g][i] in all_dict for g in mask_gids)
             for i in range(num_chunks)
         ]
         if unfull_obj_keys:
             stored_mask.append(
-                store_succeeded and all(k in all_dict for k in unfull_obj_keys)
+                store_succeeded
+                and all(unfull_obj_keys[g] in all_dict for g in mask_gids)
             )
         return (
             event_backend.export_event(event, cache_context.device),
@@ -1390,6 +1423,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         key: IPCCacheServerKey,
         obj_keys: list[ObjectKey],
         block_ids: list[list[int]],
+        l1_owners: dict[ObjectKey, int],
     ) -> dict[ObjectKey, MemoryObj]:
         """Reserve and copy out one object per object group for an unfull chunk.
 
@@ -1404,6 +1438,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             key: The store key; it addresses the unfull chunk.
             obj_keys: The unfull chunk's object key per object group.
             block_ids: The unfull chunk's block IDs per kernel group.
+            l1_owners: Transaction owners, captured before each copy for abort
+                after the stream drains. Uncaptured reservations retain write TTL.
 
         Returns:
             The reserved objects, keyed by object key.
@@ -1443,13 +1479,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         for obj_group_id, (obj_key, object_buffer) in enumerate(
             zip(obj_keys, object_buffers, strict=True)
         ):
-            reserved.update(
-                self._ctx.storage_manager.reserve_write(
-                    [obj_key],
-                    get_unfull_chunk_layout_desc(cache_context, obj_group_id),
-                    is_temporary=is_temporary,
-                )
+            group_reserved = self._ctx.storage_manager.reserve_write(
+                [obj_key],
+                get_unfull_chunk_layout_desc(cache_context, obj_group_id),
+                is_temporary=is_temporary,
             )
+            reserved.update(group_reserved)
+            l1_owners.update(l1_owners_of(group_reserved))
             memory_obj = reserved.get(obj_key)
             # Unreserved: already resident or out of memory.
             if memory_obj is None:

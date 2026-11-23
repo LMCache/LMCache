@@ -158,6 +158,7 @@ def test_config_from_dict_roundtrip(endpoint: str) -> None:
             "load_timeout_s": 6,
             "write_enabled": True,
             "store_timeout_s": 3,
+            "write_l1_usage_threshold": 0.5,
         }
     )
     assert config.peer_mq_server_url == endpoint
@@ -166,6 +167,7 @@ def test_config_from_dict_roundtrip(endpoint: str) -> None:
     assert config.load_timeout_s == 6.0
     assert config.write_enabled is True
     assert config.store_timeout_s == 3.0
+    assert config.write_l1_usage_threshold == 0.5
 
 
 @pytest.mark.parametrize("endpoint", ["tcp://peer:9555", "http://peer:9555"])
@@ -212,6 +214,18 @@ def test_config_writes_are_off_by_default():
             "peer_mq_server_url": "grpc://peer:9555",
             "peer_transfer_channel_server_url": "peer:7600",
             "store_timeout_s": 0,
+        },
+        {
+            "type": "p2p",
+            "peer_mq_server_url": "tcp://peer:5555",
+            "peer_transfer_channel_server_url": "peer:7600",
+            "write_l1_usage_threshold": 0,
+        },
+        {
+            "type": "p2p",
+            "peer_mq_server_url": "tcp://peer:5555",
+            "peer_transfer_channel_server_url": "peer:7600",
+            "write_l1_usage_threshold": 1.5,
         },
     ],
 )
@@ -286,6 +300,25 @@ def test_missing_periodic_notifier_unwinds_before_the_region_hook() -> None:
     for event in events:
         event.close.assert_called_once()
     context.get_transfer_channel_client.assert_not_called()
+
+
+def test_close_after_notifier_shutdown_skips_the_stale_notifier() -> None:
+    """Once the notifier is shut down, close does not use the handle saved at
+    registration, which would point at freed native memory."""
+    stale = MagicMock()
+    with (
+        patch.object(p2p_mod, "P2PClient", return_value=MagicMock(spec=P2PClient)),
+        patch.object(p2p_mod, "get_transfer_channel_context", return_value=MagicMock()),
+        patch.object(p2p_mod, "PeriodicEventNotifier") as periodic,
+    ):
+        periodic.get.return_value = stale
+        adapter = P2PL2Adapter(P2PL2AdapterConfig("grpc://peer:9555", "peer:7600"))
+        assert stale.register_fd.called
+        periodic.get.return_value = None
+
+        adapter.close()
+
+    stale.unregister_fd.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -782,7 +815,7 @@ def test_store_past_its_deadline_fails(stuck_step: str):
             req_client.p2p_finish_write.assert_called_once_with(keys, [True, True])
 
 
-def test_reservation_answered_after_the_deadline_starts_no_transfer():
+def test_reservation_answered_after_the_deadline_is_handed_back():
     with _adapter(write_enabled=True, store_timeout_s=0.01) as (
         adapter,
         req_client,
@@ -796,9 +829,12 @@ def test_reservation_answered_after_the_deadline_starts_no_transfer():
         time.sleep(0.02)
         assert _poll_store_result(adapter, task_id).is_successful() is False
 
-        # The store already failed: a late answer must not write anything.
-        reservation.set_result(_PEER_BUFFERS)
+        # The store already failed: a late answer must not write anything,
+        # and the buffers the peer reserved are discarded right away.
+        req_client.p2p_finish_write.assert_not_called()
+        reservation.set_result([_PEER_BUFFERS[0], _NOT_RESERVED])
         tc_client.submit_write.assert_not_called()
+        req_client.p2p_finish_write.assert_called_once_with([_key(0)], [False])
         assert adapter.pop_completed_store_tasks() == {}
 
 
