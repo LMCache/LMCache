@@ -1150,6 +1150,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             RuntimeError: If the backend does not support IPC event handles.
 
         Note:
+            Transfer events are published after the block ID length check passes.
+
             A key addressing an unfull chunk (``key.has_unfull_chunk``) also
             retrieves that chunk, which the lookup read-locked, in the same
             transaction; its block IDs follow the full chunks' in every group.
@@ -1201,32 +1203,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         )
         num_chunks = len(obj_keys_per_obj_group[0])
 
-        # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
-        # Must be published via publish() (not publish_on_stream) so the
-        # drain thread sees it before MP_REQUEST_END can race MP_RETRIEVE_END.
-        self._ctx.event_bus.publish(
-            Event(
-                event_type=EventType.MP_RETRIEVE_SUBMITTED,
-                session_id=key.request_id,
-                metadata={"device": str(cache_context.device)},
-            )
-        )
-
-        transfer_key = next_transfer_key(key.request_id)
-        self._ctx.event_bus.publish_on_stream(
-            cache_context.cupy_stream,
-            Event(
-                event_type=EventType.MP_RETRIEVE_START,
-                session_id=key.request_id,
-                metadata={
-                    "device": str(cache_context.device),
-                    "engine_id": instance_id,
-                    "model_name": model_name,
-                    "transfer_key": transfer_key,
-                },
-            ),
-        )
-
         blocks_per_chunk = [
             cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
             for group_idx in range(
@@ -1264,6 +1240,31 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 )
                 event_backend.record_event(event, cache_context.stream)
                 return event_backend.export_event(event, cache_context.device), False
+
+            # Publish synchronously so the drain thread sees the submission
+            # before MP_REQUEST_END can race MP_RETRIEVE_END.
+            self._ctx.event_bus.publish(
+                Event(
+                    event_type=EventType.MP_RETRIEVE_SUBMITTED,
+                    session_id=key.request_id,
+                    metadata={"device": str(cache_context.device)},
+                )
+            )
+
+            transfer_key = next_transfer_key(key.request_id)
+            self._ctx.event_bus.publish_on_stream(
+                cache_context.cupy_stream,
+                Event(
+                    event_type=EventType.MP_RETRIEVE_START,
+                    session_id=key.request_id,
+                    metadata={
+                        "device": str(cache_context.device),
+                        "engine_id": instance_id,
+                        "model_name": model_name,
+                        "transfer_key": transfer_key,
+                    },
+                ),
+            )
 
             # Cut and stage all block_ids to GPU once before the transfer
             block_ids_per_group_gpu = downsample_and_stage_block_ids(

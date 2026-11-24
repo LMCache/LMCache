@@ -477,17 +477,8 @@ lags), or is the device keeping pace?  The counters also give store/retrieve
 "Finished" counts a transfer leaving the device stream, not its success: a
 store that committed nothing (`stored_count == 0`) and a retrieve that
 missed both increment.  Counting only successes would strand a phantom
-in-flight transfer in the subtraction forever.
-
-> **Caveat — RETRIEVE block-id underflow.** `retrieve()` publishes
-> `MP_RETRIEVE_SUBMITTED` *before* its fail-closed block-id underflow check,
-> and that check returns early without publishing `MP_RETRIEVE_END`.  A
-> request hitting that path (logged at ERROR by the transfer module, and
-> also leaving the tracing subscriber's span open) permanently adds 1 to the
-> derived in-flight retrieve count.  It should never fire in healthy
-> operation; a steadily rising in-flight floor alongside those ERROR logs is
-> the signature.  The store path publishes its SUBMITTED sentinel *after*
-> the equivalent check, so it is unaffected.
+in-flight transfer in the subtraction forever. Store and retrieve accounting
+starts after the block ID length check passes.
 
 ---
 

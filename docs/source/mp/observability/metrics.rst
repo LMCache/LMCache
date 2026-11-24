@@ -556,8 +556,8 @@ model, use the L0 ↔ L1 throughput histograms or
        completion.
    * - ``lmcache_mp.num_submitted_retrieves``
      - Counter (attr: ``device``)
-     - CPU→GPU retrieve transfers enqueued on the device stream, +1 per
-       ``retrieve()`` call that reaches the copy.
+     - CPU→GPU retrieve attempts, +1 when the transfer module publishes
+       ``MP_RETRIEVE_SUBMITTED`` after validating the block ID lengths.
    * - ``lmcache_mp.num_finished_retrieves``
      - Counter (attr: ``device``)
      - CPU→GPU retrieve transfers completed on the device stream, +1 per
@@ -592,18 +592,6 @@ device is keeping pace.
    successes would strand a phantom in-flight transfer in the subtraction
    forever. Use ``lmcache_mp.num_chunks_loaded`` and the L0 ↔ L1
    throughput histograms to measure what actually moved.
-
-.. warning::
-
-   The derived in-flight retrieve count can drift upward on one fail-closed
-   path. ``retrieve()`` publishes ``MP_RETRIEVE_SUBMITTED`` *before* its
-   block-id underflow check, and that check returns early without
-   publishing ``MP_RETRIEVE_END``, so each request hitting it permanently
-   adds 1 to the difference. That path should never fire in healthy
-   operation and logs at ERROR when it does — an in-flight floor that
-   ratchets up alongside those log lines is the signature, not a stuck GPU.
-   The store path publishes its sentinel *after* the equivalent check and
-   is unaffected.
 
 L1 ↔ L2 Throughput Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
