@@ -243,3 +243,101 @@ def test_context_keeps_submission_until_completion_and_closes_in_order(
         "close_handle",
         "close_driver",
     ]
+
+
+class _ScriptedDriver:
+    """Test harness: a GDSContext with a fake driver that completes each
+    transfer with a set byte count.
+
+    The real driver writes Submission.result when the stream runs the copy. The
+    fake writes it at submit time, which the context cannot tell apart once
+    synchronize_and_check has synchronized the stream.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.stream = Mock(cuda_stream=7)
+        self.event = Mock()
+        self.event.is_complete.return_value = False
+        platform = gds_context.platform_stream
+        monkeypatch.setattr(platform, "current_stream", lambda device: self.stream)
+        monkeypatch.setattr(
+            platform, "stream_handle", lambda device, stream: stream.cuda_stream
+        )
+        monkeypatch.setattr(
+            platform, "record_completion_event", lambda device, stream: self.event
+        )
+        monkeypatch.setattr(platform, "synchronize_stream", lambda device, stream: None)
+        monkeypatch.setattr(platform, "synchronize_device", lambda device: None)
+        monkeypatch.setattr(OtherHandle, "read_async", self._submit)
+        monkeypatch.setattr(OtherHandle, "write_async", self._submit)
+        self._bytes_done = 0
+        self.ctx = GDSContext(OtherBackend())
+        self.ctx.initialize(
+            GdsL1Config(file_location="device://slab", size_in_bytes=4096)
+        )
+        self.buf = torch.empty(4096, dtype=torch.uint8)
+        self.ctx.register_gpu_buffer(self.buf)
+        self.memory = Mock(spec=GDSMemoryObject, slab_offset=0)
+        self.memory.get_size.return_value = 4096
+
+    def transfer(self, direction: SlabDirection, bytes_done: int) -> None:
+        """Run one 4096-byte transfer that the driver completes with bytes_done."""
+        self._bytes_done = bytes_done
+        self.ctx.transfer_async(self.memory, self.buf, direction)
+
+    def check(self) -> None:
+        """Call synchronize_and_check on the stream the transfers used."""
+        self.ctx.synchronize_and_check(self.buf.device, self.stream)
+
+    def _submit(
+        self,
+        buf_base: int,
+        size: int,
+        file_offset: int,
+        buf_offset: int,
+        raw_stream: int,
+    ) -> Submission:
+        sub = Submission(size, file_offset, buf_offset)
+        sub.result.value = self._bytes_done
+        return sub
+
+
+@pytest.fixture
+def driver(monkeypatch: pytest.MonkeyPatch) -> Iterator[_ScriptedDriver]:
+    driver = _ScriptedDriver(monkeypatch)
+    yield driver
+    driver.ctx.close()
+
+
+@pytest.mark.parametrize("direction", [SlabDirection.READ, SlabDirection.WRITE])
+@pytest.mark.parametrize("bytes_done", [2048, -5])
+def test_synchronize_and_check_raises_on_short_or_failed_transfer(
+    driver: _ScriptedDriver, direction: SlabDirection, bytes_done: int
+) -> None:
+    driver.transfer(direction, bytes_done)
+    with pytest.raises(
+        RuntimeError, match=f"expected 4096 bytes, completed {bytes_done}"
+    ):
+        driver.check()
+
+
+@pytest.mark.parametrize("direction", [SlabDirection.READ, SlabDirection.WRITE])
+def test_synchronize_and_check_accepts_complete_transfer(
+    driver: _ScriptedDriver, direction: SlabDirection
+) -> None:
+    driver.transfer(direction, 4096)
+    driver.check()
+
+
+def test_synchronize_and_check_reports_failure_from_released_batch(
+    driver: _ScriptedDriver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A checkpoint after every transfer with a completed event releases the
+    # failed batch from inflight before synchronize_and_check runs; the later
+    # successful transfer must not hide it.
+    monkeypatch.setattr(gds_context, "_SUBMISSION_CHECKPOINT_EVERY", 1)
+    driver.event.is_complete.return_value = True
+    driver.transfer(SlabDirection.READ, -5)
+    driver.transfer(SlabDirection.READ, 4096)
+    with pytest.raises(RuntimeError, match="completed -5"):
+        driver.check()

@@ -91,7 +91,8 @@ def stage(
     """Move objects to or from their staging regions with ``engine``.
 
     On return the copies are queued on the stream ahead of anything queued
-    later.
+    later. The NVMe engine instead returns only after its copies complete,
+    because GDS reports a failed copy only after it runs.
 
     Args:
         engine: The engine of every object in ``memory_objs``.
@@ -102,6 +103,8 @@ def stage(
     Raises:
         ValueError: If a host-memory object and its region differ in size.
         NotImplementedError: If an object is owned by a peer.
+        RuntimeError: If a GDS copy of a storage-backed object reported an IO
+            error or moved fewer bytes than requested.
     """
     _ENGINES[engine].stage(memory_objs, buffers, direction)
 

@@ -47,6 +47,19 @@ _owner_contexts: dict[int, "GDSContext"] = {}
 _owner_contexts_lock = threading.Lock()
 
 
+def _is_incomplete(sub: Submission) -> bool:
+    """Whether a completed transfer moved fewer bytes than requested."""
+    return sub.bytes_done != sub.size.value
+
+
+def _transfer_error(sub: Submission) -> str:
+    """Describe a failed or short transfer for the caller's error."""
+    return (
+        f"GDS I/O at slab offset {sub.file_offset.value}: expected "
+        f"{sub.size.value} bytes, completed {sub.bytes_done}"
+    )
+
+
 def initialize_l1_gds_context(owner: int, config: GdsL1Config) -> None:
     """Open the slab owned by an L1 before GPU staging buffers are registered.
 
@@ -152,14 +165,17 @@ class _StreamSubmissions:
     """Per-stream GDS submissions, kept alive until their DMA has run.
 
     Submissions accumulate in ``uncommitted``, move to ``inflight`` behind a
-    GPU event on the stream, and drop once it completes. Per-stream because an
-    event only orders work on its own stream.
+    GPU event on the stream, and drop once it completes. A completed submission
+    that moved fewer bytes than requested leaves its error message in
+    ``failed`` until :meth:`GDSContext.synchronize_and_check` reports it.
+    Per-stream because an event only orders work on its own stream.
     """
 
     uncommitted: list[Submission] = field(default_factory=list)
     inflight: list[tuple[platform_stream.CompletionEvent, list[Submission]]] = field(
         default_factory=list
     )
+    failed: list[str] = field(default_factory=list)
     ops_since_checkpoint: int = 0
 
 
@@ -363,6 +379,41 @@ class GDSContext:
             )
             pos += seg_len
 
+    def synchronize_and_check(self, device: object, stream: object) -> None:
+        """Wait for ``stream`` and verify every GDS transfer on it completed fully.
+
+        The GDS library reports per-transfer failures only after completion,
+        through ``Submission.bytes_done``. Call this before the transferred
+        bytes are used (READ) or published as stored (WRITE).
+
+        Args:
+            device: Device owning the staging buffer the transfers used.
+            stream: Stream the transfers were issued on.
+
+        Raises:
+            RuntimeError: A transfer reported an IO error or a short byte count.
+
+        Notes:
+            Blocks until ``stream`` drains, then stops tracking the stream's
+            submissions, so each failure is reported once. The caller must be
+            the only thread issuing transfers on ``stream``: a transfer queued
+            by another thread between the sync and the check would be checked
+            before it completes.
+        """
+        platform_stream.synchronize_stream(device, stream)
+        raw_stream = platform_stream.stream_handle(device, stream)
+        with self._submissions_lock:
+            st = self._submissions.pop(raw_stream, None)
+        if st is None:
+            return
+        # Submission order, so the first failure reported is the earliest one.
+        errors = list(st.failed)
+        subs = [sub for _event, batch in st.inflight for sub in batch]
+        subs.extend(st.uncommitted)
+        errors.extend(_transfer_error(sub) for sub in subs if _is_incomplete(sub))
+        if errors:
+            raise RuntimeError(errors[0])
+
     def close(self) -> None:
         """Sync the stream, deregister GDS state, and close the slab handle."""
         devices = {str(buffer.device): buffer.device for buffer in self._buffers}
@@ -524,9 +575,14 @@ class GDSContext:
             st.inflight.append((event, st.uncommitted))
             st.uncommitted = []
         st.ops_since_checkpoint = 0
-        st.inflight = [
-            (event, subs) for (event, subs) in st.inflight if not event.is_complete()
-        ]
+        pending: list[tuple[platform_stream.CompletionEvent, list[Submission]]] = []
+        for event, subs in st.inflight:
+            if not event.is_complete():
+                pending.append((event, subs))
+                continue
+            # Keep failures for synchronize_and_check instead of dropping them.
+            st.failed.extend(_transfer_error(s) for s in subs if _is_incomplete(s))
+        st.inflight = pending
 
 
 @functools.cache
