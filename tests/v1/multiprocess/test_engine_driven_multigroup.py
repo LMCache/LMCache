@@ -5,9 +5,12 @@ Tests for engine-driven multi-group (uniform coverage) transfers.
 
 # Standard
 from contextlib import contextmanager
-from typing import Any
+from multiprocessing.shared_memory import SharedMemory
+from pathlib import Path
+from typing import Any, Literal
 from unittest.mock import MagicMock
 from uuid import uuid4
+import sys
 import threading
 
 # Third Party
@@ -23,6 +26,7 @@ from lmcache.v1.client.transfer_context.base import (
     compute_kv_layout,
 )
 from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
+from lmcache.v1.client.transfer_context.shm import EngineDrivenContextShm
 from lmcache.v1.client.transfer_context.tensor_wire import (
     decode_grouped_tensors,
     encode_grouped_tensors,
@@ -346,9 +350,7 @@ def test_register_accepts_sliding_window_groups() -> None:
     def _register(payload):
         sent.append(payload)
         future = MagicMock()
-        future.result.return_value = RegisterEngineDrivenContextResponse(
-            shm_name="lmcache_l1_pool_x", pool_size=4096
-        )
+        future.result.return_value = RegisterEngineDrivenContextResponse()
         return future
 
     req_client = MagicMock()
@@ -791,6 +793,169 @@ def test_single_compressed_group_worker_server_roundtrip(
         engine.close()
 
 
+@pytest.mark.parametrize(
+    ("transport", "grpc_mode"),
+    [
+        pytest.param("zmq", "sync", id="zmq"),
+        pytest.param("grpc", "sync", id="grpc-sync"),
+        pytest.param("grpc", "aio", id="grpc-aio"),
+    ],
+)
+@pytest.mark.parametrize("grouped", [False, True], ids=["legacy", "grouped"])
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux /dev/shm")
+def test_worker_recovers_cached_kv_when_shm_attachment_fails(
+    transport: Literal["zmq", "grpc"],
+    grpc_mode: Literal["sync", "aio"],
+    grouped: bool,
+    unused_tcp_port: int,
+) -> None:
+    """Workers with and without SHM access can exchange KV through the server."""
+    chunk_tokens = 16
+    block_size = 8
+    shm_name = f"lmcache_l1_pool_{uuid4().hex[:12]}"
+    config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=8 * 1024 * 1024, use_lazy=False, shm_name=shm_name
+            )
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+    )
+    engine = MPCacheServerContext(config, chunk_size=chunk_tokens)
+    module = EngineDrivenTransferModule(engine)
+    lookup = LookupModule(engine)
+    server = create_request_server(
+        [module, lookup],
+        MPServerConfig(
+            host="127.0.0.1",
+            port=unused_tcp_port,
+            transport=transport,
+            grpc_server_mode=grpc_mode,
+        ),
+    )
+    server.start()
+    scheme = "grpc" if transport == "grpc" else "tcp"
+    server_url = f"{scheme}://127.0.0.1:{unused_tcp_port}"
+    writer_rpc = RequestClientFactory.create(server_url)
+    reader_rpc = RequestClientFactory.create(server_url)
+    writer = EngineDrivenTransferContext(1, writer_rpc)
+    reader = EngineDrivenTransferContext(2, reader_rpc)
+    # MLA uses an unambiguous [block, token, width] layout on CPU and GPU.
+    layer = torch.arange(5 * block_size * 16, dtype=torch.float32).reshape(
+        5, block_size, 16
+    )
+    source = {"layer_0": layer}
+    if grouped:
+        source["layer_1"] = layer + 1000
+    destination = {name: torch.full_like(value, -1) for name, value in source.items()}
+    groups = (
+        [
+            EngineGroupInfo(i, (i,), tokens_per_block=block_size)
+            for i in range(len(source))
+        ]
+        if grouped
+        else []
+    )
+    store_ids = [[1, 2] for _ in source]
+    retrieve_ids = [[4, 3] for _ in source]
+    model = "fallback"
+
+    def key(token: int, request_id: str) -> IPCCacheServerKey:
+        return IPCCacheServerKey.from_token_ids(
+            model,
+            1,
+            0,
+            [token] * chunk_tokens,
+            start=0,
+            end=chunk_tokens,
+            request_id=request_id,
+        )
+
+    try:
+        writer.register(source, model, 1, 2, 5, engine_group_infos=groups)
+        assert isinstance(writer.engine_driven_context, EngineDrivenContextShm)
+        cached = key(1, "store-shm")
+        assert writer.submit_store(
+            cached.request_id, cached, source, store_ids, None, 2
+        ).result(timeout=5)
+
+        # The server and writer keep their live mappings. A fresh worker's
+        # real shm_open now gets ENOENT, as in a separate /dev/shm mount.
+        segment = Path("/dev/shm") / shm_name
+        hidden_segment = segment.rename(segment.with_suffix(".hidden"))
+        try:
+            with pytest.raises(FileNotFoundError):
+                SharedMemory(name=shm_name)
+            reader.register(destination, model, 1, 2, 5, engine_group_infos=groups)
+        finally:
+            hidden_segment.rename(segment)
+        assert isinstance(reader.engine_driven_context, EngineDrivenContextInline)
+
+        # A repeated registration must report the server's selected transport,
+        # even when a new local context could now attach to the pool.
+        reader.close()
+        reader = EngineDrivenTransferContext(2, reader_rpc)
+        reader.register(destination, model, 1, 2, 5, engine_group_infos=groups)
+        assert isinstance(reader.engine_driven_context, EngineDrivenContextInline)
+        for current, rpc, token, name in (
+            (reader, reader_rpc, 1, "retrieve-inline"),
+            (writer, writer_rpc, 2, "retrieve-shm"),
+        ):
+            if token == 2:
+                fresh = key(token, "store-inline")
+                assert reader.submit_store(
+                    fresh.request_id, fresh, source, store_ids, None, 2
+                ).result(timeout=5)
+            pending = key(token, name)
+            rpc.lookup(pending, 1).result(timeout=5)
+            assert rpc.wait_prefetch_status(name, 5).result(timeout=10) == chunk_tokens
+            output = {
+                name: torch.full_like(value, -1) for name, value in source.items()
+            }
+            assert current.submit_retrieve(
+                name, pending, output, retrieve_ids, None, 2
+            ).result(timeout=5)
+            for layer_name, value in source.items():
+                expected = torch.full_like(value, -1)
+                expected[[4, 3]] = value[[1, 2]]
+                assert torch.equal(
+                    output[layer_name].view(torch.uint8), expected.view(torch.uint8)
+                )
+            rpc.end_session(name).result(timeout=5)
+        for worker in (reader, writer):
+            unregistration = worker.unregister()
+            assert unregistration is not None
+            unregistration.result(timeout=5)
+    finally:
+        reader.close()
+        writer.close()
+        reader_rpc.close()
+        writer_rpc.close()
+        server.close()
+        lookup.close()
+        module.close()
+        engine.close()
+
+
+def test_worker_rejects_unconfirmed_inline_registration() -> None:
+    """A server that ignores the inline preference leaves no usable context."""
+    rpc = MagicMock()
+    rpc.register_kv_cache_engine_driven_context.return_value.result.return_value = (
+        RegisterEngineDrivenContextResponse(
+            shm_name=f"lmcache_l1_pool_{uuid4().hex[:12]}", pool_size=4096
+        )
+    )
+    worker = EngineDrivenTransferContext(1, rpc)
+    try:
+        with pytest.raises(RuntimeError, match="server did not confirm inline"):
+            worker.register({"layer_0": torch.zeros(5, 8, 16)}, "fallback", 1, 2, 5)
+        with pytest.raises(RuntimeError, match="is not registered"):
+            _ = worker.engine_driven_context
+        assert rpc.unregister_kv_cache_engine_driven_context.call_count == 2
+    finally:
+        worker.close()
+
+
 def test_register_payload_carries_group_layouts() -> None:
     """Two full-attention groups produce per-group layouts in the payload."""
     kv = {f"layer_{i}": torch.zeros(2, 6, 4, 2, 8) for i in range(3)}
@@ -805,9 +970,7 @@ def test_register_payload_carries_group_layouts() -> None:
     def _register(payload):
         sent.append(payload)
         future = MagicMock()
-        future.result.return_value = RegisterEngineDrivenContextResponse(
-            shm_name="lmcache_l1_pool_x", pool_size=4096
-        )
+        future.result.return_value = RegisterEngineDrivenContextResponse()
         return future
 
     req_client = MagicMock()
@@ -853,9 +1016,7 @@ def _register_capturing_payload(
     def _register(payload):
         sent.append(payload)
         future = MagicMock()
-        future.result.return_value = RegisterEngineDrivenContextResponse(
-            shm_name="lmcache_l1_pool_x", pool_size=4096
-        )
+        future.result.return_value = RegisterEngineDrivenContextResponse()
         return future
 
     req_client = MagicMock()
@@ -1105,9 +1266,7 @@ def test_register_uses_adapter_chunk_size_over_local_group_lcm() -> None:
         def _register(payload):
             sent.append(payload)
             future = MagicMock()
-            future.result.return_value = RegisterEngineDrivenContextResponse(
-                shm_name="lmcache_l1_pool_x", pool_size=4096
-            )
+            future.result.return_value = RegisterEngineDrivenContextResponse()
             return future
 
         req_client = MagicMock()

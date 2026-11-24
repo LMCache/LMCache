@@ -299,8 +299,6 @@ def create_engine_driven_context(
 
     Returns SHM-based implementation when shared-memory pool information is
     available; otherwise falls back to the safe inline implementation.
-    If SHM initialization fails for any reason (e.g. segment not found,
-    permission error), gracefully falls back to inline transport.
 
     Args:
         metadata: Layout metadata for the non-GPU context.
@@ -311,27 +309,22 @@ def create_engine_driven_context(
             inline mode.
     Returns:
         A concrete :class:`EngineDrivenContext` instance.
+
+    Raises:
+        OSError: If the advertised shared-memory pool cannot be opened.
     """
     if shm_name and pool_size > 0:
         # Local
         from .shm import EngineDrivenContextShm
 
-        try:
-            logger.info(
-                "Creating EngineDrivenContextShm (shm_name=%s, pool_size=%d)",
-                shm_name,
-                pool_size,
-            )
-            return EngineDrivenContextShm(
-                metadata, req_client, mq_timeout, shm_name, pool_size
-            )
-        except Exception:
-            logger.warning(
-                "Failed to initialize SHM context (shm_name=%s), "
-                "falling back to inline tensor transport",
-                shm_name,
-                exc_info=True,
-            )
+        logger.info(
+            "Creating EngineDrivenContextShm (shm_name=%s, pool_size=%d)",
+            shm_name,
+            pool_size,
+        )
+        return EngineDrivenContextShm(
+            metadata, req_client, mq_timeout, shm_name, pool_size
+        )
 
     # Local
     from .inline import EngineDrivenContextInline

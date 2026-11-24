@@ -41,6 +41,7 @@ from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 
 # Local
 from .server_transfer import (
+    ShmTransferStrategy,
     TransferKey,
     TransferStrategy,
     create_transfer_strategy,
@@ -344,7 +345,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             payload: Struct containing all registration fields
                 (instance_id, model_name, world_size, block_size,
                 num_layers, hidden_dim_size, dtype_str, use_mla,
-                num_physical_slots).
+                num_physical_slots, group_layouts, inline_only).
 
         Raises:
             ValueError: If ``payload.dtype_str`` is not a valid torch dtype name.
@@ -361,11 +362,17 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     "Instance %d already registered (non-GPU); refreshing liveness",
                     payload.instance_id,
                 )
+                uses_shm = isinstance(
+                    self._strategies[payload.instance_id], ShmTransferStrategy
+                )
                 return RegisterEngineDrivenContextResponse(
-                    shm_name=shm_name,
-                    pool_size=pool_size,
+                    shm_name=shm_name if uses_shm else "",
+                    pool_size=pool_size if uses_shm else 0,
                     null_block_id=self._ctx.null_block_id,
                 )
+
+        if payload.inline_only:
+            shm_name, pool_size = "", 0
 
         dtype = getattr(torch, payload.dtype_str, None)
         if dtype is None or not isinstance(dtype, torch.dtype):

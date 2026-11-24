@@ -11,6 +11,7 @@ import os
 import threading
 
 # Third Party
+import msgspec
 import torch
 
 # First Party
@@ -1067,21 +1068,20 @@ class EngineDrivenTransferContext(TransferContext):
             num_physical_slots = blocks_in_chunk * block_size
         self._group_states = group_states
 
+        payload = RegisterEngineDrivenContextPayload(
+            instance_id=self._instance_id,
+            model_name=model_name,
+            world_size=world_size,
+            block_size=block_size,
+            num_layers=num_layers,
+            hidden_dim_size=hidden_dim_size,
+            dtype_str=dtype_str,
+            use_mla=use_mla_flag,
+            num_physical_slots=num_physical_slots,
+            group_layouts=group_layouts,
+        )
         future = self._submit_registration(
-            lambda: self._req_client.register_kv_cache_engine_driven_context(
-                RegisterEngineDrivenContextPayload(
-                    instance_id=self._instance_id,
-                    model_name=model_name,
-                    world_size=world_size,
-                    block_size=block_size,
-                    num_layers=num_layers,
-                    hidden_dim_size=hidden_dim_size,
-                    dtype_str=dtype_str,
-                    use_mla=use_mla_flag,
-                    num_physical_slots=num_physical_slots,
-                    group_layouts=group_layouts,
-                )
-            )
+            lambda: self._req_client.register_kv_cache_engine_driven_context(payload)
         )
         response = future.result(timeout=mq_timeout)
         if self._is_closed():
@@ -1093,21 +1093,56 @@ class EngineDrivenTransferContext(TransferContext):
             shm_name = response.shm_name
             pool_size = response.pool_size
             null_block_id = response.null_block_id
-        self._null_block_id = null_block_id
-
         metadata = EngineDrivenContextMetadata(
             layout_desc=layout_desc,
             block_size=block_size,
             use_mla=use_mla_flag,
             group_layouts=[state.layout_desc for state in group_states] or None,
         )
-        self._engine_driven_context = create_engine_driven_context(
-            metadata,
-            self._req_client,
-            mq_timeout,
-            shm_name=shm_name,
-            pool_size=pool_size,
-        )
+        try:
+            context = create_engine_driven_context(
+                metadata, self._req_client, mq_timeout, shm_name, pool_size
+            )
+        except OSError as exc:
+            logger.exception(
+                "Cannot attach to SHM pool %s. Requesting inline mode", shm_name
+            )
+            unregistration = self.unregister()
+            assert unregistration is not None
+            unregistration.result(timeout=mq_timeout)
+            inline_payload = msgspec.structs.replace(payload, inline_only=True)
+            future = self._submit_registration(
+                lambda: self._req_client.register_kv_cache_engine_driven_context(
+                    inline_payload
+                )
+            )
+            response = future.result(timeout=mq_timeout)
+            if self._is_closed():
+                return
+            if not isinstance(response, RegisterEngineDrivenContextResponse) or (
+                response.shm_name or response.pool_size
+            ):
+                unregistration = self.unregister()
+                assert unregistration is not None
+                unregistration.result(timeout=mq_timeout)
+                raise RuntimeError(
+                    f"Could not attach to SHM pool {shm_name!r} and the server "
+                    "did not confirm inline KV transfer"
+                ) from exc
+            shm_name, pool_size, null_block_id = "", 0, response.null_block_id
+            context = create_engine_driven_context(
+                metadata, self._req_client, mq_timeout, shm_name, pool_size
+            )
+        with self._lifecycle_lock:
+            if not self._closed:
+                self._null_block_id = null_block_id
+                self._engine_driven_context = context
+                registered = True
+            else:
+                registered = False
+        if not registered:
+            context.close()
+            return
         supported_transfer_mode = "SHM" if shm_name and pool_size > 0 else "inline"
         logger.info(
             "Worker engine-driven context registered "

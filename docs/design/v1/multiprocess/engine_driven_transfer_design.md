@@ -342,6 +342,10 @@ Retrieve:
 
 Notes:
 - SHM pool metadata is computed once in `MPCacheServerContext` init, not per registration.
+- If a worker cannot open the advertised pool, it unregisters the SHM context
+  and registers again with `inline_only`. It starts KV transfers only after
+  the server confirms inline by returning an empty pool. Other workers can
+  retain their own SHM registrations for the same model.
 - `chunk_indices` optimization reduces unnecessary gather/copy work on partial cache hits.
 
 ### 3.4 Transfer observability

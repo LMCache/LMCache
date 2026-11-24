@@ -363,6 +363,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
             in protocol group order. Empty means legacy single-group; the
             top-level ``num_layers``/``hidden_dim_size``/``dtype_str`` then
             describe the sole group.
+        inline_only: Use inline KV transfer even if the server has a SHM pool.
     """
 
     instance_id: int
@@ -375,6 +376,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     use_mla: bool
     num_physical_slots: int | None = None
     group_layouts: list[GroupLayout] = []
+    inline_only: bool = False
 
 
 @dataclass
