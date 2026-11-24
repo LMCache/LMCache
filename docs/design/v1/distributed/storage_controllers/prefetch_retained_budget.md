@@ -89,20 +89,26 @@ self._prefetch_retained_bytes: int = 0
 The read lock already protects charged objects from eviction. The ledger adds
 the missing bound on how much of them there can be.
 
-### 2. Admission condition (3)
+### 2. The in-flight watermark counts retained bytes
 
-`_can_admit_new_prefetch` adds a third condition for **new** requests:
+There is still one watermark, `inflight_watermark`
+(`--l2-prefetch-inflight-watermark`, default 0.5). It now covers everything
+prefetch holds in L1, not only loads in flight:
 
 ```
-(3) staging + retained + lookup_bytes + request_bytes
-        <= retained_watermark * total_bytes
+before: staging + lookup_bytes < inflight_watermark * total_bytes
+after:  staging + lookup_bytes + retained + request_bytes
+            <= inflight_watermark * total_bytes
 ```
 
-- A new config option, `prefetch_retained_watermark`, is a fraction in
-  `(0, 1]` set with `--l2-prefetch-retained-watermark`, default 0.6, which
-  keeps 40% of L1 as headroom for stores and warm data. A controller built
-  directly defaults to 1.0. Nothing ties it to `inflight_watermark`: (1)
-  bounds the in-flight part, (3) bounds the total.
+- "In flight" now means held for a request that has not run yet: buffers
+  being staged, lookups not yet planned, and loaded data still read-locked.
+  A separate retained watermark would only duplicate the knob, since this
+  condition is strictly stronger than the old one at the same value.
+- Under the same default, the old condition is a subset of the new one, so
+  existing deployments only become stricter, and only by the data they
+  retain. L1-only setups are unaffected, because nothing loaded from L1 is
+  charged.
 - Starvation guard: change the current "admit if nothing in flight" to "admit
   if nothing in flight **and** `retained == 0`", so one oversized request still
   runs.
@@ -113,9 +119,9 @@ the missing bound on how much of them there can be.
   wait, so a queued lookup does not time out
   (`mp_lookup_state.py`, `on_scheduler_check`).
 
-At 300 GB L1 with a 0.6 watermark (180 GB), about 20 CacheBlend requests
-(8.8 GB each) are staged or retained at once: about 8 running and 12 queued,
-which matches the cap that works today. The lookahead scales with L1 size
+At 300 GB L1 with the default 0.5 watermark (150 GB), about 17 CacheBlend
+requests (8.8 GB each) are staged or retained at once: about 8 running and 9
+queued, more than the cap of 12 that works today. The lookahead scales with L1 size
 and prompt size with no tuning.
 
 ### 3. Continuation tasks have strict priority
@@ -124,7 +130,8 @@ and prompt size with no tuning.
 `NEW` (the default) and `CONTINUATION`.
 
 - `CONTINUATION` tasks go to a separate queue with strict priority: no `NEW`
-  task starts while one waits. They still pass conditions (1)–(3).
+  task starts while one waits. They still pass the watermark and free-space
+  checks.
 - They do **not** bypass the checks. Bypassing would reopen the overflow: a
   prefix leg that hits little leaves almost nothing retained, so more prefix
   legs are admitted, and every large sparse leg that follows would skip the
@@ -176,9 +183,8 @@ queued runs its prefetch later for nothing.
 
 - Gauge `lmcache_mp.l1_prefetch_retained_bytes` (per L1), and
   `prefetch_retained_bytes` in the L1 `report_status`.
-- In `PrefetchController.report_status`: `retained_watermark`,
-  `continuation_queue_size` and `stall_admissions`, next to the existing
-  `pending_queue_size`.
+- In `PrefetchController.report_status`: `continuation_queue_size` and
+  `stall_admissions`, next to the existing `pending_queue_size`.
 - Follow-up: a queue-wait histogram and a cancel counter.
 
 ## Why deadlock cannot happen
@@ -225,42 +231,31 @@ The read TTL remains as a safety net for clients that never send
   from L1 residency (`contains`) before admission.
 - Several L1 managers keep today's conservative per-L1 charge.
 
-## Validation plan
+## Tests
 
-Unit tests (`tests/v1/distributed/`):
+Unit tests (`tests/v1/distributed/`, `tests/v1/multiprocess/`):
 
-- ledger: charge on L2 admission only; release on finish_read to 0, on delete,
-  on eviction, and on TTL expiry through the sweep; keys shared through dedup
-  are charged once.
-- admission: (3) blocks new requests over budget; the starvation guard admits
-  one oversized request; `CONTINUATION` bypasses (1)–(3) and goes first.
-- deadlock: a budget that fits one request, three two-leg requests whose
-  retrieves are triggered only after both legs land; all three finish.
-- cancel: a pending task is removed and issues no L2 lookup; a cancelled
-  in-flight task leaves zero read locks.
-
-End-to-end on **yotta-labs-237** (RTX PRO 6000, the same GPU as the ticket),
-gpt-oss-120b TP2 + CacheBlend, `fs_native` L2 on local NVMe in place of VAST,
-workload B (500 × 30k chunks warmed, 4-chunk 120k prompts, all N sent at once).
-GPUs reserved through gpudesk with `perf_sensitive: true`, and containers
-labeled with the owner label.
-
-| Arm | Cap | Expected |
-|---|---|---|
-| cb-l2, current dev | none | reproduces the collapse (reuse 36–76%) |
-| cb-l2, current dev | 12 | about 96% reuse, the reference |
-| cb-l2, fix | none | ≥ 95% reuse, about 4× vLLM, 0 failed prefetch chunks, 0 failed loads |
-| lmc-l2, current dev | none | tests the "generic" prediction |
-| lmc-l2, fix | none | no regression compared with the cap |
-
-N = 50 / 100 / 150 / 200. Each arm records the vLLM and LMCache `/metrics`
-deltas, adding the new gauges. To shorten the iteration loop, an optional
-reduced variant scales L1 down (for example 100 GB at N = 50), which keeps the
-same ratio of L1 to demand.
+- ledger (`test_l1_interface.py`): charged once per object; dropped when the
+  last reader finishes, on delete and on read-TTL expiry; unlocked or missing
+  keys are never charged.
+- admission (`test_prefetch_controller.py`): unconsumed loads hold back new
+  requests until a reader releases them; L1 hits are not charged; the
+  watermark test consumes each result to let the next request start.
+- continuations: one that fits starts ahead of a waiting `NEW` request; a
+  waiting one blocks `NEW` requests that would fit.
+- stall rule: with nothing in flight, a blocked head is admitted after the
+  timeout.
+- cancel: a queued request never loads; an in-flight or unconsumed one
+  releases every lock; a cancel after the result is consumed is ignored.
+- callers: a repeat lookup is a continuation; `end_session` cancels an
+  unconsumed prefetch; the CacheBlend destroy listener cancels a lookup that
+  is still polling its sparse leg.
 
 ## End-to-end result
 
-Single runs on yotta-h200-26: 2× H200, gpt-oss-120b TP2, vLLM 0.33.0,
+Measured with an earlier revision of this change that had a separate
+retained watermark of 0.6 next to the 0.5 in-flight watermark, which is the
+same condition at 0.6. Single runs on yotta-h200-26: 2× H200, gpt-oss-120b TP2, vLLM 0.33.0,
 CacheBlend plugin v0.5.8rc3, no chunked prefill, chunk size 1024. vLLM's KV
 cache was 1.25M tokens, so about 9.6 prompts of 131k tokens fit at once. L1
 was 180 GB and the `fs_native` L2 sat in `/dev/shm`. 150 docs of 30,720

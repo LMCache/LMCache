@@ -198,7 +198,6 @@ def make_controller(
     adapters: list,
     policy: PrefetchPolicy | None = None,
     inflight_watermark: float = 0.5,
-    retained_watermark: float = 1.0,
 ) -> PrefetchController:
     """Build a controller over one L1 manager and the given adapters."""
     return PrefetchController(
@@ -208,7 +207,6 @@ def make_controller(
         adapter_descriptors=[make_descriptor(i) for i in range(len(adapters))],
         policy=policy or BufferOnlyPrefetchPolicy(),
         inflight_watermark=inflight_watermark,
-        retained_watermark=retained_watermark,
     )
 
 
@@ -942,9 +940,10 @@ class TestAdmission:
         l1_manager.finish_read(all_keys)
 
     def test_watermark_holds_back_requests(self):
-        """Once in-flight requests reach the watermark, later requests wait
-        in the pending queue; the first is admitted even though it alone
-        exceeds the budget, and every request completes."""
+        """Once prefetch holds the watermark, later requests wait in the
+        pending queue; the first is admitted even though it alone exceeds the
+        budget, and each later one starts as soon as the one before is
+        consumed."""
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
         l1_manager = DramL1Manager(
@@ -969,11 +968,12 @@ class TestAdmission:
                     and ctrl.report_status()["in_flight_request_count"] == 1
                 )
             ), ctrl.report_status()
-            results = [wait_for_result(ctrl, r, timeout=15.0) for r in req_ids]
-
-            assert [row_bits(r) for r in results] == [[0, 1]] * 4
+            for i, req_id in enumerate(req_ids):
+                result = wait_for_result(ctrl, req_id, timeout=15.0)
+                assert row_bits(result) == [0, 1]
+                # Consuming the result releases the budget for the next one.
+                l1_manager.finish_read(all_keys[i * 2 : i * 2 + 2])
             assert l1_manager.get_staging_memory_usage() == 0
-            l1_manager.finish_read(all_keys)
         finally:
             ctrl.stop()
             adapter.close()
@@ -2440,7 +2440,7 @@ class TestP2PPeerFailures:
 
 
 # =============================================================================
-# Retained-bytes budget, continuation priority and cancel
+# Retained bytes in the watermark, continuation priority and cancel
 # =============================================================================
 
 OBJECT_BYTES = 100 * 2 * 512 * 2
@@ -2453,15 +2453,15 @@ def make_budget_l1(num_objects: int = 16) -> DramL1Manager:
     )
 
 
-def retained_watermark_for(l1_manager: DramL1Manager, num_objects: float) -> float:
-    """The retained watermark whose budget is ``num_objects`` test objects."""
+def watermark_for(l1_manager: DramL1Manager, num_objects: float) -> float:
+    """The in-flight watermark whose budget is ``num_objects`` test objects."""
     _used, total = l1_manager.get_memory_usage()
     return OBJECT_BYTES * num_objects / total
 
 
 class TestRetainedBudget:
     def test_unconsumed_loads_hold_back_new_requests(self):
-        """Loaded-but-unconsumed objects count against the retained budget:
+        """Loaded-but-unconsumed objects count against the watermark:
         once they fill it, a new request waits with nothing in flight, and it
         starts as soon as the earlier reader releases its objects."""
         l1_manager = make_budget_l1()
@@ -2472,8 +2472,7 @@ class TestRetainedBudget:
         ctrl = make_controller(
             l1_manager,
             [adapter],
-            inflight_watermark=1.0,
-            retained_watermark=retained_watermark_for(l1_manager, 5.5),
+            inflight_watermark=watermark_for(l1_manager, 5.5),
         )
         ctrl.start()
         try:
@@ -2537,8 +2536,7 @@ class TestRetainedBudget:
         ctrl = make_controller(
             l1_manager,
             [adapter],
-            inflight_watermark=1.0,
-            retained_watermark=retained_watermark_for(l1_manager, 5.5),
+            inflight_watermark=watermark_for(l1_manager, 5.5),
         )
         ctrl.start()
         try:
@@ -2579,8 +2577,7 @@ class TestRetainedBudget:
         ctrl = make_controller(
             l1_manager,
             [adapter],
-            inflight_watermark=1.0,
-            retained_watermark=retained_watermark_for(l1_manager, 5.5),
+            inflight_watermark=watermark_for(l1_manager, 5.5),
         )
         ctrl.start()
         try:
@@ -2620,8 +2617,7 @@ class TestRetainedBudget:
         ctrl = make_controller(
             l1_manager,
             [adapter],
-            inflight_watermark=1.0,
-            retained_watermark=retained_watermark_for(l1_manager, 5.5),
+            inflight_watermark=watermark_for(l1_manager, 5.5),
         )
         with patch(
             "lmcache.v1.distributed.storage_controllers.prefetch_controller."
@@ -2656,8 +2652,7 @@ class TestCancel:
         ctrl = make_controller(
             l1_manager,
             [adapter],
-            inflight_watermark=1.0,
-            retained_watermark=retained_watermark_for(l1_manager, 5.5),
+            inflight_watermark=watermark_for(l1_manager, 5.5),
         )
         ctrl.start()
         try:

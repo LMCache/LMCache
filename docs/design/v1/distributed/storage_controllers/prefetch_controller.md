@@ -91,13 +91,12 @@ is read-locked its row's `num_kv_readers` times for the caller.
 Pending requests start while L1 has room for their loads, not up to a fixed
 count. `_can_admit_new_prefetch(spec)` admits the request at the head of the
 queue when, for every L1 manager that receives loads from a non-draining L2
-adapter, all three conditions hold:
+adapter, both conditions hold:
 
 ```
-(1) staging_bytes + lookup_bytes < inflight_watermark * total_bytes
+(1) staging_bytes + lookup_bytes + retained_bytes + request_bytes
+        <= inflight_watermark * total_bytes
 (2) total_bytes - used_bytes - lookup_bytes >= request_bytes
-(3) staging_bytes + retained_bytes + lookup_bytes + request_bytes
-        <= retained_watermark * total_bytes
 ```
 
 - `staging_bytes` is `BaseL1Manager.get_staging_memory_usage()`: buffers reserved
@@ -119,14 +118,14 @@ adapter, all three conditions hold:
   admitted regardless, so a request that can never fit does not block the
   queue; its reservations then fail per cell as before (`l1_oom`).
 
-Condition (1) bounds how much of L1 in-flight prefetch may occupy; condition
-(2) keeps a request from starting when L1, full of resident data, could not
-hold its loads; condition (3) bounds everything prefetch pins for requests that
-have not run yet. Without (3), a burst of lookups (an engine looks up every
-waiting request, not only the ones about to run) fills L1 with read-locked
-data for requests minutes away from running, and new prefetches and stores
-fail. `retained_watermark` (`--l2-prefetch-retained-watermark`, default 0.6 in
-the server config, 1.0 for a directly built controller) turns this into
+Condition (1) bounds everything prefetch holds in L1 for requests that have
+not run yet: loads in flight, lookups not yet planned, and loaded data still
+read-locked. Condition (2) keeps a request from starting when L1, full of
+resident data, could not hold its loads. Counting retained data matters
+because an engine looks up every waiting request, not only the ones about to
+run. Without it, a burst fills L1 with read-locked data for requests minutes
+away from running, and new prefetches and stores fail. With it,
+`inflight_watermark` (`--l2-prefetch-inflight-watermark`, default 0.5) gives
 lookahead sized by L1 rather than by a request count. See
 [prefetch_retained_budget.md](prefetch_retained_budget.md).
 
@@ -157,9 +156,10 @@ wakes the loop) admits the next requests immediately. Staging held only by
 stores is re-checked at the poll timeout (500 ms) at the latest.
 
 Example: a 16 GiB L1 with the default 0.5 watermark (an 8 GiB budget) and
-requests of 288 MiB (2048 tokens of Qwen3-8B KV). 28 requests stage 7.9 GiB,
-still under the budget, so a 29th starts: 29 requests run at once, where the
-old fixed limit was 8.
+requests of 288 MiB (2048 tokens of Qwen3-8B KV). 27 requests hold 7.6 GiB, and
+a 28th still fits (7.9 GiB), but a 29th would exceed the budget. So 28
+requests are held at once, counting both those loading and those loaded but
+not yet consumed, where the old fixed limit was 8.
 
 ## Flow
 

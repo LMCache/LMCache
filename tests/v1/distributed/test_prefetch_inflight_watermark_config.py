@@ -71,19 +71,3 @@ def test_no_deprecation_warning_without_old_flag(config_warnings):
         "--l2-prefetch-max-in-flight" in record.getMessage()
         for record in config_warnings
     )
-
-
-def test_default_retained_watermark():
-    config = parse_args(_BASE_ARGS)
-    assert config.prefetch_retained_watermark == 0.6
-
-
-def test_retained_watermark_flag_is_plumbed():
-    config = parse_args(_BASE_ARGS + ["--l2-prefetch-retained-watermark", "0.3"])
-    assert config.prefetch_retained_watermark == 0.3
-
-
-@pytest.mark.parametrize("value", ["0", "-0.1", "1.5"])
-def test_retained_watermark_out_of_range_is_rejected(value):
-    with pytest.raises(ValueError, match="prefetch_retained_watermark"):
-        parse_args(_BASE_ARGS + ["--l2-prefetch-retained-watermark", value])

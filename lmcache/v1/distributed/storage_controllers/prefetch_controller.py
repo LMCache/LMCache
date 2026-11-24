@@ -572,14 +572,11 @@ class PrefetchController(StorageControllerInterface):
         l2_adapters: List of L2 adapter instances.
         adapter_descriptors: Descriptors for each L2 adapter (same order).
         policy: The prefetch policy for load plan and retention decisions.
-        inflight_watermark: Fraction of an L1 manager's capacity that
-            in-flight prefetch requests may stage before new requests wait,
-            in ``(0, 1]``.
-        retained_watermark: Fraction of an L1 manager's capacity, in
-            ``(0, 1]``, that prefetch may hold in total -- staged, being
-            looked up, and loaded but still read-locked for an unconsumed
-            request -- before new requests wait. 1.0 bounds it by the
-            capacity alone.
+        inflight_watermark: Fraction of an L1 manager's capacity, in
+            ``(0, 1]``, that prefetch may hold before new requests wait:
+            buffers being staged, lookups not yet planned, and loaded
+            objects still read-locked for a request that has not consumed
+            them.
     """
 
     # Singleton dispatch for the in-flight load gauges: tests may construct
@@ -597,7 +594,6 @@ class PrefetchController(StorageControllerInterface):
         adapter_descriptors: list[L2AdapterDescriptor],
         policy: PrefetchPolicy,
         inflight_watermark: float = 0.5,
-        retained_watermark: float = 1.0,
     ) -> None:
         self._l1_managers: dict[int, L1ManagerInterface] = {
             desc.index: mgr
@@ -621,7 +617,6 @@ class PrefetchController(StorageControllerInterface):
         }
 
         self._inflight_watermark = inflight_watermark
-        self._retained_watermark = retained_watermark
 
         # Adapters being removed: adapter id -> event set once detached.
         self._draining: dict[int, threading.Event] = {}
@@ -844,7 +839,6 @@ class PrefetchController(StorageControllerInterface):
             "is_healthy": is_healthy,
             "thread_alive": is_healthy,
             "inflight_watermark": self._inflight_watermark,
-            "retained_watermark": self._retained_watermark,
             "submission_queue_size": submission_queue_size,
             "pending_queue_size": len(self._pending_queue),
             "continuation_queue_size": len(self._continuation_queue),
@@ -1252,7 +1246,7 @@ class PrefetchController(StorageControllerInterface):
                 self._stall_admissions += 1
                 logger.warning(
                     "Prefetch request %d waited %.0f s with nothing in flight; "
-                    "admitting it over the watermarks",
+                    "admitting it over the watermark",
                     queue[0][0],
                     now - self._head_blocked_since,
                 )
@@ -1262,13 +1256,12 @@ class PrefetchController(StorageControllerInterface):
     def _can_admit_new_prefetch(self, spec: PrefetchTaskSpec) -> bool:
         """Return whether the pending request ``spec`` may start now.
 
-        The request can be admitted when all of the following conditions
+        The request can be admitted when both of the following conditions
         are met:
 
-        1. staging bytes + lookup bytes < ``inflight_watermark`` * capacity.
+        1. staging bytes + lookup bytes + retained bytes + request bytes
+           <= ``inflight_watermark`` * capacity.
         2. free bytes - lookup bytes >= request bytes.
-        3. staging bytes + retained bytes + lookup bytes + request bytes
-           <= ``retained_watermark`` * capacity.
 
         With no request in flight and no retained bytes, ``spec`` is admitted
         regardless, so a request that can never fit does not block the
@@ -1300,15 +1293,12 @@ class PrefetchController(StorageControllerInterface):
             retained_bytes = l1_manager.get_prefetch_retained_bytes()
             if idle and retained_bytes == 0:
                 continue  # nothing of prefetch's to wait for in this L1
-            staged_bytes = l1_manager.get_staging_memory_usage() + lookup_bytes
-            if staged_bytes >= self._inflight_watermark * total_bytes:
+            held_bytes = (
+                l1_manager.get_staging_memory_usage() + lookup_bytes + retained_bytes
+            )
+            if held_bytes + request_bytes > self._inflight_watermark * total_bytes:
                 return False
             if total_bytes - used_bytes - lookup_bytes < request_bytes:
-                return False
-            if (
-                staged_bytes + retained_bytes + request_bytes
-                > self._retained_watermark * total_bytes
-            ):
                 return False
         return True
 

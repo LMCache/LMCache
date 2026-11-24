@@ -764,14 +764,10 @@ class StorageManagerConfig:
     """ The L1 write-placement policy name. """
 
     prefetch_inflight_watermark: float = 0.5
-    """ Fraction of each L1's capacity that in-flight L2 prefetches may stage
-    before new prefetch requests wait, in (0, 1]. """
-
-    prefetch_retained_watermark: float = 0.6
     """ Fraction of each L1's capacity, in (0, 1], that L2 prefetches may hold
-    in total -- staged, being looked up, or loaded and still read-locked for a
-    request that has not consumed them -- before new prefetch requests wait.
-    Bounds how far ahead of the engine prefetch runs under a burst. """
+    before new prefetch requests wait: loads being staged, lookups not yet
+    planned, and loaded objects still read-locked for a request that has not
+    consumed them. Bounds how far ahead of the engine prefetch runs. """
 
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
@@ -802,11 +798,6 @@ class StorageManagerConfig:
             raise ValueError(
                 "prefetch_inflight_watermark must be in (0, 1], got "
                 f"{self.prefetch_inflight_watermark}"
-            )
-        if not 0 < self.prefetch_retained_watermark <= 1:
-            raise ValueError(
-                "prefetch_retained_watermark must be in (0, 1], got "
-                f"{self.prefetch_retained_watermark}"
             )
         validate_storage_manager_config(self)
         if self.prefetch_policy == "retain":
@@ -1137,18 +1128,11 @@ def add_storage_manager_args(
         "--l2-prefetch-inflight-watermark",
         type=float,
         default=0.5,
-        help="Fraction of L1 capacity, in (0, 1], that in-flight L2 prefetch "
-        "requests may stage before new prefetch requests wait. Default is 0.5.",
-    )
-    policy_group.add_argument(
-        "--l2-prefetch-retained-watermark",
-        type=float,
-        default=0.6,
         help="Fraction of L1 capacity, in (0, 1], that L2 prefetches may hold "
-        "in total (staged, being looked up, or loaded and still read-locked for "
-        "a request that has not retrieved them) before new prefetch requests "
-        "wait. Bounds how far ahead of the engine prefetch runs under a burst. "
-        "Default is 0.6.",
+        "before new prefetch requests wait: loads in flight, lookups not yet "
+        "planned, and loaded data still read-locked for requests that have not "
+        "retrieved it. Bounds how far ahead of the engine prefetch runs under "
+        "a burst. Default is 0.5.",
     )
     # Deprecated: released deployers (operator) still render this flag into
     # server args, and rejecting it crashes the pod on startup.
@@ -1268,7 +1252,6 @@ def parse_args_to_config(
             store_policy=args.l2_store_policy,
             prefetch_policy=args.l2_prefetch_policy,
             prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
-            prefetch_retained_watermark=args.l2_prefetch_retained_watermark,
             periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
         )
     if args.l1_size_gb is None or defaults is None:
@@ -1352,7 +1335,6 @@ def parse_args_to_config(
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
-        prefetch_retained_watermark=args.l2_prefetch_retained_watermark,
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )
     return config
