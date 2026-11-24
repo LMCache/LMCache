@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from logging import Logger
+from typing import Any, Callable, TypeVar
+import functools
 import logging
 import os
+import warnings
 
 
 def build_format(color):
@@ -92,6 +95,46 @@ def init_logger(name: str) -> Logger:
 
     logger.setLevel(log_level)
     return logger
+
+
+logger = init_logger(__name__)
+
+
+##### Deprecation #####
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def lmcache_deprecate(reason: str) -> Callable[[F], F]:
+    """Mark a function or method as deprecated.
+
+    Calling the wrapped callable emits a ``DeprecationWarning`` and logs a
+    warning the first time it is invoked, including the supplied reason.
+
+    Args:
+        reason: Human-readable explanation of why the callable is deprecated
+            and, ideally, what to use instead.
+
+    Returns:
+        A decorator that wraps the target callable while preserving its
+        signature and metadata.
+    """
+
+    def decorator(func: F) -> F:
+        warned = False
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            nonlocal warned
+            if not warned:
+                message = f"{func.__qualname__} is deprecated: {reason}"
+                warnings.warn(message, DeprecationWarning, stacklevel=2)
+                logger.warning(message)
+                warned = True
+            return func(*args, **kwargs)
+
+        return wrapper  # type: ignore[return-value]
+
+    return decorator
 
 
 if __name__ == "__main__":

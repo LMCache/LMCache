@@ -9,7 +9,7 @@ off to the engine's :class:`EngineDetector` to reshape and identify the format.
 import torch
 
 # First Party
-from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )

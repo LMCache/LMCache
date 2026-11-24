@@ -22,7 +22,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.kv_format.types import (
     DiscoverableKVCache,
     LayoutHints,

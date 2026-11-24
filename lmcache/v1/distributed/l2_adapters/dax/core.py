@@ -16,8 +16,8 @@ import threading
 import torch
 
 # First Party
-from lmcache.utils import DiskCacheMetadata, check_dax_range
 from lmcache.v1.common.logging import init_logger
+from lmcache.v1.distributed.utils import DiskCacheMetadata, check_dax_range
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 
 logger = init_logger(__name__)
