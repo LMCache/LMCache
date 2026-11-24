@@ -61,13 +61,15 @@ A second rule (`mamba-slice-planes`) then registers **one uint8 plane per slice*
 storage and only changes metadata: dtype `uint8` and shape
 `[num_blocks, num_slots, 1, width]`, where `num_slots` is
 `gcd(block_size, *payloads)` and `width` is `payload_bytes / num_slots`
-(when `block_size > 1`, a coprime `gcd == 1` does not match). When every
+(the rule does not match when `block_size > 1` and that gcd is 1, i.e. when
+the block size and the slice byte counts are coprime: the only view is one
+row of the whole payload). When every
 payload divides `kv_cache_spec.block_size`, `num_slots` equals `block_size`;
 otherwise (e.g. Qwen4 PLE `[NB, 9, 10240]` bf16 -> 184320 bytes under block
 sizes 896 or 1664, or an indivisible conv/SSM pair) `gcd` compresses the slot
-count while keeping `width` within Ascend's per-row UB staging budget (a single
-1-slot row would exceed the 128 KiB fallback for 184320-byte PLE and physical
-UB on every Ascend SoC for 384 KiB–2 MiB SSM slices). Like
+count so that one row fits the transfer kernel. At the moment the only
+block-transfer kernel that copies format 17 is the Ascend kernel, and a
+184320-byte one-slot PLE row exceeds its 128 KiB unified-buffer floor. Like
 `_MambaUnifiedViewEdit._compressed_slots`, slot compression is lossless because
 every MP path (full chunks and `unfull_chunk` boundary-state blocks via
 `multi_layer_block_kv_transfer`; `vLLM <= v0.29` without
