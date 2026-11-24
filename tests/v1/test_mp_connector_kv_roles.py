@@ -906,14 +906,17 @@ def test_scheduler_kv_events_preserve_store_remove_store(
         scheduler.shutdown()
 
 
-@pytest.mark.parametrize("replay", [0, 128])
+@pytest.mark.parametrize(
+    ("replay", "windowed", "expected_need"),
+    [(0, False, 12), (128, False, 8), (0, True, 11)],
+)
 def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
-    mock_io: SimpleNamespace, replay: int
+    mock_io: SimpleNamespace, replay: int, windowed: bool, expected_need: int
 ) -> None:
     """A full-prompt hit must not retrieve past what vLLM allocates. SWA
     replay floors the hit to a block boundary, so the connector gives back the
-    last chunk (retrieve end 8 of 12, [8, 12) released); without replay the
-    whole prompt is loaded and vLLM recomputes the last token."""
+    last chunk ([8, 12) released); a windowed group reports P - 1; otherwise
+    the whole prompt is loaded and vLLM recomputes the last token."""
     config = _config(
         KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
     )
@@ -921,22 +924,22 @@ def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
     scheduler.bind_gpu_block_pool(mock_io.pool)
     try:
         scheduler._prefix_replay_tokens = replay
+        scheduler._full_hit_holds_back_last_token = windowed
         request = _request()  # 12 prompt tokens, chunk 4
         mock_io.scheduler.check_lookup_result.return_value = 12
         need, async_load = scheduler.get_num_new_matched_tokens(request, 0)
         assert need is not None  # the lookup result is ready
         tracker = scheduler.request_trackers[request.request_id]
+        assert (need, async_load) == (expected_need, True)
         if replay:
-            assert (need, async_load) == (8, True)
             assert tracker.num_lmcache_hit_tokens == 8
             assert tracker.pending_free_ranges == [(8, 12)]
         else:
-            assert (need, async_load) == (12, True)
             assert tracker.num_lmcache_hit_tokens == 12
             assert tracker.pending_free_ranges == []
         # vLLM allocates exactly the blocks it was told about (8 tokens = 2
         # blocks under replay); the retrieve must fit in them.
-        n_blocks = 2 if replay else 3
+        n_blocks = -(-need // 4)
         scheduler.update_state_after_alloc(
             request,
             MagicMock(get_block_ids=lambda: (list(range(1, n_blocks + 1)),)),
@@ -952,6 +955,32 @@ def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
         if replay:
             kwargs = mock_io.scheduler.free_lookup_locks.call_args.kwargs
             assert kwargs["extra_ranges"] == ((8, 12),)
+    finally:
+        scheduler.shutdown()
+
+
+def test_full_prompt_hit_one_past_vllms_hit_loads_nothing_and_frees_locks(
+    mock_io: SimpleNamespace,
+) -> None:
+    """vLLM holds P - 1 tokens and recomputes the last one, so the connector
+    loads nothing, as on dev, and frees every lookup lock."""
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER)
+    scheduler.bind_gpu_block_pool(mock_io.pool)
+    try:
+        request = _request()  # 12 prompt tokens, chunk 4
+        mock_io.scheduler.check_lookup_result.return_value = 12
+        assert scheduler.get_num_new_matched_tokens(request, 11) == (0, False)
+        scheduler.update_state_after_alloc(
+            request, MagicMock(get_block_ids=lambda: ([1, 2, 3],)), 0
+        )
+        kwargs = mock_io.scheduler.free_lookup_locks.call_args.kwargs
+        assert (kwargs["start"], kwargs["end"]) == (0, 12)
+        metadata = scheduler.build_connector_meta(_schedule())
+        assert isinstance(metadata, LMCacheMPConnectorMetadata)
+        assert [meta.direction for meta in metadata.requests] == []
     finally:
         scheduler.shutdown()
 

@@ -249,6 +249,29 @@ def is_align_mode_mamba_group(group: Any) -> bool:
     )
 
 
+def is_windowed_group(group: Any) -> bool:
+    """Return whether a prefix-cacheable group keeps only a window of tokens
+    (sliding window, chunked local or Mamba): the groups for which vLLM's
+    Offloading connector reports a full-prompt hit as ``P - 1``."""
+    if is_scratch_group(group):
+        return False
+    if _manager_config(group) is not None:
+        return any(_manager_is(group, name) for name in _WINDOWED_MANAGERS)
+    return any(
+        cls.__name__ in _WINDOWED_SPECS
+        for spec in group_specs(group)
+        for cls in type(spec).__mro__
+    )
+
+
+_WINDOWED_SPECS = ("SlidingWindowSpec", "ChunkedLocalAttentionSpec", "MambaSpec")
+_WINDOWED_MANAGERS = (
+    "SlidingWindowManager",
+    "ChunkedLocalAttentionManager",
+    "MambaManager",
+)
+
+
 def tokens_per_group_block(group: Any, dcp_size: int) -> int:
     """Return the global tokens one block id of the group covers (see
     :func:`get_tokens_per_block`)."""

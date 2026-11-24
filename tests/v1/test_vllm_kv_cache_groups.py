@@ -12,6 +12,7 @@ from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
     get_tokens_per_block,
     is_scratch_spec,
+    is_windowed_group,
 )
 from lmcache.v1.common.group_view import (
     EXCLUDED_ENGINE_GROUP,
@@ -806,3 +807,48 @@ def test_conversion_pure_mla_model_replicates_every_group():
     )
 
     assert [(group.tp_replicas, group.dcp_shards) for group in infos] == [(8, 2)]
+
+
+@dataclass
+class BoundedReplaySlidingWindowSpec(SlidingWindowSpec):
+    """DeepSeek-V4.1 bounded-replay SWA: vLLM does not prefix-cache it."""
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
+@pytest.mark.parametrize(
+    "group,expected",
+    [
+        (MockKVCacheGroup(["l"], FullAttentionSpec(16)), False),
+        (MockKVCacheGroup(["l"], SlidingWindowSpec(16, 64)), True),
+        (MockKVCacheGroup(["l"], SlidingWindowMLASpec(16, 64)), True),
+        (MockKVCacheGroup(["l"], MambaSpec(16)), True),
+        (
+            MockKVCacheGroup(
+                ["l"], UniformTypeKVCacheSpecs(16, {"l": SlidingWindowSpec(16, 64)})
+            ),
+            True,
+        ),
+        (MockKVCacheGroup(["l"], BoundedReplaySlidingWindowSpec(16, 64)), False),
+        (KVCacheGroup({"l": AttentionSpec(16)}, FullAttentionManager, 16), False),
+        (KVCacheGroup({"l": AttentionSpec(16)}, SlidingWindowManager, 16), True),
+        (KVCacheGroup({"l": MambaSpec(16)}, MambaManager, 16), True),
+        (
+            KVCacheGroup(
+                {"l": AttentionSpec(16)},
+                SlidingWindowManager,
+                16,
+                prefix_cacheable=False,
+            ),
+            False,
+        ),
+    ],
+)
+def test_windowed_group_matches_vllm_offloading_sliding_window_groups(
+    group: object, expected: bool
+) -> None:
+    """Prefix-cacheable sliding-window, chunked-local and Mamba groups are
+    windowed, in both vLLM group forms; full attention and scratch are not."""
+    assert is_windowed_group(group) is expected

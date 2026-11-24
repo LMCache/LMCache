@@ -1935,10 +1935,10 @@ class LMCacheMPWorkerAdapter:
             self.store_events[request_id] = event
 
     def fail_retrieve_request(self, request_id: str, op: LoadStoreOp) -> None:
-        """Report a retrieve as failed without submitting it.
-
-        ``op``'s blocks and ``request_id`` are flagged for vLLM recovery, and
-        ``get_finished`` reports the receive once, so it never hangs waiting."""
+        """Fail a retrieve without submitting it; ``get_finished`` reports it once.
+        Args:
+            request_id: The request whose load is reported as failed.
+            op: The retrieve; its blocks are flagged for vLLM's load recovery."""
         self.error_block_ids.update(op.flat_block_ids)
         self._failed_request_ids.add(request_id)
         self._dropped_retrieves.add(request_id)

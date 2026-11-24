@@ -70,6 +70,7 @@ from lmcache.integration.vllm.kv_cache_groups import (
     is_align_mode_mamba_group,
     is_per_request_state_group,
     is_scratch_group,
+    is_windowed_group,
     tokens_per_group_block,
 )
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
@@ -664,6 +665,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config, kv_cache_config
         )
         self._prefix_replay_tokens = get_prefix_replay_tokens(kv_cache_config)
+        # A full-prompt hit is reported as P - 1 when a group keeps only a
+        # window, as vLLM's Offloading connector does (see
+        # get_num_new_matched_tokens).
+        self._full_hit_holds_back_last_token = kv_cache_config is not None and any(
+            is_windowed_group(group) for group in kv_cache_config.kv_cache_groups
+        )
         mamba_cache_mode = getattr(vllm_config.cache_config, "mamba_cache_mode", "none")
         self._reserve_last_token_for_lookup = mamba_cache_mode in ("align", "all")
         scheduler_block_size = get_vllm_scheduler_block_size(
@@ -1556,18 +1563,39 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
 
         # A full-prompt hit reports every token, as vLLM's Offloading and Nixl
-        # connectors do: the load is async, so vLLM allocates the whole hit and
-        # recomputes the last token itself afterwards. Holding that token back
-        # left its block unallocated while the retrieve covered it (#6751).
-        if ret == len(request.all_token_ids) and self._prefix_replay_tokens > 0:
-            # SWA bounded replay floors the hit to a block boundary before
-            # allocating, so give back a whole chunk.
-            chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
-            aligned = max(0, (ret - 1) // chunk * chunk)
-            if aligned < ret:
-                tracker.pending_free_ranges.append((aligned, ret))
-                tracker.num_lmcache_hit_tokens = aligned
-            need_to_load = max(0, aligned - num_computed_tokens)
+        # connectors do for full attention: the load is async, so vLLM
+        # allocates the whole hit and recomputes the last token itself
+        # afterwards. Holding that token back left its block unallocated while
+        # the retrieve covered it (#6751).
+        if ret == len(request.all_token_ids):
+            if self._prefix_replay_tokens > 0:
+                # SWA bounded replay floors the hit to a block boundary before
+                # allocating, so give back a whole chunk.
+                chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
+                aligned = max(0, (ret - 1) // chunk * chunk)
+                if aligned < ret:
+                    tracker.pending_free_ranges.append((aligned, ret))
+                    tracker.num_lmcache_hit_tokens = aligned
+                need_to_load = max(0, aligned - num_computed_tokens)
+            elif self._full_hit_holds_back_last_token:
+                # A windowed group (sliding window, chunked local, Mamba) keeps
+                # P - 1, as Offloading does: with P, vLLM null-pads the window
+                # block that recomputing token P - 1 reads. When token P - 1
+                # starts a block vLLM then does not allocate, load only the
+                # full chunks and release the tail's lock.
+                if ret != full_chunk_tokens and any(
+                    tokens_per_block > 0 and (ret - 1) % tokens_per_block == 0
+                    for tokens_per_block in self._group_tokens_per_block
+                ):
+                    tracker.pending_free_ranges.append((full_chunk_tokens, ret))
+                    tracker.num_lmcache_hit_tokens = full_chunk_tokens
+                    need_to_load = max(0, full_chunk_tokens - num_computed_tokens)
+                else:
+                    need_to_load = max(0, need_to_load - 1)
+            elif need_to_load == 1:
+                # vLLM already holds P - 1 tokens and recomputes the last one:
+                # load nothing, so update_state_after_alloc frees every lock.
+                need_to_load = 0
 
         logger.debug(
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load

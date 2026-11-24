@@ -32,7 +32,10 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.utils import init_logger
-from lmcache.v1.common.group_view import slice_block_ids_per_group
+from lmcache.v1.common.group_view import (
+    block_index_range,
+    slice_block_ids_per_group,
+)
 from lmcache.v1.common.token_codec import (
     TOKEN_STRIDE,
     num_packed_tokens,
@@ -651,10 +654,10 @@ class LMCacheMPRequestMetadata:
             ):
                 if tokens_per_block == 0:
                     continue
-                expected_blocks = (
-                    -(-end_token_idx // tokens_per_block)
-                    - start_token_idx // tokens_per_block
+                first, last = block_index_range(
+                    tokens_per_block, start_token_idx, end_token_idx
                 )
+                expected_blocks = last - first
                 if len(group_block_ids) < expected_blocks:
                     logger.error(
                         "Retrieve of tokens [%d, %d) for request %s needs %d "
