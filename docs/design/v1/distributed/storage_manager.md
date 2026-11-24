@@ -99,6 +99,41 @@ controller's decision.
 - `tests/v1/mp_observability/trace/test_codecs.py`: trace round-trips of the
   request types and of `PrefetchHandle.sliding_windows`.
 
+## Clearing
+
+`StorageManager.clear(force=False, tier=Tier.L1)` drops cached data.
+`Tier.L1` (default) keeps the historical L1-only behavior, `Tier.L2` calls
+`clear()` on every L2 adapter, and `Tier.ALL` clears L1, then L2, then L1
+again.
+L2 errors are logged and never raised, so an L2 failure never stops the L1
+clear. Adapters without `clear()` support, and adapters whose config sets
+`shared` (one bucket or directory used by several instances), are skipped
+with a warning on each clear: one instance must not wipe KV that others still
+use.
+
+`reset_cache` normally runs after generation is paused (vLLM may preempt
+running requests back to waiting rather than finish them), but stores of
+earlier requests can still be in flight. The first L1 clear removes objects
+whose L2 store is only queued, so the store controller skips them. A store
+already submitted holds an L1 read lock, so the non-forced L1 clear keeps its
+object; before deleting L2, `clear()` waits (up to 30 s) until no submitted
+store is in flight, so the store lands before the delete, and the final L1
+clear removes the now-unlocked object. Not covered: a batch the store thread
+has read-locked but not yet registered as in flight when the wait checks,
+stores of requests still running, and prefetches; closing those needs a
+clear epoch (follow-up).
+
+The MP `clear` RPC takes an optional `tier` (default `None`, which clears
+L1 only, as before). Only vLLM's `reset_cache` (vLLM `sleep()`,
+`pause_generation(clear_cache=True)`, `reset_prefix_cache(reset_connector=True)`)
+sends `tier=Tier.ALL`. SGLang's `clear_storage_backend()` and
+`POST /cache/clear` keep the L1-only clear. The default is `None` rather than
+`Tier.L1` because a gRPC request from a client that predates the field
+decodes an unset string, which is not a valid `Tier`. The RPC never raises
+for L2 problems, because vLLM's `EngineCore._reset_caches` raises
+`RuntimeError` when the connector reset reports failure, and most L2
+adapters cannot clear yet.
+
 ## Write placement and object ownership
 
 The CLI configures one or more L1 managers; `StorageManager.__init__` builds

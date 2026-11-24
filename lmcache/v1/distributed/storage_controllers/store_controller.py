@@ -379,6 +379,22 @@ class StoreController(StorageControllerInterface):
             "deferred_l1_deletion_count": len(self._deferred_l1_deletions),
         }
 
+    def wait_for_in_flight_stores(self, timeout: float) -> bool:
+        """Block until no submitted L2 store task is in flight.
+
+        Args:
+            timeout: Maximum seconds to wait.
+
+        Returns:
+            True when no store is in flight, False if ``timeout`` expired.
+        """
+        deadline = time.monotonic() + timeout
+        while self._status_in_flight_count > 0:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+        return True
+
     def add_adapter(
         self,
         adapter_id: int,

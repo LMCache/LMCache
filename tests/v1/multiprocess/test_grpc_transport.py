@@ -45,6 +45,7 @@ from lmcache.v1.common.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.distributed.p2p import P2PClient
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
@@ -233,7 +234,7 @@ def grpc_client(
             return instance_id == 7
 
         @request_handler(HandlerType.BLOCKING)
-        def clear(self, force: bool = False) -> None:
+        def clear(self, force: bool = False, tier: Tier | None = None) -> None:
             calls.clear_force = force
 
         @request_handler()
@@ -327,11 +328,15 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
 
     clear_codec = registry.by_full_name["lmcache.mp.ManagementService.Clear"]
     assert clear_codec.operation == "clear"
-    assert clear_codec.payload_types == (bool,)
-    assert clear_codec.request_decoder(clear_codec.request_encoder((), {})) == (False,)
+    assert clear_codec.payload_types == (bool, Tier | None)
+    # An unset tier (what old clients send) decodes to None, i.e. L1 only.
+    assert clear_codec.request_decoder(clear_codec.request_encoder((), {})) == (
+        False,
+        None,
+    )
     assert clear_codec.request_decoder(
-        clear_codec.request_encoder((), {"force": True})
-    ) == (True,)
+        clear_codec.request_encoder((), {"force": True, "tier": Tier.ALL})
+    ) == (True, Tier.ALL)
 
     negotiate_codec = registry.by_full_name[
         "lmcache.mp.ManagementService.NegotiateChunkSize"
@@ -852,7 +857,7 @@ def test_grpc_server_keeps_handler_concurrency(grpc_server_mode: str) -> None:
             return True
 
         @request_handler(HandlerType.BLOCKING, requires_client_affinity=True)
-        def clear(self, force: bool = False) -> None:
+        def clear(self, force: bool = False, tier: Tier | None = None) -> None:
             affinity_threads.setdefault(int(force), set()).add(threading.get_ident())
 
     config = MPServerConfig(
