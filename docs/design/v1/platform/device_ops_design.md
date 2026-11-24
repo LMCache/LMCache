@@ -471,3 +471,4 @@ module names and directories.
 | MUSA | `MusaDeviceOps` | pointer tensors + transfer overrides | none | **low** |
 | HPU | `HpuDeviceOps` | none (inherits baseline) | none | **trivial** |
 | Neuron | `NeuronDeviceOps` | none (inherits baseline) | none | **trivial** |
+| TPU | `TpuDeviceOps` | transfer override (tensor ops via host) | none | **low** |
