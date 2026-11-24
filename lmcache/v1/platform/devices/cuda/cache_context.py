@@ -19,6 +19,9 @@ if TYPE_CHECKING:
     # Third Party
     import cupy
 
+    # First Party
+    from lmcache.v1.common.object_group_transfer import ObjectGroupTransfer
+
 # First Party
 from lmcache import torch_dev
 from lmcache.utils import EngineType
@@ -345,6 +348,9 @@ class _TempGPUBuffer:
 class GPUCacheContext(BaseCacheContext):
     """
     Manages the shape and pointers to vLLM GPU KV cache tensors.
+
+    ``object_group_transfer`` supplies the base full-chunk copy implementation;
+    it is optional for layout-only users and device transfer overrides.
     """
 
     device_type = "cuda"
@@ -358,7 +364,9 @@ class GPUCacheContext(BaseCacheContext):
         engine_type: EngineType = EngineType.VLLM,
         separate_object_groups: bool = True,
         full_sw_kv: bool = False,
-    ):
+        *,
+        object_group_transfer: "ObjectGroupTransfer | None" = None,
+    ) -> None:
         # Kept for close(): raw-IPC wrappers hold driver-level mappings
         # that pin the exporter's device memory until explicitly closed.
         self._kv_wrappers: KVCache = list(kv_caches)
@@ -371,6 +379,7 @@ class GPUCacheContext(BaseCacheContext):
                 engine_type,
                 separate_object_groups,
                 full_sw_kv,
+                object_group_transfer,
             )
         except BaseException:
             # Partial construction may have imported some mappings
@@ -388,6 +397,7 @@ class GPUCacheContext(BaseCacheContext):
         engine_type: EngineType,
         separate_object_groups: bool,
         full_sw_kv: bool,
+        object_group_transfer: "ObjectGroupTransfer | None",
     ) -> None:
         """Body of ``__init__``; split out so the constructor can roll
         back partially imported KV mappings on failure.
@@ -429,6 +439,7 @@ class GPUCacheContext(BaseCacheContext):
             kv_layer_groups_manager=kv_layer_groups_manager,
             block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+            object_group_transfer=object_group_transfer,
         )
 
         self.group_kv_pointers_: list[torch.Tensor] = []

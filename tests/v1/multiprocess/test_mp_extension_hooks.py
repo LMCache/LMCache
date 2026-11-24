@@ -44,7 +44,6 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 from lmcache.v1.client.worker_transfer import (
     LMCacheDrivenTransferContext,
 )
-from lmcache.v1.multiprocess import object_group_transfer
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
@@ -115,42 +114,6 @@ def test_store_copies_only_through_the_cache_context(monkeypatch):
 
     assert ok
     assert _copies(cache_context) == [(0, _D2H), (1, _D2H)]
-
-
-def test_transfer_module_has_no_direct_copy_path():
-    # A direct import would let a new copy site skip the context's override.
-    assert not hasattr(mod, "transfer_kv_per_object_group")
-
-
-def test_default_context_copy_forwards_every_argument(monkeypatch):
-    copy = MagicMock()
-    monkeypatch.setattr(object_group_transfer, "transfer_kv_per_object_group", copy)
-    cache_context = cast(BaseCacheContext, object())
-    block_ids, memory_objs = [object()], [None]
-
-    BaseCacheContext.transfer_object_group(
-        cache_context,
-        cast(Any, block_ids),
-        memory_objs,
-        object_group_id=2,
-        batch_size=4,
-        skip_first_n_tokens=16,
-        direction=_H2D,
-        transfer_key="key",
-        block_ids_host=[[1]],
-    )
-
-    copy.assert_called_once_with(
-        cache_context,
-        block_ids,
-        memory_objs,
-        object_group_id=2,
-        batch_size=4,
-        skip_first_n_tokens=16,
-        direction=_H2D,
-        transfer_key="key",
-        block_ids_host=[[1]],
-    )
 
 
 # ------------------------------------------------------------------ #
@@ -228,6 +191,7 @@ def test_default_cache_context_hook_applies_server_settings(monkeypatch):
         engine_type=engine_type,
         separate_object_groups=True,
         full_sw_kv=True,
+        object_group_transfer=mod.transfer_kv_per_object_group,
     )
 
 
