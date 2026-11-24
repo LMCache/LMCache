@@ -47,6 +47,21 @@ sentinel. A chunk is skipped for an object group only when all block IDs in all
 of that object's kernel groups equal the sentinel. Skipped objects are neither
 reserved nor committed.
 
+A sliding-window attention group needs a stricter rule. It stores the trailing
+window of each chunk, and the engine hands out the null block for positions
+that left a request's window: after a prefix-cache hit at token `h`, vLLM gives
+a sliding-window group the null block below about `h - window`. The chunk that
+straddles that edge holds null blocks next to real ones, so
+`all_null_chunk_masks` keeps it. `null_window_chunk_masks` marks it when any
+block of its stored window equals the sentinel, and the store skips it as it
+skips an all-null chunk. Recurrent-state groups keep the all-null rule: each of
+their chunks is either all null or real at its checkpoint.
+
+The engine-driven worker applies the same two rules before it asks for slots
+or sends chunks. Only the grouped protocol can leave a chunk out, so a model
+whose single group is sliding-window or recurrent state registers that group
+through it rather than through the legacy single-group layout.
+
 LMCache already skips these copies in the transfer layer. On store, skipped
 objects become `None` entries and the D2H loop does not launch a kernel for
 them. On retrieve, the existing sliding-window/object-prefix logic starts from
@@ -66,7 +81,11 @@ contract or per-kernel transfer masks and are outside this integration.
 
 - `tests/v1/multiprocess/test_config.py` covers the default and CLI override.
 - `tests/v1/multiprocess/test_lmcache_driven_transfer_skip.py` covers global
-  null masks and reuse of the existing sparse-copy skip path.
+  null masks, sliding-window windows that hold a null block, and reuse of the
+  existing sparse-copy skip path.
+- `tests/v1/multiprocess/test_engine_driven_multigroup.py` covers the
+  engine-driven worker's rules and the grouped registration of a single
+  sliding-window group.
 - `tests/v1/multiprocess/test_native_state_lookup.py` covers sparse PAGE/STATE
   lookup with explicit object-group separation.
 - `tests/v1/multiprocess/test_native_state_alias_gpu.py` covers a real

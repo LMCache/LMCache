@@ -149,6 +149,9 @@ def test_store_owner_callback_round_trip(
         num_object_groups=2,
         num_kernel_groups=2,
         object_groups=[ObjectGroupInfo(kernel_group_indices=[i]) for i in range(2)],
+        kernel_groups=[
+            SimpleNamespace(sw_size_tokens=-1, recurrent_state=False) for _ in range(2)
+        ],
     )
     entry = SimpleNamespace(
         cache_context=cache_context,
