@@ -303,7 +303,7 @@ class LookupModule(DiscoverableModule):
         # connector that does not load unfull chunks sends an aligned end,
         # which leaves none.
         unfull_tail_tokens = max(
-            0, min(key.end, num_packed_tokens(key.token_bytes)) - requested_tokens
+            0, min(key.end, key.num_tokens) - requested_tokens
         )
 
         # Guard with has_subscribers() to avoid allocating the metadata dict
