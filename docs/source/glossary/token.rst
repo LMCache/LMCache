@@ -11,10 +11,10 @@ Token
 =====
 
 .. meta::
-   :description: A token is the unit of text a model actually operates on — a whole word, a piece of a word, punctuation, whitespace, or another recurring fragment,...
+   :description: A token is the unit of text a model actually operates on — a whole word, a piece of a word, punctuation, whitespace, or another recurring fragment —...
    :keywords: Token, tokens
 
-**A token is the unit of text a model actually operates on** — a whole word, a piece of a word, punctuation, whitespace, or another recurring fragment, drawn from the model's fixed vocabulary.
+**A token is the unit of text a model actually operates on** — a whole word, a piece of a word, punctuation, whitespace, or another recurring fragment — drawn from the model's fixed vocabulary.
 
 In English text, a token averages about four characters, or roughly three-quarters of a word; the ratio differs between tokenizers and between languages.
 Common words are usually a single token; rarer ones get split into pieces.

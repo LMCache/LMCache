@@ -32,7 +32,7 @@ How a model turns text into text. The foundation everything else rests on.
 
 :doc:`Token <token>`
    A token is the unit of text a model actually operates on — a whole word, a piece of a
-   word, punctuation, whitespace, or another recurring fragment,...
+   word, punctuation, whitespace, or another recurring fragment —...
 
 :doc:`Tokenization <tokenization>`
    Tokenization is the step that splits raw text into tokens the model recognizes.

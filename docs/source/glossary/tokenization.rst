@@ -16,7 +16,7 @@ Tokenization
 
 **Tokenization is the step that splits raw text into tokens the model recognizes.**
 
-It happens before any model computation.
+Tokenizing happens before any model computation.
 The tokenizer is specific to the model, so the same sentence can produce a different number of tokens under different tokenizers.
 For that reason, token counts from one vendor's model do not carry over exactly to another vendor's model.
 
