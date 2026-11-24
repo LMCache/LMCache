@@ -60,6 +60,18 @@ const (
 
 	// l2EncryptionKeyVolumeName is the pod volume name for the master-key mount.
 	l2EncryptionKeyVolumeName = "l2-master-key"
+
+	// livezPath is the engine's Kubernetes liveness-probe path. The HTTP
+	// server must be up and the cache engine wired into the FastAPI app
+	// state for this to return 200. It is intentionally lightweight so a
+	// stuck process still fails quickly.
+	livezPath = "/livez"
+
+	// readyzPath is the engine's Kubernetes readiness-probe path. In
+	// addition to the engine being wired up, it verifies storage-manager
+	// health across L1 managers, L2 adapters, eviction and prefetch
+	// controllers, and the worker liveness summary.
+	readyzPath = "/readyz"
 )
 
 // l2EncryptionKeyPath is the in-container path of the mounted L2 encryption
@@ -285,16 +297,22 @@ func buildDaemonSetCore(
 	}
 
 	// Probes
-	tcpProbe := &corev1.TCPSocketAction{
-		Port: intstr.FromInt32(serverPort),
-	}
+	// The engine exposes two ports: the ZMQ serving port (serverPort) and the
+	// HTTP port (httpPort). Startup must use a TCP probe against the serving
+	// port because the HTTP server only comes up once the engine finishes
+	// pinning L1. Liveness and readiness both use HTTP probes against the
+	// dedicated HTTP endpoint so we can detect a wedged event loop or a
+	// degraded component tree, not just an open port.
+	httpPort := getHTTPPort(spec)
 
 	// Scale the startup window to the L1 pin time (see startupProbeFailureThreshold).
 	startupFailureThreshold := startupProbeFailureThreshold(spec.L1.SizeGB)
 
 	startupProbe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
-			TCPSocket: tcpProbe,
+			TCPSocket: &corev1.TCPSocketAction{
+				Port: intstr.FromInt32(serverPort),
+			},
 		},
 		InitialDelaySeconds: 5,
 		PeriodSeconds:       5,
@@ -303,20 +321,25 @@ func buildDaemonSetCore(
 
 	livenessProbe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
-			TCPSocket: tcpProbe,
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: livezPath,
+				Port: intstr.FromInt32(httpPort),
+			},
 		},
 		PeriodSeconds: 10,
 	}
 
 	readinessProbe := &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
-			TCPSocket: tcpProbe,
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: readyzPath,
+				Port: intstr.FromInt32(httpPort),
+			},
 		},
 		PeriodSeconds: 5,
 	}
 
 	// Container ports
-	httpPort := getHTTPPort(spec)
 	containerPorts := []corev1.ContainerPort{
 		{
 			Name:          serverPortName,
