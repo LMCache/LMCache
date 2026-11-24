@@ -800,21 +800,19 @@ def test_object_public_round_trip_and_capabilities(backend: str) -> None:
         }
 
     _, arena = _aligned_arena(4 * _CHUNK_SIZE)
-    run_id = uuid.uuid4().hex
     keys = [
         ObjectKey(
             chunk_hash=bytes.fromhex("00112233"),
             model_name="lmcache/nixl-native-integration",
             kv_rank=42,
             object_group_id=7,
-            cache_salt=f"tenant-{run_id}",
+            cache_salt="tenant",
         ),
         ObjectKey(
             chunk_hash=bytes.fromhex("44556677"),
             model_name="lmcache/nixl-native-integration",
             kv_rank=42,
             object_group_id=8,
-            cache_salt=run_id,
         ),
     ]
     sources: list[MemoryObj] = [

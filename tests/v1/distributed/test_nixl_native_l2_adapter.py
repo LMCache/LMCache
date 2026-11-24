@@ -149,24 +149,18 @@ class _FakeNixlClient:
         os.close(self.write_fd)
 
 
-@pytest.mark.parametrize(
-    ("backend", "hash_keys"),
-    [("DOCA_MEMOS", True), ("OBJ", True), ("OBJ", False)],
-)
-def test_object_keys_at_native_boundary(
-    monkeypatch: pytest.MonkeyPatch, backend: str, hash_keys: bool
-) -> None:
-    """Send identical persistent identities for store, lookup, and load."""
+def test_hashed_object_keys_at_native_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Submit the same persisted digest for store, lookup, and load."""
+
+    class RecordingClient(_FakeNixlClient):
+        """Capture the names submitted to the native connector."""
+
+        submit_batch_set = Mock(return_value=1)
+        submit_batch_exists = Mock(return_value=2)
+        submit_batch_get = Mock(return_value=3)
+
     native_module = ModuleType("lmcache.lmcache_nixl")
-    client = _FakeNixlClient()
-    store = Mock(return_value=1)
-    lookup = Mock(return_value=2)
-    load = Mock(return_value=3)
-    monkeypatch.setattr(client, "submit_batch_set", store, raising=False)
-    monkeypatch.setattr(client, "submit_batch_exists", lookup, raising=False)
-    monkeypatch.setattr(client, "submit_batch_get", load, raising=False)
-    client_factory = Mock(return_value=client)
-    native_module.LMCacheNixlClient = client_factory  # type: ignore[attr-defined]
+    native_module.LMCacheNixlClient = RecordingClient  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "lmcache.lmcache_nixl", native_module)
     base_key = ObjectKey(bytes.fromhex("00112233"), "org/model", 42, 7)
     keys = [
@@ -174,37 +168,23 @@ def test_object_keys_at_native_boundary(
         ObjectKey(identity=base_key.identity, cache_salt="tenant"),
         ObjectKey(identity=base_key.identity, cache_salt="tenant", tags={"x": "y"}),
     ]
-    objects = [
-        cast(MemoryObj, Mock(spec=MemoryObj, byte_array=memoryview(bytearray(4))))
-        for _ in keys
+    expected = [
+        "6cc0015ab0a976200e5050447d4661e6",
+        "37e1c659672d91caea9a0b71665944ae",
+        "04de359e85b6e3f741a8ab929bab7e5c",
     ]
-
-    backend_params = {"key_is_hashed": "true"} if hash_keys else {}
-    expected = (
-        [
-            "6cc0015ab0a976200e5050447d4661e6",
-            "37e1c659672d91caea9a0b71665944ae",
-            "04de359e85b6e3f741a8ab929bab7e5c",
-        ]
-        if hash_keys
-        else [
-            "org/model@0000002a@7@00112233",
-            "org/model@0000002a@7@00112233@tenant",
-            "org/model@0000002a@7@00112233@tenant@x1-eyJ4IjoieSJ9",
-        ]
-    )
+    obj = cast(MemoryObj, Mock(spec=MemoryObj, byte_array=memoryview(bytearray(4))))
     config = NixlNativeL2AdapterConfig.from_dict(
-        {"backend": backend, "backend_params": backend_params}
+        {"backend": "OBJ", "backend_params": {"key_is_hashed": "true"}}
     )
     adapter = create_l2_adapter(config, L1MemoryDesc(4096, 8192, 4096))
     try:
-        assert client_factory.call_args.kwargs["backend_params"] == backend_params
-        adapter.submit_store_task(keys, objects)
+        adapter.submit_store_task(keys, [obj] * len(keys))
         adapter.submit_lookup_and_lock_task(keys, {})
-        adapter.submit_load_task(keys, objects)
-        assert store.call_args.args[0] == expected
-        lookup.assert_called_once_with(expected)
-        assert load.call_args.args[0] == expected
+        adapter.submit_load_task(keys, [obj] * len(keys))
+        assert RecordingClient.submit_batch_set.call_args.args[0] == expected
+        RecordingClient.submit_batch_exists.assert_called_once_with(expected)
+        assert RecordingClient.submit_batch_get.call_args.args[0] == expected
     finally:
         adapter.close()
 

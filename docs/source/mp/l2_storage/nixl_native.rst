@@ -264,8 +264,9 @@ file storage they are directories beneath ``file_path``.
 
 For ``DOCA_MEMOS``, set ``"key_is_hashed": "true"`` under
 ``backend_params``. The OBJECT path uses 32 lowercase hex characters from
-SHA-256 of the complete native L2 key. Enable the option before populating
-the cache and use matching LMCache and native NIXL connector builds.
+SHA-256 of the complete native L2 key. Hashed names have no ``shard_dirs``
+prefix. Enable the option before populating the cache and use matching
+LMCache and native NIXL connector builds.
 
 Benchmarking
 ------------
