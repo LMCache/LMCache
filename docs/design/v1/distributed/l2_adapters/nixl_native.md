@@ -229,6 +229,11 @@ rejects separators in salt. Names longer than the filesystem component limit
 are rejected. Compatibility with `fs_native` is intentionally not provided;
 that connector retains its established `.data` identity.
 
+For the `DOCA_MEMOS` object plugin, the strategy uses the first 16 bytes of
+SHA-256 over the canonical L2 wire key, rendered as 32 lowercase hex
+characters. Store, lookup, and load apply the same mapping. Hashing the wire
+key includes the salt and the versioned identity-tags field when present.
+
 ## Optional dependency boundary
 
 The connector is built in one of two ways, and neither makes the `lmcache`

@@ -28,7 +28,7 @@ setup(
             sources=["pybind.cpp", "connector.cpp", "storage.cpp"],
             include_dirs=[".", "..", _sdk_dir("NIXL_INCLUDE_DIR", "nixl.h")],
             library_dirs=[_sdk_dir("NIXL_LIBRARY_DIR", "libnixl.so")],
-            libraries=["nixl"],
+            libraries=["nixl", "crypto"],
             cxx_std=20,
             extra_compile_args=["-O3"],
         )

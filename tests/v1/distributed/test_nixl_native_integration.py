@@ -7,6 +7,7 @@ from typing import Any
 import ctypes
 import errno
 import importlib.util
+import json
 import os
 import select
 import threading
@@ -760,29 +761,55 @@ def test_failed_plugin_initialization_rolls_back_resources(tmp_path: Path) -> No
     assert not list(tmp_path.iterdir())
 
 
-@requires_nixl_object_integration
 @requires_nixl_extension
-def test_object_public_round_trip_and_capabilities() -> None:
-    """Exercise whole-object store, lookup, and load through the public API."""
-    endpoint = os.environ.get("LMCACHE_NIXL_OBJECT_ENDPOINT")
-    bucket = os.environ.get("LMCACHE_NIXL_OBJECT_BUCKET")
-    if not endpoint or not bucket:
-        pytest.skip("OBJ integration requires endpoint and bucket environment values")
+@pytest.mark.parametrize(
+    "backend",
+    [
+        pytest.param("OBJ", marks=requires_nixl_object_integration),
+        "DOCA_MEMOS",
+    ],
+)
+def test_object_public_round_trip_and_capabilities(backend: str) -> None:
+    """Store, look up, and load objects through a native NIXL plugin.
+
+    Args:
+        backend: Plugin to test against its configured disposable storage.
+    """
+    if backend == "DOCA_MEMOS":
+        params_json = os.environ.get("LMCACHE_NIXL_MEMOS_TEST_PARAMS")
+        if not params_json:
+            pytest.skip(
+                "set LMCACHE_NIXL_MEMOS_TEST_PARAMS to isolated namespace parameters"
+            )
+        backend_params = json.loads(params_json)
+    else:
+        endpoint = os.environ.get("LMCACHE_NIXL_OBJECT_ENDPOINT")
+        bucket = os.environ.get("LMCACHE_NIXL_OBJECT_BUCKET")
+        if not endpoint or not bucket:
+            pytest.skip("OBJ integration requires endpoint and bucket environment values")
+        backend_params = {
+            "bucket": bucket,
+            "endpoint_override": endpoint,
+            "scheme": os.environ.get("LMCACHE_NIXL_OBJECT_SCHEME", "https"),
+            "use_virtual_addressing": "false",
+        }
 
     _, arena = _aligned_arena(4 * _CHUNK_SIZE)
+    run_id = uuid.uuid4().hex
     keys = [
         ObjectKey(
             chunk_hash=bytes.fromhex("00112233"),
             model_name="lmcache/nixl-native-integration",
             kv_rank=42,
             object_group_id=7,
-            cache_salt="tenant",
+            cache_salt=f"tenant-{run_id}",
         ),
         ObjectKey(
             chunk_hash=bytes.fromhex("44556677"),
             model_name="lmcache/nixl-native-integration",
             kv_rank=42,
             object_group_id=8,
+            cache_salt=run_id,
         ),
     ]
     sources: list[MemoryObj] = [
@@ -792,13 +819,8 @@ def test_object_public_round_trip_and_capabilities() -> None:
     expected = [bytes(obj.byte_array) for obj in sources]
     config = NixlNativeL2AdapterConfig.from_dict(
         {
-            "backend": "OBJ",
-            "backend_params": {
-                "bucket": bucket,
-                "endpoint_override": endpoint,
-                "scheme": os.environ.get("LMCACHE_NIXL_OBJECT_SCHEME", "https"),
-                "use_virtual_addressing": "false",
-            },
+            "backend": backend,
+            "backend_params": backend_params,
             "num_workers": 1,
         }
     )

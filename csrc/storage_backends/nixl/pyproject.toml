@@ -35,7 +35,7 @@ manylinux-aarch64-image = "manylinux_2_28"
 # NIXL_BUILD_VERSION is set by build_nixl_artifacts.yml (set it when running
 # cibuildwheel by hand).
 environment-pass = ["NIXL_BUILD_VERSION"]
-before-all = "bash /project/.github/scripts/fetch_nixl_sdk.sh cu13 \"$NIXL_BUILD_VERSION\""
+before-all = "dnf -y install openssl-devel && bash /project/.github/scripts/fetch_nixl_sdk.sh cu13 \"$NIXL_BUILD_VERSION\""
 environment = { NIXL_INCLUDE_DIR = "/opt/nixl-source/src/api/cpp", NIXL_LIBRARY_DIR = "/opt/nixl-libs/.nixl_cu13.mesonpy.libs" }
 
 [tool.cibuildwheel.linux]

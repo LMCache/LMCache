@@ -83,7 +83,8 @@ WorkerNixlContext::WorkerNixlContext(
   l1_registered = true;
 
   try {
-    storage = make_nixl_storage_strategy(storage_kind, backend_params);
+    storage =
+        make_nixl_storage_strategy(storage_kind, backend_name, backend_params);
   } catch (...) {
     agent->deregisterMem(l1_registration, &options);
     l1_registered = false;

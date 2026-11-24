@@ -2,6 +2,7 @@
 
 #include "storage.h"
 
+#include <openssl/sha.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
@@ -432,11 +433,29 @@ class NixlFileStorage final : public NixlStorageStrategy {
   bool shard_directories_;
 };
 
+std::string memos_object_identity(const std::string& key) {
+  constexpr size_t identity_bytes = 16;
+  constexpr char hex[] = "0123456789abcdef";
+  unsigned char digest[SHA256_DIGEST_LENGTH];
+  if (SHA256(reinterpret_cast<const unsigned char*>(key.data()), key.size(),
+             digest) == nullptr) {
+    throw std::runtime_error("SHA-256 failed for a DOCA_MEMOS object key");
+  }
+  std::string identity(identity_bytes * 2, '0');
+  for (size_t i = 0; i < identity_bytes; ++i) {
+    identity[i * 2] = hex[digest[i] >> 4];
+    identity[i * 2 + 1] = hex[digest[i] & 0x0f];
+  }
+  return identity;
+}
+
 class NixlObjectStorage final : public NixlStorageStrategy {
  public:
-  explicit NixlObjectStorage(
+  NixlObjectStorage(
+      const std::string& backend_name,
       const std::unordered_map<std::string, std::string>& backend_params)
-      : shard_directories_(
+      : use_memos_identity_(backend_name == "DOCA_MEMOS"),
+        shard_directories_(
             parse_bool_parameter(backend_params, "shard_dirs", false)) {}
 
   void store(nixlAgent& agent, nixlBackendH* backend,
@@ -450,9 +469,8 @@ class NixlObjectStorage final : public NixlStorageStrategy {
       const NixlTransferBuffer& buffer = buffers[index];
       local.addDesc(nixlBasicDesc(reinterpret_cast<uintptr_t>(buffer.data),
                                   buffer.length, 0));
-      nixlBlobDesc object_descriptor(
-          0, buffer.length, index,
-          key_to_filename(buffer.key, shard_directories_));
+      nixlBlobDesc object_descriptor(0, buffer.length, index,
+                                     identity_for_key(buffer.key));
       registration.addDesc(object_descriptor);
       storage.addDesc(object_descriptor);
     }
@@ -467,7 +485,7 @@ class NixlObjectStorage final : public NixlStorageStrategy {
     std::vector<std::string> identities;
     identities.reserve(buffers.size());
     for (const NixlTransferBuffer& buffer : buffers) {
-      identities.push_back(key_to_filename(buffer.key, shard_directories_));
+      identities.push_back(identity_for_key(buffer.key));
     }
     std::vector<uint8_t> results =
         query_storage(agent, backend, OBJ_SEG, identities);
@@ -502,7 +520,7 @@ class NixlObjectStorage final : public NixlStorageStrategy {
     std::vector<std::string> identities;
     identities.reserve(keys.size());
     for (const std::string& key : keys) {
-      identities.push_back(key_to_filename(key, shard_directories_));
+      identities.push_back(identity_for_key(key));
     }
     return query_storage(agent, backend, OBJ_SEG, identities);
   }
@@ -521,19 +539,26 @@ class NixlObjectStorage final : public NixlStorageStrategy {
   }
 
  private:
-  bool shard_directories_;
+  std::string identity_for_key(const std::string& key) const {
+    if (use_memos_identity_) return memos_object_identity(key);
+    return key_to_filename(key, shard_directories_);
+  }
+
+  const bool use_memos_identity_;
+  const bool shard_directories_;
 };
 
 }  // namespace
 
 std::unique_ptr<NixlStorageStrategy> make_nixl_storage_strategy(
-    NixlStorageKind storage_kind,
+    NixlStorageKind storage_kind, const std::string& backend_name,
     const std::unordered_map<std::string, std::string>& backend_params) {
   switch (storage_kind) {
     case NixlStorageKind::File:
       return std::make_unique<NixlFileStorage>(backend_params);
     case NixlStorageKind::Object:
-      return std::make_unique<NixlObjectStorage>(backend_params);
+      return std::make_unique<NixlObjectStorage>(backend_name,
+                                                 backend_params);
   }
   throw std::runtime_error("unsupported inferred NIXL storage kind");
 }

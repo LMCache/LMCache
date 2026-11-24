@@ -46,7 +46,8 @@ RHEL/Alma/Rocky 8 install ``openssl3-libs`` from EPEL.
 
 A source installation can build the connector into LMCache instead. The minimum
 supported NIXL version is 1.3.0, and the NIXL installation must provide the
-public C++ headers as well as ``libnixl``. Build LMCache with:
+public C++ headers as well as ``libnixl``. The native connector also needs
+OpenSSL development headers and ``libcrypto``. Build LMCache with:
 
 .. code-block:: bash
 
@@ -261,6 +262,12 @@ This is the same persistent filename format used by ``fs_native``. With
 ``shard_dirs: "true"``, the example lives below
 ``00/11/``. For object storage those separators form an object-key prefix; for
 file storage they are directories beneath ``file_path``.
+
+The ``DOCA_MEMOS`` plugin requires 128-bit object names. When
+``backend: "DOCA_MEMOS"`` selects an object plugin, the adapter uses 32 lowercase
+hex characters from SHA-256 of the complete native L2 key, without a path
+prefix. Set ``backend_params`` according to the installed plugin and use a
+dedicated test namespace when validating a new installation.
 
 Benchmarking
 ------------

@@ -69,7 +69,7 @@ class NixlStorageBackend(StorageBackendProfile):
                     str(include_dir),
                 ],
                 library_dirs=library_dirs,
-                libraries=["nixl"],
+                libraries=["nixl", "crypto"],
                 runtime_library_dirs=list(library_dirs),
                 extra_compile_args={
                     "cxx": extra_cxx_flags + ["-O3", "-std=c++20"],
