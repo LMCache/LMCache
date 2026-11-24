@@ -1586,13 +1586,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
         return need_to_load, need_to_load > 0
 
-    def _starts_a_block(self, token_idx: int) -> bool:
-        """Return whether ``token_idx`` is the first token of a block in any group."""
-        return any(
-            tokens_per_block > 0 and token_idx % tokens_per_block == 0
-            for tokens_per_block in self._group_tokens_per_block
-        )
-
     def on_new_request(self, request: "Request") -> None:
         """Submit an LMCache lookup when a request enters the waiting queue.
 
@@ -2255,6 +2248,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # only it.
             request_configs["lmcache.hint.unfull_chunk_grid"] = self._unfull_chunk_grid
         return request_configs
+
+    def _starts_a_block(self, token_idx: int) -> bool:
+        """Return whether ``token_idx`` is the first token of a block in any group."""
+        return any(
+            tokens_per_block > 0 and token_idx % tokens_per_block == 0
+            for tokens_per_block in self._group_tokens_per_block
+        )
 
     def _add_unfull_chunk_stores(
         self,
