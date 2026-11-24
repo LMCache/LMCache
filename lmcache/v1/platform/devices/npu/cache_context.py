@@ -31,7 +31,7 @@ from lmcache.v1.platform.base.ipc_wrapper import KVCache
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.common.group_view import EngineGroupInfo
-    from lmcache.v1.common.object_group_transfer import ObjectGroupTransfer
+    from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 
 logger = init_logger(__name__)
 

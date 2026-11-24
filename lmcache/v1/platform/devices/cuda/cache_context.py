@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     import cupy
 
     # First Party
-    from lmcache.v1.common.object_group_transfer import ObjectGroupTransfer
+    from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 
 # First Party
 from lmcache import torch_dev

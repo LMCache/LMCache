@@ -14,7 +14,7 @@ from typing import Optional, Union
 import torch
 
 # First Party
-from lmcache import device_ops
+from lmcache.lmcache_native import PageBufferShapeDesc
 from lmcache.utils import EngineType, lmcache_deprecate
 from lmcache.v1.common.kv_format import (
     concrete_shape,
@@ -26,7 +26,6 @@ from lmcache.v1.common.kv_format import (
 )
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache, LayoutHints
 from lmcache.v1.common.logging import init_logger
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -687,7 +686,7 @@ def make_page_buffer_shape_desc(
     Returns:
         A populated ``PageBufferShapeDesc``.
     """
-    desc = device_ops.PageBufferShapeDesc()
+    desc = PageBufferShapeDesc()
     desc.kv_size = get_kv_size(kv_caches, engine_kv_format)
     desc.nl = num_layers_in_group
     desc.nb = num_blocks
