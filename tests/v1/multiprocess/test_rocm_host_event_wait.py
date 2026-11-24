@@ -724,8 +724,8 @@ def test_stop_fails_a_hand_off_queued_after_the_worker_shutdown_sentinel(
 
 def test_affinity_pool_completes_future_from_deferred_response() -> None:
     pool = AffinityThreadPool(max_workers=1)
-    deferred = DeferredResponse()
-    failing = DeferredResponse()
+    deferred: DeferredResponse[tuple[str, bool]] = DeferredResponse()
+    failing: DeferredResponse[tuple[str, bool]] = DeferredResponse()
     try:
         first = pool.submit(lambda: deferred, affinity_key=0)
         second = pool.submit(lambda: failing, affinity_key=0)
