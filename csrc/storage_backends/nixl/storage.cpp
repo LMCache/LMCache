@@ -434,10 +434,10 @@ class NixlFileStorage final : public NixlStorageStrategy {
 
 class NixlObjectStorage final : public NixlStorageStrategy {
  public:
-  NixlObjectStorage(
-      bool keys_are_object_names,
+  explicit NixlObjectStorage(
       const std::unordered_map<std::string, std::string>& backend_params)
-      : keys_are_object_names_(keys_are_object_names),
+      : keys_are_object_names_(
+            parse_bool_parameter(backend_params, "key_is_hashed", false)),
         shard_directories_(
             parse_bool_parameter(backend_params, "shard_dirs", false)) {}
 
@@ -534,14 +534,13 @@ class NixlObjectStorage final : public NixlStorageStrategy {
 }  // namespace
 
 std::unique_ptr<NixlStorageStrategy> make_nixl_storage_strategy(
-    NixlStorageKind storage_kind, bool keys_are_object_names,
+    NixlStorageKind storage_kind,
     const std::unordered_map<std::string, std::string>& backend_params) {
   switch (storage_kind) {
     case NixlStorageKind::File:
       return std::make_unique<NixlFileStorage>(backend_params);
     case NixlStorageKind::Object:
-      return std::make_unique<NixlObjectStorage>(keys_are_object_names,
-                                                 backend_params);
+      return std::make_unique<NixlObjectStorage>(backend_params);
   }
   throw std::runtime_error("unsupported inferred NIXL storage kind");
 }

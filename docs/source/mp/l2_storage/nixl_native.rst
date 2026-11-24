@@ -262,11 +262,10 @@ This is the same persistent filename format used by ``fs_native``. With
 ``00/11/``. For object storage those separators form an object-key prefix; for
 file storage they are directories beneath ``file_path``.
 
-The ``DOCA_MEMOS`` plugin requires 128-bit object names. When
-``backend: "DOCA_MEMOS"`` selects an object plugin, the adapter uses 32 lowercase
-hex characters from SHA-256 of the complete native L2 key, without a path
-prefix. Set ``backend_params`` according to the installed plugin and use a
-dedicated test namespace when validating a new installation.
+For ``DOCA_MEMOS``, set ``"key_is_hashed": "true"`` under
+``backend_params``. The OBJECT path uses 32 lowercase hex characters from
+SHA-256 of the complete native L2 key. Enable the option before populating
+the cache and use matching LMCache and native NIXL connector builds.
 
 Benchmarking
 ------------

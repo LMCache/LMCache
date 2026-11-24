@@ -784,6 +784,7 @@ def test_object_public_round_trip_and_capabilities(backend: str) -> None:
         backend_params = json.loads(params_json)
         # The round trip asserts both a hit and a miss from the plugin.
         backend_params["query_mem_mode"] = "actual"
+        backend_params["key_is_hashed"] = "true"
     else:
         endpoint = os.environ.get("LMCACHE_NIXL_OBJECT_ENDPOINT")
         bucket = os.environ.get("LMCACHE_NIXL_OBJECT_BUCKET")

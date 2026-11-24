@@ -35,7 +35,7 @@ _BACKEND_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
 # The lmcache_nixl Python API this adapter is written against. It must equal the
 # module's API_VERSION (csrc/storage_backends/nixl/pybind.cpp); bump both
 # together.
-NIXL_CONNECTOR_API_VERSION = 2
+NIXL_CONNECTOR_API_VERSION = 1
 # lmcache-nixl is published only at release versions, at lmcache's version.
 _INSTALL_HINT = (
     'on a release, install it with `pip install "lmcache[nixl]==<lmcache version>"`'
@@ -45,7 +45,7 @@ _INSTALL_HINT = (
 _LOCAL_BACKENDS = ("GDS", "GDS_MT", "POSIX")
 
 
-def _encode_memos_object_name(key: ObjectKey) -> str:
+def _encode_hashed_object_name(key: ObjectKey) -> str:
     return hashlib.sha256(encode_storage_key(key).encode("utf-8")).hexdigest()[:32]
 
 
@@ -294,8 +294,9 @@ def _create_nixl_native_l2_adapter(
         extra_status=status,
         pad_buffers_to_alignment=pad_buffers_to_alignment,
         encode_key=(
-            _encode_memos_object_name
-            if config.backend == "DOCA_MEMOS" and native_client.storage_type == "OBJECT"
+            _encode_hashed_object_name
+            if native_client.storage_type == "OBJECT"
+            and config.backend_params.get("key_is_hashed") == "true"
             else encode_storage_key
         ),
     )

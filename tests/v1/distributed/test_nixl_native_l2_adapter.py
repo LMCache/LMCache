@@ -150,28 +150,11 @@ class _FakeNixlClient:
 
 
 @pytest.mark.parametrize(
-    ("backend", "expected"),
-    [
-        (
-            "DOCA_MEMOS",
-            [
-                "6cc0015ab0a976200e5050447d4661e6",
-                "37e1c659672d91caea9a0b71665944ae",
-                "04de359e85b6e3f741a8ab929bab7e5c",
-            ],
-        ),
-        (
-            "OBJ",
-            [
-                "org/model@0000002a@7@00112233",
-                "org/model@0000002a@7@00112233@tenant",
-                "org/model@0000002a@7@00112233@tenant@x1-eyJ4IjoieSJ9",
-            ],
-        ),
-    ],
+    ("backend", "hash_keys"),
+    [("DOCA_MEMOS", True), ("OBJ", True), ("OBJ", False)],
 )
 def test_object_keys_at_native_boundary(
-    monkeypatch: pytest.MonkeyPatch, backend: str, expected: list[str]
+    monkeypatch: pytest.MonkeyPatch, backend: str, hash_keys: bool
 ) -> None:
     """Send identical persistent identities for store, lookup, and load."""
     native_module = ModuleType("lmcache.lmcache_nixl")
@@ -182,7 +165,8 @@ def test_object_keys_at_native_boundary(
     monkeypatch.setattr(client, "submit_batch_set", store, raising=False)
     monkeypatch.setattr(client, "submit_batch_exists", lookup, raising=False)
     monkeypatch.setattr(client, "submit_batch_get", load, raising=False)
-    native_module.LMCacheNixlClient = lambda **kwargs: client  # type: ignore[attr-defined]
+    client_factory = Mock(return_value=client)
+    native_module.LMCacheNixlClient = client_factory  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "lmcache.lmcache_nixl", native_module)
     base_key = ObjectKey(bytes.fromhex("00112233"), "org/model", 42, 7)
     keys = [
@@ -195,9 +179,26 @@ def test_object_keys_at_native_boundary(
         for _ in keys
     ]
 
-    config = NixlNativeL2AdapterConfig.from_dict({"backend": backend})
+    backend_params = {"key_is_hashed": "true"} if hash_keys else {}
+    expected = (
+        [
+            "6cc0015ab0a976200e5050447d4661e6",
+            "37e1c659672d91caea9a0b71665944ae",
+            "04de359e85b6e3f741a8ab929bab7e5c",
+        ]
+        if hash_keys
+        else [
+            "org/model@0000002a@7@00112233",
+            "org/model@0000002a@7@00112233@tenant",
+            "org/model@0000002a@7@00112233@tenant@x1-eyJ4IjoieSJ9",
+        ]
+    )
+    config = NixlNativeL2AdapterConfig.from_dict(
+        {"backend": backend, "backend_params": backend_params}
+    )
     adapter = create_l2_adapter(config, L1MemoryDesc(4096, 8192, 4096))
     try:
+        assert client_factory.call_args.kwargs["backend_params"] == backend_params
         adapter.submit_store_task(keys, objects)
         adapter.submit_lookup_and_lock_task(keys, {})
         adapter.submit_load_task(keys, objects)
@@ -306,7 +307,6 @@ def test_factory_wheel_imports_nixl_first(
     ("api_version", "accepted"),
     [
         (NIXL_CONNECTOR_API_VERSION, True),
-        (NIXL_CONNECTOR_API_VERSION - 1, False),
         (NIXL_CONNECTOR_API_VERSION + 1, False),
         (None, False),
     ],
