@@ -32,6 +32,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
 )
 from lmcache.utils import CacheRemoveEvent, CacheStoreEvent
 from lmcache.v1.client.transport.errors import MPServerUnavailableError
+from lmcache.v1.client.worker_transfer import EngineDrivenTransferContext
 from lmcache.v1.common.custom_types import (
     KVEventBatch,
     KVEventRecord,
@@ -204,6 +205,7 @@ class FakeHeartbeatThread:
         # assert the adapter starts the heartbeat healthy (event still set).
         self.health_event_set_at_init = self.health_event.is_set()
         self.recover_callback: Callable[[], bool] | None = None
+        self.probe_callback: Callable[[], bool | None] | None = None
         # Ordered record of public calls ("register_recover_callback",
         # "start", "stop") for call-order assertions.
         self.calls: list[str] = []
@@ -213,6 +215,9 @@ class FakeHeartbeatThread:
     def register_recover_callback(self, callback: Callable[[], bool]) -> None:
         self.calls.append("register_recover_callback")
         self.recover_callback = callback
+
+    def register_probe_callback(self, callback: Callable[[], bool | None]) -> None:
+        self.probe_callback = callback
 
     def start(self) -> None:
         self.calls.append("start")
@@ -1418,6 +1423,76 @@ def test_heartbeat_lazy_start_wires_callback_before_start(fake_adapter) -> None:
     adapter.submit_store_request("req-2", _op([[1]]), MagicMock())
     assert len(FakeHeartbeatThread.instances) == 1
     assert adapter.transfer_ctx.submit_store.call_count == 2
+
+
+@pytest.mark.parametrize("engine_driven", [False, True])
+def test_worker_probes_selected_registration_and_skips_released_kv(
+    fake_adapter, monkeypatch: pytest.MonkeyPatch, engine_driven: bool
+) -> None:
+    """Sleep uses ordinary PING and never treats released KV as missing."""
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    client = fake_adapter[1]
+    if engine_driven:
+        adapter.transfer_ctx = MagicMock(spec=EngineDrivenTransferContext)
+    adapter.submit_store_request("start-probe", _op([[0]]), None)
+    probe = FakeHeartbeatThread.instances[0].probe_callback
+    assert probe is not None
+    client.ping_registered.return_value.result.return_value = False
+    assert probe() is False
+    expected_type = (
+        "register_kv_cache_engine_driven_context"
+        if engine_driven
+        else "register_kv_cache"
+    )
+    client.ping_registered.assert_called_once_with(adapter.instance_id, expected_type)
+    client.ping_registered.reset_mock()
+
+    adapter.unregister_kv_caches()
+    client.ping.return_value.result.return_value = True
+    assert probe() is True
+    client.ping_registered.assert_not_called()
+    client.ping.assert_called_once_with(adapter.instance_id)
+
+
+def test_worker_rebuilds_context_when_registration_is_missing(
+    fake_adapter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real heartbeat must recover a healthy worker whose entry was reaped."""
+    adapter, contexts = _registered_adapter(fake_adapter, monkeypatch)
+    client = fake_adapter[1]
+    client.ping_registered.return_value.result.return_value = False
+    old = contexts[0]
+    replacement = MagicMock()
+
+    def register(*args, **kwargs) -> None:
+        assert not adapter.is_healthy
+        client.ping_registered.return_value.result.return_value = True
+
+    replacement.register.side_effect = register
+    monkeypatch.setattr(
+        adapter_mod, "create_transfer_context", lambda *a, **k: replacement
+    )
+    threads: list[HeartbeatThread] = []
+
+    def heartbeat_factory(**kwargs) -> HeartbeatThread:
+        kwargs["interval"] = 0.01
+        heartbeat = HeartbeatThread(**kwargs)
+        threads.append(heartbeat)
+        return heartbeat
+
+    monkeypatch.setattr(adapter_mod, "HeartbeatThread", heartbeat_factory)
+    try:
+        adapter.submit_store_request("start-recovery", _op([[0]]), None)
+        deadline = time.monotonic() + 5
+        while threads[0].total_runs == 0 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert threads[0].total_runs > 0
+        assert adapter.is_healthy
+        assert adapter.transfer_ctx is replacement
+        old.close.assert_called_once()
+        replacement.register.assert_called_once()
+    finally:
+        adapter.shutdown()
 
 
 def test_heartbeat_first_ping_runs_callback_before_setting_event() -> None:

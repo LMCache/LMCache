@@ -66,9 +66,17 @@ def test_transfer_factories_gate_modules(
         (EngineDrivenTransferModule, ("engine_driven", "auto")),
     ):
         monkeypatch.setattr(module_type, "__init__", MagicMock(return_value=None))
-        assert isinstance(module_type.create(build_ctx), module_type) == (
-            mode in supported
+        module = module_type.create(build_ctx)
+        assert isinstance(module, module_type) == (mode in supported)
+        registration = (
+            "register_kv_cache"
+            if module_type is LMCacheDrivenTransferModule
+            else "register_kv_cache_engine_driven_context"
         )
+        if module is not None:
+            assert build_ctx.registration_targets[registration] is module
+        else:
+            assert registration not in build_ctx.registration_targets
 
 
 def _event_module(
@@ -328,6 +336,60 @@ def test_management_ping_touches_targets() -> None:
     assert mgmt.ping(42) is True
     assert mgmt.ping(None) is True
     assert target.touched == [42]
+
+
+@pytest.mark.parametrize("transport", ["zmq", "grpc"])
+@pytest.mark.parametrize("engine_driven", [False, True])
+def test_registration_probe_detects_reaped_context_on_live_server(
+    transport: Literal["zmq", "grpc"], engine_driven: bool
+) -> None:
+    """A successful ordinary PING must not hide a missing KV registration."""
+    gpu = _bare_gpu_module()
+    engine = _bare_non_gpu_module()
+    gpu._cache_contexts[42] = ContextEntry(MagicMock(), "m", 1)
+    engine._engine_driven_contexts[42] = non_gpu_mod.EngineDrivenContextEntry(
+        MagicMock(), "m", 1
+    )
+    engine._strategies[42] = MagicMock()
+    management = ManagementModule(
+        gpu.context,
+        liveness_targets=[gpu, engine],
+        registration_targets={
+            "register_kv_cache": gpu,
+            "register_kv_cache_engine_driven_context": engine,
+        },
+    )
+    config = MPServerConfig(transport=transport, host="127.0.0.1", port=0)
+    server: Any = create_request_server([management], config)
+    url = (
+        f"grpc://127.0.0.1:{server.bound_port}"
+        if transport == "grpc"
+        else server.socket.getsockopt_string(zmq.LAST_ENDPOINT)
+    )
+    server.start()
+    client = RequestClientFactory.create(url, context=zmq.Context.instance())
+    registration = (
+        "register_kv_cache_engine_driven_context"
+        if engine_driven
+        else "register_kv_cache"
+    )
+    try:
+        assert client.ping_registered(42, registration).result(timeout=5) is True
+        assert client.ping_registered(99, registration).result(timeout=5) is False
+        assert client.ping_registered(42, "unknown").result(timeout=5) is False
+        # Model a pause beyond the reap window without a wall-clock sleep.
+        if engine_driven:
+            engine._engine_driven_contexts[42].last_seen = 0
+            assert engine.reap_stale_instances(30, 30) == [42]
+        else:
+            gpu._cache_contexts[42].last_seen = 0
+            assert gpu.reap_stale_instances(30, 30) == [42]
+        assert client.ping(42).result(timeout=5) is True
+        assert client.ping_registered(42, registration).result(timeout=5) is False
+    finally:
+        client.close()
+        server.close()
+        engine.close()
 
 
 def test_management_clear_defaults_to_non_force() -> None:

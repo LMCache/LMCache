@@ -2,7 +2,7 @@
 """Management and utility operations for the MPCacheServer."""
 
 # Standard
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import threading
 
 # First Party
@@ -47,6 +47,7 @@ class ManagementModule(DiscoverableModule):
             registered but never pinged.
         experimental: Experimental features advertised to clients through
             ``get_experimental`` (e.g. ``transfer_query``).
+        registration_targets: Registration RPC names mapped to their owners.
     """
 
     module_name = "management"
@@ -61,6 +62,7 @@ class ManagementModule(DiscoverableModule):
         return cls(
             build_ctx.engine_context,
             liveness_targets=build_ctx.liveness_targets,
+            registration_targets=build_ctx.registration_targets,
             worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
             worker_registration_grace_seconds=(
                 mp_config.worker_registration_grace_seconds
@@ -75,10 +77,12 @@ class ManagementModule(DiscoverableModule):
         worker_reap_timeout_seconds: float = 0.0,
         worker_registration_grace_seconds: float = 0.0,
         experimental: Sequence[str] = (),
+        registration_targets: Mapping[str, InstanceLivenessTarget] | None = None,
     ) -> None:
         self._ctx = ctx
         self._clear_lock = threading.Lock()
         self._liveness_targets = tuple(liveness_targets)
+        self._registration_targets = dict(registration_targets or {})
         self._reap_timeout = worker_reap_timeout_seconds
         self._reap_grace = worker_registration_grace_seconds
         self._experimental = tuple(experimental)
@@ -142,6 +146,25 @@ class ManagementModule(DiscoverableModule):
             for target in self._liveness_targets:
                 target.touch_instance(instance_id)
         return True
+
+    @request_handler(HandlerType.BLOCKING)
+    def ping_registered(self, instance_id: int, registration_type: str) -> bool:
+        """Refresh liveness and check the selected KV registration.
+
+        Args:
+            instance_id: Worker identity used by REGISTER.
+            registration_type: Registration RPC name identifying its owner.
+
+        Returns:
+            True if that registration exists. Other registrations are refreshed
+            but do not determine the result. Unknown registration types return False.
+        """
+        target = self._registration_targets.get(registration_type)
+        registered = target is not None and target.touch_instance(instance_id) is True
+        for other in self._liveness_targets:
+            if other is not target:
+                other.touch_instance(instance_id)
+        return registered
 
     def _reap_cycle(self) -> ThreadRunSummary:
         """Run one reaper scan: reap stale workers, drop mirrored state.

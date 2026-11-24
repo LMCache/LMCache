@@ -51,6 +51,15 @@ message PingResponse {
   bool ok = 1;
 }
 
+message PingRegisteredRequest {
+  int64 instance_id = 1;
+  string registration_type = 2;
+}
+
+message PingRegisteredResponse {
+  bool registered = 1;
+}
+
 message BlockAllocationRecord {
   string req_id = 1;
   repeated int64 new_block_ids = 2;
@@ -73,6 +82,7 @@ service ManagementService {
   rpc GetExperimental(GetExperimentalRequest) returns (GetExperimentalResponse);
   rpc Noop(NoopRequest) returns (NoopResponse);
   rpc Ping(PingRequest) returns (PingResponse);
+  rpc PingRegistered(PingRegisteredRequest) returns (PingRegisteredResponse);
   rpc ReportBlockAllocation(ReportBlockAllocationRequest)
       returns (ReportBlockAllocationResponse);
 }

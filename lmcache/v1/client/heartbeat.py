@@ -80,12 +80,26 @@ class HeartbeatThread(PeriodicThread):
         self._recover_callback: Callable[[], bool] = lambda: True
         self._unhealthy_callback: Callable[[], None] = lambda: None
         self._healthy_callback: Callable[[], bool] = self._set_health_event
+        self._probe_callback: Callable[[], bool | None] = self._probe_server
 
-    def register_recover_callback(self, callback: Callable[[], bool]) -> None:
-        """Register work required before publishing a recovered server.
+    def register_probe_callback(self, callback: Callable[[], bool | None]) -> None:
+        """Replace the server probe before starting the heartbeat.
 
         Args:
-            callback: Function returning whether recovery succeeded.
+            callback: Bounded probe returning True for a usable registration,
+                False for a reachable server with missing registration, or None
+                when the server cannot be reached. False triggers recovery with
+                health cleared. None leaves recovery for a later reachable probe.
+        """
+        self._probe_callback = callback
+
+    def register_recover_callback(self, callback: Callable[[], bool]) -> None:
+        """Register work required after an outage or lost registration.
+
+        Args:
+            callback: Function returning whether recovery succeeded. Health
+                stays cleared on failure and recovery retries on the next
+                reachable probe.
         """
         self._recover_callback = callback
 
@@ -120,6 +134,13 @@ class HeartbeatThread(PeriodicThread):
         self._health_event.set()
         return True
 
+    def _probe_server(self) -> bool | None:
+        return (
+            True
+            if send_ping(self._req_client, self.interval, self._instance_id)
+            else None
+        )
+
     def _publish_unhealthy(self) -> None:
         try:
             self._unhealthy_callback()
@@ -128,21 +149,19 @@ class HeartbeatThread(PeriodicThread):
 
     def _execute(self) -> ThreadRunSummary:
         was_healthy = self._health_event.is_set()
-        healthy = send_ping(
-            self._req_client,
-            timeout=self.interval,
-            instance_id=self._instance_id,
-        )
+        probe = self._probe_callback()
+        healthy = probe is True
         if self.stop_requested:
             return ThreadRunSummary(
                 success=True,
                 message="stop requested; skipping health update",
             )
 
-        if healthy and not was_healthy:
-            logger.warning(
-                "LMCache server is healthy again, triggering recovery callback"
-            )
+        if probe is False and was_healthy:
+            self._publish_unhealthy()
+
+        if probe is not None and (probe is False or not was_healthy):
+            logger.warning("LMCache server is reachable, restoring worker registration")
             try:
                 healthy = self._recover_callback()
             except Exception:
