@@ -98,14 +98,30 @@ def test_required_job_that_did_not_pass_fails_the_run(
     assert kind in _kinds(report)
 
 
+@pytest.mark.parametrize(
+    ("slug", "jobs", "context"),
+    [
+        ("k3-unit-tests", [_job(":pipeline: Upload pipeline")], "path-filter-skip"),
+        (
+            "k3-multiprocess-test",
+            [
+                _job(":fast_forward: Skip expensive multiprocess CI"),
+                _job(":pipeline: Upload pipeline", "broken"),
+            ],
+            "skip expensive ci",
+        ),
+    ],
+)
 def test_skipped_suite_fails_even_when_the_build_is_green(
-    gate: ModuleType, manifest: dict
+    gate: ModuleType,
+    manifest: dict,
+    slug: str,
+    jobs: list[dict[str, Any]],
+    context: str,
 ) -> None:
     builds = _passing_builds(manifest)
-    builds["k3-unit-tests"]["jobs"] = [_job(":pipeline: Upload pipeline")]
-    annotations = {
-        "k3-unit-tests": [{"context": "path-filter-skip", "body_html": "Skipped"}]
-    }
+    builds[slug]["jobs"] = jobs
+    annotations = {slug: [{"context": context, "body_html": "Skipped"}]}
     report = gate.evaluate(manifest, builds, annotations)
     assert not report["passed"]
     assert {"missing", "suite_skipped"} <= _kinds(report)
@@ -130,12 +146,19 @@ def test_unsupported_workload_skip_fails_unless_expected(
     assert gate.evaluate(expected, builds, annotations)["passed"]
 
 
-def test_pin_steps_that_never_run_are_allowed(gate: ModuleType, manifest: dict) -> None:
+@pytest.mark.parametrize(
+    "label",
+    [
+        ":test_tube: Verify SGLang nightly / zmq",
+        ":pushpin: Pin verified vLLM nightly",
+        ":fast_forward: Skip expensive multiprocess CI",
+    ],
+)
+def test_allowed_not_run_steps_may_stay_broken(
+    gate: ModuleType, manifest: dict, label: str
+) -> None:
     builds = _passing_builds(manifest)
-    builds["k3-multiprocess-test"]["jobs"] += [
-        _job(":test_tube: Verify SGLang nightly / zmq", "broken"),
-        _job(":pushpin: Pin verified vLLM nightly", "broken"),
-    ]
+    builds["k3-multiprocess-test"]["jobs"].append(_job(label, "broken"))
     assert gate.evaluate(manifest, builds, {})["passed"]
 
 

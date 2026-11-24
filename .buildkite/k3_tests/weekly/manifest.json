@@ -56,7 +56,8 @@
       ],
       "not_run_allowed": [
         "^:test_tube: Verify ",
-        "^:pushpin: Pin verified "
+        "^:pushpin: Pin verified ",
+        "^:fast_forward: Skip expensive multiprocess CI\\Z"
       ]
     },
     {
