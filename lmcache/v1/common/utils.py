@@ -47,6 +47,30 @@ except ImportError:
 logger = init_logger(__name__)
 
 
+try:
+    # First Party
+    from lmcache import _version  # type: ignore[attr-defined]
+
+    VERSION = getattr(_version, "__version__", "")
+    COMMIT_ID = getattr(_version, "__commit_id__", "")
+except ImportError:
+    VERSION = ""
+    COMMIT_ID = ""
+
+
+def get_version() -> str:
+    """Return a human-readable version string.
+
+    Returns:
+        ``"<version>-<commit-id>"``, with ``"NA"`` substituted when the
+        package version or commit id is not available (e.g. when running
+        from a source checkout without a tag).
+    """
+    version_display = VERSION if VERSION else "NA"
+    commit_id_display = COMMIT_ID if COMMIT_ID else "NA"
+    return f"{version_display}-{commit_id_display}"
+
+
 def assert_contiguous(tensor: torch.Tensor) -> None:
     """Assert that *tensor* has a contiguous physical layout with zero offset.
 
@@ -847,6 +871,16 @@ def _get_head_size_view(
         raise ValueError(f"k/v shape mismatch after decode: {k.shape} vs {v.shape}")
 
     return k.view(nb * bs, nh * hs), v.view(nb * bs, nh * hs)
+
+
+def round_down(x: int, y: int) -> int:
+    """Round down x to the nearest multiple of y."""
+    return (x // y) * y
+
+
+def round_up(x: int, y: int) -> int:
+    """Round up x to the nearest multiple of y."""
+    return ((x + y - 1) // y) * y
 
 
 def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):

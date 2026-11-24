@@ -325,30 +325,6 @@ def parse_mixed_slot_mapping(
         }
 
 
-try:
-    # First Party
-    from lmcache import _version  # type: ignore[attr-defined]
-
-    VERSION = getattr(_version, "__version__", "")
-    COMMIT_ID = getattr(_version, "__commit_id__", "")
-except ImportError:
-    VERSION = ""
-    COMMIT_ID = ""
-
-
-def get_version():
-    """Return a human-readable version string.
-
-    Returns:
-        ``"<version>-<commit-id>"``, with ``"NA"`` substituted when the
-        package version or commit id is not available (e.g. when running
-        from a source checkout without a tag).
-    """
-    version_display = VERSION if VERSION else "NA"
-    commit_id_display = COMMIT_ID if COMMIT_ID else "NA"
-    return f"{version_display}-{commit_id_display}"
-
-
 def convert_tokens_to_list(
     tokens: Optional[Union[torch.Tensor, list[int]]], token_start: int, token_end: int
 ) -> List[int]:

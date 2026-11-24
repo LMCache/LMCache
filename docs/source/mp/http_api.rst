@@ -566,15 +566,15 @@ the engine is initialized, it just has no L2 storage).
 Version descriptors. Each returns a bare JSON **string** (not an object):
 
 - ``GET /version`` — the combined descriptor from
-  ``lmcache.v1.distributed.utils.get_version()``, formatted ``"<version>-<commit_id>"``
+  ``lmcache.v1.common.utils.get_version()``, formatted ``"<version>-<commit_id>"``
   (e.g. ``"0.3.1-ca79ea33"``). On a source checkout without build-time
   version metadata, each missing component falls back to the literal
   ``"NA"`` (so a metadata-less build returns ``"NA-NA"``).
 - ``GET /lmc_version`` — the raw package version string
-  (``lmcache.v1.distributed.utils.VERSION``); empty string ``""`` when the generated
+  (``lmcache.v1.common.utils.VERSION``); empty string ``""`` when the generated
   ``lmcache._version`` module is absent.
 - ``GET /commit_id`` — the git commit id baked into the build
-  (``lmcache.v1.distributed.utils.COMMIT_ID``); empty string ``""`` when unavailable.
+  (``lmcache.v1.common.utils.COMMIT_ID``); empty string ``""`` when unavailable.
 
 All three are unconditional ``200 OK``.
 
