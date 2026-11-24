@@ -77,11 +77,6 @@ Validated models
 
       **Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-LLM + LMCache setup.
 
-CacheBlend support
-------------------
-
-Not validated.
-
 Compression support
 -------------------
 

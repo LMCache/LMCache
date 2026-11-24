@@ -100,26 +100,15 @@ Moore Threads MUSA currently supports LMCacheDriven mode.
 CacheBlend
 ----------
 
-Is CacheBlend only in a commercial version, and when will it be open-sourced?
-+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Does LMCache support CacheBlend?
+++++++++++++++++++++++++++++++++
 
-The core team is currently focused on support for the latest vLLM. The code is
-not yet ready to be open-sourced.
-
-.. note::
-   **Needs maintainer confirmation.** The original answer said that an
-   open-source version was expected "this quarter", but that statement was not
-   dated, so the timeline cannot be relied on. A current target date is needed.
-
-*Answered by* `@ApostaC <https://github.com/ApostaC>`__.
-
-Does CacheBlend support linear attention models?
-++++++++++++++++++++++++++++++++++++++++++++++++
-
-.. note::
-   **Needs maintainer confirmation.** The community raised this question, but
-   no answer was recorded, apart from a reference to an article on Xiaohongshu.
-   That article was not identified.
+Not currently. CacheBlend is a technique for reusing cached KV data for text
+that is not at the start of the prompt. It is described in the paper
+`CacheBlend: Fast Large Language Model Serving with Cached Knowledge Fusion
+<https://arxiv.org/abs/2405.16444>`_. Some CacheBlend code is in the LMCache
+repository, but it is not supported for community use, and these docs do not
+cover setting it up.
 
 KV Cache behavior and control
 -----------------------------

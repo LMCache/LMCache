@@ -170,11 +170,6 @@ Validated models
 
       **Status:** Not validated with LMCache.
 
-CacheBlend support
-------------------
-
-Not supported: the hybrid groups' cached pages are byte-opaque (see Caveats).
-
 Compression support
 -------------------
 

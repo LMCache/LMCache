@@ -265,9 +265,8 @@ Connection Injection (Webhook)
 Hand-wiring the ConfigMap mount and the ``$(cat ...)`` argument substitution
 above is repetitive across vLLM Deployments.  A **mutating admission webhook**
 shipped with the operator can do it for you so the vLLM manifest stays clean.
-It mirrors the CacheBlend webhook (see :ref:`mp-operator-cacheblend`) with an
-``lmcache-`` annotation/label discriminator so the two injectors never
-cross-fire on the same pod.
+It uses an ``lmcache-`` annotation and label discriminator, so it does not act
+on pods meant for other injectors.
 
 When invoked on an opted-in pod whose ``<engine>-connection`` ConfigMap exists,
 the webhook mutates the pod at admission time to add:
@@ -298,9 +297,8 @@ Prerequisites
 ~~~~~~~~~~~~~
 
 - **cert-manager** + ``make deploy`` (not ``make run``, which is
-  controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``) --
-  same as the CacheBlend webhook; install once per cluster (see
-  :ref:`mp-operator-cacheblend` "Additional Prerequisites").
+  controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``);
+  install once per cluster.
 - **Pod Security Standards** -- under the default isolated IPC the webhook
   injects only an emptyDir, which the ``baseline`` / ``restricted`` PSS
   profiles allow.  With ``spec.isolatedIPC: false`` the injected hostPath
@@ -816,7 +814,7 @@ Overrides & Extras
      - Extra pod labels. Selector labels (``app.kubernetes.io/name``,
        ``app.kubernetes.io/instance``, and ``app.kubernetes.io/managed-by``)
        take precedence over conflicting entries. This also applies to
-       CacheBlendEngine and LMCacheCoordinator pods. On updates, existing
+       LMCacheCoordinator pods. On updates, existing
        workload selector labels retain their values.
    * - ``serviceAccountName``
      - --
@@ -1154,185 +1152,6 @@ before the lmcache container starts:
    and share the engine's ``volumes``/``volumeMounts`` -- mount the same
    volume in both if the init container needs to touch it.
 
-.. _mp-operator-cacheblend:
-
-CacheBlend
-----------
-
-CacheBlend reuses cached KV at shifted (non-prefix) positions by recomputing a
-small subset of tokens.  The operator manages it as a second CRD,
-``CacheBlendEngine``, plus a **mutating admission webhook** that injects the
-pure-Python ``lmcache-cacheblend`` vLLM plugin into your serving pods -- so you
-do **not** rebuild the vLLM image. See :doc:`/kv_cache_optimizations/cacheblend`
-for the technique itself.
-
-It has two halves the operator runs together:
-
-- a GPU-resident CacheBlend engine (``lmcache server --engine-type blend``),
-  deployed as a DaemonSet with the **same GPU model as** ``LMCacheEngine``
-  (``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all`` + the host
-  ``/dev/shm`` mount -- or ``hostIPC`` when ``spec.hostIPC`` is set -- plus
-  ``privileged`` when ``spec.privileged`` is set, and **no**
-  ``nvidia.com/gpu`` claim) so it shares the vLLM GPU for same-device CUDA IPC;
-  and
-- the vLLM-side plugin, injected into opted-in pods by the webhook.
-
-Additional Prerequisites
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Beyond the operator prerequisites above:
-
-- **cert-manager** -- the webhook's serving certificate is issued by a
-  cert-manager ``Issuer`` + ``Certificate``.  Install it before ``make deploy``:
-
-  .. code-block:: bash
-
-      kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
-      kubectl -n cert-manager wait --for=condition=Available deploy --all --timeout=180s
-
-- **Deploy with the webhook** -- use ``make deploy`` (not ``make run``, which is
-  controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``).
-- **Pod Security Standards** -- the webhook injects a hostPath ``/dev/shm``
-  mount (or ``hostIPC``/``privileged`` when the engine opts in), which the
-  ``baseline``/``restricted`` profiles reject, so label the engine's and the
-  vLLM pod's namespaces ``pod-security.kubernetes.io/enforce=privileged``.
-
-Deploying a CacheBlendEngine
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. code-block:: yaml
-
-    apiVersion: lmcache.lmcache.ai/v1alpha1
-    kind: CacheBlendEngine
-    metadata:
-      name: my-cacheblend
-    spec:
-      l1:
-        sizeGB: 60
-      injection:
-        # The (private) cacheblend-plugin init-container image -- repository/tag/
-        # pullPolicy, like spec.image.  Set repository to YOUR image; the
-        # inherited engine-image default is not a valid payload.
-        payloadImage:
-          repository: <registry>/cacheblend-plugin
-          tag: <tag>
-        # Appended to the vLLM pod so the private payload image can pull; the
-        # Secret must exist in the vLLM pod's namespace.
-        imagePullSecrets:
-          - name: my-registry-secret
-
-The engine runs ``lmcache server --engine-type blend`` as a DaemonSet and
-emits a ``my-cacheblend-connection`` ConfigMap with the ``CBKVConnector``
-``kv-transfer-config`` (the operator wires the node-local Service host/port and
-the ``cb.*`` tunables).
-
-Opting a vLLM Pod In
-~~~~~~~~~~~~~~~~~~~~~
-
-Label the pod template for the webhook and bind it to an engine by name.  Launch
-vLLM via the image **ENTRYPOINT** (args only) -- a
-``command: ["/bin/sh", "-c", ...]`` wrapper is skipped, since appended args would
-not reach ``vllm serve``:
-
-.. code-block:: yaml
-
-    apiVersion: apps/v1
-    kind: Deployment
-    metadata:
-      name: vllm-cacheblend
-    spec:
-      replicas: 1
-      selector:
-        matchLabels:
-          app: vllm-cacheblend
-      template:
-        metadata:
-          labels:
-            app: vllm-cacheblend
-            lmcache.ai/cacheblend-inject: "true"          # opt-in (webhook objectSelector)
-          annotations:
-            lmcache.ai/cacheblend-engine: "my-cacheblend" # bind to the engine
-        spec:
-          runtimeClassName: nvidia
-          containers:
-            - name: vllm
-              image: lmcache/vllm-openai:<pinned-tag>
-              args: ["<your-model>", "--port", "8000", "--gpu-memory-utilization", "0.8"]
-              resources:
-                limits:
-                  nvidia.com/gpu: "1"
-
-The webhook injects the plugin init container, ``PYTHONPATH``, the ``/dev/shm``
-mount, the
-private-image pull secret, and the required CacheBlend vLLM flags
-(``--kv-transfer-config`` from the engine's connection ConfigMap,
-``--pipeline-parallel-size 1``, ``--no-enable-chunked-prefill``,
-``--enforce-eager``).  You supply only the model and your non-CacheBlend flags.
-
-Verifying Injection
-~~~~~~~~~~~~~~~~~~~~~
-
-The webhook mutates **Pods**, not the Deployment, so inspect a pod:
-
-.. code-block:: bash
-
-    kubectl get pod -l app=vllm-cacheblend -o yaml | \
-      grep -E "initContainers|cb-plugin|PYTHONPATH|kv-transfer-config|cacheblend-injected|skip-reason"
-
-If nothing was injected, check the pod's ``lmcache.ai/cacheblend-skip-reason``
-annotation: ``command-override`` (a ``sh -c`` wrapper was used),
-``kv-transfer-config-present`` (you set your own), ``engine-not-found`` (the
-``<name>-connection`` ConfigMap is missing), ``payload-image-unset`` (the
-engine's ``injection.payloadImage`` has no repository), or
-``target-container-not-found`` (the requested ``targetContainer`` /
-``cacheblend-container`` annotation names a container the pod does not have).
-With ``failurePolicy: Ignore`` a
-webhook/cert problem also leaves the pod un-mutated silently -- confirm the
-operator pod is ``Running`` and the ``MutatingWebhookConfiguration`` exists.
-
-CacheBlendEngine Fields
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-``CacheBlendEngineSpec`` mirrors ``LMCacheEngineSpec`` (every field in the CRD
-Spec Reference above) and adds:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 35 20 45
-
-   * - Field
-     - Default
-     - Description
-   * - ``blend.checkLayer``
-     - ``1``
-     - Layer at which token importance is scored (``cb.check_layer``).
-   * - ``blend.recompRatio``
-     - ``0.15``
-     - Fraction of non-prefix-hit tokens recomputed (``cb.recomp_ratio``).
-   * - ``blend.partialBucket``
-     - unset
-     - Pads PARTIAL row counts to a multiple of this bucket
-       (``cb.partial_bucket``).  Needed on fp8-MoE models, where every distinct
-       row count is a fresh M shape and the Triton autotuner re-tunes all MoE
-       layers per CB step without it.  Unset omits the key (padding disabled).
-   * - ``injection.payloadImage``
-     - *required*
-     - The (private) cacheblend-plugin init-container image
-       (``repository`` / ``tag`` / ``pullPolicy``).  Set ``repository`` -- the
-       inherited engine-image default is not a valid payload.
-   * - ``injection.imagePullSecrets``
-     - --
-     - Pull secrets appended to the vLLM pod for the private payload image.
-   * - ``injection.targetContainer``
-     - first container
-     - Name of the vLLM container to inject into.
-   * - ``injection.cudagraph``
-     - ``eager``
-     - ``eager`` | ``piecewise`` | ``full_decode_only`` (never ``full``).
-
-``server.chunkSize`` defaults to ``256`` and must equal 256 (the blend matcher
-requires it).
-
 .. _mp-operator-pd-disaggregation:
 
 PD Disaggregation
@@ -1343,8 +1162,7 @@ Adding a ``pd`` block to an ``LMCacheEngine`` spec switches the engine's
 connection ConfigMap to include ``MultiConnector`` configs (``NixlConnector`` +
 ``LMCacheMPConnector``) alongside the standard bare connector, and tells the
 webhook to inject the NIXL side-channel environment variables into opted-in
-vLLM pods automatically.  ``CacheBlendEngine`` accepts the same block with an
-asymmetric connector topology — see `CacheBlend PD`_ below.
+vLLM pods automatically.
 
 See :ref:`mp_disaggregated_prefill` for background on what PD disaggregation is
 and how the pieces fit together.
@@ -1512,45 +1330,6 @@ A ready-to-edit manifest is at
    prefix generates ``VLLM_*`` vars that vLLM's env-var validator flags as
    unknown.
 
-CacheBlend PD
-~~~~~~~~~~~~~
-
-``CacheBlendEngine`` accepts the same ``pd`` block, but the two roles are
-**asymmetric** because blending is a prefill-time operation:
-
-- **prefiller** -- ``MultiConnector`` with ``kv_role=kv_producer``, wrapping
-  ``NixlConnector`` and ``CBKVConnector``: the prefiller blends cached KV,
-  then pushes the result to the decoder over NIXL.
-- **decoder** -- a **bare** ``NixlConnector`` with ``kv_role=kv_consumer``:
-  the decoder only receives KV from the prefiller and does not blend, so it
-  carries no CacheBlend connector at all.
-- Pods without a ``pd-role`` annotation fall back to the bare
-  ``CBKVConnector`` config, as for a non-PD ``CacheBlendEngine``.
-
-The webhook mutation is asymmetric to match: **decoder pods receive only**
-``--kv-transfer-config`` and the NIXL env vars -- no CacheBlend payload
-staging, no ``PYTHONPATH``, none of the CacheBlend vLLM flags
-(``--enforce-eager`` would needlessly disable CUDA graphs on the decode
-role), and no engine ``/dev/shm`` wiring.  ``injection.payloadImage`` is
-therefore not required for a decoder-only engine.
-
-Opt pods in with the CacheBlend label/annotation pair plus the same
-``lmcache.ai/pd-role`` annotation:
-
-.. code-block:: yaml
-
-    metadata:
-      labels:
-        lmcache.ai/cacheblend-inject: "true"
-      annotations:
-        lmcache.ai/cacheblend-engine: "my-cacheblend-pd"
-        lmcache.ai/pd-role: "prefiller"   # or "decoder"
-
-A ready-to-edit engine manifest is at
-``operator/config/samples/lmcache_v1alpha1_cacheblendengine_pd.yaml``.
-Everything else (NIXL env vars, side-channel port, RDMA/hostNetwork caveats,
-router) works exactly as described above for ``LMCacheEngine``.
-
 LMCacheCoordinator
 ------------------
 
@@ -1583,7 +1362,7 @@ repo.  A minimal coordinator:
 Connecting an Engine
 ~~~~~~~~~~~~~~~~~~~~~
 
-Point an ``LMCacheEngine`` / ``CacheBlendEngine`` at the coordinator through its
+Point an ``LMCacheEngine`` at the coordinator through its
 ``coordinator`` block.  Use ``ref`` to name a coordinator in the same namespace
 (the operator resolves it to the in-cluster Service URL), or ``url`` for an
 explicit endpoint:
