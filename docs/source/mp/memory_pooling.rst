@@ -2,7 +2,7 @@ Private DAX memory pooling
 ==========================
 
 ``MemoryPoolController`` in ``lmcache.v1.memory_orchestrator.pooling`` coordinates
-a provider such as Pangaea with an existing MP worker's private L1 or L2 DAX
+a memory-pool provider with an existing MP worker's private L1 or L2 DAX
 hotplug API. Each worker keeps its existing allocator and KV index. No shared
 mapping, shared-object service, tenant budgets, or new gRPC messages are needed.
 
@@ -10,7 +10,7 @@ The deployment supplies a ``MemoryPoolProvider`` adapter. Its
 ``acquire(consumer_id, request_id, size_bytes)`` returns a ``MemoryAllocation``
 with an allocation ID, worker-local device path, byte offset and byte size.
 ``release(allocation_id)`` returns that exclusive range to the physical pool.
-Pangaea owns physical provisioning and placement; LMCache owns its mappings.
+The provider owns physical provisioning and placement; LMCache owns its mappings.
 The provider must retain grants across failures, make exact requests idempotent,
 reject reuse of released request IDs, and never revoke mapped memory on a TTL.
 No vendor SDK is bundled.
@@ -20,7 +20,7 @@ Call the controller from the deployment's orchestration loop:
 .. code-block:: python
 
    import httpx
-   from deployment.pangaea import create_pool  # Your provider adapter.
+   from deployment.memory_pool import create_pool  # Your provider adapter.
    from lmcache.v1.memory_orchestrator.pooling import MemoryPoolController
 
    pool = create_pool()
@@ -57,7 +57,7 @@ Controller state is in memory: after controller loss, stop/fence the original
 worker and reconcile its provider grants offline before releasing anything.
 This small API adds no scheduling policy, background loop, or persistent
 recovery service. It is separate from the shared-region ``lmcache memory``
-object service. Hardware/Pangaea qualification remains deployment-specific.
+object service. Provider and hardware qualification remain deployment-specific.
 
 Online workload-pressure test
 -----------------------------
@@ -78,4 +78,4 @@ and provider release checks that the borrowed file has been unmapped.
 
 The policy belongs to the test: production scheduling remains deployment-owned.
 This qualifies the online L1 control workflow, not L2 pressure scaling, model
-serving, real CXL hardware, or a Pangaea adapter.
+serving, real CXL hardware, or a deployment's provider adapter.
