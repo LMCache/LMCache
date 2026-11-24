@@ -53,9 +53,21 @@ class RejectingModule:
 
 
 def _payload(
-    instance: int = 1, profile: KVEventProfile | None = PROFILE
+    instance: int = 1,
+    profile: KVEventProfile | None = PROFILE,
+    chunk_size: int | None = None,
 ) -> tuple[Any, ...]:
-    return (instance, [], "model", 2, EngineType.VLLM, {}, [GROUP], profile)
+    return (
+        instance,
+        [],
+        "model",
+        2,
+        EngineType.VLLM,
+        {},
+        [GROUP],
+        profile,
+        chunk_size,
+    )
 
 
 @pytest.fixture
@@ -253,7 +265,7 @@ def test_registration_errors_reach_client_and_leave_server_usable(
                     [
                         msgspec.msgpack.encode(7),
                         encode_operation("register_kv_cache"),
-                        *[msgspec_encode(v, type(v)) for v in _payload()[:-1]],
+                        *[msgspec_encode(v, type(v)) for v in _payload()[:7]],
                     ]
                 )
                 _, operation, payload = socket.recv_multipart()
@@ -338,7 +350,7 @@ def test_zmq_missing_profile_reports_arity_not_union_attribute_error() -> None:
     )
     try:
         future: MessagingFuture[Any] | MessagingStream[Any] = client.submit_request(
-            "register_kv_cache", list(_payload()[:-1])
+            "register_kv_cache", list(_payload()[:7])
         )
         assert isinstance(future, MessagingFuture)
         with pytest.raises(ValueError, match="Payload count mismatch"):
