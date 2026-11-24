@@ -112,6 +112,58 @@ def test_make_shape_desc_sglang_mha():
     assert sd.hs == 64
 
 
+def test_make_shape_desc_ascend_mla_plane_tuple():
+    """fmt 17 (NL_X_NP_X_NB_BS_ONE_HS): MLA (latent, rope) planes carry
+    per-plane byte geometry; hs is the summed plane width."""
+    kv_caches = [
+        (
+            torch.empty(32, 16, 1, 512, dtype=torch.bfloat16),
+            torch.empty(32, 16, 1, 64, dtype=torch.bfloat16),
+        )
+        for _ in range(3)
+    ]
+    sd = make_page_buffer_shape_desc(
+        kv_caches,
+        lmcache_native.EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS,
+        layer_idx=0,
+        num_layers_in_group=3,
+        num_blocks=32,
+        block_size=16,
+    )
+    assert sd.kv_size == 1
+    assert sd.nh == 1
+    assert sd.hs == 512 + 64  # summed plane width in elements
+    assert sd.num_planes == 2
+    assert sd.plane_slot_bytes == (1 * 512 * 2, 1 * 64 * 2)
+    assert sd.plane_block_stride_bytes == (16 * 512 * 2, 16 * 64 * 2)
+
+
+def test_make_shape_desc_ascend_kv_plane_tuple():
+    """fmt 16 (NL_X_TWO_X_NB_BS_NH_HS): the per-layer (K, V) pair carries
+    per-plane byte geometry."""
+    kv_caches = [
+        (
+            torch.empty(32, 16, 8, 64, dtype=torch.bfloat16),
+            torch.empty(32, 16, 8, 64, dtype=torch.bfloat16),
+        )
+        for _ in range(2)
+    ]
+    sd = make_page_buffer_shape_desc(
+        kv_caches,
+        lmcache_native.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS,
+        layer_idx=0,
+        num_layers_in_group=2,
+        num_blocks=32,
+        block_size=16,
+    )
+    assert sd.kv_size == 2
+    assert sd.nh == 8
+    assert sd.hs == 64
+    assert sd.num_planes == 2
+    assert sd.plane_slot_bytes == (8 * 64 * 2, 8 * 64 * 2)
+    assert sd.plane_block_stride_bytes == (16 * 8 * 64 * 2, 16 * 8 * 64 * 2)
+
+
 def test_per_layer_scalar_accessors_per_layer_list():
     """For per-layer list formats, each scalar accessor honours layer_idx."""
     kv_caches = [

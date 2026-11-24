@@ -24,9 +24,9 @@ import os
 import torch
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.common.group_view import engine_group_layer_indices
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.utils import (
     LayoutHints,
     get_group_data_ptrs,
@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.common.group_view import EngineGroupInfo
     from lmcache.v1.platform.base.ipc_wrapper import KVCache
+    from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 
 logger = init_logger(__name__)
 
@@ -55,6 +56,9 @@ class CPUCacheContext(BaseCacheContext):
     replaced by :class:`StubStream` no-op objects so callers can keep
     using ``stream.synchronize()`` / ``wait_event(...)`` etc. without
     branching on the active backend.
+
+    ``object_group_transfer`` supplies the base full-chunk copy implementation;
+    it is optional for layout-only users and device transfer overrides.
 
     KV cache tensors are reconstructed from the
     :class:`CpuShmTensorWrapper` instances sent by the client over
@@ -74,6 +78,8 @@ class CPUCacheContext(BaseCacheContext):
         engine_type: EngineType = EngineType.VLLM,
         separate_object_groups: bool = True,
         full_sw_kv: bool = False,
+        *,
+        object_group_transfer: ObjectGroupTransfer | None = None,
     ) -> None:
         if not kv_caches:
             raise ValueError(
@@ -89,6 +95,8 @@ class CPUCacheContext(BaseCacheContext):
 
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
         self.device_ = torch.device("cpu")
+        if engine_type == EngineType.VLLM and not (layout_hints or {}).get("kv_layout"):
+            layout_hints = {**(layout_hints or {}), "kv_layout": "HND"}
 
         # Discover layout & build KV layer groups via the same path
         # GPUCacheContext uses, so we don't need to hand-roll any
@@ -129,6 +137,7 @@ class CPUCacheContext(BaseCacheContext):
             kv_layer_groups_manager=kv_layer_groups_manager,
             block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+            object_group_transfer=object_group_transfer,
         )
 
         # Per-group KV pointer tensors (CPU). Reuse the same helper

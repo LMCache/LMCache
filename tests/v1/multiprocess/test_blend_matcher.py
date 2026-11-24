@@ -1216,3 +1216,14 @@ def _ranges(*rs):
 )
 def test_covered_chunks(ranges, expected):
     assert covered_chunks(_ranges(*ranges), 256) == expected
+
+
+def test_repeated_chunk_matches_every_copy() -> None:
+    """A stored chunk repeated later in the query matches at each copy."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    a = _chunk(1)
+    _register(matcher, a, [1301])
+
+    matches = matcher.match_sub_sequence(a + list(range(95000, 95032)) + a)
+
+    assert [m.cur_st for m in matches] == [0, CHUNK_SIZE + 32]

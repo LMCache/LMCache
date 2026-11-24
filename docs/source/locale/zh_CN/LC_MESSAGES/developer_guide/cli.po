@@ -85,10 +85,10 @@ msgstr "自动发现机制"
 #: ../../source/developer_guide/cli.rst:34
 msgid ""
 "The CLI uses a unified ``discover_subclasses()`` utility (defined in "
-"``lmcache/v1/utils/subclass_discovery.py``) to locate command classes at "
+"``lmcache/v1/common/subclass_discovery.py``) to locate command classes at "
 "every level.  Understanding the two discovery entry points is key to "
 "extending the CLI."
-msgstr "CLI 使用统一的 ``discover_subclasses()`` 工具（定义在 ``lmcache/v1/utils/subclass_discovery.py`` 中）来定位每个级别的命令类。理解这两个发现入口是扩展 CLI 的关键。"
+msgstr "CLI 使用统一的 ``discover_subclasses()`` 工具（定义在 ``lmcache/v1/common/subclass_discovery.py`` 中）来定位每个级别的命令类。理解这两个发现入口是扩展 CLI 的关键。"
 
 #: ../../source/developer_guide/cli.rst:40
 msgid "Top-Level Command Discovery"

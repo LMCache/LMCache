@@ -4,7 +4,8 @@
 - :func:`running_coordinator` serves a coordinator on a thread.
 - :func:`running_server` starts ``lmcache server`` as a subprocess from the
   test's own interpreter, waits until the coordinator lists it, and records
-  its cache events in an ``events``-level trace.
+  its cache events in an ``events``-level trace. It uses the server's default
+  gRPC request transport without overriding ``--transport``.
 - :class:`KVClient` is one inference worker: it registers a small paged KV
   cache, which on CPU sits in POSIX shared memory, and stores token sequences
   over the server's request port, as ``lmcache bench server --mode cpu`` does.
@@ -51,7 +52,7 @@ from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.events_replay import EventsTrace
 from lmcache.v1.mp_coordinator.schemas import CacheEventsRequest
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
-from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.transport.request_client import RequestClient
 
 CHUNK_SIZE = 4
 """Tokens per chunk, on the coordinator and every server alike."""
@@ -333,8 +334,8 @@ class MPServer:
 
     @property
     def rpc_url(self) -> str:
-        """The request port a :class:`KVClient` connects to."""
-        return f"tcp://127.0.0.1:{self._rpc_port}"
+        """The gRPC endpoint served by the server's default transport."""
+        return f"grpc://127.0.0.1:{self._rpc_port}"
 
     @property
     def http_url(self) -> str:

@@ -14,10 +14,10 @@ import torch
 # First Party
 from lmcache import torch_dev
 from lmcache.lmcache_native import EngineKVFormat
-from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.common.group_view import engine_group_layer_indices
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.utils import (
     LayoutHints,
     get_device,
@@ -31,6 +31,7 @@ from lmcache.v1.platform.base.ipc_wrapper import KVCache
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.common.group_view import EngineGroupInfo
+    from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 
 logger = init_logger(__name__)
 
@@ -247,6 +248,8 @@ class NpuCacheContext(BaseCacheContext):
         engine_type: EngineType = EngineType.VLLM,
         separate_object_groups: bool = True,
         full_sw_kv: bool = False,
+        *,
+        object_group_transfer: ObjectGroupTransfer | None = None,
     ) -> None:
         """Build an NPU cache context from IPC-wrapped KV tensors.
 
@@ -258,6 +261,8 @@ class NpuCacheContext(BaseCacheContext):
             engine_type: Serving engine that produced the KV cache.
             separate_object_groups: Whether to split object groups by window.
             full_sw_kv: Whether sliding-window groups transfer their full KV.
+            object_group_transfer: Optional callback for the base full-chunk
+                transfer method; device overrides remain active.
 
         Raises:
             ValueError: If reconstructed tensors are not NPU tensors.
@@ -272,6 +277,7 @@ class NpuCacheContext(BaseCacheContext):
                 engine_type,
                 separate_object_groups,
                 full_sw_kv,
+                object_group_transfer,
             )
         except BaseException:
             self.close()
@@ -286,6 +292,7 @@ class NpuCacheContext(BaseCacheContext):
         engine_type: EngineType,
         separate_object_groups: bool,
         full_sw_kv: bool,
+        object_group_transfer: ObjectGroupTransfer | None,
     ) -> None:
         """Initialize reconstructed tensors and NPU transfer resources."""
         unwrapped = cast(
@@ -329,6 +336,7 @@ class NpuCacheContext(BaseCacheContext):
             kv_layer_groups_manager=kv_layer_groups_manager,
             block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+            object_group_transfer=object_group_transfer,
         )
 
         # CUDA-shaped device int64 pointer table per kernel group. The native

@@ -47,6 +47,8 @@ ${PIP_BIN} install "${VLLM_CPU_NIGHTLY_SPEC}" "apache-tvm-ffi<0.1.13" \
   --extra-index-url https://download.pytorch.org/whl/cpu \
   ${PIP_INSTALL_EXTRA_ARGS}
 
+python "$(dirname "${BASH_SOURCE[0]}")/cpu_nightly.py" install-dependencies
+
 python - <<'PY'
 import importlib.metadata as md
 import pathlib

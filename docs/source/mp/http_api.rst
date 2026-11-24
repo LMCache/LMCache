@@ -1613,7 +1613,7 @@ by each thread's name, ``ident``, and current stack trace.
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Returns a JSON snapshot of the
-:class:`~lmcache.v1.periodic_thread.PeriodicThreadRegistry`: counts by
+:class:`~lmcache.v1.common.periodic_thread.PeriodicThreadRegistry`: counts by
 level plus per-thread status (last run timestamp, latest summary, etc.).
 
 .. list-table::

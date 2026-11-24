@@ -9,8 +9,6 @@ from typing import Optional
 import torch
 
 # First Party
-from lmcache import torch_device_type
-from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.common.kv_format.detectors.base import (
     EngineDetector,
@@ -21,20 +19,17 @@ from lmcache.v1.common.kv_format.types import (
     DiscoverableKVCache,
     LayoutHints,
 )
+from lmcache.v1.common.logging import init_logger
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
 
-def resolve_vllm_kv_layout(
-    layout_hints: LayoutHints, cpu_attention_backend: bool
-) -> str:
-    """Validate an explicit ``kv_layout`` hint or choose a legacy default."""
+def resolve_vllm_kv_layout(layout_hints: LayoutHints) -> str:
+    """Validate the engine's ``kv_layout`` hint, defaulting to ``NHD``."""
     kv_layout = layout_hints.get("kv_layout")
     if kv_layout is None:
-        # Registrations predating layout hints relied on the CPU backend's HND
-        # allocation and the NHD default everywhere else.
-        return "HND" if cpu_attention_backend else "NHD"
+        return "NHD"
     if kv_layout not in KV_LAYOUT_NAMES:
         raise ValueError(
             f"kv_layout hint {kv_layout!r} is not a layout LMCache supports; "
@@ -57,9 +52,7 @@ class VLLM_Detector(EngineDetector):
         kv_caches: DiscoverableKVCache,
         layout_hints: LayoutHints,
     ) -> "tuple[Optional[lmcache_native.EngineKVFormat], DiscoverableKVCache]":
-        kv_layout = resolve_vllm_kv_layout(
-            layout_hints, cpu_attention_backend=torch_device_type == "cpu"
-        )
+        kv_layout = resolve_vllm_kv_layout(layout_hints)
         is_hnd = kv_layout in ("HND", "BLHNC")
 
         # Fused K/V is the only rank-4 vLLM layout, so its raw rank

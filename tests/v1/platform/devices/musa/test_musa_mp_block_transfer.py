@@ -10,6 +10,7 @@ import torch
 # First Party
 from lmcache.lmcache_native import EngineKVFormat
 from lmcache.utils import EngineType
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.devices.musa.cache_context import MUSACacheContext
@@ -17,7 +18,6 @@ from lmcache.v1.platform.devices.musa.device_ops import MusaDeviceOps
 from lmcache.v1.platform.devices.musa.ipc_wrapper import (
     is_musa_block_transfer_available,
 )
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 device_ops = cast(MusaDeviceOps, resolve_device_ops("musa"))

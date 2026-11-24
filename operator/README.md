@@ -1,4 +1,7 @@
-# LMCache Kubernetes Operator
+# LMCache Kubernetes Operator (Deprecated)
+
+> [!CAUTION]
+> The LMCache Kubernetes operator (`operator/`) is **deprecated and no longer maintained**. It is expected to be removed from this repository in **2027Q1**. Existing release artifacts (e.g. the `operator-v*` / `operator-latest` / `operator-nightly-latest` `install.yaml`) will not receive fixes or updates. Do not build new deployments on it; if you keep using an existing release, pin to that version at your own risk. For a supported path, deploy LMCache with plain Kubernetes manifests as described in the [Kubernetes deployment guide](https://docs.lmcache.ai/mp/deployment.html).
 
 A Kubernetes operator that automates the deployment and lifecycle management of [LMCache](https://github.com/LMCache/LMCache) multiprocess cache servers. It manages a single CRD (`LMCacheEngine`) and reconciles it into a DaemonSet, ConfigMap, Service, and optional ServiceMonitor.
 

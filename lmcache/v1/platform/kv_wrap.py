@@ -21,7 +21,7 @@ from typing import Any
 import torch
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.utils import get_device
 from lmcache.v1.platform import resolve_kv_wrapper_factory
 from lmcache.v1.platform.base.ipc_wrapper import KVCache

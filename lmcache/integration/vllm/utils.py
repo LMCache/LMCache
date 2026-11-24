@@ -16,9 +16,9 @@ import torch
 
 # First Party
 from lmcache import torch_device_type
-from lmcache.logging import init_logger
 from lmcache.utils import get_size_bytes as get_size_bytes
 from lmcache.v1.common.kv_format.types import KVLayoutName
+from lmcache.v1.common.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party
@@ -37,6 +37,8 @@ def vllm_layout_hints(vllm_config: "VllmConfig | None" = None) -> "LayoutHints":
     """Build layout_hints dict by querying vLLM at runtime."""
     hints: dict[str, str] = {}
     kv_layout = try_get_vllm_kv_cache_layout(vllm_config)
+    if kv_layout is None and torch_device_type == "cpu":
+        kv_layout = "HND"
     if kv_layout is not None:
         hints["kv_layout"] = kv_layout
     return hints  # type: ignore[return-value]

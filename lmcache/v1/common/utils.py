@@ -14,8 +14,6 @@ from typing import Optional, Union
 import torch
 
 # First Party
-from lmcache import device_ops
-from lmcache.logging import init_logger
 from lmcache.utils import EngineType, lmcache_deprecate
 from lmcache.v1.common.kv_format import (
     concrete_shape,
@@ -26,7 +24,8 @@ from lmcache.v1.common.kv_format import (
     get_spec_class,
 )
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache, LayoutHints
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -687,7 +686,7 @@ def make_page_buffer_shape_desc(
     Returns:
         A populated ``PageBufferShapeDesc``.
     """
-    desc = device_ops.PageBufferShapeDesc()
+    desc = PageBufferShapeDesc()
     desc.kv_size = get_kv_size(kv_caches, engine_kv_format)
     desc.nl = num_layers_in_group
     desc.nb = num_blocks
@@ -706,6 +705,19 @@ def make_page_buffer_shape_desc(
 
     resolved_stride = int(block_stride_elems) if block_stride_elems else 0
     desc.block_stride_elems = resolved_stride
+
+    if lmcache_native.is_kv_second_tuple(engine_kv_format):
+        # fmt 16/17 (Ascend MLA/DSA plane tuples) need per-plane token-row and
+        # block-stride bytes plus the plane count; the Ascend NPU kernels
+        # consume these fields, other backends ignore them.
+        planes = kv_caches[layer_idx]  # type: ignore[index]
+        desc.num_planes = len(planes)
+        desc.plane_slot_bytes = tuple(
+            int(t.shape[2]) * int(t.shape[3]) * int(t.element_size()) for t in planes
+        )
+        desc.plane_block_stride_bytes = tuple(
+            int(t.stride(0)) * int(t.element_size()) for t in planes
+        )
     return desc
 
 

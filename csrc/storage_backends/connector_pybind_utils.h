@@ -21,6 +21,10 @@ example usage (see `redis/pybind.cpp`):
   py::class_<MyConnector>(m, "MyConnectorClient")
       .def(py::init<...>(), ...)
       LMCACHE_BIND_CONNECTOR_METHODS(MyConnector);
+
+Changing the methods below changes the Python API of the NIXL connector, which
+ships as the separate lmcache-nixl package: bump API_VERSION in
+`nixl/pybind.cpp` too.
 */
 
 #define LMCACHE_BIND_CONNECTOR_METHODS(ConnectorType)                  \

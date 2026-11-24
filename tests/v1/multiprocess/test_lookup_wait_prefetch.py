@@ -69,6 +69,7 @@ def test_wait_prefetch_status_returns_count_and_consumes_job():
         row_windows=(-1,) * world_size,
         request_id="req",
         requested_tokens=512,
+        chunk_size=256,
     )
 
     assert module.wait_prefetch_status("req", timeout=1.0) == 4 * ctx.chunk_size
@@ -91,6 +92,7 @@ def test_wait_prefetch_status_timeout_returns_none_and_keeps_job():
         row_windows=(-1,),
         request_id="req",
         requested_tokens=0,
+        chunk_size=256,
     )
     module._prefetch_jobs["req"] = job
 

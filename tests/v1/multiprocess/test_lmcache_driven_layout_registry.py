@@ -11,6 +11,9 @@ import types
 import pytest
 import torch
 
+# First Party
+from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
+
 
 class _FakeKVLayerGroupsManager:
     """Minimal manager stub: one full-attention object group."""
@@ -97,6 +100,7 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     )
     ctx = MagicMock()
     ctx.chunk_size = 16
+    ctx.hash_algorithm_name = "blake3"
     ctx.layout_desc_registry = LayoutDescRegistry()
 
     def fake_create_cache_context(
@@ -107,6 +111,9 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
         engine_type: object = None,
         separate_object_groups: bool = False,
         full_sw_kv: bool = False,
+        *,
+        object_group_transfer: ObjectGroupTransfer | None = None,
+        buffer_registration: object = None,
     ) -> _FakeGPUContext:
         """Return a fake cache context without touching CUDA or wrappers."""
         return _FakeGPUContext()
@@ -147,8 +154,12 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     )
 
     module = lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx)
-    module.register_kv_cache(1, [], "shared-model", 1, EngineType.VLLM, {}, [])
-    module.register_kv_cache(2, [], "shared-model", 1, EngineType.VLLM, {}, [])
+    module.register_kv_cache(
+        1, [], "shared-model", 1, EngineType.VLLM, {}, [], event_profile=None
+    )
+    module.register_kv_cache(
+        2, [], "shared-model", 1, EngineType.VLLM, {}, [], event_profile=None
+    )
     assert ctx.layout_desc_registry.find("shared-model", 1) is layout_desc
 
     module.unregister_kv_cache(1)
@@ -175,7 +186,12 @@ def test_registry_attn_desc_roundtrip() -> None:
 
     registry = LayoutDescRegistry()
     registry.register(
-        "m", 2, _layout(), attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+        "m",
+        2,
+        _layout(),
+        chunk_size=256,
+        hash_algorithm="blake3",
+        attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2]),
     )
 
     desc = registry.find_attn_desc("m", 2)
@@ -193,11 +209,16 @@ def test_registry_derives_group_layout_descs_when_not_given() -> None:
 
     registry = LayoutDescRegistry()
     layout = _layout()
-    registry.register("m", 1, layout)
+    registry.register("m", 1, layout, chunk_size=256, hash_algorithm="blake3")
     assert registry.find_group_layout_descs("m", 1) == {0: layout}
 
     registry.register(
-        "m2", 1, layout, attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2])
+        "m2",
+        1,
+        layout,
+        chunk_size=256,
+        hash_algorithm="blake3",
+        attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2]),
     )
     assert registry.find_group_layout_descs("m2", 1) == {0: layout, 1: layout}
 
@@ -219,7 +240,7 @@ def test_registry_windows_default_single_group_when_omitted() -> None:
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 
     registry = LayoutDescRegistry()
-    registry.register("m", 1, _layout())
+    registry.register("m", 1, _layout(), chunk_size=256, hash_algorithm="blake3")
 
     assert registry.find_attn_desc("m", 1).num_chunks_in_sw == [-1]
 
@@ -232,13 +253,48 @@ def test_registry_windows_updated_on_reregister() -> None:
 
     registry = LayoutDescRegistry()
     registry.register(
-        "m", 1, _layout(), attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1])
+        "m",
+        1,
+        _layout(),
+        chunk_size=256,
+        hash_algorithm="blake3",
+        attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1]),
     )
     registry.register(
-        "m", 1, _layout(), attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 4])
+        "m",
+        1,
+        _layout(),
+        chunk_size=256,
+        hash_algorithm="blake3",
+        attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 4]),
     )
 
     assert registry.find_attn_desc("m", 1).num_chunks_in_sw == [-1, 4]
+
+
+def test_registry_keeps_hashing_metadata_until_last_unregister() -> None:
+    """All ranks of one registration key share immutable hashing metadata."""
+    # First Party
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    registry.register("m", 2, _layout(), chunk_size=256, hash_algorithm="blake3")
+    registry.register("m", 2, _layout(), chunk_size=256, hash_algorithm="blake3")
+
+    assert registry.get_chunk_size("m", 2) == 256
+    assert registry.get_token_hasher("m", 2).chunk_size == 256
+    with pytest.raises(ValueError, match="already uses chunk size 256"):
+        registry.register("m", 2, _layout(), chunk_size=512, hash_algorithm="blake3")
+    with pytest.raises(ValueError, match="already uses hash algorithm 'blake3'"):
+        registry.register(
+            "m", 2, _layout(), chunk_size=256, hash_algorithm="sha256_cbor"
+        )
+
+    registry.unregister("m", 2)
+    assert registry.get_chunk_size("m", 2) == 256
+    registry.unregister("m", 2)
+    registry.register("m", 2, _layout(), chunk_size=512, hash_algorithm="blake3")
+    assert registry.get_chunk_size("m", 2) == 512
 
 
 def test_registry_shard_replication_roundtrip_and_default() -> None:
@@ -256,10 +312,12 @@ def test_registry_shard_replication_roundtrip_and_default() -> None:
         "m",
         4,
         _layout(),
+        chunk_size=256,
+        hash_algorithm="blake3",
         attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2]),
         shard_replication_desc=shards,
     )
-    registry.register("plain", 1, _layout())
+    registry.register("plain", 1, _layout(), chunk_size=256, hash_algorithm="blake3")
 
     assert registry.find_shard_replication_desc("m", 4) == shards
     assert registry.find_shard_replication_desc("plain", 1) == ShardReplicationDesc()
@@ -282,6 +340,8 @@ def test_registry_rejects_shard_replication_not_matching_object_groups() -> None
             "m",
             4,
             _layout(),
+            chunk_size=256,
+            hash_algorithm="blake3",
             attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2]),
             shard_replication_desc=ShardReplicationDesc(group_tp_replicas=(4,)),
         )
