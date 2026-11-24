@@ -49,6 +49,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     get_unfull_chunk_layout_desc,
     get_unfull_chunk_staging_buffer,
     split_unfull_chunk_block_ids,
+    transfer_kv_per_object_group,
     transfer_unfull_chunk,
     trim_and_stage_unfull_chunk_block_ids,
 )
@@ -1108,7 +1109,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
         ``instance_id`` is the registering instance. The default ignores it;
         a subclass can use it to look up per-instance data that its worker
-        sent before registering.
+        sent before registering. Overrides using the base context transfer
+        implementation must pass ``object_group_transfer`` at construction.
         """
         return create_cache_context(
             kv_caches,
@@ -1118,6 +1120,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             engine_type=engine_type,
             separate_object_groups=self._ctx.separate_object_groups,
             full_sw_kv=self._ctx.full_sw_kv,
+            object_group_transfer=transfer_kv_per_object_group,
         )
 
     @request_handler(

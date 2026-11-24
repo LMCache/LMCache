@@ -11,6 +11,9 @@ import types
 import pytest
 import torch
 
+# First Party
+from lmcache.v1.common.object_group_transfer import ObjectGroupTransfer
+
 
 class _FakeKVLayerGroupsManager:
     """Minimal manager stub: one full-attention object group."""
@@ -108,6 +111,8 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
         engine_type: object = None,
         separate_object_groups: bool = False,
         full_sw_kv: bool = False,
+        *,
+        object_group_transfer: ObjectGroupTransfer | None = None,
     ) -> _FakeGPUContext:
         """Return a fake cache context without touching CUDA or wrappers."""
         return _FakeGPUContext()
