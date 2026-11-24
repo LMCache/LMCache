@@ -89,6 +89,52 @@ x-pod-1gpu: &pod-1gpu
     - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
 
 steps:
+  # Weekly full build only (CI_WEEKLY_FULL=1, see .github/workflows/
+  # weekly_full_build.yml). L1 KV correctness for the full-size
+  # DeepSeek-V4-Flash (sparse-MLA + fp8, TP=4) on real weights: each engine
+  # serves one greedy request, clears only its local prefix cache, and must
+  # return byte-identical output from LMCache's L1 pool. The 6-layer
+  # hma_dsv4_correctness steps below keep per-PR coverage of the KV layouts;
+  # this group keeps the real model's kernels and TP sharding covered once a
+  # week. Listed first so the 4-GPU pods get scheduled before smaller ones.
+  - group: ":compression: DSV4 full-size (4-GPU, weekly)"
+    if: build.env("CI_WEEKLY_FULL") == "1"
+    steps:
+      - label: ":compression: {{matrix.inference_engine}} / dsv4_flash_tp / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh dsv4_flash_tp
+        matrix: *common-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
+          # Test the pinned vLLM as is. The script's fallback to an older vLLM
+          # would turn a real DSV4 regression into a pass.
+          DSV4_FALLBACK_VLLM_VERSION: ""
+        # The 160GB fp8 TP-shard load, plus the weight download on a cold
+        # hf-cache node, needs the long timeout.
+        timeout_in_minutes: 120
+        retry:
+          automatic:
+            - exit_status: -1
+              limit: 2
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "4" } }
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  # TP=4 NCCL + inference-engine shared memory; the 1Gi used
+                  # by the smaller pods is too tight for four ranks.
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 8Gi } }
+        artifact_paths: ["*.log", "ci_results_*/dsv4_flash_tp/**/*"]
+
   - group: ":compression: DSV4 (1-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("VERIFY_AND_PIN_SGLANG") !~ /true/
     steps:
@@ -451,6 +497,22 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
+      # One vLLM, a main LMCache server with --enable-p2p-write and a headless
+      # peer LMCache server (no engine) on one GPU over localhost. Prompts fill
+      # the main server's small L1 past the usage threshold: the first ones
+      # must stay local, later ones must land on the peer, and every prompt
+      # must be served from LMCache on replay.
+      - label: ":compression: {{matrix.inference_engine}} / p2p_write / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh p2p_write
+        matrix: *vllm-smoke-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log", "ci_results_*/p2p_write/*.json"]
+
       # Real GPU MP integration: vLLM is launched with FIFO lazy offload
       # (threshold=2, select_count=1). Three requests verify that the first
       # two remain pending and the third drains the first request.
@@ -464,6 +526,17 @@ steps:
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
+
+      - label: ":compression: {{matrix.inference_engine}} / sleep_mode / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh sleep_mode
+        matrix: *vllm-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log", "ci_results_*/sleep_mode/**/*"]
 
       - label: ":compression: {{matrix.inference_engine}} / http_api / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh http_api

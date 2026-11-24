@@ -3,7 +3,7 @@
 # Usage: run-single-test.sh <test_name>
 #   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
 #              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
-#              | restart_recovery | lazy_offload | gds_smoke
+#              | restart_recovery | lazy_offload | sleep_mode | gds_smoke
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -130,6 +130,12 @@ elif [ "$TEST_NAME" = "lazy_offload" ]; then
     export CHUNK_SIZE="${CHUNK_SIZE:-16}"
     export VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-$CHUNK_SIZE}"
     export MODEL="${MODEL:-$DEFAULT_MODEL}"
+elif [ "$TEST_NAME" = "sleep_mode" ]; then
+    # --enable-sleep-mode makes level 1 sleep move the weights to host memory.
+    # Without it /sleep still releases the KV cache but keeps the weights on
+    # the GPU, and the test's memory check expects both to be gone.
+    export VLLM_ENABLE_SLEEP_MODE=1
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
 else
     export MODEL="${MODEL:-$DEFAULT_MODEL}"
 fi
@@ -161,7 +167,7 @@ echo "Results dir: $RESULTS_DIR"
 echo ""
 
 # Tests that still handle their own server lifecycle.
-SELF_CONTAINED_TESTS=" mp_autostart_tp2 p2p kimi_linear_tp dsv4_flash_tp "
+SELF_CONTAINED_TESTS=" mp_autostart_tp2 p2p p2p_write kimi_linear_tp dsv4_flash_tp "
 
 # Tests that compare against a baseline engine (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything

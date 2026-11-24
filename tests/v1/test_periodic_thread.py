@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for lmcache.v1.periodic_thread.PeriodicThread."""
+"""Unit tests for lmcache.v1.common.periodic_thread.PeriodicThread."""
 
 # Standard
 from typing import Optional
@@ -7,8 +7,8 @@ import threading
 import time
 
 # First Party
-from lmcache.v1.exceptions import IrrecoverableException
-from lmcache.v1.periodic_thread import (
+from lmcache.v1.common.errors import IrrecoverableException
+from lmcache.v1.common.periodic_thread import (
     PeriodicThread,
     PeriodicThreadRegistry,
     ThreadLevel,

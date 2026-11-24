@@ -112,11 +112,12 @@ packages and implementation-level tests.
 ### gRPC server modes
 
 `--grpc-server-mode` picks one of three gRPC servers that serve the same
-handlers:
+handlers. The default, `auto`, picks `native` when `pygrpc-native` is
+installed and `aio` otherwise.
 
 | Mode | Receives requests on | Handler runs on |
 |---|---|---|
-| `sync` (default) | `grpc_server_workers` threads | the receiving thread, or the client's affinity worker |
+| `sync` | `grpc_server_workers` threads | the receiving thread, or the client's affinity worker |
 | `aio` | one `grpc.aio` event loop thread | a pool picked by handler type |
 | `native` | Rust (tokio) threads, then one Python dispatcher thread | a pool picked by handler type |
 
@@ -156,6 +157,9 @@ Status codes follow grpcio: a missing handler is `UNIMPLEMENTED`, a handler
 exception is `UNKNOWN` (`Exception calling application: ...`), an undecodable
 request is `INTERNAL`, and calls still running at shutdown get `UNAVAILABLE`.
 A cancelled server-streaming call closes the handler's `MessagingStream`.
+An error while reading a server-streaming handler's stream ends the stream
+normally on all three servers, as on ZMQ, so the KV event subscriber
+resubscribes.
 Like grpcio servers it accepts gzip requests, answers uncompressed, and ends
 a call with `DEADLINE_EXCEEDED` once its `grpc-timeout` passes.
 
@@ -190,7 +194,8 @@ provide the gRPC server object, the servicer for each generated service, how
 normal handlers are bounded (a semaphore on the sync server, a thread pool on
 the aio event loop), and how the server starts and stops.
 `build_grpc_request_server` in `grpc_impl/server_builder.py` picks one of them
-from `grpc_server_mode` and returns it as a `GrpcMultiprocessServerBase`.
+from `grpc_server_mode`, resolving `auto` first, and returns it as a
+`GrpcMultiprocessServerBase`.
 `GrpcNativeMultiprocessServer` subclasses it too: it fills its method table
 from the same per-service handlers in `_make_servicer` and returns a
 placeholder servicer for its internal `grpc.Server`, which never sees those

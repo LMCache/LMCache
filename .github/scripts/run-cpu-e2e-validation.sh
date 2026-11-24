@@ -389,6 +389,8 @@ print(json.dumps({
     'kv_connector_extra_config': {
         'lmcache.mp.host': '${LMCACHE_REQUEST_SCHEME}://localhost',
         'lmcache.mp.port': int('${LMCACHE_REQUEST_PORT}'),
+        # CPU tensors use shared memory, not CUDA driver-mapped allocations.
+        'lmcache.mp.use_vmm_api': False,
     },
 }))")"
   # Optional flags — appended only when set, so unrelated callers stay
@@ -407,7 +409,7 @@ print(json.dumps({
   fi
   echo "vLLM model: ${VLLM_MODEL_ID}"
   echo "vLLM extra args: ${extra_serve_args[*]:-<none>}"
-  vllm serve "${VLLM_MODEL_ID}" \
+  PYTHONFAULTHANDLER=1 vllm serve "${VLLM_MODEL_ID}" \
     --port "${VLLM_PORT}" \
     --dtype bfloat16 \
     --disable-hybrid-kv-cache-manager \
@@ -449,6 +451,11 @@ on_error() {
   echo "❌ CPU install validation failed (exit code: ${exit_code})"
   set +e
   print_failure_logs
+  if [[ "${RUNNER_OS:-}" == "Linux" && -n "${VLLM_PID:-}" ]]; then
+    # A worker killed by the kernel cannot write its own traceback.
+    sudo -n journalctl -k -b --since "@${CPU_VALIDATION_STARTED_AT}" --no-pager \
+      --grep='Out of memory|oom-kill|Killed process|segfault|invalid opcode|general protection' || true
+  fi
   cleanup_processes
   upload_artifacts
   cleanup_workspace || echo "❌ Workspace cleanup failed"
@@ -456,6 +463,7 @@ on_error() {
   exit "$exit_code"
 }
 
+CPU_VALIDATION_STARTED_AT=$(date +%s)
 trap on_error ERR
 
 if [ "${SKIP_INSTALL}" = "1" ]; then

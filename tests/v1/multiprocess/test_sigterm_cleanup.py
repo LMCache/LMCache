@@ -133,6 +133,7 @@ def test_zmq_cli_sigterm_unlinks_shm_pool(tmp_path: Path) -> None:
         module="lmcache.v1.multiprocess.server",
         ready_log="LMCache cache server is running...",
         shutdown_signal=signal.SIGTERM,
+        extra_args=["--transport", "zmq"],
     )
 
     assert return_code == 0
