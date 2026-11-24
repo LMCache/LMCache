@@ -1300,6 +1300,9 @@ def test_remove_device_defers_unmap_while_external_views_alive(tmp_path):
     assert statuses[1].active_allocations == 0
     # Ownership persists while an external view prevents unmapping.
     assert manager.owns_range(extra, 0, 4096)
+    assert extra in Path("/proc/self/maps").read_text()
+    assert manager.remove_device(extra).state == DevDaxArenaState.DRAINING
+    assert manager.get_arena_status(extra).state == DevDaxArenaState.DRAINING
 
     # Once the view is gone, the next free retries and reaps the arena.
     del lingering_view
@@ -1310,6 +1313,10 @@ def test_remove_device_defers_unmap_while_external_views_alive(tmp_path):
     assert [status.device_path for status in manager.get_arena_statuses()] == [primary]
     # Ownership ends after the arena is actually unmapped.
     assert not manager.owns_range(extra, 0, 4096)
+    assert extra not in Path("/proc/self/maps").read_text()
+    with pytest.raises(L1ReconfigureError) as missing:
+        manager.remove_device(extra)
+    assert missing.value.status_code == 404
     manager.close()
 
 

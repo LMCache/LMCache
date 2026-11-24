@@ -9,6 +9,11 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+# First Party
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
+
 
 class ReconfigureInstanceMiddleware:
     """Advertise a worker incarnation and reject stale reconfiguration requests.
@@ -41,9 +46,21 @@ class ReconfigureInstanceMiddleware:
             )(scope, receive, send)
             return
 
+        response_started = False
+
         async def with_instance(message: Message) -> None:
+            nonlocal response_started
             if message["type"] == "http.response.start":
+                response_started = True
                 MutableHeaders(scope=message)["X-LMCache-Instance"] = self._instance
             await send(message)
 
-        await self.app(scope, receive, with_instance)
+        try:
+            await self.app(scope, receive, with_instance)
+        except Exception:
+            if response_started:
+                raise
+            logger.exception("Runtime reconfiguration failed")
+            await JSONResponse({"error": "Internal Server Error"}, status_code=500)(
+                scope, receive, with_instance
+            )

@@ -22,7 +22,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.api import MemoryLayoutDesc, Tier
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -35,6 +35,7 @@ from lmcache.v1.memory_orchestrator.pooling import (
     MemoryAllocation,
     MemoryPoolController,
     MemoryPoolProvider,
+    ShrinkResult,
 )
 from lmcache.v1.multiprocess.http_apis.l1_reconfigure_api import router
 from lmcache.v1.multiprocess.http_reconfigure import ReconfigureInstanceMiddleware
@@ -139,7 +140,7 @@ def test_online_capacity_tracks_workload_pressure(tmp_path: Path) -> None:
         with TestClient(app) as client:
             # TestClient may use httpx2 internally, with the same request interface.
             controller = MemoryPoolController(
-                pool, cast(httpx.Client, client), "pressure-worker", "l1"
+                pool, cast(httpx.Client, client), "pressure-worker", Tier.L1
             )
             worker.start()
             low_samples = 0
@@ -170,7 +171,7 @@ def test_online_capacity_tracks_workload_pressure(tmp_path: Path) -> None:
                         low_samples = low_samples + 1 if used <= 2 * SLOT_BYTES else 0
                         if sampled_peak.is_set() and low_samples >= 3:
                             assert reads > grow_reads
-                            assert controller.shrink("burst")
+                            assert controller.shrink("burst") is ShrinkResult.RELEASED
                             shrink_reads = reads
                     elif shrink_reads is not None and reads >= shrink_reads + 10:
                         break

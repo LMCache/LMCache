@@ -1133,7 +1133,7 @@ class StorageManager:
                 )
         except (BufferError, OSError):
             try:
-                self.publish_capacity()
+                self._publish_capacity_changed()
             except Exception:
                 logger.exception("Failed to publish L2 capacity after a cleanup error")
             raise

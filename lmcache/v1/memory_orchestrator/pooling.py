@@ -3,11 +3,29 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Protocol
+import enum
 import threading
 
 # Third Party
 import httpx
+
+# First Party
+from lmcache.v1.distributed.api import Tier
+
+
+class ShrinkResult(enum.Enum):
+    """Whether a requested lease is still draining or has been returned."""
+
+    DRAINING = "draining"
+    RELEASED = "released"
+
+
+class _AssignmentPhase(enum.Enum):
+    UNCERTAIN = "uncertain"
+    ATTACHED = "attached"
+    DRAINING = "draining"
+    REMOVED = "removed"
 
 
 @dataclass(frozen=True)
@@ -35,21 +53,49 @@ class MemoryPoolProvider(Protocol):
     ) -> MemoryAllocation:
         """Provision at least size_bytes on consumer_id; return an exclusive range.
 
-        Args are an opaque worker identity, retry identity and positive byte count.
-        Raise the provider's error on failure; retries must recover the same lease.
+        Args:
+            consumer_id: Opaque worker/host identity understood by the provider.
+            request_id: Idempotency identity within this consumer. Reuse with
+                different arguments or after release must be rejected.
+            size_bytes: Positive minimum allocation size in bytes; rounding up
+                to the provider's allocation granularity is allowed.
+
+        Returns:
+            An exclusive allocation ready to map on the specified worker. Its
+            lease must remain valid until explicit release, including failures.
+
+        Raises:
+            Exception: Provider-specific provisioning or transport error. The
+                outcome may be uncertain; an exact retry must recover the same
+                lease rather than allocate another range.
         """
         ...
 
     def release(self, allocation_id: str) -> None:
-        """Release a fully unmapped lease; raise on unavailable/uncertain results."""
+        """Return a fully unmapped lease to the provider.
+
+        Args:
+            allocation_id: Identity returned by acquire, after all consumers
+                have confirmed that the allocation is no longer mapped.
+
+        Returns:
+            None after release is complete. Exact retries must be idempotent;
+            the original acquire request remains retired after release.
+
+        Raises:
+            Exception: Provider-specific release or transport error, including
+                an uncertain outcome. Retry this allocation ID; do not reacquire.
+        """
         ...
 
 
 @dataclass
 class _Assignment:
-    allocation: MemoryAllocation
+    """Fence the request even when no valid allocation descriptor was received."""
+
     requested_bytes: int
-    phase: Literal["uncertain", "attached", "draining", "removed"] = "uncertain"
+    allocation: MemoryAllocation | None = None
+    phase: _AssignmentPhase = _AssignmentPhase.UNCERTAIN
 
 
 class MemoryPoolController:
@@ -59,7 +105,7 @@ class MemoryPoolController:
         pool: Provider whose leases survive this controller's lifetime.
         client: Caller-owned HTTP client with base_url, authentication and timeout.
         consumer_id: Provider's identity for this worker/host.
-        tier: Private DAX L1 or L2 backend.
+        tier: Tier.L1 or Tier.L2 for the private DAX backend.
         adapter_index: Existing DAX L2 adapter index; zero for L1.
 
     One controller must exclusively manage its assigned ranges. State is local:
@@ -74,28 +120,28 @@ class MemoryPoolController:
         pool: MemoryPoolProvider,
         client: httpx.Client,
         consumer_id: str,
-        tier: Literal["l1", "l2"],
+        tier: Tier,
         adapter_index: int = 0,
     ) -> None:
         if (
             not isinstance(consumer_id, str)
             or not consumer_id
-            or tier not in ("l1", "l2")
+            or tier not in (Tier.L1, Tier.L2)
         ):
             raise ValueError("consumer_id and a DAX tier (l1/l2) are required")
         if type(adapter_index) is not int or adapter_index < 0:
             raise ValueError("adapter_index must be a nonnegative integer")
-        if tier == "l1" and adapter_index:
+        if tier == Tier.L1 and adapter_index:
             raise ValueError("L1 does not have an adapter index")
         self._pool, self._client = pool, client
-        self._consumer_id, self._tier = consumer_id, tier
+        self._consumer_id, self._tier = consumer_id, Tier(tier)
         self._adapter_index = adapter_index
         self._instance = ""
         # shortcut: local assignments; add a journal for automatic crash recovery.
         self._assignments: dict[str, _Assignment] = {}
         self._lock = threading.Lock()
         status = self._request("GET", "status")
-        if tier == "l1":
+        if tier == Tier.L1:
             if not isinstance(status.get("arenas"), list):
                 raise RuntimeError("invalid L1 arena status")
         else:
@@ -137,15 +183,16 @@ class MemoryPoolController:
             if previous is not None:
                 if previous.requested_bytes != size_bytes:
                     raise ValueError("request_id was used with a different size")
-                if previous.phase != "attached":
+                if previous.phase is not _AssignmentPhase.ATTACHED:
                     raise RuntimeError("assignment is uncertain or being removed")
+                assert previous.allocation is not None
                 return previous.allocation
             allocation = self._pool.acquire(
                 self._consumer_id,
-                f"{self._instance}/{self._tier}/{self._adapter_index}/{request_id}",
+                f"{self._instance}/{self._tier.value}/{self._adapter_index}/{request_id}",
                 size_bytes,
             )
-            assignment = _Assignment(allocation, size_bytes)
+            assignment = _Assignment(size_bytes)
             self._assignments[request_id] = assignment
             if (
                 not isinstance(allocation, MemoryAllocation)
@@ -158,57 +205,81 @@ class MemoryPoolController:
                 or type(allocation.size_bytes) is not int
                 or allocation.size_bytes < size_bytes
                 or any(
-                    other is not assignment
-                    and isinstance(other.allocation, MemoryAllocation)
+                    other.allocation is not None
                     and other.allocation.allocation_id == allocation.allocation_id
                     for other in self._assignments.values()
                 )
             ):
                 raise ValueError("provider returned an invalid memory allocation")
+            assignment.allocation = allocation
             result = self._request(
                 "POST",
                 "add",
                 self._payload(allocation) | {"size": allocation.size_bytes},
             )
-            entry = result.get("added" if self._tier == "l1" else "device")
+            entry = result.get("added" if self._tier is Tier.L1 else "device")
             if not isinstance(entry, dict) or entry.get("state") != "active":
                 raise RuntimeError("backend did not acknowledge an active mapping")
             self._check_range(entry, allocation)
-            assignment.phase = "attached"
+            assignment.phase = _AssignmentPhase.ATTACHED
             return allocation
 
-    def shrink(self, request_id: str) -> bool:
+    def shrink(self, request_id: str) -> ShrinkResult:
         """Drain/unmap one assignment and only then release its provider lease.
 
-        Return False while L1 drains; True after release. Unknown/released IDs
-        raise KeyError. Provider release failures retain the removed phase for
-        retry. Backend transport/validation errors retain an uncertain assignment
-        requiring offline reconciliation; a same-instance L2 409 can be retried.
+        Args:
+            request_id: Identity of an assignment created by grow.
+
+        Returns:
+            ShrinkResult.DRAINING while L1 still holds the mapping, or
+            ShrinkResult.RELEASED after the provider confirms release.
+
+        Raises:
+            KeyError: The request is unknown or was already released.
+            RuntimeError: The assignment or backend outcome is uncertain.
+            httpx.HTTPError: A backend request failed. Only the explicit L2
+                locked/borrowed-slots rejection allows another removal attempt.
+            Exception: Provider-specific release failure. The detached
+                assignment remains available for a release-only retry.
         """
         with self._lock:
             assignment = self._assignments[request_id]
             allocation = assignment.allocation
             phase = assignment.phase
-            if phase == "uncertain":
+            if phase is _AssignmentPhase.UNCERTAIN:
                 raise RuntimeError(
                     "uncertain assignment requires offline reconciliation"
                 )
-            if phase != "removed":
-                assignment.phase = "uncertain"
+            assert allocation is not None
+            if phase is not _AssignmentPhase.REMOVED:
+                assignment.phase = _AssignmentPhase.UNCERTAIN
                 payload = self._payload(allocation)
-                payload["mode"] = "drain" if self._tier == "l1" else "evict"
-                if self._tier == "l2":
+                payload["mode"] = "drain" if self._tier is Tier.L1 else "evict"
+                if self._tier is Tier.L2:
                     payload["force"] = False
                 try:
                     result = self._request("POST", "remove", payload)
                 except httpx.HTTPStatusError as exc:
                     # Reaping may finish between an acknowledged drain and its retry.
-                    if not (phase == "draining" and exc.response.status_code == 404):
-                        if self._tier == "l2" and exc.response.status_code == 409:
-                            assignment.phase = "attached"
+                    if not (
+                        phase is _AssignmentPhase.DRAINING
+                        and exc.response.status_code == 404
+                    ):
+                        if self._tier is Tier.L2 and exc.response.status_code == 409:
+                            try:
+                                error = exc.response.json()
+                            except ValueError:
+                                raise exc from None
+                            if (
+                                isinstance(error, dict)
+                                and error.get("status") == "blocked"
+                                and error.get("reason")
+                                == "device has externally locked or borrowed slots"
+                            ):
+                                assignment.phase = _AssignmentPhase.ATTACHED
                         raise
                 else:
-                    if self._tier == "l1":
+                    if self._tier is Tier.L1:
                         removed = result.get("removed")
                         if not isinstance(removed, dict):
                             raise RuntimeError("missing removal acknowledgement")
@@ -218,31 +289,34 @@ class MemoryPoolController:
                         result = arenas[0]
                         self._check_range(result, allocation)
                         if result.get("state") == "draining":
-                            assignment.phase = "draining"
-                            return False
+                            assignment.phase = _AssignmentPhase.DRAINING
+                            return ShrinkResult.DRAINING
                     if result.get("state") != "removed":
                         raise RuntimeError("backend has not confirmed unmapping")
-                    if self._tier == "l2" and (
+                    if self._tier is Tier.L2 and (
                         result.get("operation") != "remove"
                         or result.get("device_path") != allocation.device_path
                     ):
                         raise RuntimeError("backend acknowledged a different removal")
-                assignment.phase = "removed"
+                assignment.phase = _AssignmentPhase.REMOVED
             self._pool.release(allocation.allocation_id)
             del self._assignments[request_id]
-            return True
+            return ShrinkResult.RELEASED
 
     def _request(
         self, method: str, operation: str, payload: dict[str, object] | None = None
     ) -> dict[str, object]:
         response = self._client.request(
             method,
-            f"/reconfigure/dax/{self._tier}/{operation}",
+            f"/reconfigure/dax/{self._tier.value}/{operation}",
             json=payload,
             headers={"X-LMCache-Expected-Instance": self._instance}
             if self._instance
             else {},
         )
+        # Authentication can reject the request before incarnation middleware.
+        if response.status_code in (401, 403):
+            response.raise_for_status()
         instance = response.headers.get("X-LMCache-Instance")
         if not instance or (self._instance and instance != self._instance):
             raise RuntimeError("worker instance changed or lacks hotplug fencing")
@@ -258,14 +332,14 @@ class MemoryPoolController:
             "device_path": allocation.device_path,
             "offset": allocation.offset_bytes,
         }
-        if self._tier == "l2":
+        if self._tier is Tier.L2:
             payload["adapter_index"] = self._adapter_index
         return payload
 
     def _check_range(self, entry: object, allocation: MemoryAllocation) -> None:
         offset, size = (
             ("offset_in_bytes", "size_in_bytes")
-            if self._tier == "l1"
+            if self._tier is Tier.L1
             else ("offset_bytes", "max_dax_size_bytes")
         )
         if not isinstance(entry, dict) or (

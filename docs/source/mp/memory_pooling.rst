@@ -21,23 +21,31 @@ Call the controller from the deployment's orchestration loop:
 
    import httpx
    from deployment.memory_pool import create_pool  # Your provider adapter.
-   from lmcache.v1.memory_orchestrator.pooling import MemoryPoolController
+   from lmcache.v1.distributed.api import Tier
+   from lmcache.v1.memory_orchestrator.pooling import MemoryPoolController, ShrinkResult
 
    pool = create_pool()
    with httpx.Client(base_url="http://mp-worker:8080", timeout=30) as worker:
-       controller = MemoryPoolController(pool, worker, "node-a/mp-a", "l1")
+       controller = MemoryPoolController(pool, worker, "node-a/mp-a", Tier.L1)
        allocation = controller.grow("request-001", 1 << 30)
-       # Later, repeat while False: L1 may still hold live allocations.
-       released = controller.shrink("request-001")
+       # Later, retry DRAINING; only RELEASED confirms return to the provider.
+       outcome = controller.shrink("request-001")
+       released = outcome is ShrinkResult.RELEASED
 
 The HTTP client belongs to the caller; configure its credentials using the
-worker's existing authentication scheme. Use ``"l2"`` and ``adapter_index=N``
+worker's existing authentication scheme. Use ``Tier.L2`` and ``adapter_index=N``
 to select the Nth DAX L2 adapter. Its ``hotplug_enabled`` setting must be true.
 Grow provisions first, then calls the existing hotplug-add endpoint. Shrink
 waits for confirmed backend removal before calling the provider's release.
 L1 drains added arenas and cannot return its initial primary arena. L2 uses
 ``evict`` with ``force=False``; this discards cached KV after locks and borrows
 permit removal. Capacity reporting already follows these backend operations.
+
+For GPU KV requests, start the MP server with ``--transport grpc`` and connect
+using an explicit endpoint such as ``grpc://172.16.18.190:5555``. The pooling
+management client above continues to use the worker's HTTP port.
+Compare shrink results explicitly with ``ShrinkResult.DRAINING`` or
+``ShrinkResult.RELEASED``; enum values must not be used as boolean results.
 
 Safety and recovery
 -------------------
@@ -46,6 +54,9 @@ Workers advertise ``X-LMCache-Instance`` on reconfiguration responses. The
 controller sends ``X-LMCache-Expected-Instance`` on subsequent requests; a
 replacement worker rejects the old incarnation before touching its backend.
 Legacy hotplug callers may omit the header, but pool controllers require it.
+Unhandled reconfiguration errors return a generic 500 with the worker identity;
+authentication failures are reported as authentication errors before identity
+validation. Only the explicit L2 locked/borrowed-slot rejection permits a retry.
 Use one controller per worker/backend and do not concurrently reconfigure its
 owned ranges through another caller.
 
@@ -53,6 +64,8 @@ An uncertain HTTP operation retains the provider lease and blocks automatic
 reuse of that request. Never release backing as rollback for a failed add,
 timeout, worker restart, or merely ``draining`` response. Provider release may
 be retried after confirmed detach without calling the backend again.
+An add rejection such as an overlap error is not an unmapping acknowledgement:
+the same range may already be live. Its lease remains held for reconciliation.
 An L2 unmap failure keeps the device ``removing`` and its range owned, while
 excluding it from usable capacity. Adapter shutdown still cleans up other
 devices and event notifiers; explicit cleanup retries retain the failed mapping.

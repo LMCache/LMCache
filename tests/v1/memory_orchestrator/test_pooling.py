@@ -10,10 +10,12 @@ import httpx
 import pytest
 
 # First Party
+from lmcache.v1.distributed.api import Tier
 from lmcache.v1.memory_orchestrator.pooling import (
     MemoryAllocation,
     MemoryPoolController,
     MemoryPoolProvider,
+    ShrinkResult,
 )
 
 ALLOCATION = MemoryAllocation("lease-1", "/dev/dax0.1", 4096, 8192)
@@ -46,6 +48,10 @@ def client_for(pool: Mock, *responses: httpx.Response | Exception) -> httpx.Clie
 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
+            assert request.url.path in (
+                "/reconfigure/dax/l1/status",
+                "/reconfigure/dax/l2/status",
+            )
             return reply(
                 {"arenas": [], "adapters": [{"status": {"hotplug_enabled": True}}]}
             )
@@ -85,9 +91,20 @@ def test_l2_busy_detach_and_uncertain_release_retry_without_reacquisition(
     )
     pool.release.side_effect = [OSError("release acknowledgement lost"), None]
     with client_for(
-        pool, reply({"device": added}), reply({}, 409), reply(removed)
+        pool,
+        reply({"device": added}),
+        reply(
+            {
+                "status": "blocked",
+                "reason": "device has externally locked or borrowed slots",
+                "locked_key_count": 1,
+                "borrowed_slot_count": 0,
+            },
+            409,
+        ),
+        reply(removed),
     ) as client:
-        controller = MemoryPoolController(pool, client, "node-a", "l2")
+        controller = MemoryPoolController(pool, client, "node-a", Tier.L2)
         assert controller.grow("grow-1", 8192) == ALLOCATION
         assert controller.grow("grow-1", 8192) == ALLOCATION
         with pytest.raises(ValueError):
@@ -98,7 +115,7 @@ def test_l2_busy_detach_and_uncertain_release_retry_without_reacquisition(
         pool.release.assert_not_called()
         with pytest.raises(OSError):
             controller.shrink("grow-1")
-        assert controller.shrink("grow-1")
+        assert controller.shrink("grow-1") is ShrinkResult.RELEASED
         with pytest.raises(KeyError):
             controller.shrink("grow-1")
     assert pool.release.call_args_list == [call("lease-1")] * 2
@@ -117,14 +134,14 @@ def test_l1_missing_range_requires_acknowledged_drain_on_same_worker(
         responses += [reply({"removed": {"arenas": [arena("draining")]}})] * 2
     responses.append(reply({}, 404, instance))
     with client_for(pool, *responses) as client:
-        controller = MemoryPoolController(pool, client, "node-a", "l1")
+        controller = MemoryPoolController(pool, client, "node-a", Tier.L1)
         controller.grow("grow-1", 8192)
         if drain:
-            assert not controller.shrink("grow-1")
-            assert not controller.shrink("grow-1")
+            assert controller.shrink("grow-1") is ShrinkResult.DRAINING
+            assert controller.shrink("grow-1") is ShrinkResult.DRAINING
             pool.release.assert_not_called()
         if drain and instance == "worker-a":
-            assert controller.shrink("grow-1")
+            assert controller.shrink("grow-1") is ShrinkResult.RELEASED
             pool.release.assert_called_once_with("lease-1")
         else:
             error = RuntimeError if drain else httpx.HTTPStatusError
@@ -140,6 +157,10 @@ def test_l1_missing_range_requires_acknowledged_drain_on_same_worker(
     [
         (httpx.ReadTimeout("unknown add outcome"), httpx.ReadTimeout),
         (reply({}, 500), httpx.HTTPStatusError),
+        (
+            reply({"error": "range overlaps an active DAX device"}, 409),
+            httpx.HTTPStatusError,
+        ),
         (reply({"added": {}}), RuntimeError),
     ],
 )
@@ -149,7 +170,7 @@ def test_uncertain_attach_never_releases_or_repeats_hotplug(
     error: type[Exception],
 ) -> None:
     with client_for(pool, outcome) as client:
-        controller = MemoryPoolController(pool, client, "node-a", "l1")
+        controller = MemoryPoolController(pool, client, "node-a", Tier.L1)
         with pytest.raises(error):
             controller.grow("grow-1", 8192)
         with pytest.raises(RuntimeError):
@@ -172,7 +193,7 @@ def test_invalid_provider_result_does_not_poison_later_assignments(pool: Mock) -
     with httpx.Client(
         base_url="http://worker", transport=httpx.MockTransport(handler)
     ) as client:
-        controller = MemoryPoolController(pool, client, "node-a", "l1")
+        controller = MemoryPoolController(pool, client, "node-a", Tier.L1)
         with pytest.raises(ValueError, match="invalid memory allocation"):
             controller.grow("bad", 8192)
         with pytest.raises(RuntimeError, match="uncertain"):
@@ -183,6 +204,45 @@ def test_invalid_provider_result_does_not_poison_later_assignments(pool: Mock) -
         pool.release.assert_not_called()
         handler.assert_called_once()
         assert controller.grow("good", 8192) == ALLOCATION
-        assert controller.shrink("good")
+        assert controller.shrink("good") is ShrinkResult.RELEASED
     assert pool.acquire.call_count == 2 and handler.call_count == 3
     pool.release.assert_called_once_with(ALLOCATION.allocation_id)
+
+
+def test_unknown_l2_conflict_stays_uncertain(pool: Mock) -> None:
+    """A generic 409 is not proof that only an external read lock blocked removal."""
+    added = dict(
+        device_path=ALLOCATION.device_path,
+        offset_bytes=4096,
+        max_dax_size_bytes=8192,
+        state="active",
+    )
+    with client_for(
+        pool, reply({"device": added}), reply({"error": "unknown conflict"}, 409)
+    ) as client:
+        controller = MemoryPoolController(pool, client, "node-a", Tier.L2)
+        controller.grow("grow-1", 8192)
+        with pytest.raises(httpx.HTTPStatusError):
+            controller.shrink("grow-1")
+        with pytest.raises(RuntimeError, match="uncertain"):
+            controller.shrink("grow-1")
+    pool.release.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_headerless_auth_error_is_reported_without_worker_change(
+    pool: Mock, status: int
+) -> None:
+    """Authentication can reject a request before incarnation middleware runs."""
+    responses = iter([reply({"arenas": []}), httpx.Response(status)])
+    with httpx.Client(
+        base_url="http://worker",
+        transport=httpx.MockTransport(lambda request: next(responses)),
+    ) as client:
+        controller = MemoryPoolController(pool, client, "node-a", Tier.L1)
+        with pytest.raises(httpx.HTTPStatusError) as error:
+            controller.grow("grow-1", 8192)
+        assert error.value.response.status_code == status
+        with pytest.raises(RuntimeError, match="uncertain"):
+            controller.shrink("grow-1")
+    pool.release.assert_not_called()

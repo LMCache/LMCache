@@ -2,8 +2,11 @@
 """Physical DAX release must wait for confirmed unmapping."""
 
 # Standard
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import mmap
 import os
+import threading
 
 # Third Party
 import pytest
@@ -12,6 +15,40 @@ import torch
 # First Party
 from lmcache.v1.distributed.l2_adapters.dax.core import DaxCore
 from tests.v1.distributed.test_dax_l2_adapter import create_memory_obj
+
+
+def test_close_does_not_block_status_while_unmapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slow unmapping leaves status available and serializes concurrent closers."""
+    entered, release = threading.Event(), threading.Event()
+    closes: list[None] = []
+
+    class SlowMapping(mmap.mmap):
+        def close(self) -> None:
+            closes.append(None)
+            entered.set()
+            assert release.wait(5)
+            super().close()
+
+    monkeypatch.setattr(mmap, "mmap", SlowMapping)
+    path = tmp_path / "dax"
+    path.write_bytes(bytes(4096))
+    core = DaxCore[str](device_path=str(path), max_dax_size_bytes=4096, slot_bytes=64)
+    with ThreadPoolExecutor(max_workers=3) as tasks:
+        first = tasks.submit(core.close)
+        try:
+            assert entered.wait(5)
+            second = tasks.submit(core.close)
+            status = tasks.submit(core.report_status).result(timeout=1)
+            assert status["closing"] and not status["is_healthy"]
+            assert core.fd is not None and os.fstat(core.fd).st_size == 4096
+            assert core.mmap_obj is not None and not core.mmap_obj.closed
+        finally:
+            release.set()
+            first.result(timeout=5)
+        second.result(timeout=5)
+    assert len(closes) == 1
 
 
 def test_close_retries_exported_mapping_and_refuses_new_work(tmp_path: Path) -> None:

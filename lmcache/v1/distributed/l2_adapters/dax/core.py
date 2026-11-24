@@ -129,6 +129,7 @@ class DaxCore(Generic[KeyT]):
 
         self._state_lock = threading.RLock()
         self._state_condition = threading.Condition(self._state_lock)
+        self._close_lock = threading.Lock()
 
         self._index: dict[KeyT, _Entry] = {}
         self._external_lock_counts: dict[KeyT, int] = {}
@@ -791,46 +792,49 @@ class DaxCore(Generic[KeyT]):
         operations to drain, clears volatile in-memory indexes, and releases
         the mmap, memoryview, and file descriptor. Failed unmapping keeps the
         mapping for a later close attempt; new operations remain refused.
+        Close calls are serialized separately so slow unmapping does not block
+        status inspection behind the metadata lock.
 
         Raises:
             BufferError: Exported views still prevent unmapping.
             OSError: The mapping or file descriptor could not be closed.
         """
-        with self._state_lock:
-            if self._closed:
-                return
+        with self._close_lock:
+            with self._state_lock:
+                if self._closed:
+                    return
+                self._closing = True
+                while self._active_writes > 0 or self._active_reads > 0:
+                    if not self._state_condition.wait(timeout=30.0):
+                        logger.warning(
+                            "DaxCore close: still waiting for %d writes, %d reads",
+                            self._active_writes,
+                            self._active_reads,
+                        )
+                arena_view, mmap_obj = self._arena_view, self._mmap_obj
 
-            self._closing = True
-            while self._active_writes > 0 or self._active_reads > 0:
-                if not self._state_condition.wait(timeout=30.0):
-                    logger.warning(
-                        "DaxCore close: still waiting for %d writes, %d reads",
-                        self._active_writes,
-                        self._active_reads,
-                    )
-
-            if self._closed:
-                return
-
-            if self._arena_view is not None:
-                self._arena_view.release()
-                self._arena_view = None
-            if self._mmap_obj is not None:
-                self._mmap_obj.close()
+            if arena_view is not None:
+                arena_view.release()
+                with self._state_lock:
+                    self._arena_view = None
+            if mmap_obj is not None:
+                mmap_obj.close()
+            with self._state_lock:
                 self._mmap_obj = None
-            self._base_ptr = 0
-            if self._fd is not None:
+                self._base_ptr = 0
                 fd, self._fd = self._fd, None
+            if fd is not None:
                 # close(2) may release the fd even on error; never retry its number.
                 os.close(fd)
 
-            self._closed = True
-            self._index.clear()
-            self._external_lock_counts.clear()
-            self._inflight.clear()
-            self._slot_states.clear()
-            self._free_slots.clear()
-            self._next_slot = 0
+            with self._state_lock:
+                self._closed = True
+                self._index.clear()
+                self._external_lock_counts.clear()
+                self._inflight.clear()
+                self._slot_states.clear()
+                self._free_slots.clear()
+                self._next_slot = 0
 
     def report_status(self) -> dict:
         """Return a status snapshot for health and observability.
