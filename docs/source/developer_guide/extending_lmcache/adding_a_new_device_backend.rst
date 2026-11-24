@@ -358,7 +358,7 @@ when exactly one reports available. If multiple backends report available, set
             "kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector",
             "kv_role": "kv_both",
             "kv_connector_extra_config": {
-                "lmcache.mp.host": "tcp://localhost",
+                "lmcache.mp.host": "grpc://localhost",
                 "lmcache.mp.port": "5555",
                 "lmcache.mp.mp_transfer_mode": "engine_driven"
             }
