@@ -80,11 +80,6 @@ void Bitmap::clear(size_t index) {
   data_[byte_index(index)] &= static_cast<uint8_t>(~(1u << bit_offset(index)));
 }
 
-bool Bitmap::test(size_t index) const {
-  if (index >= size_) return false;
-  return (data_[byte_index(index)] >> bit_offset(index)) & 1u;
-}
-
 size_t Bitmap::popcount() const {
   if (data_.empty()) return 0;
 
