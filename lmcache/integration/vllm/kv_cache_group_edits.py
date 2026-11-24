@@ -366,21 +366,23 @@ class _MambaSlicePlaneEdit(KVCacheGroupEdit):
     Some hybrid backends (e.g., vLLM-Ascend <= v0.29) register conv and SSM
     as separate contiguous slices carved from a shared pool. Each slice's
     per-block stride is its own byte size, not the padded page, so
-    :class:`_MambaPageViewEdit` does not apply. The transfer path expects
-    one uint8 plane per slice, ``[num_blocks, num_slots, 1, width]`` (format
-    17, ``NL_X_NP_X_NB_BS_ONE_HS``). ``num_slots`` is
+    :class:`_MambaPageViewEdit` does not apply. The view is one uint8 plane
+    per slice, ``[num_blocks, num_slots, 1, width]``
+    (format 17, ``NL_X_NP_X_NB_BS_ONE_HS``). ``num_slots`` is
     ``gcd(block_size, *payloads)``, which equals ``spec.block_size`` when
     every payload divides it and otherwise compresses slots (e.g. Qwen4 PLE
-    under block sizes 896 and 1664, or an indivisible conv/SSM pair) while
-    keeping ``width`` small enough for Ascend's per-row UB staging budget
-    (a single ``slots_per_block == 1`` row would exceed the 128 KiB fallback
-    for 184320-byte PLE and physical UB for 384 KiB--2 MiB SSM slices). Like
-    :meth:`_MambaUnifiedViewEdit._compressed_slots`, slot compression is
-    lossless because recurrent-state blocks are always transferred whole
-    (both full chunks and unfull-chunk boundary-state blocks). A coprime
-    block (``gcd <= 1`` while ``block_size > 1``) does not match. A packed
-    page, whose conv stride equals ``page_size_bytes``, remains owned by
-    :class:`_MambaPageViewEdit`.
+    under block sizes 896 and 1664, or an indivisible conv/SSM pair) so each
+    row is a fraction of the payload. A per-row size limit belongs to the
+    transfer kernel. On Ascend, for example, one ``slots_per_block == 1`` row
+    exceeds the 128 KiB unified-buffer floor for 184320-byte PLE and physical
+    UB for 384 KiB--2 MiB SSM slices. Currently this class and format 17 are
+    used only on Ascend; the view itself is vendor-neutral, so another backend
+    can use it. Like :meth:`_MambaUnifiedViewEdit._compressed_slots`, slot
+    compression is lossless because recurrent-state blocks are always
+    transferred whole (both full chunks and unfull-chunk boundary-state
+    blocks). A coprime block (``gcd <= 1`` while ``block_size > 1``) does not
+    match. A packed page, whose conv stride equals ``page_size_bytes``,
+    remains owned by :class:`_MambaPageViewEdit`.
     """
 
     name = "mamba-slice-planes"
@@ -403,10 +405,10 @@ class _MambaSlicePlaneEdit(KVCacheGroupEdit):
         ``gcd(block_size, *payloads)`` (``block_size`` when every payload is
         a multiple of it), which divides ``block_size`` so downstream slot
         compression (``tokens_per_block % slots_per_block == 0``) stays valid
-        while splitting each block into narrower rows that fit the Ascend
-        transfer kernel's per-row UB budget. ``None`` rejects a slice that is
-        not one contiguous block, an empty input, or a coprime block. Exact
-        row alignment and UB bounds are enforced by the transfer kernel.
+        while splitting each block into narrower rows. ``None`` rejects a
+        slice that is not one contiguous block, an empty input, or a coprime
+        block. The transfer kernel enforces row alignment and its own per-row
+        budget (on Ascend, the unified-buffer floor).
         """
         if block_size <= 0 or not states:
             return None
