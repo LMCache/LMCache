@@ -15,7 +15,7 @@ maintainers:
 # LMCache Glossary
 
 Definitions of the terms that come up when reading, writing, or benchmarking anything about LMCache.
-Written for someone who is competent but new to this corner of the stack — an engineer arriving from a different specialty, a technical writer, an analyst, a journalist.
+Written for someone who is competent but new to this corner of the stack, such as an engineer arriving from a different specialty, a technical writer, an analyst, or a journalist.
 
 Every entry is written to stand alone.
 You should be able to land on one term cold, understand it without reading anything above it, and follow the `related` links outward if you want more.
