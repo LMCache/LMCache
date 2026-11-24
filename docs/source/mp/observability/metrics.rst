@@ -640,7 +640,21 @@ attribute — the registered adapter type (e.g. ``"fs"``, ``"nixl_store"``,
      - L1→L2 store throughput in GB/s per request.
    * - ``lmcache_mp.l2_load_throughput``
      - Histogram
-     - L2→L1 load throughput in GB/s per (request, adapter) pair.
+     - Submitted L2→L1 bytes divided by latency, in GB/s per (request, adapter) pair.
+   * - ``lmcache_mp.l2_load_successful_throughput``
+     - Histogram
+     - Successfully loaded logical payload divided by latency, in GB/s per
+       (request, adapter) pair.
+
+The successful-load histogram excludes failed objects and allocator padding.
+It counts payload before prefix folding, so it does not measure bytes consumed
+by inference or physical network/disk traffic (including compression and
+retries). For example, 1 GB submitted with 0.25 GB successfully loaded in 0.5 s
+records 2 GB/s in ``l2_load_throughput`` and 0.5 GB/s in
+``l2_load_successful_throughput``. Existing load throughput semantics are
+unchanged. Tasks with zero successful bytes, or older completion events without
+``successful_bytes``, produce no successful-load sample; consult the L2 failure
+counters alongside this histogram.
 
 **PromQL for average throughput (GB/s), per backend:**
 

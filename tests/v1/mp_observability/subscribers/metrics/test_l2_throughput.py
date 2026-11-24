@@ -220,6 +220,33 @@ class TestStoreThroughput:
 
 
 class TestLoadThroughput:
+    @pytest.mark.parametrize("successful_bytes", [2_000_000_000, 500_000_000, 0, None])
+    def test_successful_payload_throughput(
+        self, subscriber: L2ThroughputSubscriber, successful_bytes: int | None
+    ) -> None:
+        """Exclude failed payload without changing submitted throughput."""
+        metric = "lmcache_mp.l2_load_successful_throughput"
+        before_count = _total_count(metric)
+        before_sum = _sum(metric)
+        submitted_sum = _sum(_LOAD_METRIC)
+        handlers = subscriber.get_subscriptions()
+        handlers[EventType.L2_LOAD_TASK_SUBMITTED](
+            _load_submitted(request_id=90, t=1.0, total_bytes=2_000_000_000)
+        )
+        completed = _load_completed(request_id=90, t=1.5)
+        if successful_bytes is not None:
+            completed.metadata["successful_bytes"] = successful_bytes
+        handlers[EventType.L2_LOAD_TASK_COMPLETED](completed)
+        handlers[EventType.L2_LOAD_TASK_COMPLETED](completed)
+
+        assert _sum(_LOAD_METRIC) - submitted_sum == pytest.approx(4.0)
+        assert _total_count(metric) - before_count == int(bool(successful_bytes))
+        assert _sum(metric) - before_sum == pytest.approx(
+            (successful_bytes or 0) / 0.5 / 1e9
+        )
+        if successful_bytes:
+            assert {"l2_name": "fs"} in _attrs_of_nonzero_dps(metric)
+
     def test_records_gbps_with_l2_name(self, subscriber):
         count_before = _total_count(_LOAD_METRIC)
         sum_before = _sum(_LOAD_METRIC)
