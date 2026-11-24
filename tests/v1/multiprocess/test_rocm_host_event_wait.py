@@ -527,7 +527,7 @@ def test_reregistration_while_waiting_drops_the_transfer(
         else:
             module._cache_contexts[1].last_seen = -1e9
             assert module.reap_stale_instances(1.0, 1.0) == [1]
-        module.register_kv_cache(1, [], "model", 1, None, None, [])
+        module.register_kv_cache(1, [], "model", 1, None, None, [], None)
         t.backend.done.add(b"old")
         assert response.result(timeout=5) == (b"", False)
         assert _kinds(replacement) == ["check"]
