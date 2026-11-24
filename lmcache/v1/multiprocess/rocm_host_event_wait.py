@@ -22,7 +22,7 @@ complete within ``timeout_s``, or that has not started at shutdown, is failed
 without enqueuing device work. Shutdown leaves a running transfer to its
 affinity worker, as it leaves the server's other handlers.
 
-XPU: ``--xpu-host-event-wait {off,store,all}`` (or
+XPU: ``--xpu-host-event-wait {off,store,retrieve,all}`` (or
 ``LMCACHE_XPU_HOST_EVENT_WAIT``, read when the option is ``off``) does the
 same on XPU, where a stream wait on the engine's pending event slows the
 engine as well; it is ``off`` by default and ignored elsewhere. ``all``
@@ -35,6 +35,16 @@ frees a finished request's blocks only after its STORE reported done, and
 before it reuses a preempted request's blocks it waits for every STORE in
 flight (``LMCacheDrivenTransferContext.flush_inflight_stores``).
 
+``retrieve`` defers RETRIEVEs only: a STORE keeps the stream wait and does
+not queue behind the RETRIEVEs, so it can run before an earlier RETRIEVE
+still waiting for its event. That is safe as well. The engine loads KV
+asynchronously: the request stays in ``WAITING_FOR_REMOTE_KVS``, runs no
+forward pass and so submits no STORE until the RETRIEVE's future reports
+the server's copies complete. Until then vLLM neither shares its new blocks
+with other requests (``delay_cache_blocks``) nor frees them on abort. A
+STORE never replaces a resident object, and the RETRIEVE's objects stay
+read-locked from its lookup.
+
 The transfer itself runs the unchanged store / retrieve code: inside it the
 instance's event backend returns the already imported event and skips the
 stream wait on it.
@@ -46,8 +56,8 @@ time without the waiting peer), delete this module, the option and the
 ``_host_event_waiter`` uses in ``lmcache_driven_transfer.py`` and
 ``current_worker_poster`` in ``affinity_pool.py``. The XPU option goes once
 a GPU driver shows no slowdown in the same reproducer on XPU: delete it and
-the ``wait_retrieves`` and ``option`` arguments (the whole module once both
-platforms are fixed).
+the ``wait_stores``, ``wait_retrieves`` and ``option`` arguments (the whole
+module once both platforms are fixed).
 """
 
 # Standard
@@ -71,7 +81,7 @@ logger = init_logger(__name__)
 
 ROCM_HOST_EVENT_WAIT_ENV = "LMCACHE_ROCM_HOST_EVENT_WAIT"
 XPU_HOST_EVENT_WAIT_ENV = "LMCACHE_XPU_HOST_EVENT_WAIT"
-XPU_HOST_EVENT_WAIT_MODES = ("off", "store", "all")
+XPU_HOST_EVENT_WAIT_MODES = ("off", "store", "retrieve", "all")
 TIMEOUT_S = 60.0
 _POLL_MIN_S = 50e-6
 _POLL_MAX_S = 1e-3
@@ -125,11 +135,13 @@ def create_host_event_waiter(
         enabled: The ``--rocm-host-event-wait`` server option;
             ``LMCACHE_ROCM_HOST_EVENT_WAIT=1`` enables it as well.
         xpu_mode: The ``--xpu-host-event-wait`` server option: ``off``,
-            ``store`` (STOREs only) or ``all``. When it is ``off``,
+            ``store`` (STOREs only), ``retrieve`` (RETRIEVEs only) or
+            ``all``. When it is ``off``,
             ``LMCACHE_XPU_HOST_EVENT_WAIT`` sets the mode instead.
 
     Raises:
-        ValueError: The XPU mode is not one of ``off``, ``store``, ``all``.
+        ValueError: The XPU mode is not one of ``off``, ``store``,
+            ``retrieve``, ``all``.
     """
     waiter = None
     if enabled or _env_enabled(ROCM_HOST_EVENT_WAIT_ENV):
@@ -146,13 +158,18 @@ def create_host_event_waiter(
     mode = _xpu_mode(xpu_mode)
     if mode != "off":
         if _running_on_xpu():
-            wait_retrieves = mode == "all"
+            wait_stores = mode in ("store", "all")
+            wait_retrieves = mode in ("retrieve", "all")
             logger.info(
                 "XPU host event wait enabled for LMCache-driven %s",
-                "STORE / RETRIEVE" if wait_retrieves else "STORE",
+                {"store": "STORE", "retrieve": "RETRIEVE"}.get(
+                    mode, "STORE / RETRIEVE"
+                ),
             )
             waiter = HostEventWaiter(
-                wait_retrieves=wait_retrieves, option="xpu_host_event_wait"
+                wait_stores=wait_stores,
+                wait_retrieves=wait_retrieves,
+                option="xpu_host_event_wait",
             )
         else:
             logger.warning(
@@ -236,9 +253,12 @@ class HostEventWaiter:
     Args:
         timeout_s: Seconds a queued transfer may wait before it is failed.
         clock: Monotonic clock; injectable for tests.
-        wait_retrieves: Whether RETRIEVEs wait on the host as well; False
-            (XPU ``store``) leaves them to the stream wait, and
+        wait_stores: Whether STOREs wait on the host; False (XPU
+            ``retrieve``) leaves them to the stream wait, and
             ``device_waits`` then counts theirs.
+        wait_retrieves: Whether RETRIEVEs wait on the host; False (XPU
+            ``store``) leaves them to the stream wait, and ``device_waits``
+            then counts theirs.
         option: The server option that enabled the waiter; the key of its
             statistics in the module status.
     """
@@ -249,7 +269,9 @@ class HostEventWaiter:
         clock: Callable[[], float] = time.monotonic,
         wait_retrieves: bool = True,
         option: str = "rocm_host_event_wait",
+        wait_stores: bool = True,
     ) -> None:
+        self.wait_stores = wait_stores
         self.wait_retrieves = wait_retrieves
         self.option = option
         self._timeout_s = timeout_s

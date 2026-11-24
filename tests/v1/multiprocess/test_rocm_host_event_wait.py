@@ -418,7 +418,7 @@ def test_xpu_option_defaults_off_and_takes_a_mode() -> None:
         parse_args_to_mp_server_config(parser.parse_args([])).xpu_host_event_wait
         == "off"
     )
-    for mode in ("off", "store", "all"):
+    for mode in ("off", "store", "retrieve", "all"):
         config = parse_args_to_mp_server_config(
             parser.parse_args(["--xpu-host-event-wait", mode])
         )
@@ -443,20 +443,24 @@ def test_xpu_off_by_default_creates_no_waiter(
 
 
 @pytest.mark.parametrize(
-    ("option", "env", "wait_retrieves"),
+    ("option", "env", "wait_stores", "wait_retrieves"),
     [
-        ("store", None, False),
-        ("all", None, True),
-        ("off", "store", False),
-        ("off", " ALL ", True),
-        ("store", "all", False),
-        ("all", "store", True),
+        ("store", None, True, False),
+        ("retrieve", None, False, True),
+        ("all", None, True, True),
+        ("off", "store", True, False),
+        ("off", "retrieve", False, True),
+        ("off", " ALL ", True, True),
+        ("store", "all", True, False),
+        ("retrieve", "store", False, True),
+        ("all", "store", True, True),
     ],
 )
 def test_xpu_mode_from_option_or_env_on_xpu(
     monkeypatch: pytest.MonkeyPatch,
     option: str,
     env: str | None,
+    wait_stores: bool,
     wait_retrieves: bool,
 ) -> None:
     """The env sets the mode only while the option is off."""
@@ -465,6 +469,7 @@ def test_xpu_mode_from_option_or_env_on_xpu(
     t = _build(monkeypatch, enabled=False, hip=None, xpu_mode=option, xpu=True)
     waiter = t.module._host_event_waiter
     assert isinstance(waiter, HostEventWaiter)
+    assert waiter.wait_stores is wait_stores
     assert waiter.wait_retrieves is wait_retrieves
     assert waiter.option == "xpu_host_event_wait"
     waiter.stop()
@@ -474,12 +479,12 @@ def test_xpu_mode_from_option_or_env_on_xpu(
 def test_xpu_invalid_env_mode_raises(monkeypatch: pytest.MonkeyPatch, env: str) -> None:
     monkeypatch.setenv(XPU_HOST_EVENT_WAIT_ENV, env)
     threads = _poller_threads()
-    with pytest.raises(ValueError, match="off, store, all"):
+    with pytest.raises(ValueError, match="off, store, retrieve, all"):
         _build(monkeypatch, enabled=False, hip=None, xpu=True)
     assert _poller_threads() == threads
 
 
-@pytest.mark.parametrize("mode", ["store", "all"])
+@pytest.mark.parametrize("mode", ["store", "retrieve", "all"])
 @pytest.mark.parametrize("hip", [None, "7.0"])
 def test_xpu_option_off_xpu_warns_and_creates_no_xpu_waiter(
     monkeypatch: pytest.MonkeyPatch, hip: str | None, mode: str
@@ -537,6 +542,39 @@ def test_xpu_defers_store_but_retrieve_keeps_device_wait(xpu_host: Any) -> None:
         "device_waits": 1,
         "pending": 0,
     }
+
+
+def test_xpu_retrieve_defers_retrieve_but_store_keeps_device_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A store neither waits on the host nor queues behind a waiting retrieve."""
+    t = _build(monkeypatch, enabled=False, hip=None, xpu_mode="retrieve", xpu=True)
+    try:
+        retrieve = t.module.retrieve(_key("r"), 1, [[]], b"r")
+        assert isinstance(retrieve, DeferredResponse)
+        store = t.module.store(_key("s"), 1, [[]], b"s")
+        assert store == (b"completion-handle", True)
+        assert not retrieve.done()
+        waited = [call[1] for call in t.backend.calls if call[0] == "wait"]
+        assert waited == [("remote", b"s")]
+
+        t.backend.done.add(b"r")
+        assert retrieve.result(timeout=5) == (b"completion-handle", False)
+        waited = [call[1] for call in t.backend.calls if call[0] == "wait"]
+        assert waited == [("remote", b"s")]
+        status = t.module.report_status()
+        assert "rocm_host_event_wait" not in status
+        assert status["xpu_host_event_wait"] == {
+            "inline": 0,
+            "deferred": 1,
+            "timeout": 0,
+            "shutdown": 0,
+            "stale": 0,
+            "device_waits": 1,
+            "pending": 0,
+        }
+    finally:
+        t.module._host_event_waiter.stop()
 
 
 def test_xpu_all_defers_store_and_retrieve(monkeypatch: pytest.MonkeyPatch) -> None:

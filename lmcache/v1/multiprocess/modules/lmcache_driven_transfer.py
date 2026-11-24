@@ -673,7 +673,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         tuple.
         """
         waiter = self._host_event_waiter
-        if waiter is not None and not waiter.in_run():
+        if waiter is not None and waiter.wait_stores and not waiter.in_run():
             return waiter.submit_after_event(
                 instance_id,
                 self.get_and_touch_context_entry(instance_id),

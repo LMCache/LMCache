@@ -117,11 +117,12 @@ during a transfer.
 On the handle path, the LMCache server's transfer stream waits on the event
 the vLLM worker recorded for each STORE and RETRIEVE, and that pending wait
 can slow the worker's kernels. The server option
-``--xpu-host-event-wait {off,store,all}`` makes the server enqueue a transfer
-only once its event has completed, polled on the host: ``store`` for STOREs
-only (RETRIEVEs keep the stream wait), ``all`` for both. It is ``off`` by
-default. When the option is ``off``, the server environment variable
-``LMCACHE_XPU_HOST_EVENT_WAIT=store`` or ``=all`` sets it instead:
+``--xpu-host-event-wait {off,store,retrieve,all}`` makes the server enqueue a
+transfer only once its event has completed, polled on the host: ``store`` for
+STOREs only, ``retrieve`` for RETRIEVEs only (the other kind keeps the stream
+wait), ``all`` for both. It is ``off`` by default. When the option is ``off``,
+the server environment variable ``LMCACHE_XPU_HOST_EVENT_WAIT`` set to
+``store``, ``retrieve`` or ``all`` sets it instead:
 
 .. code-block:: bash
 
