@@ -802,7 +802,7 @@ class TestStorageManagerL2Prefetch:
         assert (deleted, skipped) == (3, 0)
 
         handle = sm.submit_prefetch_task(single_row_spec(keys, basic_layout))
-        assert sm.wait_prefetch_status(handle, timeout=10.0)
+        assert sm.watch_prefetch_status(handle).result(timeout=10.0)
         result = sm.query_prefetch_status(handle)
 
         assert result is not None

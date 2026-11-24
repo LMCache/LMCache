@@ -132,7 +132,7 @@ class _GeneratedServicer:
                 # A sync gRPC call waits on its own thread without taking a
                 # normal-handler slot, then takes one to run the continuation.
                 deferred = registered.handler(*payloads)
-                deferred.ready.result()
+                deferred.result()
                 with self._normal_slots:
                     result = deferred.resume()
             else:

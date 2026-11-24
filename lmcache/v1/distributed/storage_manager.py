@@ -641,36 +641,13 @@ class StorageManager:
             )
         return result
 
-    def wait_prefetch_status(
-        self,
-        handle: PrefetchHandle,
-        timeout: float,
-    ) -> bool:
-        """
-        Block until the prefetch task for ``handle`` has a result, or timeout.
-
-        This lets a caller avoid busy-polling query_prefetch_status; the
-        status itself is still retrieved via query_prefetch_status afterwards.
-
-        Args:
-            handle (PrefetchHandle): The handle of the prefetch task.
-            timeout: Maximum number of seconds to wait for the result.
-
-        Returns:
-            True if a result is available within the timeout, False if the
-            wait timed out.
-        """
-        if handle.prefetch_request_id == -1:
-            return True
-        return self._prefetch_controller.wait_prefetch_result(
-            handle.prefetch_request_id, timeout
-        )
-
     def watch_prefetch_status(
         self,
         handle: PrefetchHandle,
     ) -> Future[bool]:
-        """Non-blocking wait_prefetch_status: return a future of publication.
+        """Return a future that completes when the prefetch task for ``handle``
+        has a result, without blocking the caller. The status itself is still
+        retrieved via query_prefetch_status afterwards.
 
         Args:
             handle (PrefetchHandle): The handle of the prefetch task.

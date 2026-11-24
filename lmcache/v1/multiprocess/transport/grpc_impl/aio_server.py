@@ -159,7 +159,7 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
                 )
             elif registered.handler_type is HandlerType.NON_BLOCKING:
                 deferred = handler(*payloads)
-                await asyncio.wrap_future(deferred.ready)
+                await asyncio.wrap_future(deferred)
                 result = await loop.run_in_executor(self._normal_pool, deferred.resume)
             elif registered.handler_type is not HandlerType.BLOCKING:
                 raise NotImplementedError(

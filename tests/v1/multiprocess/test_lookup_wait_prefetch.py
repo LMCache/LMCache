@@ -48,6 +48,12 @@ from lmcache.v1.multiprocess.modules.lookup import (
 )
 
 
+def _reply(deferred, timeout):
+    """Wait for the deferred reply as a transport does, then build it."""
+    deferred.result(timeout=timeout)
+    return deferred.resume()
+
+
 def _result(found):
     """A finished result whose hits all came from L1, or None."""
     if found is None:
@@ -107,7 +113,7 @@ def test_wait_prefetch_status_returns_count_and_consumes_job():
     )
 
     reply = module.wait_prefetch_status("req", timeout=1.0)
-    assert reply.result(timeout=0) == 4 * ctx.chunk_size
+    assert _reply(reply, timeout=0) == 4 * ctx.chunk_size
     ctx.storage_manager.watch_prefetch_status.assert_called_once_with(handle)
     ctx.event_bus.publish.assert_called_once()
     # Exactly-once: the job is removed after a non-None result.
@@ -131,7 +137,7 @@ def test_wait_prefetch_status_timeout_returns_none_and_keeps_job():
     )
     module._prefetch_jobs["req"] = job
 
-    assert module.wait_prefetch_status("req", timeout=0.5).result(timeout=0) is None
+    assert _reply(module.wait_prefetch_status("req", timeout=0.5), timeout=0) is None
     ctx.storage_manager.query_prefetch_status.assert_not_called()
     # Job is kept so a later wait/query can still resolve it.
     assert module._prefetch_jobs["req"] is job
@@ -139,7 +145,9 @@ def test_wait_prefetch_status_timeout_returns_none_and_keeps_job():
 
 def test_wait_prefetch_status_unknown_request_returns_zero():
     module = _make_module(_make_ctx())
-    assert module.wait_prefetch_status("missing", timeout=1.0).result(timeout=0) == 0
+    reply = _reply(module.wait_prefetch_status("missing", timeout=1.0), timeout=0)
+    # A bool would encode as one and fail the client's ``int | None`` decode.
+    assert type(reply) is int and reply == 0
 
 
 def _add_job(module, request_id="req"):
@@ -167,7 +175,7 @@ def test_wait_prefetch_status_failed_answer_fails_the_reply():
     _add_job(module)
 
     with pytest.raises(RuntimeError, match="boom"):
-        module.wait_prefetch_status("req", timeout=1.0).result(timeout=0)
+        _reply(module.wait_prefetch_status("req", timeout=1.0), timeout=0)
 
 
 def test_wait_prefetch_status_cancelled_reply_keeps_job():
@@ -175,7 +183,7 @@ def test_wait_prefetch_status_cancelled_reply_keeps_job():
     module = _make_module(ctx)
     _add_job(module)
 
-    assert module.wait_prefetch_status("req", timeout=1.0).ready.cancel()
+    assert module.wait_prefetch_status("req", timeout=1.0).cancel()
     assert published.cancelled()
     ctx.storage_manager.query_prefetch_status.assert_not_called()
     assert "req" in module._prefetch_jobs
@@ -193,8 +201,8 @@ def test_a_shorter_wait_added_later_times_out_at_its_own_deadline():
     # Let the deadline thread go to sleep on the 30 s deadline first.
     time.sleep(0.05)
     fast = module.wait_prefetch_status("fast", timeout=0.05)
-    assert fast.result(timeout=5.0) is None
-    assert not slow.ready.done()
+    assert _reply(fast, timeout=5.0) is None
+    assert not slow.done()
     module.close()
 
 
@@ -207,7 +215,7 @@ def test_end_session_drops_the_job_a_pending_wait_would_consume():
     reply = module.wait_prefetch_status("req", timeout=1.0)
     module.end_session("req")
     published.set_result(True)
-    assert reply.result(timeout=0) == 0
+    assert _reply(reply, timeout=0) == 0
     ctx.session_manager.get_or_create.assert_not_called()
 
 
@@ -285,8 +293,8 @@ def test_wait_prefetch_status_against_real_prefetch_controller():
         in_flight_key = make_key("in-flight")
         module.lookup(in_flight_key, tp_size=1)
         deferred = module.wait_prefetch_status("in-flight", timeout=5.0)
-        assert not deferred.ready.done()
-        assert deferred.result(timeout=5.0) == len(tokens)
+        assert not deferred.done()
+        assert _reply(deferred, timeout=5.0) == len(tokens)
         module.free_lookup_locks(in_flight_key, tp_size=1)
         module.end_session("in-flight")
 
@@ -295,37 +303,31 @@ def test_wait_prefetch_status_against_real_prefetch_controller():
         published_key = make_key("published")
         module.lookup(published_key, tp_size=1)
         # L1 hits still go through the prefetch loop; let it publish first.
-        assert sm.wait_prefetch_status(
-            module._prefetch_jobs["published"].handle, timeout=5.0
-        )
+        assert sm.watch_prefetch_status(
+            module._prefetch_jobs["published"].handle
+        ).result(timeout=5.0)
         ready_deferred = module.wait_prefetch_status("published", timeout=5.0)
-        assert ready_deferred.ready.done()
-        assert ready_deferred.result(timeout=1.0) == len(tokens)
+        assert ready_deferred.done()
+        assert _reply(ready_deferred, timeout=1.0) == len(tokens)
         module.free_lookup_locks(published_key, tp_size=1)
         module.end_session("published")
 
         covered_key = make_key("covered", start=len(tokens))
         module.lookup(covered_key, tp_size=1)
-        assert module.wait_prefetch_status("covered", timeout=0.1).result(1.0) == len(
-            tokens
-        )
+        covered = module.wait_prefetch_status("covered", timeout=0.1)
+        assert _reply(covered, timeout=1.0) == len(tokens)
         module.end_session("covered")
 
         # 3. Timed out, then published and consumed by the next wait.
         assert sm.delete_l1_keys(obj_keys) == (num_chunks, 0)
         timeout_key = make_key("timeout-then-hit")
         module.lookup(timeout_key, tp_size=1)
-        assert (
-            module.wait_prefetch_status("timeout-then-hit", timeout=0.02).result(2.0)
-            is None
-        )
-        assert module.wait_prefetch_status("timeout-then-hit", timeout=5.0).result(
-            5.0
-        ) == len(tokens)
-        assert (
-            module.wait_prefetch_status("timeout-then-hit", timeout=0.1).result(1.0)
-            == 0
-        )
+        timed_out = module.wait_prefetch_status("timeout-then-hit", timeout=0.02)
+        assert _reply(timed_out, timeout=2.0) is None
+        hit = module.wait_prefetch_status("timeout-then-hit", timeout=5.0)
+        assert _reply(hit, timeout=5.0) == len(tokens)
+        consumed = module.wait_prefetch_status("timeout-then-hit", timeout=0.1)
+        assert _reply(consumed, timeout=1.0) == 0
         module.free_lookup_locks(timeout_key, tp_size=1)
         module.end_session("timeout-then-hit")
     finally:

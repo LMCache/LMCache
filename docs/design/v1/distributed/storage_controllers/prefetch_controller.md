@@ -69,8 +69,7 @@ PrefetchController(l1_managers, l1_manager_descriptors,
 
 submit_prefetch_request(spec: PrefetchTaskSpec) -> PrefetchRequestId
 query_prefetch_result(request_id) -> PrefetchResult | None   # consume-once
-wait_prefetch_result(request_id, timeout) -> bool            # does not consume
-watch_prefetch_result(request_id) -> Future[bool]            # non-blocking
+watch_prefetch_result(request_id) -> Future[bool]            # does not consume
 add_adapter(adapter_id, adapter, descriptor) / request_remove_adapter(adapter_id)
 start() / stop()
 ```

@@ -26,6 +26,7 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
+from lmcache.v1.multiprocess.affinity_pool import DeferredResponse
 from lmcache.v1.multiprocess.engine_context import (
     MPCacheServerContext,
     check_chunk_hash_key,
@@ -42,11 +43,7 @@ from lmcache.v1.multiprocess.kv_load_policy import (
     KVLoadPolicy,
     create_kv_load_policy,
 )
-from lmcache.v1.multiprocess.request_handler import (
-    Deferred,
-    HandlerType,
-    request_handler,
-)
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.session import Session
 
 logger = init_logger(__name__)
@@ -563,7 +560,7 @@ class LookupModule(DiscoverableModule):
         self,
         request_id: str,
         timeout: float,
-    ) -> Deferred[int | None]:
+    ) -> DeferredResponse[int | None]:
         """Answer like query_prefetch_status once the prefetch job completes.
 
         The reply waits for the daemon to publish the result instead of
@@ -587,12 +584,14 @@ class LookupModule(DiscoverableModule):
                 "Prefetch job for request %s not found (already completed or invalid)",
                 request_id,
             )
-            missing: Future[bool] = Future()
+            missing: DeferredResponse[int | None] = DeferredResponse(lambda: 0)
             missing.set_result(False)
-            return Deferred(missing, lambda: 0)
+            return missing
 
         watched = self._ctx.storage_manager.watch_prefetch_status(job.handle)
-        ready: Future[bool] = Future()
+        ready: DeferredResponse[int | None] = DeferredResponse(
+            lambda: self.query_prefetch_status(request_id) if ready.result() else None
+        )
 
         def on_watched(done: Future[bool]) -> None:
             if ready.set_running_or_notify_cancel():
@@ -609,10 +608,7 @@ class LookupModule(DiscoverableModule):
             ready.add_done_callback(on_ready)
         watched.add_done_callback(on_watched)
 
-        return Deferred(
-            ready,
-            lambda: self.query_prefetch_status(request_id) if ready.result() else None,
-        )
+        return ready
 
     @request_handler(HandlerType.BLOCKING)
     def free_lookup_locks(

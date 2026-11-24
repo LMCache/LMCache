@@ -23,7 +23,8 @@ from lmcache.v1.mp_observability.otel_init import (
     grpc_metrics_enabled,
     register_metrics_source,
 )
-from lmcache.v1.multiprocess.request_handler import Deferred, HandlerType
+from lmcache.v1.multiprocess.affinity_pool import DeferredResponse
+from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.auth import AUTHENTICATION_ERROR
 from lmcache.v1.multiprocess.transport.grpc_impl.native_metrics import (
     native_metrics_source,
@@ -381,8 +382,8 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
             handler = cast(Callable[..., Any], registered.handler)
             result = handler(*registered.request_decoder(request))
             if registered.handler_type is HandlerType.NON_BLOCKING:
-                deferred = cast(Deferred[Any], result)
-                deferred.ready.add_done_callback(
+                deferred = cast(DeferredResponse[Any], result)
+                deferred.add_done_callback(
                     functools.partial(
                         self._schedule_non_blocking_resume,
                         registered,
@@ -420,7 +421,7 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
         self,
         registered: GrpcRequestHandler,
         call_id: int,
-        deferred: Deferred[Any],
+        deferred: DeferredResponse[Any],
         _ready: Future[Any],
     ) -> None:
         if self._closed.is_set():
@@ -437,7 +438,7 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
         self,
         registered: GrpcRequestHandler,
         call_id: int,
-        deferred: Deferred[Any],
+        deferred: DeferredResponse[Any],
     ) -> None:
         """Finish a NON_BLOCKING call on a normal worker and send its reply."""
         try:

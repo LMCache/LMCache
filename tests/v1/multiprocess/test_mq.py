@@ -33,12 +33,9 @@ from lmcache.v1.common.custom_types import (
     IPCCacheServerKey,
 )
 from lmcache.v1.distributed.api import get_request_tags
+from lmcache.v1.multiprocess.affinity_pool import DeferredResponse
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.request_handler import (
-    Deferred,
-    HandlerType,
-    request_handler,
-)
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     BlockingRequestHandler,
     MessageQueueServer,
@@ -893,18 +890,17 @@ def test_non_blocking_handler_answers_without_a_normal_worker() -> None:
 
     class Module:
         @request_handler(HandlerType.NON_BLOCKING)
-        def ping(self, instance_id: int | None) -> Deferred[bool]:
-            ready: Future[bool] = Future()
-            if instance_id == 0:
-                ready.set_result(True)
-            else:
-                pending.append(ready)
-
+        def ping(self, instance_id: int | None) -> DeferredResponse[bool]:
             def resume() -> bool:
                 resume_threads.append(threading.current_thread().name)
                 return ready.result()
 
-            return Deferred(ready, resume)
+            ready: DeferredResponse[bool] = DeferredResponse(resume)
+            if instance_id == 0:
+                ready.set_result(True)
+            else:
+                pending.append(ready)
+            return ready
 
         @request_handler(HandlerType.BLOCKING)
         def get_chunk_size(self) -> int:
@@ -941,7 +937,7 @@ def test_non_blocking_handler_error_returns_remote_error() -> None:
 
     class Module:
         @request_handler(HandlerType.NON_BLOCKING)
-        def ping(self, instance_id: int | None) -> Deferred[bool]:
+        def ping(self, instance_id: int | None) -> DeferredResponse[bool]:
             raise ValueError("bad instance")
 
     port = _unused_tcp_port()

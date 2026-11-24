@@ -47,6 +47,7 @@ from lmcache.v1.common.custom_types import (
 )
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.p2p import P2PClient
+from lmcache.v1.multiprocess.affinity_pool import DeferredResponse
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
 from lmcache.v1.multiprocess.modules.blend import BlendModule
@@ -61,7 +62,6 @@ from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.plugin_modules.qstore import QStoreModule
 from lmcache.v1.multiprocess.request_handler import (
-    Deferred,
     HandlerType,
     iter_request_handlers,
     request_handler,
@@ -844,18 +844,17 @@ def test_non_blocking_handler_answers_without_a_normal_worker(
 
     class Module:
         @request_handler(HandlerType.NON_BLOCKING)
-        def ping(self, instance_id: int | None) -> Deferred[bool]:
-            reply: Future[bool] = Future()
-            if instance_id == 0:
-                reply.set_result(True)
-            else:
-                pending.put(reply)
-
+        def ping(self, instance_id: int | None) -> DeferredResponse[bool]:
             def resume() -> bool:
                 resume_threads.append(threading.current_thread().name)
                 return reply.result()
 
-            return Deferred(reply, resume)
+            reply: DeferredResponse[bool] = DeferredResponse(resume)
+            if instance_id == 0:
+                reply.set_result(True)
+            else:
+                pending.put(reply)
+            return reply
 
         @request_handler(HandlerType.BLOCKING)
         def get_chunk_size(self) -> int:

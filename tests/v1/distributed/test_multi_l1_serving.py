@@ -119,7 +119,7 @@ def test_dram_devdax_serving_round_trip(tmp_path: Path) -> None:
         handle = storage.submit_prefetch_task(
             single_row_spec(keys, LAYOUT, num_kv_readers=2)
         )
-        assert storage.wait_prefetch_status(handle, 5)
+        assert storage.watch_prefetch_status(handle).result(timeout=5)
         result = storage.query_prefetch_status(handle)
         assert result is not None and result.hit_cells[0].popcount() == 3
         for _ in range(2):
@@ -203,7 +203,7 @@ def test_affinity_binds_first_dram_l1_after_devdax(tmp_path: Path) -> None:
         assert len(list(archive.glob("*.data"))) == 1
         storage.clear()
         handle = storage.submit_prefetch_task(single_row_spec([keys[1]], LAYOUT))
-        assert storage.wait_prefetch_status(handle, 5)
+        assert storage.watch_prefetch_status(handle).result(timeout=5)
         result = storage.query_prefetch_status(handle)
         assert result is not None and result.l2_hit_count == 1
         status = storage.report_status()["l1_managers"]

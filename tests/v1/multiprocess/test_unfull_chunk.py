@@ -651,7 +651,9 @@ def _lookup(
     grid: int = 0,
 ) -> int:
     module.lookup(_key(tokens, 0, end, request_id, grid), tp_size=1)
-    hits = module.wait_prefetch_status(request_id, timeout=5.0).result(timeout=10)
+    deferred = module.wait_prefetch_status(request_id, timeout=5.0)
+    deferred.result(timeout=10)
+    hits = deferred.resume()
     assert hits is not None
     return hits
 

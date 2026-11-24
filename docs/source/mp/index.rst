@@ -342,10 +342,6 @@ methods:
 - ``submit_prefetch_task()`` / ``query_prefetch_status()`` -- Async lookup +
   L2 prefetch. ``query_prefetch_status()`` is non-blocking and returns
   ``None`` while the L2 prefetch is still in flight.
-- ``wait_prefetch_status()`` -- Blocking alternative to polling
-  ``query_prefetch_status()``: waits on a controller condition variable
-  until the prefetch result is published (or a timeout expires).
-  L1-only prefetches return immediately.
 - ``watch_prefetch_status()`` -- Non-blocking notification of publication:
   returns a future that completes when the prefetch result is published. Used
   by the ``WAIT_PREFETCH_STATUS`` RPC.

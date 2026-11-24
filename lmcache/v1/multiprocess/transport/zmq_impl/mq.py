@@ -15,12 +15,8 @@ import zmq
 # First Party
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.security.api_key import APIKeyVerifier
-from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
-from lmcache.v1.multiprocess.request_handler import (
-    Deferred,
-    HandlerType,
-    handler_return_type,
-)
+from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool, DeferredResponse
+from lmcache.v1.multiprocess.request_handler import HandlerType, handler_return_type
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.platform import create_event_notifier
 from lmcache.v1.transport.errors import InvalidRequestError
@@ -167,25 +163,28 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
 
 class NonBlockingRequestHandler(RequestHandlerBase[ResponseType]):
     """
-    Starts in the main loop and waits on ``Deferred.ready`` without holding a
-    worker; once ready, ``Deferred.resume`` runs on the assigned normal pool.
+    Starts in the main loop and waits on the ``DeferredResponse`` without
+    holding a worker; once done, its ``resume`` runs on the assigned normal
+    pool.
     """
 
     def __init__(
         self,
         payload_clss: list[Any],
         response_cls: ResponseType,
-        handler: Callable[..., Deferred[ResponseType]],
+        handler: Callable[..., DeferredResponse[ResponseType]],
     ):
         self.executor: ThreadPoolExecutor | None = None
         self.payload_clss = payload_clss
         self.response_cls = response_cls
         self.handler = handler
 
-    def __call__(self, payloads: list[bytes]) -> Deferred[ResponseType]:
+    def __call__(self, payloads: list[bytes]) -> DeferredResponse[ResponseType]:
         return self.handler(*unwrap_request_payloads(payloads, self.payload_clss))
 
-    def submit_resume(self, deferred: Deferred[ResponseType]) -> Future[ResponseType]:
+    def submit_resume(
+        self, deferred: DeferredResponse[ResponseType]
+    ) -> Future[ResponseType]:
         assert self.executor is not None, (
             "NonBlockingRequestHandler has no executor assigned. "
             "Call add_normal_thread_pool first."
@@ -316,8 +315,7 @@ class MessageQueueServer(RequestServer):
             payloads (list[bytes]): The payloads of the request.
             prefix_frames (list[bytes]): Client identity, request UID and operation.
         """
-        identity, request_uid, b_operation = prefix_frames
-        affinity_key = hash(identity)
+        affinity_key = hash(prefix_frames[0])
         future = handler_entry(payloads, affinity_key=affinity_key)
         self._reply_when_done(handler_entry, future, prefix_frames)
 
@@ -353,7 +351,7 @@ class MessageQueueServer(RequestServer):
                 raise
             self._reply_when_done(handler_entry, future, prefix_frames)
 
-        deferred.ready.add_done_callback(_resume)
+        deferred.add_done_callback(_resume)
 
     def _reply_when_done(
         self,
@@ -362,6 +360,7 @@ class MessageQueueServer(RequestServer):
         prefix_frames: list[bytes],
     ) -> None:
         """Queue the reply, or an error reply, once ``future`` completes."""
+        identity, request_uid, b_operation = prefix_frames
 
         def _notify_response(fut: Future):
             try:

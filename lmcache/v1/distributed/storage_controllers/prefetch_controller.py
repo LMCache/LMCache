@@ -623,11 +623,8 @@ class PrefetchController(StorageControllerInterface):
         self._next_request_id: PrefetchRequestId = 0
         self._submission_efd = create_event_notifier()
 
-        # Thread-safe prefetch results (background -> external).  The condition
-        # variable lets wait_prefetch_result block until a result is published
-        # instead of busy-polling query_prefetch_result.
+        # Thread-safe prefetch results (background -> external).
         self._prefetch_results_lock = threading.Lock()
-        self._prefetch_results_cv = threading.Condition(self._prefetch_results_lock)
         self._completed_results: dict[PrefetchRequestId, PrefetchResult] = {}
         # Futures from watch_prefetch_result waiting for a result; the thread
         # that removes one from here is the one that completes it.
@@ -755,35 +752,13 @@ class PrefetchController(StorageControllerInterface):
         with self._prefetch_results_lock:
             return self._completed_results.pop(request_id, None)
 
-    def wait_prefetch_result(
-        self, request_id: PrefetchRequestId, timeout: float
-    ) -> bool:
-        """
-        Block until a prefetch request's result is published, or until timeout.
-
-        Thread-safe. Lets a handler wait for prefetch completion instead of
-        busy-polling query_prefetch_result. Does not consume the result; the
-        caller still retrieves it via query_prefetch_result.
-
-        Args:
-            request_id: The request ID from submit_prefetch_request.
-            timeout: Maximum number of seconds to wait for the result.
-
-        Returns:
-            True if the result became available within the timeout, False if
-            the wait timed out.
-        """
-        with self._prefetch_results_cv:
-            return self._prefetch_results_cv.wait_for(
-                lambda: request_id in self._completed_results, timeout=timeout
-            )
-
     def watch_prefetch_result(self, request_id: PrefetchRequestId) -> Future[bool]:
         """Return a future that completes when the request's result is
         published, without blocking the caller.
 
-        Thread-safe. Like wait_prefetch_result, it does not consume the
-        result. Cancelling the future removes the waiter.
+        Thread-safe. It does not consume the result; the caller still
+        retrieves it via query_prefetch_result. Cancelling the future removes
+        the waiter.
 
         Args:
             request_id: The request ID from submit_prefetch_request.
@@ -1816,7 +1791,6 @@ class PrefetchController(StorageControllerInterface):
         """Store the request's result and wake any waiter."""
         with self._prefetch_results_lock:
             self._completed_results[request.request_id] = result
-            self._prefetch_results_cv.notify_all()
             waiters = self._result_waiters.pop(request.request_id, [])
         # Outside the lock: a done-callback may query the result.
         for future in waiters:

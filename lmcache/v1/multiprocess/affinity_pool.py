@@ -15,7 +15,7 @@ next task, and the submitter's future completes when the response does.
 
 # Standard
 from concurrent.futures import Future
-from typing import Callable
+from typing import Callable, Generic, TypeVar
 import functools
 import queue
 import threading
@@ -29,16 +29,35 @@ logger = init_logger(__name__)
 _SHUTDOWN = object()
 
 
-class DeferredResponse(Future):
-    """A task result that is completed after the task has returned."""
+ResponseT = TypeVar("ResponseT")
 
 
-def _complete_from(target: Future, source: Future) -> None:
+class DeferredResponse(Future, Generic[ResponseT]):
+    """A task result that is completed after the task has returned.
+
+    The reply is ``resume()`` once the future is done, which by default is the
+    future's result. A NON_BLOCKING handler passes its own ``resume``, which
+    the transport runs on a normal worker; this pool runs it on the thread
+    that completes the future.
+    """
+
+    def __init__(self, resume: Callable[[], ResponseT] | None = None) -> None:
+        super().__init__()
+        self._resume = resume
+
+    def resume(self) -> ResponseT:
+        """Return the reply. Call only once the future is done."""
+        if self._resume is None:
+            return self.result()
+        return self._resume()
+
+
+def _complete_from(target: Future, source: DeferredResponse) -> None:
     exc = source.exception()
     if exc is not None:
         target.set_exception(exc)
     else:
-        target.set_result(source.result())
+        target.set_result(source.resume())
 
 
 _worker_local = threading.local()
