@@ -28,6 +28,9 @@ logger = init_logger(__name__)
 _OBJECT_KEY_HASH_ATTR = "_hash_value"
 """Instance attribute holding an ``ObjectKey``'s hash once computed."""
 
+CHUNK_SIZE_TAG = "chunk_size"
+"""Identity tag containing an object's effective full chunk size."""
+
 FetchingPolicy = Literal["prefix", "full", "whole_chunk"]
 """Which found objects a prefetch loads and reports.
 
@@ -220,6 +223,19 @@ def get_request_tags(
         tags[name.removeprefix("lmcache.tag.")] = value
     validate_identity_tags(tags)
     return freeze_dict(tags, sort_keys=True)
+
+
+def _get_object_identity_tags(
+    request_configs: Mapping[str, object] | None,
+    chunk_size: int | None,
+) -> Mapping[str, str]:
+    """Return request tags plus the internal unfull-chunk namespace."""
+    tags = get_request_tags(request_configs)
+    if chunk_size is None:
+        return tags
+    if CHUNK_SIZE_TAG in tags:
+        return tags
+    return freeze_dict({**tags, CHUNK_SIZE_TAG: str(chunk_size)}, sort_keys=True)
 
 
 @dataclass(frozen=True)
@@ -855,6 +871,7 @@ def ipc_key_to_object_keys(
     chunk_hashes: list[bytes],
     object_group_ids: list[int],
     shard_replication_desc: ShardReplicationDesc,
+    chunk_size: int | None = None,
 ) -> list[list[ObjectKey]]:
     """
     Convert a single IPCCacheServerKey and its chunk hashes to per-object-group
@@ -883,6 +900,8 @@ def ipc_key_to_object_keys(
         shard_replication_desc: How each object group is spread over the kv ranks
             (the registration's :class:`ShardReplicationDesc`;
             :data:`DEFAULT_SHARD_REPLICATION_DESC` stores every group per rank).
+        chunk_size: Effective full chunk size when ``chunk_hashes``
+            identify unfull chunks; adds it as an internal identity tag.
 
     Returns:
         list[list[ObjectKey]]: The i-th element is the list of ObjectKeys
@@ -892,7 +911,7 @@ def ipc_key_to_object_keys(
     extra_attributes = (
         ipc_key.request_configs if ipc_key.request_configs is not None else {}
     )
-    tags = get_request_tags(ipc_key.request_configs)
+    tags = _get_object_identity_tags(ipc_key.request_configs, chunk_size)
 
     return [
         [
@@ -923,6 +942,7 @@ def ipc_key_to_grouped_object_keys(
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
     shard_replication_desc: ShardReplicationDesc,
+    chunk_size: int | None = None,
 ) -> list[GroupedObjectKeys]:
     """Expand an IPC key and its chunk hashes into prefetch key rows.
 
@@ -944,6 +964,8 @@ def ipc_key_to_grouped_object_keys(
             replicated group yields one row per token shard per
             ``tp_replicas`` ranks, with ``num_kv_readers`` the ranks sharing
             that shard.
+        chunk_size: Effective full chunk size when ``chunk_hashes``
+            identify unfull chunks; adds it as an internal identity tag.
 
     Returns:
         ``len(object_group_ids) * num_ranks`` rows, group-major / rank-minor.
@@ -959,7 +981,7 @@ def ipc_key_to_grouped_object_keys(
         ``ipc_key.request_configs`` through ``extra_attributes`` when request
         configs are present.
     """
-    tags = get_request_tags(ipc_key.request_configs)
+    tags = _get_object_identity_tags(ipc_key.request_configs, chunk_size)
     extra_attributes = (
         ipc_key.request_configs if ipc_key.request_configs is not None else {}
     )

@@ -281,17 +281,11 @@ agree on the effective chunk size:
 
 ## Unfull-Chunk Compatibility
 
-`lmcache.mp.save_unfull_chunk` does not initially support multiple effective
-chunk sizes. When it is enabled, every registration must use the MP server's
-configured `--chunk-size`; the server rejects a registration that resolves to
-a different value. MP servers that share an L2 cache must also use the same
-configured chunk size.
-
-An unfull chunk's object key does not currently encode the chunk size. The same
-short token sequence can therefore produce the same key under two chunk sizes
-even though the corresponding object layouts differ. Restricting the feature
-to one chunk size prevents an object written with one layout from being read
-with another.
+An unfull chunk's `ObjectKey` includes the registration's effective full chunk
+size as the identity tag `chunk_size`. Full-chunk keys
+remain unchanged. The tag participates in equality, hashing, L2 key encoding,
+and internal wire serialization, so unfull objects created for different chunk
+sizes cannot match each other or a full object with the same content hash.
 
 For example, consider the following sequence for the same
 `(model_name, world_size)` registration key:
@@ -301,13 +295,10 @@ For example, consider the following sequence for the same
 3. Unregister the final worker, then register again with a chunk size of 256.
 4. Look up the same 256-token prompt, which is now one full chunk.
 
-Both objects currently receive the same `ObjectKey`, although the first was
-allocated using the 512-token layout and the second registration expects the
-256-token layout. The lookup can therefore report a false hit and retrieve an
-object whose size and layout do not match the current registration.
-
-TODO(chunxiaozheng): Include the effective chunk size in the object-key or hash
-namespace, then allow `lmcache.mp.save_unfull_chunk` with multiple chunk sizes.
+The first object is tagged with `chunk_size=512`, while the
+second is an untagged full-chunk object. They therefore have different keys,
+and the lookup cannot retrieve an object whose size and layout belong to the
+previous registration.
 
 ## Coordinator and CacheBlend
 
