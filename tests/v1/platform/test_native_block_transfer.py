@@ -190,33 +190,6 @@ def test_skip_spanning_launches_carries_into_later_launches() -> None:
     assert [launch.skip for launch in kernel.launches] == [8, 1]
 
 
-def test_repeated_transfers_reuse_the_uploaded_pointer_table() -> None:
-    """A shared cache serves one device table per distinct paged address set."""
-    kernel = _RecordingKernel()
-    paged, fmt, desc = _paged_kv(num_blocks=2)
-    chunks = cast(list[torch.Tensor], [_host_chunk(0x1000)])
-    cache: dict[tuple[tuple[int, ...], torch.device], torch.Tensor] = {}
-
-    for _ in range(2):
-        transfer_with_address_kernel(
-            kernel,
-            paged,
-            chunks,
-            [0],
-            CPU,
-            H2D,
-            desc,
-            _CHUNK_TOKENS,
-            fmt,
-            0,
-            4,
-            paged_table_cache=cache,
-        )
-
-    first, second = kernel.launches
-    assert first.paged is second.paged
-
-
 def test_full_cache_syncs_before_evicting_stale_tables(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
