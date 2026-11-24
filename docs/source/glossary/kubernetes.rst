@@ -1,19 +1,7 @@
-.. WORDPRESS-SYNC metadata block. Sphinx ignores this comment; the
-   glossary sync tool parses it. Keep the keys stable; they are the
-   contract between this file and the published page.
+.. Written by hand from the Tier 5 entries in tools/glossary/glossary.md; it is
+   not generated. Carry any change to those entries into this page by hand.
 
-   slug: kubernetes
-   question: How does LMCache run on Kubernetes?
-   aliases: Kubernetes, k8s, cloud native, LMCache Kubernetes, KV cache Kubernetes
-   related: cache-aware-routing, prefix-caching, cache-hit-rate, lmcache
-   tier: 5
-   publish: yes
-   wp_post_type: page
-   wp_status: draft
-   canonical: https://lmcache.ai/glossary/kubernetes
-   schema_type: DefinedTermSet
-   seo_title: LMCache on Kubernetes: KV Caching in a Cloud-Native Deployment
-   meta_description: How a KV cache layer behaves on Kubernetes (pods, replicas, routing, Operators, and probes), and why replica count is a cache hit rate problem.
+   url: https://docs.lmcache.ai/glossary/kubernetes.html
    last_reviewed: 2026-09-10
    review_status: needs-technical-review
 

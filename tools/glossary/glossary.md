@@ -4,12 +4,8 @@ description: Plain-language definitions of the inference, caching, benchmarking,
 status: draft
 version: 0.1
 last_reviewed: 2026-09-10
-sources:
-  - handoff/Intro to KV Cache and LMCache -- DRAFT.pdf
-  - handoff/benchmarks/metrics-and-factors.md
-  - handoff/benchmarks/systems-vocabulary.md
-maintainers:
-  - TBD
+published_at: https://docs.lmcache.ai/glossary/index.html
+generator: tools/glossary/build_glossary.py
 ---
 
 # LMCache Glossary
@@ -36,12 +32,14 @@ publish: yes
 ```
 
 - **`slug`** — the URL segment.
-  One page per term: `lmcache.ai/glossary/<slug>`.
-- **`question`** — the question-shaped form, for the page `<h1>`, the `<title>`, and FAQ schema.
+  One page per term: `https://docs.lmcache.ai/glossary/<slug>.html`.
+  Tier 5 terms have no page of their own; links to them go to `https://docs.lmcache.ai/glossary/kubernetes.html`.
+- **`question`** — the question-shaped form of the term.
+  The generator does not render it.
 - **`aliases`** — alternate spellings and expansions.
-  Use for search, redirects, and auto-linking first mentions in blog posts.
+  They become the page's search keywords, and blog posts match them when linking the first mention of a term.
 - **`related`** — slugs of 3–6 sibling terms.
-  These become the `relatedConcept` links; they are what turns a pile of definitions into a traversable graph.
+  These become the page's *See also* row; they are what turns a pile of definitions into a traversable graph.
 - **`tier`** — which group the term belongs to (see below).
 - **`publish`** — `yes` for terms that should get their own public page; `support` for terms that exist so other documents don't have to re-explain them inline, and that are better served as short entries on the index than as standalone pages.
 
@@ -892,7 +890,7 @@ Any claim that cache retrieval is faster than recomputation is, underneath, a cl
 
 *These are support terms.
 They exist so the documents above do not have to re-explain infrastructure vocabulary inline.
-Most are better served as short entries on the glossary index than as standalone pages — they are not terms anyone should land on lmcache.ai to learn.*
+They are covered together on one hand-written page, `docs/source/glossary/kubernetes.rst`, rather than as standalone pages — they are not terms anyone should land on the docs site to learn.*
 
 <!--
 slug: process

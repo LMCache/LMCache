@@ -127,11 +127,25 @@ class TestRenderTerm:
     def test_metadata_title_and_seealso(self) -> None:
         token = bg.parse(SAMPLE_MD)[0]
         rst = bg.render_term(token, {"pod": "kubernetes"})
-        assert "   slug: token" in rst
-        assert "   canonical: https://lmcache.ai/glossary/token" in rst
+        assert "   url: https://docs.lmcache.ai/glossary/token.html" in rst
+        assert "   review_status: needs-technical-review" in rst
         assert ".. _glossary-token:\n\nToken\n=====\n" in rst
         assert "   :doc:`tokenization` | :doc:`kubernetes`" in rst
         assert rst.endswith("\n")
+
+    def test_header_has_no_wordpress_fields(self) -> None:
+        # The pages publish on docs.lmcache.ai; no WordPress sync reads them.
+        terms = bg.parse(SAMPLE_MD)
+        for rst in (bg.render_term(terms[0], {}), bg.render_index(terms)):
+            assert "WORDPRESS" not in rst
+            assert "wp_" not in rst
+            assert "https://lmcache.ai/" not in rst
+
+
+class TestRenderIndex:
+    def test_header_names_the_docs_url(self) -> None:
+        rst = bg.render_index(bg.parse(SAMPLE_MD))
+        assert "   url: https://docs.lmcache.ai/glossary/index.html" in rst
 
 
 class TestBuild:
