@@ -29,7 +29,7 @@ sequenceDiagram
 
 A client names **one** registered MP server and either a **token sequence**
 (plus the model/world_size and tenant salt) or the **keys** of the chunks to
-warm, and the optional `source_tier`=`l2` / `target_tier`=`l1`. Token ids always
+warm. Token ids always
 cover every chunk from position 0, since chunk hashes are prefix-chained; keys
 reach a chunk in the middle of a prompt. The coordinator forwards only the
 supplied form, so a server that predates the keys form rejects the request
@@ -50,15 +50,17 @@ status calls are quick and the client drives completion on demand.
   world_size, token_ids, cache_salt}` (a `KeysOrTokensRequest`) and
   `PrefetchResponse {instance_id, request_id, chunks, status}`.
 - **`controllers/prefetch_manager.py`** — `PrefetchManager`. `submit_prefetch`
-  forwards the request's one form (keys or tokens) to the target's
-  `POST /cache/prefetches` and returns its reply;
+  sends the body it is given to the target's `POST /cache/prefetches`, records
+  the submit stats and returns the reply;
   `get_status` proxies `GET /cache/prefetches/{request_id}` and relays
   `(status_code, body)`. No fire-and-forget tasks — both calls are quick.
 - **`http_apis/cache_api.py`** — `POST /cache/prefetches` and
   `GET /cache/prefetches/{instance_id}/{request_id}`. Each resolves the target
   via `get_context(request).registry.get(instance_id)` (**404** if unknown) and
   uses the shared outbound `httpx.AsyncClient` (`get_outbound_client(request)`);
-  a transport error to the target surfaces as **502**.
+  a transport error to the target surfaces as **502**. The submit handler
+  builds the forwarded body from the request's one form, so the wire format
+  stays in the HTTP layer and the controller never sees the request model.
 
 ## Keys form on the MP server
 

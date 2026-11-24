@@ -27,6 +27,7 @@ from lmcache.v1.distributed.api import (
     PrefetchResult,
     ShardReplicationDesc,
 )
+from lmcache.v1.multiprocess.cache_control.key_resolver import MAX_KEYS_PER_REQUEST
 from lmcache.v1.multiprocess.cache_control.object_service import MAX_DELETE_BATCH
 from lmcache.v1.multiprocess.http_apis.cache_api import router as cache_router
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
@@ -634,14 +635,23 @@ class TestPrefetchEndpoint:
         "body",
         [
             pytest.param({"cache_salt": "alice"}, id="neither-form"),
+            pytest.param(
+                {"model_name": "m", "token_ids": [1, 2, 3, 4]},
+                id="tokens-without-world-size",
+            ),
             pytest.param("both-forms", id="both-forms"),
+            pytest.param("too-many-keys", id="too-many-keys"),
         ],
     )
     def test_rejects_request_without_exactly_one_form(self, body):
+        """Exactly one of keys / token_ids; the tokens form needs a world
+        size, and the keys form is capped."""
         client = TestClient(_make_prefetch_app(_ctx(layout=object())))
+        key = encoded_key_json(ObjectKey(chunk_hash=b"\x01", model_name="m", kv_rank=0))
         if body == "both-forms":
-            key = ObjectKey(chunk_hash=b"\x01", model_name="m", kv_rank=0)
-            body = {**_prefetch_body([1, 2, 3, 4]), "keys": [encoded_key_json(key)]}
+            body = {**_prefetch_body([1, 2, 3, 4]), "keys": [key]}
+        elif body == "too-many-keys":
+            body = {"keys": [key] * (MAX_KEYS_PER_REQUEST + 1)}
         assert client.post("/cache/prefetches", json=body).status_code == 422
 
     def test_status_unknown_request_id_404(self):

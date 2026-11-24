@@ -29,7 +29,10 @@ from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
 from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
-from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
+from lmcache.v1.multiprocess.cache_control.key_resolver import (
+    MAX_KEYS_PER_REQUEST,
+    resolve_object_keys,
+)
 
 
 def _client() -> TestClient:
@@ -324,7 +327,12 @@ def test_pin_by_keys_pins_only_the_named_mid_prompt_chunk():
     [
         pytest.param({"model_name": "m", "world_size": 1}, id="neither-form"),
         pytest.param({"token_ids": [1, 2, 3, 4]}, id="tokens-without-model"),
+        pytest.param(
+            {"model_name": "m", "token_ids": [1, 2, 3, 4]},
+            id="tokens-without-world-size",
+        ),
         pytest.param("both-forms", id="both-forms"),
+        pytest.param("too-many-keys", id="too-many-keys"),
     ],
 )
 @pytest.mark.parametrize(
@@ -339,12 +347,18 @@ def test_pin_by_keys_pins_only_the_named_mid_prompt_chunk():
 def test_key_controls_reject_request_without_exactly_one_form(
     method: str, path: str, body: dict | str
 ):
-    """Pin, delete and prefetch bodies carry exactly one of keys / token_ids,
-    and the tokens form needs a model_name; anything else is a 422."""
+    """Pin, delete and prefetch bodies carry exactly one of keys / token_ids;
+    the tokens form needs model_name and world_size -- a defaulted world size
+    would resolve another parallel setup's keys and report success -- and
+    the keys form is capped like the node's delete batch. Anything else is a
+    422."""
     with _pin_client() as client:
-        if isinstance(body, str):  # "both-forms" needs a resolved key
-            key = _resolve(client.app.state.ctx)[0]
-            body = {**_pin_body(), "keys": [_wire_key(key)]}
+        key = _wire_key(_resolve(client.app.state.ctx)[0])
+        if body == "both-forms":
+            body = {**_pin_body(), "keys": [key]}
+        elif body == "too-many-keys":
+            body = {"keys": [key] * (MAX_KEYS_PER_REQUEST + 1)}
+        assert isinstance(body, dict)
         request_body = {**body, "instance_id": "mp-1"}
         assert client.request(method, path, json=request_body).status_code == 422
 
@@ -877,11 +891,39 @@ def test_a_delete_by_key_removes_only_that_chunk_in_every_group():
         )
 
         assert resp.status_code == 200, resp.text
+        assert resp.json()["requested"] == 1  # one chunk, named twice
         [call] = deletes
         assert {k["chunk_hash_hex"] for k in call["keys"]} == {
             second_chunk.chunk_hash.hex()
         }
         assert sorted(k["object_group_id"] for k in call["keys"]) == list(GROUPS)
+
+
+def test_a_delete_by_key_reaches_every_rank_of_the_chunk():
+    """With TP=2 the directory lists one key per rank; deleting the one a
+    lookup returned must remove the chunk on both ranks, or it stays
+    half-present and unusable. Another parallel setup's copy is left."""
+    deletes: list = []
+    with _registered_delete_client(deletes) as client:
+        ctx = client.app.state.ctx
+        tp2, _ = resolve_object_keys(ctx.token_hasher, "m", 2, TOKENS, "alice")
+        tp1 = _resolve(ctx)
+        _store(ctx, tp2 + tp1)
+        second_chunk_rank0 = tp2[2]
+
+        resp = client.post(
+            "/cache/delete",
+            json={"instance_id": "mp-1", "keys": [_wire_key(second_chunk_rank0)]},
+        )
+
+        assert resp.status_code == 200, resp.text
+        [call] = deletes
+        assert sorted(k["kv_rank"] for k in call["keys"]) == sorted(
+            key.kv_rank for key in tp2[2:]
+        )
+        assert {k["chunk_hash_hex"] for k in call["keys"]} == {
+            second_chunk_rank0.chunk_hash.hex()
+        }
 
 
 def test_a_delete_sends_only_the_groups_the_chunk_is_stored_in():

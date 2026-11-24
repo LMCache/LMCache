@@ -44,6 +44,11 @@ if TYPE_CHECKING:
 # work proportionate.
 MAX_TOKEN_IDS = 1_000_000
 
+# Hard cap on how many keys a single key-addressed request may carry. Equal to
+# the node's delete batch, so a delete named by keys fits one node call before
+# it is expanded to the chunks' other stored copies.
+MAX_KEYS_PER_REQUEST = 10_000
+
 
 def _resolve_ipc_key_and_hashes(
     token_hasher: TokenHasher,

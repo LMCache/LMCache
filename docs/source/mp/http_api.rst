@@ -973,16 +973,16 @@ configured L2 adapters, so there is no ``?adapter=`` selector.
      - list[object]
      - Keys form. Each ``{"chunk_hash_hex", "model_name", "kv_rank",
        "object_group_id", "cache_salt", "tags"}``; they must agree on model,
-       world size (packed in ``kv_rank``), ``cache_salt`` and ``tags``. The
-       token-form fields below are then ignored.
+       world size (packed in ``kv_rank``), ``cache_salt`` and ``tags``; at
+       most 10,000 keys. The token-form fields below are then ignored.
    * - ``model_name``
      - string
      - Tokens form, required. The served model id, exactly as registered
        (e.g. ``Qwen/Qwen3-8B``).
    * - ``world_size``
      - int
-     - Tokens form (default ``1``). The value vLLM registered for the node's
-       KV layout and rank fan-out (``1`` for a single-GPU, TP=1 deployment).
+     - Tokens form, required. The value vLLM registered for the node's KV
+       layout and rank fan-out (``1`` for a single-GPU, TP=1 deployment).
    * - ``token_ids``
      - list[int]
      - Tokens form. The prompt token ids. Must use the same tokenizer /
@@ -1014,12 +1014,13 @@ no ``request_id`` to poll:
 - ``202``: submitted (or a ``noop`` as above).
 - ``400``: ``token_ids`` exceeds the per-request cap, ``cache_salt``
   violates its invariants, or ``keys`` disagree on model, world size,
-  ``cache_salt`` or ``tags``.
-- ``409``: no layout registered for ``(model_name, world_size)`` — the model
-  has not allocated KV cache on this node yet (start vLLM first).
-- ``422``: request body fails field-level validation, or supplies both or
-  neither of ``keys`` / ``token_ids``.
-- ``503``: engine not initialized.
+  ``cache_salt`` or ``tags`` or pack no world size in ``kv_rank``.
+- ``422``: request body fails field-level validation, supplies both or
+  neither of ``keys`` / ``token_ids``, omits ``model_name`` or
+  ``world_size`` in the tokens form, or carries more than 10,000 keys.
+- ``503``: engine not initialized, or no layout registered for
+  ``(model_name, world_size)`` — the model has not allocated KV cache on this
+  node yet (start vLLM first).
 
 **Example:**
 

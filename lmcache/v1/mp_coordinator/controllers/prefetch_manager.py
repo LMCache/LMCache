@@ -14,7 +14,7 @@ submit and status calls are quick and the client drives completion on demand.
 from __future__ import annotations
 
 # Standard
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 import threading
 import time
@@ -35,7 +35,6 @@ from lmcache.v1.mp_coordinator.utils.http import instance_url
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.mp_coordinator.schemas import PrefetchRequest
     from lmcache.v1.mp_coordinator.views.instance_registry import MPInstance
 
 logger = init_logger(__name__)
@@ -122,19 +121,14 @@ class PrefetchManager(Controller):
         self,
         target: MPInstance,
         http_client: httpx.AsyncClient,
-        request: PrefetchRequest,
+        body: dict[str, Any],
     ) -> dict[str, Any]:
         """``POST /cache/prefetches`` to ``target`` and return its JSON reply.
-
-        Forwards only the form ``request`` carries, ``keys`` or the token
-        fields: a server without the keys form then rejects a keys request
-        rather than reading empty token fields as a sub-chunk sequence and
-        answering noop.
 
         Args:
             target: The MP server to warm.
             http_client: Shared async client for outbound coordinator calls.
-            request: What to warm; its ``instance_id`` is not forwarded.
+            body: The server's ``POST /cache/prefetches`` body, sent as is.
 
         Returns:
             The server's reply, e.g. ``{"request_id", "chunks", "status"}`` or
@@ -144,18 +138,6 @@ class PrefetchManager(Controller):
             httpx.HTTPError: If the target is unreachable or returns non-2xx.
             ValueError: If the target's reply is not JSON.
         """
-        body: dict[str, Any]
-        if request.keys:
-            body = {"keys": [asdict(key) for key in request.keys]}
-        else:
-            body = {
-                "model_name": request.model_name,
-                "world_size": request.world_size,
-                "token_ids": request.token_ids,
-                "cache_salt": request.cache_salt,
-            }
-            if request.tags:
-                body["tags"] = dict(request.tags)
         url = instance_url(target, "/cache/prefetches")
         submitted_at = time.monotonic()
         try:
@@ -180,8 +162,8 @@ class PrefetchManager(Controller):
         logger.info(
             "Prefetch submitted to %s: %d keys, %d tokens",
             target.instance_id,
-            len(request.keys),
-            len(request.token_ids),
+            len(body.get("keys", [])),
+            len(body.get("token_ids", [])),
         )
         return reply
 

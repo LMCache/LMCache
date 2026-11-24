@@ -463,7 +463,7 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
                 detail=f"no MP server registered with instance_id={body.instance_id!r}",
             )
         resolved, chunks = _resolve_request_keys(body, ctx.token_hasher)
-        resolved = ctx.views.get(KeyDirectory).get_keys_across_object_groups(resolved)
+        resolved = ctx.views.get(KeyDirectory).get_stored_keys_of_chunks(resolved)
 
         if not chunks:
             return DeleteResponse(
@@ -544,14 +544,16 @@ def _resolve_request_keys(
     body: KeysOrTokensRequest, token_hasher: TokenHasher
 ) -> tuple[list[ObjectKey], int]:
     """Return a pin or delete body's keys and the count reported as
-    ``requested``.
+    ``requested``: whole chunks, so for the keys form the distinct chunks the
+    keys name (one chunk's keys on several ranks or groups count once).
 
     Raises:
         HTTPException: 400 if the token cap is exceeded or a key field is
             invalid (tokens form).
     """
     if body.keys:
-        return [encoded.to_object_key() for encoded in body.keys], len(body.keys)
+        keys = [encoded.to_object_key() for encoded in body.keys]
+        return keys, len({key.chunk_hash for key in keys})
     try:
         return resolve_object_keys(
             token_hasher,

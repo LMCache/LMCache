@@ -121,8 +121,8 @@ class PrefetchService:
 
         Raises:
             InvalidRequest: unsupported direction, keys that disagree on
-                model, world size, cache salt or tags, or a registered group
-                without a layout.
+                model, world size, cache salt or tags, keys whose ``kv_rank``
+                packs no world size, or a registered group without a layout.
             Unavailable: no layout registered for the model (not on this node).
         """
         _check_direction(source_tier, target_tier)
@@ -141,6 +141,11 @@ class PrefetchService:
                 "cache_salt and tags"
             )
         [(model_name, world_size, cache_salt, tags)] = identities
+        if world_size < 1:
+            raise InvalidRequest(
+                "the keys' kv_rank packs no world size; pass keys as the "
+                "directory lists them"
+            )
         chunk_hashes = list(dict.fromkeys(key.chunk_hash for key in keys))
         group_layout_descs, attn_desc, shard_replication_desc = self._registered_descs(
             model_name, world_size

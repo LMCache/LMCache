@@ -1218,16 +1218,15 @@ Supply exactly one of ``keys`` / ``token_ids``.
      - Keys form. Each key, in the wire form ``GET /directory/keys`` returns,
        names its chunk; the server warms that chunk in every object group and
        rank. The keys must agree on model, world size, ``cache_salt`` and
-       ``tags``. The fields below are then ignored.
+       ``tags``; at most 10,000 keys. The fields below are then ignored.
    * - ``model_name``
      - string
      - Tokens form, required. Model whose layout sizes the target's L1
        buffers.
    * - ``world_size``
      - int
-     - Tokens form. Optional (default ``1``). World size (``>= 1``) selecting
-       the KV layout and the per-rank fan-out (``1`` for a single-GPU, TP=1
-       deployment).
+     - Tokens form, required. World size (``>= 1``) selecting the KV layout
+       and the per-rank fan-out (``1`` for a single-GPU, TP=1 deployment).
    * - ``token_ids``
      - list[int]
      - Tokens form. Prompt tokens whose complete ``chunk_size`` chunks are
@@ -1264,8 +1263,9 @@ submitted to warm (keys form: the distinct chunks the keys name).
 - ``404``: unknown ``instance_id`` (not registered).
 - ``502``: the target server was unreachable or rejected the submit -- including
   keys that disagree on model, world size, ``cache_salt`` or ``tags``.
-- ``422``: request body fails field-level validation, or supplies both or
-  neither of ``keys`` / ``token_ids``.
+- ``422``: request body fails field-level validation, supplies both or neither
+  of ``keys`` / ``token_ids``, omits ``model_name`` or ``world_size`` in the
+  tokens form, or carries more than 10,000 keys.
 
 .. note::
 
@@ -1394,8 +1394,8 @@ Pin keys in the L2 eviction plan.
    * - ``keys``
      - list[object]
      - Keys form. The keys to pin, each ``{"chunk_hash_hex", "model_name",
-       "kv_rank", "object_group_id", "cache_salt", "tags"}``. The other fields
-       below are ignored.
+       "kv_rank", "object_group_id", "cache_salt", "tags"}``; at most 10,000.
+       The other fields below are ignored.
    * - ``token_ids``
      - list[int]
      - Tokens form. Prompt tokens whose complete chunks are pinned; must match
@@ -1406,8 +1406,8 @@ Pin keys in the L2 eviction plan.
        keys.
    * - ``world_size``
      - int
-     - Tokens form. Optional (default ``1``). World size (``>= 1``) selecting
-       the per-rank fan-out.
+     - Tokens form, required. World size (``>= 1``) selecting the per-rank
+       fan-out.
    * - ``cache_salt``
      - string
      - Tokens form. Optional (default ``""``). Per-tenant isolation salt.
@@ -1422,9 +1422,10 @@ Pin keys in the L2 eviction plan.
 
     {"requested": 12, "affected": 12, "status": "pinned"}
 
-``requested`` is the number of whole chunks resolved (keys form: the number of
-keys given); ``affected`` is the number of L2 keys pinned (tokens form: chunks
-times the per-rank fan-out).
+``requested`` is the number of whole chunks resolved (keys form: the distinct
+chunks the keys name, so one chunk's keys on several ranks or groups count
+once); ``affected`` is the number of L2 keys pinned (tokens form: chunks times
+the per-rank fan-out).
 
 **HTTP status codes:**
 
@@ -1432,8 +1433,8 @@ times the per-rank fan-out).
 - ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt`` violates
   its invariants.
 - ``422``: request body fails field-level validation, supplies both or neither
-  of ``keys`` / ``token_ids``, omits ``model_name`` in the tokens form, or has
-  an undecodable key.
+  of ``keys`` / ``token_ids``, omits ``model_name`` or ``world_size`` in the
+  tokens form, carries more than 10,000 keys, or has an undecodable key.
 - ``503``: the metadata file (``--metadata-path``) could not be written; the
   change was undone, so retry once the storage is fixed.
 
@@ -1579,9 +1580,12 @@ anyway (L1 read/write locks on the node and the coordinator's L2 pin set).
 
     {"instance_id": "server-1", "requested": 12, "affected": 24, "skipped": 0, "status": "deleted"}
 
-``requested`` is the number of whole chunks resolved (keys form: the number of
-keys given). Each key is expanded to every object group the coordinator's
-directory holds its chunk in. ``affected`` and
+``requested`` is the number of whole chunks resolved (keys form: the distinct
+chunks the keys name). A key names its chunk: it is expanded to every copy the
+coordinator's directory holds of that chunk in the key's parallel setup -- every
+object group and every kv rank of the same world size -- so the one key
+``POST /directory/lookup`` returns removes the whole chunk, not one rank's
+share. ``affected`` and
 ``skipped`` are **totals across the tiers acted on**: ``affected`` counts L1 keys
 removed by the node plus L2 keys removed by the coordinator, and ``skipped``
 counts L1 keys the node refused plus L2 keys held back for an L2 pin (non-force
@@ -1593,8 +1597,9 @@ sequence returns ``status`` ``"noop"``.
 
 - ``200``: deleted (or a ``noop``).
 - ``404``: no server is registered under ``instance_id``.
-- ``422``: request body fails field-level validation, or supplies both or
-  neither of ``keys`` / ``token_ids``.
+- ``422``: request body fails field-level validation, supplies both or neither
+  of ``keys`` / ``token_ids``, omits ``model_name`` or ``world_size`` in the
+  tokens form, or carries more than 10,000 keys.
 - ``502``: the target server was unreachable or rejected the delete.
 - ``503``: a forced delete removed the keys, but dropping their pins could not
   be written to the metadata file; the pins are kept.

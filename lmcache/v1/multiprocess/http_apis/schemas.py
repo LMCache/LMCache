@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey, Tier, validate_identity_tags
+from lmcache.v1.multiprocess.cache_control.key_resolver import MAX_KEYS_PER_REQUEST
 from lmcache.v1.utils.frozen_dict import freeze_dict
 
 
@@ -47,12 +48,14 @@ class PrefetchRequest:
 
     Raises:
         ValueError: both or neither of ``keys`` / ``token_ids`` is supplied,
-            ``token_ids`` comes without ``model_name``, a key cannot convert
-            into an ``ObjectKey``, or a tag is invalid (surfaced as 422).
+            ``token_ids`` comes without ``model_name`` or a ``world_size`` of
+            at least 1, there are more than ``MAX_KEYS_PER_REQUEST`` keys, a
+            key cannot convert into an ``ObjectKey``, or a tag is invalid
+            (surfaced as 422).
     """
 
     model_name: str = ""
-    world_size: int = 1
+    world_size: int = 0
     token_ids: list[int] = field(default_factory=list)
     cache_salt: str = ""
     source_tier: Tier = Tier.L2
@@ -65,6 +68,13 @@ class PrefetchRequest:
             raise ValueError("supply exactly one of 'keys' or 'token_ids'")
         if self.token_ids and not self.model_name:
             raise ValueError("'model_name' is required with 'token_ids'")
+        if self.token_ids and self.world_size < 1:
+            raise ValueError("'world_size' (>= 1) is required with 'token_ids'")
+        if len(self.keys) > MAX_KEYS_PER_REQUEST:
+            raise ValueError(
+                f"too many keys in a single request "
+                f"(limit={MAX_KEYS_PER_REQUEST}, got={len(self.keys)})"
+            )
         for encoded in self.keys:
             encoded.to_object_key()
         validate_identity_tags(self.tags)

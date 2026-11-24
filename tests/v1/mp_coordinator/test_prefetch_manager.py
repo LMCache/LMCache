@@ -14,7 +14,6 @@ import pytest
 # First Party
 from lmcache.v1.mp_coordinator.controllers import prefetch_manager
 from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
-from lmcache.v1.mp_coordinator.schemas import PrefetchRequest
 from lmcache.v1.mp_coordinator.views.instance_registry import MPInstance
 
 
@@ -31,8 +30,8 @@ def _instance(instance_id: str, ip: str = "10.0.0.1", port: int = 8000) -> MPIns
 
 @pytest.mark.asyncio
 async def test_submit_prefetch_posts_body_and_returns_reply():
-    """submit_prefetch POSTs /cache/prefetches with the token body and returns the
-    server's JSON reply verbatim."""
+    """submit_prefetch POSTs the body it is given to /cache/prefetches and
+    returns the server's JSON reply verbatim."""
     mgr = PrefetchManager()
     target = _instance("mp-1", ip="10.0.0.7", port=8765)
     captured: dict[str, object] = {}
@@ -49,13 +48,12 @@ async def test_submit_prefetch_posts_body_and_returns_reply():
         result = await mgr.submit_prefetch(
             target=target,
             http_client=client,
-            request=PrefetchRequest(
-                instance_id="mp-1",
-                model_name="m",
-                world_size=2,
-                token_ids=[1, 2, 3, 4],
-                cache_salt="alice",
-            ),
+            body={
+                "model_name": "m",
+                "world_size": 2,
+                "token_ids": [1, 2, 3, 4],
+                "cache_salt": "alice",
+            },
         )
 
     assert captured["method"] == "POST"
@@ -83,13 +81,12 @@ async def test_submit_prefetch_raises_on_http_error():
             await mgr.submit_prefetch(
                 target=target,
                 http_client=client,
-                request=PrefetchRequest(
-                    instance_id="mp-1",
-                    model_name="m",
-                    world_size=1,
-                    token_ids=[1, 2],
-                    cache_salt="",
-                ),
+                body={
+                    "model_name": "m",
+                    "world_size": 1,
+                    "token_ids": [1, 2],
+                    "cache_salt": "",
+                },
             )
 
 
@@ -133,13 +130,12 @@ async def test_submit_prefetch_builds_ipv6_authority_from_registered_host():
         await mgr.submit_prefetch(
             target=target,
             http_client=client,
-            request=PrefetchRequest(
-                instance_id="mp-1",
-                model_name="m",
-                world_size=1,
-                token_ids=[1, 2, 3, 4],
-                cache_salt="",
-            ),
+            body={
+                "model_name": "m",
+                "world_size": 1,
+                "token_ids": [1, 2, 3, 4],
+                "cache_salt": "",
+            },
         )
 
     assert captured["url"] == "http://[::1]:8765/cache/prefetches"
@@ -179,13 +175,12 @@ async def _submit(mgr: PrefetchManager, client: httpx.AsyncClient) -> dict:
     return await mgr.submit_prefetch(
         target=_instance("mp-1"),
         http_client=client,
-        request=PrefetchRequest(
-            instance_id="mp-1",
-            model_name="m",
-            world_size=1,
-            token_ids=[1, 2, 3, 4],
-            cache_salt="",
-        ),
+        body={
+            "model_name": "m",
+            "world_size": 1,
+            "token_ids": [1, 2, 3, 4],
+            "cache_salt": "",
+        },
     )
 
 

@@ -19,7 +19,12 @@ import torch
 # First Party
 from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.common.token_hasher import TokenHasher
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ShardReplicationDesc, Tier
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    ObjectKey,
+    ShardReplicationDesc,
+    Tier,
+)
 from lmcache.v1.multiprocess.cache_control import key_resolver
 from lmcache.v1.multiprocess.cache_control.errors import (
     InvalidRequest,
@@ -202,4 +207,19 @@ def test_a_prefetch_by_keys_of_different_tenants_is_a_bad_request():
 
     with pytest.raises(InvalidRequest, match="same model"):
         service.submit_keys(mixed, Tier.L2, Tier.L1)
+    assert storage.rows == []
+
+
+def test_a_prefetch_by_a_key_with_no_world_size_is_a_bad_request():
+    """A ``kv_rank`` that packs no world size (``0``) is the caller's error,
+    not a missing layout."""
+    windows = AttnWindowDesc(num_chunks_in_sw=[-1], world_size=1)
+    service, storage = _service(_Registry({0: _layout(8)}, windows))
+    key = _chunk_keys(0)[0]
+    malformed = ObjectKey(
+        chunk_hash=key.chunk_hash, model_name=key.model_name, kv_rank=0
+    )
+
+    with pytest.raises(InvalidRequest, match="world size"):
+        service.submit_keys([malformed], Tier.L2, Tier.L1)
     assert storage.rows == []

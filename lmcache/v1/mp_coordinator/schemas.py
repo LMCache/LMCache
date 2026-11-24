@@ -10,7 +10,7 @@ This module holds HTTP models only.
 """
 
 # Standard
-from typing import Annotated
+from typing import Annotated, ClassVar
 import base64
 import ipaddress
 
@@ -30,6 +30,7 @@ from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-export
 from lmcache.v1.distributed.api import Tier, validate_identity_tags
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.views.key_directory import Placement
+from lmcache.v1.multiprocess.cache_control.key_resolver import MAX_KEYS_PER_REQUEST
 
 
 def _validate_matching_tags(value: dict[str, str]) -> dict[str, str]:
@@ -408,7 +409,7 @@ class KeysOrTokensRequest(BaseModel):
 
     * ``keys`` — act on these keys as given, in the wire form the directory
       and pin listings return. It reaches a chunk in the middle of a prompt
-      without its prefix chunks.
+      without its prefix chunks. At most ``MAX_KEYS_PER_REQUEST`` keys.
     * ``token_ids`` (with ``model_name`` / ``world_size``) — resolve a token
       sequence to the keys of its complete chunks. Chunk hashes are
       prefix-chained, so this must be the **full** sequence from position 0
@@ -419,11 +420,19 @@ class KeysOrTokensRequest(BaseModel):
         keys: The keys to act on (keys form).
         token_ids: The full token sequence (tokens form).
         model_name: Model whose rank fan-out to use (tokens form).
-        world_size: World size selecting the per-rank fan-out (tokens form).
+        world_size: World size selecting the per-rank fan-out (tokens form;
+            required there unless ``WORLD_SIZE_REQUIRED_WITH_TOKENS`` is
+            false).
         cache_salt: Per-tenant isolation salt applied to produced keys
             (tokens form).
         tags: Matching tags supplied when the content was stored (tokens form).
+        WORLD_SIZE_REQUIRED_WITH_TOKENS: Whether the tokens form must state
+            ``world_size``. A defaulted world size resolves another parallel
+            setup's keys, so a body that acts on them (pin, prefetch,
+            delete) would report success having touched nothing.
     """
+
+    WORLD_SIZE_REQUIRED_WITH_TOKENS: ClassVar[bool] = True
 
     keys: list[EncodedObjectKey] = Field(default_factory=list)
     token_ids: list[int] = Field(default_factory=list)
@@ -444,8 +453,14 @@ class KeysOrTokensRequest(BaseModel):
             The unchanged keys once each converts to an ``ObjectKey``.
 
         Raises:
-            ValueError: If a key cannot convert into an ``ObjectKey``.
+            ValueError: If there are more than ``MAX_KEYS_PER_REQUEST`` keys,
+                or a key cannot convert into an ``ObjectKey``.
         """
+        if len(value) > MAX_KEYS_PER_REQUEST:
+            raise ValueError(
+                f"too many keys in a single request "
+                f"(limit={MAX_KEYS_PER_REQUEST}, got={len(value)})"
+            )
         for encoded in value:
             encoded.to_object_key()
         return value
@@ -459,12 +474,19 @@ class KeysOrTokensRequest(BaseModel):
 
         Raises:
             ValueError: If both or neither of ``keys`` / ``token_ids``
-                is supplied, or the tokens form omits ``model_name``.
+                is supplied, or the tokens form omits ``model_name`` or a
+                required ``world_size``.
         """
         if bool(self.keys) == bool(self.token_ids):
             raise ValueError("supply exactly one of 'keys' or 'token_ids'")
         if self.token_ids and not self.model_name:
             raise ValueError("'model_name' is required with 'token_ids'")
+        if (
+            self.token_ids
+            and self.WORLD_SIZE_REQUIRED_WITH_TOKENS
+            and "world_size" not in self.model_fields_set
+        ):
+            raise ValueError("'world_size' is required with 'token_ids'")
         return self
 
 
@@ -473,8 +495,11 @@ class DirectoryLookupRequest(KeysOrTokensRequest):
 
     Resolves cache content to its placements and token ids, in either form
     of :class:`KeysOrTokensRequest`. The tokens form uses the same fan-out
-    the pin APIs use.
+    the pin APIs use; its ``world_size`` defaults to ``1``, as it always has
+    for this read-only lookup.
     """
+
+    WORLD_SIZE_REQUIRED_WITH_TOKENS: ClassVar[bool] = False
 
 
 class DirectoryKeyPlacements(BaseModel):
