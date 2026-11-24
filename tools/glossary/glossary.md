@@ -481,14 +481,14 @@ The systems questions are therefore what to keep, where to keep it, when to move
 <!--
 slug: cacheblend
 question: What is CacheBlend?
-aliases: [cache blending, enable_blending]
+aliases: [cache blending]
 related: [prefix-caching, cache-hit, kv-cache, ttft]
 tier: 2
 publish: yes
 -->
 ### CacheBlend
 
-**CacheBlend is a technique, implemented in LMCache, for reusing the cached KV data of a text chunk even when the chunk is not at the start of the prompt** — most usefully in RAG workloads, where independently retrieved document chunks get concatenated in whatever order retrieval returned them.
+**CacheBlend is a technique for reusing the cached KV data of a text chunk even when the chunk is not at the start of the prompt** — most usefully in RAG workloads, where independently retrieved document chunks get concatenated in whatever order retrieval returned them.
 It was introduced in the CacheBlend paper (Yao et al., EuroSys 2025).
 
 The problem it addresses: in a causal transformer, every token's Key and Value are built from that token's representation *after attending to everything before it*.
@@ -498,18 +498,13 @@ Reusing the cached data without further work therefore gives only an approximate
 
 Instead of recomputing the whole chunk, CacheBlend runs every token through the layers up to an early check layer.
 At that layer it compares each token's freshly computed Key with its cached Key and selects the tokens whose Keys deviate most.
-Only those tokens, about 15 percent of the reused tokens by default, are recomputed through the remaining layers; the other tokens keep their cached Keys and Values.
-LMCache exposes this as a single check layer (`cb.check_layer`, default 1) and a recompute ratio (`cb.recomp_ratio`, default 0.15).
-The paper narrows the selected set gradually over several layers instead.
+Only those tokens, a small fraction of the reused tokens, are recomputed through the remaining layers; the other tokens keep their cached Keys and Values.
+In the paper, the selected set narrows gradually over several layers rather than at a single check layer.
 
 With an early check layer on a 32-layer model, this is roughly 18–20 percent of the layer computation of a full prefill, and the fraction falls as models get deeper.
 Loading the cached data from storage is a separate cost, which the paper overlaps with the recomputation.
 CacheBlend trades a small amount of accuracy for speed, on the assumption that the tokens whose Keys deviate most at the check layer are the ones whose errors matter most.
 In the paper's evaluation, recomputing 5–18 percent of tokens reduced F1 or Rouge-L by at most 0.002.
-
-> **Status note:** In LMCache's multiprocess server, CacheBlend is off by default; you enable it with `lmcache server --engine-type blend`, and it requires a chunk size of 256.
-> The older in-process implementation (`enable_blending`) supported only Llama, Qwen2, and Qwen3 model architectures.
-> Verify current model support against the release before publishing.
 
 <!--
 slug: pd-disaggregation
@@ -704,7 +699,7 @@ If none of a request's tokens are in the cache, caching does not reduce that req
 Engines that reuse only a matching prefix report this number as the *prefix cache hit rate*.
 vLLM, for example, exposes the counters `vllm:prefix_cache_hits` and `vllm:prefix_cache_queries`, and the hit rate is their ratio.
 LMCache's token-level hit rate also counts only the matching prefix, in units of whole chunks.
-CacheBlend is different, because it can also reuse cached chunks that are not part of a prefix; LMCache therefore reports blend hits with their own metrics.
+CacheBlend is different, because it can also reuse cached chunks that are not part of a prefix.
 
 The saved prefill work grows with the hit rate.
 A workload with heavy prompt overlap saves far more total TTFT and compute than a workload of unique one-time prompts, where the hit rate is near zero.
@@ -1080,7 +1075,7 @@ Both sides still have to agree on which URLs exist and what data format each one
    Every Tier 1–4 definition should be read by someone on the core team.
    The CacheBlend, parallelism, and quantization entries are the highest-risk for drift against the current release.
 2. **Version-pin the specifics.**
-   The Tier 2 entries now describe the multiprocess server flags (`--l1-size-gb`, `--eviction-policy`, `--l2-adapter`, `--engine-type blend`) and the CacheBlend defaults (`cb.check_layer` 1, `cb.recomp_ratio` 0.15) as of the November 2026 `dev` branch.
+   The Tier 2 entries now describe the multiprocess server flags (`--l1-size-gb`, `--eviction-policy`, `--l2-adapter`) as of the November 2026 `dev` branch.
    Recheck them against each release, and prefer wording that does not state a number that will age.
 3. **Cost figures.**
    The TCO entry deliberately carries no dollar amounts.

@@ -112,8 +112,8 @@ The specific problem LMCache exists to solve.
    storage, so that it stays reusable instead of being discarded.
 
 :doc:`CacheBlend <cacheblend>`
-   CacheBlend is a technique, implemented in LMCache, for reusing the cached KV data of a
-   text chunk even when the chunk is not at the start of the prompt...
+   CacheBlend is a technique for reusing the cached KV data of a text chunk even when the
+   chunk is not at the start of the prompt — most usefully in RAG...
 
 :doc:`Prefill–decode (P/D) disaggregation <pd-disaggregation>`
    P/D disaggregation is running prefill and decode on separate GPU pools or machines
