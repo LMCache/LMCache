@@ -651,12 +651,15 @@ class UnifiedLMCacheMPConnector:
             local_hit_tokens=int(local_hit_tokens),
             cache_salt=cache_salt,
         )
-        self._lookups[request_id] = operation
         aligned_end = len(token_ids) // self.chunk_size * self.chunk_size
-        if aligned_end == 0:
+        locally_covered = operation.local_hit_tokens >= aligned_end
+        if aligned_end > 0 and (self.tp_size > 1 or self.pp_size > 1):
+            locally_covered = self._sync_success(locally_covered)
+        if aligned_end == 0 or locally_covered:
             operation.total_hit_tokens = 0
             return operation
 
+        self._lookups[request_id] = operation
         submitted = True
         # The existing submission consensus propagates leader health without
         # adding a second collective to every lookup.

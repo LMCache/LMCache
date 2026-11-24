@@ -2,6 +2,8 @@
 """Small, server-free tests for the unified SGLang MP connector contracts."""
 
 # Standard
+from collections.abc import Iterator
+from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 import threading
@@ -1416,3 +1418,115 @@ class TestSGLangStoreRetry(unittest.TestCase):
         )
         assert operation is not None
         return operation
+
+
+@contextmanager
+def _store_connector(
+    rank: int = 0,
+    parallel_axis: str = "single",
+    *,
+    client: Mock | None = None,
+) -> Iterator[tuple[UnifiedLMCacheMPConnector, Mock, Mock]]:
+    """Construct a connector with mocked transfer and heartbeat dependencies."""
+    adapter = Mock()
+    adapter.resolve_registered_groups.return_value = [
+        SGLangKVComponentGroup(
+            "full", (torch.empty(32, 2, 3),), tokens_per_block=4, slots_per_block=4
+        )
+    ]
+    adapter.is_mla_enabled.return_value = False
+    adapter_name = "lmcache.integration.sglang.unified_kv_adapter"
+    adapter_module = ModuleType(adapter_name)
+    vars(adapter_module)["SGLangUnifiedKVAdapter"] = Mock(return_value=adapter)
+    config = SimpleNamespace(mp_host="127.0.0.1", mp_port=5555)
+    config.get_extra_config_value = lambda _key, default: default
+    if client is None:
+        client = Mock()
+    client.get_chunk_size.return_value.result.return_value = 8
+    transfer = Mock()
+    transfer.submit_store.return_value.query.return_value = True
+    transfer.submit_store.return_value.result.return_value = True
+    heartbeat = Mock(stop_requested=False)
+    with (
+        patch.dict("sys.modules", {adapter_name: adapter_module}),
+        patch(
+            "lmcache.v1.client.client_config.load_mp_client_config",
+            return_value=config,
+        ),
+        patch(
+            "lmcache.v1.client.transport.factory.RequestClientFactory.create",
+            return_value=client,
+        ),
+        patch(
+            "lmcache.v1.client.worker_transfer.create_transfer_context",
+            return_value=transfer,
+        ),
+        patch(
+            "lmcache.integration.sglang.unified_lmcache_mp_connector.HeartbeatThread",
+            return_value=heartbeat,
+        ),
+    ):
+        connector = UnifiedLMCacheMPConnector(
+            config_file=None,
+            model_config=SimpleNamespace(model_path="test-model"),
+            tp_size=2 if parallel_axis == "tp" else 1,
+            tp_rank=rank if parallel_axis == "tp" else 0,
+            tp_group=None,
+            pp_size=2 if parallel_axis == "pp" else 1,
+            pp_rank=rank if parallel_axis == "pp" else 0,
+            pp_group=None,
+            page_size=4,
+            token_to_kv_pool_allocator=Mock(),
+            req_to_token_pool=Mock(),
+            tree_components=(),
+            mamba_component=None,
+            sliding_window_size=None,
+        )
+        try:
+            yield connector, transfer, heartbeat
+        finally:
+            connector.close()
+
+
+def _submit_store(
+    connector: UnifiedLMCacheMPConnector, end: int, request_id: str = "request"
+) -> LMCacheStoreOperation:
+    """Submit the request's currently planned suffix and require acceptance."""
+    start = connector.get_store_start(request_id, end)
+    operation = connector.submit_store(
+        request_id,
+        list(range(end)),
+        torch.arange(4 + start, 4 + end),
+        device_indices_start=start,
+        cache_salt="",
+    )
+    assert operation is not None
+    return operation
+
+
+class TestSGLangLocallyCoveredLookup:
+    """Exercise local coverage through the lookup and store entry points."""
+
+    def test_fully_covered_chunks_need_no_external_lookup(self) -> None:
+        """A partial trailing chunk needs no query or remote session."""
+        client = Mock()
+        with _store_connector(client=client) as (connector, _, _):
+            lookup = connector.submit_lookup(
+                "warm", list(range(20)), local_hit_tokens=16, cache_salt=""
+            )
+            assert connector.poll_lookup(lookup) == 0
+            connector.finish_request("warm")
+
+        client.lookup.assert_not_called()
+        client.query_prefetch_status.assert_not_called()
+        client.end_session.assert_not_called()
+
+    def test_skipped_lookup_leaves_prefix_eligible_for_store(self) -> None:
+        """A GPU prefix hit alone cannot advance LMCache's store cursor."""
+        with _store_connector() as (connector, _, _):
+            lookup = connector.submit_lookup(
+                "warm", list(range(20)), local_hit_tokens=16, cache_salt=""
+            )
+            assert connector.poll_lookup(lookup) == 0
+            store = _submit_store(connector, 20, request_id="warm")
+            assert (store.start, store.end) == (0, 16)
