@@ -506,6 +506,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             engine_type=engine_type,
             separate_object_groups=self._ctx.separate_object_groups,
             full_sw_kv=self._ctx.full_sw_kv,
+            object_group_transfer=transfer_kv_per_object_group,
         )
         layout_desc = get_layout_desc(
             cache_context, self._ctx.chunk_size, object_group_id=0
@@ -728,8 +729,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                     ]
 
                     # NOTE: batch_size must stay 1 for store.
-                    transfer_kv_per_object_group(
-                        cache_context,
+                    cache_context.transfer_object_group(
                         block_ids_per_group_gpu,
                         memory_objs,
                         object_group_id=obj_group_id,
