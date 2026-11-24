@@ -54,8 +54,8 @@ The tiers:
 4. **Engine and hardware knobs** — the settings that move the metrics, most of which are not LMCache's.
 5. **Deployment and systems** — infrastructure terms that appear in deployment discussions.
 
-A note carried over from the source material, worth keeping visible: LMCache's own configuration is never the only primary driver of any benchmark metric.
-Tiers 3, 4, and 5 exist largely so that claim can be understood.
+LMCache's own configuration is never the single primary driver of any benchmark metric.
+Tiers 3, 4, and 5 exist so the reader can better understand why that is true.
 
 ---
 
