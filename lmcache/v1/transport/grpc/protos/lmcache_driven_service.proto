@@ -29,6 +29,15 @@ message UnregisterKvCacheRequest {
 
 message UnregisterKvCacheResponse {}
 
+message NegotiateEventReuseRequest {
+  int64 instance_id = 1;
+  bool reuse_events = 2;
+}
+
+message NegotiateEventReuseResponse {
+  bool reuse_events = 1;
+}
+
 message StoreRequest {
   IpcCacheServerKey key = 1;
   int64 instance_id = 2;
@@ -56,6 +65,8 @@ service LMCacheDrivenService {
   rpc RegisterKvCache(RegisterKvCacheRequest) returns (RegisterKvCacheResponse);
   rpc UnregisterKvCache(UnregisterKvCacheRequest)
       returns (UnregisterKvCacheResponse);
+  rpc NegotiateEventReuse(NegotiateEventReuseRequest)
+      returns (NegotiateEventReuseResponse);
   rpc Store(StoreRequest) returns (StoreResponse);
   rpc Retrieve(RetrieveRequest) returns (RetrieveResponse);
 }

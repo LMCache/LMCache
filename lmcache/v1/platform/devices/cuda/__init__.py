@@ -25,11 +25,16 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def _select_event_ipc_backend(device_type: str) -> "EventIPCBackend":
+def _select_event_ipc_backend(
+    device_type: str, max_event_records: int | None
+) -> "EventIPCBackend":
     """Construct the event IPC backend for the current isolated-IPC setting.
 
     Args:
         device_type: Device-type label passed through to the backend.
+        max_event_records: Records one interprocess event may take while
+            its exported handles track them; see
+            ``EventIPCBackend.max_event_records``.
 
     Returns:
         The timeline-semaphore backend when isolated IPC is enabled (see
@@ -53,6 +58,7 @@ def _select_event_ipc_backend(device_type: str) -> "EventIPCBackend":
     return DefaultEventIPCBackend(
         event_module=torch.cuda,
         device_type=device_type,
+        max_event_records=max_event_records,
     )
 
 
@@ -125,11 +131,24 @@ class CudaDeviceSpec(DeviceSpec):
         return CudaDeviceOps
 
     @property
+    def ipc_event_max_records(self) -> int | None:
+        """Records one interprocess event may take while importers track it.
+
+        CUDA does not document whether the handle of a destroyed interprocess
+        event can be handed out again for a new one, which would make an
+        import kept by handle stand for a destroyed event. Keep one event
+        per operation.
+        """
+        return 1
+
+    @property
     def event_ipc_backend(self) -> "EventIPCBackend":
         """Return the CUDA event IPC backend."""
         backend = self._event_backend_cache
         if backend is None:
-            backend = _select_event_ipc_backend(self.device_type)
+            backend = _select_event_ipc_backend(
+                self.device_type, self.ipc_event_max_records
+            )
             self._event_backend_cache = backend
         return backend
 

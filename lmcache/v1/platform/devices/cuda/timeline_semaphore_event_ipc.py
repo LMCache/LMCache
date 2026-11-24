@@ -229,6 +229,10 @@ class TimelineSemaphoreEventIPCBackend:
     CUDA events require between ``record`` and ``ipc_handle``.
     """
 
+    #: An exported handle is a snapshot of the sequence at export time, so
+    #: each operation needs its own record and export.
+    max_event_records: int | None = 1
+
     def __init__(self) -> None:
         self.device_type: str = "cuda"
         self._lock = threading.Lock()

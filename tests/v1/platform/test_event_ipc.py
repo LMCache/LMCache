@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from typing import cast
 import gc
 import inspect
+import threading
+import time
 import weakref
 
 # Third Party
@@ -12,15 +15,20 @@ from lmcache import torch_device_type
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.event_ipc import (
     _EXPORTED_EVENT_RING_SIZE,
+    CachedImportEventBackend,
     DefaultEventIPCBackend,
     EventIPCBackend,
+    EventRecordPool,
+    _BackgroundReleaser,
     get_event_ipc_backend,
+    supports_event_reuse,
 )
 from lmcache.v1.platform.devices.cpu import CpuDeviceSpec
 from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
 from lmcache.v1.platform.devices.cuda.timeline_semaphore_event_ipc import (
     TimelineSemaphoreEventIPCBackend,
 )
+from lmcache.v1.platform.devices.rocm import RocmDeviceSpec
 from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
 import lmcache.v1.platform as platform
 
@@ -324,3 +332,214 @@ def test_protocol_signatures_match_default_backend():
     for name in proto_methods:
         assert callable(getattr(DefaultEventIPCBackend, name))
         assert inspect.signature(getattr(DefaultEventIPCBackend, name)) is not None
+
+
+class _CountingEvent(_FakeEvent):
+    """Fake event with a distinct handle per event and counted exports."""
+
+    _count = 0
+
+    def __init__(self, interprocess: bool = False) -> None:
+        super().__init__(interprocess)
+        _CountingEvent._count += 1
+        self.id = _CountingEvent._count
+        self.exports = 0
+        self.records = 0
+
+    def ipc_handle(self) -> bytes:
+        self.exports += 1
+        return b"handle-%d" % self.id
+
+    def record(self, stream=None):
+        self.records += 1
+        super().record(stream)
+
+
+class _CountingEventModule:
+    Event = _CountingEvent
+
+
+def _reusing_backend(max_event_records: int | None) -> DefaultEventIPCBackend:
+    return DefaultEventIPCBackend(
+        event_module=_CountingEventModule(),
+        device_type="fake",
+        max_event_records=max_event_records,
+    )
+
+
+def _record(pool: EventRecordPool, stream: str) -> _CountingEvent:
+    event = cast(_CountingEvent, pool.acquire(stream))
+    event.record(stream)
+    return event
+
+
+def test_record_pool_rotates_per_stream_and_caps_records():
+    """Events rotate per stream and are replaced after max_event_records."""
+    pool = EventRecordPool(_reusing_backend(2), "dev", slots=2)
+
+    first = [_record(pool, "s") for _ in range(4)]
+    other = _record(pool, "t")
+    replaced = _record(pool, "s")
+
+    assert first[0] is first[2] and first[1] is first[3]
+    assert first[0] is not first[1]
+    assert other not in first
+    assert replaced not in first
+    assert [event.records for event in first[:2]] == [2, 2]
+    assert [call[1] for call in first[0].calls] == ["s", "s"]
+
+
+def test_record_pool_exports_each_pooled_event_once():
+    pool = EventRecordPool(_reusing_backend(None), "dev", slots=1)
+    event = _record(pool, "s")
+    foreign = _CountingEvent(interprocess=True)
+
+    assert pool.export(event) == pool.export(_record(pool, "s"))
+    assert event.exports == 1
+    pool.export(foreign)
+    pool.export(foreign)
+    assert foreign.exports == 2
+
+
+def test_record_pool_without_reuse_creates_an_event_per_record():
+    """With max_event_records == 1 the pool behaves as if absent."""
+    pool = EventRecordPool(_reusing_backend(1), "dev", slots=4)
+    events = [_record(pool, "s") for _ in range(3)]
+
+    assert len({id(event) for event in events}) == 3
+    assert [event.records for event in events] == [1, 1, 1]
+    pool.export(events[0])
+    pool.export(events[0])
+    assert events[0].exports == 2
+
+
+def test_record_pool_creates_an_event_per_record_unless_the_peer_agreed():
+    """reuse=False (the importing peer did not agree) disables the pool."""
+    pool = EventRecordPool(_reusing_backend(None), "dev", slots=4, reuse=False)
+    events = [_record(pool, "s") for _ in range(3)]
+
+    assert len({id(event) for event in events}) == 3
+    assert len({pool.export(event) for event in events}) == 3
+
+
+def test_supports_event_reuse_follows_max_event_records():
+    assert supports_event_reuse(_reusing_backend(None))
+    assert supports_event_reuse(_reusing_backend(31))
+    assert not supports_event_reuse(_reusing_backend(1))
+    assert not supports_event_reuse(object())
+
+
+def test_record_pool_close_drops_its_events():
+    pool = EventRecordPool(_reusing_backend(None), "dev", slots=1)
+    alive = weakref.ref(pool.acquire("s"))
+    pool.close()
+    gc.collect()
+
+    assert alive() is None
+    assert _record(pool, "s") is not None
+
+
+def test_cached_import_keeps_recent_imports_and_releases_evicted_ones():
+    """Imports are kept per handle, least recently used out first."""
+    released: list[object] = []
+    backend = CachedImportEventBackend(_reusing_backend(None), 2, released.append)
+
+    a = backend.import_event(b"a", "dev")
+    b = backend.import_event(b"b", "dev")
+    assert backend.import_event(b"a", "dev") is a
+    backend.import_event(b"c", "dev")
+
+    assert released == [b]
+    assert backend.import_event(b"a", "dev") is a
+    assert backend.import_event(b"b", "dev") is not b
+
+
+def test_cached_import_serves_a_new_handle_per_operation():
+    """A peer that sends a new handle per operation keeps working, bounded."""
+    released: list[object] = []
+    backend = CachedImportEventBackend(_reusing_backend(None), 4, released.append)
+
+    imported = [backend.import_event(b"op-%d" % i, "dev") for i in range(10)]
+
+    assert [event.calls[0][2] for event in imported] == [
+        b"op-%d" % i for i in range(10)
+    ]
+    assert released == imported[:6]
+
+
+def test_cached_import_passes_through_without_reuse():
+    released: list[object] = []
+    backend = CachedImportEventBackend(_reusing_backend(1), 4, released.append)
+
+    assert backend.import_event(b"a", "dev") is not backend.import_event(b"a", "dev")
+    assert released == []
+
+
+def test_cached_import_close_releases_every_import():
+    released: list[object] = []
+    backend = CachedImportEventBackend(_reusing_backend(None), 4, released.append)
+    imported = [backend.import_event(h, "dev") for h in (b"a", b"b")]
+
+    backend.close()
+
+    assert released == imported
+    assert backend.import_event(b"a", "dev") is not imported[0]
+
+
+def test_cached_import_drops_evicted_imports_off_the_calling_thread():
+    """Destroying an import can block, so the last reference goes elsewhere."""
+    dropped_on: list[str] = []
+
+    class _TrackedEvent(_FakeEvent):
+        def __del__(self) -> None:
+            dropped_on.append(threading.current_thread().name)
+
+    class _TrackedModule:
+        Event = _TrackedEvent
+
+    backend = CachedImportEventBackend(
+        DefaultEventIPCBackend(
+            event_module=_TrackedModule(), device_type="fake", max_event_records=None
+        ),
+        1,
+    )
+    backend.import_event(b"a", "dev")
+    backend.import_event(b"b", "dev")
+
+    deadline = time.monotonic() + 5
+    while not dropped_on and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert dropped_on == ["lmcache-event-release"]
+
+
+def test_release_thread_drops_everything_when_stopped():
+    """At exit nothing is left to be destroyed on the release thread."""
+    dropped_on: list[str] = []
+
+    class _TrackedEvent(_FakeEvent):
+        def __del__(self) -> None:
+            dropped_on.append(threading.current_thread().name)
+
+    releaser = _BackgroundReleaser()
+    releaser.release(_TrackedEvent())
+    releaser.stop()
+    assert dropped_on == ["lmcache-event-release"]
+
+    releaser.release(_TrackedEvent())
+    assert dropped_on == ["lmcache-event-release", threading.current_thread().name]
+
+
+def test_cached_import_backend_satisfies_protocol():
+    backend = CachedImportEventBackend(_reusing_backend(None), 1)
+    assert isinstance(backend, EventIPCBackend)
+    assert backend.device_type == "fake"
+    assert backend.max_event_records is None
+
+
+def test_device_specs_declare_event_reuse(restore_isolated_ipc) -> None:
+    """ROCm reuses events within its record limit; CUDA and snapshots do not."""
+    set_isolated_ipc(False)
+    assert RocmDeviceSpec().event_ipc_backend.max_event_records == 31
+    assert CudaDeviceSpec().event_ipc_backend.max_event_records == 1
+    assert TimelineSemaphoreEventIPCBackend.max_event_records == 1
+    assert CpuDeviceSpec().event_ipc_backend.max_event_records == 1
