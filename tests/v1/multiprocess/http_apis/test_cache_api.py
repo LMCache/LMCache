@@ -527,6 +527,19 @@ def _ctx(layout: Optional[object]) -> _FakeContext:
     )
 
 
+def encoded_key_json(key: ObjectKey) -> dict:
+    """A key's JSON wire form."""
+    encoded = key.to_encoded_object_key()
+    return {
+        "chunk_hash_hex": encoded.chunk_hash_hex,
+        "model_name": encoded.model_name,
+        "kv_rank": encoded.kv_rank,
+        "object_group_id": encoded.object_group_id,
+        "cache_salt": encoded.cache_salt,
+        "tags": dict(encoded.tags),
+    }
+
+
 def _prefetch_body(
     token_ids: list[int],
     world_size: int = 2,
@@ -596,6 +609,40 @@ class TestPrefetchEndpoint:
         assert body["found_keys"] == 4
         assert body["total_keys"] == 4
         assert client.get(f"/cache/prefetches/{rid}").status_code == 404
+
+    def test_submit_by_keys_warms_the_named_chunk(self):
+        ctx = _ctx(layout=object())
+        client = TestClient(_make_prefetch_app(ctx))
+        key = ObjectKey(
+            chunk_hash=(1).to_bytes(4, "big"),
+            model_name="m",
+            kv_rank=ObjectKey.ComputeKVRank(2, 0, 2, 0),
+            cache_salt="alice",
+        )
+        resp = client.post(
+            "/cache/prefetches",
+            json={"keys": [encoded_key_json(key)]},
+        )
+        assert resp.status_code == 202, resp.text
+        assert resp.json()["chunks"] == 1
+        assert ("m", 2) in ctx.layout_desc_registry.lookup_calls
+        assert {
+            key.chunk_hash for key in ctx.storage_manager.submit_calls[0]["keys"]
+        } == {(1).to_bytes(4, "big")}
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param({"cache_salt": "alice"}, id="neither-form"),
+            pytest.param("both-forms", id="both-forms"),
+        ],
+    )
+    def test_rejects_request_without_exactly_one_form(self, body):
+        client = TestClient(_make_prefetch_app(_ctx(layout=object())))
+        if body == "both-forms":
+            key = ObjectKey(chunk_hash=b"\x01", model_name="m", kv_rank=0)
+            body = {**_prefetch_body([1, 2, 3, 4]), "keys": [encoded_key_json(key)]}
+        assert client.post("/cache/prefetches", json=body).status_code == 422
 
     def test_status_unknown_request_id_404(self):
         client = TestClient(_make_prefetch_app(_ctx(layout=object())))

@@ -374,15 +374,17 @@ class KeyDirectory(View):
 
         Returns:
             Each key with the stored keys that differ from it only in
-            ``object_group_id``, in ascending group order.
+            ``object_group_id``, in ascending group order. A key reached
+            twice -- the caller named one chunk in several groups -- is
+            returned once, at its first position.
         """
         with self._lock:
-            expanded_keys: list[ObjectKey] = []
+            expanded_keys: dict[ObjectKey, None] = {}
             for key in keys:
                 key_in_each_group = [key, *self._get_stored_keys_in_other_groups(key)]
                 key_in_each_group.sort(key=lambda group_key: group_key.object_group_id)
-                expanded_keys.extend(key_in_each_group)
-            return expanded_keys
+                expanded_keys.update(dict.fromkeys(key_in_each_group))
+            return list(expanded_keys)
 
     def _get_stored_keys_in_other_groups(self, key: ObjectKey) -> list[ObjectKey]:
         """Return the stored keys that differ from ``key`` only in object group.

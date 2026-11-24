@@ -8,7 +8,8 @@ into one key per rank in object group ``0``; coordinator callers reach the
 other groups through what the directory holds and how pins match.
 :func:`resolve_grouped_object_keys` is the node's prefetch resolver, and
 expands every object group the model registered, each with its own layout and
-attention window.
+attention window; :func:`resolve_grouped_chunk_keys` does the same for chunks
+named by hash rather than by tokens.
 """
 
 # Future
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 # First Party
@@ -23,6 +25,7 @@ from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
+    FULL_ATTENTION_WINDOW_CHUNKS,
     GroupedObjectKeys,
     MemoryLayoutDesc,
     ObjectKey,
@@ -61,26 +64,7 @@ def _resolve_ipc_key_and_hashes(
             f"too many token_ids in a single request "
             f"(limit={MAX_TOKEN_IDS}, got={len(token_ids)})"
         )
-    matching_tags = ObjectKeyIdentity(
-        chunk_hash=b"",
-        kv_rank=0,
-        model_name=model_name,
-        cache_salt=cache_salt,
-        tags=tags or {},
-    ).tags
-    ipc_key = IPCCacheServerKey.from_token_ids(
-        model_name=model_name,
-        world_size=world_size,
-        worker_id=None,
-        token_ids=token_ids,
-        start=0,
-        end=len(token_ids),
-        request_id="",
-        cache_salt=cache_salt,
-        request_configs={
-            f"lmcache.tag.{name}": value for name, value in matching_tags.items()
-        },
-    )
+    ipc_key = _lookup_ipc_key(model_name, world_size, token_ids, cache_salt, tags=tags)
     chunk_hashes = token_hasher.compute_chunk_hashes(list(token_ids))
     return ipc_key, chunk_hashes
 
@@ -183,3 +167,89 @@ def resolve_grouped_object_keys(
         shard_replication_desc,
     )
     return key_groups, len(chunk_hashes)
+
+
+def resolve_grouped_chunk_keys(
+    chunk_hashes: list[bytes],
+    model_name: str,
+    world_size: int,
+    cache_salt: str,
+    group_layout_descs: dict[int, MemoryLayoutDesc],
+    attn_desc: AttnWindowDesc,
+    shard_replication_desc: ShardReplicationDesc,
+    *,
+    tags: Mapping[str, str] | None = None,
+) -> list[GroupedObjectKeys]:
+    """Expand named chunks into prefetch key rows for every object group.
+
+    The same rows as :func:`resolve_grouped_object_keys`, for chunks named by
+    hash instead of a token sequence, except that every row has no sliding
+    window: the named chunks need not be a contiguous prefix, so there is no
+    trailing window to keep, and each must be loaded.
+
+    Args:
+        chunk_hashes: The chunks to load, one row column each, in order.
+        model_name: Model whose rank fan-out to use.
+        world_size: Tensor-parallel world size selecting the per-rank fan-out.
+        cache_salt: Per-tenant isolation salt.
+        group_layout_descs: Each object group's memory layout.
+        attn_desc: The model's per-group attention windows (only its group
+            count is used).
+        shard_replication_desc: How each object group is spread over the kv ranks.
+        tags: Matching tags supplied when the content was stored.
+
+    Returns:
+        One row per ``(object group, kv rank)``, group-major, each holding
+        ``len(chunk_hashes)`` keys.
+
+    Raises:
+        ValueError: A key field (e.g. ``cache_salt``) is invalid, or a group
+            has no layout.
+    """
+    ipc_key = _lookup_ipc_key(model_name, world_size, [], cache_salt, tags=tags)
+    rows = ipc_key_to_grouped_object_keys(
+        ipc_key,
+        chunk_hashes,
+        list(range(attn_desc.num_object_groups)),
+        group_layout_descs,
+        attn_desc,
+        shard_replication_desc,
+    )
+    return [
+        replace(row, sliding_window_size=FULL_ATTENTION_WINDOW_CHUNKS) for row in rows
+    ]
+
+
+def _lookup_ipc_key(
+    model_name: str,
+    world_size: int,
+    token_ids: list[int],
+    cache_salt: str,
+    *,
+    tags: Mapping[str, str] | None = None,
+) -> IPCCacheServerKey:
+    """Build the lookup-side IPC key (no ``worker_id``, so every rank).
+
+    Raises:
+        ValueError: A key field (e.g. ``cache_salt``) is invalid.
+    """
+    matching_tags = ObjectKeyIdentity(
+        chunk_hash=b"",
+        kv_rank=0,
+        model_name=model_name,
+        cache_salt=cache_salt,
+        tags=tags or {},
+    ).tags
+    return IPCCacheServerKey.from_token_ids(
+        model_name=model_name,
+        world_size=world_size,
+        worker_id=None,
+        token_ids=token_ids,
+        start=0,
+        end=len(token_ids),
+        request_id="",
+        cache_salt=cache_salt,
+        request_configs={
+            f"lmcache.tag.{name}": value for name, value in matching_tags.items()
+        },
+    )

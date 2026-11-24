@@ -1183,11 +1183,14 @@ KV for a known prompt **before** the requests arrive, so the first request hits
 L1 instead of paying the L2 fetch inline -- useful when you know a workload is
 about to be routed to a node (a traffic shift, a hot shared system prompt).
 
-You describe the content by **token ids** -- the unit the cache speaks -- never
-by internal cache keys, which you cannot construct (a key is a content hash
-plus a per-rank layout bitmap). The coordinator forwards the request to the
-named server, which hashes the tokens, expands them across the node's ranks,
-loads the chunks from L2 into L1, and **retains** them so a later lookup hits.
+You describe the content by **token ids** -- the unit the cache speaks -- or by
+**keys** you already hold (from ``GET /directory/keys`` or
+``POST /directory/lookup``). Token ids always cover every chunk from position 0,
+since chunk hashes are prefix-chained; keys reach a chunk in the middle of a
+prompt without its prefix chunks. The coordinator forwards the supplied form
+alone to the named server, which resolves it, expands each chunk across the
+node's object groups and ranks, loads the chunks from L2 into L1, and
+**retains** them so a later lookup hits.
 The submit returns a ``request_id``; poll the status endpoint until
 ``completed``. The warm acquires no lock -- the poll simply reports progress and
 clears the server-side job once the load finishes.
@@ -1195,7 +1198,8 @@ clears the server-side job once the load finishes.
 ``POST /cache/prefetches``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Submit a warm prefetch of a token sequence on one named server.
+Submit a warm prefetch of keys, or a token sequence, on one named server.
+Supply exactly one of ``keys`` / ``token_ids``.
 
 **Request body:**
 
@@ -1209,18 +1213,26 @@ Submit a warm prefetch of a token sequence on one named server.
    * - ``instance_id``
      - string
      - Target MP server; must be registered.
+   * - ``keys``
+     - list[object]
+     - Keys form. Each key, in the wire form ``GET /directory/keys`` returns,
+       names its chunk; the server warms that chunk in every object group and
+       rank. The keys must agree on model, world size, ``cache_salt`` and
+       ``tags``. The fields below are then ignored.
    * - ``model_name``
      - string
-     - Model whose layout sizes the target's L1 buffers.
+     - Tokens form, required. Model whose layout sizes the target's L1
+       buffers.
    * - ``world_size``
      - int
-     - World size (``>= 1``) selecting the KV layout and the per-rank fan-out
-       (``1`` for a single-GPU, TP=1 deployment).
+     - Tokens form. Optional (default ``1``). World size (``>= 1``) selecting
+       the KV layout and the per-rank fan-out (``1`` for a single-GPU, TP=1
+       deployment).
    * - ``token_ids``
      - list[int]
-     - Prompt tokens whose complete ``chunk_size`` chunks are warmed; must match
-       what was stored (same tokenizer / special tokens). A sub-chunk sequence
-       is a ``noop``.
+     - Tokens form. Prompt tokens whose complete ``chunk_size`` chunks are
+       warmed; must match what was stored (same tokenizer / special tokens). A
+       sub-chunk sequence is a ``noop``.
    * - ``cache_salt``
      - string
      - Optional (default ``""``). Per-tenant isolation salt applied to the
@@ -1244,14 +1256,16 @@ When the sequence is shorter than one chunk, nothing is submitted and
     {"instance_id": "server-1", "request_id": "", "chunks": 0, "status": "noop"}
 
 ``request_id`` is the id to poll; ``chunks`` is the number of whole chunks
-submitted to warm.
+submitted to warm (keys form: the distinct chunks the keys name).
 
 **HTTP status codes:**
 
 - ``200``: submitted (or a ``noop`` as above).
 - ``404``: unknown ``instance_id`` (not registered).
-- ``502``: the target server was unreachable or rejected the submit.
-- ``422``: request body fails field-level validation.
+- ``502``: the target server was unreachable or rejected the submit -- including
+  keys that disagree on model, world size, ``cache_salt`` or ``tags``.
+- ``422``: request body fails field-level validation, or supplies both or
+  neither of ``keys`` / ``token_ids``.
 
 .. note::
 
@@ -1273,6 +1287,22 @@ submitted to warm.
             "tags": {"adapter_revision": "abc123"}
         }'
     # -> {"instance_id": "server-1", "request_id": "abc123", "chunks": 12, "status": "submitted"}
+
+    # Keys form: warm one mid-prompt chunk found via /directory/lookup.
+    curl -s -X POST http://localhost:9300/cache/prefetches \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "instance_id": "server-1",
+            "keys": [{
+                "chunk_hash_hex": "aa12...",
+                "model_name": "Qwen/Qwen3-8B",
+                "kv_rank": 16777472,
+                "object_group_id": 0,
+                "cache_salt": "user-a",
+                "tags": {"adapter_revision": "abc123"}
+            }]
+        }'
+    # -> {"instance_id": "server-1", "request_id": "def456", "chunks": 1, "status": "submitted"}
 
 ``GET /cache/prefetches/{instance_id}/{request_id}``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1534,11 +1564,12 @@ requested page in first-pinned order, each with its current ``pin_count``.
 ``POST /cache/delete``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Delete a token sequence on one named server.
+Delete keys, or a token sequence's keys, on one named server.
 
-**Request body:** (``model_name``, ``world_size``, ``token_ids``,
-``cache_salt``, and optional matching ``tags`` as documented for
-``POST /cache/pins``) plus ``tier`` (``l1`` / ``l2`` / ``all``) and ``force``
+**Request body:** ``instance_id``, the content in either form as documented
+for ``POST /cache/pins`` (``keys``, or ``model_name``, ``world_size``,
+``token_ids``, ``cache_salt`` and optional matching ``tags``), plus ``tier``
+(``l1`` / ``l2`` / ``all``) and ``force``
 (bool, default ``false``). When ``force`` is ``true``, locked keys are deleted
 anyway (L1 read/write locks on the node and the coordinator's L2 pin set).
 
@@ -1548,7 +1579,9 @@ anyway (L1 read/write locks on the node and the coordinator's L2 pin set).
 
     {"instance_id": "server-1", "requested": 12, "affected": 24, "skipped": 0, "status": "deleted"}
 
-``requested`` is the number of whole chunks resolved. ``affected`` and
+``requested`` is the number of whole chunks resolved (keys form: the number of
+keys given). Each key is expanded to every object group the coordinator's
+directory holds its chunk in. ``affected`` and
 ``skipped`` are **totals across the tiers acted on**: ``affected`` counts L1 keys
 removed by the node plus L2 keys removed by the coordinator, and ``skipped``
 counts L1 keys the node refused plus L2 keys held back for an L2 pin (non-force
@@ -1560,6 +1593,8 @@ sequence returns ``status`` ``"noop"``.
 
 - ``200``: deleted (or a ``noop``).
 - ``404``: no server is registered under ``instance_id``.
+- ``422``: request body fails field-level validation, or supplies both or
+  neither of ``keys`` / ``token_ids``.
 - ``502``: the target server was unreachable or rejected the delete.
 - ``503``: a forced delete removed the keys, but dropping their pins could not
   be written to the metadata file; the pins are kept.

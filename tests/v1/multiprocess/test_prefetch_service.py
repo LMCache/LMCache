@@ -154,3 +154,52 @@ def test_a_sequence_past_the_token_cap_is_still_a_bad_request(monkeypatch):
 
     with pytest.raises(InvalidRequest, match="too many token_ids"):
         _submit(service, world_size=1)
+
+
+def _chunk_keys(chunk: int, world_size: int = 2, salt: str = "alice") -> list:
+    """Every rank's group-0 key for one chunk of ``TOKENS``, as a caller
+    holding keys (from the directory, say) would name it."""
+    keys, _ = key_resolver.resolve_object_keys(
+        TokenHasher(chunk_size=CHUNK_SIZE, hash_algorithm="blake3"),
+        "m",
+        world_size,
+        TOKENS,
+        salt,
+    )
+    return keys[chunk * world_size : (chunk + 1) * world_size]
+
+
+def test_a_prefetch_by_key_warms_that_chunk_in_every_group_and_rank():
+    """Keys name chunks: the named mid-prompt chunk is warmed in every
+    object group and rank, whichever rank's key named it, and with no
+    sliding window -- named chunks are not a contiguous prefix, and the
+    full fetch refuses windowed rows."""
+    layouts = {0: _layout(8), 1: _layout(16), 2: _layout(32)}
+    windows = AttnWindowDesc(num_chunks_in_sw=[-1, 3, 1], world_size=2)
+    service, storage = _service(_Registry(layouts, windows))
+    second_chunk = _chunk_keys(1)
+
+    reply = service.submit_keys(second_chunk, Tier.L2, Tier.L1)
+
+    assert reply["chunks"] == 1
+    assert reply["status"] == "submitted"
+    assert [row.object_group_id for row in storage.rows] == [0, 0, 1, 1, 2, 2]
+    assert {row.sliding_window_size for row in storage.rows} == {-1}
+    assert {key.chunk_hash for row in storage.rows for key in row.keys} == {
+        second_chunk[0].chunk_hash
+    }
+    for row in storage.rows:
+        assert row.layout_desc == layouts[row.object_group_id]
+        assert len(row.keys) == 1
+
+
+def test_a_prefetch_by_keys_of_different_tenants_is_a_bad_request():
+    """One prefetch warms one model's content for one tenant; keys that
+    disagree on identity cannot share its layout lookup."""
+    windows = AttnWindowDesc(num_chunks_in_sw=[-1], world_size=2)
+    service, storage = _service(_Registry({0: _layout(8)}, windows))
+    mixed = [_chunk_keys(0, salt="alice")[0], _chunk_keys(1, salt="bob")[0]]
+
+    with pytest.raises(InvalidRequest, match="same model"):
+        service.submit_keys(mixed, Tier.L2, Tier.L1)
+    assert storage.rows == []

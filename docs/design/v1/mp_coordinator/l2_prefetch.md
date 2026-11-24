@@ -15,8 +15,8 @@ sequenceDiagram
     participant Co as coordinator
     participant M as mp server
 
-    Cl->>Co: POST /cache/prefetches {instance_id, model_name, world_size, token_ids, cache_salt}
-    Co->>M: POST /cache/prefetches (tokens forwarded verbatim)
+    Cl->>Co: POST /cache/prefetches {instance_id, keys | model_name, world_size, token_ids, cache_salt}
+    Co->>M: POST /cache/prefetches (the supplied form only)
     M-->>Co: {request_id, chunks, status: "submitted"}
     Co-->>Cl: {instance_id, request_id, chunks, status}
     loop until completed
@@ -27,9 +27,13 @@ sequenceDiagram
     end
 ```
 
-A client names **one** registered MP server and a **token sequence** (plus the
-model/world_size and tenant salt, and the optional `source_tier`=`l2` /
-`target_tier`=`l1`). The coordinator resolves the target's address from the
+A client names **one** registered MP server and either a **token sequence**
+(plus the model/world_size and tenant salt) or the **keys** of the chunks to
+warm, and the optional `source_tier`=`l2` / `target_tier`=`l1`. Token ids always
+cover every chunk from position 0, since chunk hashes are prefix-chained; keys
+reach a chunk in the middle of a prompt. The coordinator forwards only the
+supplied form, so a server that predates the keys form rejects the request
+(422) instead of reading empty token fields as a sub-chunk `noop`. The coordinator resolves the target's address from the
 registry, `POST`s to its `/cache/prefetches`, and relays the server's
 `request_id` back. The client then polls
 `GET /cache/prefetches/{instance_id}/{request_id}` on the coordinator, which proxies
@@ -42,11 +46,12 @@ status calls are quick and the client drives completion on demand.
 
 ## Components
 
-- **`schemas.py`** — `PrefetchRequest {instance_id, model_name, world_size,
-  token_ids, cache_salt, source_tier=l2, target_tier=l1}` and
+- **`schemas.py`** — `PrefetchRequest {instance_id, keys | model_name,
+  world_size, token_ids, cache_salt}` (a `KeysOrTokensRequest`) and
   `PrefetchResponse {instance_id, request_id, chunks, status}`.
 - **`controllers/prefetch_manager.py`** — `PrefetchManager`. `submit_prefetch`
-  awaits the target's `POST /cache/prefetches` and returns its reply;
+  (tokens) and `submit_prefetch_keys` (keys) await the target's
+  `POST /cache/prefetches` and return its reply;
   `get_status` proxies `GET /cache/prefetches/{request_id}` and relays
   `(status_code, body)`. No fire-and-forget tasks — both calls are quick.
 - **`http_apis/cache_api.py`** — `POST /cache/prefetches` and
@@ -54,6 +59,17 @@ status calls are quick and the client drives completion on demand.
   via `get_context(request).registry.get(instance_id)` (**404** if unknown) and
   uses the shared outbound `httpx.AsyncClient` (`get_outbound_client(request)`);
   a transport error to the target surfaces as **502**.
+
+## Keys form on the MP server
+
+`PrefetchService.submit_keys` treats each key as naming its chunk, the way a
+pin does. It takes the model, world size (unpacked from `kv_rank`), salt and
+tags from the keys -- they must agree, or the request is a 400 -- and rebuilds
+one row per registered `(object group, kv rank)` from the distinct chunk
+hashes. So one key per chunk warms the whole chunk, and every row has the same
+length, which the `full` fetch needs. Every row gets no sliding window: the
+named chunks need not be a contiguous prefix, so there is no trailing window
+to keep, and `full` refuses windowed rows.
 
 ## Wiring (`app.py`)
 

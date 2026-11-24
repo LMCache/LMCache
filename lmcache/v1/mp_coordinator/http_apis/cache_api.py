@@ -37,15 +37,15 @@ router = APIRouter()
 
 @router.post("/cache/prefetches")
 async def request_prefetch(body: PrefetchRequest, request: Request) -> PrefetchResponse:
-    """Submit a warm prefetch of a token sequence on one MP server.
+    """Submit a warm prefetch of keys, or a token sequence, on one MP server.
 
     Resolves ``body.instance_id`` in the registry and proxies to that server's
     ``POST /cache/prefetches``, which submits the load and returns a
     ``request_id``. Poll ``GET /cache/prefetches/{instance_id}/{request_id}``.
 
     Args:
-        body: Target instance, model/world_size, the token_ids to warm, and the
-            per-tenant cache_salt.
+        body: Target instance, and the ``keys`` to warm or model/world_size,
+            the token_ids to warm, and the per-tenant cache_salt.
 
     Returns:
         ``PrefetchResponse`` carrying the server's ``request_id`` (empty when the
@@ -65,16 +65,22 @@ async def request_prefetch(body: PrefetchRequest, request: Request) -> PrefetchR
             detail=f"no MP server registered with instance_id={body.instance_id!r}",
         )
 
+    http_client = get_outbound_client(request)
     try:
-        result = await prefetch.submit_prefetch(
-            target=target,
-            http_client=get_outbound_client(request),
-            model_name=body.model_name,
-            world_size=body.world_size,
-            token_ids=body.token_ids,
-            cache_salt=body.cache_salt,
-            tags=body.tags,
-        )
+        if body.keys:
+            result = await prefetch.submit_prefetch_keys(
+                target=target, http_client=http_client, keys=body.keys
+            )
+        else:
+            result = await prefetch.submit_prefetch(
+                target=target,
+                http_client=http_client,
+                model_name=body.model_name,
+                world_size=body.world_size,
+                token_ids=body.token_ids,
+                cache_salt=body.cache_salt,
+                tags=body.tags,
+            )
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502,

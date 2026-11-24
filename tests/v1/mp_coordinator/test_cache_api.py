@@ -111,6 +111,42 @@ def test_prefetch_submit_then_status_proxy():
         }
 
 
+def test_prefetch_by_keys_forwards_only_the_keys():
+    """The keys form reaches the server as keys alone: forwarding the empty
+    token fields too would let a server without the keys form read the
+    request as a sub-chunk sequence and answer noop."""
+    forwarded: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        forwarded.append(json.loads(request.content))
+        return httpx.Response(
+            202, json={"request_id": "abc", "chunks": 1, "status": "submitted"}
+        )
+
+    with _pin_client() as client:
+        client.post(
+            "/instances",
+            json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
+        )
+        client.app.state.outbound_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+        key = _wire_key(_resolve(client.app.state.ctx)[1])
+
+        resp = client.post(
+            "/cache/prefetches", json={"instance_id": "mp-1", "keys": [key]}
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "instance_id": "mp-1",
+            "request_id": "abc",
+            "chunks": 1,
+            "status": "submitted",
+        }
+        assert forwarded == [{"keys": [key]}]
+
+
 def test_prefetch_status_unknown_instance_returns_404():
     """Status for an unregistered instance must 404."""
     with _client() as client:
@@ -291,18 +327,26 @@ def test_pin_by_keys_pins_only_the_named_mid_prompt_chunk():
         pytest.param("both-forms", id="both-forms"),
     ],
 )
-def test_pin_rejects_request_without_exactly_one_form(body: dict | str):
-    """A pin body must carry exactly one of keys / token_ids, and the tokens
-    form needs a model_name; anything else is a 422."""
+@pytest.mark.parametrize(
+    "method, path",
+    [
+        ("POST", "/cache/pins"),
+        ("DELETE", "/cache/pins"),
+        ("POST", "/cache/delete"),
+        ("POST", "/cache/prefetches"),
+    ],
+)
+def test_key_controls_reject_request_without_exactly_one_form(
+    method: str, path: str, body: dict | str
+):
+    """Pin, delete and prefetch bodies carry exactly one of keys / token_ids,
+    and the tokens form needs a model_name; anything else is a 422."""
     with _pin_client() as client:
-        if body == "both-forms":
+        if isinstance(body, str):  # "both-forms" needs a resolved key
             key = _resolve(client.app.state.ctx)[0]
-            body = {
-                **_pin_body(),
-                "keys": [_wire_key(key)],
-            }
-        assert client.post("/cache/pins", json=body).status_code == 422
-        assert client.request("DELETE", "/cache/pins", json=body).status_code == 422
+            body = {**_pin_body(), "keys": [_wire_key(key)]}
+        request_body = {**body, "instance_id": "mp-1"}
+        assert client.request(method, path, json=request_body).status_code == 422
 
 
 def test_list_pins_empty_table():
@@ -813,6 +857,31 @@ def test_a_delete_reaches_every_object_group():
         [call] = deletes
         assert {k["object_group_id"] for k in call["keys"]} == set(GROUPS)
         assert len(call["keys"]) == len(keys)
+
+
+def test_a_delete_by_key_removes_only_that_chunk_in_every_group():
+    """The keys form names one mid-prompt chunk; the delete reaches it in
+    every object group it is stored in, once per key even when the caller
+    passes the chunk's key in several groups (as the directory lists it),
+    and leaves the prefix chunk alone."""
+    deletes: list = []
+    with _registered_delete_client(deletes) as client:
+        ctx = client.app.state.ctx
+        _store(ctx, _keys_in_groups(ctx))
+        second_chunk = _resolve(ctx)[1]
+        named = [replace(second_chunk, object_group_id=g) for g in (0, 1)]
+
+        resp = client.post(
+            "/cache/delete",
+            json={"instance_id": "mp-1", "keys": [_wire_key(k) for k in named]},
+        )
+
+        assert resp.status_code == 200, resp.text
+        [call] = deletes
+        assert {k["chunk_hash_hex"] for k in call["keys"]} == {
+            second_chunk.chunk_hash.hex()
+        }
+        assert sorted(k["object_group_id"] for k in call["keys"]) == list(GROUPS)
 
 
 def test_a_delete_sends_only_the_groups_the_chunk_is_stored_in():

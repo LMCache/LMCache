@@ -38,6 +38,7 @@ from lmcache.v1.mp_coordinator.persistence.metadata import MetadataWriteError
 from lmcache.v1.mp_coordinator.schemas import (
     DeleteRequest,
     DeleteResponse,
+    KeysOrTokensRequest,
     PinListResponse,
     PinnedKeyInfo,
     PinRequest,
@@ -350,7 +351,9 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
         Raises:
             HTTPException: 400 if the token cap is exceeded or a key field is invalid.
         """
-        resolved, chunks = _resolve_pin_keys(body, get_context(request).token_hasher)
+        resolved, chunks = _resolve_request_keys(
+            body, get_context(request).token_hasher
+        )
         before = controller.capture()
         controller.pin(resolved)
         _save_or_undo(request, controller, before)
@@ -377,7 +380,9 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
         Raises:
             HTTPException: 400 if the token cap is exceeded or a key field is invalid.
         """
-        resolved, chunks = _resolve_pin_keys(body, get_context(request).token_hasher)
+        resolved, chunks = _resolve_request_keys(
+            body, get_context(request).token_hasher
+        )
         before = controller.capture()
         controller.unpin(resolved)
         _save_or_undo(request, controller, before)
@@ -426,7 +431,8 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
 
     @router.post("/cache/delete")
     async def request_delete(body: DeleteRequest, request: Request) -> DeleteResponse:
-        """Delete a token sequence on one MP server, per ``body.tier``.
+        """Delete keys, or a token sequence's keys, on one MP server, per
+        ``body.tier``.
 
         ``body.tier`` is ``l1``, ``l2`` or ``all``. When the delete touches L2,
         keys pinned in this controller's table are held back unless
@@ -435,11 +441,12 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
         eviction controller serves its own.
 
         Args:
-            body: Target instance, model/world_size, token_ids, cache_salt, tier,
-                force.
+            body: Target instance, ``keys`` or model/world_size, token_ids,
+                cache_salt, and tier, force.
 
         Returns:
-            ``DeleteResponse`` with ``requested`` chunks, ``affected`` keys
+            ``DeleteResponse`` with ``requested`` chunks (keys form: the keys
+            given), ``affected`` keys
             removed, and ``skipped`` keys refused (L1 locks reported by the node,
             plus L2 pins held back here).
 
@@ -455,17 +462,7 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
                 status_code=404,
                 detail=f"no MP server registered with instance_id={body.instance_id!r}",
             )
-        try:
-            resolved, chunks = resolve_object_keys(
-                ctx.token_hasher,
-                body.model_name,
-                body.world_size,
-                body.token_ids,
-                body.cache_salt,
-                tags=body.tags,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
+        resolved, chunks = _resolve_request_keys(body, ctx.token_hasher)
         resolved = ctx.views.get(KeyDirectory).get_keys_across_object_groups(resolved)
 
         if not chunks:
@@ -543,10 +540,11 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
     return (router,)
 
 
-def _resolve_pin_keys(
-    body: PinRequest, token_hasher: TokenHasher
+def _resolve_request_keys(
+    body: KeysOrTokensRequest, token_hasher: TokenHasher
 ) -> tuple[list[ObjectKey], int]:
-    """Return a pin body's keys and the count reported as ``requested``.
+    """Return a pin or delete body's keys and the count reported as
+    ``requested``.
 
     Raises:
         HTTPException: 400 if the token cap is exceeded or a key field is

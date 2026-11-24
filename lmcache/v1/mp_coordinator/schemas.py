@@ -400,25 +400,26 @@ class CacheEventsResponse(BaseModel):
     stale: int = 0
 
 
-class DirectoryLookupRequest(BaseModel):
-    """Body of ``POST /directory/lookup``.
+class KeysOrTokensRequest(BaseModel):
+    """Cache content named either by object keys or by a token sequence.
 
-    Supply exactly one of the two lookup forms:
+    The base of the coordinator bodies that act on cache content (directory
+    lookup, pin, prefetch, delete). Supply exactly one of the two forms:
 
-    * ``keys`` — resolve these keys directly.
-    * ``token_ids`` (with ``model_name`` / ``world_size``) — resolve a
-      request's token sequence to the object keys of its complete
-      chunks, the same fan-out the pin APIs use. Chunk hashes are
-      prefix-chained, so this must be the request's **full** token
-      sequence from position 0; a mid-request slice resolves to
-      different keys. Trailing incomplete chunks are ignored.
+    * ``keys`` — act on these keys as given, in the wire form the directory
+      and pin listings return. It reaches a chunk in the middle of a prompt
+      without its prefix chunks.
+    * ``token_ids`` (with ``model_name`` / ``world_size``) — resolve a token
+      sequence to the keys of its complete chunks. Chunk hashes are
+      prefix-chained, so this must be the **full** sequence from position 0
+      and always covers every chunk from there; trailing incomplete chunks
+      are ignored.
 
     Attributes:
-        keys: The keys to resolve (keys form).
-        token_ids: The request's full token sequence (tokens form).
+        keys: The keys to act on (keys form).
+        token_ids: The full token sequence (tokens form).
         model_name: Model whose rank fan-out to use (tokens form).
-        world_size: World size selecting the per-rank fan-out
-            (tokens form).
+        world_size: World size selecting the per-rank fan-out (tokens form).
         cache_salt: Per-tenant isolation salt applied to produced keys
             (tokens form).
         tags: Matching tags supplied when the content was stored (tokens form).
@@ -450,8 +451,8 @@ class DirectoryLookupRequest(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _validate_one_form(self) -> "DirectoryLookupRequest":
-        """Enforce that exactly one lookup form is supplied.
+    def _validate_one_form(self) -> "KeysOrTokensRequest":
+        """Enforce that exactly one form is supplied (surfaced as 422).
 
         Returns:
             The unchanged request once exactly one form is present.
@@ -465,6 +466,15 @@ class DirectoryLookupRequest(BaseModel):
         if self.token_ids and not self.model_name:
             raise ValueError("'model_name' is required with 'token_ids'")
         return self
+
+
+class DirectoryLookupRequest(KeysOrTokensRequest):
+    """Body of ``POST /directory/lookup``.
+
+    Resolves cache content to its placements and token ids, in either form
+    of :class:`KeysOrTokensRequest`. The tokens form uses the same fan-out
+    the pin APIs use.
+    """
 
 
 class DirectoryKeyPlacements(BaseModel):
@@ -623,31 +633,20 @@ class BlendLookupResponse(BaseModel):
     matches: list[BlendMatchModel] = Field(default_factory=list)
 
 
-class PrefetchRequest(BaseModel):
+class PrefetchRequest(KeysOrTokensRequest):
     """Body of ``POST /cache/prefetches`` on the coordinator.
 
-    Asks the coordinator to warm one MP server's L1 with the chunks of a token
-    sequence. The caller describes content by ``token_ids`` -- the unit the
-    cache speaks -- not by internal cache keys, which it cannot construct. The
-    coordinator forwards the request verbatim to that server's own
-    ``POST /cache/prefetches``, which hashes the tokens and expands them into the
-    per-rank keys.
+    Asks the coordinator to warm one MP server's L1 with the named chunks, in
+    either form of :class:`KeysOrTokensRequest`. The coordinator forwards
+    the supplied form alone to that server's own ``POST /cache/prefetches``,
+    which resolves it against its registered layouts. A key names its chunk:
+    the server warms that chunk in every object group and rank.
 
     Attributes:
         instance_id: Identifier of the target MP server (must be registered).
-        model_name: Model whose layout the target uses to allocate L1 buffers.
-        world_size: World size selecting the layout and the per-rank fan-out.
-        token_ids: Prompt tokens whose complete chunks should be warmed.
-        cache_salt: Per-tenant isolation salt applied to the produced keys.
-        tags: Matching tags supplied when the content was stored.
     """
 
     instance_id: str
-    model_name: str
-    world_size: int = Field(ge=1)
-    token_ids: list[int] = Field(default_factory=list)
-    cache_salt: str = ""
-    tags: MatchingTags = Field(default_factory=dict)
 
 
 class PrefetchResponse(BaseModel):
@@ -669,73 +668,14 @@ class PrefetchResponse(BaseModel):
     status: str
 
 
-class PinRequest(BaseModel):
+class PinRequest(KeysOrTokensRequest):
     """Body of ``POST`` / ``DELETE /cache/pins`` on the coordinator.
 
     Pinning protects keys from L2 eviction until unpinned. L2 pins are
-    fleet-wide (per ``cache_salt``), so no target instance is needed. Supply
-    exactly one of the two forms:
-
-    * ``keys`` — (un)pin these keys as given. Use it to pin a chunk in the
-      middle of a prompt without its prefix chunks: chunk hashes are
-      prefix-chained, so the tokens form always covers every chunk from
-      position 0.
-    * ``token_ids`` (with ``model_name`` / ``world_size``) — the coordinator
-      resolves the sequence to the keys of its complete chunks locally.
-
-    Attributes:
-        keys: The keys to (un)pin (keys form).
-        token_ids: Prompt tokens whose complete chunks should be (un)pinned
-            (tokens form).
-        model_name: Model whose rank fan-out to use when resolving keys
-            (tokens form).
-        world_size: World size selecting the per-rank fan-out (tokens form).
-        cache_salt: Per-tenant isolation salt applied to the produced keys
-            (tokens form).
-        tags: Matching tags supplied when the content was stored (tokens form).
+    fleet-wide (per ``cache_salt``), so no target instance is needed. Content
+    is named in either form of :class:`KeysOrTokensRequest`; the coordinator
+    resolves the tokens form locally.
     """
-
-    keys: list[EncodedObjectKey] = Field(default_factory=list)
-    token_ids: list[int] = Field(default_factory=list)
-    model_name: str = ""
-    world_size: int = Field(default=1, ge=1)
-    cache_salt: str = ""
-    tags: MatchingTags = Field(default_factory=dict)
-
-    @field_validator("keys")
-    @classmethod
-    def _validate_keys(cls, value: list[EncodedObjectKey]) -> list[EncodedObjectKey]:
-        """Reject undecodable keys at request validation (surfaced as 422).
-
-        Args:
-            value: The hydrated keys.
-
-        Returns:
-            The unchanged keys once each converts to an ``ObjectKey``.
-
-        Raises:
-            ValueError: If a key cannot convert into an ``ObjectKey``.
-        """
-        for encoded in value:
-            encoded.to_object_key()
-        return value
-
-    @model_validator(mode="after")
-    def _validate_one_form(self) -> "PinRequest":
-        """Enforce that exactly one form is supplied (surfaced as 422).
-
-        Returns:
-            The unchanged request once exactly one form is present.
-
-        Raises:
-            ValueError: If both or neither of ``keys`` / ``token_ids`` is
-                supplied, or ``token_ids`` comes without ``model_name``.
-        """
-        if bool(self.keys) == bool(self.token_ids):
-            raise ValueError("supply exactly one of 'keys' or 'token_ids'")
-        if self.token_ids and not self.model_name:
-            raise ValueError("'model_name' is required with 'token_ids'")
-        return self
 
 
 class PinResponse(BaseModel):
@@ -778,16 +718,15 @@ class PinListResponse(BaseModel):
     pins: list[PinnedKeyInfo] = Field(default_factory=list)
 
 
-class DeleteRequest(BaseModel):
+class DeleteRequest(KeysOrTokensRequest):
     """Body of ``POST /cache/delete`` on the coordinator.
+
+    Content is named in either form of :class:`KeysOrTokensRequest`; the
+    coordinator expands each key to the object groups the directory holds it
+    in.
 
     Attributes:
         instance_id: Identifier of the target MP server (must be registered).
-        model_name: Model whose layout the target uses to resolve keys.
-        world_size: World size selecting the layout and the per-rank fan-out.
-        token_ids: Prompt tokens whose complete chunks should be deleted.
-        cache_salt: Per-tenant isolation salt applied to the produced keys.
-        tags: Matching tags supplied when the content was stored.
         tier: Which tier(s) to delete: ``l1`` (L1 only), ``l2`` (L2 only), or
             ``all`` (both). ``l1`` never touches L2 and vice versa.
         force: When True, delete even locked/pinned keys -- bypasses L1
@@ -795,11 +734,6 @@ class DeleteRequest(BaseModel):
     """
 
     instance_id: str
-    model_name: str
-    world_size: int = Field(ge=1)
-    token_ids: list[int] = Field(default_factory=list)
-    cache_salt: str = ""
-    tags: MatchingTags = Field(default_factory=dict)
     tier: Tier = Tier.ALL
     force: bool = False
 
