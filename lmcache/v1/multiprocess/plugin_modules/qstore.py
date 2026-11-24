@@ -778,9 +778,9 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         ed = time.perf_counter()
         if stored_count:
             logger.info(
-                "Stored %d Q tokens in %.3f seconds",
+                "Stored %d Q tokens in %.3f ms",
                 num_chunks * self._ctx.chunk_size,
-                ed - st,
+                (ed - st) * 1000,
             )
         return event_backend.export_event(event, cache_context.device), store_succeeded
 
@@ -1192,9 +1192,9 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                     )
         if succeeded:
             logger.info(
-                "Retrieved %d raw objects into the Q ring in %.3f seconds",
+                "Retrieved %d raw objects into the Q ring in %.3f ms",
                 len(retained),
-                time.perf_counter() - st,
+                (time.perf_counter() - st) * 1000,
             )
         return event_backend.export_event(event, cache_context.device), succeeded
 
@@ -1283,8 +1283,8 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                     )
         if succeeded:
             logger.info(
-                "Stored %d raw objects from the Q ring in %.3f seconds",
+                "Stored %d raw objects from the Q ring in %.3f ms",
                 len(all_dict),
-                time.perf_counter() - st,
+                (time.perf_counter() - st) * 1000,
             )
         return event_backend.export_event(event, cache_context.device), succeeded

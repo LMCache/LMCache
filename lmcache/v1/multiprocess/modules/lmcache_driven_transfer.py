@@ -1055,11 +1055,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         ed = time.perf_counter()
         if num_tokens:
             logger.info(
-                "Stored %d of %d requested tokens in %.3f seconds",
+                "Stored %d of %d requested tokens in %.3f ms",
                 num_tokens,
                 num_chunks * self._ctx.chunk_size
                 + (key.end % self._ctx.chunk_size if unfull_obj_keys else 0),
-                ed - st,
+                (ed - st) * 1000,
             )
 
         # A chunk is stored only when every checked object group committed
@@ -1405,9 +1405,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         if retrieve_succeeded:
             ed = time.perf_counter()
             logger.info(
-                "Retrieved %d tokens in %.3f seconds",
+                "Retrieved %d tokens in %.3f ms",
                 num_tokens,
-                ed - st,
+                (ed - st) * 1000,
             )
 
         return (

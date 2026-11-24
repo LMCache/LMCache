@@ -234,10 +234,10 @@ Send the same prompt twice, then read the two cache-reuse signals:
 .. code-block:: text
 
    # server log, first request
-   Stored 432 tokens in 0.221 seconds
+   Stored 432 tokens in 221.000 ms
 
    # server log, second request with the same prefix
-   Retrieved 432 tokens in 0.037 seconds
+   Retrieved 432 tokens in 37.000 ms
 
 ``Stored`` on the first request and ``Retrieved`` on the second is the signal
 that the client and the server agree on the cache. A second ``Stored`` instead of

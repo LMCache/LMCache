@@ -664,9 +664,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
             )
             logger.info(
-                "Stored %d tokens in %.3f seconds",
+                "Stored %d tokens in %.3f ms",
                 num_tokens,
-                time.perf_counter() - st,
+                (time.perf_counter() - st) * 1000,
             )
         return result
 
@@ -891,9 +891,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
             )
             logger.info(
-                "Retrieved %d tokens in %.3f seconds",
+                "Retrieved %d tokens in %.3f ms",
                 num_tokens,
-                time.perf_counter() - st,
+                (time.perf_counter() - st) * 1000,
             )
         return result
 
