@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 # First Party
 from lmcache import torch_dev
 from lmcache.utils import EngineType
+from lmcache.v1.common.buffer_registration import BufferRegistration
 from lmcache.v1.common.group_view import (
     EngineGroupInfo,
     engine_group_layer_indices,
@@ -35,10 +36,6 @@ from lmcache.v1.common.utils import (
     get_device,
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,
-)
-from lmcache.v1.gpu_connector.gds_context import (
-    deregister_gds_gpu_buffer,
-    register_gds_gpu_buffer,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
@@ -370,6 +367,7 @@ class GPUCacheContext(BaseCacheContext):
         # Kept for close(): raw-IPC wrappers hold driver-level mappings
         # that pin the exporter's device memory until explicitly closed.
         self._kv_wrappers: KVCache = list(kv_caches)
+        self._buffer_registration: BufferRegistration | None = None
         try:
             self._init_impl(
                 kv_caches,
@@ -463,11 +461,6 @@ class GPUCacheContext(BaseCacheContext):
         # GPU streams
         self.cuda_stream_ = torch_dev.Stream(device=self.device_)
 
-        # Register the staging buffer with the GDS cuFile context on the
-        # context's CUDA stream.
-        with torch_dev.stream(self.cuda_stream_):
-            register_gds_gpu_buffer(self._temp_buffer.buffer)
-
         # Third Party
         import cupy
 
@@ -506,8 +499,22 @@ class GPUCacheContext(BaseCacheContext):
             max_batch_size=max_batch_size,
         )
 
+    def register_staging_buffer(self, registration: BufferRegistration) -> None:
+        """Register the full staging buffer on the context's transfer stream.
+
+        Args:
+            registration: External registration, retained after success until
+                ``close``. Call once after construction and before transfers.
+
+        Raises:
+            RuntimeError: If registration fails; the adapter must roll back.
+        """
+        with torch_dev.stream(self.cuda_stream_):
+            registration.register(self._temp_buffer.buffer)
+        self._buffer_registration = registration
+
     def close(self) -> None:
-        """Drain the context stream, deregister the GDS staging buffer and
+        """Drain the context stream, release any staging registration and
         release the imported KV mappings (reverse of __init__).
 
         The stream is synchronized first so no in-flight kernel still
@@ -519,8 +526,10 @@ class GPUCacheContext(BaseCacheContext):
         right after this call.
         """
         self.cuda_stream_.synchronize()
-        with torch_dev.stream(self.cuda_stream_):
-            deregister_gds_gpu_buffer(self._temp_buffer.buffer)
+        if self._buffer_registration is not None:
+            with torch_dev.stream(self.cuda_stream_):
+                self._buffer_registration.deregister(self._temp_buffer.buffer)
+            self._buffer_registration = None
         self._close_kv_wrappers()
 
     def _close_kv_wrappers(self) -> None:

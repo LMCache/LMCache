@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     # First Party
+    from lmcache.v1.common.buffer_registration import BufferRegistration
     from lmcache.v1.common.memory_management import MemoryObj
     from lmcache.v1.common.object_group_transfer import ObjectGroupTransfer
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
@@ -190,6 +191,15 @@ class BaseCacheContext(ABC):
     # ------------------------------------------------------------------
     # Concrete -- shared implementations
     # ------------------------------------------------------------------
+
+    def register_staging_buffer(  # noqa: B027 -- optional device capability
+        self, registration: BufferRegistration
+    ) -> None:
+        """Register staging storage before transfers; no-op by default.
+
+        Overrides retain successful registrations until close drains the stream.
+        """
+        return None
 
     @property
     def device(self) -> torch.device:

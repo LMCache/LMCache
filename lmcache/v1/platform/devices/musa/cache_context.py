@@ -14,6 +14,7 @@ import torch
 # First Party
 from lmcache import torch_dev
 from lmcache.utils import EngineType
+from lmcache.v1.common.buffer_registration import BufferRegistration
 from lmcache.v1.common.group_view import engine_group_layer_indices
 from lmcache.v1.common.kv_format import get_spec_class
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache
@@ -23,10 +24,6 @@ from lmcache.v1.common.utils import (
     get_device,
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,
-)
-from lmcache.v1.gpu_connector.gds_context import (
-    deregister_gds_gpu_buffer,
-    register_gds_gpu_buffer,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
@@ -288,6 +285,7 @@ class MUSACacheContext(BaseCacheContext):
             ValueError: If reconstructed tensors are not MUSA tensors.
         """
         self._ipc_wrappers = tuple(kv_caches)
+        self._buffer_registration: BufferRegistration | None = None
         try:
             self._initialize(
                 kv_caches,
@@ -379,15 +377,8 @@ class MUSACacheContext(BaseCacheContext):
             device=self.device_,
             max_batch_size=4,
         )
-        self._gds_buffer_registered = False
         self.stream_ = torch_dev.Stream(device=self.device_)
         self.host_callback_stream_ = _MUSAHostCallbackStream(self.stream_)
-
-        # Register the staging buffer with all active GDS L1 contexts on the
-        # context's MUSA stream (mirrors the CUDA cache context).
-        with torch_dev.stream(self.stream_):
-            register_gds_gpu_buffer(self._temp_buffer.buffer)
-        self._gds_buffer_registered = True
 
         logger.debug(
             "MUSACacheContext: %d layers, %d blocks, dtype=%s",
@@ -396,10 +387,24 @@ class MUSACacheContext(BaseCacheContext):
             self.kv_layer_groups_manager_.kernel_groups[0].dtype,
         )
 
+    def register_staging_buffer(self, registration: BufferRegistration) -> None:
+        """Register the full staging buffer on the context's transfer stream.
+
+        Args:
+            registration: External registration, retained after success until
+                ``close``. Call once after construction and before transfers.
+
+        Raises:
+            RuntimeError: If registration fails; the adapter must roll back.
+        """
+        with torch_dev.stream(self.stream_):
+            registration.register(self._temp_buffer.buffer)
+        self._buffer_registration = registration
+
     def close(self) -> None:
         """Synchronize transfers and release receiver-side IPC owners.
 
-        Also deregisters the GDS staging buffer on the context's MUSA stream
+        Also releases any staging registration on the context's MUSA stream
         before releasing IPC wrappers.
 
         Returns:
@@ -411,7 +416,7 @@ class MUSACacheContext(BaseCacheContext):
         stream = getattr(self, "stream_", None)
         temp_buffer = getattr(self, "_temp_buffer", None)
         wrappers = getattr(self, "_ipc_wrappers", ())
-        if not wrappers and not getattr(self, "_gds_buffer_registered", False):
+        if not wrappers and self._buffer_registration is None:
             return
         try:
             synchronize = getattr(stream, "synchronize", None)
@@ -422,13 +427,13 @@ class MUSACacheContext(BaseCacheContext):
             # failed constructor may have created the staging buffer without
             # owning a registration for it.
             if (
-                getattr(self, "_gds_buffer_registered", False)
+                self._buffer_registration is not None
                 and temp_buffer is not None
                 and stream is not None
             ):
                 with torch_dev.stream(stream):
-                    deregister_gds_gpu_buffer(temp_buffer.buffer)
-                self._gds_buffer_registered = False
+                    self._buffer_registration.deregister(temp_buffer.buffer)
+                self._buffer_registration = None
 
             kv_tensors = getattr(self, "kv_caches_", None)
             if isinstance(kv_tensors, list):
