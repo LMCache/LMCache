@@ -245,37 +245,6 @@ class ObjectKeyIdentity:
         validate_identity_tags(self.tags)
         object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
-    def __hash__(self) -> int:
-        """Hash of the field tuple, computed once and cached.
-
-        Index walks and LRU touches hash every key of a request several
-        times; the dataclass-generated hash rebuilds the field tuple (and
-        the ``tags`` item frozenset) on each call. Every field is
-        immutable, so the value cannot change. The cache never travels to
-        another process (``__getstate__``): string hashes are seeded per
-        process.
-        """
-        h: int | None = self.__dict__.get("_hash")
-        if h is None:
-            h = hash(
-                (
-                    self.chunk_hash,
-                    self.kv_rank,
-                    self.model_name,
-                    self.object_group_id,
-                    self.cache_salt,
-                    self.tags,
-                )
-            )
-            object.__setattr__(self, "_hash", h)
-        return h
-
-    def __getstate__(self) -> dict[str, object]:
-        """Keep the process-local hash cache out of pickles and copies."""
-        state = dict(self.__dict__)
-        state.pop("_hash", None)
-        return state
-
     def derive(
         self,
         chunk_hash: bytes | None = None,
