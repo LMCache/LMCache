@@ -65,22 +65,12 @@ async def request_prefetch(body: PrefetchRequest, request: Request) -> PrefetchR
             detail=f"no MP server registered with instance_id={body.instance_id!r}",
         )
 
-    http_client = get_outbound_client(request)
     try:
-        if body.keys:
-            result = await prefetch.submit_prefetch_keys(
-                target=target, http_client=http_client, keys=body.keys
-            )
-        else:
-            result = await prefetch.submit_prefetch(
-                target=target,
-                http_client=http_client,
-                model_name=body.model_name,
-                world_size=body.world_size,
-                token_ids=body.token_ids,
-                cache_salt=body.cache_salt,
-                tags=body.tags,
-            )
+        result = await prefetch.submit_prefetch(
+            target=target,
+            http_client=get_outbound_client(request),
+            request=body,
+        )
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502,

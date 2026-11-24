@@ -14,7 +14,6 @@ submit and status calls are quick and the client drives completion on demand.
 from __future__ import annotations
 
 # Standard
-from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 import threading
@@ -36,7 +35,7 @@ from lmcache.v1.mp_coordinator.utils.http import instance_url
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.distributed.api import EncodedObjectKey
+    from lmcache.v1.mp_coordinator.schemas import PrefetchRequest
     from lmcache.v1.mp_coordinator.views.instance_registry import MPInstance
 
 logger = init_logger(__name__)
@@ -123,23 +122,19 @@ class PrefetchManager(Controller):
         self,
         target: MPInstance,
         http_client: httpx.AsyncClient,
-        model_name: str,
-        world_size: int,
-        token_ids: list[int],
-        cache_salt: str,
-        *,
-        tags: Mapping[str, str] | None = None,
+        request: PrefetchRequest,
     ) -> dict[str, Any]:
         """``POST /cache/prefetches`` to ``target`` and return its JSON reply.
+
+        Forwards only the form ``request`` carries, ``keys`` or the token
+        fields: a server without the keys form then rejects a keys request
+        rather than reading empty token fields as a sub-chunk sequence and
+        answering noop.
 
         Args:
             target: The MP server to warm.
             http_client: Shared async client for outbound coordinator calls.
-            model_name: Model whose layout the target uses to allocate L1.
-            world_size: World size selecting the layout and per-rank fan-out.
-            token_ids: Prompt tokens whose complete chunks should be warmed.
-            cache_salt: Per-tenant isolation salt applied to the produced keys.
-            tags: Matching tags supplied when the content was stored.
+            request: What to warm; its ``instance_id`` is not forwarded.
 
         Returns:
             The server's reply, e.g. ``{"request_id", "chunks", "status"}`` or
@@ -149,43 +144,46 @@ class PrefetchManager(Controller):
             httpx.HTTPError: If the target is unreachable or returns non-2xx.
             ValueError: If the target's reply is not JSON.
         """
-        body: dict[str, Any] = {
-            "model_name": model_name,
-            "world_size": world_size,
-            "token_ids": token_ids,
-            "cache_salt": cache_salt,
-        }
-        if tags:
-            body["tags"] = dict(tags)
-        return await self._submit(target, http_client, body, f"{len(token_ids)} tokens")
-
-    async def submit_prefetch_keys(
-        self,
-        target: MPInstance,
-        http_client: httpx.AsyncClient,
-        keys: list[EncodedObjectKey],
-    ) -> dict[str, Any]:
-        """``POST /cache/prefetches`` naming chunks by key, and return the reply.
-
-        Sends the keys alone: a server without the keys form then rejects
-        the request rather than reading empty token fields as a sub-chunk
-        sequence and answering noop.
-
-        Args:
-            target: The MP server to warm.
-            http_client: Shared async client for outbound coordinator calls.
-            keys: Keys naming the chunks to warm; the server warms each chunk
-                in every object group and rank.
-
-        Returns:
-            The server's reply, e.g. ``{"request_id", "chunks", "status"}``.
-
-        Raises:
-            httpx.HTTPError: If the target is unreachable or returns non-2xx.
-            ValueError: If the target's reply is not JSON.
-        """
-        body: dict[str, Any] = {"keys": [asdict(key) for key in keys]}
-        return await self._submit(target, http_client, body, f"{len(keys)} keys")
+        body: dict[str, Any]
+        if request.keys:
+            body = {"keys": [asdict(key) for key in request.keys]}
+        else:
+            body = {
+                "model_name": request.model_name,
+                "world_size": request.world_size,
+                "token_ids": request.token_ids,
+                "cache_salt": request.cache_salt,
+            }
+            if request.tags:
+                body["tags"] = dict(request.tags)
+        url = instance_url(target, "/cache/prefetches")
+        submitted_at = time.monotonic()
+        try:
+            resp = await http_client.post(url, json=body)
+            resp.raise_for_status()
+            reply = resp.json()
+        except (httpx.HTTPError, ValueError):
+            self._count_submit("server_error")
+            raise
+        accepted_at = time.monotonic()
+        submit_result = "noop" if reply.get("status") == "noop" else "submitted"
+        request_id = reply.get("request_id")
+        with self._lock:
+            self._forget_abandoned_locked()
+            self._stats.requests_submitted[submit_result] += 1
+            self._stats.chunks_requested_per_request.observe(reply.get("chunks", 0))
+            self._stats.submit_duration_seconds.observe(accepted_at - submitted_at)
+            # Without a request id it cannot be polled, so there is nothing
+            # to track.
+            if submit_result == "submitted" and request_id:
+                self._submitted_at[(target.instance_id, request_id)] = accepted_at
+        logger.info(
+            "Prefetch submitted to %s: %d keys, %d tokens",
+            target.instance_id,
+            len(request.keys),
+            len(request.token_ids),
+        )
+        return reply
 
     def record_unknown_server(self) -> None:
         """Count a prefetch asked of a server that is not registered.
@@ -257,52 +255,6 @@ class PrefetchManager(Controller):
                 ),
                 status_polls=dict(self._stats.status_polls),
             )
-
-    async def _submit(
-        self,
-        target: MPInstance,
-        http_client: httpx.AsyncClient,
-        body: dict[str, Any],
-        described: str,
-    ) -> dict[str, Any]:
-        """Send one prefetch body to ``target`` and record its outcome.
-
-        Args:
-            target: The MP server to warm.
-            http_client: Shared async client for outbound coordinator calls.
-            body: The JSON body to send.
-            described: What the body names, for the log line.
-
-        Returns:
-            The server's reply.
-
-        Raises:
-            httpx.HTTPError: If the target is unreachable or returns non-2xx.
-            ValueError: If the target's reply is not JSON.
-        """
-        url = instance_url(target, "/cache/prefetches")
-        submitted_at = time.monotonic()
-        try:
-            resp = await http_client.post(url, json=body)
-            resp.raise_for_status()
-            reply = resp.json()
-        except (httpx.HTTPError, ValueError):
-            self._count_submit("server_error")
-            raise
-        accepted_at = time.monotonic()
-        submit_result = "noop" if reply.get("status") == "noop" else "submitted"
-        request_id = reply.get("request_id")
-        with self._lock:
-            self._forget_abandoned_locked()
-            self._stats.requests_submitted[submit_result] += 1
-            self._stats.chunks_requested_per_request.observe(reply.get("chunks", 0))
-            self._stats.submit_duration_seconds.observe(accepted_at - submitted_at)
-            # Without a request id it cannot be polled, so there is nothing
-            # to track.
-            if submit_result == "submitted" and request_id:
-                self._submitted_at[(target.instance_id, request_id)] = accepted_at
-        logger.info("Prefetch submitted to %s: %s", target.instance_id, described)
-        return reply
 
     def _count_submit(self, submit_result: str) -> None:
         """Count one submit that reached no prefetch on a server."""

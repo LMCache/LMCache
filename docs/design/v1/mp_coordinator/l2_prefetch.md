@@ -50,8 +50,8 @@ status calls are quick and the client drives completion on demand.
   world_size, token_ids, cache_salt}` (a `KeysOrTokensRequest`) and
   `PrefetchResponse {instance_id, request_id, chunks, status}`.
 - **`controllers/prefetch_manager.py`** — `PrefetchManager`. `submit_prefetch`
-  (tokens) and `submit_prefetch_keys` (keys) await the target's
-  `POST /cache/prefetches` and return its reply;
+  forwards the request's one form (keys or tokens) to the target's
+  `POST /cache/prefetches` and returns its reply;
   `get_status` proxies `GET /cache/prefetches/{request_id}` and relays
   `(status_code, body)`. No fire-and-forget tasks — both calls are quick.
 - **`http_apis/cache_api.py`** — `POST /cache/prefetches` and
