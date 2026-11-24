@@ -156,12 +156,17 @@ afterwards.
    drops are deleted (`finish_write_and_delete`).
 5. **Load** (`_submit_load_tasks`). One load task per adapter in the plan,
    carrying the reserved buffers.
-6. **Admit** (`_poll_load_results`), per adapter as its result arrives. Loaded
-   keys go through `finish_write_and_reserve_read` and join `l1_locked_keys`
-   and the request's `l2_loaded_cells`; failed keys are deleted
-   (`finish_write_and_delete`, `L2_PREFETCH_FAILED` reason `not_found`); the
-   adapter's L2 locks are returned and its entries leave `l2_locked_keys` and
-   `l1_reserved_keys`.
+6. **Admit** (`_poll_load_results`, `_settle_load`), per adapter as its
+   result arrives. Loaded keys go through `finish_write_and_reserve_read` and
+   join `l1_locked_keys` and the request's `l2_loaded_cells`; failed keys are
+   deleted (`finish_write_and_delete`, `L2_PREFETCH_FAILED` reason
+   `not_found`); the adapter's L2 locks are returned and its entries leave
+   `l2_locked_keys` and `l1_reserved_keys`. An adapter whose
+   `submit_load_task` or `query_load_result` raises is settled the same way
+   with nothing loaded (reason `load_error`): only the cells planned from it
+   fail, and the final plan is made over the locks the request still holds
+   (for full attention with the default `prefix` policy, the cells before the
+   first missing one).
 7. **Finish** (`_finish_request`), once no load task is outstanding. Plan once
    more on `l1_locked_keys` alone (`policy.plan_load` with no L2): the cells
    the plan keeps are the hit, and every L1 lock outside it is released, so a
@@ -188,11 +193,18 @@ resident and evictable. Which locked cells are in the hit is the policy's
 decision: under `prefix` the fold, under `full` every locked cell, under
 `whole_chunk` the columns locked in every row.
 
-**Errors.** Any exception while advancing a request aborts it
+**Errors.** An exception from one adapter's load (step 6) fails only that
+adapter's keys. Any other exception while advancing a request aborts it
 (`_abort_request`): the three maps are walked to return L2 locks, delete
 staging buffers and release L1 read locks, an all-zero result is published,
 and the request is retired. `stop()` does the same for every in-flight
-request. Outstanding adapter tasks are left to complete on their own.
+request. Outstanding adapter tasks are left to complete on their own; an
+adapter that raised is not polled again either.
+
+The load phase is singled out because the maps record exactly what the
+adapter holds for the request (its L2 locks and the staging buffers), so the
+controller can return them and keep the rest. A lookup that raises still
+aborts the request: which keys the adapter locked is not known then.
 
 ## Policy
 
@@ -236,7 +248,7 @@ selected with `--l2-prefetch-policy`.
 | `L2_PREFETCH_LOAD_SUBMITTED` | Load tasks submitted (once per request). |
 | `L2_LOAD_TASK_SUBMITTED` / `L2_LOAD_TASK_COMPLETED` | Per adapter, per request. |
 | `L2_PREFETCH_LOAD_COMPLETED` | Per adapter, as its load is admitted. |
-| `L2_PREFETCH_FAILED` | `l1_oom` / `l1_contended` from the reserve step, `not_found` from admission. |
+| `L2_PREFETCH_FAILED` | `l1_oom` / `l1_contended` from the reserve step, `not_found` and `load_error` from admission. |
 
 Gauges: `lmcache_mp.num_inflight_l2_loads`,
 `lmcache_mp.inflight_load_memory_usage_bytes` (per adapter) and

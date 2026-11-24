@@ -248,10 +248,15 @@ Prometheus ``/metrics`` endpoint.
    * - ``lmcache_mp.l2_prefetch_failure``
      - Counter
      - Chunks that L2 reported present at lookup but failed to land in L1.
-       Tagged by ``reason`` ∈ {``l1_oom``, ``not_found``} plus
-       ``model_name``. ``l1_oom`` means L1 had no room to receive the
-       prefetched object; ``not_found`` means the adapter returned no
-       data despite a positive lookup (e.g. concurrent delete).
+       Tagged by ``reason`` ∈ {``l1_oom``, ``l1_contended``, ``not_found``,
+       ``load_error``} plus ``model_name``. ``l1_oom`` means L1 had no room
+       to receive the prefetched object; ``l1_contended`` means the key is
+       held in an L1 the request may not read; ``not_found`` means the
+       adapter returned no data despite a positive lookup (e.g. concurrent
+       delete); ``load_error`` means the adapter raised while loading, for
+       example a P2P transfer to a peer whose connection broke. A rising
+       ``load_error`` count means some adapter's loads keep raising; its
+       log names the adapter.
 
 A ``reason=serde_failure`` value will be added to ``l2_prefetch_failure``
 as an additive, non-breaking extension once L2 adapters distinguish

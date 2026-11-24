@@ -22,6 +22,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
     FULL_ATTENTION_WINDOW_CHUNKS,
     FetchingPolicy,
@@ -70,9 +71,13 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     L2AdapterDescriptor,
 )
 from lmcache.v1.memory_management import (
+    MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.mp_observability.event import Event as ObservedEvent
+from lmcache.v1.mp_observability.event import EventType
+from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
 from tests.v1.distributed.borrowing_mock import (
     BorrowingMockL2Adapter,
     BorrowingMockL2AdapterConfig,
@@ -645,7 +650,169 @@ class TestRawBlockWorkerFailure:
                 healthy_adapter.close()
 
 
+class LoadErrorAdapter(MockL2Adapter):
+    """MockL2Adapter whose loads raise when submitted or when polled."""
+
+    def __init__(self, raise_on: str) -> None:
+        super().__init__(MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0))
+        self._raise_on = raise_on
+
+    def submit_load_task(
+        self, keys: list[ObjectKey], objects: list[MemoryObj]
+    ) -> L2TaskId:
+        if self._raise_on == "submit":
+            raise RuntimeError("transfer channel failed: test error")
+        return super().submit_load_task(keys, objects)
+
+    def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
+        if self._raise_on == "query":
+            raise RuntimeError("transfer channel failed: test error")
+        return super().query_load_result(task_id)
+
+
+@pytest.fixture
+def prefetch_failure_events():
+    """Enable a fresh event bus and capture its L2_PREFETCH_FAILED and
+    L2_LOAD_TASK_COMPLETED events."""
+    bus = init_event_bus(EventBusConfig(enabled=True, max_queue_size=10_000))
+    events: list[ObservedEvent] = []
+    bus.subscribe(EventType.L2_PREFETCH_FAILED, events.append)
+    bus.subscribe(EventType.L2_LOAD_TASK_COMPLETED, events.append)
+    bus.start()
+    try:
+        yield events
+    finally:
+        bus.stop()
+        init_event_bus(EventBusConfig(enabled=False))
+
+
+class TestAdapterLoadError:
+    @pytest.mark.parametrize("raise_on", ["submit", "query"])
+    @pytest.mark.parametrize(
+        "l1_count", [3, 2], ids=["rest_in_l1", "rest_in_l1_and_healthy_l2"]
+    )
+    def test_load_error_fails_only_that_adapters_keys(
+        self, l1_manager, prefetch_failure_events, raise_on, l1_count
+    ):
+        """An adapter whose load raises fails the keys planned from it; the
+        L1 hits and the other adapter's load are still the hit."""
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(4)]
+        healthy = make_adapter()
+        failing = LoadErrorAdapter(raise_on)
+        write_keys_to_l1(l1_manager, keys[:l1_count], layout)
+        store_keys_in_l2(healthy, keys[l1_count:3], layout)
+        store_keys_in_l2(failing, keys[3:], layout)
+        ctrl = make_controller(l1_manager, [healthy, failing])
+        ctrl.start()
+        try:
+            req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+            result = wait_for_result(ctrl, req_id)
+
+            assert row_bits(result) == [0, 1, 2]
+            assert hit_counts(result) == (l1_count, 3 - l1_count)
+            assert_read_locked(l1_manager, keys[:3])
+            assert_absent(l1_manager, keys[3:])
+            assert l1_manager.get_staging_memory_usage() == 0
+            assert_l2_unlocked(healthy)
+            assert_l2_unlocked(failing)
+            assert wait_for_condition(
+                lambda: [
+                    (e.metadata["reason"], e.metadata["keys"])
+                    for e in prefetch_failure_events
+                    if e.event_type == EventType.L2_PREFETCH_FAILED
+                ]
+                == [("load_error", keys[3:])]
+            )
+            # A load that was submitted and then raised completes with no
+            # bytes, so the load throughput leaves it out; the healthy load
+            # completes as usual.
+            healthy_idx, failing_idx = 0, 1
+            expected = {
+                healthy_idx: [None] if l1_count == 2 else [],
+                failing_idx: [0] if raise_on == "query" else [],
+            }
+
+            def completions():
+                seen: dict[int, list] = {healthy_idx: [], failing_idx: []}
+                for e in prefetch_failure_events:
+                    if e.event_type == EventType.L2_LOAD_TASK_COMPLETED:
+                        seen[e.metadata["adapter_index"]].append(
+                            e.metadata.get("bytes_transferred")
+                        )
+                return seen
+
+            assert wait_for_condition(lambda: completions() == expected)
+            l1_manager.finish_read(keys[:3])
+        finally:
+            ctrl.stop()
+            healthy.close()
+            failing.close()
+
+
 class TestMultiAdapterPrefetch:
+    def test_a_load_l1_no_longer_admits_is_not_a_hit(self, prefetch_failure_events):
+        """A healthy adapter finishes after the L1 write reservation of its
+        key expired, while another adapter raised: L1 cannot serve that key,
+        so the hit is only the L1 prefix. The adapter did load it, so it is
+        not reported as a load failure of the adapter's."""
+        keys = [make_object_key(i) for i in range(3)]
+        layout = make_layout()
+        cfg = make_l1_config()
+        cfg.write_ttl_seconds = 1
+        manager = DramL1Manager(cfg)
+        # Copies its key and reports success after about two seconds.
+        slow = make_adapter(bandwidth_gb=0.0001)
+        failing = LoadErrorAdapter("submit")
+        ctrl = None
+        try:
+            write_keys_to_l1(manager, keys[:1], layout)
+            store_keys_in_l2(slow, keys[1:2], layout)
+            store_keys_in_l2(failing, keys[2:], layout)
+            ctrl = make_controller(manager, [slow, failing])
+            ctrl.start()
+            result = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
+            )
+            assert row_bits(result) == [0]
+            assert wait_for_condition(
+                lambda: [
+                    (e.metadata["reason"], e.metadata["keys"])
+                    for e in prefetch_failure_events
+                    if e.event_type == EventType.L2_PREFETCH_FAILED
+                ]
+                == [("load_error", keys[2:])]
+            )
+            manager.finish_read(keys[:1])
+        finally:
+            if ctrl is not None:
+                ctrl.stop()
+            slow.close()
+            failing.close()
+            manager.close()
+
+    def test_a_load_that_returns_nothing_leaves_no_throughput_sample(
+        self, l1_manager, prefetch_failure_events
+    ):
+        keys = [make_object_key(50)]
+        inner = make_adapter()
+        adapter = FaultInjectL2Adapter(inner, rate=0, seed=0, gap_indices=(0,))
+        store_keys_in_l2(inner, keys, make_layout())
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+        try:
+            result = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
+            )
+            assert row_bits(result) == []
+            assert wait_for_condition(lambda: len(prefetch_failure_events) == 2)
+            seen = {e.event_type: e.metadata for e in prefetch_failure_events}
+            assert seen[EventType.L2_PREFETCH_FAILED]["reason"] == "not_found"
+            assert seen[EventType.L2_LOAD_TASK_COMPLETED]["bytes_transferred"] == 0
+        finally:
+            ctrl.stop()
+            adapter.close()
+
     def test_disjoint_adapters(self, l1_manager):
         """Adapter 0 has {0,1}, adapter 1 has {2,3} -> full prefix of 4."""
         adapters = [make_adapter(), make_adapter()]

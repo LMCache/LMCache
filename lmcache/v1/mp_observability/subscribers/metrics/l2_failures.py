@@ -12,10 +12,12 @@ This covers the health-monitoring surface for L2 prefetch (see LM-291):
     * ``not_found``    — L2 reported the key present during lookup but the
       load returned no data (adapter-level inconsistency, e.g. concurrent
       delete).
+    * ``load_error``   — the adapter raised while submitting or reporting the
+      load (e.g. a broken P2P transfer channel).
 
 The ``serde_failure`` reason is intentionally omitted until the serde PR
-lands; once it does, it becomes an additive third value of the same tag
-with no breaking change to dashboards.
+lands; once it does, it becomes an additive value of the same tag with no
+breaking change to dashboards.
 
 All emissions carry ``model_name`` extracted from each ``ObjectKey``.
 """
@@ -45,7 +47,7 @@ class L2FailureMetricsSubscriber(EventSubscriber):
             description=(
                 "Count of keys that were expected in L2 but failed to load "
                 "into L1. Tagged by ``reason`` = l1_oom | l1_contended | "
-                "not_found and ``model_name``."
+                "not_found | load_error and ``model_name``."
             ),
             unit="chunks",
         )
