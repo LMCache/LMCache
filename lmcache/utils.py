@@ -4,38 +4,21 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, TypeVar, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 import asyncio
-import functools
-import hashlib
 import os
 import re
 import stat
 import threading
 import traceback
-import warnings
-
-try:
-    # Third Party
-    from nvtx import annotate  # type: ignore
-except ImportError:
-
-    def annotate(*args, **kwargs):
-        """Dummy decorator when nvtx is not available."""
-
-        def decorator(func):
-            return func
-
-        return decorator
-
 
 # Third Party
 from cachetools import TTLCache as _TTLCache  # type: ignore
 import torch
 
 # First Party
-from lmcache.v1.common.logging import init_logger
+# Kept for vLLM: its lmcache_mp_connector imports init_logger from this module.
+from lmcache.v1.common.logging import init_logger as init_logger
 
 if TYPE_CHECKING:
     # First Party
@@ -168,30 +151,6 @@ def check_dax_range(device_path: str, fd: int, offset: int, size: int) -> None:
 def cdiv(a: int, b: int) -> int:
     """Ceiling division."""
     return -(a // -b)
-
-
-def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
-    """
-    Calculate the size in bytes with the given shapes and dtypes.
-    """
-    assert len(shapes) == len(kv_dtypes), (
-        f"shapes and dtypes must have the same length, "
-        f"but got {len(shapes)} and {len(kv_dtypes)}"
-    )
-    return sum(
-        shape.numel() * kv_dtype.itemsize
-        for shape, kv_dtype in zip(shapes, kv_dtypes, strict=True)
-    )
-
-
-def round_down(x: int, y: int) -> int:
-    """Round down x to the nearest multiple of y."""
-    return (x // y) * y
-
-
-def round_up(x: int, y: int) -> int:
-    """Round up x to the nearest multiple of y."""
-    return ((x + y - 1) // y) * y
 
 
 def compress_slot_mapping(slots: list[int]) -> list[Union[int, list[int]]]:
@@ -465,62 +424,6 @@ if hasattr(torch, "float8_e5m2fnuz"):
 STR_DTYPE_TO_TORCH_DTYPE = {v: k for k, v in TORCH_DTYPE_TO_STR_DTYPE.items()}
 
 
-@dataclass
-class CacheStoreEvent:
-    block_hashes: list[int | bytes]
-    parent_block_hash: int | bytes | None
-    token_ids: list[int]
-    block_size: int
-
-    # Deprecated, use lora_name instead
-    # Retained for backwards compatibility
-    # Remove when vLLM removes it from BlockStored
-    lora_id: int | None
-
-    medium: str | None
-    lora_name: str | None
-
-
-@dataclass
-class CacheRemoveEvent:
-    """Removal of previously announced CPU chunks, paired with CacheStoreEvent."""
-
-    block_hashes: list[int | bytes]
-    medium: str | None
-
-
-CacheEvent = CacheStoreEvent | CacheRemoveEvent
-
-
-class EngineType(Enum):
-    VLLM = "vllm"
-    ATOM = "atom"
-    SGLANG = "sglang"
-    TRTLLM = "trtllm"
-    MOCK = "mock"
-
-
-##### NVTX annotation #####
-_NVTX_COLORS = ["green", "blue", "purple", "rapids"]
-
-
-def _get_color_for_nvtx(name):
-    m = hashlib.sha256()
-    m.update(name.encode())
-    hash_value = int(m.hexdigest(), 16)
-    idx = hash_value % len(_NVTX_COLORS)
-    return _NVTX_COLORS[idx]
-
-
-def _lmcache_nvtx_annotate(func, domain="lmcache"):
-    """Decorator for applying nvtx annotations to methods in lmcache."""
-    return annotate(
-        message=func.__qualname__,
-        color=_get_color_for_nvtx(func.__qualname__),
-        domain=domain,
-    )(func)
-
-
 ##### Observability Threading related #####
 _shared_observability_lock = threading.Lock()
 
@@ -541,43 +444,6 @@ def thread_safe(func):
         return result
 
     return wrapper
-
-
-##### Deprecation #####
-F = TypeVar("F", bound=Callable[..., Any])
-
-
-def lmcache_deprecate(reason: str) -> Callable[[F], F]:
-    """Mark a function or method as deprecated.
-
-    Calling the wrapped callable emits a ``DeprecationWarning`` and logs a
-    warning the first time it is invoked, including the supplied reason.
-
-    Args:
-        reason: Human-readable explanation of why the callable is deprecated
-            and, ideally, what to use instead.
-
-    Returns:
-        A decorator that wraps the target callable while preserving its
-        signature and metadata.
-    """
-
-    def decorator(func: F) -> F:
-        warned = False
-
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            nonlocal warned
-            if not warned:
-                message = f"{func.__qualname__} is deprecated: {reason}"
-                warnings.warn(message, DeprecationWarning, stacklevel=2)
-                logger.warning(message)
-                warned = True
-            return func(*args, **kwargs)
-
-        return wrapper  # type: ignore[return-value]
-
-    return decorator
 
 
 #### Thread/asyncio-related utilities ####

@@ -26,14 +26,6 @@ from lmcache.integration.vllm.mp_server_launcher import (
     wait_for_mp_server_from_url,
 )
 from lmcache.integration.vllm.utils import vllm_layout_hints
-from lmcache.utils import (
-    CacheEvent,
-    CacheRemoveEvent,
-    CacheStoreEvent,
-    EngineType,
-    _lmcache_nvtx_annotate,
-    init_logger,
-)
 from lmcache.v1.client.heartbeat import HeartbeatThread
 from lmcache.v1.client.kv_event_subscriber import (
     KVEventStreamClosed,
@@ -46,6 +38,7 @@ from lmcache.v1.common.custom_types import (
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
     BlockAllocationRecord,
+    EngineType,
     IPCCacheServerKey,
     KVEventBatch,
     KVEventRecord,
@@ -55,8 +48,15 @@ from lmcache.v1.common.group_view import (
     expand_engine_block_ids,
     is_kv_writer,
 )
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_codec import num_packed_tokens
-from lmcache.v1.common.utils import LayoutHints
+from lmcache.v1.common.utils import (
+    CacheEvent,
+    CacheRemoveEvent,
+    CacheStoreEvent,
+    LayoutHints,
+    _lmcache_nvtx_annotate,
+)
 from lmcache.v1.platform.fd_channel import fd_channel_path_for_url
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
 from lmcache.v1.transport.futures import MessagingFuture

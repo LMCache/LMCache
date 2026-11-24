@@ -12,13 +12,12 @@ import pytest
 import zmq
 
 # First Party
-from lmcache.utils import EngineType
 from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.transport.zmq_impl.mq_client import MessageQueueClient
 from lmcache.v1.common.api import MemoryLayoutDesc
 from lmcache.v1.common.attn_window import AttnWindowDesc
-from lmcache.v1.common.custom_types import KVEventProfile
+from lmcache.v1.common.custom_types import EngineType, KVEventProfile
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry

@@ -43,12 +43,12 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _send_lookup,
     _wait_for_result,
 )
-from lmcache.utils import EngineType
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
     create_transfer_context,
 )
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import (
     DTYPE_MAP,

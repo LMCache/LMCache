@@ -24,9 +24,8 @@ from lmcache.utils import (
     get_dax_device_geometry,
     get_version,
     parse_mixed_slot_mapping,
-    round_down,
-    round_up,
 )
+from lmcache.v1.platform.devices.npu.pin_memory import round_down, round_up
 import lmcache.utils as lmcache_utils
 
 

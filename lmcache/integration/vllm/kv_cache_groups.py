@@ -492,7 +492,7 @@ def create_engine_group_infos_from_vllm(
         order used by store/retrieve block IDs.
     """
     # First Party
-    from lmcache.utils import EngineType
+    from lmcache.v1.common.custom_types import EngineType
     from lmcache.v1.common.group_view import EXCLUDED_ENGINE_GROUP
     from lmcache.v1.common.utils import (
         normalize_and_discover_per_layer_formats,

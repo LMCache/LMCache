@@ -23,14 +23,10 @@ import torch
 
 # First Party
 from lmcache import device_ops, torch_dev
-from lmcache.utils import (
-    EngineType,
-    _lmcache_nvtx_annotate,
-)
-from lmcache.v1.common.custom_types import TRANSFER_QUERY, IPCCacheServerKey
+from lmcache.v1.common.custom_types import TRANSFER_QUERY, EngineType, IPCCacheServerKey
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.logging import init_logger
-from lmcache.v1.common.utils import LayoutHints
+from lmcache.v1.common.utils import LayoutHints, _lmcache_nvtx_annotate
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.storage_manager import l1_owners_of
 from lmcache.v1.gpu_connector.gds_context import GDSBufferRegistration
