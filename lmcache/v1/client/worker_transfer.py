@@ -15,7 +15,6 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.utils import EngineType, init_logger
 from lmcache.v1.client.transfer_context.base import (
     ContextClosedError,
     EngineDrivenContext,
@@ -29,11 +28,13 @@ from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.common.api import MemoryLayoutDesc
 from lmcache.v1.common.custom_types import (
+    EngineType,
     GroupLayout,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.utils import (
     LayoutHints,
     get_device,

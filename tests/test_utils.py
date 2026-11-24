@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for lmcache.utils module."""
+"""Unit tests for common and distributed utilities."""
 
 # Standard
 from pathlib import Path
@@ -13,7 +13,8 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import (
+from lmcache.v1.common.utils import get_version, round_down, round_up
+from lmcache.v1.distributed.utils import (
     DaxDeviceGeometry,
     _append_range_or_elements,
     cdiv,
@@ -22,12 +23,9 @@ from lmcache.utils import (
     convert_tokens_to_list,
     decompress_slot_mapping,
     get_dax_device_geometry,
-    get_version,
     parse_mixed_slot_mapping,
-    round_down,
-    round_up,
 )
-import lmcache.utils as lmcache_utils
+import lmcache.v1.distributed.utils as lmcache_utils
 
 
 # ============================================================
@@ -221,19 +219,22 @@ class TestParseMixedSlotMapping:
 class TestGetVersion:
     def test_version_with_values(self):
         with (
-            patch("lmcache.utils.VERSION", "1.0.0"),
-            patch("lmcache.utils.COMMIT_ID", "abc123"),
+            patch("lmcache.v1.common.utils.VERSION", "1.0.0"),
+            patch("lmcache.v1.common.utils.COMMIT_ID", "abc123"),
         ):
             assert get_version() == "1.0.0-abc123"
 
     def test_version_empty(self):
-        with patch("lmcache.utils.VERSION", ""), patch("lmcache.utils.COMMIT_ID", ""):
+        with (
+            patch("lmcache.v1.common.utils.VERSION", ""),
+            patch("lmcache.v1.common.utils.COMMIT_ID", ""),
+        ):
             assert get_version() == "NA-NA"
 
     def test_version_partial(self):
         with (
-            patch("lmcache.utils.VERSION", "2.0"),
-            patch("lmcache.utils.COMMIT_ID", ""),
+            patch("lmcache.v1.common.utils.VERSION", "2.0"),
+            patch("lmcache.v1.common.utils.COMMIT_ID", ""),
         ):
             assert get_version() == "2.0-NA"
 

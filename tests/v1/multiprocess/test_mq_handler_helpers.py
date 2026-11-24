@@ -7,9 +7,9 @@ and passed between processes during multiprocessing tests.
 """
 
 # First Party
-from lmcache.utils import EngineType
 from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
+    EngineType,
     IPCCacheServerKey,
     KVEventProfile,
 )
