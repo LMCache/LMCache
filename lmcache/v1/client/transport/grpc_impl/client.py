@@ -6,7 +6,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import Any, Callable, cast
+from typing import Any, Callable
 import functools
 import socket
 import threading
@@ -17,15 +17,10 @@ import uuid
 import grpc
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.client.transport.errors import (
-    MPRequestError,
-    MPServerUnavailableError,
-)
 from lmcache.v1.client.transport.grpc_impl.auth import (
     GrpcClientAuthenticationInterceptor,
 )
-from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 from lmcache.v1.transport.grpc.descriptors import (
     client_method_name,
@@ -39,24 +34,8 @@ from lmcache.v1.transport.grpc.method_registry import (
     GrpcMethodCodec,
     get_method_codec_registry,
 )
-
-CONNECT_TIMEOUT_MS = 5000
-INITIAL_RECONNECT_BACKOFF_MS = 100
-MAX_RECONNECT_BACKOFF_MS = 1000
-
-# Same bounds as the ZMQ client (#4671); gRPC defaults are 20 s and 120 s.
-# "min_reconnect_backoff_ms" is gRPC's per-attempt connect timeout.
-_GRPC_OPTIONS = (
-    ("grpc.max_send_message_length", -1),
-    ("grpc.max_receive_message_length", -1),
-    ("grpc.min_reconnect_backoff_ms", CONNECT_TIMEOUT_MS),
-    ("grpc.initial_reconnect_backoff_ms", INITIAL_RECONNECT_BACKOFF_MS),
-    ("grpc.max_reconnect_backoff_ms", MAX_RECONNECT_BACKOFF_MS),
-    # Connect directly, as ZMQ does. grpcio otherwise follows the proxy variables
-    # that engines often have set for downloads, even to reach localhost.
-    ("grpc.enable_http_proxy", 0),
-)
-_SERVER_GONE = frozenset({grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.CANCELLED})
+from lmcache.v1.transport.grpc.utils import GRPC_CHANNEL_OPTIONS, request_error
+from lmcache.v1.transport.request_client import RequestClient
 
 # A ZMQ socket greets every new connection with this 10-byte ZMTP signature.
 _ZMTP_SIGNATURE_LEN = 10
@@ -64,14 +43,6 @@ _PEER_PROBE_TIMEOUT_S = 1.0
 _PEER_PROBE_INTERVAL_S = 5.0
 
 logger = init_logger(__name__)
-
-
-def _request_error(exc: grpc.RpcError) -> MPServerUnavailableError | MPRequestError:
-    """Map a failed call's status to the error the request client raises."""
-    call = cast(grpc.Call, exc)
-    code = call.code()
-    error_cls = MPServerUnavailableError if code in _SERVER_GONE else MPRequestError
-    return error_cls(code.name, call.details() or "")
 
 
 def _peer_speaks_zmtp(host: str, port: int) -> bool:
@@ -129,7 +100,9 @@ class GrpcMultiprocessClient(RequestClient):
     def __init__(self, server_url: str, api_key: str | None = None) -> None:
         target = parse_grpc_target(server_url)
         self._server_url = server_url
-        channel: grpc.Channel = grpc.insecure_channel(target, options=_GRPC_OPTIONS)
+        channel: grpc.Channel = grpc.insecure_channel(
+            target, options=GRPC_CHANNEL_OPTIONS
+        )
         if api_key is not None:
             channel = grpc.intercept_channel(
                 channel, GrpcClientAuthenticationInterceptor(api_key)
@@ -256,7 +229,7 @@ class GrpcMultiprocessClient(RequestClient):
                 except grpc.RpcError as exc:
                     if self._wrong_transport is not None:
                         raise ConnectionError(self._wrong_transport) from exc
-                    raise _request_error(exc) from exc
+                    raise request_error(exc) from exc
 
             return MessagingStream(read, call.cancel)
         future: MessagingFuture[Any] = MessagingFuture()
@@ -276,7 +249,7 @@ class GrpcMultiprocessClient(RequestClient):
             try:
                 result = rpc.codec.response_decoder(grpc_future.result())
             except grpc.RpcError as exc:
-                error = _request_error(exc)
+                error = request_error(exc)
                 error.__cause__ = exc
                 future.set_exception(error)
             except BaseException as exc:

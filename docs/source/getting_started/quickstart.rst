@@ -205,6 +205,12 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
       server transfer modes must be compatible; a server dedicated to one mode
       can instead use ``lmcache_driven`` or ``engine_driven``.
 
+      If workers use the engine-driven path, also pass
+      ``--shm-name lmcache_pool --no-l1-use-lazy`` so KV chunks move through a
+      shared-memory pool.  Without these flags the server falls back to the
+      typed inline transport, which serialises every chunk through the request
+      channel and is much slower; see :ref:`mp-transfer-mode`.
+
       To use gRPC instead of ZMQ, include the ``grpc://`` scheme in the
       connector configuration:
 
@@ -397,7 +403,10 @@ normally, then set ``lmcache.mp.mp_transfer_mode=lmcache_driven`` on the vLLM
 side to enable the zero-copy SHM handle path (the default ``auto`` routing
 maps non-CUDA devices to ``engine_driven``, a worker-side gather/scatter
 copy path that the server only loads when started with
-``--supported-transfer-mode engine_driven`` or ``auto``).
+``--supported-transfer-mode engine_driven`` or ``auto``).  If you keep the
+engine-driven path, start the server with ``--shm-name lmcache_pool
+--no-l1-use-lazy``; otherwise it falls back to the slow typed inline
+transport (see :ref:`mp-transfer-mode`).
 
 **Docker** -- see :doc:`../production/docker_deployment`.
 

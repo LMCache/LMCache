@@ -50,6 +50,15 @@ agents:
 
 ## Per-job environment
 
+The repository's `post-checkout` hook merges the PR base in the checkout
+container, where Git is available, before Bash opens the job's scripts. It uses
+the existing `LMCACHE_PR_BASE_MERGE` policy and XPU candidate validation.
+The `pre-command` hook exports `LMCACHE_PR_BASE_MERGE=never` so setup scripts
+cannot merge again while running. This export belongs in the command container:
+Kubernetes does not pass checkout-hook exports to command containers.
+This keeps scripts and files from the same checkout when `dev` moves paths.
+Repository hooks and checkout must be enabled on the agent.
+
 Every CI job sources `setup-env.sh` to install vLLM + LMCache:
 
 ```yaml

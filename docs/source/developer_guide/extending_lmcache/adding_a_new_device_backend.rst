@@ -331,12 +331,16 @@ Verification
 Start LMCache server.  The worker below uses the engine-driven
 transfer path, which the server only loads when
 ``--supported-transfer-mode`` is ``engine_driven`` or ``auto`` (the
-default is ``lmcache_driven``):
+default is ``lmcache_driven``).  ``--shm-name`` together with
+``--no-l1-use-lazy`` gives the engine-driven path a shared-memory pool;
+without them KV chunks are serialised through the request channel, which
+is much slower (see :ref:`mp-transfer-mode`):
 
 .. code-block:: bash
 
     lmcache server --l1-size-gb 10 --eviction-policy LRU --port 5555 \
-        --supported-transfer-mode engine_driven
+        --supported-transfer-mode engine_driven \
+        --shm-name lmcache_pool --no-l1-use-lazy
 
 Run vLLM with MP connector. If you want a specific torch device category, set
 ``DEVICE_TYPE``. Backends that share one device type are selected automatically
@@ -525,6 +529,16 @@ that hook; the default ``DeviceSpec.create_cache_context`` raises
 ``NotImplementedError`` so a missing override surfaces loudly instead
 of silently falling back.  The cache context itself manages the KV
 cache layout and pointers used for IPC transfer.
+
+The KV and Q-ring server factories pass their default ``ObjectGroupTransfer``
+callback as the keyword-only ``object_group_transfer`` constructor argument.
+Custom contexts must accept and forward it to ``BaseCacheContext.__init__``
+when using the default full-chunk transfer implementation. A custom
+``LMCacheDrivenTransferModule._create_cache_context`` override must supply the
+callback when constructing such a context. ``transfer_object_group`` remains
+the device override point. The callback defaults to ``None`` for layout-only
+contexts; invoking the base transfer method without it raises ``RuntimeError``.
+Transfer completion and storage commit remain the caller's responsibility.
 
 Host-side pinning via ``pin_memory_backend`` is *optional* and only
 affects staging-buffer performance; it is not required to enable

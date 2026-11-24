@@ -8,8 +8,8 @@ import io
 import pytest
 
 # First Party
-from lmcache import banner
-from lmcache.banner import (
+from lmcache.v1.common import banner
+from lmcache.v1.common.banner import (
     DISABLE_BANNER_ENV,
     LMCACHE_LINKEDIN,
     LMCACHE_RECIPES,

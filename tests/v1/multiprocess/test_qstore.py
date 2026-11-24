@@ -457,13 +457,11 @@ def test_store_q_tracks_its_blocks_until_completed(stub_device, monkeypatch) -> 
     )
     monkeypatch.setattr(qstore_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     transfers: list[int] = []
-    monkeypatch.setattr(
-        qstore_mod,
-        "transfer_kv_per_object_group",
-        lambda *a, object_group_id, **kw: transfers.append(object_group_id),
-    )
     module = _module(ctx)
     cache_context = MagicMock()
+    cache_context.transfer_object_group.side_effect = (
+        lambda *a, object_group_id, **kw: transfers.append(object_group_id)
+    )
     cache_context.kv_layer_groups_manager.num_object_groups = 1
     cache_context.kv_layer_groups_manager.num_kernel_groups = 1
     cache_context.calculate_num_blocks.return_value = 2
@@ -840,14 +838,18 @@ def test_status_reports_object_layouts_from_the_layout_registry() -> None:
         "m",
         1,
         attention,
-        AttnWindowDesc(num_chunks_in_sw=[-1], group_kinds=("attention",)),
+        chunk_size=256,
+        hash_algorithm="blake3",
+        attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1], group_kinds=("attention",)),
     )
     query = MemoryLayoutDesc([torch.Size([1, 36, 256, 4096])], [torch.bfloat16])
     ctx.layout_desc_registry.register(
         "m##query",
         1,
         query,
-        AttnWindowDesc(num_chunks_in_sw=[-1], group_kinds=("attention",)),
+        chunk_size=256,
+        hash_algorithm="blake3",
+        attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1], group_kinds=("attention",)),
     )
     kv_module = MagicMock(name="kv_module")
     kv_module.context_entries_snapshot.return_value = {

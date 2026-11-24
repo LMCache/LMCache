@@ -12,7 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 # First Party
-from lmcache.v1.periodic_thread import PeriodicThreadRegistry, ThreadLevel
+from lmcache.v1.common.periodic_thread import PeriodicThreadRegistry, ThreadLevel
 
 router = APIRouter()
 

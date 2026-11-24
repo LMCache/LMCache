@@ -187,6 +187,8 @@ def main() -> None:
         str(BLOCK_SIZE),
         "--supported-transfer-mode",
         "engine_driven",
+        "--transport",
+        "zmq",
     ]
     kv_transfer_config = {
         "kv_connector": "LMCacheMPConnector",
