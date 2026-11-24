@@ -210,12 +210,22 @@ def test_retrieve_of_a_tail_vllm_partly_holds_skips_vllms_tokens():
 
 
 @pytest.mark.parametrize(
+    "group_tokens_per_block",
+    [
+        [GRID],
+        # A 32-token group, a scratch group (no tokens) and a 16-token group.
+        [2 * GRID, 0, GRID],
+    ],
+)
+@pytest.mark.parametrize(
     "prompt",
     [
         # The tail is the prompt's last token alone (P = 1 mod chunk).
         2 * CHUNK + 1,
-        # The last token starts a block inside the tail (P = 1 mod block).
+        # The last token starts a 16-token block inside the tail.
         2 * CHUNK + GRID + 1,
+        # The last token starts a block in every group.
+        2 * CHUNK + 2 * GRID + 1,
         # The last token shares a block with the one before.
         2 * CHUNK + 20,
         # The prompt is whole chunks.
@@ -223,13 +233,14 @@ def test_retrieve_of_a_tail_vllm_partly_holds_skips_vllms_tokens():
     ],
 )
 def test_full_prompt_hit_loads_every_token_into_the_blocks_vllm_allocates(
-    prompt: int,
+    prompt: int, group_tokens_per_block: list[int]
 ):
     """A full-prompt hit reports every prompt token, as vLLM's Offloading and
-    Nixl connectors do, so vLLM allocates the whole hit and recomputes the
-    last token itself. Holding that token back left its block unallocated
-    while the retrieve covered it (#6751)."""
+    Nixl connectors do, so vLLM allocates the whole hit in every group and
+    recomputes the last token itself. Holding that token back left its block
+    unallocated while the retrieve covered it (#6751)."""
     connector, _ = _connector(lookup_hit=prompt)
+    connector._group_tokens_per_block = group_tokens_per_block
 
     assert connector.get_num_new_matched_tokens(
         _request(prompt_tokens=prompt, max_tokens=1), 0
@@ -241,42 +252,7 @@ def test_full_prompt_hit_loads_every_token_into_the_blocks_vllm_allocates(
     # LMCache holds the tail, so it is not stored again.
     assert tracker.unfull_chunk_boundaries == ({prompt} if prompt % CHUNK else set())
 
-    # vLLM allocates blocks for the tokens it was told to load.
-    blocks = list(range(-(-prompt // GRID)))
-    tracker.append_block_ids((blocks,))
-    tracker.state = LMCacheMPRequestState.WAITING_FOR_LOAD
-    meta = LMCacheMPRequestMetadata.GetRetrieveMetadata(tracker, CHUNK, [GRID])
-
-    assert meta is not None
-    assert (meta.op.start, meta.op.end) == (0, prompt)
-    assert meta.op.block_ids == [blocks]
-
-
-@pytest.mark.parametrize(
-    "prompt",
-    [
-        # Only the 16-token group starts a block at the last token.
-        2 * CHUNK + GRID + 1,
-        # Both groups do.
-        2 * CHUNK + 2 * GRID + 1,
-        # Neither does.
-        2 * CHUNK + 20,
-    ],
-)
-def test_full_prompt_hit_fits_the_blocks_of_every_group(prompt: int):
-    """Each group gets its own blocks for the whole hit, whichever groups
-    the last token starts a block in. A scratch group (0 tokens per block)
-    takes no part."""
-    group_tokens_per_block = [2 * GRID, 0, GRID]
-    connector, _ = _connector(lookup_hit=prompt)
-    connector._group_tokens_per_block = group_tokens_per_block
-
-    assert connector.get_num_new_matched_tokens(
-        _request(prompt_tokens=prompt, max_tokens=1), 0
-    ) == (prompt, True)
-
-    tracker = connector.request_trackers["req-0"]
-    assert tracker.num_lmcache_hit_tokens == prompt
+    # vLLM allocates each group's blocks for the tokens it was told to load.
     blocks = [
         list(range(-(-prompt // span))) if span else []
         for span in group_tokens_per_block
@@ -383,22 +359,6 @@ def test_full_prompt_hit_keeps_the_sliding_window_vllm_recomputes_with(prompt: i
     assert meta is not None
     assert (meta.op.start, meta.op.end) == (0, full_chunks if trimmed else prompt)
     assert meta.op.block_ids == [blocks[: -(-meta.op.end // GRID)]]
-
-
-def test_mamba_hit_capped_by_the_reserved_last_token_is_not_reduced_again():
-    """Mamba align/all modes look up at most P - 1 tokens, so their best hit
-    is already P - 1 and is not a full-prompt hit: no second token is held
-    back for the windowed (Mamba) group."""
-    prompt = 2 * CHUNK + 20
-    connector, scheduler_adapter = _connector(lookup_hit=prompt - 1)
-    connector._full_hit_holds_back_last_token = True
-    connector._group_tokens_per_block = [GRID]
-
-    assert connector.get_num_new_matched_tokens(
-        _request(prompt_tokens=prompt, max_tokens=1), 0
-    ) == (prompt - 1, True)
-    kwargs = scheduler_adapter.maybe_submit_lookup_request.call_args.kwargs
-    assert kwargs["reserve_last_token"] is True
 
 
 def test_boundary_state_block_is_pinned_until_the_request_is_sent():

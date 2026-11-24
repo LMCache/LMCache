@@ -906,17 +906,14 @@ def test_scheduler_kv_events_preserve_store_remove_store(
         scheduler.shutdown()
 
 
-@pytest.mark.parametrize(
-    ("replay", "windowed", "expected_need"),
-    [(0, False, 12), (128, False, 8), (0, True, 11)],
-)
-def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
-    mock_io: SimpleNamespace, replay: int, windowed: bool, expected_need: int
+@pytest.mark.parametrize("replay", [0, 128])
+def test_full_prompt_hit_retrieves_only_into_the_blocks_vllm_allocates(
+    mock_io: SimpleNamespace, replay: int
 ) -> None:
     """A full-prompt hit must not retrieve past what vLLM allocates. SWA
     replay floors the hit to a block boundary, so the connector gives back the
-    last chunk ([8, 12) released); a windowed group reports P - 1; otherwise
-    the whole prompt is loaded and vLLM recomputes the last token."""
+    last chunk ([8, 12) released); otherwise the whole prompt is loaded and
+    vLLM recomputes the last token."""
     config = _config(
         KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
     )
@@ -924,13 +921,12 @@ def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
     scheduler.bind_gpu_block_pool(mock_io.pool)
     try:
         scheduler._prefix_replay_tokens = replay
-        scheduler._full_hit_holds_back_last_token = windowed
         request = _request()  # 12 prompt tokens, chunk 4
         mock_io.scheduler.check_lookup_result.return_value = 12
         need, async_load = scheduler.get_num_new_matched_tokens(request, 0)
         assert need is not None  # the lookup result is ready
         tracker = scheduler.request_trackers[request.request_id]
-        assert (need, async_load) == (expected_need, True)
+        assert (need, async_load) == (8 if replay else 12, True)
         if replay:
             assert tracker.num_lmcache_hit_tokens == 8
             assert tracker.pending_free_ranges == [(8, 12)]
@@ -955,6 +951,57 @@ def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
         if replay:
             kwargs = mock_io.scheduler.free_lookup_locks.call_args.kwargs
             assert kwargs["extra_ranges"] == ((8, 12),)
+    finally:
+        scheduler.shutdown()
+
+
+def test_full_prompt_hit_with_a_sliding_window_group_holds_back_the_last_token(
+    mock_io: SimpleNamespace,
+) -> None:
+    """With a sliding-window group in vLLM's KV cache config, a full-prompt
+    hit is reported as P - 1, so vLLM allocates the window of the last
+    token it recomputes; the retrieve still covers the whole prompt."""
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    layout = {"block_size": 4, "num_kv_heads": 1, "head_size": 8}
+    if hasattr(kv_cache_interface, "KVCacheGroup"):
+        # Third Party
+        from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+        # Newer vLLM keeps the window in the group's manager config.
+        group: Any = kv_cache_interface.KVCacheGroup(
+            kv_cache_specs={
+                "layer": kv_cache_interface.AttentionSpec(**layout, dtype=torch.float32)
+            },
+            manager_config=kv_cache_interface.ManagerConfig(
+                SlidingWindowManager, SlidingWindowManager.Params(sliding_window=8)
+            ),
+            block_size=4,
+        )
+    else:
+        spec = kv_cache_interface.SlidingWindowSpec(
+            **layout, dtype=torch.float32, sliding_window=8
+        )
+        group = kv_cache_interface.KVCacheGroupSpec(["layer"], spec)
+    cache_config = KVCacheConfig(
+        num_blocks=8, kv_cache_tensors=[], kv_cache_groups=[group]
+    )
+    scheduler = LMCacheMPConnector(config, KVConnectorRole.SCHEDULER, cache_config)
+    scheduler.bind_gpu_block_pool(mock_io.pool)
+    try:
+        request = _request()  # 12 prompt tokens, chunk 4
+        mock_io.scheduler.check_lookup_result.return_value = 12
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (11, True)
+        scheduler.update_state_after_alloc(
+            request, MagicMock(get_block_ids=lambda: ([1, 2, 3],)), 11
+        )
+        metadata = scheduler.build_connector_meta(_schedule())
+        assert isinstance(metadata, LMCacheMPConnectorMetadata)
+        (meta,) = metadata.requests
+        assert meta.direction == "RETRIEVE"
+        assert (meta.op.start, meta.op.end) == (0, 12)
+        assert meta.op.block_ids == [[1, 2, 3]]
     finally:
         scheduler.shutdown()
 

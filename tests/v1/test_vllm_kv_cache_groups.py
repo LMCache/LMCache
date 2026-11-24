@@ -51,6 +51,11 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 
 
 @dataclass
+class ChunkedLocalAttentionSpec(AttentionSpec):
+    attention_chunk_size: int
+
+
+@dataclass
 class FullAttentionSpec(AttentionSpec):
     sliding_window: "int | None" = None
 
@@ -515,6 +520,10 @@ class MambaManager:
     pass
 
 
+class ChunkedLocalAttentionManager:
+    pass
+
+
 class CircularBufferManager:
     pass
 
@@ -824,6 +833,7 @@ class BoundedReplaySlidingWindowSpec(SlidingWindowSpec):
         (MockKVCacheGroup(["l"], FullAttentionSpec(16)), False),
         (MockKVCacheGroup(["l"], SlidingWindowSpec(16, 64)), True),
         (MockKVCacheGroup(["l"], SlidingWindowMLASpec(16, 64)), True),
+        (MockKVCacheGroup(["l"], ChunkedLocalAttentionSpec(16, 64)), True),
         (MockKVCacheGroup(["l"], MambaSpec(16)), True),
         (
             MockKVCacheGroup(
@@ -834,6 +844,14 @@ class BoundedReplaySlidingWindowSpec(SlidingWindowSpec):
         (MockKVCacheGroup(["l"], BoundedReplaySlidingWindowSpec(16, 64)), False),
         (KVCacheGroup({"l": AttentionSpec(16)}, FullAttentionManager, 16), False),
         (KVCacheGroup({"l": AttentionSpec(16)}, SlidingWindowManager, 16), True),
+        (
+            KVCacheGroup(
+                {"l": ChunkedLocalAttentionSpec(16, 64)},
+                ChunkedLocalAttentionManager,
+                16,
+            ),
+            True,
+        ),
         (KVCacheGroup({"l": MambaSpec(16)}, MambaManager, 16), True),
         (
             KVCacheGroup(
