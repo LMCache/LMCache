@@ -483,3 +483,14 @@ func TestIsolatedIPCEnabled(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateSpec_EvictionPolicyNoop(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1:       L1BackendSpec{SizeGB: 10},
+		Eviction: &EvictionSpec{Policy: ptr("noop")},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 0 {
+		t.Fatalf("expected no errors, got %v", errs)
+	}
+}

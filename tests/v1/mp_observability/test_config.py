@@ -62,6 +62,14 @@ class TestExtraLoggingArgs:
             _parse(["--enable-extra-logging", "--extra-logging-interval", "0"])
 
 
+class TestMetricsArgs:
+    def test_disable_metrics(self):
+        assert _parse(["--disable-metrics"]).metrics_enabled is False
+
+    def test_disable_prometheus_is_an_alias(self):
+        assert _parse(["--disable-prometheus"]).metrics_enabled is False
+
+
 class _CaptureHandler(logging.Handler):
     def __init__(self) -> None:
         super().__init__()
