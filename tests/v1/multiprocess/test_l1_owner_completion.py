@@ -135,7 +135,7 @@ def test_store_owner_callback_round_trip(
         storage_manager=storage,
         event_bus=MagicMock(),
         resolve_obj_keys=lambda key, gids: [[]] * 2 if unfull else [[k] for k in keys],
-        resolve_unfull_chunk_obj_keys=lambda key, gids: keys,
+        resolve_unfull_chunk_obj_keys=lambda key, gids, chunk_size: keys,
     )
     module = transfer.LMCacheDrivenTransferModule(cast(Any, ctx))
     backend = MagicMock()
