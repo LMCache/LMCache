@@ -46,7 +46,6 @@ from typing import TYPE_CHECKING, Any
 import os
 
 # First Party
-from lmcache.v1.common import device_type as _common_device_type
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform._device_detect import (
     DEVICE_BACKEND_ENV_VAR,
@@ -227,7 +226,5 @@ def synchronize_device(device: torch.device) -> None:
 
 
 torch_dev, torch_device_type = get_torch_device()
-
-_common_device_type.torch_device_type = torch_device_type
 
 current_device_spec: DeviceSpec = _current_device_spec_fn()

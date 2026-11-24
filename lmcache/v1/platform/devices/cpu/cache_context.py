@@ -95,6 +95,8 @@ class CPUCacheContext(BaseCacheContext):
 
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
         self.device_ = torch.device("cpu")
+        if engine_type == EngineType.VLLM and not (layout_hints or {}).get("kv_layout"):
+            layout_hints = {**(layout_hints or {}), "kv_layout": "HND"}
 
         # Discover layout & build KV layer groups via the same path
         # GPUCacheContext uses, so we don't need to hand-roll any
