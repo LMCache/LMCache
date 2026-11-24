@@ -1912,6 +1912,24 @@ class TestIsKeyEvictable:
         manager.close()
 
 
+def test_is_key_resident_matches_reserve_read(basic_l1_config, basic_layout):
+    """A key is resident from finish_write until delete, and checking it
+    takes no lock."""
+    manager = DramL1Manager(basic_l1_config)
+    key = make_object_key(1)
+    assert manager.is_key_resident(key) is False
+
+    manager.reserve_write([key], [False], basic_layout)
+    assert manager.is_key_resident(key) is False
+    manager.finish_write([key])
+    assert manager.is_key_resident(key) is True
+    assert manager.is_key_evictable(key) is True
+
+    manager.delete([key])
+    assert manager.is_key_resident(key) is False
+    manager.close()
+
+
 # =============================================================================
 # Tests for staging objects (write tags)
 # =============================================================================

@@ -12,9 +12,10 @@ concrete classes in `lmcache/v1/distributed/l1_manager/` (see
 - Members are exactly the calls the callers make today: reserve and finish
   for writes and reads, including the combined `finish_write_and_reserve_read`
   and `finish_write_and_delete`; `unsafe_read`, `delete`, `clear`,
-  `touch_keys`, `is_key_evictable`, `register_listener`; `get_memory_usage`,
-  `get_staging_memory_usage`, `get_capacity_bytes`, `get_l1_memory_desc`,
-  `get_memory_tags`, `report_status`, `memcheck`, `close`; and the
+  `touch_keys`, `is_key_evictable`, `is_key_resident`, `register_listener`;
+  `get_memory_usage`, `get_staging_memory_usage`, `get_capacity_bytes`,
+  `get_l1_memory_desc`, `get_memory_tags`, `report_status`, `memcheck`,
+  `close`; and the
   `l1_manager_id`, `config` and `backend_type` (`L1BackendType`) properties.
   An implementation that cannot honour a call answers with the documented
   `L1Error` codes instead of raising, so the callers keep one code path.
