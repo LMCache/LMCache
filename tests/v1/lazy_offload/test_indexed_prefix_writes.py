@@ -2,6 +2,7 @@
 """Indexed and full-scan drains must agree on complete ordered prefix writes."""
 
 # Standard
+from importlib.util import find_spec
 from typing import Any
 import random
 
@@ -15,6 +16,10 @@ from lmcache.integration.vllm.lazy_offload_policy.prefix_write_index import (
 )
 from tests.v1.lazy_offload.block_pool_fake import FakeBlockPool, make_real_pool
 from tests.v1.lazy_offload.test_eviction_aware_policy import add_op, drain, make_queue
+
+requires_vllm = pytest.mark.skipif(
+    find_spec("vllm") is None, reason="requires a real vLLM BlockPool"
+)
 
 
 def test_indexed_prefix_decisions_match_full_scan() -> None:
@@ -67,6 +72,7 @@ def test_indexed_prefix_decisions_match_full_scan() -> None:
     assert index.num_ops == 0
 
 
+@requires_vllm
 def test_indexed_prefix_writes_survive_real_pool_lifecycle() -> None:
     pool = make_real_pool(32)
     q = create_offload_policy({"lmcache.mp.indexed_prefix_writes": True}, pool)
@@ -110,6 +116,7 @@ def test_indexed_write_emits_prefix_before_victim_with_step_cap() -> None:
     assert [op.store_metadata.op.end for op in q._pending["A"]] == [1024]
 
 
+@requires_vllm
 def test_real_pool_reassignment_invalidates_all_owners_even_away_from_front() -> None:
     pool = make_real_pool(32)
     queue = create_offload_policy({"lmcache.mp.indexed_prefix_writes": True}, pool)
@@ -129,6 +136,7 @@ def test_real_pool_reassignment_invalidates_all_owners_even_away_from_front() ->
     assert drain(queue).emptied_request_ids == ["C"]
 
 
+@requires_vllm
 @pytest.mark.parametrize(
     "extra",
     [
