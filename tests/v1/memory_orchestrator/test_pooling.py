@@ -157,3 +157,32 @@ def test_uncertain_attach_never_releases_or_repeats_hotplug(
         with pytest.raises(RuntimeError):
             controller.shrink("grow-1")
     pool.release.assert_not_called()
+
+
+def test_invalid_provider_result_does_not_poison_later_assignments(pool: Mock) -> None:
+    """Retain an invalid request without preventing another lease from attaching."""
+    pool.acquire.side_effect = [None, ALLOCATION]
+    handler = Mock(
+        side_effect=[
+            reply({"arenas": []}),
+            reply({"added": arena()}),
+            reply({"removed": {"arenas": [arena("removed")]}}),
+        ]
+    )
+    with httpx.Client(
+        base_url="http://worker", transport=httpx.MockTransport(handler)
+    ) as client:
+        controller = MemoryPoolController(pool, client, "node-a", "l1")
+        with pytest.raises(ValueError, match="invalid memory allocation"):
+            controller.grow("bad", 8192)
+        with pytest.raises(RuntimeError, match="uncertain"):
+            controller.grow("bad", 8192)
+        with pytest.raises(RuntimeError, match="uncertain"):
+            controller.shrink("bad")
+        pool.acquire.assert_called_once_with("node-a", "worker-a/l1/0/bad", 8192)
+        pool.release.assert_not_called()
+        handler.assert_called_once()
+        assert controller.grow("good", 8192) == ALLOCATION
+        assert controller.shrink("good")
+    assert pool.acquire.call_count == 2 and handler.call_count == 3
+    pool.release.assert_called_once_with(ALLOCATION.allocation_id)

@@ -159,6 +159,7 @@ class MemoryPoolController:
                 or allocation.size_bytes < size_bytes
                 or any(
                     other is not assignment
+                    and isinstance(other.allocation, MemoryAllocation)
                     and other.allocation.allocation_id == allocation.allocation_id
                     for other in self._assignments.values()
                 )
