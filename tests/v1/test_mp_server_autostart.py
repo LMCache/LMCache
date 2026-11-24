@@ -672,6 +672,7 @@ def test_launcher_starts_command_and_waits_until_healthy(monkeypatch) -> None:
         extra_config={"lmcache.mp.autostart": True},
         server_host="tcp://localhost",
         server_port=5555,
+        transport="zmq",
     )
 
     MPServerLauncher(config).start("tcp://localhost:5555", MagicMock())

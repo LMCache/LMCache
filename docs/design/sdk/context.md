@@ -14,7 +14,7 @@ Retrieve / store / close are **methods** on the context.
 import lmcache.sdk.kvcache as kvcache   # query tensors: lmcache.sdk.qcache
 
 ctx = kvcache.connect(
-    url="tcp://localhost:5555",       # tcp:// for ZMQ; grpc:// for gRPC
+    url="grpc://localhost:5555",      # grpc:// for gRPC; tcp:// for ZMQ
     http_url="http://localhost:9000", # HTTP url for retrieving KV cache shape
     model_name="Qwen/Qwen3-8B",
 )
