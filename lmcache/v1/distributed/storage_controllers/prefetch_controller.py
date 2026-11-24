@@ -26,8 +26,8 @@ import threading
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.logging import init_logger
 from lmcache.utils import get_size_bytes
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import (
     FetchingPolicy,
     GroupedObjectKeys,
@@ -136,6 +136,32 @@ def _gather_keys(
     return [
         key for _group, keys in _gather_keys_by_row(key_groups, bitmaps) for key in keys
     ]
+
+
+def _gather_keys_by_chunk(
+    key_groups: list[GroupedObjectKeys],
+    bitmaps: Bitmap2D,
+) -> list[ObjectKey]:
+    """Gather selected keys in chunk order for eviction recency.
+
+    Use the original bitmap positions so sparse or sliding-window rows
+    stay aligned. Prefix-preserving eviction gives earlier input keys
+    higher recency, so each chunk must precede the next across all rows.
+
+    Args:
+        key_groups: The request's chunk-ordered key rows.
+        bitmaps: Selection grid with the same rows and widths as key_groups.
+
+    Returns:
+        Selected keys in increasing chunk order, preserving the input row
+        order within each chunk.
+    """
+    _, num_chunks = bitmaps.size()
+    keys_by_chunk: list[list[ObjectKey]] = [[] for _ in range(num_chunks)]
+    for group, bitmap in zip(key_groups, bitmaps, strict=True):
+        for chunk_idx in bitmap.get_indices_list():
+            keys_by_chunk[chunk_idx].append(group.keys[chunk_idx])
+    return [key for chunk_keys in keys_by_chunk for key in chunk_keys]
 
 
 def _gather_keys_by_row(
@@ -270,6 +296,7 @@ def _reserve_l1_cells(
     cells: Bitmap2D,
     retain: dict[ObjectKey, bool],
     tag: str,
+    allow_resident: bool,
 ) -> tuple[Bitmap2D, dict[ObjectKey, "MemoryObj"], int]:
     """Reserve a staging buffer in one L1 manager for every cell in ``cells``.
 
@@ -283,6 +310,10 @@ def _reserve_l1_cells(
         retain: Whether each key in ``cells`` stays resident after the
             reader is done.
         tag: The writer tag for the reservations.
+        allow_resident: Also stage keys already resident in ``l1_manager``;
+            admission then read-locks the resident copy. Pass ``True`` only
+            for an L1 the request may read, as the lock pass covers only
+            those: a resident key there landed after the lock pass.
 
     Returns:
         The tuple of (L1 reserve result, reserved objects, failed count).
@@ -304,6 +335,7 @@ def _reserve_l1_cells(
             is_temporary=[not retain[key] for key in keys],
             layout_desc=group.layout_desc,
             tag=tag,
+            allow_resident=allow_resident,
         )
         for col, key in zip(cols, keys, strict=True):
             error, mem_obj = results[key]
@@ -335,8 +367,8 @@ def _reserve_l1_cells(
             )
         )
     if contended_keys:
-        # The key became resident in L1 after the lock pass; the caller
-        # falls back to the L1-only hit.
+        # The key is resident in an L1 this request may not read, so it can
+        # neither be reused nor loaded there again; the caller drops it.
         event_bus.publish(
             Event(
                 event_type=EventType.L2_PREFETCH_FAILED,
@@ -1374,8 +1406,19 @@ class PrefetchController(StorageControllerInterface):
 
         cells_by_l1, retain = self._build_l1_allocation_plans(request)
         for l1_idx, cells in cells_by_l1.items():
+            l1_manager = self._l1_managers[l1_idx]
+            # A key that landed in a readable L1 after the lock pass is staged
+            # anyway and admission read-locks the resident copy, so it stays a
+            # hit; in an L1 the request may not read it stays a miss.
             success, objs, l1_failed_count = _reserve_l1_cells(
-                self._l1_managers[l1_idx], request.key_groups, cells, retain, tag
+                l1_manager,
+                request.key_groups,
+                cells,
+                retain,
+                tag,
+                allow_resident=_tags_allowed(
+                    l1_manager.get_memory_tags(), request.allowed_l1_memory_tags
+                ),
             )
             l1_reserved_keys[l1_idx] = success
             reserved_objs.update(objs)
@@ -1659,8 +1702,8 @@ class PrefetchController(StorageControllerInterface):
         """Settle the request's L1 locks and publish its result.
 
         The prefetch policy plans once more on the L1 locks alone: the cells
-        it keeps are the hit, and the rest are released. It will also touch
-        the L1 keys so that the eviction module can be updated.
+        it keeps are the hit, and the rest are released. Touch hit keys in
+        chunk order so eviction prioritizes earlier chunks across groups.
 
         Args:
             request: The request to finish. Its L2 locked map and reserved
@@ -1685,7 +1728,7 @@ class PrefetchController(StorageControllerInterface):
                         )
 
             # Notify the eviction module
-            hit_keys = _gather_keys(request.key_groups, locked)
+            hit_keys = _gather_keys_by_chunk(request.key_groups, locked)
             if hit_keys:
                 self._l1_managers[l1_idx].touch_keys(hit_keys)
 

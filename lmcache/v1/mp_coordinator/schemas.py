@@ -131,7 +131,7 @@ class RegisterRequest(BaseModel):
         p2p_advertised_url: URL the instance advertises for peer-to-peer
             transfers. Optional -- empty when the instance does not participate
             in P2P.
-        mq_port: Port of the instance's ZMQ message-queue server that P2P peers
+        mq_port: Port of the instance's P2P gRPC listener that P2P peers
             send lookup/unlock RPCs to, reachable at the instance's ``ip``.
             Optional -- 0 when P2P is disabled.
     """
@@ -672,23 +672,70 @@ class PrefetchResponse(BaseModel):
 class PinRequest(BaseModel):
     """Body of ``POST`` / ``DELETE /cache/pins`` on the coordinator.
 
-    Pinning protects the resolved keys from L2 eviction until unpinned. The
-    coordinator resolves ``token_ids`` to keys locally; L2 pins are fleet-wide
-    (per ``cache_salt``), so no target instance is needed.
+    Pinning protects keys from L2 eviction until unpinned. L2 pins are
+    fleet-wide (per ``cache_salt``), so no target instance is needed. Supply
+    exactly one of the two forms:
+
+    * ``keys`` — (un)pin these keys as given. Use it to pin a chunk in the
+      middle of a prompt without its prefix chunks: chunk hashes are
+      prefix-chained, so the tokens form always covers every chunk from
+      position 0.
+    * ``token_ids`` (with ``model_name`` / ``world_size``) — the coordinator
+      resolves the sequence to the keys of its complete chunks locally.
 
     Attributes:
-        model_name: Model whose rank fan-out to use when resolving keys.
-        world_size: World size selecting the per-rank fan-out.
-        token_ids: Prompt tokens whose complete chunks should be (un)pinned.
-        cache_salt: Per-tenant isolation salt applied to the produced keys.
-        tags: Matching tags supplied when the content was stored.
+        keys: The keys to (un)pin (keys form).
+        token_ids: Prompt tokens whose complete chunks should be (un)pinned
+            (tokens form).
+        model_name: Model whose rank fan-out to use when resolving keys
+            (tokens form).
+        world_size: World size selecting the per-rank fan-out (tokens form).
+        cache_salt: Per-tenant isolation salt applied to the produced keys
+            (tokens form).
+        tags: Matching tags supplied when the content was stored (tokens form).
     """
 
-    model_name: str
-    world_size: int = Field(ge=1)
+    keys: list[EncodedObjectKey] = Field(default_factory=list)
     token_ids: list[int] = Field(default_factory=list)
+    model_name: str = ""
+    world_size: int = Field(default=1, ge=1)
     cache_salt: str = ""
     tags: MatchingTags = Field(default_factory=dict)
+
+    @field_validator("keys")
+    @classmethod
+    def _validate_keys(cls, value: list[EncodedObjectKey]) -> list[EncodedObjectKey]:
+        """Reject undecodable keys at request validation (surfaced as 422).
+
+        Args:
+            value: The hydrated keys.
+
+        Returns:
+            The unchanged keys once each converts to an ``ObjectKey``.
+
+        Raises:
+            ValueError: If a key cannot convert into an ``ObjectKey``.
+        """
+        for encoded in value:
+            encoded.to_object_key()
+        return value
+
+    @model_validator(mode="after")
+    def _validate_one_form(self) -> "PinRequest":
+        """Enforce that exactly one form is supplied (surfaced as 422).
+
+        Returns:
+            The unchanged request once exactly one form is present.
+
+        Raises:
+            ValueError: If both or neither of ``keys`` / ``token_ids`` is
+                supplied, or ``token_ids`` comes without ``model_name``.
+        """
+        if bool(self.keys) == bool(self.token_ids):
+            raise ValueError("supply exactly one of 'keys' or 'token_ids'")
+        if self.token_ids and not self.model_name:
+            raise ValueError("'model_name' is required with 'token_ids'")
+        return self
 
 
 class PinResponse(BaseModel):

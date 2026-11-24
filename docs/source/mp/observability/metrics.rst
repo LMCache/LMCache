@@ -808,9 +808,9 @@ each metric see ``docs/design/v1/mp_observability/METRICS.md`` and
 gRPC Runtime Metrics
 ~~~~~~~~~~~~~~~~~~~~
 
-When metrics are enabled and the MP request transport is gRPC, LMCache also
-registers gRPC Python's OpenTelemetry observability plugin against the same
-OTel ``MeterProvider``. ZMQ mode does not register this plugin, so the
+When metrics are enabled and the MP request transport is gRPC (the default),
+LMCache also registers gRPC Python's OpenTelemetry observability plugin
+against the same OTel ``MeterProvider``. ZMQ mode does not register this plugin, so the
 existing LMCache EventBus metrics remain unchanged. The plugin is provided by
 ``grpcio-observability`` and is installed only on Linux, which is the platform
 currently supported by that upstream package. On non-Linux developer hosts the

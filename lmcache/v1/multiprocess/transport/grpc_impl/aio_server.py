@@ -12,8 +12,8 @@ import threading
 import grpc
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.security.api_key import APIKeyVerifier
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.security.api_key import APIKeyVerifier
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.auth import (
     GrpcAioAuthenticationInterceptor,
@@ -26,6 +26,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     GrpcRequestHandler,
     client_affinity_key,
 )
+from lmcache.v1.transport.errors import InvalidRequestError
 from lmcache.v1.transport.futures import MessagingStream
 from lmcache.v1.transport.grpc.descriptors import ServiceBinding
 
@@ -90,6 +91,7 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
         max_gpu_workers: int,
         grpc_server_workers: int,
         authentication: APIKeyVerifier | None = None,
+        rpc_client: type | None = None,
     ) -> None:
         super().__init__(
             bind_url,
@@ -97,6 +99,7 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
             max_gpu_workers,
             grpc_server_workers,
             authentication,
+            rpc_client,
         )
         # The loop must not block, so normal handlers need their own threads
         # here instead of the sync server's semaphore.
@@ -170,6 +173,9 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
                 result = await loop.run_in_executor(
                     self._normal_pool, handler, *payloads
                 )
+        except InvalidRequestError as exc:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+            raise RuntimeError("gRPC context abort unexpectedly returned") from exc
         except NotImplementedError as exc:
             await context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))
             raise RuntimeError("gRPC context abort unexpectedly returned") from exc
@@ -230,7 +236,7 @@ class GrpcAioMultiprocessServer(GrpcMultiprocessServerBase):
                         registered.operation,
                         exc_info=item,
                     )
-                    await context.abort(grpc.StatusCode.INTERNAL, str(item))
+                    break
                 yield registered.response_encoder(item)
                 credits.release()
         finally:

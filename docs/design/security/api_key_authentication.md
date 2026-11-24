@@ -1,7 +1,7 @@
 # API-key authentication
 
 LMCache services share transport-neutral API-key loading and verification from
-`lmcache.security.api_key`. Protocol adapters are responsible for extracting a
+`lmcache.v1.common.security.api_key`. Protocol adapters are responsible for extracting a
 credential from their wire format and passing only the token to
 `APIKeyVerifier.verify_token()`.
 

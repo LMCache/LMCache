@@ -4,12 +4,18 @@ on:
   schedule:
     - cron: '30 7 * * *'
   workflow_dispatch:
+    inputs:
+      cpu_verify_only:
+        description: "Only verify newest CPU wheels and update their tested pins"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   nightly-wheels:
+    if: ${{ !inputs.cpu_verify_only }}
     name: Build nightly CUDA wheels (${{ matrix.arch }})
     strategy:
       fail-fast: false
@@ -117,6 +123,7 @@ jobs:
         run: gh release upload nightly dist/cu130/*.whl --clobber --repo ${{ github.repository }}
 
   resolve-xpu-nightly:
+    if: ${{ !inputs.cpu_verify_only }}
     name: Resolve vLLM XPU nightly runtime
     runs-on: ubuntu-24.04
     outputs:
@@ -185,6 +192,22 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
+      - name: Fast-forward XPU nightly branch to the candidate source
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags origin \
+            refs/heads/xpu-nightly:refs/remotes/origin/xpu-nightly
+          if ! git merge-base --is-ancestor \
+            refs/remotes/origin/xpu-nightly "${SOURCE_COMMIT}"; then
+            echo "::error::xpu-nightly cannot fast-forward to ${SOURCE_COMMIT}; refusing to rewind or replace its history." >&2
+            exit 1
+          fi
+          # Keep Buildkite's branch verification valid without using a moving dev tip.
+          git push origin "${SOURCE_COMMIT}:refs/heads/xpu-nightly"
       - name: Run both Buildkite XPU pipelines
         id: validate
         env:
@@ -291,6 +314,7 @@ jobs:
   # versioned like the CUDA nightlies (0.5.4.devN+rocm7.2) so a nightly can
   # never be mistaken for a release.
   nightly-rocm-wheel:
+    if: ${{ !inputs.cpu_verify_only }}
     name: Build ROCm nightly wheel
     uses: ./.github/workflows/build_rocm_artifacts.yml
     with:
@@ -337,6 +361,7 @@ jobs:
   # release workflow, but receives a unique development version and is
   # published to a rolling GitHub Release rather than PyPI.
   nightly-musa-wheel:
+    if: ${{ !inputs.cpu_verify_only }}
     name: Build MUSA nightly wheel
     uses: ./.github/workflows/build_musa_artifacts.yml
     with:
@@ -382,6 +407,7 @@ jobs:
   # RBLN nightly reuses the release build and smoke check with a development
   # version, published to a rolling GitHub Release rather than PyPI.
   nightly-rbln-wheel:
+    if: ${{ !inputs.cpu_verify_only }}
     name: Build RBLN nightly wheel
     uses: ./.github/workflows/build_rbln_artifacts.yml
     with:
@@ -425,6 +451,7 @@ jobs:
           asset_glob: dist/rbln/*.whl
 
   nightly-build:
+    if: ${{ !inputs.cpu_verify_only }}
     name: Build image (${{ matrix.arch }})
     strategy:
       fail-fast: false
@@ -482,8 +509,8 @@ jobs:
           docker builder prune -af
           docker buildx build --load \
           --platform linux/${{ matrix.arch }} \
-          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
-          --build-arg CUDA_VERSION=13.0 \
+          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.05-cuda13.2-devel-ubuntu24.04 \
+          --build-arg CUDA_VERSION=13.2 \
           --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
           --target image-build \
           --tag lmcache/vllm-openai:nightly-${{ github.run_id }}-${{ matrix.arch }} \
@@ -526,8 +553,8 @@ jobs:
           docker builder prune -af
           docker buildx build --load \
           --platform linux/${{ matrix.arch }} \
-          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
-          --build-arg CUDA_VERSION=13.0 \
+          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.05-cuda13.2-devel-ubuntu24.04 \
+          --build-arg CUDA_VERSION=13.2 \
           --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
           --target lmcache-final \
           --tag lmcache/standalone:nightly-${{ github.run_id }}-${{ matrix.arch }} \
@@ -615,7 +642,7 @@ jobs:
   nightly-pin-or-report-vllm:
     name: Pin or report vLLM
     needs: nightly-verify-cpu-vllm
-    if: always()
+    if: always() && !cancelled()
     concurrency:
       group: github-nightly-vllm-pin
       cancel-in-progress: false

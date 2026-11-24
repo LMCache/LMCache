@@ -44,9 +44,9 @@ from lmcache.v1.kv_layer_groups import (
     KVLayerGroupInfo,
     parse_kvcache_shape_spec,
 )
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 from lmcache.v1.transport.futures import MessagingFuture
+from lmcache.v1.transport.request_client import RequestClient
 from lmcache.v1.transport.zmq.wire import decode_operation
 
 
@@ -418,7 +418,7 @@ class TestCommandArguments:
         parser: argparse.ArgumentParser,
     ) -> None:
         args = parser.parse_args(["bench", "server"])
-        assert args.rpc_url == "tcp://localhost:5555"
+        assert args.rpc_url == "grpc://localhost:5555"
         assert args.mode == "gpu"
         assert args.num_tokens == 512
         assert args.num_blocks == 1024

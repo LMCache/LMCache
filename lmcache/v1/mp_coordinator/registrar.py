@@ -22,7 +22,7 @@ from pydantic import ValidationError
 import httpx
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.mp_coordinator.schemas import (
     ChunkSizeBindRequest,
     ChunkSizeBindResponse,
@@ -82,7 +82,7 @@ async def register(
         instance_id: Desired id; empty lets the coordinator assign one.
         p2p_advertised_url: Transfer-channel URL to advertise for P2P. Empty
             when P2P is disabled.
-        mq_port: Port of this server's ZMQ message-queue server for P2P lookup
+        mq_port: Port of this server's P2P gRPC listener for P2P lookup
             RPCs. 0 when P2P is disabled.
         chunk_size: Finalized MP chunk size, if negotiation has completed.
 
@@ -141,7 +141,7 @@ async def keep_registered(
         heartbeat_interval: Seconds between heartbeats.
         p2p_advertised_url: Transfer-channel URL to advertise for P2P. Empty
             when P2P is disabled.
-        mq_port: Port of this server's ZMQ message-queue server for P2P lookup
+        mq_port: Port of this server's P2P gRPC listener for P2P lookup
             RPCs. 0 when P2P is disabled.
         on_registered: Called after every successful registration, including
             a re-registration. Required, not defaulted: the coordinator keeps

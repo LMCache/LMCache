@@ -57,7 +57,9 @@ construction fails with::
 
 - ``cluster_mode`` (bool, default ``false``): When ``true`` use
   ``GlideClusterClient``; otherwise use standalone ``GlideClient``.
-- ``username`` (str, default ``""``): Optional auth username.
+- ``username`` (str, default ``""``): Optional auth username. Requires
+  ``password``. Leave empty to use the default user with password-only
+  auth.
 - ``password`` (str, default ``""``): Optional auth password.
 - ``key_prefix`` (str, default ``""``): Deployment-level key namespace,
   joined with the standard wire key by ``@``. **Must not contain**
