@@ -35,6 +35,7 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError
+from lmcache.v1.distributed.internal_api import L1OperationResult
 from lmcache.v1.distributed.l1_manager import DevDaxL1Manager
 from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
@@ -44,6 +45,7 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxArenaState,
     DevDaxRemoveMode,
 )
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.http_apis.l1_reconfigure_api import router
 from lmcache.v1.multiprocess.http_apis.reconfigure_api import router as l2_router
 
@@ -107,6 +109,19 @@ def devices(tmp_path: Path) -> Iterator[_DeviceProvider]:
         prefix="lmcache-devdax-",
     ) as workspace:
         yield _DeviceProvider(workspace)
+
+
+def _obj(result: L1OperationResult) -> MemoryObj:
+    """Return the object of a successful L1 result; narrows the tuple for mypy."""
+    err, obj = result
+    assert err == L1Error.SUCCESS and obj is not None
+    return obj
+
+
+def _tensor(result: L1OperationResult) -> torch.Tensor:
+    tensor = _obj(result).tensor
+    assert tensor is not None
+    return tensor
 
 
 def _layout(num_bytes: int = SLOT_BYTES) -> MemoryLayoutDesc:
@@ -314,8 +329,7 @@ def test_kv_cache_drain_gates_device_removal(devices: _DeviceProvider) -> None:
         # KV entry A fills the primary device.
         key_a, key_b, key_c = _key(1), _key(2), _key(3)
         write = l1.reserve_write([key_a], [False], _layout())
-        assert write[key_a][0] == L1Error.SUCCESS
-        write[key_a][1].tensor.fill_(0xA1)
+        _tensor(write[key_a]).fill_(0xA1)
         assert l1.finish_write([key_a])[key_a] == L1Error.SUCCESS
         del write
 
@@ -325,8 +339,7 @@ def test_kv_cache_drain_gates_device_removal(devices: _DeviceProvider) -> None:
         assert added.state == DevDaxArenaState.ACTIVE
         for key, fill in ((key_b, 0xB2), (key_c, 0xC3)):
             write = l1.reserve_write([key], [False], _layout())
-            assert write[key][0] == L1Error.SUCCESS
-            write[key][1].tensor.fill_(fill)
+            _tensor(write[key]).fill_(fill)
             assert l1.finish_write([key])[key] == L1Error.SUCCESS
             del write
         gc.collect()
@@ -348,10 +361,9 @@ def test_kv_cache_drain_gates_device_removal(devices: _DeviceProvider) -> None:
         # KV cached on a draining device stays readable.
         for key, fill in ((key_b, 0xB2), (key_c, 0xC3)):
             read = l1.reserve_read([key])
-            assert read[key][0] == L1Error.SUCCESS
-            assert torch.all(read[key][1].tensor == fill)
-            assert read[key][1].get_shapes() == _layout().shapes
-            assert read[key][1].get_dtypes() == _layout().dtypes
+            assert torch.all(_tensor(read[key]) == fill)
+            assert _obj(read[key]).get_shapes() == _layout().shapes
+            assert _obj(read[key]).get_dtypes() == _layout().dtypes
             assert l1.finish_read([key])[key] == L1Error.SUCCESS
             del read
         gc.collect()
@@ -372,8 +384,7 @@ def test_kv_cache_drain_gates_device_removal(devices: _DeviceProvider) -> None:
 
         # KV on the remaining device is untouched by the removal.
         read = l1.reserve_read([key_a])
-        assert read[key_a][0] == L1Error.SUCCESS
-        assert torch.all(read[key_a][1].tensor == 0xA1)
+        assert torch.all(_tensor(read[key_a]) == 0xA1)
         assert l1.finish_read([key_a])[key_a] == L1Error.SUCCESS
         del read
         assert l1.delete([key_a])[key_a] == L1Error.SUCCESS

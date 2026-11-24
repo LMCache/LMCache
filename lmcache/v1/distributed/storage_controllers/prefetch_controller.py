@@ -39,6 +39,7 @@ from lmcache.v1.distributed.api import (
     PrefetchTaskSpec,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
+from lmcache.v1.distributed.config import DevDaxL1ManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -1260,7 +1261,6 @@ class PrefetchController(StorageControllerInterface):
             Locks are taken regardless of the lock mode; under ``NO_LOCK``
             they are released when the request finishes.
         """
-        flattened_keys = request.get_flattened_keys()
         num_rows = len(request.key_groups)
         num_cols = len(request.key_groups[0].keys)
         completed = False
@@ -1270,24 +1270,34 @@ class PrefetchController(StorageControllerInterface):
                     l1_manager.get_memory_tags(), request.allowed_l1_memory_tags
                 ):
                     continue
-                result = {
-                    key: reserved
-                    for row in request.key_groups
-                    for key, reserved in l1_manager.reserve_read(
-                        row.keys, row.num_kv_readers
-                    ).items()
-                }
-                res_bitmap = Bitmap(len(flattened_keys))
-                for i, key in enumerate(flattened_keys):
-                    error, _obj = result[key]
-                    if error != L1Error.SUCCESS:
-                        continue
-                    res_bitmap.set(i)
-                l1_found_bitmap = _scatter_bitmaps_full_global(
-                    res_bitmap, num_rows, num_cols
+                locked = Bitmap2D.zeros(num_rows, num_cols)
+                request.key_states.l1_locked_keys[l1_idx] = locked
+                config = self._l1_manager_descriptors[l1_idx].config
+                shared = (
+                    isinstance(config, DevDaxL1ManagerConfig)
+                    and config.shared is not None
                 )
-                request.key_states.l1_locked_keys[l1_idx] = l1_found_bitmap
-                request.found_cells += l1_found_bitmap
+                for row_idx, row in enumerate(request.key_groups):
+                    result = l1_manager.reserve_read(row.keys, row.num_kv_readers)
+                    for col, key in enumerate(row.keys):
+                        if result[key][0] == L1Error.SUCCESS:
+                            locked[row_idx].set(col)
+                    # Record every lease in the row before checking peer layouts.
+                    if shared:
+                        for key, (err, obj) in result.items():
+                            if (
+                                err == L1Error.SUCCESS
+                                and obj is not None
+                                and (
+                                    obj.get_shapes() != row.layout_desc.shapes
+                                    or obj.get_dtypes() != row.layout_desc.dtypes
+                                )
+                            ):
+                                raise ValueError(
+                                    f"Shared Device-DAX object {key} "
+                                    "does not have the reader's layout"
+                                )
+                request.found_cells += locked
             completed = True
         finally:
             if not completed:

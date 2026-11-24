@@ -208,10 +208,6 @@ class BaseL1Manager(L1ManagerInterface):
             memory_manager: Allocator facade for the medium; this manager owns
                 it from now on and closes it in :meth:`close`.
         """
-        self._config = config
-        self._l1_manager_id = next_l1_manager_id()
-        self._lock = threading.Lock()
-
         # Resident objects: readable, never write-locked.
         self._objects: dict[ObjectKey, L1ObjectState] = {}
         # Staging objects: key -> writer tag -> write-locked object that is
@@ -227,6 +223,14 @@ class BaseL1Manager(L1ManagerInterface):
         self._boot_capacity_bytes = get_configured_capacity_bytes(config)
         self._write_ttl_seconds = config.write_ttl_seconds
         self._read_ttl_seconds = config.read_ttl_seconds
+
+        self._init_reporting(config)
+
+    def _init_reporting(self, config: L1ManagerConfig) -> None:
+        """Register identity, events and gauges once storage is ready."""
+        self._config = config
+        self._l1_manager_id = next_l1_manager_id()
+        self._lock = threading.Lock()
 
         self._registered_listeners: list[L1ManagerListener] = []
 
@@ -1054,6 +1058,9 @@ class BaseL1Manager(L1ManagerInterface):
             self._staging_bytes = 0
 
         self._memory_manager.close()
+        self._unregister_gauges()
+
+    def _unregister_gauges(self) -> None:
         with BaseL1Manager._gauge_lock:
             BaseL1Manager._gauge_targets.pop(self._l1_manager_id, None)
 

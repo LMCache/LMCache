@@ -22,6 +22,7 @@ from lmcache.usage_telemetry.mp import InitializeMPUsageContext
 from lmcache.usage_telemetry.mp_continuous import InitializeMPContinuousUsage
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.config import (
+    DevDaxL1ManagerConfig,
     StorageManagerConfig,
     add_storage_manager_args,
     parse_args_to_config,
@@ -298,6 +299,40 @@ def _build_server_components(
     return ServerBuildComponents(modules=modules)
 
 
+def check_shared_devdax_support(
+    mp_config: MPServerConfig, storage_manager_config: StorageManagerConfig
+) -> None:
+    """Reject MP features that cannot use a shared Device-DAX L1.
+
+    Args:
+        mp_config: MP server configuration.
+        storage_manager_config: Storage configuration.
+
+    Raises:
+        ValueError: A shared Device-DAX L1 is configured with engine-driven or
+            auto transfer, CacheBlend, P2P or a runtime plugin.
+    """
+    if not any(
+        isinstance(c, DevDaxL1ManagerConfig) and c.shared is not None
+        for c in storage_manager_config.l1_manager_configs
+    ):
+        return
+    if mp_config.supported_transfer_mode != "lmcache_driven":
+        raise ValueError(
+            "A shared Device-DAX L1 requires --supported-transfer-mode "
+            f"lmcache_driven, got {mp_config.supported_transfer_mode!r}"
+        )
+    if mp_config.engine_type == "blend":
+        raise ValueError("A shared Device-DAX L1 does not support CacheBlend")
+    if mp_config.p2p_config.enabled:
+        raise ValueError("A shared Device-DAX L1 does not support P2P")
+    if mp_config.runtime_plugin_config.locations:
+        raise ValueError(
+            "A shared Device-DAX L1 does not support runtime plugins: "
+            f"{mp_config.runtime_plugin_config.locations}"
+        )
+
+
 def run_cache_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
@@ -324,6 +359,10 @@ def run_cache_server(
     Returns:
         If return_engine is True: tuple of (request server, MPCacheServer).
         If return_engine is False: None (blocks until interrupted).
+
+    Raises:
+        ValueError: A shared Device-DAX L1 is combined with an unsupported
+            MP feature.
     """
     try:
         server, engine, event_bus = _start_cache_server(
@@ -363,6 +402,8 @@ def _start_cache_server(
     start_prometheus_http_server: bool,
     coordinator_config: CoordinatorConfig,
 ) -> tuple[RequestServer, MPCacheServer, EventBus]:
+    check_shared_devdax_support(mp_config, storage_manager_config)
+
     # Before any event IPC backend is resolved (KV-cache registration), so
     # the setting is observed by every resolver in this process.
     set_isolated_ipc(mp_config.isolated_ipc)

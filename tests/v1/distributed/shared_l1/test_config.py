@@ -2,6 +2,7 @@
 """Validation of the ``shared`` object of a Device-DAX L1 and of server modes."""
 
 # Standard
+from dataclasses import replace
 import json
 
 # Third Party
@@ -18,6 +19,12 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     parse_args,
 )
+from lmcache.v1.multiprocess.config import (
+    MPServerConfig,
+    P2PConfig,
+    RuntimePluginConfig,
+)
+from lmcache.v1.multiprocess.server import check_shared_devdax_support
 
 SHARED = {"orchestrator": "h:1", "region_id": "region", "client_id": "host"}
 PRIVATE = dict(type="DEVDAX", tag="pool", size_gb=1, path="/dev/dax0.0", offset_gb=1)
@@ -36,7 +43,8 @@ def parse(*specs: dict[str, object]) -> StorageManagerConfig:
 
 
 def test_shared_object_is_optional_unique_and_reuses_the_dax_fields() -> None:
-    shared, _, shadow = parse(SPEC, DRAM, SHADOW).l1_manager_configs
+    config = parse(SPEC, DRAM, SHADOW)
+    shared, _, shadow = config.l1_manager_configs
     private = parse(PRIVATE).l1_manager_configs[0]
     assert isinstance(shadow, ShadowL1ManagerConfig)
     assert shadow.segment is MemorySegment.CXL
@@ -96,3 +104,28 @@ def test_programmatic_construction_is_validated(
             memory, tag="pool", eviction=eviction, shared=shared
         )
         StorageManagerConfig(config, EvictionConfig("LRU"), l1_manager_configs=[config])
+
+
+BASE_MP = MPServerConfig(supported_transfer_mode="lmcache_driven")
+
+
+@pytest.mark.parametrize(
+    "mp_config",
+    [
+        replace(BASE_MP, supported_transfer_mode="auto"),
+        replace(BASE_MP, supported_transfer_mode="engine_driven"),
+        replace(BASE_MP, engine_type="blend"),
+        replace(BASE_MP, p2p_config=P2PConfig(advertise_url="h:9000")),
+        replace(BASE_MP, runtime_plugin_config=RuntimePluginConfig(["plugin.py"])),
+    ],
+)
+def test_unsupported_server_modes(mp_config: MPServerConfig) -> None:
+    with pytest.raises(ValueError, match="shared Device-DAX"):
+        check_shared_devdax_support(mp_config, parse(SPEC))
+
+
+def test_supported_server_modes() -> None:
+    check_shared_devdax_support(BASE_MP, parse(SPEC, DRAM))
+    # Without a shared L1 the server keeps every mode.
+    every_mode = replace(BASE_MP, supported_transfer_mode="auto", engine_type="blend")
+    check_shared_devdax_support(every_mode, parse(PRIVATE))
