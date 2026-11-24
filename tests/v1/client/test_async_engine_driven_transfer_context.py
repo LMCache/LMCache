@@ -47,7 +47,12 @@ class _FakeStoreContext:
         return self.prepare_result
 
     def commit_store(
-        self, _key: object, _instance_id: int, chunks: list[torch.Tensor]
+        self,
+        _key: object,
+        _instance_id: int,
+        chunks: list[torch.Tensor],
+        chunk_indices: list[int] | None = None,
+        num_chunks: int = 0,
     ) -> bool:
         return bool(self.commit_impl(chunks))
 

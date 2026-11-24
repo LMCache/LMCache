@@ -1181,7 +1181,9 @@ def test_store_multigroup_inline_leaves_out_all_null_chunks(monkeypatch) -> None
 
     monkeypatch.setattr(worker_transfer, "gather_paged_kv_to_cpu", _fake_gather)
     prepared: list[Any] = []
-    monkeypatch.setattr(pctx, "prepare_store", lambda k, i: prepared.append(k))
+    monkeypatch.setattr(
+        pctx, "prepare_store_multigroup", lambda k, i, s: prepared.append(k)
+    )
     committed: list[Any] = []
 
     def _commit(_k: Any, _i: int, chunks: Any) -> bool:
@@ -1209,6 +1211,46 @@ def test_store_multigroup_inline_leaves_out_all_null_chunks(monkeypatch) -> None
     )
     assert future.result(timeout=1) is True
     assert gathered == [] and committed == [] and prepared == []
+
+
+def test_store_multigroup_inline_sends_only_the_chunks_the_server_names(
+    monkeypatch,
+) -> None:
+    """The server names, per group, the chunks its store filter keeps; the
+    worker gathers and sends only those, and nothing when it names none."""
+    ctx, pctx, _ = _inline_worker_ctx(monkeypatch)
+    gathered: list[dict] = []
+
+    def _fake_gather(*_a: Any, **kwargs: Any):
+        gathered.append(kwargs)
+        return [f"chunk{c}" for c in kwargs["chunk_indices"]]
+
+    monkeypatch.setattr(worker_transfer, "gather_paged_kv_to_cpu", _fake_gather)
+    named: list[Any] = [([1, 0], [0, 1])]
+    monkeypatch.setattr(pctx, "prepare_store_multigroup", lambda k, i, s: named[0])
+    committed: list[Any] = []
+
+    def _commit(_k: Any, _i: int, chunks: Any) -> bool:
+        committed.append(chunks)
+        return True
+
+    monkeypatch.setattr(pctx, "commit_store", _commit)
+    kv = {name: torch.zeros(1) for name in ("layer_0", "layer_1", "layer_2")}
+    future = ctx.submit_store(
+        "req", MagicMock(), kv, [[1, 2, 3, 4], [5, 6]], MagicMock(), 2
+    )
+    assert future.result(timeout=1) is True
+    assert [g["chunk_indices"] for g in gathered] == [[1], [0]]
+    assert committed == [[([1], ["chunk1"]), ([0], ["chunk0"])]]
+
+    gathered.clear()
+    committed.clear()
+    named[0] = ([], [])
+    future = ctx.submit_store(
+        "req", MagicMock(), kv, [[1, 2, 3, 4], [5, 6]], MagicMock(), 2
+    )
+    assert future.result(timeout=1) is True
+    assert gathered == [] and committed == []
 
 
 def test_store_multigroup_shm_asks_server_to_skip_all_null_chunks(
@@ -1410,6 +1452,31 @@ def test_inline_strategy_writes_only_the_chunks_the_payload_names() -> None:
     )
     assert set(sm.objs) == set(_GROUP_KEYS[0]) | {_GROUP_KEYS[1][2]}
     assert torch.equal(sm.objs[_GROUP_KEYS[1][2]].tensor, torch.ones(_SHAPES[1]))
+
+
+def test_inline_strategy_prepare_store_names_the_chunks_to_write() -> None:
+    """Inline prepare reserves nothing; it names the chunks the store filter
+    keeps and never offers it a skipped chunk."""
+    sm = _FakeStorageManager(_SHAPES)
+    offered: list[ObjectKey] = []
+
+    def _select(keys: list[ObjectKey]) -> list[ObjectKey]:
+        offered.extend(keys)
+        return [key for key in keys if key != _GROUP_KEYS[0][1]]
+
+    sm.select_keys_to_write = _select  # type: ignore[method-assign]
+    response = InlineTransferStrategy(sm).prepare_store(  # type: ignore[arg-type]
+        key=_KEY,
+        instance_id=7,
+        context=_group_metadata(),
+        resolve_obj_keys=lambda _k: _GROUP_KEYS[0],
+        group_keys=_GROUP_KEYS,
+        skipped_chunks=((), (0, 1)),
+    )
+
+    assert offered == _GROUP_KEYS[0] + [_GROUP_KEYS[1][2]]
+    assert response.context == {"chunk_indices": [0, 2, 2], "group_ids": [0, 0, 1]}
+    assert sm.objs == {}
 
 
 def test_shm_strategy_reserves_no_slot_for_skipped_chunks() -> None:

@@ -2,7 +2,7 @@
 """Inline EngineDrivenContext implementation for multiprocess mode."""
 
 # Standard
-from typing import cast
+from typing import Any, cast
 import math
 
 # Third Party
@@ -56,12 +56,50 @@ def _page_count(pages: list[tuple[int, int]], i: int) -> int:
     return 0 if i == len(pages) - 1 else end - start
 
 
+def _run_pages(
+    positions: list[int], sizes: list[int], num_chunks: int
+) -> list[tuple[int, int, int, int]]:
+    """Cut the chunks at increasing ``positions`` into flat-envelope pages.
+
+    A flat envelope carries exactly the chunks of its range, so a page ends
+    where the positions skip a chunk, or where it would exceed
+    :data:`INLINE_PAGE_BYTES` (it holds one chunk at least).
+
+    Args:
+        positions: Increasing chunk positions within the key.
+        sizes: Tensor bytes of each chunk, parallel to ``positions``.
+        num_chunks: Chunk positions in the key.
+
+    Returns:
+        ``(lo, hi, start, count)`` per page: the page carries the chunks at
+        ``positions[lo:hi]`` and is sent as chunk ``start`` and ``count``.
+        The last page sends count ``0`` (through the last chunk); when the
+        last chunk is not sent, that page is empty and starts at
+        ``num_chunks``.
+    """
+    pages: list[tuple[int, int, int, int]] = []
+    lo = used = 0
+    for i, (pos, size) in enumerate(zip(positions, sizes, strict=True)):
+        if i > lo and (pos != positions[i - 1] + 1 or used + size > INLINE_PAGE_BYTES):
+            pages.append((lo, i, positions[lo], i - lo))
+            lo, used = i, 0
+        used += size
+    end = len(positions)
+    if positions and positions[-1] == num_chunks - 1:
+        pages.append((lo, end, positions[lo], 0))
+        return pages
+    if lo < end:
+        pages.append((lo, end, positions[lo], end - lo))
+    pages.append((end, end, num_chunks, 0))
+    return pages
+
+
 class EngineDrivenContextInline(EngineDrivenContext):
     """Safe inline implementation of :class:`EngineDrivenContext`.
 
     Transport mechanism:
-    - **Store**: ``prepare_store`` sends ``PREPARE_STORE`` (returns empty slots
-      for inline mode); ``commit_store`` serialises chunks and sends
+    - **Store**: ``prepare_store`` sends ``PREPARE_STORE``, which names the
+      chunks to send; ``commit_store`` serialises those chunks and sends
       ``COMMIT_STORE``.
     - **Retrieve**: ``prepare_retrieve`` sends ``PREPARE_RETRIEVE`` and
       deserialises the returned bytes; ``commit_retrieve`` sends
@@ -78,46 +116,81 @@ class EngineDrivenContextInline(EngineDrivenContext):
 
     def prepare_store(
         self, key: IPCCacheServerKey, instance_id: int
-    ) -> tuple[list[torch.Tensor], list[int]] | None:
-        """Send PREPARE_STORE RPC and return no pre-allocated buffers."""
-        future = self.req_client.prepare_store(key, instance_id)
-        try:
-            future.result(timeout=self.mq_timeout)
-        except TimeoutError:
-            pass
-        return None
+    ) -> tuple[list[torch.Tensor] | None, list[int]] | None:
+        """Send PREPARE_STORE and return the chunks the server names.
+
+        Returns:
+            ``(None, chunk_indices)``: no pre-allocated buffers, and the
+            chunk positions to send. ``None`` on a timeout, or when the
+            server names no chunks, as one that predates chunk selection
+            does: the caller then sends every chunk.
+        """
+        context = self._prepare_store_context(key, instance_id, ())
+        chunk_indices = context.get("chunk_indices") if context else None
+        if not isinstance(chunk_indices, list):
+            return None
+        return None, chunk_indices
+
+    def prepare_store_multigroup(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        skipped_chunks: tuple[tuple[int, ...], ...] = (),
+    ) -> tuple[list[int], list[int]] | None:
+        """Send a multi-group PREPARE_STORE; return the chunks the server names.
+
+        Named apart from the SHM ``prepare_store_grouped`` because inline
+        mode returns chunk positions, not buffers.
+
+        Args:
+            key: Cache key for the token range to store.
+            instance_id: Worker instance identifier.
+            skipped_chunks: Per group, chunk positions the worker will not
+                store (all-null engine blocks); the server never names them.
+
+        Returns:
+            Parallel ``(chunk_indices, group_ids)`` lists naming each chunk
+            to send. ``None`` on a timeout, or when the server names no
+            chunks: the caller then sends every chunk it stores.
+        """
+        context = self._prepare_store_context(key, instance_id, skipped_chunks)
+        chunk_indices = context.get("chunk_indices") if context else None
+        group_ids = context.get("group_ids") if context else None
+        if not isinstance(chunk_indices, list) or not isinstance(group_ids, list):
+            return None
+        return chunk_indices, group_ids
 
     def commit_store(
         self,
         key: IPCCacheServerKey,
         instance_id: int,
         chunks: "list[torch.Tensor] | list[tuple[list[int], list[torch.Tensor]]]",
+        chunk_indices: list[int] | None = None,
+        num_chunks: int = 0,
     ) -> bool:
         """Serialize chunks and send via COMMIT_STORE, one page at a time.
 
-        Single-group callers pass a flat chunk list, sent as a tensor
-        envelope. Multi-group callers pass, per group, ``(chunk_indices,
-        tensors)`` -- the chunks that group stores, which omit all-null
-        chunks -- sent as a grouped envelope that the server validates
-        against each group's registered layout. Pages are committed in order
-        and the first failed page stops the store; earlier pages stay stored.
+        Single-group callers pass a flat chunk list, sent as tensor
+        envelopes; ``chunk_indices`` and ``num_chunks`` place the chunks in
+        the key when the server named a subset of it (see
+        :func:`_run_pages`). Multi-group callers pass, per group,
+        ``(chunk_indices, tensors)`` -- the chunks that group stores, which
+        omit all-null chunks and the ones the server did not name -- sent as
+        a grouped envelope that the server validates against each group's
+        registered layout. Pages are committed in order and the first failed
+        page stops the store; earlier pages stay stored.
 
         Returns:
             ``True`` on success, ``False`` on failure or timeout.
         """
-        grouped = bool(chunks) and isinstance(chunks[0], tuple)
-        groups = cast("list[tuple[list[int], list[torch.Tensor]]]", chunks)
-        flat = cast("list[torch.Tensor]", chunks)
-        if grouped:
+        if chunks and isinstance(chunks[0], tuple):
+            groups = cast("list[tuple[list[int], list[torch.Tensor]]]", chunks)
             sizes = [0] * (1 + max((ix[-1] for ix, _ in groups if ix), default=-1))
             for indices, tensors in groups:
                 for idx, tensor in zip(indices, tensors, strict=True):
                     sizes[idx] += tensor.nbytes
-        else:
-            sizes = [tensor.nbytes for tensor in flat]
-        pages = _pages(sizes)
-        for i, (start, end) in enumerate(pages):
-            if grouped:
+            pages = _pages(sizes)
+            for i, (start, end) in enumerate(pages):
                 payload = encode_grouped_tensors(
                     [
                         (
@@ -131,15 +204,20 @@ class EngineDrivenContextInline(EngineDrivenContext):
                         for indices, tensors in groups
                     ]
                 )
-            else:
-                payload = encode_tensors(flat[start:end])
-            future = self.req_client.commit_store(
-                key, instance_id, payload, start, _page_count(pages, i)
-            )
-            try:
-                if not future.result(timeout=self.mq_timeout):
+                if not self._commit_page(
+                    key, instance_id, payload, start, _page_count(pages, i)
+                ):
                     return False
-            except TimeoutError:
+            return True
+        flat = cast("list[torch.Tensor]", chunks)
+        if chunk_indices is None:
+            chunk_indices, num_chunks = list(range(len(flat))), len(flat)
+        for lo, hi, start, count in _run_pages(
+            chunk_indices, [tensor.nbytes for tensor in flat], num_chunks
+        ):
+            if not self._commit_page(
+                key, instance_id, encode_tensors(flat[lo:hi]), start, count
+            ):
                 return False
         return True
 
@@ -250,3 +328,36 @@ class EngineDrivenContextInline(EngineDrivenContext):
 
     def close(self) -> None:
         """No-op: the inline path holds no persistent resources."""
+
+    def _prepare_store_context(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        skipped_chunks: tuple[tuple[int, ...], ...],
+    ) -> dict[str, Any] | None:
+        """Send PREPARE_STORE; return the response context, None on timeout."""
+        future = (
+            self.req_client.prepare_store(key, instance_id, skipped_chunks)
+            if skipped_chunks
+            else self.req_client.prepare_store(key, instance_id)
+        )
+        try:
+            response = future.result(timeout=self.mq_timeout)
+        except TimeoutError:
+            return None
+        return response.context if isinstance(response.context, dict) else None
+
+    def _commit_page(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        payload: bytes,
+        start: int,
+        count: int,
+    ) -> bool:
+        """Send one COMMIT_STORE page; return whether the server stored it."""
+        future = self.req_client.commit_store(key, instance_id, payload, start, count)
+        try:
+            return bool(future.result(timeout=self.mq_timeout))
+        except TimeoutError:
+            return False

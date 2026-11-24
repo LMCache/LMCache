@@ -1190,9 +1190,10 @@ class EngineDrivenTransferContext(TransferContext):
                 if chunk_indices is not None and len(chunk_indices) == 0:
                     future.set_result(True)
                     return future
+                full_block_ids = _single_group_block_ids(block_ids)
                 cpu_chunks = gather_paged_kv_to_cpu(
                     kv_caches,
-                    _single_group_block_ids(block_ids),
+                    full_block_ids,
                     blocks_in_chunk,
                     layout_hints=self._layout_hints,
                     engine_kv_format=self._engine_kv_format,
@@ -1207,7 +1208,13 @@ class EngineDrivenTransferContext(TransferContext):
                 # unconditional -- guarding it on out_buffers left the inline
                 # path serializing a buffer still being written.
                 synchronize_device(device)
-                ok = ctx.commit_store(key, self._instance_id, cpu_chunks)
+                ok = ctx.commit_store(
+                    key,
+                    self._instance_id,
+                    cpu_chunks,
+                    chunk_indices=chunk_indices,
+                    num_chunks=len(full_block_ids) // blocks_in_chunk,
+                )
         except ContextClosedError:
             # Context is being swapped/shut down; the store is simply lost
             # (same contract as a store against an unhealthy server).
@@ -1361,11 +1368,13 @@ class EngineDrivenTransferContext(TransferContext):
     ) -> "list[_GroupStorePlan] | None":
         """Decide what each group stores and where it gathers to.
 
-        All-null chunks are left out on both transports. Over SHM the server
-        reserves slots for the rest (and none for skipped chunks) and they are
-        the gather targets. Inline has no slots: ``alloc``, when given,
-        provides each group's gather targets (the async path's pinned
-        staging), otherwise gather allocates fresh CPU tensors.
+        All-null chunks are left out on both transports, and so are the
+        chunks the server's store filter drops. Over SHM the server reserves
+        slots for the rest (and none for skipped chunks) and they are the
+        gather targets. Inline has no slots: the server names the chunks to
+        send, and ``alloc``, when given, provides each group's gather
+        targets (the async path's pinned staging), otherwise gather
+        allocates fresh CPU tensors.
 
         Returns:
             One plan per group with chunks to store (an empty list when
@@ -1391,11 +1400,33 @@ class EngineDrivenTransferContext(TransferContext):
                     plans.append(_GroupStorePlan(gid, chunks_g, out_g))
             return plans
 
-        plans = []
+        stored: list[list[int]] = []
         for gid, state in enumerate(self._group_states):
             skip = set(skipped[gid])
             num_chunks = len(block_ids[gid]) // state.blocks_in_chunk
-            indices = [c for c in range(num_chunks) if c not in skip]
+            stored.append([c for c in range(num_chunks) if c not in skip])
+        if not any(stored):
+            return []
+        named = ctx.prepare_store_multigroup(
+            key,
+            self._instance_id,
+            tuple(tuple(g) for g in skipped) if any(skipped) else (),
+        )
+        if named is not None:
+            # The server named the chunks to send; it reserves nothing yet.
+            sent: list[set[int]] = [set() for _ in stored]
+            for c, gid in zip(*named, strict=True):
+                sent[gid].add(c)
+            stored = [
+                [c for c in g_stored if c in g_sent]
+                for g_stored, g_sent in zip(stored, sent, strict=True)
+            ]
+            if not any(stored):
+                return []
+        plans = []
+        for gid, (state, indices) in enumerate(
+            zip(self._group_states, stored, strict=True)
+        ):
             out = (
                 alloc(
                     state.layout_desc.shapes[0],
@@ -1406,10 +1437,6 @@ class EngineDrivenTransferContext(TransferContext):
                 else None
             )
             plans.append(_GroupStorePlan(gid, indices, out))
-        if not any(plan.chunk_indices for plan in plans):
-            return []
-        # Handshake only: the inline strategy reserves nothing at prepare.
-        ctx.prepare_store(key, self._instance_id)
         return plans
 
     def _gather_multigroup(
