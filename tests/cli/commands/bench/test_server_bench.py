@@ -418,7 +418,7 @@ class TestCommandArguments:
         parser: argparse.ArgumentParser,
     ) -> None:
         args = parser.parse_args(["bench", "server"])
-        assert args.rpc_url == "tcp://localhost:5555"
+        assert args.rpc_url == "grpc://localhost:5555"
         assert args.mode == "gpu"
         assert args.num_tokens == 512
         assert args.num_blocks == 1024

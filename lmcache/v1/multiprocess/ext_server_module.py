@@ -372,6 +372,17 @@ def register_grpc_services(
     Raises:
         TypeError: If a module exposes a non-callable registrar attribute.
     """
+    for module in modules:
+        if not hasattr(module, _GRPC_SERVICE_REGISTRAR) and hasattr(
+            module, _ZMQ_SERVICE_REGISTRAR
+        ):
+            logger.warning(
+                "%s implements %s but not %s, so its services are not "
+                "available on this gRPC server.",
+                type(module).__name__,
+                _ZMQ_SERVICE_REGISTRAR,
+                _GRPC_SERVICE_REGISTRAR,
+            )
     _register_transport_services(modules, server, _GRPC_SERVICE_REGISTRAR)
 
 

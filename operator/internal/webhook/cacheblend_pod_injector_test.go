@@ -41,7 +41,7 @@ const (
 	testEngineName = "cb"
 	testNamespace  = "vllm-ns"
 	testPodName    = "vllm-pod"
-	testSvcHost    = "tcp://cb.vllm-ns.svc.cluster.local"
+	testSvcHost    = "grpc://cb.vllm-ns.svc.cluster.local"
 )
 
 // newTestScheme returns a scheme with clientgo + the lmcache v1alpha1 types.
@@ -262,7 +262,7 @@ var _ = Describe("CacheBlendPodInjector", func() {
 			Expect(argsHasFlag(c.Args, cbFlagEnforceEager)).To(BeTrue(),
 				"default cudagraph eager -> --enforce-eager")
 
-			By("M5: --kv-transfer-config carries CBKVConnector + tcp:// host")
+			By("M5: --kv-transfer-config carries CBKVConnector + grpc:// host")
 			kv := argsFlagValue(c.Args, cbFlagKVTransferConfig)
 			Expect(kv).NotTo(BeEmpty())
 			Expect(kv).To(ContainSubstring("CBKVConnector"))

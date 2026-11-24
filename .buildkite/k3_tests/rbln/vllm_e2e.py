@@ -188,14 +188,14 @@ def main() -> None:
         "--supported-transfer-mode",
         "engine_driven",
         "--transport",
-        "zmq",
+        "grpc",
     ]
     kv_transfer_config = {
         "kv_connector": "LMCacheMPConnector",
         "kv_role": "kv_both",
         "kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector",
         "kv_connector_extra_config": {
-            "lmcache.mp.host": "tcp://127.0.0.1",
+            "lmcache.mp.host": "grpc://127.0.0.1",
             "lmcache.mp.port": LMCACHE_PORT,
         },
     }
