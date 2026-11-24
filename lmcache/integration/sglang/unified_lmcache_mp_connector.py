@@ -225,7 +225,7 @@ class UnifiedLMCacheMPConnector:
             )
         host = str(config.mp_host)
         if "://" not in host:
-            host = f"tcp://{host}"
+            host = f"grpc://{host}"
         self.server_url = f"{host.rstrip(':')}:{config.mp_port}"
         self._mq_timeout = float(
             config.get_extra_config_value(
@@ -295,6 +295,7 @@ class UnifiedLMCacheMPConnector:
         self._control_futures: list[Any] = []
         self._heartbeat: Optional[HeartbeatThread] = None
         self._heartbeat_lock = threading.Lock()
+        self._needs_store_progress_reset = False
 
         self.chunk_size = self._get_chunk_size()
         if self.chunk_size <= 0 or any(
@@ -442,7 +443,10 @@ class UnifiedLMCacheMPConnector:
     def ready_prefix_count(
         self, operations: Sequence[LMCacheLoadOperation | LMCacheStoreOperation]
     ) -> int:
-        """Return the cross-rank count of ready leading operations."""
+        """Return the cross-rank count of ready leading operations.
+
+        Synchronize store progress resets across TP/PP ranks.
+        """
         count = 0
         for operation in operations:
             try:
@@ -456,9 +460,16 @@ class UnifiedLMCacheMPConnector:
             if not ready:
                 break
             count += 1
-        tensor = torch.tensor([count], dtype=torch.int64, device="cpu")
+        with self._heartbeat_lock:
+            keep_store_progress = not self._needs_store_progress_reset
+            self._needs_store_progress_reset = False
+        tensor = torch.tensor(
+            [count, int(keep_store_progress)], dtype=torch.int64, device="cpu"
+        )
         self._parallel_all_reduce(tensor, dist.ReduceOp.MIN)
-        return int(tensor.item())
+        if not tensor[1].item():
+            self._store_submitted_tokens.clear()
+        return int(tensor[0].item())
 
     def _sync_leader_int(self, value: int) -> int:
         tensor = torch.tensor([value], dtype=torch.int64, device="cpu")
@@ -579,7 +590,7 @@ class UnifiedLMCacheMPConnector:
             heartbeat.start()
 
     def _reregister_kv_cache_after_recovery(self) -> bool:
-        """Re-register KV tensors before publishing a recovered server."""
+        """Re-register KV tensors and request a store progress reset."""
         heartbeat = self._heartbeat
         if (
             self._closed
@@ -598,7 +609,9 @@ class UnifiedLMCacheMPConnector:
         if not registered:
             return False
         # A restarted server has no record of the previously stored prefixes.
-        self._store_submitted_tokens.clear()
+        # Reset store progress together to keep collective calls aligned.
+        with self._heartbeat_lock:
+            self._needs_store_progress_reset = True
         logger.warning("Re-registered SGLang KV tensors after LMCache recovery")
         return True
 

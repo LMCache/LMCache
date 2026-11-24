@@ -19,7 +19,7 @@ import math
 import torch
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.torch_ops._tensor_from_ptr import _get_copy_lib
 

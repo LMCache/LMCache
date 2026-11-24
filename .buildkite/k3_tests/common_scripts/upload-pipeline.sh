@@ -24,6 +24,15 @@ source "${SCRIPT_DIR}/helpers.sh"
 # shellcheck source=.buildkite/k3_tests/common_scripts/path-filter.sh
 source "${SCRIPT_DIR}/path-filter.sh"
 
+# weekly_full_build.yml pushes the tested commit to this CI-owned branch and
+# then creates the real weekly builds through the API with CI_WEEKLY_FULL=1.
+# The push itself can also start ordinary branch builds; end those green here
+# instead of spending GPUs on a duplicate, unchecked run.
+if [[ "${BUILDKITE_BRANCH:-}" == "ci-weekly-full" && "${CI_WEEKLY_FULL:-0}" != "1" ]]; then
+    echo "+++ :fast_forward: Push build on ci-weekly-full; the weekly full build runs separately"
+    exit 0
+fi
+
 case "${PIPELINE_FILE}" in
     *k3_tests/multiprocess/pipeline.yml|*k3_tests/multiprocess/smoke-pipeline.yml)
         expensive_pipeline_name="multiprocess"

@@ -13,21 +13,16 @@ import msgspec
 import zmq
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.security.api_key import APIKeyVerifier
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.security.api_key import APIKeyVerifier
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
-from lmcache.v1.multiprocess.custom_types import (
-    get_customized_decoder,
-    get_customized_encoder,
-)
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.platform import create_event_notifier
-from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.transport.errors import InvalidRequestError
 from lmcache.v1.transport.futures import MessagingStream
-from lmcache.v1.transport.qstore import QRingInfo
 from lmcache.v1.transport.rpc import RpcOperation, RpcSpec, get_rpc_spec
+from lmcache.v1.transport.zmq.codec import msgspec_decode, msgspec_encode
 from lmcache.v1.transport.zmq.wire import (
     AUTH_ERROR_FRAME,
     ZMQ_ERROR_OPERATION,
@@ -46,7 +41,7 @@ def unwrap_request_payloads(
     b_payloads: list[bytes], payload_clss: list[Any]
 ) -> list[Any]:
     if len(b_payloads) != len(payload_clss):
-        raise ValueError("Payload count does not match expected count")
+        raise InvalidRequestError("Payload count does not match expected count")
 
     decoded_payloads = [
         msgspec_decode(payload, cls=cls)
@@ -55,54 +50,34 @@ def unwrap_request_payloads(
     return decoded_payloads
 
 
-_SPECIAL_ENCODER_DECODERS = {
-    DeviceIPCWrapper: (
-        get_customized_encoder(DeviceIPCWrapper),
-        get_customized_decoder(DeviceIPCWrapper),
-    ),
-    list[DeviceIPCWrapper]: (
-        get_customized_encoder(list[DeviceIPCWrapper]),
-        get_customized_decoder(list[DeviceIPCWrapper]),
-    ),
-    list[QRingInfo]: (
-        get_customized_encoder(list[QRingInfo]),
-        get_customized_decoder(list[QRingInfo]),
-    ),
-    MemoryLayoutDesc: (
-        get_customized_encoder(MemoryLayoutDesc),
-        get_customized_decoder(MemoryLayoutDesc),
-    ),
-    dict[int, MemoryLayoutDesc]: (
-        get_customized_encoder(dict[int, MemoryLayoutDesc]),
-        get_customized_decoder(dict[int, MemoryLayoutDesc]),
-    ),
-}
+def _error_response_frames(
+    identity: bytes, request_uid: bytes, operation: RpcOperation, error: Exception
+) -> list[bytes]:
+    """Build the shared reply for blocking failures and explicit rejections.
 
+    Args:
+        identity: ROUTER identity of the requesting client.
+        request_uid: Encoded UID that correlates the reply with its request.
+        operation: Original RPC operation to report in the error payload.
+        error: Handler or payload validation failure.
 
-def msgspec_encode(obj: Any, cls: Any) -> bytes:
-    # Handle special cases
-    if cls in _SPECIAL_ENCODER_DECODERS:
-        encoder, _ = _SPECIAL_ENCODER_DECODERS[cls]
-        return encoder.encode(obj)
-    # Defensive guard: coerce obj to the declared cls so that
-    # e.g. a bool passed as int (or vice-versa) is encoded in the
-    # wire format that msgspec_decode expects for that cls.
-    if cls in (bool, int):
-        obj = cls(obj)
-    return msgspec.msgpack.encode(obj)
-
-
-def msgspec_decode(b_obj: bytes, cls: Any) -> Any:
-    # Handle special cases
-    if cls in _SPECIAL_ENCODER_DECODERS:
-        _, decoder = _SPECIAL_ENCODER_DECODERS[cls]
-        return decoder.decode(b_obj)
-    # Defensive guard: msgspec strict-validates wire format
-    # (bool ≠ int in msgpack), but runtime type may not match
-    # declared cls. Decode untyped, then coerce.
-    if cls in (bool, int):
-        return cls(msgspec.msgpack.decode(b_obj))
-    return msgspec.msgpack.decode(b_obj, type=cls)
+    Returns:
+        The routing prefix and an error envelope using the existing ZMQ codes.
+    """
+    return [
+        identity,
+        request_uid,
+        encode_operation(ZMQ_ERROR_OPERATION),
+        encode_error_response(
+            ZmqErrorResponse(
+                code="invalid_argument"
+                if isinstance(error, ValueError)
+                else "handler_error",
+                operation=operation,
+                message=str(error),
+            )
+        ),
+    ]
 
 
 ResponseType = TypeVar("ResponseType", covariant=True)
@@ -318,10 +293,10 @@ class MessageQueueServer(RequestServer):
         Args:
             handler_entry (BlockingRequestHandler[Any]): The handler entry.
             payloads (list[bytes]): The payloads of the request.
-            prefix_frames (list[bytes]): The prefix frames to send back.
-                prefix_frames[0] is the zmq identity used as affinity key.
+            prefix_frames (list[bytes]): Client identity, request UID and operation.
         """
-        affinity_key = hash(prefix_frames[0])
+        identity, request_uid, b_operation = prefix_frames
+        affinity_key = hash(identity)
         future = handler_entry(payloads, affinity_key=affinity_key)
 
         def _notify_response(fut: Future):
@@ -339,25 +314,10 @@ class MessageQueueServer(RequestServer):
                 self._output_efd.notify()
 
             except Exception as exc:
-                operation = decode_operation(prefix_frames[2])
+                operation = decode_operation(b_operation)
                 logger.exception("Error in blocking handler %s", operation)
-                error_code = (
-                    "invalid_argument"
-                    if isinstance(exc, ValueError)
-                    else "handler_error"
-                )
                 self.output_queue.put(
-                    prefix_frames[:2]
-                    + [
-                        encode_operation(ZMQ_ERROR_OPERATION),
-                        encode_error_response(
-                            ZmqErrorResponse(
-                                code=error_code,
-                                operation=operation,
-                                message=str(exc),
-                            )
-                        ),
-                    ]
+                    _error_response_frames(identity, request_uid, operation, exc)
                 )
                 self._output_efd.notify()
 
@@ -418,6 +378,11 @@ class MessageQueueServer(RequestServer):
                     handler_entry=handler_entry,
                     payloads=payloads,
                     prefix_frames=[identity, b_request_uid, b_operation],
+                )
+            except InvalidRequestError as exc:
+                logger.exception("Rejected operation %s", operation)
+                self.socket.send_multipart(
+                    _error_response_frames(identity, b_request_uid, operation, exc)
                 )
             except Exception:
                 logger.exception("Error handling operation %s", operation)

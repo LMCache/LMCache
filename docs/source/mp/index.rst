@@ -53,8 +53,8 @@ LMCache ships two server entry points:
    * - Entry Point
      - Description
    * - ``lmcache server``
-     - **Recommended.** Configurable request transport (ZMQ by default, or
-       gRPC) + FastAPI HTTP frontend — see :doc:`http_api`.
+     - **Recommended.** Configurable request transport (gRPC by default, or
+       the deprecated ZMQ) + FastAPI HTTP frontend; see :doc:`http_api`.
    * - ``python3 -m lmcache.v1.multiprocess.server``
      - (Legacy) Request server with no HTTP endpoints; same
        ``--engine-type`` / ``--supported-transfer-mode`` flags as
@@ -200,13 +200,14 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
      - BLOCKING
      - (Engine-driven path) Worker commits the chunk's serialized bytes
        (typed inline path) or releases the prepared SHM slot (SHM path) so the
-       server can persist into L1 storage.
+       server can persist into L1 storage. Inline transfers over 128 MiB are
+       committed in pages of chunks.
    * - ``PREPARE_RETRIEVE``
      - BLOCKING
      - (Engine-driven path) Worker asks the server to prepare the
        retrieval payload for a key. The typed inline path returns the bytes
-       inline; the SHM path returns slot info so the worker can read
-       from shared memory.
+       inline, in pages of chunks for transfers over 128 MiB; the SHM path
+       returns slot info so the worker can read from shared memory.
    * - ``COMMIT_RETRIEVE``
      - BLOCKING
      - (Engine-driven path) Worker acknowledges retrieval completion so
@@ -580,8 +581,10 @@ Key Source Files
      - Transport-neutral ``EngineModule`` protocol
    * - ``lmcache/v1/transport/rpc.py``
      - RPC discovery and typed operation specifications
+   * - ``lmcache/v1/transport/request_client.py``
+     - Typed ``RequestClient`` contract
    * - ``lmcache/v1/multiprocess/transport/base.py``
-     - Typed ``RequestClient`` and ``RequestServer`` contracts
+     - ``RequestServer`` interface
    * - ``lmcache/v1/multiprocess/transport/server_factory.py``
      - Transport-neutral request-server construction boundary
    * - ``lmcache/v1/multiprocess/transport/zmq_impl/server.py``

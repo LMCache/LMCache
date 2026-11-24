@@ -76,9 +76,12 @@ class FakeMessageQueueClient:
     instances: list["FakeMessageQueueClient"] = []
     future = FakeFuture(True)
 
-    def __init__(self, server_url: str, context: object) -> None:
+    def __init__(
+        self, server_url: str, context: object, api_key: str | None = None
+    ) -> None:
         self.server_url = server_url
         self.context = context
+        self.api_key = api_key
         self.closed = False
         self.requests: list[int | None] = []
         self.instances.append(self)
@@ -97,9 +100,11 @@ class FakeRequestClientFactory:
     """Factory double matching the public method-oriented client interface."""
 
     @staticmethod
-    def create(server_url: str, *, context: object) -> FakeMessageQueueClient:
-        """Return a recording client for the requested endpoint and context."""
-        return FakeMessageQueueClient(server_url, context)
+    def create(
+        server_url: str, *, context: object, api_key: str | None = None
+    ) -> FakeMessageQueueClient:
+        """Return a recording client for the endpoint, context and credential."""
+        return FakeMessageQueueClient(server_url, context, api_key)
 
 
 def fake_module(name: str, attrs: dict[str, object]) -> ModuleType:
@@ -235,7 +240,9 @@ def test_grpc_url_starts_a_grpc_server(monkeypatch) -> None:
         def __init__(self, config: MPServerAutostartConfig) -> None:
             configs.append(config)
 
-        def start(self, server_url: str, zmq_context: object) -> None:
+        def start(
+            self, server_url: str, zmq_context: object, api_key: str | None = None
+        ) -> None:
             return None
 
     monkeypatch.setattr(launcher_mod, "MPServerLauncher", FakeLauncher)
@@ -455,12 +462,16 @@ def test_maybe_start_mp_server_from_url_starts_when_enabled(monkeypatch) -> None
             self.zmq_context: object | None = None
             instances.append(self)
 
-        def start(self, server_url: str, zmq_context: object) -> None:
+        def start(
+            self, server_url: str, zmq_context: object, api_key: str | None = None
+        ) -> None:
             self.started = True
             self.server_url = server_url
             self.zmq_context = zmq_context
 
-        def wait_until_healthy(self, server_url: str, zmq_context: object) -> None:
+        def wait_until_healthy(
+            self, server_url: str, zmq_context: object, api_key: str | None = None
+        ) -> None:
             self.waited = True
             self.server_url = server_url
             self.zmq_context = zmq_context
@@ -494,10 +505,14 @@ def test_wait_for_mp_server_from_url_waits_when_enabled(monkeypatch) -> None:
             self.waited = False
             instances.append(self)
 
-        def start(self, _server_url: str, _zmq_context: object) -> None:
+        def start(
+            self, _server_url: str, _zmq_context: object, api_key: str | None = None
+        ) -> None:
             self.started = True
 
-        def wait_until_healthy(self, server_url: str, zmq_context: object) -> None:
+        def wait_until_healthy(
+            self, server_url: str, zmq_context: object, api_key: str | None = None
+        ) -> None:
             self.waited = True
             self.server_url = server_url
             self.zmq_context = zmq_context
@@ -544,12 +559,16 @@ def test_maybe_start_mp_server_from_url_parses_local_server_url(monkeypatch) -> 
             self.config = config
             instances.append(self)
 
-        def start(self, server_url: str, zmq_context: object) -> None:
+        def start(
+            self, server_url: str, zmq_context: object, api_key: str | None = None
+        ) -> None:
             self.server_url = server_url
             self.zmq_context = zmq_context
             return None
 
-        def wait_until_healthy(self, server_url: str, zmq_context: object) -> None:
+        def wait_until_healthy(
+            self, server_url: str, zmq_context: object, api_key: str | None = None
+        ) -> None:
             self.server_url = server_url
             self.zmq_context = zmq_context
             return None
@@ -578,12 +597,16 @@ def test_maybe_start_mp_server_from_url_prefers_resolved_endpoint(
             self.config = config
             instances.append(self)
 
-        def start(self, server_url: str, zmq_context: object) -> None:
+        def start(
+            self, server_url: str, zmq_context: object, api_key: str | None = None
+        ) -> None:
             self.server_url = server_url
             self.zmq_context = zmq_context
             return None
 
-        def wait_until_healthy(self, server_url: str, zmq_context: object) -> None:
+        def wait_until_healthy(
+            self, server_url: str, zmq_context: object, api_key: str | None = None
+        ) -> None:
             self.server_url = server_url
             self.zmq_context = zmq_context
             return None
@@ -621,7 +644,7 @@ def test_launcher_skips_start_when_server_already_healthy(monkeypatch) -> None:
     monkeypatch.setattr(
         launcher_mod,
         "is_mp_server_healthy",
-        lambda server_url, zmq_context: True,
+        lambda server_url, zmq_context, **_: True,
     )
     monkeypatch.setattr(launcher_mod.subprocess, "Popen", popen_mock)
     config = MPServerAutostartConfig.from_extra_config(
@@ -642,13 +665,14 @@ def test_launcher_starts_command_and_waits_until_healthy(monkeypatch) -> None:
     monkeypatch.setattr(
         launcher_mod,
         "is_mp_server_healthy",
-        lambda server_url, zmq_context: next(health_results),
+        lambda server_url, zmq_context, **_: next(health_results),
     )
     monkeypatch.setattr(launcher_mod.subprocess, "Popen", popen_mock)
     config = MPServerAutostartConfig.from_extra_config(
         extra_config={"lmcache.mp.autostart": True},
         server_host="tcp://localhost",
         server_port=5555,
+        transport="zmq",
     )
 
     MPServerLauncher(config).start("tcp://localhost:5555", MagicMock())
@@ -667,6 +691,8 @@ def test_launcher_starts_command_and_waits_until_healthy(monkeypatch) -> None:
         "5555",
         "--http-host",
         "localhost",
+        "--transport",
+        "zmq",
     ]
 
 
@@ -677,7 +703,7 @@ def test_launcher_timeout_terminates_process(monkeypatch) -> None:
     monkeypatch.setattr(
         launcher_mod,
         "is_mp_server_healthy",
-        lambda server_url, zmq_context: False,
+        lambda server_url, zmq_context, **_: False,
     )
     monkeypatch.setattr(launcher_mod.subprocess, "Popen", popen_mock)
     monkeypatch.setattr(launcher_mod.time, "monotonic", lambda: next(monotonic_values))
@@ -704,7 +730,7 @@ def test_launcher_early_exit_raises_connection_error(monkeypatch) -> None:
     monkeypatch.setattr(
         launcher_mod,
         "is_mp_server_healthy",
-        lambda server_url, zmq_context: False,
+        lambda server_url, zmq_context, **_: False,
     )
     monkeypatch.setattr(launcher_mod.subprocess, "Popen", popen_mock)
     monkeypatch.setattr(launcher_mod.time, "monotonic", lambda: 0.0)
@@ -738,6 +764,27 @@ def test_health_probe_sends_zmq_ping_and_closes_client(monkeypatch) -> None:
     assert FakeMessageQueueClient.future.timeout == 0.25
 
 
+def test_health_probe_presents_the_configured_api_key(monkeypatch) -> None:
+    """A server that requires auth must accept the probe's credential.
+
+    Without the key the readiness PING is rejected and auto-start times out,
+    which is the failure this covers: the key arrives through
+    ``lmcache.mp.api_key_file`` and never through the environment.
+    """
+    FakeMessageQueueClient.instances = []
+    FakeMessageQueueClient.future = FakeFuture(True)
+    patch_mp_health_modules(monkeypatch)
+
+    assert launcher_mod.is_mp_server_healthy(
+        "tcp://localhost:5555",
+        MagicMock(),
+        timeout=0.25,
+        api_key="server-side-key",
+    )
+
+    assert FakeMessageQueueClient.instances[0].api_key == "server-side-key"
+
+
 def test_health_probe_returns_false_on_zmq_ping_timeout(monkeypatch) -> None:
     FakeMessageQueueClient.instances = []
     FakeMessageQueueClient.future = FakeFuture(error=TimeoutError())
@@ -769,7 +816,7 @@ def test_shutdown_kills_process_after_terminate_timeout(monkeypatch) -> None:
     monkeypatch.setattr(
         launcher_mod,
         "is_mp_server_healthy",
-        lambda server_url, zmq_context: next(health_results),
+        lambda server_url, zmq_context, **_: next(health_results),
     )
     process = StubbornProcess()
     monkeypatch.setattr(

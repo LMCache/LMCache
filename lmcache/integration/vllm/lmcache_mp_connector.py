@@ -58,7 +58,6 @@ import torch
 import zmq
 
 # First Party
-from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.experimental import dispatch
 from lmcache.integration.vllm.kv_cache_group_edits import (
     apply_kv_cache_group_edits,
@@ -94,6 +93,7 @@ from lmcache.integration.vllm.utils import (
 from lmcache.utils import CacheRemoveEvent
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.client.worker_transfer import LMCacheDrivenTransferContext
+from lmcache.v1.common.banner import print_banner_once
 
 try:
     # First Party
@@ -574,17 +574,17 @@ def _ensure_transport_scheme(server_url: str) -> str:
     """Ensure a multiprocess server URL carries a transport scheme.
 
     Preserve explicit schemes so the request client factory can select the
-    transport. Bare endpoints retain the legacy ZMQ TCP behavior.
+    transport. Bare endpoints default to gRPC.
 
     Args:
         server_url: A server URL, with or without a ``<scheme>://`` prefix.
 
     Returns:
-        The URL with a transport scheme, defaulting to ``tcp://``.
+        The URL with a transport scheme, defaulting to ``grpc://``.
     """
     if "://" in server_url:
         return server_url
-    return f"tcp://{server_url}"
+    return f"grpc://{server_url}"
 
 
 class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
@@ -595,13 +595,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     Multi-server deployment:
     - lmcache.mp.server_urls: server URL list or comma-separated string,
-      e.g. "tcp://host1:6667,tcp://host2:6667".
+      e.g. "grpc://host1:6667,grpc://host2:6667".
 
     Single-server deployment:
     - lmcache.mp.host: the host of the LMCache server, e.g. "127.0.0.1" or
-      "tcp://127.0.0.1" (default "tcp://localhost"). The final URL is
-      "{host}:{port}". If no transport scheme is provided, "tcp://" is
-      automatically prepended.
+      "grpc://127.0.0.1" (default "grpc://localhost"). The final URL is
+      "{host}:{port}". If no transport scheme is provided, "grpc://" is
+      automatically prepended. "tcp://" selects the deprecated ZMQ transport.
     - lmcache.mp.port: the port of the LMCache server.
 
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
@@ -738,15 +738,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             # Legacy single-server fallback.
             server_host = vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.host", "tcp://localhost"
+                "lmcache.mp.host", "grpc://localhost"
             )
             server_port = vllm_config.kv_transfer_config.get_from_extra_config(
                 "lmcache.mp.port", 5555
             )
             server_urls = [f"{server_host}:{server_port}"]
 
-        # Preserve explicit transport schemes and default bare host:port
-        # endpoints to the legacy ZMQ TCP transport.
         server_urls = [_ensure_transport_scheme(u) for u in server_urls]
 
         # The server count is derived from lmcache.mp.server_urls.
@@ -2099,7 +2097,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 RequestAllocationRecord(
                     req_id=new_request.req_id,
                     new_block_ids=list(primary_block_ids),
-                    new_token_ids=tracker.get_token_ids_slice(0, total_tokens),
+                    new_token_ids=tracker.get_token_ids(0, total_tokens),
                 )
             )
 
@@ -2124,7 +2122,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tokens_per_block = self._group_tokens_per_block[0]
             start_token = (total_blocks - num_new_blocks) * tokens_per_block
             end_token = total_blocks * tokens_per_block
-            new_token_ids = tracker.get_token_ids_slice(start_token, end_token)
+            new_token_ids = tracker.get_token_ids(start_token, end_token)
             records.append(
                 RequestAllocationRecord(
                     req_id=request_id,

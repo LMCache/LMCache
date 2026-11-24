@@ -16,15 +16,15 @@ import msgspec
 import zmq
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
-from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
+from lmcache.v1.transport.rpc import RpcOperation, RpcSpec, get_rpc_spec
+from lmcache.v1.transport.zmq.codec import (
     msgspec_decode,
     msgspec_encode,
 )
-from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
-from lmcache.v1.transport.rpc import RpcOperation, RpcSpec, get_rpc_spec
 from lmcache.v1.transport.zmq.wire import (
     ZMQ_ERROR_OPERATION,
     decode_error_response,
@@ -266,7 +266,7 @@ class MessageQueueClient:
                     b_operation = encode_operation(rpc_spec.operation)
                     payload_classes = rpc_spec.payload_types
                     if len(payload_classes) != len(wrapped_request.request_payloads):
-                        expected_classes = [cls.__name__ for cls in payload_classes]
+                        expected_classes = [str(cls) for cls in payload_classes]
                         actual_classes = [
                             type(payload).__name__
                             for payload in wrapped_request.request_payloads
@@ -498,8 +498,7 @@ class MessageQueueClient:
                 host, port = self._peer
                 self._wrong_transport = (
                     f"The server at {self._server_url} speaks gRPC, not ZMQ. Use "
-                    f"grpc://{host}:{port}, or start the server with "
-                    "--transport zmq."
+                    f"grpc://{host}:{port}; the zmq transport is deprecated."
                 )
                 logger.error("%s", self._wrong_transport)
             self.cancel_streams(release)
