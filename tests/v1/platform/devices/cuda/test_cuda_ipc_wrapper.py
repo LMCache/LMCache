@@ -26,6 +26,7 @@ from lmcache.v1.platform.devices.cuda.ipc_wrapper import (
     CudaIPCWrapper,
     RawCudaIPCWrapper,
 )
+from lmcache.v1.platform.devices.cuda.utils import _cuda
 from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
 from lmcache.v1.platform.kv_wrap import kv_wrapper_fds_delivered
 
@@ -108,6 +109,42 @@ def test_raw_wrapper_records_interior_offset() -> None:
         interior_wrapper._alloc_offset - base_wrapper._alloc_offset  # noqa: SLF001
     )
     assert offset_delta == 4096 * base.element_size()
+
+
+def test_raw_wrapper_supports_cumemalloc() -> None:
+    """Driver allocations must use cuIpcGetMemHandle, not the runtime API.
+
+    DeepInfer allocates its KV pool directly with cuMemAlloc.  CUDA 13
+    rejects those pointers in cudaIpcGetMemHandle even though they are valid
+    legacy IPC allocations.
+    """
+    # Third Party
+    import cupy
+
+    allocation_size = 1 << 16
+    with torch.cuda.device(0):
+        err, ptr = _cuda.driver.cuMemAlloc(allocation_size)
+    assert err == _cuda.driver.CUresult.CUDA_SUCCESS
+
+    mem = None
+    memptr = None
+    array = None
+    tensor = None
+    try:
+        with cupy.cuda.Device(0):
+            mem = cupy.cuda.UnownedMemory(int(ptr), allocation_size, owner=ptr)
+            memptr = cupy.cuda.MemoryPointer(mem, 0)
+            array = cupy.ndarray(allocation_size, dtype=cupy.uint8, memptr=memptr)
+        tensor = torch.from_dlpack(array)
+
+        wrapper = RawCudaIPCWrapper(tensor)
+        assert wrapper._alloc_offset == 0  # noqa: SLF001
+        assert wrapper._nbytes == allocation_size  # noqa: SLF001
+    finally:
+        del tensor, array, memptr, mem
+        with torch.cuda.device(0):
+            (free_err,) = _cuda.driver.cuMemFree(ptr)
+        assert free_err == _cuda.driver.CUresult.CUDA_SUCCESS
 
 
 def test_raw_wrapper_constructs_on_a_fresh_thread() -> None:
