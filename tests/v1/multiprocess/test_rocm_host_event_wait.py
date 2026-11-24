@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the opt-in ROCm host event wait of LMCache-driven transfers."""
+"""Tests for the opt-in ROCm / XPU host event wait of LMCache-driven transfers."""
 
 # Standard
 from contextlib import nullcontext
@@ -27,6 +27,7 @@ from lmcache.v1.multiprocess.config import (
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
 from lmcache.v1.multiprocess.rocm_host_event_wait import (
     ROCM_HOST_EVENT_WAIT_ENV,
+    XPU_HOST_EVENT_WAIT_ENV,
     HostEventWaiter,
 )
 from tests.v1.multiprocess.test_event_ipc_handle_path import (
@@ -79,6 +80,7 @@ def waiters():
 @pytest.fixture(autouse=True)
 def _no_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(ROCM_HOST_EVENT_WAIT_ENV, raising=False)
+    monkeypatch.delenv(XPU_HOST_EVENT_WAIT_ENV, raising=False)
 
 
 def _poller_threads() -> int:
@@ -90,13 +92,16 @@ def _build(
     enabled: bool,
     hip: str | None,
     registry: bool = False,
+    xpu_mode: str = "off",
+    xpu: bool = False,
 ) -> Any:
-    """Build the module through ``create()`` with the option and platform.
+    """Build the module through ``create()`` with the options and platform.
 
     With ``registry`` the entry is registered in the module's real registry
     (``t.make_entry`` builds more); otherwise the lookup is patched to it.
     """
     monkeypatch.setattr(torch.version, "hip", hip)
+    monkeypatch.setattr(rocm_host_event_wait, "_running_on_xpu", lambda: xpu)
     monkeypatch.setattr(
         lmcache_driven_transfer, "DeviceHostFuncDispatcher", _NoopDispatcher
     )
@@ -142,6 +147,7 @@ def _build(
         mp_config=SimpleNamespace(
             supported_transfer_mode="lmcache_driven",
             rocm_host_event_wait=enabled,
+            xpu_host_event_wait=xpu_mode,
             port=0,
         ),
         engine_context=server_context,
@@ -399,6 +405,157 @@ def test_no_inline_run_while_the_poller_runs_the_same_instance(waiters: Any) -> 
     assert (first.result(timeout=5), second.result(timeout=5)) == ("a", "b")
     assert order == ["a", "b"]
     assert waiter.stats()["inline"] == 1
+
+
+# ---------------------------------------------------------------- XPU
+
+
+def test_xpu_option_defaults_off_and_takes_a_mode() -> None:
+    parser = argparse.ArgumentParser()
+    add_mp_server_args(parser)
+    assert MPServerConfig.xpu_host_event_wait == "off"
+    assert (
+        parse_args_to_mp_server_config(parser.parse_args([])).xpu_host_event_wait
+        == "off"
+    )
+    for mode in ("off", "store", "all"):
+        config = parse_args_to_mp_server_config(
+            parser.parse_args(["--xpu-host-event-wait", mode])
+        )
+        assert config.xpu_host_event_wait == mode
+        assert config.rocm_host_event_wait is False
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--xpu-host-event-wait"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--xpu-host-event-wait", "1"])
+
+
+@pytest.mark.parametrize("xpu", [False, True])
+def test_xpu_off_by_default_creates_no_waiter(
+    monkeypatch: pytest.MonkeyPatch, xpu: bool
+) -> None:
+    logger = MagicMock()
+    monkeypatch.setattr(rocm_host_event_wait, "logger", logger)
+    t = _build(monkeypatch, enabled=False, hip=None, xpu=xpu)
+    assert t.module._host_event_waiter is None
+    assert "xpu_host_event_wait" not in t.module.report_status()
+    logger.warning.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("option", "env", "wait_retrieves"),
+    [
+        ("store", None, False),
+        ("all", None, True),
+        ("off", "store", False),
+        ("off", " ALL ", True),
+        ("store", "all", False),
+        ("all", "store", True),
+    ],
+)
+def test_xpu_mode_from_option_or_env_on_xpu(
+    monkeypatch: pytest.MonkeyPatch,
+    option: str,
+    env: str | None,
+    wait_retrieves: bool,
+) -> None:
+    """The env sets the mode only while the option is off."""
+    if env is not None:
+        monkeypatch.setenv(XPU_HOST_EVENT_WAIT_ENV, env)
+    t = _build(monkeypatch, enabled=False, hip=None, xpu_mode=option, xpu=True)
+    waiter = t.module._host_event_waiter
+    assert isinstance(waiter, HostEventWaiter)
+    assert waiter.wait_retrieves is wait_retrieves
+    assert waiter.option == "xpu_host_event_wait"
+    waiter.stop()
+
+
+@pytest.mark.parametrize("env", ["1", "true", "stores"])
+def test_xpu_invalid_env_mode_raises(monkeypatch: pytest.MonkeyPatch, env: str) -> None:
+    monkeypatch.setenv(XPU_HOST_EVENT_WAIT_ENV, env)
+    threads = _poller_threads()
+    with pytest.raises(ValueError, match="off, store, all"):
+        _build(monkeypatch, enabled=False, hip=None, xpu=True)
+    assert _poller_threads() == threads
+
+
+@pytest.mark.parametrize("mode", ["store", "all"])
+@pytest.mark.parametrize("hip", [None, "7.0"])
+def test_xpu_option_off_xpu_warns_and_creates_no_xpu_waiter(
+    monkeypatch: pytest.MonkeyPatch, hip: str | None, mode: str
+) -> None:
+    threads = _poller_threads()
+    logger = MagicMock()
+    monkeypatch.setattr(rocm_host_event_wait, "logger", logger)
+    t = _build(monkeypatch, enabled=False, hip=hip, xpu_mode=mode)
+    assert t.module._host_event_waiter is None
+    assert _poller_threads() == threads
+    logger.warning.assert_called_once()
+    assert "only needed on XPU" in logger.warning.call_args.args[0]
+
+
+def test_rocm_option_on_xpu_creates_no_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """XPU uses its own option; the ROCm one stays ignored off ROCm."""
+    logger = MagicMock()
+    monkeypatch.setattr(rocm_host_event_wait, "logger", logger)
+    t = _build(monkeypatch, enabled=True, hip=None, xpu=True)
+    assert t.module._host_event_waiter is None
+    assert "only needed on ROCm" in logger.warning.call_args.args[0]
+
+
+@pytest.fixture
+def xpu_host(monkeypatch: pytest.MonkeyPatch):
+    t = _build(monkeypatch, enabled=False, hip=None, xpu_mode="store", xpu=True)
+    yield t
+    t.module._host_event_waiter.stop()
+
+
+def test_xpu_defers_store_but_retrieve_keeps_device_wait(xpu_host: Any) -> None:
+    """A retrieve neither waits on the host nor queues behind a waiting store."""
+    store = xpu_host.module.store(_key("s"), 1, [[]], b"s")
+    assert isinstance(store, DeferredResponse)
+    retrieve = xpu_host.module.retrieve(_key("r"), 1, [[]], b"r")
+    assert retrieve == (b"completion-handle", False)
+    assert not store.done()
+    waited = [call[1] for call in xpu_host.backend.calls if call[0] == "wait"]
+    assert waited == [("remote", b"r")]
+
+    xpu_host.backend.done.add(b"s")
+    assert store.result(timeout=5) == (b"completion-handle", True)
+    waited = [call[1] for call in xpu_host.backend.calls if call[0] == "wait"]
+    assert waited == [("remote", b"r")]
+    status = xpu_host.module.report_status()
+    assert "rocm_host_event_wait" not in status
+    assert status["xpu_host_event_wait"] == {
+        "inline": 0,
+        "deferred": 1,
+        "timeout": 0,
+        "shutdown": 0,
+        "stale": 0,
+        "device_waits": 1,
+        "pending": 0,
+    }
+
+
+def test_xpu_all_defers_store_and_retrieve(monkeypatch: pytest.MonkeyPatch) -> None:
+    t = _build(monkeypatch, enabled=False, hip=None, xpu_mode="all", xpu=True)
+    try:
+        store = t.module.store(_key("s"), 1, [[]], b"s")
+        retrieve = t.module.retrieve(_key("r"), 1, [[]], b"r")
+        assert isinstance(store, DeferredResponse)
+        assert isinstance(retrieve, DeferredResponse)
+        t.backend.done.update((b"s", b"r"))
+        assert store.result(timeout=5) == (b"completion-handle", True)
+        assert retrieve.result(timeout=5) == (b"completion-handle", False)
+        assert not [call for call in t.backend.calls if call[0] == "wait"]
+        status = t.module.report_status()
+        assert "rocm_host_event_wait" not in status
+        assert status["xpu_host_event_wait"]["deferred"] == 2
+        assert status["xpu_host_event_wait"]["device_waits"] == 0
+    finally:
+        t.module._host_event_waiter.stop()
 
 
 # ---------------------------------------------------------------- lifecycle

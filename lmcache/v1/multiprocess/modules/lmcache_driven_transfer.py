@@ -248,7 +248,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             fd_socket_path=fd_channel_path(build_ctx.mp_config.port),
         )
         module._host_event_waiter = create_host_event_waiter(
-            build_ctx.mp_config.rocm_host_event_wait
+            build_ctx.mp_config.rocm_host_event_wait,
+            build_ctx.mp_config.xpu_host_event_wait,
         )
         return module
 
@@ -507,8 +508,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             "registered_gpu_ids": registered_gpu_ids,
             "cache_context_meta": cache_context_meta,
         }
-        if self._host_event_waiter is not None:
-            status["rocm_host_event_wait"] = self._host_event_waiter.stats()
+        waiter = self._host_event_waiter
+        if waiter is not None:
+            status[waiter.option] = waiter.stats()
         return status
 
     def close(self) -> None:
@@ -666,8 +668,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     ) -> tuple[bytes, bool]:
         """Store the GPU KV cache blocks to CPU; see store_with_chunk_mask.
 
-        With the ROCm host event wait, a store whose producer event has not
-        completed yet returns a ``DeferredResponse`` for the same tuple.
+        With the ROCm or XPU host event wait, a store whose producer event
+        has not completed yet returns a ``DeferredResponse`` for the same
+        tuple.
         """
         waiter = self._host_event_waiter
         if waiter is not None and not waiter.in_run():
@@ -1096,7 +1099,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             engine's prefix cache already holds part of the unfull chunk).
         """
         waiter = self._host_event_waiter
-        if waiter is not None and not waiter.in_run():
+        if waiter is not None and waiter.wait_retrieves and not waiter.in_run():
             return waiter.submit_after_event(
                 instance_id,
                 self.get_and_touch_context_entry(instance_id),

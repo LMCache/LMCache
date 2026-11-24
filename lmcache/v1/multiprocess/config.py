@@ -121,6 +121,12 @@ class MPServerConfig:
     a stream wait on it; see lmcache.v1.multiprocess.rocm_host_event_wait.
     LMCACHE_ROCM_HOST_EVENT_WAIT=1 enables it too. Ignored off ROCm."""
 
+    xpu_host_event_wait: Literal["off", "store", "all"] = "off"
+    """XPU workaround: like rocm_host_event_wait, for LMCache-driven STOREs
+    only ('store', RETRIEVEs keep the stream wait) or STOREs and RETRIEVEs
+    ('all'). When 'off', LMCACHE_XPU_HOST_EVENT_WAIT=store|all sets it.
+    Ignored off XPU."""
+
     isolated_ipc: bool = False
     """Whether IPC mechanisms must work across isolated containers (no shared
     host IPC namespace or /dev/shm); see lmcache.v1.platform.ipc_policy.
@@ -546,6 +552,18 @@ def add_mp_server_args(
         "LMCACHE_ROCM_HOST_EVENT_WAIT=1 enables it too. (Default is off)",
     )
     mp_group.add_argument(
+        "--xpu-host-event-wait",
+        choices=["off", "store", "all"],
+        default="off",
+        help="XPU workaround: a stream wait on the serving engine's pending "
+        "event slows the engine's kernels. 'store' makes STOREs enqueue "
+        "their copies only once that event has completed (polled on the "
+        "host) while RETRIEVEs keep the stream wait; 'all' does so for "
+        "STOREs and RETRIEVEs. Use it when this server runs next to the "
+        "engine on XPU; ignored elsewhere. When 'off', "
+        "LMCACHE_XPU_HOST_EVENT_WAIT=store|all sets it. (Default is off)",
+    )
+    mp_group.add_argument(
         "--isolated-ipc",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -736,6 +754,7 @@ def parse_args_to_mp_server_config(
         enable_blend_reorder=args.enable_blend_reorder,
         supported_transfer_mode=args.supported_transfer_mode,
         rocm_host_event_wait=args.rocm_host_event_wait,
+        xpu_host_event_wait=args.xpu_host_event_wait,
         isolated_ipc=args.isolated_ipc,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),

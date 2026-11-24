@@ -22,6 +22,19 @@ complete within ``timeout_s``, or that has not started at shutdown, is failed
 without enqueuing device work. Shutdown leaves a running transfer to its
 affinity worker, as it leaves the server's other handlers.
 
+XPU: ``--xpu-host-event-wait {off,store,all}`` (or
+``LMCACHE_XPU_HOST_EVENT_WAIT``, read when the option is ``off``) does the
+same on XPU, where a stream wait on the engine's pending event slows the
+engine as well; it is ``off`` by default and ignored elsewhere. ``all``
+defers STOREs and RETRIEVEs as on ROCm. ``store`` defers STOREs only: a
+RETRIEVE keeps the stream wait and does not queue behind the STOREs, so it
+can run before an earlier STORE still waiting for its event. That is safe:
+the STORE has stored nothing yet, so no lookup returns its keys to the
+RETRIEVE, and its GPU blocks are not reused while it waits. The engine
+frees a finished request's blocks only after its STORE reported done, and
+before it reuses a preempted request's blocks it waits for every STORE in
+flight (``LMCacheDrivenTransferContext.flush_inflight_stores``).
+
 The transfer itself runs the unchanged store / retrieve code: inside it the
 instance's event backend returns the already imported event and skips the
 stream wait on it.
@@ -31,7 +44,10 @@ two-process reproducer (the consumer's stream waits on the producer's pending
 IPC event while the producer runs small kernels; their time must equal the
 time without the waiting peer), delete this module, the option and the
 ``_host_event_waiter`` uses in ``lmcache_driven_transfer.py`` and
-``current_worker_poster`` in ``affinity_pool.py``.
+``current_worker_poster`` in ``affinity_pool.py``. The XPU option goes once
+a GPU driver shows no slowdown in the same reproducer on XPU: delete it and
+the ``wait_retrieves`` and ``option`` arguments (the whole module once both
+platforms are fixed).
 """
 
 # Standard
@@ -54,6 +70,8 @@ from lmcache.v1.multiprocess.affinity_pool import (
 logger = init_logger(__name__)
 
 ROCM_HOST_EVENT_WAIT_ENV = "LMCACHE_ROCM_HOST_EVENT_WAIT"
+XPU_HOST_EVENT_WAIT_ENV = "LMCACHE_XPU_HOST_EVENT_WAIT"
+XPU_HOST_EVENT_WAIT_MODES = ("off", "store", "all")
 TIMEOUT_S = 60.0
 _POLL_MIN_S = 50e-6
 _POLL_MAX_S = 1e-3
@@ -75,23 +93,72 @@ def _running_on_hip() -> bool:
     return torch.version.hip is not None
 
 
-def create_host_event_waiter(enabled: bool) -> "HostEventWaiter | None":
-    """Return the waiter if the option is enabled on ROCm, else None.
+def _running_on_xpu() -> bool:
+    # First Party
+    from lmcache.v1.platform import get_torch_device
+
+    return get_torch_device()[1] == "xpu"
+
+
+def _env_enabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true")
+
+
+def _xpu_mode(option: str) -> str:
+    mode = option
+    if mode == "off":
+        mode = os.environ.get(XPU_HOST_EVENT_WAIT_ENV, "").strip().lower() or "off"
+    if mode not in XPU_HOST_EVENT_WAIT_MODES:
+        raise ValueError(
+            f"--xpu-host-event-wait / {XPU_HOST_EVENT_WAIT_ENV} must be one of "
+            f"{', '.join(XPU_HOST_EVENT_WAIT_MODES)}; got {mode!r}"
+        )
+    return mode
+
+
+def create_host_event_waiter(
+    enabled: bool, xpu_mode: str = "off"
+) -> "HostEventWaiter | None":
+    """Return the waiter if an option is enabled on its platform, else None.
 
     Args:
         enabled: The ``--rocm-host-event-wait`` server option;
             ``LMCACHE_ROCM_HOST_EVENT_WAIT=1`` enables it as well.
+        xpu_mode: The ``--xpu-host-event-wait`` server option: ``off``,
+            ``store`` (STOREs only) or ``all``. When it is ``off``,
+            ``LMCACHE_XPU_HOST_EVENT_WAIT`` sets the mode instead.
+
+    Raises:
+        ValueError: The XPU mode is not one of ``off``, ``store``, ``all``.
     """
-    env = os.environ.get(ROCM_HOST_EVENT_WAIT_ENV, "").strip().lower()
-    if not (enabled or env in ("1", "true")):
-        return None
-    if not _running_on_hip():
-        logger.warning(
-            "--rocm-host-event-wait is only needed on ROCm; ignored on this platform"
-        )
-        return None
-    logger.info("ROCm host event wait enabled for LMCache-driven STORE / RETRIEVE")
-    return HostEventWaiter()
+    waiter = None
+    if enabled or _env_enabled(ROCM_HOST_EVENT_WAIT_ENV):
+        if _running_on_hip():
+            logger.info(
+                "ROCm host event wait enabled for LMCache-driven STORE / RETRIEVE"
+            )
+            waiter = HostEventWaiter()
+        else:
+            logger.warning(
+                "--rocm-host-event-wait is only needed on ROCm; "
+                "ignored on this platform"
+            )
+    mode = _xpu_mode(xpu_mode)
+    if mode != "off":
+        if _running_on_xpu():
+            wait_retrieves = mode == "all"
+            logger.info(
+                "XPU host event wait enabled for LMCache-driven %s",
+                "STORE / RETRIEVE" if wait_retrieves else "STORE",
+            )
+            waiter = HostEventWaiter(
+                wait_retrieves=wait_retrieves, option="xpu_host_event_wait"
+            )
+        else:
+            logger.warning(
+                "--xpu-host-event-wait is only needed on XPU; ignored on this platform"
+            )
+    return waiter
 
 
 def current_run_entry() -> Any:
@@ -169,11 +236,22 @@ class HostEventWaiter:
     Args:
         timeout_s: Seconds a queued transfer may wait before it is failed.
         clock: Monotonic clock; injectable for tests.
+        wait_retrieves: Whether RETRIEVEs wait on the host as well; False
+            (XPU ``store``) leaves them to the stream wait, and
+            ``device_waits`` then counts theirs.
+        option: The server option that enabled the waiter; the key of its
+            statistics in the module status.
     """
 
     def __init__(
-        self, timeout_s: float = TIMEOUT_S, clock: Callable[[], float] = time.monotonic
+        self,
+        timeout_s: float = TIMEOUT_S,
+        clock: Callable[[], float] = time.monotonic,
+        wait_retrieves: bool = True,
+        option: str = "rocm_host_event_wait",
     ) -> None:
+        self.wait_retrieves = wait_retrieves
+        self.option = option
         self._timeout_s = timeout_s
         self._clock = clock
         self._cond = threading.Condition()
