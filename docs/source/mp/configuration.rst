@@ -323,8 +323,16 @@ by chunk. A client may instead send the hashes itself
 (``IPCCacheServerKey.chunk_hashes``): the rolling hash of every complete
 chunk in ``[0, end)``, computed with the server's own ``TokenHasher`` so the
 keys are byte-identical. The server then neither decodes nor hashes tokens.
-The ATOM adapters send them when built with ``client_chunk_hashes=True``;
-other clients keep sending tokens. This key form has these requirements:
+The ATOM adapters send them when built with ``client_chunk_hashes=True``. SGLang opts in using its LMCache client YAML:
+
+.. code-block:: yaml
+
+   extra_config:
+     lmcache.mp.client_chunk_hashes: true
+
+SGLang sends token keys by default. In hash mode, each connector computes
+hashes at the negotiated LMCache chunk size and caches the rolling chain per
+request. This key form has these requirements:
 
 - **blake3 only.** Client hashes are blake3. A server started with another
   ``--hash-algorithm`` rejects such keys.

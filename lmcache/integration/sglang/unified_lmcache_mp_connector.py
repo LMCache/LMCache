@@ -28,7 +28,9 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
     LMCacheStoreOperation,
     SGLangKVComponentGroup,
 )
+from lmcache.v1.client.chunk_hashes import ChunkHashCache
 from lmcache.v1.client.heartbeat import HeartbeatThread
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 
 if TYPE_CHECKING:
     # First Party
@@ -309,6 +311,11 @@ class UnifiedLMCacheMPConnector:
         # physical block count. LMCache-driven derives per-group counts from
         # EngineGroupInfo and ignores this compatibility argument.
         self.blocks_in_chunk = self.chunk_size // self._kv_groups[0].tokens_per_block
+        self._chunk_hash_cache = (
+            ChunkHashCache(self.chunk_size)
+            if config.get_extra_config_value("lmcache.mp.client_chunk_hashes", False)
+            else None
+        )
         self.register_kv_cache()
         logger.info("UnifiedLMCacheMPConnector initialized succeed.")
 
@@ -632,15 +639,26 @@ class UnifiedLMCacheMPConnector:
         end: int,
         worker_id: Optional[int],
         request_configs: Optional[dict[str, Any]] = None,
-    ) -> Any:
-        # First Party
-        from lmcache.v1.common.custom_types import IPCCacheServerKey
-
-        return IPCCacheServerKey.from_token_ids(
+    ) -> IPCCacheServerKey:
+        if self._chunk_hash_cache is not None:
+            return IPCCacheServerKey.from_chunk_hashes(
+                model_name=self.model_name,
+                world_size=self.kv_world_size,
+                worker_id=worker_id,
+                chunk_hashes=self._chunk_hash_cache.hashes(
+                    operation.request_id, operation.token_ids, end
+                ),
+                start=start,
+                end=end,
+                request_id=operation.request_id,
+                cache_salt=operation.cache_salt,
+                request_configs=request_configs,
+            )
+        return IPCCacheServerKey(
             model_name=self.model_name,
             world_size=self.kv_world_size,
             worker_id=worker_id,
-            token_ids=operation.token_ids,
+            token_bytes=operation.token_bytes,
             start=start,
             end=end,
             request_id=operation.request_id,
@@ -1269,6 +1287,8 @@ class UnifiedLMCacheMPConnector:
         # LOOKUP or STORE reached the server and requires END_SESSION.
         was_active = request_id in self._active_sessions
         self._lookups.pop(request_id, None)
+        if self._chunk_hash_cache is not None:
+            self._chunk_hash_cache.drop(request_id)
         if was_active and self.is_lookup_leader:
             self._track_control_future(self._req_client.end_session(request_id))
         self._active_sessions.discard(request_id)
