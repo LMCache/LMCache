@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# MetaX MACA bare-metal FULL unit test suite. Runs on push to dev (post-merge),
-# not on PRs -- see pipeline.yml for the trigger split and run-smoke-tests.sh
-# for the fast PR-facing subset. Runs directly on a dedicated single-GPU host
+# MetaX MACA bare-metal full unit test suite for manually triggered non-PR
+# builds. See pipeline.yml for the trigger split and run-smoke-tests.sh for the
+# fast PR-facing subset. Runs directly on a dedicated single-GPU host
 # registered to the "metax-maca" queue -- no K8s/GPU-Operator involved, unlike
 # the multi-GPU vendor pipelines under k3_tests/. There is no pick-free-gpu
 # step because this queue's agent owns its GPU exclusively.
@@ -14,12 +14,7 @@ LMCACHE_TRACK_USAGE="false" \
 pytest --maxfail=1 --cov=lmcache \
     --cov-report term --cov-report=html:coverage-test \
     --cov-report=xml:coverage-test.xml --html=durations/test.html \
-    --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py \
-    --ignore=tests/v1/test_nixl_batched_contains.py \
-    --ignore=tests/v1/test_device_id_race.py \
-    --ignore=tests/v1/test_nixl_multipath.py \
     --ignore=tests/skipped \
-    --ignore=tests/v1/storage_backend/test_eic.py \
     --deselect="tests/v1/distributed/serde/test_turboquant.py::test_turboquant_direct_roundtrip_cuda[turboquant_k8v4-2.6-0.95]" \
     --ignore=tests/v1/mp_coordinator/test_instances_usage_e2e.py \
     --ignore=tests/v1/platform/devices/cuda/test_cuda_ipc_wrapper.py \
@@ -34,8 +29,7 @@ pytest --maxfail=1 --cov=lmcache \
     --deselect="tests/cli/commands/bench/test_server_bench.py::TestUnregisterKVCache::test_data_mode_sends_engine_driven_unregister" \
     --deselect="tests/v1/mp_coordinator/test_key_directory.py::test_token_ids_outside_uint32_leave_the_binding_unfilled" \
     --deselect="tests/v1/test_torch_ops.py::TestScenarios::test_1_scenario[cuda_ops-load_and_reshape_flash-scenario_load_and_reshape_flash]" \
-    --deselect="tests/v1/test_torch_ops.py::TestScenarios::test_2_compare[multi_layer_block_kv_transfer]" \
-    --deselect="tests/v1/shm_allocator/test_shm_allocator.py::TestShmFileConnector"
+    --deselect="tests/v1/test_torch_ops.py::TestScenarios::test_2_compare[multi_layer_block_kv_transfer]"
 
 # Not deselected/ignored above for a MACA capability reason, documented
 # separately so a future re-run on different hardware knows what to revisit:
@@ -64,9 +58,6 @@ pytest --maxfail=1 --cov=lmcache \
 #   child process crashes before writing to a pipe the parent blocks on
 #   with no timeout). The real fix is upstream: generalize the ROCm-only
 #   skip to cover any environment without `cuda.bindings`.
-# - test_shm_allocator.py::TestShmFileConnector (all 3 tests, sharing one
-#   fixture): its 5GB pinned-memory allocation fails MACA's mcHostRegister
-#   with mcErrorInvalidValue on this host.
 
 cat << EOF | buildkite-agent annotate --style "info"
   Read the <a href="artifact://coverage-test/index.html">uploaded coverage report</a>

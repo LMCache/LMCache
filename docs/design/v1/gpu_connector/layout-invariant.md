@@ -6,7 +6,7 @@
 > KV-cache layout.** It also returns the canonical (post-permute) form
 > of the kv_caches alongside the format, so callers never need a
 > separate normalization step. Every other module queries KV-cache
-> information via helpers in `lmcache/v1/gpu_connector/utils.py` that
+> information via helpers in `lmcache/v1/common/utils.py` that
 > accept an `EngineKVFormat` argument.
 
 "Layout parsing" means: list-nesting depth, tensor-dimension ordering,
@@ -23,15 +23,15 @@ DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
 Every KV-cache value in LMCache is one of these shapes:
 
 - a single `torch.Tensor` (vLLM cross-layer, TRT-LLM),
-- a flat `list[torch.Tensor]` (vLLM per-layer, SGLang MLA),
-- a nested `list[list[torch.Tensor]]` (SGLang MHA's `[K_list, V_list]`).
+- a flat `list[torch.Tensor]` (vLLM per-layer and unified SGLang components),
+- a nested `list[list[torch.Tensor]]` (legacy split K/V kernel layouts).
 
 Engine adapters that hand us other containers (vLLM's `dict[str, Tensor]`)
 are responsible for unwrapping to this form before calling any helper.
 
 ## Package structure
 
-The layout logic lives in `lmcache/v1/gpu_connector/kv_format/`. The
+The layout logic lives in `lmcache/v1/common/kv_format/`. The
 public `utils.py` helpers below are a thin **facade** that delegates
 into it, so the single-source-of-truth surface is unchanged for callers.
 
@@ -60,14 +60,21 @@ kv_format/
   (`is_mla`, `is_hnd`, `is_cross_layer`, `attention_backends`).
 - **Static facts are class attributes, declared once.** The structural shape
   (`is_cross_layer` / `is_kv_list` / `is_layer_list`, exactly one true) and the
-  `is_mla` / `is_hnd` / `is_fused_packed` / `is_two_major` / `is_pbs_fused`
-  modifiers are booleans on the spec, defaulting to `False` so a spec only
-  declares what applies. Consumers read them via `get_spec_class(fmt)` — a
-  call site must never re-list formats (`fmt in (A, B, ...)`), which is how
-  the same predicate used to drift across `torch_ops.py`, the transfer
-  helpers and the connectors. The device kernels keep their own copy in
-  `csrc/engine_kv_format.h`; `tests/v1/gpu_connector/test_kv_format_classification.py`
-  pins the two sides together and enforces the structural partition.
+  `is_mla` / `is_hnd` / `is_fused_packed` / `is_two_major` / `is_pbs_fused` /
+  `requires_blocked_scale_repacking` / `supports_dim0_padding` modifiers are
+  booleans on the spec, defaulting to `False` so a spec only declares what
+  applies. Consumers read them via `get_spec_class(fmt)` — a call site must
+  never re-list formats (`fmt in (A, B, ...)`), which is how the same predicate
+  used to drift across `torch_ops.py`, the transfer helpers and the
+  connectors. Kernel-relevant facts are mirrored in `csrc/engine_kv_format.h`;
+  facts read only by Python call sites (e.g. `is_single_kv`,
+  `requires_blocked_scale_repacking`, `supports_dim0_padding`) are not.
+  `tests/v1/gpu_connector/test_kv_format_classification.py` pins the facts and
+  enforces the structural partition. `supports_dim0_padding` is an explicit
+  opt-in, not a shape derivation: dim-0 is the per-block axis and `stride(0)`
+  stays addressable even when it exceeds the tight per-block payload.
+  `NL_X_NB_TWO_BS_NH_HS` is intentionally absent until such a layout is
+  verified end to end.
 - **Backend labels are diagnostic, colocated on the spec.** A single
   `EngineKVFormat` can be produced by several (engine, attention-backend)
   combinations, so each spec lists them in `attention_backends` (a tuple),
@@ -150,15 +157,17 @@ an `EngineKVFormat`. Nothing else may index raw shapes.
 | `NL_X_NB_TWO_BS_NH_HS` | vLLM flash-infer | NHD | `NL × [NB, 2, BS, NH, HS]` |
 | `NL_X_TWO_NB_NH_BS_HS` | vLLM flash-attn | HND | `NL × [2, NB, NH, BS, HS]` |
 | `NL_X_NB_TWO_NH_BS_HS` | vLLM flash-infer | HND | `NL × [NB, 2, NH, BS, HS]` |
-| `NL_X_NB_BS_HS` | vLLM MLA | — | `NL × [NB, BS, HS]` |
-| `TWO_X_NL_X_NBBS_NH_HS` | SGLang MHA | NHD | `[K_list, V_list]`, each `NL × [PBS, NH, HS]` |
-| `TWO_X_NL_X_NB_BS_NH_HS` | SGLang MHA via MP daemon | NHD | `[K_list, V_list]`, each `NL × [NB, BS, NH, HS]` |
-| `NL_X_NBBS_ONE_HS` | SGLang MLA | — | `NL × [PBS, 1, HS]` |
+| `NL_X_NB_BS_HS` | vLLM MLA / SGLang unified MLA | — | `NL × [NB, BS, HS]` |
+| `NL_X_NB_BS_NH_HS` | SGLang unified components | NHD | `NL × [NB, BS, NH, HS]` |
+| `TWO_X_NL_X_NBBS_NH_HS` | Legacy SGLang MHA | NHD | `[K_list, V_list]`, each `NL × [PBS, NH, HS]` |
+| `TWO_X_NL_X_NB_BS_NH_HS` | Legacy SGLang MP MHA | NHD | `[K_list, V_list]`, each `NL × [NB, BS, NH, HS]` |
+| `NL_X_NBBS_ONE_HS` | Legacy SGLang MLA | — | `NL × [PBS, 1, HS]` |
 | `NL_X_NB_NH_BS_TWO_HS` | vLLM blocks-first fused (CPU) | HND | DEPRECATED (use `NL_X_NB_NH_BS_CS`): `NL × [NB, NH, BS, 2, HS]`, split from raw `[NB, NH, BS, 2·HS]` |
 | `NL_X_NB_BS_NH_TWO_HS` | vLLM blocks-first fused | NHD | DEPRECATED (use `NL_X_NB_BS_NH_CS`): `NL × [NB, BS, NH, 2, HS]`, split from raw `[NB, BS, NH, 2·HS]` |
 | `NL_X_NB_NH_BS_CS` | vLLM blocks-first fused (unified KV cache) | HND | `NL × [NB, NH, BS, CS]`, raw registration; CS = content size = 2·HS (K/V packed) |
 | `NL_X_NB_BS_NH_CS` | vLLM blocks-first fused (unified KV cache) | NHD | `NL × [NB, BS, NH, CS]`, raw registration; CS = content size = 2·HS (K/V packed) |
 | `NL_X_TWO_NB_NH_ONE_BS_HS` | vLLM-RBLN attention | HND | `NL × [2, NB, NH, 1, BS, HS]`; axis 3 is always 1 (an RBLN attention-backend requirement) |
+| `NL_X_NB_TWO_NH_ONE_BS_HS` | vLLM-RBLN default attention kernels | HND | `NL × [NB, 2, NH, 1, BS, HS]`; blocks-first counterpart of the row above, axis 3 is always 1 |
 
 The two cross-layer formats (`NB_NL_TWO_*`) share a single base
 pointer, the kernel walks layers internally via `shape_desc.nl`. Use
@@ -203,7 +212,7 @@ helper.
 | Helper | Returns | Notes |
 |---|---|---|
 | `get_group_data_ptrs(kv, fmt, layer_indices)` | `list[int]` | Pointer array in **kernel-expected order**: `[base]` for cross-layer (`layer_indices` ignored), `[K_0…K_N, V_0…V_N]` for SGLang MHA, per-layer flat elsewhere. Matches the dispatch in `csrc/cuda/mp_mem_kernels.cu:161-169`. The pointer-array shape is a property of the format — callers never ask "does this format have per-layer pointers?". |
-| `make_page_buffer_shape_desc(kv, fmt, layer_idx, num_layers_in_group, num_blocks, block_size, block_stride_elems)` | `PageBufferShapeDesc` | The kernel-facing shape struct. ``block_stride_elems`` carries the per-block dim-0 element stride; pass the value returned by `resolve_block_stride_and_log_layout` so groups with different physical block sizes (e.g. a compressed DeepSeek V4 indexer group alongside dense layers) share a single GPU pool. |
+| `make_page_buffer_shape_desc(kv, fmt, layer_idx, num_layers_in_group, num_blocks, block_size, block_stride_elems)` | `PageBufferShapeDesc` | The kernel-facing shape struct. During grouping, `resolve_block_stride` records the per-block dim-0 element stride in `KernelGroupIdentity`; the manager stamps the descriptor from `identity.block_stride_elems`. This lets groups with different physical block sizes (e.g. a compressed DeepSeek V4 indexer group alongside dense layers) share a single GPU pool. |
 
 ### Contiguity
 
@@ -245,15 +254,15 @@ consumer code must never do any of the following — it queries via the
 ## Consumers
 
 - **`lmcache/v1/kv_layer_groups.py::KVLayerGroupsManager.__init__`** —
-  partitions layers by the 5-tuple `(kv_size, num_heads, head_size,
-  block_size, dtype)` using `is_mla`, `get_num_heads`, `get_head_size`,
-  `get_block_size`, and `get_dtype` with each layer's index. Including
-  `block_size` in the identity lets compressed groups (e.g. a DeepSeek
-  V4 indexer with a smaller physical slot count) sit alongside
-  non-compressed groups under a single `GPUCacheContext`. Builds a
-  `PageBufferShapeDesc` per group via `make_page_buffer_shape_desc`,
-  passing the `block_stride_elems` resolved by
-  `resolve_block_stride_and_log_layout`. The real constructor is the
+  partitions layers by the full `KernelGroupIdentity` field list
+  `(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype,
+  engine_kv_format, block_stride_elems)`. Including `block_size` in the
+  identity lets compressed groups (e.g. a DeepSeek V4 indexer with a smaller
+  physical slot count) sit alongside non-compressed groups under a single
+  `GPUCacheContext`; including `block_stride_elems` separates physically
+  different block layouts. Builds a `PageBufferShapeDesc` per group via
+  `make_page_buffer_shape_desc`, stamping `block_stride_elems` from the
+  group's identity. The real constructor is the
   only way in — no test-only shortcuts, no cached topology fields; the
   manager exposes only `kv_layer_groups`, `num_groups`, and
   `get_shape_desc`.
@@ -262,7 +271,8 @@ consumer code must never do any of the following — it queries via the
   `get_shape_desc(group_idx)` to it, assembles per-group GPU pointer
   tensors via `get_group_data_ptrs`. No parallel `shape_descs_` /
   `hidden_dim_sizes_` state.
-- **`lmcache/v1/gpu_connector/gpu_connectors.py::VLLMPagedMemGPUConnectorV3._initialize_kv_cache_pointers`**
+- **`VLLMPagedMemGPUConnectorV3._initialize_kv_cache_pointers`** in the external
+  [`LMCache_inprocess`](https://github.com/LMCache/LMCache_inprocess) package
   — for the in-process vLLM path, calls
   `normalize_kv_and_discover_format` (which permutes for HND support
   and detects the format in one step) and constructs

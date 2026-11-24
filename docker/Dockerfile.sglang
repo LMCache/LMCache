@@ -1,0 +1,66 @@
+# LMCache image for SGLang: the official SGLang release image plus LMCache
+# compiled from source against the torch in that image, so `python3 -m sglang.launch_server
+# --enable-lmcache` can connect to an LMCache MP server (lmcache/standalone).
+#
+# Please update any changes made here to docker/README.md
+#
+# The release workflow builds on the release tag lmsysorg/sglang:latest points
+# to. LMCache's compiled extensions are tied to torch, so they are compiled in
+# that SGLang image with --no-build-isolation instead of installing the general
+# PyPI wheel built for the vLLM torch pin. The build fails, instead of
+# shipping an image that silently falls back to slow paths, if:
+#   - SGLang's torch differs from EXPECTED_TORCH,
+#   - installing build/runtime dependencies changes SGLang's torch/CUDA stack,
+#   - lmcache's native extension or SGLang connector does not load,
+#   - SGLang lacks the --enable-lmcache flag.
+#
+# Build (from the repository root):
+#   docker build -f docker/Dockerfile.sglang \
+#     --build-arg LMCACHE_VERSION=v0.5.8 \
+#     --build-arg EXPECTED_TORCH=2.14.1 \
+#     -t lmcache/sglang:v0.5.8 .
+
+ARG SGLANG_VERSION=latest
+FROM lmsysorg/sglang:${SGLANG_VERSION}
+
+ARG SGLANG_VERSION
+# LMCache release represented by the source in the build context.
+ARG LMCACHE_VERSION
+# torch version shipped by the selected SGLang image; empty skips the check.
+ARG EXPECTED_TORCH=
+# CUDA architectures compiled into LMCache's native extension. Docker builds do
+# not have a visible GPU from which PyTorch can infer this list.
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
+
+# python3 is SGLang's own environment (its venv is first on PATH).
+RUN --mount=type=bind,source=.,target=/mnt/lmcache-source,readonly \
+    set -eux; \
+    test -n "${LMCACHE_VERSION}"; \
+    TORCH="$(python3 -c 'import torch; print(torch.__version__)')"; \
+    if [ -n "${EXPECTED_TORCH}" ] && [ "${TORCH%%+*}" != "${EXPECTED_TORCH}" ]; then \
+        echo "SGLang ${SGLANG_VERSION} ships torch ${TORCH}; lmcache is built against torch ${EXPECTED_TORCH}" >&2; \
+        exit 1; \
+    fi; \
+    python3 -m pip freeze \
+        | grep -E '^(torch|torchaudio|torchvision|triton|cuda-bindings|cuda-python|cuda-toolkit)==' \
+        > /tmp/sglang-constraints.txt; \
+    cp -a /mnt/lmcache-source /tmp/lmcache-source; \
+    cd /tmp/lmcache-source; \
+    python3 -m pip install --no-cache-dir -c /tmp/sglang-constraints.txt -r requirements/build.txt; \
+    python3 -m pip install --no-cache-dir --no-build-isolation -c /tmp/sglang-constraints.txt .; \
+    # `python3 -c` puts the working directory first on sys.path, so checking from
+    # the source tree would import its unbuilt lmcache package, not the install.
+    cd /; \
+    test "$(python3 -c 'import importlib.metadata as m; print(m.version("lmcache"))')" = "${LMCACHE_VERSION#v}"; \
+    test "$(python3 -c 'import torch; print(torch.__version__)')" = "${TORCH}"; \
+    python3 /tmp/lmcache-source/.github/scripts/assert_native_ops.py; \
+    python3 -c 'import lmcache.integration.sglang.unified_lmcache_mp_connector'; \
+    lmcache --help > /dev/null; \
+    grep -rqs "enable_lmcache" "$(python3 -c 'import os, sglang; print(os.path.dirname(sglang.__file__))')/srt"; \
+    python3 -c 'import importlib.metadata as m, torch; print("lmcache", m.version("lmcache"), "sglang", m.version("sglang"), "torch", torch.__version__)'; \
+    rm -rf /tmp/lmcache-source /tmp/sglang-constraints.txt
+
+LABEL org.opencontainers.image.title="lmcache/sglang" \
+      org.opencontainers.image.description="SGLang ${SGLANG_VERSION} with LMCache ${LMCACHE_VERSION}" \
+      org.opencontainers.image.source="https://github.com/LMCache/LMCache"

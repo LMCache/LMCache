@@ -18,30 +18,28 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap, EngineKVFormat
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.kv_format.contiguity import (
+    attempt_permute_to_contiguous_view,
+)
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
     ipc_key_to_object_keys,
 )
-from lmcache.v1.distributed.bitmap_ops.fold import (
-    fold_unfold_grouped,
-    fold_unfold_ranked,
-)
-from lmcache.v1.gpu_connector.kv_format.contiguity import (
-    attempt_permute_to_contiguous_view,
-)
+from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import (
     LayoutDescRegistry,
     MPCacheServerContext,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import all_null_chunk_masks
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.session import SessionManager
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 CHUNK = 16
 TOKENS = tuple(range(CHUNK * 8))
@@ -53,7 +51,7 @@ class _PresenceStorage:
     def __init__(self, present: set[ObjectKey]) -> None:
         self.present = present
         self.locked: Counter[ObjectKey] = Counter()
-        self.results: dict[int, Bitmap | list[Bitmap]] = {}
+        self.results: dict[int, list[Bitmap]] = {}
         self.requests: list[Any] = []
 
     def submit_prefetch_task(
@@ -65,62 +63,48 @@ class _PresenceStorage:
         task_id = len(self.requests)
         self.requests.append(request)
 
-        # The public prefetch API changed from one flat, chunk-major bitmap to
-        # one bitmap per (object group, kv rank) row. Keep this test double
-        # compatible with both sides of that transition so the PR continues to
-        # validate its lookup behavior when tested against the latest dev.
-        if hasattr(request, "key_groups"):
-            rows = request.key_groups
-            presence_rows: list[Bitmap] = []
-            for row in rows:
-                presence = Bitmap(len(row.keys))
-                for index, key in enumerate(row.keys):
-                    if key in self.present:
-                        presence.set(index)
-                presence_rows.append(presence)
-            hit, retained_rows = fold_unfold_grouped(
-                presence_rows,
-                [row.sliding_window_size for row in rows],
-            )
-            self.results[task_id] = retained_rows
-            for row, retained in zip(rows, retained_rows, strict=True):
-                for index in retained.get_indices_list():
-                    self.locked[row.keys[index]] += request.num_kv_readers
-            return PrefetchHandle(
-                prefetch_request_id=task_id,
-                external_request_id=external_request_id,
-                l1_found_indices=(),
-                l1_hit_chunks=hit,
-                total_requested_keys=sum(len(row.keys) for row in rows),
-                submit_time=0.0,
-            )
-
-        presence = Bitmap(len(request.keys))
-        for index, key in enumerate(request.keys):
-            if key in self.present:
-                presence.set(index)
-        attn = request.attn_desc
-        chunks = len(request.keys) // (attn.num_object_groups * attn.world_size)
-        hit, retained = fold_unfold_ranked(
-            presence, chunks, attn.world_size, attn.num_chunks_in_sw
+        rows = request.key_groups
+        presence_rows: list[Bitmap] = []
+        for row in rows:
+            presence = Bitmap(len(row.keys))
+            for index, key in enumerate(row.keys):
+                if key in self.present:
+                    presence.set(index)
+            presence_rows.append(presence)
+        hit, retained_rows = fold_unfold_grouped(
+            presence_rows,
+            [row.sliding_window_size for row in rows],
         )
-        self.results[task_id] = retained
-        for index in retained.get_indices_list():
-            self.locked[request.keys[index]] += request.num_kv_readers
+        self.results[task_id] = retained_rows
+        for row, retained in zip(rows, retained_rows, strict=True):
+            for index in retained.get_indices_list():
+                self.locked[row.keys[index]] += row.num_kv_readers
         return PrefetchHandle(
             prefetch_request_id=task_id,
             external_request_id=external_request_id,
-            l1_found_indices=tuple(retained.get_indices_list()),
-            l1_hit_chunks=hit,
-            total_requested_keys=len(request.keys),
+            total_requested_keys=sum(len(row.keys) for row in rows),
             submit_time=0.0,
         )
 
     def query_prefetch_status(self, handle: PrefetchHandle) -> Any:
-        """Return the completed prefetch's retain mask."""
-        return self.results[handle.prefetch_request_id]
+        """Return the completed prefetch's retain mask; every hit is served
+        from L1 in this double."""
+        # First Party
+        from lmcache.v1.distributed.api import PrefetchResult
 
-    def finish_read_prefetched(self, keys: list[ObjectKey], read_locks: int) -> None:
+        rows = self.results[handle.prefetch_request_id]
+        return PrefetchResult(
+            hit_cells=rows,
+            l1_hit_cells=[row.copy() for row in rows],
+            l2_hit_cells=[Bitmap(len(row)) for row in rows],
+        )
+
+    def finish_read_prefetched(
+        self,
+        keys: list[ObjectKey],
+        read_locks: int,
+        l1_owners: dict[ObjectKey, int] | None = None,
+    ) -> None:
         """Release only locks actually acquired by a lookup."""
         for key in keys:
             assert self.locked[key] >= read_locks
@@ -176,7 +160,7 @@ def _groups() -> KVLayerGroupsManager:
 
 
 def _key(world_size: int = 1, tokens: tuple[int, ...] = TOKENS) -> IPCCacheServerKey:
-    return IPCCacheServerKey(
+    return IPCCacheServerKey.from_token_ids(
         model_name="native-state",
         world_size=world_size,
         worker_id=None,
@@ -184,7 +168,6 @@ def _key(world_size: int = 1, tokens: tuple[int, ...] = TOKENS) -> IPCCacheServe
         start=0,
         end=len(tokens),
         request_id="native-request",
-        num_kv_readers=1,
     )
 
 
@@ -205,7 +188,9 @@ def _lookup(
     present: set[ObjectKey] = set()
     for rank, endpoints in enumerate(checkpoint_ends):
         worker_key = replace(key, worker_id=rank)
-        per_group = ipc_key_to_object_keys(worker_key, hashes, [0, 1])
+        per_group = ipc_key_to_object_keys(
+            worker_key, hashes, [0, 1], DEFAULT_SHARD_REPLICATION_DESC
+        )
         # Every native store contributes PAGE for its token range and only
         # one STATE object at its endpoint, exactly as the ATOM worker emits.
         for ordinal, endpoint in enumerate(endpoints):
@@ -248,10 +233,17 @@ def _lookup(
         for gid, group in enumerate(manager.object_groups)
     }
     registry.register(
-        "native-state", world_size, layouts[0], manager.get_attn_desc(), layouts
+        "native-state",
+        world_size,
+        layouts[0],
+        chunk_size=CHUNK,
+        hash_algorithm="blake3",
+        attn_desc=manager.get_attn_desc(),
+        group_layout_descs=layouts,
     )
     storage = _PresenceStorage(present)
     ctx = SimpleNamespace(
+        get_read_owners=lambda request_id: None,
         storage_manager=storage,
         token_hasher=hasher,
         layout_desc_registry=registry,
@@ -262,9 +254,9 @@ def _lookup(
     ctx.event_bus.has_subscribers.return_value = False
     module = LookupModule(cast(MPCacheServerContext, ctx))
     module.lookup(key, tp_size=world_size)
-    hit = module.query_prefetch_status(key.request_id)
-    assert hit is not None
-    return hit, storage, module, key
+    hit_tokens = module.query_prefetch_status(key.request_id)
+    assert hit_tokens is not None and hit_tokens % CHUNK == 0
+    return hit_tokens // CHUNK, storage, module, key
 
 
 @pytest.mark.parametrize(

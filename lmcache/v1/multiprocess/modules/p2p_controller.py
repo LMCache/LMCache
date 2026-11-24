@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""P2PController: peer discovery, adapter lifecycle, and lookup serving."""
+"""P2PController: peer discovery, adapter lifecycle, lookup and write serving."""
 
 # Standard
 from dataclasses import dataclass
 from enum import Enum
 from functools import partial
-from typing import Literal
 import threading
 import time
 
@@ -14,30 +13,41 @@ import httpx
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import (
-    GroupedObjectKeys,
-    MemoryLayoutDesc,
-    ObjectKey,
-    PrefetchHandle,
-    PrefetchTaskSpec,
-)
-from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
-from lmcache.v1.distributed.transfer_channel import (
-    delete_transfer_channel_context,
-    initialize_transfer_channel_context,
-)
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.mp_observability.otel_init import register_gauge
-from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
-from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.periodic_thread import (
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.periodic_thread import (
     PeriodicThread,
     ThreadLevel,
     ThreadRunSummary,
     create_periodic_thread,
 )
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed.api import (
+    GroupedObjectKeys,
+    MemoryLayoutDesc,
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+    PrefetchHandle,
+    PrefetchTaskSpec,
+)
+from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.internal_api import L1ManagerInterface
+from lmcache.v1.distributed.transfer_channel import (
+    delete_transfer_channel_context,
+    initialize_transfer_channel_context,
+)
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import register_gauge
+from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.engine_module import (
+    DiscoverableModule,
+    EngineModule,
+    ModuleBuildContext,
+)
+from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 
 logger = init_logger(__name__)
 
@@ -46,6 +56,12 @@ _INVALID_ADDRESS = TransferChannelAddress(offset=-1, size=0)
 
 # Consecutive missed polls a peer may be absent before its adapter is removed.
 _MAX_MISSES = 3
+
+# The L1 registered with the transfer channel: the one peers read and write.
+_P2P_L1_TAGS = MemoryTags(segment=MemorySegment.DRAM, residency=MemoryResidency.LOCAL)
+
+# L1 writer tag of objects a peer writes into this instance.
+_P2P_WRITE_TAG = "p2p"
 
 
 def _group_keys_by_object_group(
@@ -145,12 +161,16 @@ class _P2PLookupJob:
     """ The same keys as submitted to the storage manager, one row per
     object group; the status result is one bitmap per row """
 
+    submitted_at: float
+    """ ``time.monotonic()`` when the lookup was submitted; a job older than
+    the lookup timeout is treated as abandoned by its requester """
 
-class P2PController:
-    """Serves lookup requests from peers and maintains one L2 adapter per peer.
+
+class P2PController(DiscoverableModule):
+    """Serves peers' lookup and write requests and keeps one L2 adapter per peer.
 
     P2P is enabled when ``p2p_config`` carries an advertise URL; otherwise the
-    controller only answers lookup/unlock RPCs.
+    controller only answers the peer RPCs.
 
     Args:
         ctx: Shared engine context providing the storage manager and friends.
@@ -159,9 +179,20 @@ class P2PController:
         coordinator_config: Coordinator connection used for peer discovery.
         instance_id: Stable id of this instance, used to exclude itself from the
             discovered peer set.
-        request_transport: Request transport exposed by this server and its
-            discovered peers.
     """
+
+    module_name = "p2p_controller"
+    rpc_service = "p2p"
+
+    @classmethod
+    def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
+        """Build the controller; it applies to every configuration."""
+        return cls(
+            build_ctx.engine_context,
+            build_ctx.mp_config.p2p_config,
+            build_ctx.coordinator_config,
+            build_ctx.mp_config.instance_id,
+        )
 
     def __init__(
         self,
@@ -169,15 +200,15 @@ class P2PController:
         p2p_config: P2PConfig,
         coordinator_config: CoordinatorConfig,
         instance_id: str,
-        request_transport: Literal["zmq", "grpc"] = "zmq",
     ) -> None:
         self._ctx = ctx
         self._p2p_config = p2p_config
         self._instance_id = instance_id
-        self._request_scheme = "grpc" if request_transport == "grpc" else "tcp"
         self._next_task_id = 0
         self._jobs: dict[int, _P2PLookupJob] = {}
         self._job_lock = threading.Lock()
+        # Last abandoned-job scan time; unlocked, as a race only adds a scan.
+        self._last_drop_time = time.monotonic()
 
         # Orchestration state (guarded by _orch_lock; written only by the poll
         # thread, read by report_status).
@@ -199,10 +230,26 @@ class P2PController:
 
         Args:
             coordinator_config: Coordinator connection used for peer discovery.
+
+        Raises:
+            ValueError: There is not exactly one local DRAM L1, or it exposes
+                no registerable memory buffer.
         """
+        # Peers read the L1 registered with the transfer channel: the one
+        # local DRAM L1.
+        try:
+            l1_manager = self._ctx.storage_manager.get_l1_manager_by_tags(_P2P_L1_TAGS)
+        except ValueError as e:
+            raise ValueError(f"P2P requires exactly one local DRAM L1: {e}") from e
+        l1_memory_desc = l1_manager.get_l1_memory_desc()
+        if l1_memory_desc is None:
+            raise ValueError(
+                f"P2P requires a registerable L1 buffer; L1 "
+                f"{l1_manager.config.tag!r} exposes none"
+            )
         initialize_transfer_channel_context(
             self._p2p_config.transfer_engine,
-            self._ctx.storage_manager.l1_memory_desc,
+            l1_memory_desc,
             listen_url=self._p2p_config.effective_listen_url,
             advertise_url=self._p2p_config.advertise_url,
         )
@@ -279,40 +326,51 @@ class P2PController:
         Returns:
             A unique task id (int) for querying the lookup status later
         """
+        # Scan at most once per lookup timeout; abandoned jobs live <= 2 timeouts.
+        now = time.monotonic()
+        if now - self._last_drop_time >= self._p2p_config.lookup_timeout:
+            self._last_drop_time = now
+            self._drop_abandoned_jobs(now)
         with self._job_lock:
             task_id = self._next_task_id
             self._next_task_id += 1
 
         key_groups = _group_keys_by_object_group(keys, group_layout_descs)
         if key_groups:
-            # NOTE: skip_l2=True -- only objects already resident in L1 are
-            # locked; "full" keeps every resident key, gaps allowed.
+            # NOTE: only objects already resident in the local DRAM L1 (the L1
+            # registered with the transfer channel) are locked, from no other
+            # L1 and no L2; "full" keeps every resident key, gaps allowed.
             handle = self._ctx.storage_manager.submit_prefetch_task(
-                PrefetchTaskSpec(key_groups=key_groups, fetching_policy="full"),
+                PrefetchTaskSpec(
+                    key_groups=key_groups,
+                    fetching_policy="full",
+                    allowed_l1_memory_tags=frozenset({_P2P_L1_TAGS}),
+                    allowed_l2_memory_tags=frozenset(),
+                ),
                 external_request_id=f"p2p-{task_id}",
-                skip_l2=True,
             )
         else:
             # Nothing to look up: an already-complete empty handle.
             handle = PrefetchHandle(
                 prefetch_request_id=-1,
                 external_request_id=f"p2p-{task_id}",
-                l1_found_indices=(),
-                l1_hit_chunks=0,
                 total_requested_keys=0,
                 submit_time=time.monotonic(),
             )
 
         with self._job_lock:
             self._jobs[task_id] = _P2PLookupJob(
-                handle=handle, keys=keys, key_groups=key_groups
+                handle=handle,
+                keys=keys,
+                key_groups=key_groups,
+                submitted_at=time.monotonic(),
             )
 
         logger.debug(
-            "P2P lookup submitted: task_id=%d, %d keys, %d L1 hits",
+            "P2P lookup submitted: task_id=%d, %d keys, %d requested",
             task_id,
             len(keys),
-            len(handle.l1_found_indices),
+            handle.total_requested_keys,
         )
         return task_id
 
@@ -348,12 +406,12 @@ class P2PController:
             )
             return None
 
-        found_rows = self._ctx.storage_manager.query_prefetch_status(job.handle)
-        if found_rows is None:
+        result = self._ctx.storage_manager.query_prefetch_status(job.handle)
+        if result is None:
             # Still in progress (only possible once L2 prefetch is enabled).
             return None
 
-        addresses = self._build_addresses(job, found_rows)
+        addresses = self._build_addresses(job, result.hit_cells)
 
         with self._job_lock:
             self._jobs.pop(task_id, None)
@@ -373,9 +431,137 @@ class P2PController:
             return
         self._ctx.storage_manager.finish_read_prefetched(keys)
 
+    @request_handler(HandlerType.BLOCKING)
+    def p2p_reserve_write(
+        self,
+        keys: list[ObjectKey],
+        layout_desc: MemoryLayoutDesc,
+    ) -> list[TransferChannelAddress]:
+        """Reserve a write buffer per key in the L1 that peers transfer into.
+
+        Args:
+            keys: Keys the requester wants to write.
+            layout_desc: Memory layout of each object.
+
+        Returns:
+            Exactly one address per key, in request order. A valid address
+            is a buffer of ``layout_desc``'s size reserved for that key. An
+            invalid address means nothing was reserved for it: the L1 is out
+            of memory, the key is already resident here, or another peer
+            write of the key is in progress.
+        """
+        results = self._p2p_write_l1().reserve_write(
+            keys,
+            is_temporary=[False] * len(keys),
+            layout_desc=layout_desc,
+            tag=_P2P_WRITE_TAG,
+        )
+        addresses: list[TransferChannelAddress] = []
+        oom_keys: list[ObjectKey] = []
+        for key in keys:
+            err, obj = results[key]
+            if obj is None:
+                addresses.append(_INVALID_ADDRESS)
+                if err == L1Error.OUT_OF_MEMORY:
+                    oom_keys.append(key)
+                continue
+            addresses.append(
+                TransferChannelAddress(offset=obj.shm_offset, size=obj.shm_byte_length)
+            )
+        if oom_keys:
+            get_event_bus().publish(
+                Event(
+                    event_type=EventType.L1_ALLOCATION_FAILED,
+                    metadata={"during": "p2p_store", "keys": oom_keys},
+                )
+            )
+        return addresses
+
+    @request_handler(HandlerType.BLOCKING)
+    def p2p_finish_write(
+        self,
+        keys: list[ObjectKey],
+        succeeded: list[bool],
+    ) -> list[bool]:
+        """Commit or discard reservations made by ``p2p_reserve_write``.
+
+        Args:
+            keys: Keys that got a valid address from ``p2p_reserve_write``.
+            succeeded: Parallel to ``keys``: whether the requester's write of
+                that key completed. ``True`` commits the reservation, so the
+                object becomes readable here. ``False`` discards it and frees
+                its memory; the object never becomes readable.
+
+        Returns:
+            Exactly one flag per key, in request order: ``True`` iff the key
+            was committed, so it is resident here when this call returns. It
+            is ``False`` for every key passed with ``succeeded=False``, and
+            for a key passed with ``succeeded=True`` that has no live
+            reservation (never reserved, or expired with the L1 write TTL).
+
+        Raises:
+            ValueError: If ``keys`` and ``succeeded`` differ in length.
+        """
+        written: list[ObjectKey] = []
+        failed: list[ObjectKey] = []
+        for key, ok in zip(keys, succeeded, strict=True):
+            (written if ok else failed).append(key)
+
+        l1_manager = self._p2p_write_l1()
+        commit_results = l1_manager.finish_write(written, tag=_P2P_WRITE_TAG)
+        l1_manager.finish_write_and_delete(failed, tag=_P2P_WRITE_TAG)
+        return [
+            ok and commit_results[key] == L1Error.SUCCESS
+            for key, ok in zip(keys, succeeded, strict=True)
+        ]
+
     # -----------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------
+
+    def _p2p_write_l1(self) -> L1ManagerInterface:
+        """Return the L1 that peers write into.
+
+        Raises:
+            ValueError: There is not exactly one local DRAM L1.
+        """
+        # TODO(ApostaC): go through StorageManager once it can reserve in an
+        # L1 chosen by memory tags, discard a reservation without admitting
+        # it, and report per-key commit results.
+        return self._ctx.storage_manager.get_l1_manager_by_tags(_P2P_L1_TAGS)
+
+    def _drop_abandoned_jobs(self, now: float) -> None:
+        """Drop finished jobs older than the lookup timeout, draining results.
+
+        Args:
+            now: ``time.monotonic()`` at the call; jobs submitted more than
+                one lookup timeout before it are abandoned.
+
+        Note:
+            Read locks are left to the L1 read TTL; unlocking after expiry
+            could release a later reader's lock.
+        """
+        cutoff = now - self._p2p_config.lookup_timeout
+        with self._job_lock:
+            stale = [
+                task_id
+                for task_id, job in self._jobs.items()
+                if job.submitted_at < cutoff
+            ]
+            jobs = [(task_id, self._jobs.pop(task_id)) for task_id in stale]
+        unfinished: list[tuple[int, _P2PLookupJob]] = []
+        for task_id, job in jobs:
+            if self._ctx.storage_manager.query_prefetch_status(job.handle) is None:
+                unfinished.append((task_id, job))
+        if jobs:
+            logger.debug(
+                "Dropped %d abandoned P2P lookup jobs (%d still running)",
+                len(jobs) - len(unfinished),
+                len(unfinished),
+            )
+        if unfinished:
+            with self._job_lock:
+                self._jobs.update(unfinished)
 
     def _build_addresses(
         self,
@@ -586,11 +772,17 @@ class P2PController:
         Returns:
             ``True`` if the adapter was created and tracked.
         """
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
+
         config = P2PL2AdapterConfig(
-            peer_mq_server_url=(f"{self._request_scheme}://{inst.ip}:{inst.mq_port}"),
+            peer_mq_server_url=f"grpc://{inst.ip}:{inst.mq_port}",
             peer_transfer_channel_server_url=inst.p2p_advertised_url,
             lookup_timeout_s=self._p2p_config.lookup_timeout,
             load_timeout_s=self._p2p_config.load_timeout,
+            write_enabled=self._p2p_config.enable_write,
+            store_timeout_s=self._p2p_config.store_timeout,
+            write_l1_usage_threshold=self._p2p_config.write_l1_usage_threshold,
         )
         try:
             adapter_id = self._ctx.storage_manager.add_l2_adapter(config)

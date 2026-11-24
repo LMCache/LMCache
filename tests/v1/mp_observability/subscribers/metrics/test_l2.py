@@ -259,20 +259,6 @@ class TestL2PrefetchMetrics:
         assert delta["lmcache_mp.l2_prefetch_lookup"] == 1
         assert delta["lmcache_mp.l2_prefetch_lookup_objects"] == 12
 
-    def test_lookup_completed_counts_hits(self, bus, subscriber, snapshot):
-        bus.start()
-        bus.publish(
-            Event(
-                event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
-                metadata={"request_id": 1, "prefix_hit_count": 10},
-            )
-        )
-        time.sleep(_DRAIN_WAIT)
-        bus.stop()
-
-        delta = snapshot()
-        assert delta["lmcache_mp.l2_prefetch_hit"] == 10
-
     def test_load_submitted_counts(self, bus, subscriber, snapshot):
         bus.start()
         keys = _make_keys(10)
@@ -332,12 +318,6 @@ class TestL2PrefetchMetrics:
         )
         bus.publish(
             Event(
-                event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
-                metadata={"request_id": 42, "prefix_hit_count": 18},
-            )
-        )
-        bus.publish(
-            Event(
                 event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
                 metadata={
                     "request_id": 42,
@@ -364,7 +344,6 @@ class TestL2PrefetchMetrics:
         delta = snapshot()
         assert delta["lmcache_mp.l2_prefetch_lookup"] == 1
         assert delta["lmcache_mp.l2_prefetch_lookup_objects"] == 20
-        assert delta["lmcache_mp.l2_prefetch_hit"] == 18
         assert delta["lmcache_mp.l2_prefetch_load_submitted"] == 1
         assert delta["lmcache_mp.l2_prefetch_load_submitted_objects"] == 18
         assert delta["lmcache_mp.l2_prefetch_load_completed"] == 18
@@ -407,11 +386,10 @@ class TestL2MetricsSubscriptions:
         assert EventType.L2_STORE_COMPLETED in subs
         assert EventType.L2_LOAD_TASK_COMPLETED in subs
         assert EventType.L2_PREFETCH_LOOKUP_SUBMITTED in subs
-        assert EventType.L2_PREFETCH_LOOKUP_COMPLETED in subs
         assert EventType.L2_PREFETCH_LOAD_SUBMITTED in subs
         assert EventType.L2_PREFETCH_LOAD_COMPLETED in subs
         assert EventType.L2_KEYS_EVICTED in subs
-        assert len(subs) == 8
+        assert len(subs) == 7
 
 
 # ---------------------------------------------------------------------------
@@ -564,12 +542,6 @@ class TestL2MetricsAccumulation:
             )
             bus.publish(
                 Event(
-                    event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
-                    metadata={"request_id": i, "prefix_hit_count": 8},
-                )
-            )
-            bus.publish(
-                Event(
                     event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
                     metadata={
                         "request_id": i,
@@ -596,7 +568,6 @@ class TestL2MetricsAccumulation:
         delta = snapshot()
         assert delta["lmcache_mp.l2_prefetch_lookup"] == 3
         assert delta["lmcache_mp.l2_prefetch_lookup_objects"] == 30
-        assert delta["lmcache_mp.l2_prefetch_hit"] == 24
         assert delta["lmcache_mp.l2_prefetch_load_submitted"] == 3
         assert delta["lmcache_mp.l2_prefetch_load_submitted_objects"] == 24
         assert delta["lmcache_mp.l2_prefetch_load_completed"] == 21

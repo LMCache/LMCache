@@ -27,9 +27,10 @@ class KafkaCacheEventSourceConfig:
         bootstrap_servers: Comma-separated Kafka bootstrap servers.
         topic: Topic to consume; must match the MP servers'
             ``--coordinator-kafka-topic``.
-        group_id: Consumer group whose committed offsets a restarted
-            coordinator resumes from; a new group reads the whole retained
-            stream.
+        group_id: Consumer group the coordinator joins. Where a restart
+            resumes is the checkpoint's business, not the group's (see
+            :class:`~.ingest.stream_position.StreamPosition`); the group
+            only decides how partitions are shared between members.
     """
 
     bootstrap_servers: str = ""
@@ -68,10 +69,11 @@ class MPCoordinatorConfig:
             cycle (0.0 to 1.0).
         trigger_watermark: Eviction fires when usage reaches this fraction
             of the quota (0.0 to 1.0).
-        chunk_size: Tokens per KV chunk. The single fleet chunk size: it is the
-            CacheBlend match unit *and* resolves a pin request's ``token_ids`` to
-            object keys. Must equal the MP servers' ``--chunk-size`` or blend
-            matches and resolved pin keys will not line up with what was stored.
+        chunk_size: Minimum tokens per KV chunk. The first MP server negotiation
+            binds the coordinator to the fleet's final value, which drives both
+            CacheBlend matching and pin-request token hashing. A coordinator
+            serves one final chunk size; fleets using different final values
+            need separate coordinators.
         hash_algorithm: Token hash algorithm for pin key resolution. Must equal
             the MP servers' ``--hash-algorithm`` (default ``blake3``, which is
             self-contained; other algorithms require vLLM importable in the
@@ -93,6 +95,14 @@ class MPCoordinatorConfig:
         timeout_keep_alive: Seconds the HTTP server keeps idle connections
             open before closing them. Must be greater than the heartbeat
             interval of MP servers to avoid race-condition disconnects.
+        public_endpoints: Exact HTTP paths the coordinator serves without
+            credentials when API-key authentication is on. ``None`` keeps the
+            default, which is ``/healthz`` alone: the liveness probe must not
+            require configuration, while ``/metrics`` describes fleet placement
+            and reported bytes. An explicit tuple replaces that default -- the
+            usual value is ``("/healthz", "/metrics")`` for a deployment that
+            scrapes without a credential -- and an empty tuple requires a key
+            on every path including the probe.
         extra_config: Settings the core config does not name, keyed by
             whatever reads them. Discovery means a new view or controller
             is one file; without this, giving it a setting would still
@@ -117,7 +127,7 @@ class MPCoordinatorConfig:
             ``lmcache[kafka]`` extra.
     """
 
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 9300
     instance_timeout: float = 30.0
     health_check_interval: float = 10.0
@@ -131,6 +141,7 @@ class MPCoordinatorConfig:
     checkpoint_path: str = ""
     checkpoint_interval: float = 60.0
     metadata_path: str = ""
+    public_endpoints: tuple[str, ...] | None = None
     extra_config: Mapping[str, object] = field(default_factory=dict)
     timeout_keep_alive: int = 10
     metrics_enabled: bool = True
@@ -143,7 +154,8 @@ class MPCoordinatorConfig:
         """Validate timing parameters.
 
         Raises:
-            ValueError: If a timing parameter is non-positive/negative.
+            ValueError: If a timing parameter is non-positive/negative, or a
+                public endpoint is not an absolute path.
         """
         if self.instance_timeout <= 0:
             raise ValueError("instance_timeout must be positive")
@@ -167,3 +179,9 @@ class MPCoordinatorConfig:
             raise ValueError("checkpoint_interval must be non-negative")
         if self.timeout_keep_alive <= 0:
             raise ValueError("timeout_keep_alive must be positive")
+        for endpoint in self.public_endpoints or ():
+            if not endpoint.startswith("/"):
+                raise ValueError(
+                    f"public endpoint {endpoint!r} must be an absolute path "
+                    "starting with '/'"
+                )

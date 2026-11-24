@@ -1,217 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-Tests for the QUERY_PREFETCH_LOOKUP_HITS RPC contract,
-request-transport round-trip, and server handler.
-"""
+"""Tests for the key rows the LOOKUP handler submits to the storage manager."""
 
 # Standard
 from unittest.mock import MagicMock
-import time
-
-# Third Party
-import pytest
 
 # First Party
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
+    DEFAULT_SHARD_REPLICATION_DESC,
     GroupedObjectKeys,
     ipc_key_to_object_keys,
 )
-from lmcache.v1.distributed.storage_manager import PrefetchHandle
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
-from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.rpc import get_rpc_spec
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
-
-# Test helpers
-from tests.v1.multiprocess.transport_test_utils import (
-    REQUEST_TRANSPORTS,
-    RequestTransport,
-    request_server_url,
-    start_lookup_request_server,
-)
-
-# ============================================================================
-# Protocol definition tests
-# ============================================================================
-
-
-def test_query_prefetch_lookup_hits_payload_classes():
-    """QUERY_PREFETCH_LOOKUP_HITS payload should be [str]."""
-    payload_classes = get_rpc_spec("query_prefetch_lookup_hits").payload_types
-    assert len(payload_classes) == 1
-    assert payload_classes[0] is str
-
-
-def test_query_prefetch_lookup_hits_response_class():
-    """QUERY_PREFETCH_LOOKUP_HITS response should be int | None."""
-    response_class = get_rpc_spec("query_prefetch_lookup_hits").response_type
-    assert response_class == int | None
-
-
-# ============================================================================
-# Request-transport round-trip tests
-# ============================================================================
-
-
-class _QueryLookupHitsHandler:
-    """Return a configured lookup-hit result and record the request ID."""
-
-    def __init__(self, result: int | None) -> None:
-        self.result = result
-        self.request_id: str | None = None
-
-    @request_handler(HandlerType.BLOCKING)
-    def query_prefetch_lookup_hits(self, request_id: str) -> int | None:
-        """Record the request ID and return the configured result."""
-        self.request_id = request_id
-        return self.result
-
-
-@pytest.mark.parametrize("request_transport", REQUEST_TRANSPORTS)
-@pytest.mark.parametrize("expected", [42, None])
-def test_query_prefetch_lookup_hits_request_transport(
-    request_transport: RequestTransport,
-    expected: int | None,
-) -> None:
-    """Lookup-hit results round-trip over every request transport."""
-    handler = _QueryLookupHitsHandler(expected)
-    port = 15575 if request_transport == "zmq" else 15576
-    server_url = request_server_url(request_transport, port)
-    server = start_lookup_request_server(request_transport, server_url, handler)
-    client = RequestClientFactory.create(server_url)
-    try:
-        result = client.query_prefetch_lookup_hits("req-1").result(timeout=5)
-        assert result == expected
-        assert handler.request_id == "req-1"
-    finally:
-        client.close()
-        server.close()
-
-
-# ============================================================================
-# Server handler tests
-# ============================================================================
-
-
-def _make_module_with_job(
-    world_size: int, storage_return: int | None, num_object_groups: int = 1
-) -> tuple[LookupModule, str]:
-    """Create a LookupModule with a mock context and a single prefetch job.
-
-    Returns:
-        (module, request_id)
-    """
-    ctx = MagicMock()
-    ctx.token_hasher.chunk_size = 256
-    module = LookupModule(ctx)
-
-    handle = PrefetchHandle(
-        prefetch_request_id=0,
-        external_request_id="req-0",
-        l1_found_indices=(),
-        l1_hit_chunks=0,
-        total_requested_keys=10,
-        submit_time=time.monotonic(),
-    )
-    request_id = "req-1"
-    job = _PrefetchJob(
-        handle=handle,
-        row_windows=(-1,) * world_size,
-        request_id=request_id,
-        requested_tokens=0,
-        num_object_groups=num_object_groups,
-    )
-    module._prefetch_jobs[request_id] = job
-    # The storage layer returns the prefix-hit count; the module divides it by
-    # world_size.
-    ctx.storage_manager.query_prefetch_lookup_hits.return_value = storage_return
-
-    return module, request_id
-
-
-def test_server_lookup_hits_returns_count():
-    """query_prefetch_lookup_hits returns chunk count when lookup is done."""
-    module, request_id = _make_module_with_job(world_size=1, storage_return=5)
-
-    result = module.query_prefetch_lookup_hits(request_id)
-
-    assert result == 5
-    module.context.storage_manager.query_prefetch_lookup_hits.assert_called_once()
-
-
-def test_server_lookup_hits_passes_through_chunk_count():
-    """Storage manager now returns chunk-level counts directly."""
-    module, request_id = _make_module_with_job(world_size=2, storage_return=5)
-
-    result = module.query_prefetch_lookup_hits(request_id)
-
-    assert result == 5
-
-
-def test_server_lookup_hits_passes_through_with_multiple_groups():
-    """Storage manager returns chunk-level counts regardless of num_object_groups."""
-    module, request_id = _make_module_with_job(
-        world_size=2, storage_return=2, num_object_groups=3
-    )
-
-    result = module.query_prefetch_lookup_hits(request_id)
-
-    assert result == 2
-
-
-def test_server_lookup_hits_returns_none_when_in_progress():
-    """Returns None when storage manager lookup is still in progress."""
-    module, request_id = _make_module_with_job(world_size=1, storage_return=None)
-
-    result = module.query_prefetch_lookup_hits(request_id)
-
-    assert result is None
-
-
-def test_server_lookup_hits_returns_zero_for_invalid_request():
-    """Returns 0 for a request_id that doesn't exist (prevents infinite spin)."""
-    ctx = MagicMock()
-    ctx.token_hasher.chunk_size = 256
-    module = LookupModule(ctx)
-
-    result = module.query_prefetch_lookup_hits("nonexistent-req")
-
-    assert result == 0
-    ctx.storage_manager.query_prefetch_lookup_hits.assert_not_called()
-
-
-def test_server_lookup_hits_returns_zero_after_prefetch_consumed():
-    """Returns 0 after query_prefetch_status has consumed the job.
-
-    This prevents the caller from spinning forever on a completed request.
-    """
-    module, request_id = _make_module_with_job(world_size=1, storage_return=5)
-
-    # Simulate query_prefetch_status consuming the job
-    module._prefetch_jobs.pop(request_id)
-
-    result = module.query_prefetch_lookup_hits(request_id)
-
-    assert result == 0
-
-
-def test_server_lookup_hits_zero_count():
-    """Returns 0 when no keys matched (not None)."""
-    module, request_id = _make_module_with_job(world_size=1, storage_return=0)
-
-    result = module.query_prefetch_lookup_hits(request_id)
-
-    assert result == 0
-    assert result is not None
-
-
-def test_server_handler_registered():
-    """LookupModule should have a query_prefetch_lookup_hits method."""
-    assert hasattr(LookupModule, "query_prefetch_lookup_hits")
-    assert callable(LookupModule.query_prefetch_lookup_hits)
-
+from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
 # ============================================================================
 # Grouped key layout
@@ -223,9 +25,8 @@ def _lookup_key(world_size: int) -> IPCCacheServerKey:
     return IPCCacheServerKey(
         model_name="m",
         world_size=world_size,
-        num_kv_readers=1,
         worker_id=None,
-        token_ids=(0,),
+        token_bytes=pack_token_ids((0,)),
         start=0,
         end=0,
         request_id="r",
@@ -242,18 +43,28 @@ def _captured_lookup_key_groups(
     reaching into a private helper.
     """
     ctx = MagicMock()
+    # No previous lookup to settle: ``lookup`` claims any unreleased
+    # result before ``begin_lookup`` resets it.
+    _sess = ctx.session_manager.get_or_create.return_value
+    _sess.take_prefetch_release.return_value = None
     ctx.chunk_size = 16
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = MagicMock()  # non-None layout
     # lookup() requires a registered per-group layout map (it error-returns
     # without one); one entry per object group, keyed by object_group_id.
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        DEFAULT_SHARD_REPLICATION_DESC
+    )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {
         gid: MagicMock() for gid in range(num_groups)
     }
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1] * num_groups
     )
-    ctx.token_hasher.compute_chunk_hashes.return_value = chunk_hashes
+    token_hasher = MagicMock()
+    token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    ctx.layout_desc_registry.get_chunk_size.return_value = 16
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
 
     module = LookupModule(ctx)
     module.lookup(_lookup_key(world_size=world_size), tp_size=1)
@@ -295,7 +106,9 @@ def test_lookup_single_group_matches_single_group_expansion():
         world_size=2, num_groups=1, chunk_hashes=chunk_hashes
     )
 
-    expected = ipc_key_to_object_keys(_lookup_key(world_size=2), chunk_hashes, [0])[0]
+    expected = ipc_key_to_object_keys(
+        _lookup_key(world_size=2), chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
+    )[0]
     assert len(rows) == 2
     submitted = [k for row in rows for k in row.keys]
     assert sorted(submitted, key=repr) == sorted(expected, key=repr)
@@ -304,16 +117,22 @@ def test_lookup_single_group_matches_single_group_expansion():
 def test_lookup_hashing_stops_at_key_end() -> None:
     """LOOKUP must not hash chunks beyond the IPC key's requested range."""
     ctx = MagicMock()
+    # No previous lookup to settle: ``lookup`` claims any unreleased
+    # result before ``begin_lookup`` resets it.
+    _sess = ctx.session_manager.get_or_create.return_value
+    _sess.take_prefetch_release.return_value = None
     ctx.chunk_size = 16
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = MagicMock()
-    ctx.token_hasher.compute_chunk_hashes.return_value = []
+    token_hasher = MagicMock()
+    token_hasher.compute_packed_chunk_hashes.return_value = []
+    ctx.layout_desc_registry.get_chunk_size.return_value = 16
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     key = IPCCacheServerKey(
         model_name="m",
         world_size=1,
-        num_kv_readers=1,
         worker_id=None,
-        token_ids=tuple(range(32)),
+        token_bytes=pack_token_ids(range(32)),
         start=0,
         end=16,
         request_id="r",
@@ -321,6 +140,6 @@ def test_lookup_hashing_stops_at_key_end() -> None:
 
     LookupModule(ctx).lookup(key, tp_size=1)
 
-    ctx.token_hasher.compute_chunk_hashes.assert_called_once_with(
-        list(range(32)), end=16
+    token_hasher.compute_packed_chunk_hashes.assert_called_once_with(
+        pack_token_ids(range(32)), start=0, end=16
     )

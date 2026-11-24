@@ -13,7 +13,13 @@ blocks to the LMCache MP server over the existing STORE path — keyed under a
 query-specific model name `<model>##query`.
 
 This is driven by the vLLM MP connector's `QRingBufferCapture` and gated by the
-`transfer_intermediate_tensors` flag. Nothing here is called by SDK users.
+`transfer_intermediate_tensors` flag. The server side is `QStoreModule`, an
+opt-in plugin module loaded with
+`--server-module '{"module_path": "lmcache.v1.multiprocess.plugin_modules.qstore"}'`
+(see [`plugin_modules/qstore.md`](../v1/multiprocess/plugin_modules/qstore.md));
+the connector only starts capturing when the server advertises
+`transfer_query` through `get_experimental`. Nothing here is called by SDK
+users.
 
 ## Components
 
@@ -65,7 +71,8 @@ ignored rather than disabling the whole step's capture.
 ## Lifecycle
 
 1. **Register**: `setup_q_ring` → `register_q_ring` → `REGISTER_Q_CACHE`; the
-   server's `QStoreModule` builds the Q cache context.
+   server's `QStoreModule` (loaded via `--server-module`) builds the Q cache
+   context.
 2. **Capture**: each attention layer's `save_q_layer` scatters Q into the
    ring blocks reserved for that step's store requests.
 3. **Store**: `batched_submit_qstore_requests` sends `STORE_Q` per request;

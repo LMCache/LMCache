@@ -43,6 +43,9 @@ target.
    * - :doc:`Mooncake Store <mooncake_store>`
      - ``mooncake_store``
      - Remote & Distributed
+   * - :doc:`HF3FS <hf3fs>`
+     - ``hf3fs``
+     - Remote & Distributed
    * - :doc:`RESP (Redis/Valkey) <resp>`
      - ``resp``
      - Remote & Distributed
@@ -52,6 +55,9 @@ target.
    * - :doc:`Aerospike <aerospike>`
      - ``aerospike``
      - Remote & Distributed
+   * - :doc:`WQS <wqs>`
+     - ``wqs_store``
+     - Remote & Distributed (vendor-provided)
    * - :doc:`DAX <dax>`
      - ``dax``
      - Byte-addressable memory

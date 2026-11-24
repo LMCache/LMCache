@@ -87,6 +87,7 @@ func startupProbeFailureThreshold(l1SizeGB float64) int32 {
 }
 
 // BuildDaemonSet constructs a DaemonSet for the given LMCacheEngine.
+// Selector labels take precedence over additional pod labels.
 func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	return buildDaemonSetCore(engine.Name, engine.Namespace, &engine.Spec, BuildContainerArgs(&engine.Spec), "lmcache/vllm-openai")
 }
@@ -98,6 +99,8 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 // true — runtimeClassName, optional privileged (default false, via
 // spec.Privileged), NVIDIA_VISIBLE_DEVICES, resources without a device-plugin
 // GPU claim) so those settings cannot drift between the two engines.
+// Selector labels take precedence over spec.PodLabels so the pod template
+// remains selectable by the DaemonSet and its Services.
 //
 // Parameters:
 //   - name, namespace: the owning object's identity, used for labels and metadata.
@@ -115,7 +118,7 @@ func buildDaemonSetCore(
 	defaultImageRepo string,
 ) *appsv1.DaemonSet {
 	selectorLabels := SelectorLabels(name)
-	podLabels := MergeLabels(StandardLabels(name), spec.PodLabels)
+	podLabels := MergeLabels(StandardLabels(name), spec.PodLabels, selectorLabels)
 	podAnnotations := spec.PodAnnotations
 
 	gpuVendor := derefString(spec.GPUVendor, lmcachev1alpha1.GPUVendorNvidia)

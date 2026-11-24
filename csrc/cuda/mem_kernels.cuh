@@ -32,26 +32,12 @@ void multi_layer_kv_transfer_fused_ptr(
     const EngineKVFormat engine_kv_format, const int block_size = 0,
     const int head_size = 0, const int64_t block_stride_elems = 0);
 
-// collapses to multi_layer_kv_transfer for MLA
-void multi_layer_kv_transfer_unilateral(
-    torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
-    const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
-    const int page_buffer_size, const TransferDirection direction,
-    const EngineKVFormat engine_kv_format);
-
 void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
                               torch::Tensor& vllm_key_value_cache,
                               torch::Tensor& slot_mapping,
                               const TransferDirection direction,
                               const EngineKVFormat engine_kv_format,
                               const bool token_major = false);
-
-void single_layer_kv_transfer_sgl(torch::Tensor& lmc_key_value_cache,
-                                  torch::Tensor& sgl_key_cache,
-                                  torch::Tensor& sgl_value_cache,
-                                  torch::Tensor& slot_mapping,
-                                  const TransferDirection direction,
-                                  const bool token_major = false);
 
 void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
                           TransferDirection direction,

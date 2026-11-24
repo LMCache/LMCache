@@ -76,18 +76,25 @@ def _meta(
 
 
 class _RecordingSink(CacheEventSink):
-    """Sink that records every published list; optionally fails."""
+    """Sink that records every published list; optionally fails, counting
+    the failed list's entries as dropped the way a real sink does."""
 
     def __init__(self) -> None:
         self.published: list[list[CacheEventBatch]] = []
         self.fail_next = False
         self.closed = False
+        self.dropped = 0
 
     def publish(self, batches: list[CacheEventBatch]) -> None:
         if self.fail_next:
             self.fail_next = False
+            self.dropped += sum(len(batch.entries) for batch in batches)
             raise CacheEventPublishError("injected failure")
         self.published.append(batches)
+
+    @property
+    def dropped_events(self) -> int:
+        return self.dropped
 
     def close(self) -> None:
         self.closed = True
@@ -311,7 +318,7 @@ def test_token_binding_eviction_warns(monkeypatch):
     subscriber says so."""
     monkeypatch.setattr(cache_events, "_TOKEN_BINDING_CACHE_SIZE", 2)
     warnings: list[str] = []
-    # The module logger does not propagate (see ``lmcache.logging``), so
+    # The module logger does not propagate (see ``lmcache.v1.common.logging``), so
     # record the call instead of relying on root-handler capture.
     monkeypatch.setattr(
         cache_events.logger,
@@ -586,6 +593,48 @@ def test_publish_failure_drops_batches_and_leaves_a_seq_gap():
     assert batch.seq == 2
 
 
+def test_batches_built_after_a_loss_carry_the_dropped_total():
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(1), _key(2)], "sizes": [100, 100], "backend": "fs"},
+        ),
+    )
+    sink.fail_next = True
+    subscriber.flush()
+
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(3)], "sizes": [100], "backend": "fs"},
+        ),
+    )
+    subscriber.flush()
+
+    [[batch]] = sink.published
+    assert batch.dropped_events == 2
+
+
+def test_batches_before_any_loss_carry_no_dropped_events():
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [_key(1)], "sizes": [100], "backend": "fs"},
+        ),
+    )
+    subscriber.flush()
+
+    [[batch]] = sink.published
+    assert batch.dropped_events == 0
+
+
 def test_negative_flush_interval_rejected():
     with pytest.raises(ValueError):
         _subscriber(_RecordingSink(), flush_interval=-1.0)
@@ -834,6 +883,36 @@ def test_http_sink_raises_publish_error_on_http_failure():
     sink.close()
 
 
+def test_http_sink_counts_every_entry_of_a_failed_request_as_dropped():
+    sink = HttpCacheEventSink("http://127.0.0.1:1")  # nothing listens here
+    batches = [
+        CacheEventBatch(
+            instance_id="node-a",
+            incarnation=1,
+            seq=seq,
+            event_type=CacheEventType.STORE,
+            tier=Tier.L2,
+            backend="fs",
+            entries=entries,
+        )
+        for seq, entries in ((1, [_entry(1, 100)]), (2, [_entry(2, 1), _entry(3, 1)]))
+    ]
+    assert sink.dropped_events == 0
+
+    with pytest.raises(CacheEventPublishError):
+        sink.publish(batches)
+    sink.close()
+
+    assert sink.dropped_events == 3
+
+
+def test_multi_sink_reports_the_drops_of_every_sink():
+    first, second = _RecordingSink(), _RecordingSink()
+    first.dropped, second.dropped = 2, 5
+
+    assert MultiCacheEventSink([first, second]).dropped_events == 7
+
+
 # -- Capacity declarations ----------------------------------------------------
 
 
@@ -960,7 +1039,10 @@ def test_no_destination_builds_no_subscriber(monkeypatch: pytest.MonkeyPatch) ->
     )
     assert (
         cache_events.maybe_create_cache_event_subscriber(
-            MPServerConfig(), HTTPFrontendConfig(), CoordinatorConfig()
+            MPServerConfig(),
+            HTTPFrontendConfig(),
+            CoordinatorConfig(),
+            mq_port=0,
         )
         is None
     )
@@ -981,7 +1063,10 @@ def test_events_trace_alone_builds_a_subscriber_with_a_trace_sink(
     mp_config = MPServerConfig(instance_id="node-a")
 
     subscriber = cache_events.maybe_create_cache_event_subscriber(
-        mp_config, HTTPFrontendConfig(http_port=8123), CoordinatorConfig()
+        mp_config,
+        HTTPFrontendConfig(http_port=8123),
+        CoordinatorConfig(),
+        mq_port=19001,
     )
     recorder.close()
 
@@ -995,6 +1080,7 @@ def test_events_trace_alone_builds_a_subscriber_with_a_trace_sink(
     assert records[0].args["phase"] == "start"
     assert records[0].args["instance_id"] == "node-a"
     assert records[0].args["http_port"] == 8123
+    assert records[0].args["mq_port"] == 19001
     assert records[0].args["incarnation"] == kwargs["incarnation"]
 
 
@@ -1019,6 +1105,7 @@ def test_coordinator_and_trace_together_fan_out(
         MPServerConfig(),
         HTTPFrontendConfig(),
         CoordinatorConfig(url="http://coordinator:9300", event_reporting=True),
+        mq_port=0,
     )
     recorder.close()
 
@@ -1044,6 +1131,7 @@ def test_reporting_without_http_frontend_records_only_the_trace(
         MPServerConfig(),
         None,
         CoordinatorConfig(url="http://coordinator:9300", event_reporting=True),
+        mq_port=0,
     )
     recorder.close()
 

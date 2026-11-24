@@ -46,7 +46,7 @@ The simulator enforces the same prefix rule as LMCache: a chunk is only counted 
 
 - **Eviction policy:** LRU (Least Recently Used)
 - **Cache key:** chunk hash (hex string, opaque)
-- **Capacity unit:** bytes of KV cache memory
+- **Capacity unit:** bytes of KV cache memory. Only whole chunks fit; a budget smaller than one chunk stores no entries and produces a 0% hit rate.
 
 ---
 

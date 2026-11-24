@@ -10,6 +10,7 @@ zero changes to this file.
 from pathlib import Path
 from types import ModuleType
 import importlib.util
+import re
 import sys
 
 ROOT_DIR = Path(__file__).parent
@@ -21,6 +22,7 @@ if str(ROOT_DIR) not in sys.path:
 # Third Party
 from setuptools import find_packages, setup  # noqa: E402
 from setuptools.command.build_py import build_py as _build_py  # noqa: E402
+from setuptools.command.egg_info import egg_info as _egg_info  # noqa: E402
 
 # First Party
 from setup_extensions import BuildPolicy, BuildProfile  # noqa: E402
@@ -43,9 +45,8 @@ def _load_proto_generator() -> ModuleType:
         ROOT_DIR
         / "lmcache"
         / "v1"
-        / "multiprocess"
         / "transport"
-        / "grpc_impl"
+        / "grpc"
         / "_proto_gen"
         / "_generate.py"
     )
@@ -66,7 +67,27 @@ class _BuildPyWithGrpcStubs(_build_py):
         distribution_name = self.distribution.get_name().replace("_", "-").lower()
         if distribution_name != "lmcache-cli":
             generator = _load_proto_generator()
-            generator.generate()
+            for package in generator.GENERATED_PACKAGES:
+                generator.generate(package)
+        super().run()
+
+
+class _EggInfoWithNixlConnector(_egg_info):
+    """Add the native NIXL connector, at this version, to the nixl extra."""
+
+    def run(self) -> None:
+        nixl_extra = self.distribution.extras_require.get("nixl")
+        version = self.distribution.get_version()
+        # lmcache-nixl is published only at release versions, so dev builds
+        # keep the extra to the nixl runtime. The release-version pattern is
+        # also in stamp_nixl_version.sh. egg_info can run more than once in a
+        # process, so append only once.
+        if (
+            nixl_extra is not None
+            and re.fullmatch(r"\d+\.\d+\.\d+((a|b|rc)\d+)?(\.post\d+)?", version)
+            and not any(req.startswith("lmcache-nixl") for req in nixl_extra)
+        ):
+            nixl_extra.append(f"lmcache-nixl=={version}")
         super().run()
 
 
@@ -75,11 +96,16 @@ if __name__ == "__main__":
     profile = policy.resolve_profile()
     ext_modules, cmdclass, req_file = policy.collect_extensions(profile)
     cmdclass["build_py"] = _BuildPyWithGrpcStubs
+    cmdclass["egg_info"] = _EggInfoWithNixlConnector
 
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
     # Platform-neutral extras; the build profile adds its own below.
     extras_require: dict[str, list[str]] = {
         "kafka": _read_requirements(ROOT_DIR / "requirements" / "kafka.txt"),
+        "raw-block": ["lmcache-rust-raw-block-io"],
+        "grpc-native": _read_requirements(
+            ROOT_DIR / "requirements" / "grpc_native.txt"
+        ),
     }
     if (
         not BuildProfile.is_gpu_ext_disabled()

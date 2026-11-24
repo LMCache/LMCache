@@ -132,7 +132,8 @@ encrypted under a distinct key derived from its ``cache_salt``.
         --eviction-policy LRU \
         --l2-adapter '{
             "type": "s3",
-            "bucket": "my-kv-cache",
+            "s3_endpoint": "s3://my-kv-cache.s3.us-west-2.amazonaws.com",
+            "s3_region": "us-west-2",
             "serde": {
                 "type": "aesgcm",
                 "key_provider": "hkdf",
@@ -140,11 +141,18 @@ encrypted under a distinct key derived from its ``cache_salt``.
             }
         }'
 
+Use your S3 bucket's virtual-hosted endpoint and its AWS region.
 Provide the master key as a file (e.g. a mounted Kubernetes ``Secret``).
 The ``hkdf`` provider reads it once at startup and derives a per-``cache_salt``
 key via HKDF-SHA256; the master key is never written to L2. ``aes_bits``
 defaults to ``128`` (already unbreakable and slightly faster); set ``256`` if a
 compliance mandate requires it.
+
+Each encrypted object is bound to the key it was stored under: an object that
+was modified, or that is found under another key, fails to load and is
+recomputed instead of being served. Objects encrypted by earlier LMCache
+versions use an older format, so after an upgrade they fail to load once and
+are recomputed.
 
 .. warning::
 

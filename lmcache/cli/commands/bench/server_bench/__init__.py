@@ -22,22 +22,38 @@ class ServerBenchCommand(BaseCommand):
         return "End-to-end test for LMCache MP cache server (GPU mode)."
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        """Register benchmark arguments even without the full runtime.
+
+        Args:
+            parser: The argument parser for the server benchmark subcommand.
+        """
         # First Party
-        from lmcache.cli.commands.bench.server_bench.command import (
+        from lmcache.cli.commands.bench.server_bench.arguments import (
             add_server_arguments,
         )
 
         add_server_arguments(parser)
 
     def execute(self, args: argparse.Namespace) -> None:
+        """Load and execute the benchmark, reporting runtime import failures."""
         # Standard
         import copy
         import sys
 
-        # First Party
-        from lmcache.cli.commands.bench.server_bench.command import (
-            run_server_bench,
-        )
+        try:
+            # First Party
+            from lmcache.cli.commands.bench.server_bench.command import (
+                run_server_bench,
+            )
+        except ImportError as exc:
+            print(
+                "ERROR: Unable to load `lmcache bench server`. "
+                "This command requires the full LMCache package.\n"
+                "  Install with: pip install lmcache\n"
+                f"  Original import error: {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
         # A comma-separated --flamegraph-mode drives the load once per mode
         # (the modes cannot share a recording window), each rendered to its

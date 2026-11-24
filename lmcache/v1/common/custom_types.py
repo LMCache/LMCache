@@ -1,0 +1,502 @@
+# SPDX-License-Identifier: Apache-2.0
+# Standard
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Any
+
+# Third Party
+import msgspec
+
+# First Party
+from lmcache.v1.common.token_codec import (
+    TOKEN_STRIDE,
+    num_packed_tokens,
+    pack_token_ids,
+)
+
+"""
+Defines the types for inter-process communications.
+
+Key Types:
+- IPCCacheServerKey: Token-based cache key
+  - Contains token_bytes, start, end, request_id (all required)
+  - Or, from a client that hashes itself, chunk_hashes instead of token_bytes
+  - Converted to ObjectKey for storage operations via ipc_key_to_object_keys()
+"""
+
+
+@dataclass(frozen=True)
+class KVEventProfile:
+    """Native event identity contract supplied at KV-cache registration.
+
+    Args:
+        profile_id: Opaque engine/hash/seed/representation version identifier.
+            The server compares this identity; it never reconstructs hashes.
+        block_size: Number of tokens per engine event block.
+
+    Raises:
+        ValueError: If the identity is empty or the block size is not positive.
+    """
+
+    profile_id: str
+    block_size: int
+
+    def __post_init__(self) -> None:
+        if not self.profile_id or self.block_size <= 0:
+            raise ValueError("KV event profile requires an ID and positive block size")
+
+
+@dataclass(order=True, frozen=True)
+class IPCCacheServerKey:
+    """Cache key for the IPC (multiprocess) protocol.
+
+    This key type is sent by the client over ZMQ (serialized via msgspec).
+
+    The client sends token_bytes, start, end, and request_id (all required).
+    The server computes chunk hashes via TokenHasher and converts to
+    ObjectKey for storage operations using ipc_key_to_object_keys().
+
+    ``token_bytes`` is packed by :mod:`lmcache.v1.common.token_codec`
+    (see there for the layout and why no chunk hash changes). It replaced a
+    ``token_ids`` tuple in place, so client and server must be upgraded
+    together.
+
+    A client may instead send ``chunk_hashes``: the server's rolling blake3
+    chunk hashes (:class:`TokenHasher` with ``hash_algorithm="blake3"``) of
+    every complete chunk in ``[0, end)``, concatenated, with ``token_bytes``
+    empty. The server then neither decodes nor hashes tokens.
+
+    The request_id field is for session tracking and is NOT included
+    in equality/hash comparisons (two keys with same content but different
+    request_ids are considered equal for cache purposes).
+    """
+
+    model_name: str
+    world_size: int
+    worker_id: int | None
+
+    token_bytes: bytes  # packed big-endian uint32, one word per token
+    start: int
+    end: int
+
+    # === Session tracking (not part of cache identity) ===
+    request_id: str = field(compare=False)
+
+    # === Per-user isolation salt (part of cache identity) ===
+    # msgspec encodes dataclasses as maps, so forward wire compatibility
+    # works by field name: an old payload without ``cache_salt`` decodes
+    # on new code using the default "". Placing the field last is a style
+    # choice — all defaulted fields must come after non-defaulted ones.
+    #
+    # Invariant: must not contain ``@``, ``/``, ``\``, or NUL, and
+    # must be <= 128 chars — same rationale as ObjectKey (see
+    # ObjectKey.cache_salt). Validated in __post_init__.
+    cache_salt: str = ""
+
+    # Request-scoped LMCache configuration passed across the IPC boundary.
+    # It is metadata, not part of cache identity.
+    request_configs: dict[str, Any] | None = field(default=None, compare=False)
+
+    # Client-computed chunk hashes of [0, end), CHUNK_HASH_BYTES each, sent
+    # instead of token_bytes. Defaulted, so payloads without it decode to b"".
+    chunk_hashes: bytes = b""
+
+    # Duplicated from ObjectKey — cannot import ObjectKey here due to
+    # circular dependency (api.py imports IPCCacheServerKey).
+    _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
+    _SALT_MAX_LEN = 128
+
+    def __post_init__(self) -> None:
+        if len(self.token_bytes) % TOKEN_STRIDE:
+            raise ValueError(
+                f"token_bytes of {len(self.token_bytes)} byte(s) is not a "
+                f"whole number of {TOKEN_STRIDE}-byte token ids"
+            )
+        if self.chunk_hashes and self.token_bytes:
+            raise ValueError("a key carries either token_bytes or chunk_hashes")
+        if len(self.chunk_hashes) % CHUNK_HASH_BYTES:
+            raise ValueError(
+                f"chunk_hashes of {len(self.chunk_hashes)} byte(s) is not a "
+                f"whole number of {CHUNK_HASH_BYTES}-byte hashes"
+            )
+        bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
+        if bad:
+            raise ValueError(
+                f"cache_salt must not contain {bad!r} (got {self.cache_salt!r})"
+            )
+        if len(self.cache_salt) > self._SALT_MAX_LEN:
+            raise ValueError(
+                f"cache_salt exceeds max length {self._SALT_MAX_LEN} "
+                f"(got {len(self.cache_salt)})"
+            )
+
+    @classmethod
+    def from_token_ids(
+        cls,
+        model_name: str,
+        world_size: int,
+        worker_id: int | None,
+        token_ids: Sequence[int],
+        start: int = 0,
+        end: int = 0,
+        request_id: str = "",
+        cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
+    ) -> "IPCCacheServerKey":
+        """Create a key from unpacked token ids.
+
+        The canonical way to build a key from a token list: it owns the
+        packing so callers never handle :mod:`token_codec` themselves.
+
+        Args:
+            model_name: Model the key belongs to.
+            world_size: Number of TP workers.
+            worker_id: Worker the key is scoped to, or ``None`` for all.
+            token_ids: The token sequence.
+            start: Start token index of the key's range.
+            end: End token index of the key's range (exclusive).
+            request_id: Request the key belongs to.
+            cache_salt: Per-user isolation salt.
+            request_configs: Optional LMCache request configs.
+
+        Returns:
+            The key, with ``token_ids`` packed into ``token_bytes``.
+        """
+        return cls(
+            model_name=model_name,
+            world_size=world_size,
+            worker_id=worker_id,
+            token_bytes=pack_token_ids(token_ids),
+            start=start,
+            end=end,
+            request_id=request_id,
+            cache_salt=cache_salt,
+            request_configs=request_configs,
+        )
+
+    @classmethod
+    def from_chunk_hashes(
+        cls,
+        model_name: str,
+        world_size: int,
+        worker_id: int | None,
+        chunk_hashes: Sequence[bytes],
+        start: int = 0,
+        end: int = 0,
+        request_id: str = "",
+        cache_salt: str = "",
+        request_configs: dict[str, Any] | None = None,
+    ) -> "IPCCacheServerKey":
+        """Create a key from client-computed chunk hashes.
+
+        Args:
+            model_name: Model the key belongs to.
+            world_size: Number of TP workers.
+            worker_id: Worker the key is scoped to, or ``None`` for all.
+            chunk_hashes: Rolling blake3 hashes of every complete chunk in
+                ``[0, end)``, in order, as the server's ``TokenHasher``
+                computes them.
+            start: Start token index of the key's range.
+            end: End token index of the key's range (exclusive).
+            request_id: Request the key belongs to.
+            cache_salt: Per-user isolation salt.
+            request_configs: Optional LMCache request configs.
+
+        Returns:
+            The key, with the hashes concatenated into ``chunk_hashes``.
+        """
+        return cls(
+            model_name=model_name,
+            world_size=world_size,
+            worker_id=worker_id,
+            token_bytes=b"",
+            start=start,
+            end=end,
+            request_id=request_id,
+            cache_salt=cache_salt,
+            request_configs=request_configs,
+            chunk_hashes=b"".join(chunk_hashes),
+        )
+
+    @property
+    def num_tokens(self) -> int:
+        """How many tokens this key describes.
+
+        The number of token ids it carries, or for a chunk-hash key, ``end``
+        (its hashes cover the complete chunks of ``[0, end)``).
+        """
+        if self.chunk_hashes:
+            return self.end
+        return num_packed_tokens(self.token_bytes)
+
+    def check_chunk_hash_count(self, chunk_size: int) -> None:
+        """Check that ``chunk_hashes`` holds one hash per complete chunk.
+
+        A key carrying client-computed chunk hashes must have exactly one
+        for every complete chunk of ``[0, end)``. Any other count means the
+        client chunked the prompt differently (for example with another chunk
+        size), and its hashes would name the wrong positions.
+
+        Args:
+            chunk_size: The server's chunk size for the key's registration.
+
+        Raises:
+            ValueError: If the key carries chunk hashes and their count is
+                not ``end // chunk_size``.
+        """
+        if not self.chunk_hashes:
+            return
+        count = len(self.chunk_hashes) // CHUNK_HASH_BYTES
+        if count != self.end // chunk_size:
+            raise ValueError(
+                f"key carries {count} chunk hash(es) for [0, {self.end}); "
+                f"expected {self.end // chunk_size} with the server's chunk "
+                f"size {chunk_size}"
+            )
+
+    def split_chunk_hashes(self) -> list[bytes]:
+        """Return ``chunk_hashes`` as one bytes object per chunk."""
+        hashes = self.chunk_hashes
+        return [
+            hashes[offset : offset + CHUNK_HASH_BYTES]
+            for offset in range(0, len(hashes), CHUNK_HASH_BYTES)
+        ]
+
+    def no_worker_id_version(self) -> "IPCCacheServerKey":
+        """Create a copy with worker_id=None for lookup requests."""
+        return IPCCacheServerKey(
+            model_name=self.model_name,
+            world_size=self.world_size,
+            worker_id=None,
+            token_bytes=self.token_bytes,
+            start=self.start,
+            end=self.end,
+            request_id=self.request_id,
+            cache_salt=self.cache_salt,
+            request_configs=self.request_configs,
+            chunk_hashes=self.chunk_hashes,
+        )
+
+    def has_unfull_chunk(self, chunk_size: int) -> bool:
+        """Return whether this key's range ends with an unfull chunk.
+
+        An ``end`` that is not a multiple of ``chunk_size`` addresses the
+        unfull chunk ``[floor(end / chunk_size) * chunk_size, end)`` as the
+        range's last chunk. Only the LMCache-driven transfer path stores and
+        loads unfull chunks; other paths floor ``end``. A key carrying
+        ``chunk_hashes`` has hashes for complete chunks only, so it never
+        addresses an unfull chunk and its ``end`` is floored too.
+
+        Args:
+            chunk_size: The LMCache chunk size in tokens.
+
+        Returns:
+            True when ``end`` is not a multiple of ``chunk_size`` and the key
+            carries tokens.
+        """
+        return not self.chunk_hashes and self.end % chunk_size != 0
+
+
+# Size of one client-computed (blake3) chunk hash in
+# IPCCacheServerKey.chunk_hashes.
+CHUNK_HASH_BYTES = 32
+
+
+class GroupLayout(msgspec.Struct):
+    """Per-LMCache-group layout for multi-group engine-driven registration.
+
+    Attributes:
+        num_layers: Number of KV layers in this group.
+        hidden_dim_size: Flattened hidden dimension per token for this group.
+        dtype_str: Torch dtype name for this group's KV tensors.
+        tokens_per_block: Tokens covered by one paged block of this group
+            (``EngineGroupInfo.tokens_per_block``; falls back to the engine
+            ``block_size`` when the engine reported ``0``).
+        window_tokens: Tokens stored per LMCache chunk for this group. Equals
+            the full chunk token count for full-attention groups; for a
+            sliding-window group it is ``min(chunk_tokens, sw_size_tokens)`` so
+            the server sizes each per-chunk object to the window. ``0`` means
+            "full chunk" (legacy workers that predate SW support).
+        kv_size: Object planes for this group: ``2`` for separate K/V, ``1``
+            for single-plane formats (MLA, fused K/V, indexer caches). Groups
+            of one model can differ, so the server must not size them from the
+            top-level ``use_mla``. ``0`` means "unreported" (legacy workers)
+            and falls back to the top-level ``use_mla``.
+        window_chunks: Trailing LMCache chunks this group needs for a cache
+            hit (its attention window, rounded up to whole chunks). ``0``
+            means full attention, the whole prefix, which is also what
+            workers that predate windows send.
+        recurrent: Whether the group's pages hold recurrent state snapshots
+            (Mamba/GDN/linear attention) rather than per-token attention KV.
+        num_physical_slots: Physical slots stored per chunk, after windowing
+            and slot compression. ``None`` retains the legacy one-slot-per-token
+            layout derived from ``window_tokens``.
+    """
+
+    num_layers: int
+    hidden_dim_size: int
+    dtype_str: str
+    tokens_per_block: int
+    window_tokens: int = 0
+    kv_size: int = 0
+    window_chunks: int = 0
+    recurrent: bool = False
+    num_physical_slots: int | None = None
+
+
+class RegisterEngineDrivenContextPayload(msgspec.Struct):
+    """Payload for the REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT protocol message.
+
+    Attributes:
+        instance_id: Worker instance identifier (typically PID).
+        model_name: Model name associated with this worker.
+        world_size: Worker world size used in cache keys.
+        block_size: Tokens per paged block.
+        num_layers: Number of model layers.
+        hidden_dim_size: Flattened hidden dimension per token.
+        dtype_str: Torch dtype name (e.g. ``"float16"``).
+        use_mla: Whether the worker KV format is MLA.
+        num_physical_slots: Number of physical KV slots gathered into one
+            LMCache chunk. ``None`` accepts the legacy protocol, where the
+            server assumed one physical slot per logical token.
+        group_layouts: Per-group layouts for multi-group (hybrid-KV) workers,
+            in protocol group order. Empty means legacy single-group; the
+            top-level ``num_layers``/``hidden_dim_size``/``dtype_str`` then
+            describe the sole group.
+    """
+
+    instance_id: int
+    model_name: str
+    world_size: int
+    block_size: int
+    num_layers: int
+    hidden_dim_size: int
+    dtype_str: str
+    use_mla: bool
+    num_physical_slots: int | None = None
+    group_layouts: list[GroupLayout] = []
+
+
+@dataclass
+class RegisterEngineDrivenContextResponse:
+    """Shared response for engine-driven context registration.
+
+    Attributes:
+        shm_name: Name of the server's SHM-backed L1 pool, or ``""``.
+        pool_size: Size of that pool in bytes.
+        null_block_id: Engine block ID the server treats as absent KV data.
+            Workers skip storing chunks whose blocks are all this ID.
+    """
+
+    shm_name: str = ""
+    pool_size: int = 0
+    null_block_id: int = 0
+
+
+@dataclass
+class PrepareStoreResponse:
+    """Shared response for an engine-driven store preparation."""
+
+    context: dict = field(default_factory=dict)
+
+
+@dataclass
+class PrepareRetrieveResponse:
+    """Shared response for an engine-driven retrieve preparation."""
+
+    success: bool
+    data: bytes = b""
+    context: dict = field(default_factory=dict)
+
+
+@dataclass
+class BlockAllocationRecord:
+    """A single per-request GPU block allocation delta from vLLM."""
+
+    req_id: str
+    new_block_ids: list[int]
+    new_token_ids: list[int]
+
+
+@dataclass
+class CBMatchResult:
+    """Result of a sub-sequence match from BlendTokenRangeMatcher.
+
+    Attributes:
+        old_st: Start position in the originally registered (stored) sequence.
+        old_ed: End position in the originally registered (stored) sequence.
+        cur_st: Start position in the query sequence where the match was found.
+        cur_ed: End position in the query sequence where the match was found.
+        hash: Token hash bytes (from registration) used as the storage key.
+    """
+
+    old_st: int
+    old_ed: int
+    cur_st: int
+    cur_ed: int
+    hash: bytes
+
+
+@dataclass
+class CBUnifiedLookupResult:
+    """Resolved payload of ``CB_UNIFIED_LOOKUP``: prefix lookup + non-prefix
+    fingerprint match, reconciled in one RPC. The RPC returns ``None`` (not this)
+    while either leg's KV is still loading into L1; this type is sent only once
+    both are resident.
+
+    Attributes:
+        prefix_coverage_tokens: Contiguous prefix-cache coverage (L1+L2) in
+            tokens — what the standard LOOKUP would report.
+        non_prefix_segments: Fingerprint matches outside the prefix coverage
+            (cur_st order), each carrying ``(old_st, old_ed, cur_st, cur_ed,
+            hash)``. Already sparse-prefetched, so the retrieve set equals the
+            prefetched set. Includes fleet-coordinator (shared-L2) matches:
+            those are merged in before the sparse prefetch -- prefix-covered and
+            locally-duplicated ones dropped -- so they ride the identical
+            prefetch + retrieve path and need no separate handling.
+        segmented_prefix_segments: Post-gap chunks retained by the
+            ``SEGMENTED_PREFIX`` prefix leg (beyond ``count_leading_ones``) — at
+            their original positions (``old_st == cur_st``), so the connector
+            tags them ``prefix`` (pure load, no recompute) and only the gap is
+            recomputed. Sourced from the prefix bitmap, not the fingerprint
+            matcher; empty when ``SEGMENTED_PREFIX`` is off.
+    """
+
+    prefix_coverage_tokens: int
+    non_prefix_segments: list[CBMatchResult]
+    segmented_prefix_segments: list[CBMatchResult] = field(default_factory=list)
+
+
+# Experimental feature advertised through GET_EXPERIMENTAL by the opt-in qstore
+# server module (lmcache.v1.multiprocess.plugin_modules.qstore); the vLLM
+# connector requests it for ``lmcache.mp.transfer_intermediate_tensors``.
+TRANSFER_QUERY = "transfer_query"
+KV_EVENT_KIND_STORED = "stored"
+KV_EVENT_KIND_REMOVED = "removed"
+KV_EVENT_MEDIUM_CPU = "CPU"
+
+
+@dataclass
+class KVEventRecord:
+    """Sequenced CPU cache change; stores carry one chunk's tokens and parent."""
+
+    seq: int
+    kind: str
+    medium: str
+    model_name: str
+    block_hashes: list[bytes]
+    parent_block_hash: bytes | None
+    token_ids: list[int]
+
+
+@dataclass
+class KVEventBatch:
+    """One ordered batch. Incarnation changes or lost=True require withdrawal
+    of earlier announcements; enabled=False ends the stream. Resume at next_cursor.
+    """
+
+    enabled: bool
+    incarnation: int
+    next_cursor: int
+    lost: bool
+    events: list[KVEventRecord]

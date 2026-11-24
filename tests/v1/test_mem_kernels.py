@@ -732,7 +732,7 @@ def test_lmcache_memcpy_async():
         cpu_tensor_from_gpu = gpu_tensor.to("cpu")
         assert torch.allclose(cpu_tensor_from_gpu, cpu_tensor, atol=1e-5)
 
-    rt = torch.cuda.cudart()
+    rt = torch_dev.cudart()
 
     # Register the cpu memory
     ptr = big_cpu_tensor.data_ptr()
@@ -852,7 +852,7 @@ def test_lmcache_memcpy_async_int8_hidden132():
     cpu_tensor = torch.randint(-128, 127, (total_elements,), dtype=dtype, device="cpu")
     gpu_tensor = torch.zeros(total_elements, dtype=dtype, device=torch_device_type)
 
-    rt = torch.cuda.cudart()
+    rt = torch_dev.cudart()
 
     # Register the cpu memory in PIN_CHUNK_SIZE chunks
     ptr = cpu_tensor.data_ptr()
@@ -954,3 +954,57 @@ def test_lmcache_memcpy_async_int8_hidden132():
     ptr_dst = cpu_dst.data_ptr()
     for i in range(num_chunks):
         rt.cudaHostUnregister(ptr_dst + i * chunk_size)
+
+
+def test_multi_layer_kernel_offset_past_int32():
+    """Regression: a paged pool over 2**31 scalars must not wrap the offset.
+
+    ``page_buffer_offset`` used to compute ``token_idx * scalars_per_token``
+    in int32, so slots past 2**31 / scalars_per_token got a negative offset
+    and the kernel faulted (seen on a 13831-scalar hybrid aux group at
+    ~62k context). The head size is odd so the kernel moves 2-byte units,
+    which keeps the single-plane MLA pool at ~4.3 GiB.
+    """
+    head_size, block_size, num_tokens = 1025, 16, 48
+    dtype = torch.bfloat16
+    int32_max = 2**31 - 1
+    first_slot = int32_max // head_size + 1
+    num_blocks = (first_slot + num_tokens) // block_size + 1
+    page_buffer_size = num_blocks * block_size
+    pool_bytes = page_buffer_size * head_size * dtype.itemsize
+    if torch_dev.mem_get_info()[0] < pool_bytes + (1 << 30):
+        pytest.skip(f"needs {pool_bytes / 2**30:.1f} GiB free GPU memory")
+
+    device = torch.device(torch_device_type)
+    paged = torch.zeros(num_blocks, block_size, head_size, dtype=dtype, device=device)
+    rows = paged.view(page_buffer_size, head_size)
+    ptrs = torch.tensor([paged.data_ptr()], dtype=torch.long, device=device)
+    slots = torch.arange(
+        page_buffer_size - num_tokens,
+        page_buffer_size,
+        dtype=torch.long,
+        device=device,
+    )
+    assert int(slots[0]) * head_size > int32_max
+    src = torch.randn(1, 1, num_tokens, head_size, dtype=dtype, device=device)
+
+    for direction, kv in (
+        (lmcache_native.TransferDirection.H2D, src),
+        (lmcache_native.TransferDirection.D2H, torch.zeros_like(src)),
+    ):
+        cuda_ops.multi_layer_kv_transfer(
+            kv,
+            ptrs,
+            slots,
+            device,
+            page_buffer_size,
+            direction,
+            lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
+            block_size=block_size,
+            head_size=head_size,
+        )
+        torch_dev.synchronize()
+        assert torch.equal(rows[slots], src[0, 0])
+        assert torch.equal(kv, src)
+    # Nothing landed at the wrapped-around (low) addresses.
+    assert not rows[:num_tokens].any()

@@ -9,6 +9,7 @@ cover what CUDA events cannot do (same-process import).
 from collections.abc import Callable
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
+import threading
 import time
 
 # Third Party
@@ -160,6 +161,63 @@ def test_query_transitions_with_recording_stream() -> None:
 
     stream.synchronize()
     assert backend.query_event(event) is True
+
+
+def _run_in_fresh_thread(fn: Callable[[], None]) -> None:
+    """Run ``fn`` on a new thread that has made no CUDA runtime call.
+
+    Such a thread has no current CUDA context, and ``torch.cuda.device`` does
+    not create one when the device index is unchanged (ordinal 0 here), so
+    driver-API calls on the legacy default stream need the backend to bind
+    the primary context itself.
+    """
+    errors: list[BaseException] = []
+
+    def target() -> None:
+        try:
+            fn()
+        except BaseException as exc:  # re-raised below
+            errors.append(exc)
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(timeout=30)
+    assert not thread.is_alive(), "fresh-thread call hung"
+    if errors:
+        raise errors[0]
+
+
+def test_record_from_fresh_thread_on_current_stream() -> None:
+    """A fresh thread can record on ``current_stream()`` (handle 0)."""
+    backend = TimelineSemaphoreEventIPCBackend()
+    device = torch.device(DEVICE)
+    backend.check_event_support(device)
+    recorded: list[object] = []
+
+    def record() -> None:
+        event = backend.create_event(device)
+        backend.record_event(event, torch.cuda.current_stream())
+        recorded.append(event)
+
+    _run_in_fresh_thread(record)
+    backend.synchronize_event(recorded[0], device)
+    assert backend.query_event(recorded[0]) is True
+
+
+def test_wait_from_fresh_thread_on_current_stream() -> None:
+    """A fresh thread's first CUDA call can be a wait on ``current_stream()``."""
+    backend = TimelineSemaphoreEventIPCBackend()
+    device = torch.device(DEVICE)
+    backend.check_event_support(device)
+    event = backend.create_event(device)
+    backend.record_event(event, torch.cuda.Stream())
+    imported = backend.import_event(backend.export_event(event, device), device)
+
+    _run_in_fresh_thread(
+        lambda: backend.wait_event(imported, torch.cuda.current_stream())
+    )
+    torch.cuda.synchronize()
+    assert backend.query_event(imported) is True
 
 
 def test_same_process_export_import_orders_consumer_stream() -> None:

@@ -28,7 +28,7 @@ LAYERS, HEADS, BLOCK, HEAD_SIZE, BLOCKS = 4, 2, 8, 4, 8
 
 def _paged(fill):
     return [
-        torch.full((2, BLOCKS, HEADS, BLOCK, HEAD_SIZE), float(fill + i))
+        torch.full((BLOCKS, 2, HEADS, BLOCK, HEAD_SIZE), float(fill + i))
         for i in range(LAYERS)
     ]
 
@@ -74,10 +74,7 @@ def test_parallel_gather_and_scatter_do_not_share_staging():
         for _ in range(50):
             scatter_chunk_to_blocks_hnd(layers, [2, 3], src)
         return all(
-            torch.equal(
-                layer[:, 2:4],
-                torch.full_like(layer[:, 2:4], float(fill) + 100.0),
-            )
+            torch.equal(layer[2:4], torch.full_like(layer[2:4], float(fill) + 100.0))
             for layer in layers
         )
 

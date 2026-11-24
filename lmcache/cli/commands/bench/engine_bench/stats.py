@@ -11,7 +11,7 @@ import time
 
 # First Party
 from lmcache.cli.commands.bench.engine_bench.config import EngineBenchConfig
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 
@@ -243,6 +243,7 @@ class StatsCollector:
             "config": asdict(config),
             "results": asdict(final),
         }
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             json.dump(output, f, indent=2)
         logger.debug("Exported JSON summary to: %s", path)

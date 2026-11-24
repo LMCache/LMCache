@@ -62,7 +62,7 @@ server instances in a registry and evicts those whose heartbeats lapse.
 
 ```bash
 lmcache coordinator \
-    --host 0.0.0.0 --port 9300 \
+    --host 127.0.0.1 --port 9300 \
     --instance-timeout 30 \
     --health-check-interval 10
 ```
@@ -181,10 +181,10 @@ Checksum:                                OK
 ### `lmcache bench`
 
 **`bench server`** -- end-to-end sanity test for a running LMCache MP cache
-server (ZMQ + HTTP). For each sequence in ``[--start, --end)`` the tool runs a
+server (gRPC + HTTP). For each sequence in ``[--start, --end)`` the tool runs a
 cold pass (``LOOKUP`` miss → ``STORE``) and a warm pass (``LOOKUP`` hit →
-``RETRIEVE``), then cross-checks per-chunk checksums against the server's HTTP
-API. Exercises the full RPC path
+``RETRIEVE``), then verifies the retrieved data using per-chunk checksums.
+Exercises the full RPC path
 (``REGISTER_KV_CACHE → GET_CHUNK_SIZE → LOOKUP → QUERY_PREFETCH_STATUS →
 RETRIEVE → STORE → END_SESSION``).
 
@@ -194,7 +194,8 @@ Supports two run modes via ``--mode``:
   (LMCache-driven handle transfer path).
 - **``cpu``** -- allocates regular CPU tensors and uses the engine-driven
   worker-side gather/scatter path by default. Its ``TransferContext`` uses
-  server-owned SHM staging when available and falls back to pickle transport.
+  server-owned SHM staging when available and falls back to typed inline
+  tensor transport.
   To migrate the tensors to POSIX SHM for the handle path, add
   ``--transfer-mode lmcache_driven``.
 
@@ -204,11 +205,11 @@ gpu→lmcache_driven, cpu→engine_driven.
 
 ```bash
 $ lmcache bench server \
-    --rpc-url tcp://localhost:5555 \
+    --rpc-url grpc://localhost:5555 \
     --url http://localhost:8080 \
     --start 0 --end 2
 
-Connecting to LMCache MP Server at tcp://localhost:5555 (mode=gpu, transfer=auto) ...
+Connecting to LMCache MP Server at grpc://localhost:5555 (mode=gpu, transfer=auto) ...
 Server chunk_size = 256
 Resolved KV shape spec: (2,1024,16,8,128):float16:32
 [seq=0] LOOKUP cold:  0/2 chunks hit (1.82 ms)
@@ -302,7 +303,7 @@ in `lmcache/cli/corpora/`.
 
 - **Auto-discovery (N-level):** Commands at all levels are discovered
   automatically via `discover_subclasses()` (in
-  `lmcache/v1/utils/subclass_discovery.py`). No manual registration is needed
+  `lmcache/v1/common/subclass_discovery.py`). No manual registration is needed
   — adding a new command at any depth is a single-file change.
   - **Leaf commands:** Inherit from `BaseCommand` directly.
   - **Command groups:** Inherit from `CompositeCommand(BaseCommand)`. Its
@@ -337,7 +338,7 @@ lmcache/cli/
 ├── main.py              # main() entry point
 ├── metrics/             # Metrics system (see framework-and-metrics.md)
 ├── commands/
-│   ├── __init__.py      # Auto-discovers ALL_COMMANDS (no manual edits)
+│   ├── __init__.py      # Directed registration; ALL_COMMANDS is a lazy shim
 │   ├── base.py          # BaseCommand ABC + CompositeCommand
 │   ├── mock.py          # lmcache mock  (example/test command)
 │   ├── server.py        # lmcache server
@@ -379,7 +380,7 @@ lmcache/cli/
 
 - **Entry point:** `lmcache = "lmcache.cli.main:main"` in `pyproject.toml`.
 - **Auto-discovery mechanism:** Powered by `discover_subclasses()` in
-  `lmcache/v1/utils/subclass_discovery.py`. Uses `pkgutil.iter_modules` to
+  `lmcache/v1/common/subclass_discovery.py`. Uses `pkgutil.iter_modules` to
   scan direct submodules, then `inspect.getmembers` to find concrete
   `BaseCommand` subclasses. Each subclass is yielded at most once.
 - **`CompositeCommand` pattern:** A `CompositeCommand` scans its own package
@@ -399,5 +400,3 @@ lmcache/cli/
 | **1** | **`server`** (done), `ping kvcache`, `kvcache clear`, `kvcache end-session`, `describe kvcache` |
 | **2** | `ping engine`, `query engine`, `query kvcache`, `bench engine`, `bench server`, `bench l2`, `describe engine`, corpora |
 | **3** | `kvcache evict` (future) |
-
-Existing `lmcache_server` entry point kept as a deprecated alias for 2 minor releases.

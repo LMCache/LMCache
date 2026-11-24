@@ -50,6 +50,10 @@ BUILD_ID="${BUILD_ID:-local_$$}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
 # LMCache MP server log, scanned to confirm the retrieve run hit LMCache.
 LMCACHE_LOG="${LMCACHE_LOG:-/tmp/build_${BUILD_ID}_lmcache.log}"
+# vLLM log, scanned for the engine-driven worker's registered group count.
+VLLM_LOG="${ENGINE_LOG_FILE:-/tmp/build_${BUILD_ID}_vllm.log}"
+# Engine-driven lanes set this to "inline" or "shm"; empty skips the check.
+ENGINE_DRIVEN_TRANSPORT="${ENGINE_DRIVEN_TRANSPORT:-}"
 
 HMA_DIR="$RESULTS_DIR/hma_lm_eval"
 VLLM_RUN_DIR="$HMA_DIR/vllm_run"
@@ -144,6 +148,52 @@ count_retrieves() {
     grep -c "Retrieved" "$LMCACHE_LOG" 2>/dev/null || true
 }
 
+# Confirm an engine-driven lane really ran the requested transport over every
+# KV cache group, so a silent fallback cannot pass the score comparison.
+#
+# Globals (read):
+#   ENGINE_DRIVEN_TRANSPORT - "inline", "shm", or empty (check skipped).
+#   LMCACHE_LOG             - LMCache MP server log (transfer strategy line).
+#   VLLM_LOG                - vLLM log (worker registration line).
+# Arguments:
+#   none.
+# Outputs:
+#   Confirmation or failure detail to stdout.
+# Returns:
+#   0 if the server picked the requested strategy and the worker registered
+#   more than one group (or its registration line is absent); 1 otherwise.
+assert_engine_driven_transport() {
+    [ -n "$ENGINE_DRIVEN_TRANSPORT" ] || return 0
+
+    local marker
+    case "$ENGINE_DRIVEN_TRANSPORT" in
+        inline) marker="Using safe inline engine-driven transfer strategy" ;;
+        shm) marker="Using shm engine-driven transfer strategy" ;;
+        *)
+            echo "ERROR: ENGINE_DRIVEN_TRANSPORT must be inline or shm, got '$ENGINE_DRIVEN_TRANSPORT'."
+            return 1
+            ;;
+    esac
+    if ! grep -q "$marker" "$LMCACHE_LOG" 2>/dev/null; then
+        echo "ERROR: LMCache log does not contain '$marker'."
+        return 1
+    fi
+    echo "Engine-driven $ENGINE_DRIVEN_TRANSPORT transport confirmed in LMCache log."
+
+    local line groups
+    line=$(grep -o "Worker engine-driven context registered ([^)]*)" "$VLLM_LOG" 2>/dev/null | tail -1 || true)
+    if [ -z "$line" ]; then
+        echo "WARNING: no engine-driven worker registration line in $VLLM_LOG; group count unchecked."
+        return 0
+    fi
+    groups=$(echo "$line" | sed -n 's/.*groups=\([0-9]*\).*/\1/p')
+    if [ -z "$groups" ] || [ "$groups" -lt 2 ]; then
+        echo "ERROR: expected a multi-group registration, got: $line"
+        return 1
+    fi
+    echo "Engine-driven worker registered $groups KV cache groups."
+}
+
 # ── 1. vLLM run: compute from scratch, populating LMCache ───
 run_lm_eval "$VLLM_PORT" "$VLLM_RUN_DIR" "vLLM run"
 
@@ -160,6 +210,8 @@ reset_vllm_prefix_cache "$VLLM_PORT"
 run_lm_eval "$VLLM_PORT" "$RETRIEVE_RUN_DIR" "LMCache retrieve run"
 
 retrieves_after=$(count_retrieves)
+
+assert_engine_driven_transport
 
 # ── 4. Compare scores and verify LMCache was actually used ──
 echo "============================================"

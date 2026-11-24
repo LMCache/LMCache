@@ -35,7 +35,7 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.memory_management import MemoryFormat
 
 # Test helpers
@@ -153,8 +153,9 @@ def tp_lookup_hit_chunks(
     Returns ``(hit_chunks, rows)``: the number of leading chunks every worker
     has (the fold over the per-rank rows) and the per-rank found bitmaps.
     """
-    rows = storage_manager.query_prefetch_status(handle)
-    assert rows is not None
+    result = storage_manager.query_prefetch_status(handle)
+    assert result is not None
+    rows = result.hit_cells
     hit_chunks, _ = fold_unfold_grouped(rows, [-1] * world_size)
     return hit_chunks, rows
 
@@ -193,7 +194,9 @@ class TestStorageManagerTPLookup:
                 for i in range(num_chunks)
             ]
             reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
-            storage_manager.finish_write(list(reserved_dict.keys()))
+            storage_manager.finish_write(
+                list(reserved_dict), l1_owners_of(reserved_dict)
+            )
 
         # Scheduler-style lookup: one key row per worker
         rows = create_lookup_key_rows(num_chunks, world_size)
@@ -221,7 +224,7 @@ class TestStorageManagerTPLookup:
             for i in range(num_chunks)
         ]
         reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
-        storage_manager.finish_write(list(reserved_dict.keys()))
+        storage_manager.finish_write(list(reserved_dict), l1_owners_of(reserved_dict))
 
         # Scheduler-style lookup: one key row per worker
         rows = create_lookup_key_rows(num_chunks, world_size)
@@ -250,7 +253,7 @@ class TestStorageManagerTPLookup:
             for i in range(num_chunks)
         ]
         reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
-        storage_manager.finish_write(list(reserved_dict.keys()))
+        storage_manager.finish_write(list(reserved_dict), l1_owners_of(reserved_dict))
 
         # Scheduler-style lookup: one key row per worker
         rows = create_lookup_key_rows(num_chunks, world_size)
@@ -282,7 +285,9 @@ class TestStorageManagerTPLookup:
                 for i in range(num_stored_chunks)
             ]
             reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
-            storage_manager.finish_write(list(reserved_dict.keys()))
+            storage_manager.finish_write(
+                list(reserved_dict), l1_owners_of(reserved_dict)
+            )
 
         # Request 5 chunks with a scheduler-style lookup (one row per worker)
         rows = create_lookup_key_rows(num_requested_chunks, world_size)
@@ -313,7 +318,7 @@ class TestStorageManagerTPLookup:
             for i in range(5)
         ]
         reserved_dict = storage_manager.reserve_write(storage_keys_w0, test_layout)
-        storage_manager.finish_write(list(reserved_dict.keys()))
+        storage_manager.finish_write(list(reserved_dict), l1_owners_of(reserved_dict))
 
         # Worker 1 has only 2 chunks
         storage_keys_w1 = [
@@ -321,7 +326,7 @@ class TestStorageManagerTPLookup:
             for i in range(2)
         ]
         reserved_dict = storage_manager.reserve_write(storage_keys_w1, test_layout)
-        storage_manager.finish_write(list(reserved_dict.keys()))
+        storage_manager.finish_write(list(reserved_dict), l1_owners_of(reserved_dict))
 
         # Request 5 chunks with a scheduler-style lookup (one row per worker)
         rows = create_lookup_key_rows(5, world_size)
@@ -352,7 +357,9 @@ class TestStorageManagerTPLookup:
                 for i in range(num_chunks)
             ]
             reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
-            storage_manager.finish_write(list(reserved_dict.keys()))
+            storage_manager.finish_write(
+                list(reserved_dict), l1_owners_of(reserved_dict)
+            )
 
         # Scheduler-style lookup: one key row per worker
         rows = create_lookup_key_rows(num_chunks, world_size)
@@ -383,7 +390,9 @@ class TestStorageManagerTPLookup:
                 for i in range(num_chunks)
             ]
             reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
-            storage_manager.finish_write(list(reserved_dict.keys()))
+            storage_manager.finish_write(
+                list(reserved_dict), l1_owners_of(reserved_dict)
+            )
 
         # Scheduler-style lookup: one key row per worker
         rows = create_lookup_key_rows(num_chunks, world_size)
@@ -423,12 +432,12 @@ class TestStorageManagerTPStoreRetrieve:
         # Store worker 0's data
         reserved_dict0 = storage_manager.reserve_write([key_w0], test_layout)
         assert len(reserved_dict0) == 1
-        storage_manager.finish_write(list(reserved_dict0.keys()))
+        storage_manager.finish_write(list(reserved_dict0), l1_owners_of(reserved_dict0))
 
         # Store worker 1's data
         reserved_dict1 = storage_manager.reserve_write([key_w1], test_layout)
         assert len(reserved_dict1) == 1
-        storage_manager.finish_write(list(reserved_dict1.keys()))
+        storage_manager.finish_write(list(reserved_dict1), l1_owners_of(reserved_dict1))
 
         # Prefetch to secure both entries
         handle = storage_manager.submit_prefetch_task(
@@ -459,7 +468,9 @@ class TestStorageManagerTPStoreRetrieve:
                 for i in range(3)
             ]
             reserved_dict = storage_manager.reserve_write(keys, test_layout)
-            storage_manager.finish_write(list(reserved_dict.keys()))
+            storage_manager.finish_write(
+                list(reserved_dict), l1_owners_of(reserved_dict)
+            )
             all_keys.extend(keys)
 
         # Prefetch to secure all entries
@@ -511,15 +522,17 @@ class TestTPEdgeCases:
             for i in range(num_chunks)
         ]
         reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
-        storage_manager.finish_write(list(reserved_dict.keys()))
+        storage_manager.finish_write(list(reserved_dict), l1_owners_of(reserved_dict))
 
         # Lookup should find all chunks
         handle = storage_manager.submit_prefetch_task(
             single_row_spec(storage_keys, test_layout)
         )
-        found_count = storage_manager.query_prefetch_status(handle)[
-            0
-        ].count_leading_ones()
+        found_count = (
+            storage_manager.query_prefetch_status(handle)
+            .hit_cells[0]
+            .count_leading_ones()
+        )
         assert found_count == num_chunks
 
         # Retrieve should work
@@ -545,7 +558,9 @@ class TestTPEdgeCases:
             ]
             all_keys.extend(storage_keys)
             reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
-            storage_manager.finish_write(list(reserved_dict.keys()))
+            storage_manager.finish_write(
+                list(reserved_dict), l1_owners_of(reserved_dict)
+            )
 
         # Scheduler lookup: one key row per worker
         rows = create_lookup_key_rows(num_chunks, world_size)
@@ -588,15 +603,17 @@ class TestTPEdgeCases:
         # Store all keys
         reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
         assert len(reserved_dict) == world_size
-        storage_manager.finish_write(list(reserved_dict.keys()))
+        storage_manager.finish_write(list(reserved_dict), l1_owners_of(reserved_dict))
 
         # Lookup all keys
         handle = storage_manager.submit_prefetch_task(
             single_row_spec(storage_keys, test_layout)
         )
-        found_count = storage_manager.query_prefetch_status(handle)[
-            0
-        ].count_leading_ones()
+        found_count = (
+            storage_manager.query_prefetch_status(handle)
+            .hit_cells[0]
+            .count_leading_ones()
+        )
         assert found_count == world_size
 
         # Retrieve each worker's key independently
@@ -643,7 +660,9 @@ class TestTPIntegration:
                 for i in range(stored_chunks)
             ]
             reserved_dict = storage_manager.reserve_write(storage_keys, test_layout)
-            storage_manager.finish_write(list(reserved_dict.keys()))
+            storage_manager.finish_write(
+                list(reserved_dict), l1_owners_of(reserved_dict)
+            )
 
         # Step 3: Scheduler lookup, one key row per worker
         rows = create_lookup_key_rows(requested_chunks, world_size)
@@ -686,7 +705,7 @@ class TestTPIntegration:
                 for i in range(num_chunks)
             ]
             reserved = storage_manager.reserve_write(storage_keys, test_layout)
-            storage_manager.finish_write(list(reserved.keys()))
+            storage_manager.finish_write(list(reserved), l1_owners_of(reserved))
             results[worker_id] = len(reserved)
 
         # Run stores concurrently

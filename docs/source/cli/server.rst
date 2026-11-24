@@ -48,13 +48,16 @@ Commonly used flags include:
    * - Flag
      - Description
    * - ``--transport {zmq,grpc}``
-     - Request transport exposed by the server (default: ``zmq``).
+     - Request transport exposed by the server (default: ``grpc``).
+       ``zmq`` is deprecated and will be removed in a future release; see
+       :ref:`mp-migrating-from-zmq`.
    * - ``--host HOST``
      - Bind address for the server.
    * - ``--port PORT``
      - Request-transport port.
    * - ``--chunk-size N``
-     - KV cache chunk size in tokens.
+     - Minimum KV cache chunk size in tokens. The vLLM MP connector may
+       negotiate it upward; see :doc:`/mp/chunk_size_negotiation`.
    * - ``--l1-size-gb GB``
      - L1 (CPU/DRAM) cache capacity in GB.
    * - ``--eviction-policy POLICY``
@@ -67,6 +70,15 @@ Commonly used flags include:
      - Base number of request worker threads.
    * - ``--grpc-server-workers N``
      - gRPC dispatch threads (used only with ``--transport grpc``).
+   * - ``--grpc-server-mode {auto,sync,aio,native}``
+     - gRPC server implementation (used with ``--transport grpc`` and by
+       the P2P listener).
+       Default is ``auto``, which picks ``native`` when the
+       ``pygrpc-native`` package is installed and ``aio`` otherwise.
+   * - ``--api-key-file PATH``
+     - Read a key accepted by the HTTP API and the request transport. Repeat
+       during key rotation. Both ZMQ and gRPC enforce it; see
+       :doc:`/mp/request_transport`.
    * - ``--coordinator-url URL``
      - Register with an MP coordinator at this base URL (e.g.
        ``http://coordinator:9300``). Opt-in; enables fleet registration. See
@@ -93,8 +105,8 @@ Commonly used flags include:
    * - ``--coordinator-kafka-topic TOPIC``
      - Kafka topic receiving cache events (default ``lmcache-cache-events``).
    * - ``--coordinator-kafka-delivery-timeout SECONDS``
-     - Seconds one flush waits for broker acknowledgement (``> 0``, default
-       ``10``).
+     - Seconds the producer retries a record before dropping it (``> 0``,
+       default ``300``).
    * - ``--p2p-advertise-url HOST:PORT``
      - Enable P2P KV cache sharing and advertise this server's
        transfer-channel endpoint to peers (e.g. ``10.0.0.1:8500``). Setting it
@@ -104,6 +116,11 @@ Commonly used flags include:
      - Address the transfer-channel server binds to. Defaults to
        ``--p2p-advertise-url``. Set it when the advertised address differs from
        the bind address (e.g. bind ``0.0.0.0`` while advertising a routable IP).
+   * - ``--p2p-rpc-port PORT``
+     - Independent P2P gRPC control port, bound on ``--host`` (default ``0``:
+       OS-assigned). Pin and allow this port when a firewall, Docker port
+       mapping, or NetworkPolicy restricts reachable ports; allowing only
+       the worker ``--port`` is insufficient.
    * - ``--p2p-lookup-timeout SECONDS``
      - Deadline for a peer lookup before it counts as a miss (default ``30``).
    * - ``--p2p-load-timeout SECONDS``
@@ -111,6 +128,9 @@ Commonly used flags include:
        (default ``30``).
    * - ``--p2p-transfer-engine ENGINE``
      - Transfer-channel implementation for P2P reads (default ``nixl``).
+   * - ``--server-module JSON``
+     - Import out-of-tree ``DiscoverableModule`` classes. Repeatable.
+       See :doc:`/developer_guide/extending_lmcache/server_modules`.
    * - ``--trace-level {storage,events}``
      - Enable trace recording: ``storage`` records StorageManager calls for
        replay, ``events`` records the cache-event stream emitted for the

@@ -37,6 +37,65 @@ LMCACHE_REQUEST_TRANSPORT=zmq \
 The request transport can be `zmq` or `grpc`. The harness maps these values to
 the `tcp://` and `grpc://` connector addresses respectively.
 
+## vLLM sleep mode
+
+`sleep_mode` covers vLLM's sleep and wake-up on the extensible KV cache, which
+vLLM enables by default for an LMCache-driven deployment. The LMCache server
+imports that KV cache, so sleep frees the memory only if the connector
+unregisters it first, and wake-up has to register the newly committed memory
+([design](../../../docs/design/integration/vllm/mp_sleep_mode.md)).
+
+```text
+run-single-test.sh sleep_mode
+  -> VLLM_ENABLE_SLEEP_MODE=1: the vLLM adapter adds --enable-sleep-mode
+  -> workloads/vllm/sleep-mode.sh -> sleep_mode.py
+     -> cache_config_info reports the extensible KV cache as enabled
+     -> prompt: stored to LMCache, then served from LMCache
+     -> /sleep?level=1&reset_connector=false, /wake_up
+        -> prompt: served from LMCache, same output
+     -> /sleep?level=1&reset_connector=true, /wake_up
+        -> prompt: miss, stored again, then served from LMCache, same output
+```
+
+During each sleep the LMCache server's `/status` must list no registered KV
+cache and GPU memory in use must fall to at most 25% of its level before
+sleep. After each wake-up one KV cache must be registered and GPU memory in
+use must stay within 110% of that level. The script runs every check and
+writes the outcomes to `ci_results_<build>/sleep_mode/checks.json`.
+
+CI runs the workload in LMCache-driven transfer, where the registration is
+`registered_gpu_ids` in `/status`. It also runs in engine-driven transfer,
+with the settings of the `lm_eval_engine_driven` step:
+
+```bash
+LMCACHE_MP_TRANSFER_MODE=engine_driven L1_USE_LAZY=false \
+    .buildkite/k3_tests/multiprocess/scripts/run-single-test.sh sleep_mode
+```
+
+There the server imports no GPU memory and the registration is its
+shared-memory staging context (`registered_non_cuda_instance_ids`), so
+connector hooks that do nothing fail only the two checks that the
+registration is gone during sleep.
+
+## SGLang nightly validation
+
+Normal SGLang jobs install the source revision recorded in
+`buildkite_latest_tested_sglang/latest_tested_sglang.txt`. A scheduled
+Buildkite build can set `VERIFY_AND_PIN_SGLANG=true` to run the canary path:
+
+```text
+official SGLang nightly index
+  -> resolve newest nightly version and commit
+  -> run lm_eval with LMCache over ZMQ and gRPC
+  -> require both jobs to report identical metadata
+  -> update latest_tested_sglang.txt and tested_runtimes.jsonl
+```
+
+The canary installs the nightly's exact source commit because the LMCache CI
+image uses Python 3.12 while SGLang currently publishes its nightly wheel for
+CPython 3.10. `SGLANG_INSTALL_SPEC` remains available for an explicit per-build
+override.
+
 ## Directory layout
 
 ```text
@@ -46,11 +105,14 @@ multiprocess/
 └── scripts/
     ├── engines/
     │   ├── README.md            # Adapter API details
+    │   ├── sglang.sh            # SGLang implementation
     │   └── vllm.sh              # vLLM implementation
     ├── workloads/
     │   ├── README.md            # Workload classification
     │   ├── helpers.sh           # Shared workload environment
     │   ├── common/              # Engine-neutral requests and assertions
+    │   ├── sglang/              # SGLang-specific workloads
+    │   ├── verification/        # Shared workload verification helpers
     │   └── vllm/                # vLLM-specific workloads
     ├── launch-processes.sh      # Shared process launcher
     ├── wait-for-servers.sh      # Readiness checks and diagnostics
@@ -165,6 +227,13 @@ authoritative by assigning defaults with `${VAR:-default}`. A workload that
 must distinguish an LMCache retrieval from an engine-local hit can opt in with
 `VERIFY_LMCACHE_RETRIEVAL=true`; its adapter implements
 `engine_clear_local_cache <port>` without clearing LMCache itself.
+
+The SGLang adapter exercises the unified radix-cache integration in both
+`lmcache_driven` and single-group `engine_driven` modes. Its CI coverage reuses
+the common long-document, accuracy, HTTP API, and restart-recovery workloads.
+Engine-driven hybrid models remain excluded until the shared transfer context
+supports multiple transfer groups. Special deadlock launch profiles remain
+excluded until the unified connector implements that contract.
 
 Workload support requires no adapter allowlist. A common workload is available
 to every adapter; an engine-specific workload is available when its script

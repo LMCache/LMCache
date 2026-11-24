@@ -27,7 +27,6 @@ import threading
 import time
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.usage_telemetry.flush import start_usage_flush_thread
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
 from lmcache.usage_telemetry.identity import (
@@ -42,6 +41,7 @@ from lmcache.usage_telemetry.transport import (
     build_usage_payload,
     usage_server_url,
 )
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import (
     EventBus,
@@ -96,7 +96,12 @@ class MPContinuousUsageReporter(EventSubscriber):
             raise ValueError(
                 f"max_buffered_samples must be positive, got {max_buffered_samples}"
             )
-        self._specs = specs if specs is not None else default_metric_specs(chunk_size)
+        self._chunk_size = chunk_size
+        self._specs = (
+            specs
+            if specs is not None
+            else default_metric_specs(lambda: self._chunk_size)
+        )
         spec_fields = [spec.field for spec in self._specs]
         message_fields = {
             f.name for f in fields(ContinuousContextMessage)
@@ -138,6 +143,12 @@ class MPContinuousUsageReporter(EventSubscriber):
         """
         self._flush_thread.stop()
         self.flush()
+
+    def update_chunk_size(self, chunk_size: int) -> None:
+        """Update token-count metric conversion after chunk-size negotiation."""
+        with self._lock:
+            self._chunk_size = chunk_size
+            self._buffers = {spec.field: [] for spec in self._specs}
 
     @swallow_telemetry_errors
     def flush(self) -> None:

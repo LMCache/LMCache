@@ -1,19 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the CUDA VMM KV-cache IPC wrapper.
+"""Tests for the VMM KV-cache IPC wrapper on CUDA and ROCm.
 
 VMM (``cuMemCreate``/``cuMemMap``) memory has no legacy CUDA IPC handle;
 :class:`VmmCudaIPCWrapper` shares it through
 ``cuMemExportToShareableHandle`` instead. POSIX-fd delivery is out of
-band -- these tests stand in for the fd transport with a
-``socket.send_fds`` pair and a test-installed resolver.
+band: most tests stand in for the fd channel with a ``socket.send_fds``
+pair and a test-installed resolver; one goes through the real channel.
 """
 
 # Standard
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
+import ctypes
+import faulthandler
 import os
-import pickle
 import socket
+import time
+import traceback
 
 # Third Party
 import pytest
@@ -21,31 +25,39 @@ import torch
 
 # First Party
 from lmcache.v1.platform import resolve_kv_wrapper_factory
-from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
-from lmcache.v1.platform.devices.cuda.ipc_wrapper import (
-    VmmCudaIPCWrapper,
-    set_vmm_fd_resolver,
-)
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper, set_fd_resolver
+from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
+from lmcache.v1.platform.devices.cuda.ipc_wrapper import VmmCudaIPCWrapper
 from lmcache.v1.platform.devices.cuda.utils import _cuda
+from lmcache.v1.platform.devices.rocm import RocmDeviceSpec
+from lmcache.v1.platform.devices.rocm.ipc_wrapper import VmmRocmIPCWrapper
+from lmcache.v1.platform.fd_channel import FdChannelServer
 from lmcache.v1.platform.ipc_policy import (
     is_isolated_ipc,
     is_use_vmm_api,
     set_isolated_ipc,
     set_use_vmm_api,
 )
+from lmcache.v1.platform.kv_wrap import kv_wrapper_fds_delivered
 
 pytestmark = [
     pytest.mark.cuda,
-    pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device"),
-    # ROCm reports torch.cuda.is_available() but has no cuda.bindings.
     pytest.mark.skipif(
-        torch.version.hip is not None,
-        reason="VMM IPC wrapping is NVIDIA-only (cuda.bindings)",
+        not torch.cuda.is_available(), reason="requires a CUDA or ROCm device"
     ),
 ]
 
+IS_ROCM = torch.version.hip is not None
+# The VMM wrapper and device spec this platform selects.
+VMM_WRAPPER = VmmRocmIPCWrapper if IS_ROCM else VmmCudaIPCWrapper
+DEVICE_SPEC = RocmDeviceSpec if IS_ROCM else CudaDeviceSpec
+
 DEVICE = "cuda:0"
 GRANULARITY = 2 * 1024 * 1024  # minimum cuMemCreate granularity (2 MiB)
+# requestedHandleTypes values, identical in CUDA and HIP.
+HANDLE_TYPE_NONE = 0x0
+HANDLE_TYPE_POSIX_FD = 0x1
+HANDLE_TYPE_FABRIC = 0x8
 
 # Fabric tests run only where IMEX channels are provisioned (the driver
 # created this directory's channel nodes -- NVreg_CreateImexChannel0 or
@@ -75,54 +87,88 @@ def restore_switches():
 def clear_fd_resolver():
     """Uninstall any test-installed fd resolver after the test."""
     yield
-    set_vmm_fd_resolver(None)
+    set_fd_resolver(None)
 
 
 class _VmmPool:
     """A VMM-backed device buffer: N chunks mapped into one VA range.
 
-    Stands in for a vLLM cumem-allocator segment (``num_chunks=1``, the
-    CUDA path) or a chunked ROCm-style allocation (``num_chunks>1``).
+    Stands in for a vLLM cumem-allocator segment or extensible-KV-cache
+    layer (``num_chunks=1``) or a chunked allocation (``num_chunks>1``).
+    Allocates with ``cuda.bindings``, or ``rocm.bindings`` on ROCm.
     """
 
     def __init__(
         self,
         num_chunks: int = 1,
-        handle_type: object | None = None,
+        handle_type: int = HANDLE_TYPE_POSIX_FD,
         device_index: int = 0,
     ) -> None:
-        driver = _cuda.driver
-        if handle_type is None:
-            handle_types = driver.CUmemAllocationHandleType
-            handle_type = handle_types.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
         self.size = num_chunks * GRANULARITY
         self.device_index = device_index
+        self.handles: list[object] = []
+        with torch.cuda.device(device_index):
+            if IS_ROCM:
+                self._alloc_rocm(num_chunks, handle_type)
+            else:
+                self._alloc_cuda(num_chunks, handle_type)
 
+    def _alloc_cuda(self, num_chunks: int, handle_type: int) -> None:
+        driver = _cuda.driver
         prop = driver.CUmemAllocationProp()
         prop.type = driver.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
         prop.location.type = driver.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
-        prop.location.id = device_index
-        prop.requestedHandleTypes = handle_type
+        prop.location.id = self.device_index
+        prop.requestedHandleTypes = driver.CUmemAllocationHandleType(handle_type)
 
-        with torch.cuda.device(device_index):
-            err, base = driver.cuMemAddressReserve(self.size, 0, 0, 0)
-            assert int(err) == 0, f"cuMemAddressReserve: {err}"
-            self.base = int(base)
-            self.handles = []
-            for i in range(num_chunks):
-                err, handle = driver.cuMemCreate(GRANULARITY, prop, 0)
-                assert int(err) == 0, f"cuMemCreate: {err}"
-                self.handles.append(handle)
-                (err,) = driver.cuMemMap(
-                    self.base + i * GRANULARITY, GRANULARITY, 0, handle, 0
-                )
-                assert int(err) == 0, f"cuMemMap: {err}"
-            access = driver.CUmemAccessDesc()
-            access.location.type = driver.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
-            access.location.id = device_index
-            access.flags = driver.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
-            (err,) = driver.cuMemSetAccess(self.base, self.size, [access], 1)
-            assert int(err) == 0, f"cuMemSetAccess: {err}"
+        err, base = driver.cuMemAddressReserve(self.size, 0, 0, 0)
+        assert int(err) == 0, f"cuMemAddressReserve: {err}"
+        self.base = int(base)
+        for i in range(num_chunks):
+            err, handle = driver.cuMemCreate(GRANULARITY, prop, 0)
+            assert int(err) == 0, f"cuMemCreate: {err}"
+            self.handles.append(handle)
+            (err,) = driver.cuMemMap(
+                self.base + i * GRANULARITY, GRANULARITY, 0, handle, 0
+            )
+            assert int(err) == 0, f"cuMemMap: {err}"
+        access = driver.CUmemAccessDesc()
+        access.location.type = driver.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
+        access.location.id = self.device_index
+        access.flags = driver.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
+        (err,) = driver.cuMemSetAccess(self.base, self.size, [access], 1)
+        assert int(err) == 0, f"cuMemSetAccess: {err}"
+
+    def _alloc_rocm(self, num_chunks: int, handle_type: int) -> None:
+        # Third Party
+        from rocm.bindings import hip
+
+        prop = hip.hipMemAllocationProp()
+        prop.type = hip.hipMemAllocationType.hipMemAllocationTypePinned
+        prop.location.type = hip.hipMemLocationType.hipMemLocationTypeDevice
+        prop.location.id = self.device_index
+        # The binding leaves out the requestedHandleTypes union after `type`.
+        ctypes.c_int.from_address(
+            prop.as_c_void_p().value + ctypes.sizeof(ctypes.c_int)
+        ).value = handle_type
+
+        err, base = hip.hipMemAddressReserve(self.size, 0, None, 0)
+        assert err == hip.hipError_t.hipSuccess, f"hipMemAddressReserve: {err}"
+        self.base = int(base)
+        for i in range(num_chunks):
+            err, handle = hip.hipMemCreate(GRANULARITY, prop, 0)
+            assert err == hip.hipError_t.hipSuccess, f"hipMemCreate: {err}"
+            self.handles.append(handle)
+            (err,) = hip.hipMemMap(
+                self.base + i * GRANULARITY, GRANULARITY, 0, handle, 0
+            )
+            assert err == hip.hipError_t.hipSuccess, f"hipMemMap: {err}"
+        access = hip.hipMemAccessDesc()
+        access.location.type = hip.hipMemLocationType.hipMemLocationTypeDevice
+        access.location.id = self.device_index
+        access.flags = hip.hipMemAccessFlags.hipMemAccessFlagsProtReadWrite
+        (err,) = hip.hipMemSetAccess(self.base, self.size, access, 1)
+        assert err == hip.hipError_t.hipSuccess, f"hipMemSetAccess: {err}"
 
     def tensor(self, offset_bytes: int, num_floats: int) -> torch.Tensor:
         """A float32 torch view at ``offset_bytes`` into the pool."""
@@ -137,8 +183,17 @@ class _VmmPool:
         return torch.from_dlpack(cp_flat).view(torch.float32)
 
     def close(self) -> None:
-        driver = _cuda.driver
         with torch.cuda.device(self.device_index):
+            if IS_ROCM:
+                # Third Party
+                from rocm.bindings import hip
+
+                hip.hipMemUnmap(self.base, self.size)
+                for handle in self.handles:
+                    hip.hipMemRelease(handle)
+                hip.hipMemAddressFree(self.base, self.size)
+                return
+            driver = _cuda.driver
             driver.cuMemUnmap(self.base, self.size)
             for handle in self.handles:
                 driver.cuMemRelease(handle)
@@ -158,12 +213,12 @@ def vmm_pool():
 
 
 def test_factory_selects_vmm_wrapper_when_enabled(restore_switches, vmm_pool) -> None:
-    """use_vmm_api routes registration through VmmCudaIPCWrapper."""
+    """use_vmm_api routes registration through the platform VMM wrapper."""
     set_isolated_ipc(False)
     set_use_vmm_api(True)
     tensor = vmm_pool.tensor(0, 1024)
     wrapper = resolve_kv_wrapper_factory("cuda")(tensor)
-    assert type(wrapper) is VmmCudaIPCWrapper
+    assert type(wrapper) is VMM_WRAPPER
     wrapper.close()
 
 
@@ -179,22 +234,87 @@ def test_factory_default_unaffected(restore_switches) -> None:
     assert type(wrapper) is CudaIPCWrapper
 
 
+@pytest.mark.skipif(not IS_ROCM, reason="ROCm binding compatibility test")
+def test_hip71_vmm_import_passes_fd_by_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HIP 7.1+ follows the API contract: the pointer value is the POSIX fd."""
+    # First Party
+    from lmcache.v1.platform.devices.rocm import vmm_bindings
+
+    success = vmm_bindings.hip.hipError_t.hipSuccess
+    received: list[int] = []
+    imported_handle = object()
+
+    def import_handle(fd: int, _kind: object) -> tuple[object, object]:
+        received.append(fd)
+        return success, imported_handle
+
+    monkeypatch.setattr(
+        vmm_bindings.hip,
+        "hipRuntimeGetVersion",
+        lambda: (success, 70_100_000),
+    )
+    monkeypatch.setattr(
+        vmm_bindings.hip,
+        "hipMemImportFromShareableHandle",
+        import_handle,
+    )
+
+    err, handle = vmm_bindings.cuMemImportFromShareableHandle(37, object())
+
+    assert err == success
+    assert handle is imported_handle
+    assert received == [37]
+
+
+@pytest.mark.skipif(not IS_ROCM, reason="ROCm binding compatibility test")
+def test_hip70_vmm_import_passes_address_of_fd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HIP 7.0 must receive a pointer to storage to avoid a runtime crash."""
+    # First Party
+    from lmcache.v1.platform.devices.rocm import vmm_bindings
+
+    success = vmm_bindings.hip.hipError_t.hipSuccess
+    received: list[int] = []
+    imported_handle = object()
+
+    def import_handle(fd_address: int, _kind: object) -> tuple[object, object]:
+        received.append(ctypes.c_int.from_address(fd_address).value)
+        return success, imported_handle
+
+    monkeypatch.setattr(
+        vmm_bindings.hip,
+        "hipRuntimeGetVersion",
+        lambda: (success, 70_000_000),
+    )
+    monkeypatch.setattr(
+        vmm_bindings.hip,
+        "hipMemImportFromShareableHandle",
+        import_handle,
+    )
+
+    err, handle = vmm_bindings.cuMemImportFromShareableHandle(37, object())
+
+    assert err == success
+    assert handle is imported_handle
+    assert received == [37]
+
+
 def test_vmm_composes_with_isolated_per_kind(restore_switches) -> None:
     """use_vmm_api + isolated_ipc compose: the VMM wrapper is selected,
     and a POSIX-fd-only allocation is rejected at wrap time (fd passing
     needs a shared filesystem path, which zero-share rules out).
     """
-    # First Party
-    from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
-
     set_isolated_ipc(True)
     set_use_vmm_api(True)
-    assert CudaDeviceSpec().ipc_wrapper_cls is VmmCudaIPCWrapper
+    assert DEVICE_SPEC().ipc_wrapper_cls is VMM_WRAPPER
 
     pool = _VmmPool()  # posix_fd handle type
     try:
         with pytest.raises(RuntimeError, match="isolated_ipc"):
-            VmmCudaIPCWrapper(pool.tensor(0, 1024))
+            VMM_WRAPPER(pool.tensor(0, 1024))
     finally:
         pool.close()
 
@@ -208,14 +328,11 @@ def test_fabric_kind_allowed_under_isolated(restore_switches) -> None:
     """A fabric-exportable allocation wraps fine under isolated_ipc --
     the blob travels inline and needs no shared filesystem.
     """
-    driver = _cuda.driver
     set_isolated_ipc(True)
     set_use_vmm_api(True)
-    pool = _VmmPool(
-        handle_type=driver.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
-    )
+    pool = _VmmPool(handle_type=HANDLE_TYPE_FABRIC)
     try:
-        wrapper = VmmCudaIPCWrapper(pool.tensor(0, 1024))
+        wrapper = VMM_WRAPPER(pool.tensor(0, 1024))
         assert wrapper._kind == "fabric"  # noqa: SLF001
         wrapper.close()
     finally:
@@ -228,7 +345,7 @@ def test_vmm_wrap_rejects_non_vmm_memory(restore_switches) -> None:
     """
     tensor = torch.arange(64, device=DEVICE, dtype=torch.float32)
     with pytest.raises(RuntimeError, match="VMM"):
-        VmmCudaIPCWrapper(tensor)
+        VMM_WRAPPER(tensor)
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +357,7 @@ def test_wrap_records_chunk_offset(vmm_pool) -> None:
     """An interior view records its byte offset within the mapped chunk."""
     offset_bytes = 8192
     tensor = vmm_pool.tensor(offset_bytes, 2048)
-    wrapper = VmmCudaIPCWrapper(tensor)
+    wrapper = VMM_WRAPPER(tensor)
     try:
         assert wrapper._alloc_offset == offset_bytes  # noqa: SLF001
         assert wrapper._nbytes == 2048 * 4  # noqa: SLF001
@@ -258,7 +375,7 @@ def test_wrap_rejects_multi_chunk() -> None:
     try:
         spanning = pool.tensor(0, pool.size // 4)  # covers both chunks
         with pytest.raises(RuntimeError, match="chunk"):
-            VmmCudaIPCWrapper(spanning)
+            VMM_WRAPPER(spanning)
     finally:
         pool.close()
 
@@ -267,13 +384,10 @@ def test_wrap_rejects_unexportable_allocation() -> None:
     """requestedHandleTypes=NONE memory cannot be exported by any
     mechanism; wrap must fail loudly with the actionable hint.
     """
-    driver = _cuda.driver
-    pool = _VmmPool(
-        handle_type=driver.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_NONE
-    )
+    pool = _VmmPool(handle_type=HANDLE_TYPE_NONE)
     try:
         with pytest.raises(RuntimeError, match="requestedHandleTypes"):
-            VmmCudaIPCWrapper(pool.tensor(0, 1024))
+            VMM_WRAPPER(pool.tensor(0, 1024))
     finally:
         pool.close()
 
@@ -282,15 +396,16 @@ def test_wrap_rejects_unpermutable_noncontiguous(vmm_pool) -> None:
     """Same contiguity contract as RawCudaIPCWrapper."""
     base = vmm_pool.tensor(0, 1024)
     with pytest.raises(ValueError, match="contiguous"):
-        VmmCudaIPCWrapper(base[::2])
+        VMM_WRAPPER(base[::2])
 
 
-def test_pickle_strips_process_local_state(vmm_pool) -> None:
-    """The fd and registry references never travel with the pickle."""
-    wrapper = VmmCudaIPCWrapper(vmm_pool.tensor(0, 1024))
+def test_wire_strips_process_local_state(vmm_pool) -> None:
+    """The fd and registry references never travel with the descriptor."""
+    wrapper = VMM_WRAPPER(vmm_pool.tensor(0, 1024))
     try:
         assert wrapper.fd_payload() is not None
-        clone = pickle.loads(pickle.dumps(wrapper))
+        clone = DeviceIPCWrapper.Deserialize(DeviceIPCWrapper.Serialize(wrapper))
+        assert isinstance(clone, VMM_WRAPPER)
         assert clone.fd_payload() is None
         assert clone._opens == 0  # noqa: SLF001
         assert clone._export_id == wrapper._export_id  # noqa: SLF001
@@ -300,7 +415,7 @@ def test_pickle_strips_process_local_state(vmm_pool) -> None:
 
 def test_exporter_close_closes_fd(vmm_pool) -> None:
     """close() on the exporting side must release the exported fd."""
-    wrapper = VmmCudaIPCWrapper(vmm_pool.tensor(0, 1024))
+    wrapper = VMM_WRAPPER(vmm_pool.tensor(0, 1024))
     payload = wrapper.fd_payload()
     assert payload is not None
     _export_id, fd = payload
@@ -313,10 +428,10 @@ def test_exporter_close_closes_fd(vmm_pool) -> None:
 
 def test_to_tensor_without_resolver_raises(vmm_pool, clear_fd_resolver) -> None:
     """An fd-kind wrapper cannot import without the out-of-band fd."""
-    set_vmm_fd_resolver(None)
-    wrapper = VmmCudaIPCWrapper(vmm_pool.tensor(0, 1024))
+    set_fd_resolver(None)
+    wrapper = VMM_WRAPPER(vmm_pool.tensor(0, 1024))
     try:
-        clone = pickle.loads(pickle.dumps(wrapper))
+        clone = DeviceIPCWrapper.Deserialize(DeviceIPCWrapper.Serialize(wrapper))
         with pytest.raises(RuntimeError, match="resolver"):
             clone.to_tensor()
     finally:
@@ -332,38 +447,98 @@ def _vmm_consumer(conn: Connection, sock: socket.socket) -> None:
     """Child: receive the wrapper (pipe) and its fd (SCM_RIGHTS), import,
     verify the producer's pattern, write back, and hold until released.
     """
-    torch.cuda.init()
-    torch.cuda.set_device(0)
+    faulthandler.dump_traceback_later(90)
+    try:
+        conn.send(("stage", "process entry"))
+        # VmmRocmIPCWrapper.to_tensor() selects the device while importing.
+        # Avoid a redundant HIP runtime initialization before that operation.
+        if not IS_ROCM:
+            torch.cuda.init()
+            torch.cuda.set_device(0)
+        conn.send(("stage", "device setup complete"))
 
-    wrapper = DeviceIPCWrapper.Deserialize(conn.recv_bytes())
-    assert isinstance(wrapper, VmmCudaIPCWrapper)
-    export_id, fds, _flags, _addr = socket.recv_fds(sock, 4096, 1)
-    assert export_id == wrapper._export_id  # noqa: SLF001
+        wrapper = DeviceIPCWrapper.Deserialize(conn.recv_bytes())
+        assert isinstance(wrapper, VMM_WRAPPER)
+        conn.send(("stage", "wrapper received"))
 
-    # Stand-in for the fd transport: each resolve hands out a dup so a
-    # re-import after close also works.
-    set_vmm_fd_resolver(lambda eid: os.dup(fds[0]))
+        export_id, fds, _flags, _addr = socket.recv_fds(sock, 4096, 1)
+        assert export_id == wrapper._export_id  # noqa: SLF001
+        conn.send(("stage", "fd received"))
 
-    tensor = wrapper.to_tensor()
-    again = wrapper.to_tensor()  # idempotent second import, same mapping
-    same_mapping = tensor.data_ptr() == again.data_ptr()
+        # Stand-in for the fd transport: each resolve hands out a dup so a
+        # re-import after close also works.
+        set_fd_resolver(lambda eid: os.dup(fds[0]))
 
-    expected = torch.arange(
-        tensor.numel(), device=tensor.device, dtype=tensor.dtype
-    ).reshape(tensor.shape)
-    matches = bool(torch.equal(tensor, expected)) and same_mapping
+        tensor = wrapper.to_tensor()
+        conn.send(("stage", "first mapping complete"))
+        again = wrapper.to_tensor()  # idempotent second import, same mapping
+        conn.send(("stage", "second mapping complete"))
+        same_mapping = tensor.data_ptr() == again.data_ptr()
 
-    tensor.fill_(-1.0)
-    torch.cuda.synchronize()
+        expected = torch.arange(
+            tensor.numel(), device=tensor.device, dtype=tensor.dtype
+        ).reshape(tensor.shape)
+        matches = bool(torch.equal(tensor, expected)) and same_mapping
 
-    wrapper.close()
-    reopened = wrapper.to_tensor()  # fresh import proves a clean unmap
-    matches = matches and bool((reopened == -1.0).all().item())
-    wrapper.close()
-    os.close(fds[0])
+        tensor.fill_(-1.0)
+        torch.cuda.synchronize()
 
-    conn.send(matches)
-    conn.recv()  # hold until the parent verified the write-back
+        wrapper.close()
+        conn.send(("stage", "first close complete"))
+        reopened = wrapper.to_tensor()  # fresh import proves a clean unmap
+        conn.send(("stage", "reopen complete"))
+        matches = matches and bool((reopened == -1.0).all().item())
+        wrapper.close()
+        os.close(fds[0])
+
+        conn.send(("result", matches))
+        conn.recv()  # hold until the parent verified the write-back
+    except BaseException:
+        try:
+            conn.send(("error", traceback.format_exc()))
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+        raise
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+
+def _recv_vmm_consumer_result(
+    conn: Connection, child: BaseProcess, timeout: float = 120
+) -> bool:
+    """Receive progress until the VMM consumer reports its result."""
+    deadline = time.monotonic() + timeout
+    last_stage = "not started"
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            pytest.fail(
+                f"consumer timed out; last stage: {last_stage}; "
+                f"exit code: {child.exitcode}"
+            )
+        if not conn.poll(min(remaining, 1.0)):
+            if child.exitcode is not None:
+                pytest.fail(
+                    f"consumer exited before reporting; last stage: {last_stage}; "
+                    f"exit code: {child.exitcode}"
+                )
+            continue
+
+        try:
+            kind, payload = conn.recv()
+        except EOFError:
+            pytest.fail(
+                f"consumer pipe closed; last stage: {last_stage}; "
+                f"exit code: {child.exitcode}"
+            )
+        if kind == "stage":
+            last_stage = payload
+        elif kind == "error":
+            pytest.fail(f"consumer failed after {last_stage}:\n{payload}")
+        elif kind == "result":
+            return bool(payload)
+        else:
+            pytest.fail(f"unexpected consumer message: {(kind, payload)!r}")
 
 
 def test_cross_process_round_trip_of_interior_view(clear_fd_resolver) -> None:
@@ -383,7 +558,7 @@ def test_cross_process_round_trip_of_interior_view(clear_fd_resolver) -> None:
         )
         torch.cuda.synchronize()
 
-        wrapper = VmmCudaIPCWrapper(view)
+        wrapper = VMM_WRAPPER(view)
         payload = DeviceIPCWrapper.Serialize(wrapper)
         fd_payload = wrapper.fd_payload()
         assert fd_payload is not None
@@ -397,10 +572,7 @@ def test_cross_process_round_trip_of_interior_view(clear_fd_resolver) -> None:
         try:
             parent_conn.send_bytes(payload)
             socket.send_fds(parent_sock, [export_id], [fd])
-            # poll() before recv(): a crashed consumer must fail the test,
-            # not block recv() forever.
-            assert parent_conn.poll(120), "consumer died before reporting"
-            assert parent_conn.recv() is True
+            assert _recv_vmm_consumer_result(parent_conn, child) is True
 
             torch.cuda.synchronize()
             assert bool((view == -1.0).all().item())  # consumer wrote back
@@ -418,6 +590,115 @@ def test_cross_process_round_trip_of_interior_view(clear_fd_resolver) -> None:
                 child.join()
         assert child.exitcode == 0
         wrapper.close()
+    finally:
+        pool.close()
+
+
+def test_cross_process_round_trip_of_dim0_padded_view(clear_fd_resolver) -> None:
+    """Regression for #5097 on the VMM path: a hybrid-model unified KV pool
+    view (blocks at a padded dim-0 stride) round-trips element for element,
+    and consumer writes never touch the inter-block padding. Strides are
+    distinct so the layout normalization never reorders dims.
+    """
+    pool = _VmmPool()
+    try:
+        flat = pool.tensor(0, pool.size // 4)
+        flat.fill_(7.0)
+        view = flat[512:].as_strided((4, 8, 16), (256, 16, 1))
+        view.copy_(
+            torch.arange(view.numel(), device=DEVICE, dtype=torch.float32).reshape(
+                view.shape
+            )
+        )
+        torch.cuda.synchronize()
+
+        wrapper = VMM_WRAPPER(view)
+        payload = DeviceIPCWrapper.Serialize(wrapper)
+        fd_payload = wrapper.fd_payload()
+        assert fd_payload is not None
+        export_id, fd = fd_payload
+
+        parent_sock, child_sock = socket.socketpair()
+        ctx = get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe()
+        child = ctx.Process(target=_vmm_consumer, args=(child_conn, child_sock))
+        child.start()
+        try:
+            parent_conn.send_bytes(payload)
+            socket.send_fds(parent_sock, [export_id], [fd])
+            # Consumer saw the exact pattern.
+            assert _recv_vmm_consumer_result(parent_conn, child) is True
+
+            torch.cuda.synchronize()
+            assert bool((view == -1.0).all().item())  # consumer wrote back
+            blocks = flat[512 : 512 + 4 * 256].view(4, 256)
+            assert bool((blocks[:, 128:] == 7.0).all().item())  # padding untouched
+            parent_conn.send("release")
+        finally:
+            child.join(timeout=60)
+            if child.is_alive():
+                child.kill()
+                child.join()
+        assert child.exitcode == 0
+        wrapper.close()
+    finally:
+        pool.close()
+
+
+def _vmm_channel_consumer(conn: Connection, path: str) -> None:
+    """Child: serve the fd channel as the MP server does, import the wrapper
+    the parent registers, verify its pattern and write back."""
+    torch.cuda.init()
+    torch.cuda.set_device(0)
+    channel = FdChannelServer(path)
+    set_fd_resolver(channel.take)
+    conn.send("ready")
+
+    wrapper = DeviceIPCWrapper.Deserialize(conn.recv_bytes())
+    tensor = wrapper.to_tensor()
+    expected = torch.arange(tensor.numel(), device=tensor.device, dtype=tensor.dtype)
+    matches = bool(torch.equal(tensor, expected))
+    tensor.fill_(-1.0)
+    torch.cuda.synchronize()
+    wrapper.close()
+    conn.send(matches)
+    conn.recv()  # hold until the parent verified the write-back
+    channel.close()
+
+
+def test_cross_process_round_trip_over_the_fd_channel() -> None:
+    """Registration-scoped delivery: the producer sends the fd over the MP
+    server's fd channel, keeps none of its own, and the consumer imports the
+    allocation through the channel's resolver."""
+    pool = _VmmPool()
+    try:
+        view = pool.tensor(0, 4096)
+        view.copy_(torch.arange(view.numel(), device=DEVICE, dtype=torch.float32))
+        torch.cuda.synchronize()
+        wrapper = VMM_WRAPPER(view)
+
+        path = os.path.join("/dev/shm", f"lmcache_fd_test_{os.getpid()}.sock")
+        ctx = get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe()
+        child = ctx.Process(target=_vmm_channel_consumer, args=(child_conn, path))
+        child.start()
+        try:
+            assert parent_conn.poll(120), "consumer died before serving"
+            assert parent_conn.recv() == "ready"
+            with kv_wrapper_fds_delivered([wrapper], path, timeout=30):
+                assert wrapper.fd_payload() is None
+                parent_conn.send_bytes(DeviceIPCWrapper.Serialize(wrapper))
+                assert parent_conn.poll(120), "consumer died before reporting"
+                assert parent_conn.recv() is True
+            torch.cuda.synchronize()
+            assert bool((view == -1.0).all().item())
+            parent_conn.send("release")
+        finally:
+            child.join(timeout=60)
+            if child.is_alive():
+                child.kill()
+                child.join()
+        assert child.exitcode == 0
     finally:
         pool.close()
 
@@ -448,18 +729,15 @@ def _fabric_consumer(conn: Connection) -> None:
 )
 def test_fabric_round_trip() -> None:
     """Fabric-kind wrappers need no fd channel: the 64-byte blob rides
-    the pickle and imports across processes on its own.
+    the descriptor and imports across processes on its own.
     """
-    driver = _cuda.driver
-    pool = _VmmPool(
-        handle_type=driver.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
-    )
+    pool = _VmmPool(handle_type=HANDLE_TYPE_FABRIC)
     try:
         view = pool.tensor(4096, 1024)
         view.copy_(torch.arange(1024, device=DEVICE, dtype=torch.float32))
         torch.cuda.synchronize()
 
-        wrapper = VmmCudaIPCWrapper(view)
+        wrapper = VMM_WRAPPER(view)
         assert wrapper._kind == "fabric"  # noqa: SLF001
         assert wrapper.fd_payload() is None
 

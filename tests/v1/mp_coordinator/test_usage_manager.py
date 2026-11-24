@@ -248,3 +248,11 @@ def test_restore_after_fence_does_not_double_count():
     usage.consume(_l1_batch([_key(1)], event_type=CacheEventType.DELETE))
     assert usage.get_total_bytes(Tier.L1) == 0
     assert usage.get_bytes_by_instance(Tier.L1) == {}
+
+
+def test_stats_report_the_fleet_bytes_per_tier():
+    usage = CacheUsageManager()
+    usage.consume(_batch([_key(1), _key(2)], tier=Tier.L2, size_bytes=100))
+    usage.consume(_l1_batch([_key(3)]))
+
+    assert usage.stats().bytes_stored == {"l1": 100, "l2": 200}

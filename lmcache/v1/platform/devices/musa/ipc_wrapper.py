@@ -18,10 +18,11 @@ import os
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.kv_format.contiguity import (
+from lmcache.v1.common.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
-from lmcache.v1.gpu_connector.utils import assert_contiguous
+from lmcache.v1.common.utils import assert_contiguous
+from lmcache.v1.platform.base.ipc_wire import MusaIPCData, WireIPCData
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 ENV_MUSA_HANDLE_TRANSFER = "LMCACHE_MUSA_HANDLE_TRANSFER"
@@ -204,6 +205,28 @@ def is_musa_handle_transfer_available() -> bool:
     )
 
 
+def _musa_handle_to_wire(handle: object) -> object:
+    """Serialize a TorchMUSA IPC handle into MessagePack primitives.
+
+    ``torch.musa.ipc.export_tensor`` returns an opaque ``MUSAIPCTensorHandle``
+    dataclass, which the fail-closed wire rejects. The handle carries its own
+    ``to_dict`` serializer (byte fields base64-encoded into strings), so use it
+    instead of shipping the raw object.
+    """
+    to_dict = getattr(handle, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    return handle
+
+
+def _musa_handle_from_wire(ipc_module: object, handle: object) -> object:
+    """Restore a TorchMUSA IPC handle from its wire (possibly dict) form."""
+    handle_cls = getattr(ipc_module, "MUSAIPCTensorHandle", None)
+    if isinstance(handle, dict) and handle_cls is not None:
+        return handle_cls.from_dict(handle)
+    return handle
+
+
 class MusaIPCWrapper(DeviceIPCWrapper):
     """Wire-compatible wrapper for TorchMUSA memory IPC handles."""
 
@@ -265,6 +288,25 @@ class MusaIPCWrapper(DeviceIPCWrapper):
             0 if device_index is None else device_index
         )
 
+    def to_wire(self) -> MusaIPCData:
+        """Return a primitive-valued MUSA handle; opaque objects are rejected."""
+        return MusaIPCData(
+            version=1,
+            metadata=self.wire_metadata(),
+            handle=_musa_handle_to_wire(self.handle),
+        )
+
+    @classmethod
+    def from_wire(cls, data: WireIPCData) -> "MusaIPCWrapper":
+        """Restore a MUSA descriptor without a receiver-local owner."""
+        if not isinstance(data, MusaIPCData):
+            raise ValueError("Expected MUSA IPC descriptor")
+        obj = object.__new__(cls)
+        obj.restore_metadata(data.metadata)
+        obj.handle = data.handle
+        obj._opened_handle = None
+        return obj
+
     def to_tensor(self) -> torch.Tensor:
         """Reconstruct the MUSA tensor in the current process.
 
@@ -284,7 +326,9 @@ class MusaIPCWrapper(DeviceIPCWrapper):
                 )
             # The TorchMUSA handle carries its producer ordinal and UUID;
             # open_tensor resolves them against receiver-visible devices.
-            owner = ipc_module.open_tensor(self.handle)
+            owner = ipc_module.open_tensor(
+                _musa_handle_from_wire(ipc_module, self.handle)
+            )
             self._opened_handle = owner
         return owner.tensor
 

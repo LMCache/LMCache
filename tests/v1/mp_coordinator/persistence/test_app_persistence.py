@@ -6,13 +6,16 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 import json
+import time
 
 # Third Party
 from fastapi.testclient import TestClient
 
 # First Party
 from lmcache.v1.mp_coordinator.app import create_app
+from lmcache.v1.mp_coordinator.background_loops import BackgroundLoops
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.metric_sources import get_and_clear_metric_sources
 
 
 @contextmanager
@@ -105,3 +108,31 @@ class TestBothArtifacts:
             assert client.get("/directory/stats").json()["num_keys"] == 1
 
         assert list(tmp_path.iterdir()) == []
+
+
+def test_a_failing_periodic_checkpoint_fails_the_checkpoint_loop(tmp_path: Path):
+    """The loop counts the failed pass, so the loop metrics show a
+    checkpoint that cannot be written."""
+    in_the_way = tmp_path / "dir-in-the-way"
+    in_the_way.mkdir()
+    config = MPCoordinatorConfig(
+        health_check_interval=0.0,
+        eviction_check_interval=0.0,
+        checkpoint_path=str(in_the_way),
+        checkpoint_interval=0.01,
+    )
+
+    with TestClient(create_app(config)):
+        [loops] = [
+            s for s in get_and_clear_metric_sources() if isinstance(s, BackgroundLoops)
+        ]
+        deadline = time.monotonic() + 10.0
+        while (
+            time.monotonic() < deadline
+            and not loops.stats()["checkpoint"].passes_failed
+        ):
+            time.sleep(0.01)
+
+    checkpoint = loops.stats()["checkpoint"]
+    assert checkpoint.passes_failed >= 1
+    assert checkpoint.last_success_timestamp is None

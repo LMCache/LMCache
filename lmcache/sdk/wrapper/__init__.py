@@ -2,8 +2,11 @@
 """Transport wrappers for the LMCache KV cache SDK."""
 
 # First Party
-from lmcache.sdk.wrapper.contiguous import ContiguousTransferWrapper
+from lmcache.sdk.wrapper.ring_mapping import RingMapping, RingStateError
+from lmcache.sdk.wrapper.ring_transfer import SDKObjectLayout
 
 __all__ = [
-    "ContiguousTransferWrapper",
+    "RingMapping",
+    "RingStateError",
+    "SDKObjectLayout",
 ]

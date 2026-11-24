@@ -13,24 +13,26 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.lmcache_native import EngineKVFormat
-from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.buffer_registration import BufferRegistration
+from lmcache.v1.common.group_view import engine_group_layer_indices
+from lmcache.v1.common.kv_format import get_spec_class
+from lmcache.v1.common.kv_format.types import DiscoverableKVCache
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.utils import (
     LayoutHints,
     get_device,
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.custom_types import KVCache
-from lmcache.v1.multiprocess.group_view import engine_group_layer_indices
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.base.ipc_wrapper import KVCache
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+    from lmcache.v1.common.group_view import EngineGroupInfo
+    from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 
 logger = init_logger(__name__)
 
@@ -149,6 +151,11 @@ class _TempMUSABuffer:
         """Return the number of chunks that fit in the staging buffer."""
         return self._max_batch_size
 
+    @property
+    def buffer(self) -> torch.Tensor:
+        """Return the flat staging tensor (for GDS muFile registration)."""
+        return self._temp_buffer
+
     def get_temp_kernel_group_buffer(
         self,
         batch_idx: int,
@@ -211,10 +218,15 @@ class _TempMUSABuffer:
             self._kv_groups_manager.get_slots_per_chunk_in_sw(kernel_group_idx)
             * num_chunks
         )
-        if group.engine_kv_format == EngineKVFormat.NL_X_NB_BS_HS:
-            return torch.Size((group.num_layers, num_slots, group.hidden_dim_size))
+        engine_kv_format = group.engine_kv_format
+        assert engine_kv_format is not None
         return torch.Size(
-            (sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size)
+            get_spec_class(engine_kv_format).staging_shape(
+                group.num_layers,
+                num_slots,
+                group.hidden_dim_size,
+                int(sd.kv_size),
+            )
         )
 
     def _get_size_for_kernel_group(self, kernel_group_idx: int) -> int:
@@ -253,6 +265,8 @@ class MUSACacheContext(BaseCacheContext):
         engine_type: EngineType = EngineType.VLLM,
         separate_object_groups: bool = True,
         full_sw_kv: bool = False,
+        *,
+        object_group_transfer: ObjectGroupTransfer | None = None,
     ) -> None:
         """Build a MUSA cache context from IPC-wrapped KV tensors.
 
@@ -264,11 +278,14 @@ class MUSACacheContext(BaseCacheContext):
             engine_type: Serving engine that produced the KV cache.
             separate_object_groups: Whether to split object groups by window.
             full_sw_kv: Whether sliding-window groups transfer their full KV.
+            object_group_transfer: Optional callback for the base full-chunk
+                transfer method; device overrides remain active.
 
         Raises:
             ValueError: If reconstructed tensors are not MUSA tensors.
         """
         self._ipc_wrappers = tuple(kv_caches)
+        self._buffer_registration: BufferRegistration | None = None
         try:
             self._initialize(
                 kv_caches,
@@ -278,6 +295,7 @@ class MUSACacheContext(BaseCacheContext):
                 engine_type,
                 separate_object_groups,
                 full_sw_kv,
+                object_group_transfer,
             )
         except BaseException:
             self.close()
@@ -292,6 +310,7 @@ class MUSACacheContext(BaseCacheContext):
         engine_type: EngineType,
         separate_object_groups: bool,
         full_sw_kv: bool,
+        object_group_transfer: ObjectGroupTransfer | None,
     ) -> None:
         """Initialize reconstructed tensors and MUSA transfer resources."""
         unwrapped = cast(DiscoverableKVCache, unwrap_kv_cache_tensors(kv_caches))
@@ -338,6 +357,7 @@ class MUSACacheContext(BaseCacheContext):
             kv_layer_groups_manager=kv_layer_groups_manager,
             block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+            object_group_transfer=object_group_transfer,
         )
 
         self.group_kv_pointers_: list[torch.Tensor] = []
@@ -367,8 +387,25 @@ class MUSACacheContext(BaseCacheContext):
             self.kv_layer_groups_manager_.kernel_groups[0].dtype,
         )
 
+    def register_staging_buffer(self, registration: BufferRegistration) -> None:
+        """Register the full staging buffer on the context's transfer stream.
+
+        Args:
+            registration: External registration, retained after success until
+                ``close``. Call once after construction and before transfers.
+
+        Raises:
+            RuntimeError: If registration fails; the adapter must roll back.
+        """
+        with torch_dev.stream(self.stream_):
+            registration.register(self._temp_buffer.buffer)
+        self._buffer_registration = registration
+
     def close(self) -> None:
         """Synchronize transfers and release receiver-side IPC owners.
+
+        Also releases any staging registration on the context's MUSA stream
+        before releasing IPC wrappers.
 
         Returns:
             None.
@@ -376,24 +413,41 @@ class MUSACacheContext(BaseCacheContext):
         Raises:
             RuntimeError: If the MUSA stream cannot be synchronized.
         """
-        wrappers = self._ipc_wrappers
-        if not wrappers:
-            return
-
         stream = getattr(self, "stream_", None)
-        synchronize = getattr(stream, "synchronize", None)
-        if callable(synchronize):
-            synchronize()
+        temp_buffer = getattr(self, "_temp_buffer", None)
+        wrappers = getattr(self, "_ipc_wrappers", ())
+        if not wrappers and self._buffer_registration is None:
+            return
+        try:
+            synchronize = getattr(stream, "synchronize", None)
+            if callable(synchronize):
+                synchronize()
 
-        kv_tensors = getattr(self, "kv_caches_", None)
-        if isinstance(kv_tensors, list):
-            kv_tensors.clear()
+            # Deregister only after a complete registration succeeded. A
+            # failed constructor may have created the staging buffer without
+            # owning a registration for it.
+            if (
+                self._buffer_registration is not None
+                and temp_buffer is not None
+                and stream is not None
+            ):
+                with torch_dev.stream(stream):
+                    self._buffer_registration.deregister(temp_buffer.buffer)
+                self._buffer_registration = None
 
-        for wrapper in wrappers:
-            close = getattr(wrapper, "close", None)
-            if callable(close):
-                close()
-        self._ipc_wrappers = ()
+            kv_tensors = getattr(self, "kv_caches_", None)
+            if isinstance(kv_tensors, list):
+                kv_tensors.clear()
+        finally:
+            # IPC owners are independent of GDS registration and must be
+            # released even when synchronization or deregistration fails.
+            try:
+                for wrapper in wrappers:
+                    close = getattr(wrapper, "close", None)
+                    if callable(close):
+                        close()
+            finally:
+                self._ipc_wrappers = ()
 
     @property
     def stream(self) -> Any:
@@ -460,6 +514,21 @@ class MUSACacheContext(BaseCacheContext):
             batch_idx,
             object_group_idx,
         )
+
+    def get_temp_staging_buffer(self, num_bytes: int) -> torch.Tensor | None:
+        """Return the start of the transfer staging buffer as one flat region.
+
+        Args:
+            num_bytes: Bytes the region must hold.
+
+        Returns:
+            A flat uint8 view of the buffer's first ``num_bytes`` bytes, or
+            None when the staging buffer is smaller than ``num_bytes``.
+        """
+        staging_buffer = self._temp_buffer.buffer
+        if num_bytes > staging_buffer.numel():
+            return None
+        return staging_buffer[:num_bytes]
 
     def get_kernel_group_shape_dtype(
         self,

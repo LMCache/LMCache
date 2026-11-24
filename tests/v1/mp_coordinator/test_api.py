@@ -3,10 +3,12 @@
 
 # Third Party
 from fastapi.testclient import TestClient
+import pytest
 
 # First Party
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 
 
 def _client() -> TestClient:
@@ -29,6 +31,46 @@ def test_register_lists_then_deregister():
 
         assert client.delete("/instances/i1").status_code == 204
         assert client.get("/instances").json()["instances"] == []
+
+
+def test_chunk_size_binding_updates_coordinator_components_once() -> None:
+    config = MPCoordinatorConfig(
+        chunk_size=256,
+        enable_blend_lookup=True,
+        health_check_interval=0.0,
+    )
+    with TestClient(create_app(config)) as client:
+        response = client.put("/config/chunk-size", json={"chunk_size": 640})
+        assert response.status_code == 200
+        assert response.json() == {"chunk_size": 640}
+
+        ctx = client.app.state.ctx
+        assert ctx.token_hasher.chunk_size == 640
+        assert ctx.views.get(KeyDirectory)._blend_chunk_size == 640
+
+        assert (
+            client.put("/config/chunk-size", json={"chunk_size": 640}).status_code
+            == 200
+        )
+        conflict = client.put("/config/chunk-size", json={"chunk_size": 400})
+        assert conflict.status_code == 409
+        assert "separate coordinator" in conflict.json()["detail"]
+
+
+def test_registration_restores_finalized_chunk_size_after_restart() -> None:
+    with _client() as client:
+        response = client.post(
+            "/instances",
+            json={
+                "instance_id": "i1",
+                "ip": "127.0.0.1",
+                "http_port": 8080,
+                "chunk_size": 640,
+            },
+        )
+
+        assert response.status_code == 200
+        assert client.app.state.ctx.token_hasher.chunk_size == 640
 
 
 def test_register_round_trips_p2p_and_mq_fields():
@@ -114,6 +156,53 @@ def test_register_rejects_blank_ip():
         # Whitespace-only ip is stripped to empty and rejected.
         bad = {"instance_id": "x", "ip": "   ", "http_port": 8080}
         assert client.post("/instances", json=bad).status_code == 422
+
+
+@pytest.mark.parametrize(
+    "ip",
+    [
+        "169.254.169.254/latest/meta-data/iam/security-credentials/?x=",
+        "127.0.0.1:6379/inject",
+        "http://127.0.0.1",
+        "user@internal.example",
+        "internal.example?path=/admin",
+        "internal host",
+        "internal\\admin",
+        "[::1]",
+    ],
+)
+def test_register_rejects_ip_with_url_syntax(ip: str) -> None:
+    """Registration cannot inject authority or path components via ``ip``."""
+    with _client() as client:
+        response = client.post(
+            "/instances",
+            json={"instance_id": "x", "ip": ip, "http_port": 8080},
+        )
+
+        assert response.status_code == 422
+        assert client.get("/instances").json()["instances"] == []
+
+
+@pytest.mark.parametrize(
+    "ip",
+    [
+        "127.0.0.1",
+        "internal.svc.cluster.local",
+        "lmcache_mp",
+        "localhost",
+        "::1",
+    ],
+)
+def test_register_accepts_bare_ip_or_host_name(ip: str) -> None:
+    with _client() as client:
+        response = client.post(
+            "/instances",
+            json={"instance_id": "x", "ip": ip, "http_port": 8080},
+        )
+
+        assert response.status_code == 200
+        listed = client.get("/instances").json()["instances"]
+        assert listed[0]["ip"] == ip
 
 
 def test_whitespace_instance_id_is_generated():

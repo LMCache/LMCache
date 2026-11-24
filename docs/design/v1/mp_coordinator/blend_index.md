@@ -5,7 +5,7 @@ HTTP surface: `POST /directory/blend-lookup`
 (`http_apis/directory_api.py`)
 
 The fragment counterpart to the key directory's prefix lookup, and the
-follow-up [key_directory.md](key_directory.md) names as "fragment tokens
+follow-up [key_directory.md](views/key_directory.md) names as "fragment tokens
 → keys". It answers: **given a request's tokens, which cached chunks does
 it contain, and where?** — the query behind fleet-wide CacheBlend reuse,
 where a request assembled from documents cached anywhere in the fleet
@@ -19,7 +19,9 @@ It is **off unless the coordinator is started with
 `--enable-blend-lookup`**, which calls `KeyDirectory.enable_blend_lookup`
 at startup. Until then no chunk content is hashed and `blend_match`
 returns nothing — a fleet that does not run CacheBlend pays nothing for
-this. Chunks stored before the call are not retroactively indexed.
+this. The MP server's first chunk-size negotiation then binds the index to
+the fleet's final window size through `PUT /config/chunk-size`. Chunks stored
+before lookup is enabled are not retroactively indexed.
 An entry whose `token_offset` is `UNKNOWN_TOKEN_OFFSET` fills its
 binding's content but is not indexed: without the stored position a match
 could not say where to re-RoPE from, and a wrong position yields wrong KV
@@ -44,7 +46,7 @@ directory removes:
 
 The cost is coordinator memory: verification needs the tokens resident,
 `O(m)` rather than `O(m/C)`. See
-[key_directory.md](key_directory.md) — Token index for the
+[key_directory.md](views/key_directory.md) — Token index for the
 representation that keeps that affordable.
 
 ## Identity and scope
@@ -65,13 +67,17 @@ Content is the key; **identity rides on the occupants**.
 
 ### The namespace
 
-`BlendNamespace` (`api.py`) is `(model_name, cache_salt, world_size)` —
-exactly the three fields `ipc_key_to_object_keys` reads to turn a
+`BlendNamespace` (`api.py`) is `(model_name, cache_salt, world_size, tags)` —
+the matching fields `ipc_key_to_object_keys` reads to turn a
 `chunk_hash` into `ObjectKey`s. On the store side it is derived from the
 key itself, `world_size` from the top byte `ComputeKVRank` packed into
-`kv_rank`; on the query side it arrives on the request. `object_group_id`
+`kv_rank`; on the query side it arrives on the request. Tags are immutable
+snapshots with order-independent equality and hashing, so a request with
+`{"adapter": "b"}` cannot select a chunk available only to adapter `a`.
+`object_group_id`
 is deliberately out: groups partition a server's own layout rather than
-the fleet, and blend servers must not enable `--separate-object-groups`.
+the fleet. The Blend server's per-leg read set expands a matched chunk into
+the relevant attention, recurrent-state, and auxiliary object-group keys.
 
 **Scoping loses no legitimate reuse.** Each dimension is one the
 requester's own key expansion would miss on anyway: another model's KV is
@@ -167,9 +173,23 @@ Driven entirely by binding lifecycle in `KeyDirectory`:
 | `STORE` with `token_ids` | `add(tokens, chunk_hash, token_offset, ns)` |
 | `STORE` first filling a binding's content | `add` for **every** namespace on the binding |
 | re-`STORE` with different content | `remove_chunk`, then re-`add` per namespace |
-| `DELETE` of a namespace's last key for a chunk | `remove_claim(tokens, chunk_hash, ns)` |
-| `DELETE` of a chunk's last placement overall | the last `remove_claim` drops the occupant |
-| `fence_instance` (restart / deregistration) | `remove_claim` per dropped chunk |
+| a key loses its last placement (`DELETE` or `fence_instance`) | `remove_claim` for the key's namespace; the key is marked missing |
+| a missing key is stored again | `add`, once the namespace has no missing key |
+| a chunk's last key loses its last placement | the binding is dropped, its missing keys with it |
+
+**One missing key retires the claim.** Blend loads a chunk only when every
+key (one per kv rank and object group) loads, so the claim is released as
+soon as one key has no placement on any instance or tier:
+
+```text
+DELETE [k1]  node-a   k1 still on node-b    -> claim held
+DELETE [k1]  node-b   k1 has no placement   -> claim released
+STORE  [k0]  node-c   k1 still missing      -> not reclaimed
+STORE  [k1]  node-a   nothing missing       -> claim held again
+```
+
+Missing keys are not checkpointed: after a restore, a chunk is claimed by
+the keys it still has.
 
 The namespace comes from the key the event carries, so nothing new is
 published for it. The steady-state store path claims for one namespace
@@ -235,4 +255,4 @@ thread rather than on the event loop.
   directory is eventually consistent, so a match is still a hint the
   owner validates. Filtering on placements would tighten this, at the
   cost of taking the directory lock on the serving path (see
-  [key_directory.md](key_directory.md)).
+  [key_directory.md](views/key_directory.md)).

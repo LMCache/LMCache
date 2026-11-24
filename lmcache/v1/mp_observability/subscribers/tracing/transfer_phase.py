@@ -23,11 +23,11 @@ import time
 
 # First Party
 from lmcache.lmcache_native import TransferDirection
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.ops_types import TransferPhase
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 from lmcache.v1.mp_observability.subscribers.tracing.span_registry import SpanRegistry
-from lmcache.v1.platform.ops_types import TransferPhase
 
 logger = init_logger(__name__)
 
@@ -86,7 +86,7 @@ class TransferPhaseTracingSubscriber(EventSubscriber):
 
     Must be registered after ``MPServerTracingSubscriber`` on the same
     registry: it reads the ``store`` / ``retrieve`` span that subscriber
-    opens on the same ``MP_*_START`` event.
+    opens under the same ``transfer_key`` on the same ``MP_*_START`` event.
 
     Args:
         registry: Shared span registry the MP server subscriber writes to.
@@ -127,7 +127,9 @@ class TransferPhaseTracingSubscriber(EventSubscriber):
         if not transfer_key:
             return
         parent = _PARENT_BY_EVENT[event.event_type]
-        ctx = self._registry.get_context(event.session_id, parent)
+        ctx = self._registry.get_context(
+            event.session_id, parent, transfer_key=str(transfer_key)
+        )
         if ctx is None:
             return
         self._transfers[str(transfer_key)] = _TransferTotals(

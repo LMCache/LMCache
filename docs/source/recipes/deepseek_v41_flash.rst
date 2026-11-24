@@ -42,7 +42,6 @@ Validated models
 
          lmcache server \
              --chunk-size 256 \
-             --separate-object-groups \
              --l1-size-gb 100 \
              --eviction-policy LRU
 
@@ -68,12 +67,13 @@ Validated models
       automatically from the checkpoint and only needs to be passed explicitly
       if you override the tokenizer.
 
-      **Chunk size.** The server's ``--chunk-size`` must be a multiple of every
-      non-scratch group's ``tokens_per_block``. DeepSeek-V4.1-Flash uses ``32``
-      for its sliding-window groups and ``64`` for the compressed-KV / indexer
-      group, so any multiple of ``64`` works; ``256`` is a good default.
-      ``--separate-object-groups`` keeps the per-group registration explicit,
-      which is what this multi-geometry model needs.
+      **Chunk size.** The connector negotiates a multiple of every non-scratch
+      group's ``tokens_per_block``. DeepSeek-V4.1-Flash uses ``32`` for its
+      sliding-window groups and ``64`` for the compressed-KV / indexer group,
+      so the configured minimum of ``256`` remains unchanged. See
+      :doc:`/mp/chunk_size_negotiation`.
+      Object-group separation is enabled by default and must remain enabled for
+      this multi-geometry model.
 
       ``--enable-expert-parallel`` distributes the MoE experts across the
       tensor-parallel ranks, as on :doc:`DeepSeek-V4-Flash <deepseek_v4_flash>`;
@@ -106,7 +106,7 @@ Compression support
    * - Method
      - Status
      - Notes
-   * - :doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`
+   * - :doc:`CacheGen <../mp/cachegen>`
      - Not supported
      - Packed ``fp8_ds_mla`` records are byte-opaque.
 

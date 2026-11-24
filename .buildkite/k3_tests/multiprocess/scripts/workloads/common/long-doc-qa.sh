@@ -31,8 +31,10 @@ MAX_INFLIGHT_REQUESTS="${MAX_INFLIGHT_REQUESTS:-5}"
 MAX_TTFT_SLOWDOWN_PCT="${MAX_TTFT_SLOWDOWN_PCT:--60}"
 MAX_ROUND_TIME_SLOWDOWN_PCT="${MAX_ROUND_TIME_SLOWDOWN_PCT:--15}"
 
-# Output directory
-LONG_DOC_QA_DIR="$RESULTS_DIR/long_doc_qa"
+# Resolve paths before each benchmark changes its working directory.
+LMCACHE_DIR="$(cd "$LMCACHE_DIR" && pwd)"
+mkdir -p "$RESULTS_DIR/long_doc_qa"
+LONG_DOC_QA_DIR="$(cd "$RESULTS_DIR/long_doc_qa" && pwd)"
 
 echo "=== Long Doc QA Test ==="
 echo "Model: $MODEL"
@@ -48,7 +50,6 @@ echo "  Max TTFT slowdown: ${MAX_TTFT_SLOWDOWN_PCT}% (LMCache must be >= $(echo 
 echo "  Max round time slowdown: ${MAX_ROUND_TIME_SLOWDOWN_PCT}% (LMCache must be >= $(echo "$MAX_ROUND_TIME_SLOWDOWN_PCT" | tr -d '-')% faster)"
 echo ""
 
-mkdir -p "$LONG_DOC_QA_DIR"
 
 run_long_doc_qa() {
     local port="$1"
@@ -57,20 +58,33 @@ run_long_doc_qa() {
 
     echo "=== Running long_doc_qa ($description) ==="
     local output_file="$LONG_DOC_QA_DIR/${description}_output.txt"
+    local phase_dir="$LONG_DOC_QA_DIR/$description"
+    mkdir -p "$phase_dir"
+    local -a benchmark_command=(
+        python3 "$LMCACHE_DIR/benchmarks/long_doc_qa/long_doc_qa.py"
+        --port "$port"
+        --model "$MODEL"
+        --document-length "$DOCUMENT_LENGTH"
+        --num-documents "$NUM_DOCUMENTS"
+        --output-len "$OUTPUT_LEN"
+        --repeat-count "$REPEAT_COUNT"
+        --repeat-mode "$REPEAT_MODE"
+        --shuffle-seed "$SHUFFLE_SEED"
+        --max-inflight-requests "$MAX_INFLIGHT_REQUESTS"
+        --output "$output_file"
+        --json-output
+    )
 
-    python3 "$LMCACHE_DIR/benchmarks/long_doc_qa/long_doc_qa.py" \
-        --port "$port" \
-        --model "$MODEL" \
-        --document-length "$DOCUMENT_LENGTH" \
-        --num-documents "$NUM_DOCUMENTS" \
-        --output-len "$OUTPUT_LEN" \
-        --repeat-count "$REPEAT_COUNT" \
-        --repeat-mode "$REPEAT_MODE" \
-        --shuffle-seed "$SHUFFLE_SEED" \
-        --max-inflight-requests "$MAX_INFLIGHT_REQUESTS" \
-        --output "$output_file" \
-        --json-output \
-        2>>"$output_file" | tee "$result_file"
+    (
+        cd "$phase_dir"
+        "${benchmark_command[@]}" 2>>"$output_file" | tee "$result_file"
+    )
+
+    python3 "$COMMON_WORKLOAD_DIR/long_doc_qa_diagnostics.py" \
+        --phase "$description" \
+        --engine "$INFERENCE_ENGINE" \
+        --results-dir "$phase_dir" \
+        --command "${benchmark_command[@]}" | tee "$phase_dir/diagnostics.txt"
 
     echo "$description benchmark completed"
     echo ""

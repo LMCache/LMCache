@@ -6,28 +6,29 @@
 # and oneAPI/SYCL runtime libs (bound at runtime by the host XPU image).
 #
 # Env (set by workflow, with sensible defaults for local runs):
+#   PYTHON                     runtime interpreter (default python3 on PATH)
 #   TORCH_XPU_SPEC             pip torch spec      (default detected from preinstalled torch)
 #   TORCH_XPU_INDEX            torch wheel index   (default xpu index)
 #   SKIP_AUDITWHEEL_REPAIR     1 to explicitly skip repair (default 0)
 #   SETUPTOOLS_SCM_PRETEND_VERSION wheel version   (default 0.0.0.dev0)
 set -euxo pipefail
 
-if command -v python3.12 >/dev/null 2>&1; then
-    PY=python3.12
-else
-    PY=python3
-fi
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
-DEFAULT_TORCH_SPEC="$($PY - <<'PY'
-try:
-    import torch
-    print(f"torch=={torch.__version__}")
-except Exception:
-    print("torch==2.12.0+xpu")
-PY
-)"
+source_oneapi_environment() {
+    export OCL_ICD_FILENAMES="${OCL_ICD_FILENAMES:-}"
+    # oneAPI setvars can trip over unset optional vars in some images.
+    set +u
+    # shellcheck disable=SC1091
+    source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
+    set -u
+}
 
-TORCH_XPU_SPEC="${TORCH_XPU_SPEC:-$DEFAULT_TORCH_SPEC}"
+# Use the runtime environment, not a versioned system Python outside its venv.
+PY="$(command -v "${PYTHON:-python3}")"
+INSTALLED_TORCH="$("$PY" -c 'import torch; print(torch.__version__)')"
+
+TORCH_XPU_SPEC="${TORCH_XPU_SPEC:-torch==$INSTALLED_TORCH}"
 TORCH_XPU_INDEX="${TORCH_XPU_INDEX:-https://download.pytorch.org/whl/xpu}"
 
 export SETUPTOOLS_SCM_PRETEND_VERSION="${SETUPTOOLS_SCM_PRETEND_VERSION:-0.0.0.dev0}"
@@ -40,41 +41,35 @@ git config --global --add safe.directory /work/LMCache
 
 # oneAPI toolchain env for icpx/dpcpp.
 if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
-    export OCL_ICD_FILENAMES="${OCL_ICD_FILENAMES:-}"
-    # oneAPI setvars can trip over unset optional vars in some images.
-    # Load it with nounset disabled, then restore nounset for the rest.
-    set +u
-    # shellcheck disable=SC1091
-    source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
-    set -u
+    source_oneapi_environment
 fi
 
-$PY --version
+# vLLM runtime images supply SYCL libraries without the compiler. Match that
+# runtime instead of installing a newer compiler with different libraries.
+if ! command -v icpx >/dev/null 2>&1; then
+    PYTHON="$PY" bash \
+        "${SCRIPT_DIR}/../../.buildkite/k3_tests/xpu/install_xpu_dpcpp_compiler.sh"
+    source_oneapi_environment
+fi
+
+"$PY" --version
 icpx --version
 
 # Build against XPU torch; ABI compatibility is keyed to this torch minor.
-INSTALLED_TORCH="$($PY - <<'PY'
-try:
-    import torch
-    print(torch.__version__)
-except Exception:
-    print("")
-PY
-)"
 REQUESTED_TORCH="${TORCH_XPU_SPEC#torch==}"
-if [[ -z "$INSTALLED_TORCH" || "$INSTALLED_TORCH" != "$REQUESTED_TORCH" ]]; then
-    $PY -m pip install --no-cache-dir "${TORCH_XPU_SPEC}" --index-url "${TORCH_XPU_INDEX}"
+if [[ "$INSTALLED_TORCH" != "$REQUESTED_TORCH" ]]; then
+    "$PY" -m pip install --no-cache-dir "${TORCH_XPU_SPEC}" --index-url "${TORCH_XPU_INDEX}"
 fi
 
-$PY -m pip install --no-cache-dir \
+"$PY" -m pip install --no-cache-dir \
     ninja "setuptools>=77.0.3,<81.0.0" setuptools_scm grpcio==1.78.0 grpcio-tools==1.78.0 wheel pybind11 auditwheel patchelf
-$PY -c 'import torch; print("BUILD TORCH:", torch.__version__, "xpu:", hasattr(torch, "xpu"), "cxx11abi:", torch._C._GLIBCXX_USE_CXX11_ABI)'
+"$PY" -c 'import torch; print("BUILD TORCH:", torch.__version__, "xpu:", hasattr(torch, "xpu"), "cxx11abi:", torch._C._GLIBCXX_USE_CXX11_ABI)'
 
 cd /work/LMCache
 rm -rf build dist dist_xpu
 
 export BUILD_WITH_SYCL=1
-$PY setup.py bdist_wheel --dist-dir=dist_xpu
+"$PY" setup.py bdist_wheel --dist-dir=dist_xpu
 
 # Repair: exclude torch and oneAPI/SYCL runtime libs so the wheel binds to the
 # host image at runtime (same policy as ROCm/CUDA variant wheels).
@@ -89,7 +84,7 @@ else
         echo "patchelf is required for auditwheel repair" >&2
         exit 1
     fi
-    $PY -m auditwheel repair \
+    "$PY" -m auditwheel repair \
         --plat manylinux_2_35_x86_64 \
         --exclude 'libtorch*.so*' \
         --exclude 'libc10*.so*' \
@@ -103,11 +98,15 @@ else
         --exclude 'libmkl_intel_ilp64.so*' \
         --exclude 'libmkl_intel_lp64.so*' \
         --exclude 'libmkl_core.so*' \
+        --exclude 'libsvml.so*' \
+        --exclude 'libimf.so*' \
+        --exclude 'libirng.so*' \
+        --exclude 'libintlc.so*' \
         -w dist dist_xpu/*.whl
 fi
 
 echo "=== XPU extension dynamic deps (post-repair wheel) ==="
-python3 -c "import zipfile,glob; w=glob.glob('dist/*.whl')[0]; zipfile.ZipFile(w).extractall('/tmp/whcheck_xpu')"
+"$PY" -c "import zipfile,glob; w=glob.glob('dist/*.whl')[0]; zipfile.ZipFile(w).extractall('/tmp/whcheck_xpu')"
 SO=$(find /tmp/whcheck_xpu -name 'xpu_ops*.so')
 
 echo "=== XPU device image in the built extension ==="
@@ -116,6 +115,20 @@ echo "$OFFLOAD_SECTIONS"
 grep -Eq '(__CLANG_OFFLOAD_BUNDLE__sycl-|\.llvm\.offloading)' <<< "$OFFLOAD_SECTIONS"
 
 readelf -d "$SO" | grep NEEDED || true
+
+# The SYCL build profile compiles and links every extension with
+# -no-intel-lib, so none of them may depend on (or vendor) the Intel compiler
+# runtime (libsvml/libimf/libirng/libintlc, ~37 MB). The runtime image ships
+# them via intel-cmplr-lib-rt should anything else need them.
+echo "=== Intel compiler runtime must not be vendored or NEEDED ==="
+if find /tmp/whcheck_xpu -path '*lmcache.libs*' -name 'lib*.so*' | grep -E 'lib(svml|imf|irng|intlc)'; then
+    echo "Intel compiler runtime libs were vendored into the wheel" >&2
+    exit 1
+fi
+if find /tmp/whcheck_xpu -name '*.so' -exec readelf -d {} + | grep NEEDED | grep -E 'lib(svml|imf|irng|intlc)'; then
+    echo "an extension still links against the Intel compiler runtime" >&2
+    exit 1
+fi
 
 echo "=== final XPU wheel ==="
 ls -la /work/LMCache/dist/

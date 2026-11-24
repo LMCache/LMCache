@@ -9,13 +9,20 @@ from typing import Any
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.kv_format import get_spec_class
+from lmcache.v1.common.kv_format import get_spec_class
 
 # torch dtype -> at::ScalarType (rope dispatch); missing -> Python fallback.
 _TORCH_TO_AT_SCALAR = {
     torch.float16: 5,  # at::ScalarType::Half
     torch.float32: 6,  # at::ScalarType::Float
     torch.bfloat16: 15,  # at::ScalarType::BFloat16
+}
+
+# Declared fp8 flavor -> at::ScalarType (vLLM's uint8 KV can't name its own
+# bit layout). Values pinned by a static_assert in csrc/cuda/pos_kernels.cu.
+_FP8_FLAVOR_TO_AT_SCALAR = {
+    "fp8_e4m3": 24,  # at::ScalarType::Float8_e4m3fn
+    "fp8_e5m2": 23,  # at::ScalarType::Float8_e5m2
 }
 
 
@@ -37,6 +44,8 @@ class _CBRopeState:
     # Required for MLA: inference would rotate the latent's content dims.
     group_rot: "list[tuple[int, int] | None]" = field(default_factory=list)
     group_head_size: list[int] = field(default_factory=list)
+    # fp8 flavor of the paged KV ("fp8_e4m3"/"fp8_e5m2"); "" = unquantized.
+    kv_quant: str = ""
 
     def head_size_for_group(self, engine_group_idx: int) -> int:
         """The scatter head size for one engine group.

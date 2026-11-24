@@ -8,7 +8,7 @@ from typing import Any, Callable, TypeVar, get_type_hints
 import inspect
 
 # First Party
-from lmcache.v1.multiprocess.rpc import RpcOperation, get_rpc_spec
+from lmcache.v1.transport.rpc import RpcOperation, get_rpc_spec
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -18,7 +18,7 @@ _HANDLER_OPTIONS_ATTR = "__lmcache_request_handler_options__"
 class HandlerType(Enum):
     """Select how a request handler is executed."""
 
-    SYNC = auto()
+    SERIALIZED = auto()
     BLOCKING = auto()
     NON_BLOCKING = auto()
 
@@ -42,7 +42,7 @@ class BoundRequestHandler:
 
 
 def request_handler(
-    handler_type: HandlerType = HandlerType.SYNC,
+    handler_type: HandlerType = HandlerType.SERIALIZED,
     *,
     operation: RpcOperation | None = None,
     requires_client_affinity: bool = False,
@@ -76,8 +76,13 @@ def _normalize_none_type(value: Any) -> Any:
     return type(None) if value is None else value
 
 
-def _validate_handler(operation: RpcOperation, handler: Callable[..., Any]) -> None:
-    spec = get_rpc_spec(operation)
+def validate_handler(
+    operation: RpcOperation,
+    handler: Callable[..., Any],
+    rpc_client: type | None = None,
+) -> None:
+    """Check handler against operation's RPC types; raise TypeError on mismatch."""
+    spec = get_rpc_spec(operation, rpc_client)
     handler_signature = inspect.signature(handler)
     hints = get_type_hints(handler)
     parameters = tuple(handler_signature.parameters.values())
@@ -93,7 +98,9 @@ def _validate_handler(operation: RpcOperation, handler: Callable[..., Any]) -> N
             f"{payload_types!r} do not match RPC {operation!r} types "
             f"{spec.payload_types!r}"
         )
-    if _normalize_none_type(response_type) != _normalize_none_type(spec.response_type):
+    if _normalize_none_type(response_type) != _normalize_none_type(
+        spec.handler_response_type
+    ):
         raise TypeError(
             f"Handler {handler.__qualname__} return annotation "
             f"{response_type!r} does not match RPC {operation!r} type "
@@ -101,7 +108,9 @@ def _validate_handler(operation: RpcOperation, handler: Callable[..., Any]) -> N
         )
 
 
-def iter_request_handlers(module: object) -> tuple[BoundRequestHandler, ...]:
+def iter_request_handlers(
+    module: object, rpc_client: type | None = None
+) -> tuple[BoundRequestHandler, ...]:
     """Discover decorated module handlers and validate them against RPC specs."""
     handlers: list[BoundRequestHandler] = []
     seen: set[RpcOperation] = set()
@@ -116,7 +125,7 @@ def iter_request_handlers(module: object) -> tuple[BoundRequestHandler, ...]:
             raise ValueError(
                 f"{module_type.__name__} has multiple handlers for {operation!r}"
             )
-        _validate_handler(operation, handler)
+        validate_handler(operation, handler, rpc_client)
         seen.add(operation)
         handlers.append(
             BoundRequestHandler(

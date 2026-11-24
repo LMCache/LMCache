@@ -12,17 +12,36 @@ import os
 import uuid
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.security.api_key import add_api_key_args
+from lmcache.v1.multiprocess.ext_server_module import (
+    ExtServerModuleSpec,
+    parse_server_module_specs,
+)
 
 logger = init_logger(__name__)
+
+
+class _DeprecatedStoreTrue(argparse.Action):
+    """``store_true`` for a renamed flag: sets the new destination and warns."""
+
+    def __init__(self, option_strings, dest, new_flag: str, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, default=False, **kwargs)
+        self.new_flag = new_flag
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        logger.warning(
+            "%s is deprecated; use %s instead.", option_string, self.new_flag
+        )
+        setattr(namespace, self.dest, True)
 
 
 @dataclass
 class MPServerConfig:
     """Configuration for the multiprocess cache server."""
 
-    transport: Literal["zmq", "grpc"] = "zmq"
-    """Request transport exposed by the cache server."""
+    transport: Literal["zmq", "grpc"] = "grpc"
+    """Request transport exposed by the cache server. ZMQ is deprecated."""
 
     host: str = "localhost"
     """Request server host."""
@@ -31,7 +50,8 @@ class MPServerConfig:
     """Request server port."""
 
     chunk_size: int = 256
-    """Chunk size for KV cache operations."""
+    """Minimum chunk size for KV cache operations. vLLM connector startup may
+    negotiate this upward to satisfy model-specific KV geometry."""
 
     max_workers: int = 1
     """Base number of worker threads. Sets default for both GPU and CPU pools."""
@@ -47,6 +67,17 @@ class MPServerConfig:
     grpc_server_workers: int = 32
     """Worker threads for gRPC request dispatch. Only used by gRPC transport."""
 
+    grpc_server_mode: Literal["auto", "sync", "aio", "native"] = "auto"
+    """gRPC server implementation. ``aio`` receives requests on one event loop
+    and hands only the handlers to worker threads. ``native`` does the HTTP/2
+    and gRPC framing in Rust, off the GIL, and needs the
+    ``pygrpc-native`` package. ``auto`` picks ``native`` when that package is
+    installed and ``aio`` otherwise. Used by gRPC transport and by the P2P
+    listener."""
+
+    api_key_files: list[str] = field(default_factory=list)
+    """Key files shared by authentication-enabled HTTP and request entry points."""
+
     hash_algorithm: str = "blake3"
     """Hash algorithm for token-based operations (builtin, sha256_cbor, blake3)."""
 
@@ -54,10 +85,9 @@ class MPServerConfig:
     """Cache engine backend type: 'default' for standard prefix caching,
     'blend' to compose the blend module (non-prefix KV reuse)."""
 
-    separate_object_groups: bool = False
-    """When True, split kernel groups into one object group per
-    sliding-window size at KV-cache registration (hybrid models). When False
-    (default), all kernel groups share a single full-attention object group."""
+    separate_object_groups: bool = True
+    """Whether to split kernel groups by cross-chunk retention semantics.
+    When false, every kernel group shares one full-attention cache object."""
 
     enable_segmented_prefix: bool = False
     """CacheBlend only (engine_type='blend'): on a mid-prefix L2 retrieve
@@ -65,10 +95,18 @@ class MPServerConfig:
     L1-resident (served by the sparse leg as L1 hits, the hole recomputed)
     instead of truncating the prefix at the gap. No effect for other engines."""
 
-    enable_dedup_content: bool = False
-    """engine_type='blend' only: skip fingerprint registration for a chunk whose
-    content is already indexed, so the same text stored behind two prefixes is
-    indexed once. No effect for other engines."""
+    enable_dedup_content_fingerprint: bool = False
+    """Blend only: don't re-register fingerprints for content already indexed.
+    KV is still stored. Formerly ``enable_dedup_content``."""
+
+    enable_dedup_content_kv: bool = False
+    """Blend only: don't store chunks fully covered by this request's
+    fingerprint hits (content already cached under another prefix)."""
+
+    enable_blend_reorder: bool = False
+    """engine_type='blend' only: record stored prompts' token ids and answer
+    the ``cb_reorder_plan`` RPC, which orders a prompt so it starts with an
+    exact copy of a cached prompt. No effect for other engines."""
 
     supported_transfer_mode: Literal["lmcache_driven", "engine_driven", "auto"] = (
         "lmcache_driven"
@@ -76,6 +114,12 @@ class MPServerConfig:
     """Transfer mode: 'lmcache_driven' for server-driven transfer
     (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
     engine-driven transfer (PREPARE/COMMIT), or 'auto' to enable both."""
+
+    rocm_host_event_wait: bool = False
+    """ROCm workaround: LMCache-driven STORE / RETRIEVE enqueue their copies
+    only once the engine's producer event has completed on the host, instead of
+    a stream wait on it; see lmcache.v1.multiprocess.rocm_host_event_wait.
+    LMCACHE_ROCM_HOST_EVENT_WAIT=1 enables it too. Ignored off ROCm."""
 
     isolated_ipc: bool = False
     """Whether IPC mechanisms must work across isolated containers (no shared
@@ -93,7 +137,8 @@ class MPServerConfig:
 
     shm_name: str | None = ""
     """SHM segment name for engine-driven KV transfer.
-    "" (default): force pickle. None: auto-allocate. Other: use that name."""
+    "" (default): force safe inline transfer. None: auto-allocate. Other: use
+    that name."""
 
     script_allowed_imports: list[str] = field(default_factory=list)
     """Modules that /run_script endpoint is allowed to import."""
@@ -116,30 +161,53 @@ class MPServerConfig:
     engine adapter's heartbeat interval so a few missed pings never reap a live
     worker."""
 
+    session_ttl_seconds: float = 600.0
+    """Seconds a request session may stay idle before it is reaped. A session
+    carries the lookup state ``free_lookup_locks`` needs, so it must outlive
+    the longest time a request can wait in the engine's queue between its
+    lookup and its admission (minutes under deep agentic backlogs)."""
+
+    kv_load_policy: str = "DEFAULT"
+    """Per-request choice between serving a lookup and letting the engine
+    recompute the prompt: a built-in name ("DEFAULT") or
+    "package.module:ClassName" naming a
+    ``lmcache.v1.multiprocess.kv_load_policy.KVLoadPolicy`` subclass. The
+    policy is constructed with ``runtime_plugin_config.extra_config``."""
+
     worker_registration_grace_seconds: float = 3600.0
     """Silence budget (seconds) for a worker that registered but has never
     sent a PING (model warmup, or death before its first request). Must be
     >= worker_reap_timeout_seconds."""
 
-    enable: list[str] = field(default_factory=list)
-    """List of experimental transfer modules to enable. Options: transfer_query
-    (see lmcache.v1.multiprocess.modules.experimental.__init___.py)."""
+    kv_event_log_size: int = 32768
+    """CPU store/eviction records retained for KV-event subscribers; 0 disables it."""
 
     null_block_id: int = 0
     """Engine block ID that denotes absent KV data. The default ``0`` keeps
     compatibility with vLLM; engines where block zero is valid can select a
     different sentinel, for example ``-1``."""
 
+    server_modules: list[ExtServerModuleSpec] = field(default_factory=list)
+    """Out-of-tree ``DiscoverableModule`` classes to import explicitly."""
+
+    @property
+    def enable_dedup_content(self) -> bool:
+        """Deprecated alias of :attr:`enable_dedup_content_fingerprint`."""
+        return self.enable_dedup_content_fingerprint
+
     def __post_init__(self) -> None:
-        """Validate the worker-reaping timeouts.
+        """Validate the chunk size and worker-reaping timeouts.
 
         Raises:
-            ValueError: If a timeout is non-finite, the reap timeout is
-                negative or a non-zero value below the 30 s floor, or the
-                registration grace is below the reap timeout.
+            ValueError: If the chunk size is not positive, a timeout is
+                non-finite, the reap timeout is negative or a non-zero value
+                below the 30 s floor, or the registration grace is below the
+                reap timeout.
         """
         reap = self.worker_reap_timeout_seconds
         grace = self.worker_registration_grace_seconds
+        if self.chunk_size < 1:
+            raise ValueError(f"chunk size must be positive; got {self.chunk_size}")
         if self.grpc_server_workers < 1:
             raise ValueError(
                 f"grpc server workers must be >= 1; got {self.grpc_server_workers}"
@@ -187,6 +255,9 @@ class P2PConfig:
     """Transfer-channel server ``host:port`` to bind and listen on. Empty
     defers to :attr:`advertise_url`."""
 
+    rpc_port: int = 0
+    """P2P control RPC port on the server host; zero selects a free port."""
+
     lookup_timeout: float = 30.0
     """Seconds before a peer lookup result counts as a miss."""
 
@@ -195,6 +266,31 @@ class P2PConfig:
 
     transfer_engine: str = "nixl"
     """Transfer-channel implementation to use."""
+
+    enable_write: bool = False
+    """Store objects into peers' L1. Enable it on only one side of a pair."""
+
+    store_timeout: float = 30.0
+    """Seconds before a store into a peer counts as a failure."""
+
+    write_l1_usage_threshold: float = 0.7
+    """Used fraction of the local DRAM L1 at which newly written objects are
+    stored into a peer instead of staying local, in (0, 1]."""
+
+    def __post_init__(self) -> None:
+        """Validate the write settings.
+
+        Raises:
+            ValueError: If the store timeout is not positive or the usage
+                threshold is outside (0, 1].
+        """
+        if self.store_timeout <= 0:
+            raise ValueError(f"P2P store timeout must be > 0, got {self.store_timeout}")
+        if not 0 < self.write_l1_usage_threshold <= 1:
+            raise ValueError(
+                "P2P write L1 usage threshold must be in (0, 1], got "
+                f"{self.write_l1_usage_threshold}"
+            )
 
     @property
     def enabled(self) -> bool:
@@ -227,7 +323,7 @@ class HTTPFrontendConfig:
 DEFAULT_HTTP_FRONTEND_CONFIG = HTTPFrontendConfig()
 
 DEFAULT_KAFKA_CACHE_EVENT_TOPIC = "lmcache-cache-events"
-DEFAULT_KAFKA_DELIVERY_TIMEOUT = 10.0
+DEFAULT_KAFKA_DELIVERY_TIMEOUT = 300.0
 
 
 @dataclass(frozen=True)
@@ -242,7 +338,8 @@ class KafkaCacheEventSinkConfig:
     Attributes:
         bootstrap_servers: Comma-separated Kafka bootstrap servers.
         topic: Topic receiving cache-event records.
-        delivery_timeout: Seconds to wait for broker acknowledgement.
+        delivery_timeout: Seconds the producer retries a record before
+            dropping it.
     """
 
     bootstrap_servers: str
@@ -325,6 +422,7 @@ def add_mp_server_args(
     Returns:
         The same parser with MP server arguments added.
     """
+    add_api_key_args(parser)
     mp_group = parser.add_argument_group(
         "MP Server", "Configuration for the multiprocess cache server"
     )
@@ -340,8 +438,9 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--transport",
         choices=("zmq", "grpc"),
-        default="zmq",
-        help="Request transport exposed by the cache server. Default is zmq.",
+        default="grpc",
+        help="Request transport exposed by the cache server. Default is grpc. "
+        "zmq is deprecated and will be removed in a future release.",
     )
     mp_group.add_argument(
         "--host",
@@ -359,7 +458,9 @@ def add_mp_server_args(
         "--chunk-size",
         type=int,
         default=256,
-        help="Chunk size for KV cache operations. Default is 256.",
+        help="Minimum chunk size for KV cache operations. The vLLM connector "
+        "may negotiate this upward to satisfy model-specific KV geometry. "
+        "Default is 256.",
     )
     mp_group.add_argument(
         "--null-block-id",
@@ -397,6 +498,18 @@ def add_mp_server_args(
         "--transport grpc. Default is 32.",
     )
     mp_group.add_argument(
+        "--grpc-server-mode",
+        choices=("auto", "sync", "aio", "native"),
+        default="auto",
+        help="gRPC server implementation. aio receives requests on one event "
+        "loop and hands only the handlers to worker threads. native does the "
+        "HTTP/2 and gRPC framing in Rust, off the GIL, and needs the "
+        "pygrpc-native package. auto picks native when pygrpc-native is "
+        "installed and aio otherwise. Used by --transport grpc and by the "
+        "P2P listener. "
+        "Default is auto.",
+    )
+    mp_group.add_argument(
         "--hash-algorithm",
         type=str,
         default="blake3",
@@ -422,6 +535,16 @@ def add_mp_server_args(
         "'engine_driven' for engine-driven transfer (PREPARE/COMMIT), "
         "or 'auto' to enable both transfer paths. "
         "Default is 'lmcache_driven'.",
+    )
+    mp_group.add_argument(
+        "--rocm-host-event-wait",
+        action="store_true",
+        help="ROCm workaround: a stream wait on the serving engine's pending "
+        "event can slow the engine's kernels on the same hardware pipe. With "
+        "this flag STORE / RETRIEVE enqueue their copies only once that event "
+        "has completed (polled on the host). Enable it when this server runs "
+        "next to the engine on ROCm; ignored elsewhere. "
+        "LMCACHE_ROCM_HOST_EVENT_WAIT=1 enables it too. (Default is off)",
     )
     mp_group.add_argument(
         "--isolated-ipc",
@@ -457,6 +580,8 @@ def add_mp_server_args(
         help="SHM segment name for engine-driven KV transfer. "
         'Default "" (not specified): disable SHM. '
         "Set to a name to create and use that specific SHM segment. "
+        "Requires --no-l1-use-lazy: lazy L1 allocation cannot back a "
+        "named SHM segment, so SHM stays disabled while lazy is on. "
         "(Only use this for engine_driven transfer mode, see "
         "`--supported-transfer-mode`.) ",
     )
@@ -480,9 +605,9 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--separate-object-groups",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Split kernel groups into one object group per sliding-window size "
-        "at KV-cache registration (for hybrid models). (Default is False)",
+        default=True,
+        help="Split kernel groups into object groups by cross-chunk retention "
+        "semantics at KV-cache registration. Enabled by default.",
     )
     mp_group.add_argument(
         "--worker-reap-timeout-seconds",
@@ -491,6 +616,22 @@ def add_mp_server_args(
         help="Silence budget (s) before a ping-proven worker's KV cache "
         "registration is reaped. 0 disables reaping. Must be >= 3 x the "
         "engine adapter's heartbeat interval. Default is 120.",
+    )
+    mp_group.add_argument(
+        "--session-ttl-seconds",
+        type=float,
+        default=600.0,
+        help="Seconds a request session may stay idle before it is reaped. "
+        "Raise it above the longest engine queueing delay. Default is 600.",
+    )
+    mp_group.add_argument(
+        "--kv-load-policy",
+        type=str,
+        default="DEFAULT",
+        help="Per-request choice between serving a lookup and letting the "
+        "engine recompute the prompt. DEFAULT serves every lookup unless the "
+        "request sets lmcache.skip_load; 'package.module:ClassName' loads a "
+        "custom KVLoadPolicy, constructed with --runtime-plugin-config.",
     )
     mp_group.add_argument(
         "--worker-registration-grace-seconds",
@@ -508,20 +649,49 @@ def add_mp_server_args(
         "L1-resident instead of truncating at the gap. No effect otherwise.",
     )
     mp_group.add_argument(
-        "--enable-dedup-content",
+        "--enable-dedup-content-fingerprint",
         action="store_true",
-        help="--engine-type blend only: skip fingerprint registration for a "
-        "chunk whose content is already indexed, so the same text stored "
-        "behind different prefixes is indexed once. No effect otherwise.",
+        help="Blend only: don't re-register fingerprints for content already "
+        "indexed. KV is still stored.",
     )
     mp_group.add_argument(
-        "--enable",
-        type=str,
-        nargs="*",
+        "--enable-dedup-content",
+        action=_DeprecatedStoreTrue,
+        dest="enable_dedup_content_fingerprint",
+        new_flag="--enable-dedup-content-fingerprint",
+        help=argparse.SUPPRESS,
+    )
+    mp_group.add_argument(
+        "--enable-dedup-content-kv",
+        action="store_true",
+        help="Blend only: don't store chunks fully covered by this request's "
+        "fingerprint hits (content already cached under another prefix).",
+    )
+    mp_group.add_argument(
+        "--enable-blend-reorder",
+        action="store_true",
+        help="--engine-type blend only: answer the cb_reorder_plan RPC, which "
+        "orders a prompt so it starts with an exact copy of a cached prompt.",
+    )
+    mp_group.add_argument(
+        "--kv-event-log-size",
+        type=int,
+        default=MPServerConfig.kv_event_log_size,
+        help="CPU store/eviction records retained for KV-event subscribers. "
+        "0 disables the channel. Default is %(default)s.",
+    )
+    mp_group.add_argument(
+        "--server-module",
+        action="append",
         default=[],
-        help="List of experimental transfer modules to enable. "
-        "Options: transfer_query (see lmcache.v1.multiprocess.modules."
-        "experimental.__init___.py).",
+        help="JSON object describing a server module to load. "
+        "Repeat to load multiple Python modules. Example: "
+        '\'{"module_path":"my_pkg.server_module",'
+        '"config":{"name":"demo"}}\'. '
+        "Opt-in modules shipped with LMCache live under "
+        "lmcache.v1.multiprocess.plugin_modules, e.g. "
+        '\'{"module_path":"lmcache.v1.multiprocess.plugin_modules.qstore"}\' '
+        "for query-tensor transfer.",
     )
     return parser
 
@@ -556,12 +726,17 @@ def parse_args_to_mp_server_config(
         max_gpu_workers=max_gpu,
         max_cpu_workers=max_cpu,
         grpc_server_workers=args.grpc_server_workers,
+        grpc_server_mode=args.grpc_server_mode,
+        api_key_files=args.api_key_file,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
         enable_segmented_prefix=args.enable_segmented_prefix,
-        enable_dedup_content=args.enable_dedup_content,
+        enable_dedup_content_fingerprint=args.enable_dedup_content_fingerprint,
+        enable_dedup_content_kv=args.enable_dedup_content_kv,
+        enable_blend_reorder=args.enable_blend_reorder,
         supported_transfer_mode=args.supported_transfer_mode,
+        rocm_host_event_wait=args.rocm_host_event_wait,
         isolated_ipc=args.isolated_ipc,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),
@@ -572,8 +747,11 @@ def parse_args_to_mp_server_config(
         script_allowed_imports=args.script_allowed_imports or [],
         run_script_api_enabled=args.run_script_api_enabled,
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
+        session_ttl_seconds=args.session_ttl_seconds,
+        kv_load_policy=args.kv_load_policy,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,
-        enable=args.enable or [],
+        kv_event_log_size=args.kv_event_log_size,
+        server_modules=parse_server_module_specs(args.server_module or []),
     )
 
 
@@ -606,6 +784,12 @@ def add_p2p_args(
         "--p2p-advertise-url.",
     )
     group.add_argument(
+        "--p2p-rpc-port",
+        type=int,
+        default=0,
+        help="P2P control RPC port on --host. Default is 0 (automatically assigned).",
+    )
+    group.add_argument(
         "--p2p-lookup-timeout",
         type=float,
         default=30.0,
@@ -622,6 +806,30 @@ def add_p2p_args(
         type=str,
         default="nixl",
         help="Transfer-channel implementation to use. Default is nixl.",
+    )
+    group.add_argument(
+        "--enable-p2p-write",
+        action="store_true",
+        help="Store objects into peers' L1 once the local DRAM L1 is fuller "
+        "than --p2p-write-l1-usage-threshold, and drop the local copy. Use "
+        "it on a server whose peers extend its DRAM (for example headless "
+        "peers), and on only one side of a pair. Selects the 'p2p' store "
+        "policy and the 'skip_l1' prefetch policy unless --l2-store-policy "
+        "or --l2-prefetch-policy is set.",
+    )
+    group.add_argument(
+        "--p2p-write-l1-usage-threshold",
+        type=float,
+        default=0.7,
+        help="Used fraction of the local DRAM L1, in (0, 1], at which new "
+        "objects are stored into a peer instead of staying local. Keep it "
+        "below --eviction-trigger-watermark. Default is 0.7.",
+    )
+    group.add_argument(
+        "--p2p-store-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds before a store into a peer counts as a failure. Default is 30.",
     )
     return parser
 
@@ -640,9 +848,13 @@ def parse_args_to_p2p_config(
     return P2PConfig(
         advertise_url=getattr(args, "p2p_advertise_url", "") or "",
         listen_url=getattr(args, "p2p_listen_url", "") or "",
+        rpc_port=getattr(args, "p2p_rpc_port", 0),
         lookup_timeout=getattr(args, "p2p_lookup_timeout", 30.0),
         load_timeout=getattr(args, "p2p_load_timeout", 30.0),
         transfer_engine=getattr(args, "p2p_transfer_engine", "nixl"),
+        enable_write=getattr(args, "enable_p2p_write", False),
+        store_timeout=getattr(args, "p2p_store_timeout", 30.0),
+        write_l1_usage_threshold=getattr(args, "p2p_write_l1_usage_threshold", 0.7),
     )
 
 
@@ -665,9 +877,7 @@ def add_http_frontend_args(
         "--http-host",
         type=str,
         default="127.0.0.1",
-        help="Host to bind the HTTP server. Default is 127.0.0.1; the admin "
-        "API has no authentication, so only bind a non-loopback address on a "
-        "trusted network.",
+        help="Host to bind the HTTP server. Default is 127.0.0.1.",
     )
     http_group.add_argument(
         "--http-port",
@@ -779,8 +989,9 @@ def add_coordinator_args(
         "--coordinator-kafka-delivery-timeout",
         type=float,
         default=DEFAULT_KAFKA_DELIVERY_TIMEOUT,
-        help="Seconds to wait for Kafka broker acknowledgement (must be > 0). "
-        f"Default is {DEFAULT_KAFKA_DELIVERY_TIMEOUT}.",
+        help="Seconds the Kafka producer keeps retrying a cache-event record "
+        "before dropping it (must be > 0). Default is "
+        f"{DEFAULT_KAFKA_DELIVERY_TIMEOUT}.",
     )
     group.add_argument(
         "--coordinator-blend-timeout",

@@ -11,7 +11,7 @@ Check the developer's local changes against the coding standards defined in
 `docs/coding_standards.md` and modify the code to fix compliance issues, so the
 PR is clean before it is opened.
 
-This skill is meant to be run **before** `/create-pr`.
+Use this skill **before** the `create-pr` skill.
 
 ## Arguments
 
@@ -63,8 +63,9 @@ For each changed file, also identify the **changed public symbols** (functions,
 methods, classes, fields whose signature, return type, raised exceptions, or
 behavior contract changed). You will use these in Step 4 to find and inspect callers.
 
-For large changes, delegate to the Explore agent to summarize per-file
-responsibilities before reviewing.
+For large changes, summarize per-file responsibilities before reviewing. If
+delegation is available and permitted, an exploration subagent may prepare
+that summary; otherwise, inspect the files directly.
 
 ### Step 3 -- Run the checks
 
@@ -79,37 +80,45 @@ These are straightforward to fix:
 3. **`Optional` usage** (Section 2.1): Where a value is always initialized, remove the `Optional` wrapper and initialize directly. Where None is genuinely possible, rewrite as `X | None`.
 4. **Bare generics** (Section 2.1): Replace bare `list`, `dict`, `tuple`, `set` in annotations with parameterized forms (`list[T]`, `dict[K, V]`).
 5. **Lazy imports** (Section 7.2): Move imports to the top of the file, under the correct section heading. Preserve `torch`-before-native-C-extension ordering.
-6. **Bare `logging.getLogger(__name__)`** (Section 7.4): Replace with `init_logger(__name__)` from `lmcache.logging`.
+6. **Bare `logging.getLogger(__name__)`** (Section 7.4): Replace with `init_logger(__name__)` from `lmcache.v1.common.logging`.
 7. **Operational logs at `INFO` level** (Section 7.4): If a log is about store/retrieve/task progress, change `logger.info(...)` to `logger.debug(...)`.
 8. **Inappropriate `WARNING`** (Section 7.4): For log messages about benign concurrent conditions (e.g., "key not found, this should not happen" in a code path documented as not holding the global lock), downgrade to `debug` and fix the misleading message.
+9. **`logger.error` inside `except` blocks** (Section 10.1): Replace with `logger.exception(...)` so the traceback is preserved, unless the exception is re-raised.
 
 #### B. Docstring issues (fix when content is clear; ask when content is unclear)
 
-9. **Missing docstrings** on public/modified functions (Section 3.1-3.2):
-   - If the function is simple and its purpose is obvious from the code, draft a full docstring (summary, args, returns, raises).
-   - If behavior is non-obvious, draft a docstring with clear sections but add a `TODO: confirm` note where you are uncertain, and flag it in the report.
-10. **Docstring accuracy** (Section 3.3): If you added a parameter but the docstring still describes the old signature, update it. If a parameter is currently a no-op (accepted but ignored), the docstring must say so explicitly.
-11. **Missing type hints** on function args or return values (Section 2.1): Add them based on the function's body.
+10. **Missing docstrings** on public/modified functions (Section 3.1-3.2):
+    - If the function is simple and its purpose is obvious from the code, draft a full docstring (summary, args, returns, raises).
+    - If behavior is non-obvious, draft a docstring with clear sections but add a `TODO: confirm` note where you are uncertain, and flag it in the report.
+11. **Docstring accuracy** (Section 3.3): If you added a parameter but the docstring still describes the old signature, update it. If a parameter is currently a no-op (accepted but ignored), the docstring must say so explicitly.
+12. **Missing type hints** on function args or return values (Section 2.1): Add them based on the function's body.
 
 #### C. Design issues (flag; do NOT silently refactor)
 
 These are judgment calls and should be reported, not auto-fixed:
 
-12. **Cross-class private member access** (Section 4.4): Accessing `other._private` outside the defining class.
-13. **Ambiguous return values** (Section 4.3): Function returns `None` for multiple distinct meanings.
-14. **Boolean parameters on public APIs** (Section 4.3).
-15. **New features without tests** (Section 5.2).
-16. **Bug fixes without regression tests** (Section 5.2).
-17. **Unbounded collection growth** (Section 7.6): A set/dict that is appended to without cleanup.
-18. **Error paths that leave state inconsistent** (Section 7.5): Exceptions that skip lock release, FD close, or pool free.
-19. **Missing design doc** for non-trivial new features (Section 5.1).
-20. **PR scope too large** (Section 1.1): If the diff touches many unrelated modules, suggest how to split.
-21. **Lock protocol violations** (Section 8): Debug methods not holding `self._lock`; shared state accessed without synchronization.
+13. **Cross-class private member access** (Section 4.4): Accessing `other._private` outside the defining class.
+14. **Ambiguous return values** (Section 4.3): Function returns `None` for multiple distinct meanings.
+15. **Boolean parameters on public APIs** (Section 4.3).
+16. **New features without tests** (Section 5.2).
+17. **Bug fixes without regression tests** (Section 5.2).
+18. **User-facing features without an end-to-end test** (Section 5.2): a new or changed CLI command, flag, or server API that only has unit tests. Ask for a test that drives the feature through that entry point.
+19. **Unbounded collection growth** (Section 7.6): A set/dict that is appended to without cleanup.
+20. **Error paths that leave state inconsistent** (Section 7.5): Exceptions that skip lock release, FD close, or pool free.
+21. **Missing design doc** for non-trivial new features (Section 5.1).
+22. **PR scope too large** (Section 1.1): If the diff touches many unrelated modules, suggest how to split.
+23. **Lock protocol violations** (Section 8): Debug methods not holding `self._lock`; shared state accessed without synchronization.
+24. **Defensive programming** (Section 10.1): Handling for failures that cannot occur — speculative `None` checks, fallback defaults, or a broad `try/except` wrapping a large block outside a thread/RPC/background-loop boundary.
+25. **AI comment/TODO violations** (Section 10.2): Comments narrating the change ("now we...", "previously..."), boilerplate docstrings restating signatures on internal helpers, or TODOs that defer required work or lack a GitHub handle.
+26. **Engine or model leakage** (Section 4.6): Inference-engine types, scheduler semantics, model-family branches, or engine-specific cache layouts outside `lmcache/integration/<engine>/`.
+27. **Middle-layer backend coupling** (Section 4.6): Orchestration code branches on concrete accelerator, storage-backend, or transport names instead of using the corresponding platform, storage, or transfer contract.
+28. **Closed extension points** (Section 4.6): Independently maintained implementations require edits to a central vendor list when a bounded registry, entry point, plugin, or subclass discovery boundary is appropriate.
+29. **Unnecessary indirection** (Section 4.6): Opaque data structures, reflection, metaprogramming, or inheritance on a non-critical path without a demonstrated extension or performance requirement.
 
 ### Step 4 -- Apply fixes
 
 For category A and B issues (unless `--check-only`):
-- Use `Edit` to make precise, minimal changes.
+- Use the available file-editing capability to make precise, minimal changes.
 - Preserve existing comments and code style.
 - After fixes, re-read the file to confirm the edit applied cleanly.
 
@@ -134,11 +143,13 @@ If none of the above applies, skip this step.
 
 **How to run it:**
 
-1. For each changed public symbol, `Grep` its name across the whole repo
+1. For each changed public symbol, search for its name (for example, with `rg`) across
+   the whole repo
    (production code, `tests/`, `benchmarks/`, `lmcache/integration/`, `docs/`).
    Do not limit to files in the diff.
-2. For commonly-named symbols with many false matches, use `Grep -A 2 -B 2`
-   for context, or delegate to the `Agent` (Explore) tool with a focused prompt
+2. For commonly-named symbols with many false matches, search with context
+   (for example, `rg -A 2 -B 2`). If delegation is available and permitted,
+   an exploration subagent may perform the search with a focused prompt
    (e.g., "find all callers of `LMCacheMPWorkerAdapter.submit_store_request`
    and summarize the arguments each caller passes").
 3. For base-class / protocol changes, also grep for subclasses
@@ -153,7 +164,8 @@ If none of the above applies, skip this step.
   - Newly raised exception the caller doesn't handle, when the caller is on the normal success path
 
   For these, update the caller in the same pass as the main change. Apply the
-  edit using `Edit`, then re-read to confirm. If the caller is in an unrelated
+  edit with the available file-editing capability, then re-read to confirm. If the
+  caller is in an unrelated
   module and the fix is non-trivial, flag it for manual review instead.
 
 - **Behaviorally risky** (category C-like, flag for the developer):

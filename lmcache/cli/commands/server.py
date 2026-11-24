@@ -6,7 +6,7 @@ import argparse
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 
@@ -90,6 +90,7 @@ class ServerCommand(BaseCommand):
                 parse_args_to_http_frontend_config,
                 parse_args_to_mp_server_config,
             )
+            from lmcache.v1.multiprocess.http_auth import HTTPAuthenticationConfig
             from lmcache.v1.multiprocess.http_server import run_http_server
         except ImportError:
             print(
@@ -106,4 +107,7 @@ class ServerCommand(BaseCommand):
             storage_manager_config=parse_args_to_config(args),
             obs_config=parse_args_to_observability_config(args),
             coordinator_config=parse_args_to_coordinator_config(args),
+            http_authentication=HTTPAuthenticationConfig.from_sources(
+                args.api_key_file
+            ),
         )

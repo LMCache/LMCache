@@ -19,24 +19,27 @@ if TYPE_CHECKING:
     # Third Party
     import cupy
 
+    # First Party
+    from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
+
 # First Party
 from lmcache import torch_dev
-from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.gds_context import get_gds_context
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.buffer_registration import BufferRegistration
+from lmcache.v1.common.group_view import (
+    EngineGroupInfo,
+    engine_group_layer_indices,
+)
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.utils import (
     LayoutHints,
     get_device,
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.custom_types import KVCache
-from lmcache.v1.multiprocess.group_view import (
-    EngineGroupInfo,
-    engine_group_layer_indices,
-)
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.base.ipc_wrapper import KVCache
 
 logger = init_logger(__name__)
 
@@ -342,6 +345,9 @@ class _TempGPUBuffer:
 class GPUCacheContext(BaseCacheContext):
     """
     Manages the shape and pointers to vLLM GPU KV cache tensors.
+
+    ``object_group_transfer`` supplies the base full-chunk copy implementation;
+    it is optional for layout-only users and device transfer overrides.
     """
 
     device_type = "cuda"
@@ -353,12 +359,15 @@ class GPUCacheContext(BaseCacheContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
-        separate_object_groups: bool = False,
+        separate_object_groups: bool = True,
         full_sw_kv: bool = False,
-    ):
+        *,
+        object_group_transfer: "ObjectGroupTransfer | None" = None,
+    ) -> None:
         # Kept for close(): raw-IPC wrappers hold driver-level mappings
         # that pin the exporter's device memory until explicitly closed.
         self._kv_wrappers: KVCache = list(kv_caches)
+        self._buffer_registration: BufferRegistration | None = None
         try:
             self._init_impl(
                 kv_caches,
@@ -368,6 +377,7 @@ class GPUCacheContext(BaseCacheContext):
                 engine_type,
                 separate_object_groups,
                 full_sw_kv,
+                object_group_transfer,
             )
         except BaseException:
             # Partial construction may have imported some mappings
@@ -385,6 +395,7 @@ class GPUCacheContext(BaseCacheContext):
         engine_type: EngineType,
         separate_object_groups: bool,
         full_sw_kv: bool,
+        object_group_transfer: "ObjectGroupTransfer | None",
     ) -> None:
         """Body of ``__init__``; split out so the constructor can roll
         back partially imported KV mappings on failure.
@@ -426,6 +437,7 @@ class GPUCacheContext(BaseCacheContext):
             kv_layer_groups_manager=kv_layer_groups_manager,
             block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+            object_group_transfer=object_group_transfer,
         )
 
         self.group_kv_pointers_: list[torch.Tensor] = []
@@ -438,20 +450,16 @@ class GPUCacheContext(BaseCacheContext):
             self.group_kv_pointers_.append(list_to_gpu_tensor(ptrs, self.device_))
 
         # Temporary GPU buffer for transfers — a single flat uint8 buffer
-        self._temp_buffer = _TempGPUBuffer(
+        self._temp_buffer = self._make_temp_buffer(
             kv_layer_groups_manager=self.kv_layer_groups_manager_,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             device=self.device_,
             max_batch_size=4,
+            full_sw_kv=full_sw_kv,
         )
 
         # GPU streams
         self.cuda_stream_ = torch_dev.Stream(device=self.device_)
-
-        # Register the staging buffer with the GDS cuFile context on the
-        # context's CUDA stream.
-        with torch_dev.stream(self.cuda_stream_):
-            get_gds_context().register_gpu_buffer(self._temp_buffer.buffer)
 
         # Third Party
         import cupy
@@ -468,8 +476,45 @@ class GPUCacheContext(BaseCacheContext):
             logger,
         )
 
+    def _make_temp_buffer(
+        self,
+        kv_layer_groups_manager: KVLayerGroupsManager,
+        lmcache_tokens_per_chunk: int,
+        device: torch.device,
+        max_batch_size: int,
+        full_sw_kv: bool,
+    ) -> _TempGPUBuffer:
+        """Builds the staging buffer for this context.
+
+        This class always produces the kernel-group-major layout; a
+        subclass overrides this to stage in a different layout without
+        re-implementing ``__init__``.  ``full_sw_kv`` is passed through so a
+        layout that cannot serve CacheBlend can refuse the combination while
+        it is still being built.
+        """
+        return _TempGPUBuffer(
+            kv_layer_groups_manager=kv_layer_groups_manager,
+            lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+            device=device,
+            max_batch_size=max_batch_size,
+        )
+
+    def register_staging_buffer(self, registration: BufferRegistration) -> None:
+        """Register the full staging buffer on the context's transfer stream.
+
+        Args:
+            registration: External registration, retained after success until
+                ``close``. Call once after construction and before transfers.
+
+        Raises:
+            RuntimeError: If registration fails; the adapter must roll back.
+        """
+        with torch_dev.stream(self.cuda_stream_):
+            registration.register(self._temp_buffer.buffer)
+        self._buffer_registration = registration
+
     def close(self) -> None:
-        """Drain the context stream, deregister the GDS staging buffer and
+        """Drain the context stream, release any staging registration and
         release the imported KV mappings (reverse of __init__).
 
         The stream is synchronized first so no in-flight kernel still
@@ -481,8 +526,10 @@ class GPUCacheContext(BaseCacheContext):
         right after this call.
         """
         self.cuda_stream_.synchronize()
-        with torch_dev.stream(self.cuda_stream_):
-            get_gds_context().deregister_gpu_buffer(self._temp_buffer.buffer)
+        if self._buffer_registration is not None:
+            with torch_dev.stream(self.cuda_stream_):
+                self._buffer_registration.deregister(self._temp_buffer.buffer)
+            self._buffer_registration = None
         self._close_kv_wrappers()
 
     def _close_kv_wrappers(self) -> None:
@@ -556,6 +603,21 @@ class GPUCacheContext(BaseCacheContext):
         return self._temp_buffer.get_temp_object_group_buffer(
             batch_idx, object_group_idx
         )
+
+    def get_temp_staging_buffer(self, num_bytes: int) -> torch.Tensor | None:
+        """Return the start of the transfer staging buffer as one flat region.
+
+        Args:
+            num_bytes: Bytes the region must hold.
+
+        Returns:
+            A flat uint8 view of the buffer's first ``num_bytes`` bytes, or
+            None when the staging buffer is smaller than ``num_bytes``.
+        """
+        staging_buffer = self._temp_buffer.buffer
+        if num_bytes > staging_buffer.numel():
+            return None
+        return staging_buffer[:num_bytes]
 
     def get_kernel_group_shape_dtype(
         self,

@@ -307,3 +307,129 @@ def test_ropeless_group_sentinel_skips_rerope():
     # The mapped group is unaffected.
     assert state.rot_for_group(2, torch.bfloat16) == (0, 256)
     assert state.cache_for_group(2) is cache
+
+
+# --------------------------------------------------------------------------
+# 4. fp8 KV (per-tensor): dtype resolution + dequant-rotate-requant
+# --------------------------------------------------------------------------
+
+
+def test_fp8_at_scalar_maps():
+    """The plan builder resolves a uint8 K plane through the declared flavor
+    (enum values guarded C++-side by a static_assert in pos_kernels.cu)."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.blend.rope import (
+        _FP8_FLAVOR_TO_AT_SCALAR,
+        _TORCH_TO_AT_SCALAR,
+    )
+
+    assert _FP8_FLAVOR_TO_AT_SCALAR == {"fp8_e4m3": 24, "fp8_e5m2": 23}
+    # An undeclared uint8 plane must resolve to nothing (plan unavailable).
+    assert torch.uint8 not in _TORCH_TO_AT_SCALAR
+    assert "" not in _FP8_FLAVOR_TO_AT_SCALAR
+
+
+def _reference_rerope_fp8(rows_u8, old_pos, new_pos, cache_bf16, n_heads, hs):
+    """Emulate the kernel's fp8 path op-for-op: dequant e4m3 -> bf16 (the
+    cache dtype), interleaved re-rotation with per-op bf16 rounding (c10
+    scalar ops round back after every multiply/add, as torch bf16 tensor ops
+    do), requant to e4m3."""
+    out = rows_u8.view(torch.float8_e4m3fn).to(torch.bfloat16).clone()
+    half = hs // 2
+    co, so = cache_bf16[old_pos, :half], cache_bf16[old_pos, half:]
+    cn, sn = cache_bf16[new_pos, :half], cache_bf16[new_pos, half:]
+    for h in range(n_heads):
+        win = out[:, h * hs : (h + 1) * hs]
+        x, y = win[:, 0::2].clone(), win[:, 1::2].clone()
+        xr = x * co + y * so
+        yr = y * co - x * so
+        win[:, 0::2] = xr * cn - yr * sn
+        win[:, 1::2] = yr * cn + xr * sn
+    return out.to(torch.float8_e4m3fn)
+
+
+@_gpu
+def test_native_plan_fp8_key_bf16_cache():
+    """The fp8 KV path end to end through the native plan: uint8 slots
+    holding e4m3 bits, a bf16 cos/sin cache (key_scalar_type=24,
+    cache_scalar_type=15), legacy full-head rotation. The kernel must
+    dequant-rotate-requant; uint8 math or a cache misread would be wildly
+    off the reference."""
+    cuda_ops = _cuda_ops()
+    if not hasattr(cuda_ops, "execute_cb_retrieve_plan_flat"):
+        pytest.skip("cuda_ops build lacks execute_cb_retrieve_plan_flat")
+    torch.manual_seed(2)
+    device = torch.device(torch_device_type)
+    nl, spc, n_heads, hs, max_pos = 2, 8, 2, 8, 4096
+    hidden = n_heads * hs
+    n_chunks = 2
+
+    cache_bf16, _ = _cos_sin_cache(max_pos, hs, device)
+    host_u8 = [
+        torch.randn(1, nl, spc, hidden, dtype=_DTYPE, device=device)
+        .to(torch.float8_e4m3fn)
+        .view(torch.uint8)
+        .cpu()
+        .pin_memory()
+        for _ in range(n_chunks)
+    ]
+    slots = [
+        torch.zeros(1, nl, spc, hidden, dtype=torch.uint8, device=device)
+        for _ in range(n_chunks)
+    ]
+    old_sts, cur_sts = [128, 512], [640, 96]
+
+    try:
+        spec = cuda_ops.CBGroupSpec(
+            paged_kv_ptrs=0,
+            temp_buffer_ptrs=[s.data_ptr() for s in slots],
+            num_layers=nl,
+            slot_tokens=spc,
+            hidden_elems=hidden,
+            element_size=1,
+            engine_kv_format=lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
+            page_buffer_size=1,
+            block_size=1,
+            head_size=hs,
+            slot_mapping_base=0,
+            slot_mapping_capacity=0,
+            cos_sin_cache=cache_bf16.data_ptr(),
+            rot_dim=hs,
+            rope_num_kv_heads=n_heads,
+            rope_head_stride=hs,
+            key_scalar_type=24,  # at::ScalarType::Float8_e4m3fn
+            cache_scalar_type=15,  # at::ScalarType::BFloat16
+            is_neox=False,
+        )
+    except TypeError:
+        pytest.skip("cuda_ops build predates CBGroupSpec.cache_scalar_type")
+
+    chunk_bytes = nl * spc * hidden
+    staging = [
+        (slots[i].data_ptr(), host_u8[i].data_ptr(), chunk_bytes, 0)
+        for i in range(n_chunks)
+    ]
+    ropes = [(0, i, old_sts[i], cur_sts[i]) for i in range(n_chunks)]
+    step_offsets = [(len(staging), len(ropes), 0)]
+    cuda_ops.execute_cb_retrieve_plan_flat(
+        device,
+        1 << 26,
+        [spec],
+        np.asarray(staging, dtype=np.int64),
+        np.asarray(ropes, dtype=np.int64),
+        np.zeros((0, 4), dtype=np.int64),
+        np.asarray(step_offsets, dtype=np.int64),
+    )
+    torch_dev.synchronize()
+
+    for i in range(n_chunks):
+        rows = host_u8[i][0].reshape(nl * spc, hidden).to(device)
+        ramp = torch.arange(spc, device=device).repeat(nl)
+        ref = _reference_rerope_fp8(
+            rows, old_sts[i] + ramp, cur_sts[i] + ramp, cache_bf16, n_heads, hs
+        )
+        got = slots[i][0].reshape(nl * spc, hidden).view(torch.float8_e4m3fn)
+        # One e4m3 quantization step of slack for round-to-nearest-even ties.
+        torch.testing.assert_close(
+            got.to(torch.float32), ref.to(torch.float32), atol=0.07, rtol=0.07
+        )
