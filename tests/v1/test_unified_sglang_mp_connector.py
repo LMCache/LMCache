@@ -247,7 +247,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         self.connector = _new_connector()
         self.connector.page_size = 4
 
-    def test_init_converts_chunk_tokens_to_sglang_blocks(self) -> None:
+    def test_init_resolves_client_chunk_minimum_and_converts_to_blocks(self) -> None:
         source_tensor = Mock(
             device=torch.device("cuda"),
             dtype=torch.float16,
@@ -273,7 +273,9 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         ]
         adapter.is_mla_enabled.return_value = False
         config = SimpleNamespace(mp_host="127.0.0.1", mp_port=5555)
-        config.get_extra_config_value = lambda _key, default: default
+        config.get_extra_config_value = lambda key, default: (
+            10 if key == "lmcache.mp.chunk_size" else default
+        )
         request_client = Mock()
         request_client.get_chunk_size.return_value.result.return_value = 8
         adapter_module_name = "lmcache.integration.sglang.unified_kv_adapter"
@@ -309,7 +311,8 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
                 sliding_window_size=None,
             )
 
-        self.assertEqual(connector.blocks_in_chunk, 2)
+        self.assertEqual(connector.chunk_size, 12)
+        self.assertEqual(connector.blocks_in_chunk, 3)
 
     def test_slots_to_blocks_accepts_noncontiguous_pages(self):
         slots = torch.tensor([4, 5, 6, 7, 12, 13, 14, 15])
