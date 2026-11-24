@@ -3,7 +3,6 @@
 
 # Standard
 from collections.abc import Iterator
-import time
 
 # Third Party
 import pytest
@@ -174,67 +173,17 @@ def test_resident_key_needs_allow_resident_to_stage(l1: L1ManagerInterface) -> N
     assert l1.is_key_evictable(key(5)) is True
 
 
-def _admit_locked(l1: L1ManagerInterface, keys: list[ObjectKey]) -> int:
-    """Stage, admit and read-lock ``keys`` as a prefetch would; return the
-    size of one object."""
-    staged = l1.reserve_write(keys, [False] * len(keys), LAYOUT, tag="pf")
-    size = 0
-    for k in keys:
-        error, obj = staged[k]
-        assert error is L1Error.SUCCESS and obj is not None
-        size = obj.get_size()
-    admitted = l1.finish_write_and_reserve_read(keys, tag="pf")
-    assert all(admitted[k][0] is L1Error.SUCCESS for k in keys)
-    return size
-
-
-def test_prefetch_retained_charge_follows_the_read_lock(l1: L1ManagerInterface) -> None:
-    size = _admit_locked(l1, [key(1), key(2)])
-    assert l1.get_prefetch_retained_bytes() == 0
-
-    l1.charge_prefetch_retained([key(1), key(2)])
-    l1.charge_prefetch_retained([key(1)])  # charged once per object
+def test_prefetch_retained_bytes_follow_the_read_lock(l1: L1ManagerInterface) -> None:
+    keys = [key(1), key(2), key(3)]
+    staged = l1.reserve_write(keys, [False] * 3, LAYOUT, tag="pf")
+    size = staged[key(1)][1].get_size()
+    l1.finish_write_and_reserve_read(keys[:2], tag="pf")
+    l1.finish_write(keys[2:], tag="pf")  # resident but not read-locked
+    l1.charge_prefetch_retained(keys + [key(4)])  # key(4) is not resident
+    l1.charge_prefetch_retained([key(1)])  # charged once
     assert l1.get_prefetch_retained_bytes() == 2 * size
 
-    # A second reader keeps the object charged until the last one is done.
-    assert l1.reserve_read([key(1)])[key(1)][0] is L1Error.SUCCESS
-    l1.finish_read([key(1)])
-    assert l1.get_prefetch_retained_bytes() == 2 * size
     l1.finish_read([key(1)])
     assert l1.get_prefetch_retained_bytes() == size
-
     l1.delete([key(2)], force=True)
     assert l1.get_prefetch_retained_bytes() == 0
-
-
-def test_prefetch_retained_skips_unlocked_and_missing(l1: L1ManagerInterface) -> None:
-    l1.reserve_write([key(3)], [False], LAYOUT)
-    l1.finish_write([key(3)])
-    l1.charge_prefetch_retained([key(3), key(4)])
-    assert l1.get_prefetch_retained_bytes() == 0
-    assert l1.report_status()["prefetch_retained_bytes"] == 0
-
-
-def test_prefetch_retained_charge_expires_with_the_read_ttl(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        memory_management,
-        "_allocate_cpu_memory",
-        lambda size, *args, **kwargs: torch.empty(size, dtype=torch.uint8),
-    )
-    monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **k: None)
-    l1 = DramL1Manager(
-        L1ManagerConfig(
-            L1MemoryManagerConfig(size_in_bytes=CAPACITY, use_lazy=False, shm_name=""),
-            read_ttl_seconds=1,
-        )
-    )
-    try:
-        size = _admit_locked(l1, [key(5)])
-        l1.charge_prefetch_retained([key(5)])
-        assert l1.get_prefetch_retained_bytes() == size
-        time.sleep(1.2)
-        assert l1.get_prefetch_retained_bytes() == 0
-    finally:
-        l1.close()

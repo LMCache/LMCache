@@ -200,17 +200,6 @@ class ShadowL1Manager(BaseL1Manager):
         """Return 0: placeholders hold no local bytes."""
         return 0
 
-    def charge_prefetch_retained(self, keys: list[ObjectKey]) -> None:
-        """Do nothing: views hold no local bytes to charge.
-
-        Args:
-            keys: Ignored.
-        """
-
-    def get_prefetch_retained_bytes(self) -> int:
-        """Return 0: views hold no local bytes."""
-        return 0
-
     def close(self) -> None:
         """Release every view, read-locked or not; idempotent. Outstanding
         GPU work is synchronized first so no read lands from a released

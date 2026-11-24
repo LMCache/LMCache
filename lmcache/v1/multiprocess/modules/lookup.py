@@ -15,7 +15,6 @@ from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     ObjectKey,
-    PrefetchAdmission,
     PrefetchHandle,
     PrefetchTaskSpec,
     ipc_key_to_grouped_object_keys,
@@ -335,15 +334,6 @@ class LookupModule(DiscoverableModule):
         )
         session = self._ctx.session_manager.get_or_create(key.request_id, token_hasher)
         session.update_from_key(key)
-        # A repeat lookup (e.g. after the engine's prefix hit shrank) belongs
-        # to a request that was already admitted and may still hold an
-        # earlier lookup's locks: it must not wait behind new requests for
-        # budget that only it can release.
-        admission = (
-            PrefetchAdmission.CONTINUATION
-            if session.has_lookup_result()
-            else PrefetchAdmission.NEW
-        )
         start_chunk = min(max(0, key.start // chunk_size), len(chunk_hashes))
         # The engine-covered prefix is never looked up, so it is excluded from
         # the hit-rate denominator and reported separately.
@@ -433,7 +423,6 @@ class LookupModule(DiscoverableModule):
                 attn_desc,
                 shard_replication_desc,
             ),
-            admission=admission,
         )
         handle = self._ctx.storage_manager.submit_prefetch_task(
             spec,
@@ -592,9 +581,6 @@ class LookupModule(DiscoverableModule):
             with self._prefetch_job_lock:
                 job = self._prefetch_jobs.get(key.request_id)
             if job is not None and self._consume_prefetch_result(job) is None:
-                # Not a cancel: the free may cover an abandoned earlier lookup
-                # while this request's current one is still running. If the
-                # request ends instead, end_session cancels the prefetch.
                 logger.warning(
                     "free_lookup_locks for request %s while its prefetch is "
                     "still running; leaving its locks to the prefetch controller",
@@ -675,9 +661,6 @@ class LookupModule(DiscoverableModule):
             )
         )
         session = self._ctx.session_manager.remove(request_id)
-        # A lookup whose result was never consumed: its locks belong to no
-        # one once the session is gone.
-        self._cancel_prefetch_job(request_id)
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_REQUEST_END,
@@ -736,22 +719,6 @@ class LookupModule(DiscoverableModule):
             shard_replication_desc,
         )
         return [obj_key for group_keys in per_group for obj_key in group_keys]
-
-    def _cancel_prefetch_job(self, request_id: str) -> None:
-        """Drop the request's unconsumed prefetch job and cancel its prefetch.
-
-        The storage manager returns the prefetch's locks whether it is still
-        queued, running, or finished with its result unconsumed. No-op when
-        the request has no job (its result was consumed, or it never looked
-        up).
-
-        Args:
-            request_id: The request whose job to cancel.
-        """
-        with self._prefetch_job_lock:
-            job = self._prefetch_jobs.pop(request_id, None)
-        if job is not None:
-            self._ctx.storage_manager.cancel_prefetch_task(job.handle)
 
     def _register_prefetch_job(self, job: _PrefetchJob) -> None:
         with self._prefetch_job_lock:

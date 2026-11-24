@@ -2440,7 +2440,7 @@ class TestP2PPeerFailures:
 
 
 # =============================================================================
-# Retained bytes in the watermark, continuation priority and cancel
+# Retained bytes in the watermark, continuation priority, stall rule
 # =============================================================================
 
 OBJECT_BYTES = 100 * 2 * 512 * 2
@@ -2564,46 +2564,6 @@ class TestRetainedBudget:
             adapter.close()
             l1_manager.close()
 
-    def test_waiting_continuation_blocks_new_requests(self):
-        """No NEW request starts while a continuation waits, even one that
-        would fit: the budget is kept for the lookup already admitted."""
-        l1_manager = make_budget_l1()
-        adapter = make_adapter()
-        layout = make_layout()
-        held = [make_object_key(i) for i in range(3)]
-        cont_keys = [make_object_key(i) for i in range(10, 13)]
-        new_keys = [make_object_key(20)]
-        store_keys_in_l2(adapter, held + cont_keys + new_keys, layout)
-        ctrl = make_controller(
-            l1_manager,
-            [adapter],
-            inflight_watermark=watermark_for(l1_manager, 5.5),
-        )
-        ctrl.start()
-        try:
-            wait_for_result(ctrl, ctrl.submit_prefetch_request(single_row_spec(held)))
-            cont_id = ctrl.submit_prefetch_request(
-                single_row_spec(cont_keys, admission=PrefetchAdmission.CONTINUATION)
-            )
-            new_id = ctrl.submit_prefetch_request(single_row_spec(new_keys))
-            assert wait_for_condition(
-                lambda: (
-                    ctrl.report_status()["continuation_queue_size"] == 1
-                    and ctrl.report_status()["pending_queue_size"] == 1
-                )
-            ), ctrl.report_status()
-            time.sleep(0.3)
-            assert ctrl.query_prefetch_result(new_id) is None
-
-            l1_manager.finish_read(held)
-            assert row_bits(wait_for_result(ctrl, cont_id)) == [0, 1, 2]
-            assert row_bits(wait_for_result(ctrl, new_id)) == [0]
-            l1_manager.finish_read(cont_keys + new_keys)
-        finally:
-            ctrl.stop()
-            adapter.close()
-            l1_manager.close()
-
     def test_stalled_head_is_admitted_after_timeout(self):
         """With nothing in flight, a head blocked only by retained bytes is
         admitted after the stall timeout, so an engine that waits on it in
@@ -2637,112 +2597,3 @@ class TestRetainedBudget:
                 ctrl.stop()
                 adapter.close()
                 l1_manager.close()
-
-
-class TestCancel:
-    def test_cancel_queued_request_never_runs(self):
-        """A cancelled request still waiting for budget is dropped: it never
-        loads anything and publishes no result."""
-        l1_manager = make_budget_l1()
-        adapter = make_adapter()
-        layout = make_layout()
-        held = [make_object_key(i) for i in range(3)]
-        queued = [make_object_key(i) for i in range(10, 13)]
-        store_keys_in_l2(adapter, held + queued, layout)
-        ctrl = make_controller(
-            l1_manager,
-            [adapter],
-            inflight_watermark=watermark_for(l1_manager, 5.5),
-        )
-        ctrl.start()
-        try:
-            wait_for_result(ctrl, ctrl.submit_prefetch_request(single_row_spec(held)))
-            queued_id = ctrl.submit_prefetch_request(single_row_spec(queued))
-            assert wait_for_condition(
-                lambda: ctrl.report_status()["pending_queue_size"] == 1
-            )
-            ctrl.cancel_prefetch_request(queued_id)
-            assert wait_for_condition(
-                lambda: ctrl.report_status()["pending_queue_size"] == 0
-            )
-
-            l1_manager.finish_read(held)
-            time.sleep(0.3)
-            assert ctrl.query_prefetch_result(queued_id) is None
-            assert_absent(l1_manager, queued)
-        finally:
-            ctrl.stop()
-            adapter.close()
-            l1_manager.close()
-
-    def test_cancel_in_flight_request_releases_its_locks(self, l1_manager):
-        """A request cancelled during its load releases every lock at finish
-        and publishes no result."""
-        adapter = make_adapter(bandwidth_gb=0.001)
-        layout = make_layout()
-        keys = [make_object_key(i) for i in range(3)]
-        store_keys_in_l2(adapter, keys, layout)
-        ctrl = make_controller(l1_manager, [adapter])
-        ctrl.start()
-        try:
-            req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
-            assert wait_for_condition(
-                lambda: ctrl.report_status()["in_flight_request_count"] == 1
-            )
-            ctrl.cancel_prefetch_request(req_id)
-            assert wait_for_condition(
-                lambda: ctrl.report_status()["in_flight_request_count"] == 0,
-                timeout=15.0,
-            )
-            assert ctrl.query_prefetch_result(req_id) is None
-            # Temporary loads (buffer-only policy) are freed once unlocked.
-            assert_absent(l1_manager, keys)
-            assert l1_manager.get_prefetch_retained_bytes() == 0
-            assert_l2_unlocked(adapter)
-        finally:
-            ctrl.stop()
-            adapter.close()
-
-    def test_cancel_unconsumed_result_releases_its_locks(self, l1_manager):
-        """Cancelling a finished request whose result nobody consumed drops
-        the result and releases its locks."""
-        adapter = make_adapter()
-        layout = make_layout()
-        keys = [make_object_key(i) for i in range(3)]
-        store_keys_in_l2(adapter, keys, layout)
-        ctrl = make_controller(l1_manager, [adapter])
-        ctrl.start()
-        try:
-            req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
-            assert ctrl.wait_prefetch_result(req_id, timeout=5.0)
-            assert l1_manager.get_prefetch_retained_bytes() == 3 * OBJECT_BYTES
-
-            ctrl.cancel_prefetch_request(req_id)
-            assert wait_for_condition(
-                lambda: l1_manager.get_prefetch_retained_bytes() == 0
-            )
-            assert ctrl.query_prefetch_result(req_id) is None
-            assert_absent(l1_manager, keys)
-        finally:
-            ctrl.stop()
-            adapter.close()
-
-    def test_cancel_after_consume_is_ignored(self, l1_manager):
-        """Once the result is consumed its locks belong to the consumer: a
-        later cancel leaves them alone."""
-        adapter = make_adapter()
-        layout = make_layout()
-        keys = [make_object_key(i) for i in range(3)]
-        store_keys_in_l2(adapter, keys, layout)
-        ctrl = make_controller(l1_manager, [adapter])
-        ctrl.start()
-        try:
-            req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
-            assert row_bits(wait_for_result(ctrl, req_id)) == [0, 1, 2]
-            ctrl.cancel_prefetch_request(req_id)
-            time.sleep(0.3)
-            assert_read_locked(l1_manager, keys)
-            l1_manager.finish_read(keys)
-        finally:
-            ctrl.stop()
-            adapter.close()

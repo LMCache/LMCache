@@ -188,13 +188,8 @@ class LookupMixin:
         The caller polls ``query_prefetch_status(handle)`` then calls
         :meth:`_sparse_classify` with the found rows.
 
-        Args:
-            key: The request's lookup key.
-            resolved: The CB read groups, their layouts and the attention
-                window descriptor, from :meth:`_resolve_cb_read_layouts`.
-            matches: The non-prefix matches to fetch.
-            admission: ``CONTINUATION`` when this request's prefix leg was
-                submitted (the lookup is already admitted), else ``NEW``.
+        ``admission`` is ``CONTINUATION`` when the prefix leg already
+        admitted this lookup.
 
         Returns:
             The prefetch handle, per-hash object keys (one per blend read
@@ -641,9 +636,6 @@ class LookupMixin:
                         key,
                         resolved,
                         job.non_prefix,
-                        # The prefix leg admitted this lookup: the sparse leg
-                        # must not queue behind new requests (see
-                        # PrefetchAdmission.CONTINUATION).
                         PrefetchAdmission.CONTINUATION
                         if job.prefix_handle is not None
                         else PrefetchAdmission.NEW,

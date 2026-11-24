@@ -108,58 +108,36 @@ adapter, both conditions hold:
 - `request_bytes` is the same worst case for the head request.
 - `used_bytes, total_bytes` come from `get_memory_usage()`, the same numbers
   eviction uses (the total is the grown heap on the lazy tier).
-- `retained_bytes` is `get_prefetch_retained_bytes()`: objects this
-  controller loaded from L2 that are still read-locked because their request
-  has not consumed them. They are charged with `charge_prefetch_retained` when
-  each load is admitted (objects L1 already held are not charged), and the
-  charge drops when the read lock is released or expires, or the object
-  leaves L1.
+- `retained_bytes` is `get_prefetch_retained_bytes()`: objects this controller
+  loaded from L2 (`charge_prefetch_retained`) that are still resident and
+  read-locked, i.e. not yet consumed by their request. L1 hits are not charged.
 - With no request in flight and no retained bytes, the head request is
   admitted regardless, so a request that can never fit does not block the
   queue; its reservations then fail per cell as before (`l1_oom`).
 
-Condition (1) bounds everything prefetch holds in L1 for requests that have
-not run yet: loads in flight, lookups not yet planned, and loaded data still
-read-locked. Condition (2) keeps a request from starting when L1, full of
-resident data, could not hold its loads. Counting retained data matters
-because an engine looks up every waiting request, not only the ones about to
-run. Without it, a burst fills L1 with read-locked data for requests minutes
-away from running, and new prefetches and stores fail. With it,
-`inflight_watermark` (`--l2-prefetch-inflight-watermark`, default 0.5) gives
-lookahead sized by L1 rather than by a request count. See
-[prefetch_retained_budget.md](prefetch_retained_budget.md).
+Condition (1) bounds everything prefetch holds for requests that have not run
+yet. Retained bytes must count: an engine looks up its whole waiting queue at
+once, so without them a burst fills L1 with locked data for requests minutes
+from running, and later prefetches fail. Condition (2) keeps a request from
+starting when L1, full of resident data, could not hold its loads.
 
-**Continuations.** A spec with `admission=PrefetchAdmission.CONTINUATION` (a
-later leg of an admitted lookup, such as the CacheBlend sparse leg or a repeat
-lookup) waits in a separate queue with strict priority: no `NEW` request
-starts while a continuation waits. Continuations pass the same checks. A
-`NEW` leg is charged at the worst case of the whole prompt, so once in-flight
-lookups settle, its continuation fits in what it was charged.
+**Continuations.** `PrefetchAdmission.CONTINUATION` (the CacheBlend sparse leg
+after its prefix leg) waits in its own queue, and no `NEW` request starts
+while one waits. It passes the same checks; its prefix leg was charged at the
+worst case of the whole prompt, so it fits once in-flight lookups settle.
 
 **Stall rule.** With nothing in flight, a head refused for
-`PREFETCH_STALL_ADMIT_SECONDS` (30 s) is admitted anyway (`stall_admissions`
-in `report_status`). Retained bytes drain only as engines consume their
-prefetches, so this keeps an engine that waits on lookups in order (instead
-of skipping pending ones as vLLM does) from deadlocking.
-
-**Cancel.** `cancel_prefetch_request(id)` (via
-`StorageManager.cancel_prefetch_task`) drops a queued request without
-touching L2. A request in flight finishes with its locks released and no
-result. A finished request whose result was not consumed has the result
-dropped and its locks released, because the controller keeps the finished
-request beside each unconsumed `LOCK` result. A consumed result is not
-affected. `LookupModule.end_session` and the CacheBlend session-destroy
-listener cancel lookups whose results their request never consumed.
+`PREFETCH_STALL_ADMIT_SECONDS` (30 s) is admitted anyway, so an engine that
+waits on lookups in order (vLLM skips pending ones) cannot deadlock.
 
 The check runs at the end of every loop iteration, so a completed load (which
 wakes the loop) admits the next requests immediately. Staging held only by
 stores is re-checked at the poll timeout (500 ms) at the latest.
 
 Example: a 16 GiB L1 with the default 0.5 watermark (an 8 GiB budget) and
-requests of 288 MiB (2048 tokens of Qwen3-8B KV). 27 requests hold 7.6 GiB, and
-a 28th still fits (7.9 GiB), but a 29th would exceed the budget. So 28
-requests are held at once, counting both those loading and those loaded but
-not yet consumed, where the old fixed limit was 8.
+requests of 288 MiB (2048 tokens of Qwen3-8B KV). 28 requests hold 7.9 GiB, so
+a 29th waits: 28 are loading or loaded-but-unconsumed at once, where the old
+fixed limit was 8.
 
 ## Flow
 

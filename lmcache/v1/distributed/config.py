@@ -765,9 +765,8 @@ class StorageManagerConfig:
 
     prefetch_inflight_watermark: float = 0.5
     """ Fraction of each L1's capacity, in (0, 1], that L2 prefetches may hold
-    before new prefetch requests wait: loads being staged, lookups not yet
-    planned, and loaded objects still read-locked for a request that has not
-    consumed them. Bounds how far ahead of the engine prefetch runs. """
+    (in flight, or loaded but not yet consumed) before new prefetch requests
+    wait. """
 
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
@@ -1129,10 +1128,8 @@ def add_storage_manager_args(
         type=float,
         default=0.5,
         help="Fraction of L1 capacity, in (0, 1], that L2 prefetches may hold "
-        "before new prefetch requests wait: loads in flight, lookups not yet "
-        "planned, and loaded data still read-locked for requests that have not "
-        "retrieved it. Bounds how far ahead of the engine prefetch runs under "
-        "a burst. Default is 0.5.",
+        "(in flight, or loaded but not yet consumed) before new prefetch "
+        "requests wait. Default is 0.5.",
     )
     # Deprecated: released deployers (operator) still render this flag into
     # server args, and rejecting it crashes the pod on startup.
