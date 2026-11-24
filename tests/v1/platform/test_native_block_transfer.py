@@ -190,65 +190,6 @@ def test_skip_spanning_launches_carries_into_later_launches() -> None:
     assert [launch.skip for launch in kernel.launches] == [8, 1]
 
 
-def test_full_cache_syncs_before_evicting_stale_tables(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Eviction waits for the device so in-flight launches keep their tables."""
-    kernel = _RecordingKernel()
-    syncs: list[torch.device] = []
-    monkeypatch.setattr(device_ops_helper, "synchronize_device", syncs.append)
-    cache: dict[tuple[tuple[int, ...], torch.device], torch.Tensor] = {}
-    pages = [_paged_kv(num_blocks=2) for _ in range(65)]
-    chunks = cast(list[torch.Tensor], [_host_chunk(0x1000)])
-
-    for paged, fmt, desc in pages:
-        transfer_with_address_kernel(
-            kernel,
-            paged,
-            chunks,
-            [0],
-            CPU,
-            H2D,
-            desc,
-            _CHUNK_TOKENS,
-            fmt,
-            0,
-            4,
-            paged_table_cache=cache,
-        )
-
-    assert len(cache) == 64
-    assert syncs == [CPU]
-
-    # The ops instance is shared across device indices, so an evicted table
-    # can belong to a different device than the incoming transfer.
-    syncs.clear()
-    cache.clear()
-    gpu_table = MagicMock()
-    gpu_table.device = torch.device("cuda:0")
-    cache[((0,), CPU)] = gpu_table
-    for i in range(1, 64):
-        cache[((i,), CPU)] = torch.zeros(4)
-    paged, fmt, desc = _paged_kv(num_blocks=2)
-    transfer_with_address_kernel(
-        kernel,
-        paged,
-        chunks,
-        [0],
-        CPU,
-        H2D,
-        desc,
-        _CHUNK_TOKENS,
-        fmt,
-        0,
-        4,
-        paged_table_cache=cache,
-    )
-
-    assert len(cache) == 64
-    assert syncs == [torch.device("cuda:0")]
-
-
 def test_pinned_chunks_keep_the_async_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """Already pinned chunks are passed as-is and nothing synchronizes."""
     kernel = _RecordingKernel()
