@@ -435,9 +435,9 @@ class NixlFileStorage final : public NixlStorageStrategy {
 class NixlObjectStorage final : public NixlStorageStrategy {
  public:
   NixlObjectStorage(
-      const std::string& backend_name,
+      bool keys_are_object_names,
       const std::unordered_map<std::string, std::string>& backend_params)
-      : expects_memos_object_name_(backend_name == "DOCA_MEMOS"),
+      : keys_are_object_names_(keys_are_object_names),
         shard_directories_(
             parse_bool_parameter(backend_params, "shard_dirs", false)) {}
 
@@ -523,32 +523,25 @@ class NixlObjectStorage final : public NixlStorageStrategy {
 
  private:
   std::string identity_for_key(const std::string& key) const {
-    if (!expects_memos_object_name_) {
-      return key_to_filename(key, shard_directories_);
-    }
-    if (key.size() != 32 ||
-        key.find_first_not_of("0123456789abcdef") != std::string::npos) {
-      throw std::runtime_error(
-          "DOCA_MEMOS requires a 32-character lowercase hexadecimal object "
-          "name");
-    }
-    return key;
+    return keys_are_object_names_ ? key
+                                  : key_to_filename(key, shard_directories_);
   }
 
-  const bool expects_memos_object_name_;
-  const bool shard_directories_;
+  const bool keys_are_object_names_;
+  bool shard_directories_;
 };
 
 }  // namespace
 
 std::unique_ptr<NixlStorageStrategy> make_nixl_storage_strategy(
-    NixlStorageKind storage_kind, const std::string& backend_name,
+    NixlStorageKind storage_kind, bool keys_are_object_names,
     const std::unordered_map<std::string, std::string>& backend_params) {
   switch (storage_kind) {
     case NixlStorageKind::File:
       return std::make_unique<NixlFileStorage>(backend_params);
     case NixlStorageKind::Object:
-      return std::make_unique<NixlObjectStorage>(backend_name, backend_params);
+      return std::make_unique<NixlObjectStorage>(keys_are_object_names,
+                                                 backend_params);
   }
   throw std::runtime_error("unsupported inferred NIXL storage kind");
 }

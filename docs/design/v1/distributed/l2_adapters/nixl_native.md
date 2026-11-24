@@ -232,9 +232,9 @@ that connector retains its established `.data` identity.
 For `DOCA_MEMOS`, the Python adapter uses `hashlib` at the submission
 boundary to hash the canonical L2 wire key, including any salt and identity
 tags. It passes the first 16 bytes of SHA-256 as 32 lowercase hex characters
-for store, lookup, and load. The OBJECT strategy validates this name and uses
-it directly in NIXL descriptors and queries. Connector API version 2
-defines the pre-encoded DOCA_MEMOS key contract.
+for store, lookup, and load. The worker selects verbatim object names for
+DOCA_MEMOS, so the OBJECT strategy uses them directly in NIXL descriptors and
+queries. Connector API version 2 defines this pre-encoded key contract.
 
 ## Optional dependency boundary
 
