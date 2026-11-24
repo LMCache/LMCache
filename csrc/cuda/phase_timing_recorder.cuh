@@ -137,10 +137,6 @@ class PhaseTimingRecorder {
   // Bound on queued records; the oldest are evicted past this.
   static constexpr size_t kMaxPending = 8192;
 
-  // Caller must hold mutex_. Evicts the oldest records until `headroom`
-  // more fit under the cap.
-  void evict_until_below_cap(size_t headroom);
-
   std::mutex mutex_;
   std::deque<PhaseTimingRecord> pending_;  // guarded by mutex_
 };
