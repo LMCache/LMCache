@@ -49,7 +49,7 @@ PYBIND11_MODULE(lmcache_native, m) {
   // Device-independent KV-format and transfer enums. These live in the
   // common (non-CUDA) native module so they are available regardless of the
   // GPU backend, and so they are the single source of truth shared with the
-  // pure-Python fallback in ``lmcache.v1.platform.ops_types``.
+  // pure-Python fallback in ``lmcache.v1.common.ops_types``.
   py::enum_<EngineKVFormat>(m, "EngineKVFormat")
       .value("NB_NL_TWO_BS_NH_HS", EngineKVFormat::NB_NL_TWO_BS_NH_HS)
       .value("NL_X_TWO_NB_BS_NH_HS", EngineKVFormat::NL_X_TWO_NB_BS_NH_HS)
