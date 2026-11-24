@@ -94,6 +94,9 @@ the unfull chunk `[kC, end)`.
 A connector with the feature off sends an aligned LOOKUP `end` and no grid
 hint, so the server never hands it a tail it cannot load. The other transfer
 paths (engine-driven, qstore, server transfer) still floor an unaligned `end`.
+A key carrying client-computed `chunk_hashes` instead of tokens has hashes for
+complete chunks only, so it never addresses a tail on any path: its `end` is
+floored and the lookup does not probe tail lengths for it.
 
 ## Interface changes
 
@@ -101,7 +104,7 @@ Wire / IPC:
 
 | Interface | Change |
 |---|---|
-| `IPCCacheServerKey` | No new field. New method `has_unfull_chunk(chunk_size)`: `end % chunk_size != 0`. |
+| `IPCCacheServerKey` | No new field. New method `has_unfull_chunk(chunk_size)`: `end % chunk_size != 0` for a key carrying tokens; always false for a key carrying `chunk_hashes`. |
 | QUERY_PREFETCH_STATUS / WAIT_PREFETCH_STATUS reply | **Always a token count** now, for every lookup (was a chunk count). It is a multiple of `C` unless the hit ends with a tail. Every MP client is updated (vLLM `LookupState`, SGLang, TensorRT-LLM, ATOM, SDK, `lmcache bench server`); server and clients must be upgraded together. |
 | STORE / RETRIEVE on the LMCache-driven path | An unaligned `end` now also stores or loads the tail `[kC, end)`; its block IDs follow the full chunks' in every group. vLLM, SGLang, TensorRT-LLM, the SDK and the bench send aligned ends unless they mean a tail; ATOM's ranges come from ATOM. |
 | FREE_LOOKUP_LOCKS | An unaligned `end` also frees the tail ending exactly there, if this request's lookup locked it. |

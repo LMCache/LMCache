@@ -33,8 +33,9 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     # First Party
+    from lmcache.v1.common.memory_management import MemoryObj
+    from lmcache.v1.common.object_group_transfer import ObjectGroupTransfer
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-    from lmcache.v1.memory_management import MemoryObj
     from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
@@ -43,7 +44,10 @@ class BaseCacheContext(ABC):
 
     Subclasses call :meth:`__init__` after computing the common
     layout parameters and before setting up device-specific state.
-    All keyword arguments are required so the contract is explicit.
+    Layout keyword arguments are required. ``object_group_transfer`` is the
+    optional default copy callback, supplied at construction by server callers.
+    Contexts that only use layout helpers or override ``transfer_object_group``
+    do not need it.
 
     Concrete subclasses MUST set :attr:`device_type` to the
     ``torch.device.type`` string they handle (``"cuda"``, ``"cpu"``,
@@ -65,6 +69,7 @@ class BaseCacheContext(ABC):
         kv_layer_groups_manager: KVLayerGroupsManager,
         block_ids_buffer: torch.Tensor,
         lmcache_tokens_per_chunk: int,
+        object_group_transfer: ObjectGroupTransfer | None = None,
     ) -> None:
         self.kv_caches_ = kv_caches
         self.device_ = device
@@ -72,6 +77,7 @@ class BaseCacheContext(ABC):
         self.kv_layer_groups_manager_ = kv_layer_groups_manager
         self.block_ids_buffer_ = block_ids_buffer
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        self._object_group_transfer = object_group_transfer
         # Imported worker events, held until the stream wait queued on each
         # has been consumed (see hold_imported_event / release_imported_event).
         self._held_imports: dict[int, object] = {}
@@ -393,19 +399,19 @@ class BaseCacheContext(ABC):
         """Enqueue the copy of one object group between the KV cache and
         *memory_objs*, in either direction.
 
-        The copy is defined by the staging buffers, shape descriptors and
-        KV formats this context owns, so it lives here: a subclass that
-        changes the staging layout overrides this method together with it,
-        and the two cannot disagree. The default is
-        :func:`~lmcache.v1.multiprocess.object_group_transfer.transfer_kv_per_object_group`;
-        see it for the argument semantics.
-        """
-        # First Party
-        from lmcache.v1.multiprocess.object_group_transfer import (
-            transfer_kv_per_object_group,
-        )
+        A subclass that changes the staging layout can override this method.
+        The default calls the ``object_group_transfer`` constructor callback;
+        see :class:`~lmcache.v1.common.object_group_transfer.ObjectGroupTransfer`
+        for argument semantics, completion ownership and copy errors.
 
-        transfer_kv_per_object_group(
+        Raises:
+            RuntimeError: If no default transfer callback was supplied.
+        """
+        if self._object_group_transfer is None:
+            raise RuntimeError(
+                "No object-group transfer callback supplied to cache context"
+            )
+        self._object_group_transfer(
             self,
             block_ids_gpu,
             memory_objs,

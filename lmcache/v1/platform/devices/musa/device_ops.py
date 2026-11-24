@@ -21,8 +21,8 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
-from lmcache.logging import init_logger
 from lmcache.v1.common.kv_format import get_spec_class
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.devices.musa import native_kv_transfer

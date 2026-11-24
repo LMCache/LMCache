@@ -249,6 +249,9 @@ func TestBuildContainerArgs_Defaults(t *testing.T) {
 
 	assertArg(t, args, "--host", "0.0.0.0")
 	assertArg(t, args, "--port", "5555")
+	// The operator hands vLLM a tcp:// host, so the server must keep serving
+	// ZMQ explicitly rather than following the server default (issue #6735).
+	assertArg(t, args, "--transport", "zmq")
 	assertArg(t, args, "--l1-size-gb", "10.0")
 	assertArg(t, args, "--chunk-size", "256")
 	assertArg(t, args, "--max-workers", "1")

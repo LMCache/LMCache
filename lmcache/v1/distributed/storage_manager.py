@@ -13,9 +13,9 @@ import time
 
 # First Party
 from lmcache.lmcache_native import PeriodicEventNotifier
-from lmcache.logging import init_logger
 from lmcache.utils import lmcache_deprecate
 from lmcache.v1.common.errors import LMCacheTimeoutError
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import (
     CapacitySnapshot,
     L1BackendType,
@@ -185,18 +185,19 @@ class StorageManager:
             # active for reads, touches, status or capacity.
             self._closing_adapters: set[int] = set()
 
+            # Before the adapters, so an unwind closes them first.
+            PeriodicEventNotifier.create(
+                interval_ms=config.periodic_notifier_interval_ms,
+                use_eventfd=HAS_EVENTFD,
+            )
+            cleanup.callback(PeriodicEventNotifier.shutdown)
+
             for ac in config.l2_adapter_config.adapters:
                 self._check_dax_devices_unowned(ac)
                 adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
                 cleanup.callback(adapter.close)
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
-
-            PeriodicEventNotifier.create(
-                interval_ms=config.periodic_notifier_interval_ms,
-                use_eventfd=HAS_EVENTFD,
-            )
-            cleanup.callback(PeriodicEventNotifier.shutdown)
 
             # Per-cache_salt quota registry. Shared across the L2 eviction
             # controller (reads quotas each cycle) and the HTTP quota
@@ -1282,6 +1283,7 @@ class StorageManager:
         Every L2 adapter is closed even if another fails. If any adapter
         fails to close, the L1 managers are left open, since that adapter
         may still access L1 buffers.
+        The periodic event notifier shuts down after the adapters close.
         """
         self._prefetch_controller.stop()
         for controller in self._store_controllers.values():
@@ -1289,8 +1291,6 @@ class StorageManager:
         for controller in self._eviction_controllers:
             controller.stop()
         self._l2_eviction_controller.stop()
-
-        PeriodicEventNotifier.shutdown()
 
         with self._adapters_lock:
             adapters = list(self._l2_adapters.items())
@@ -1301,6 +1301,8 @@ class StorageManager:
             except Exception:
                 logger.exception("L2 adapter %d failed to close", adapter_id)
                 close_failed = True
+        # After the adapters: they unregister from the notifier on close.
+        PeriodicEventNotifier.shutdown()
         if close_failed:
             # A close-failed adapter may still read or write L1 buffers (for
             # example a serde wrapper whose serializer is still running), so

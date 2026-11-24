@@ -13,9 +13,9 @@ from typing import TYPE_CHECKING, Literal, get_args
 import enum
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.api import MemoryLayoutDesc as MemoryLayoutDesc
 from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.utils.frozen_dict import freeze_dict
 
 if TYPE_CHECKING:

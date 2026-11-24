@@ -10,10 +10,10 @@ import threading
 import time
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.attn_window import DEFAULT_ATTN_WINDOW_DESC, AttnWindowDesc
 from lmcache.v1.common.custom_types import IPCCacheServerKey
-from lmcache.v1.common.token_codec import num_packed_tokens, unpack_token_ids
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     ObjectKey,
@@ -27,6 +27,7 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.engine_context import (
     MPCacheServerContext,
+    check_chunk_hash_key,
     finish_lookup_read,
 )
 from lmcache.v1.multiprocess.engine_module import (
@@ -49,6 +50,37 @@ logger = init_logger(__name__)
 _DEFAULT_LOAD_POLICY = DefaultKVLoadPolicy({})
 
 
+def _key_chunk_hashes(
+    hasher: TokenHasher,
+    key: IPCCacheServerKey,
+    start: int = 0,
+    end: int | None = None,
+) -> list[bytes]:
+    """Chunk hashes of ``key`` for ``[start, end)``.
+
+    Hashes the key's tokens, or takes the hashes a client computed instead
+    (see ``IPCCacheServerKey.chunk_hashes``); both give the same result.
+
+    Args:
+        hasher: The server's token hasher.
+        key: Key carrying ``token_bytes`` or ``chunk_hashes``.
+        start: Token-level start index (must be chunk-aligned).
+        end: Token-level end index (must be chunk-aligned).
+
+    Returns:
+        List of ``bytes`` hash values for chunks in ``[start, end)``.
+    """
+    if not key.chunk_hashes:
+        return hasher.compute_packed_chunk_hashes(key.token_bytes, start=start, end=end)
+    hashes = hasher.client_chunk_hashes(key)
+    num_complete = len(hashes)
+    # An arriving key holds exactly end // chunk_size hashes
+    # (check_chunk_hash_key); copies narrowed to a lock range keep them all.
+    if end is not None:
+        num_complete = min(num_complete, end // hasher.chunk_size)
+    return hashes[start // hasher.chunk_size : num_complete]
+
+
 def resolve_prefetched_obj_keys(
     ctx: MPCacheServerContext,
     key: IPCCacheServerKey,
@@ -64,9 +96,7 @@ def resolve_prefetched_obj_keys(
     registry = ctx.layout_desc_registry
     chunk_size = registry.get_chunk_size(key.model_name, key.world_size)
     token_hasher = registry.get_token_hasher(key.model_name, key.world_size)
-    chunk_hashes = token_hasher.compute_packed_chunk_hashes(
-        key.token_bytes, start=key.start, end=key.end
-    )
+    chunk_hashes = _key_chunk_hashes(token_hasher, key, start=key.start, end=key.end)
     if not chunk_hashes:
         return []
 
@@ -283,7 +313,13 @@ class LookupModule(DiscoverableModule):
         Args:
             key: Cache key with request_id embedded.
             tp_size: Legacy wire field; ignored (kept for payload arity).
+
+        Raises:
+            ValueError: If ``key`` carries chunk hashes while cache events
+                need token ids, or not one per complete chunk of
+                ``[0, end)`` (see ``check_chunk_hash_key``).
         """
+        check_chunk_hash_key(self._ctx, key)
         if key.request_configs is not None and not isinstance(
             key.request_configs, Mapping
         ):
@@ -293,7 +329,6 @@ class LookupModule(DiscoverableModule):
                 key.request_id,
             )
             key = replace(key, request_configs=None)
-
         model_name, world_size = key.model_name, key.world_size
         self._ctx.event_bus.publish(
             Event(
@@ -324,9 +359,7 @@ class LookupModule(DiscoverableModule):
         token_hasher = self._ctx.layout_desc_registry.get_token_hasher(
             model_name, world_size
         )
-        chunk_hashes = token_hasher.compute_packed_chunk_hashes(
-            key.token_bytes, end=key.end
-        )
+        chunk_hashes = _key_chunk_hashes(token_hasher, key, end=key.end)
         if not chunk_hashes:
             self._register_empty_prefetch_job(
                 key,
@@ -358,6 +391,7 @@ class LookupModule(DiscoverableModule):
                         "seq_len": key.num_tokens,
                         "dtypes": [str(d) for d in layout_desc.dtypes],
                         "shapes": [list(s) for s in layout_desc.shapes],
+                        # Empty for a key carrying client-computed hashes.
                         "token_ids": unpack_token_ids(key.token_bytes),
                     },
                 )
@@ -374,7 +408,7 @@ class LookupModule(DiscoverableModule):
             )
         )
         session = self._ctx.session_manager.get_or_create(key.request_id, token_hasher)
-        session.set_tokens(key.token_bytes)
+        session.update_from_key(key)
         start_chunk = min(max(0, key.start // chunk_size), len(chunk_hashes))
         # The engine-covered prefix is never looked up, so it is excluded from
         # the hit-rate denominator and reported separately.
@@ -483,7 +517,7 @@ class LookupModule(DiscoverableModule):
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
                 engine_covered_chunks=start_chunk,
-                prompt_tokens=num_packed_tokens(key.token_bytes),
+                prompt_tokens=key.num_tokens,
                 engine_hit_tokens=engine_hit_tokens,
                 model_name=model_name,
                 cache_salt=key.cache_salt,
@@ -601,15 +635,19 @@ class LookupModule(DiscoverableModule):
                 must be that lookup's hit boundary, so the range resolves to
                 exactly the keys it locked (sliding-window groups translate
                 from the hit).
+
+        Raises:
+            ValueError: If ``key`` carries chunk hashes the server cannot use
+                (see ``check_chunk_hash_key``).
         """
         if key.start >= key.end and not extra_ranges:
             return
 
+        check_chunk_hash_key(self._ctx, key)
         if key.request_configs is not None and not isinstance(
             key.request_configs, Mapping
         ):
             key = replace(key, request_configs=None)
-
         token_hasher = self._ctx.layout_desc_registry.get_token_hasher(
             key.model_name, key.world_size
         )
@@ -824,7 +862,7 @@ class LookupModule(DiscoverableModule):
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
                 engine_covered_chunks=engine_covered_chunks,
-                prompt_tokens=num_packed_tokens(key.token_bytes),
+                prompt_tokens=key.num_tokens,
                 engine_hit_tokens=_parse_non_negative_int_hint(
                     key.request_configs,
                     "lmcache.hint.engine_computed_tokens",
@@ -1077,8 +1115,9 @@ class LookupModule(DiscoverableModule):
                 grid_candidates = grid_candidates[:max_grid_probes]
             candidate_boundaries.extend(grid_candidates)
         # A connector that does not load unfull chunks sends an aligned end
-        # and no grid, so it has no candidate.
-        if not candidate_boundaries:
+        # and no grid, so it has no candidate. A key carrying chunk hashes
+        # has no tokens to hash an unfull chunk from.
+        if not candidate_boundaries or key.chunk_hashes:
             return 0, 0, {}
         group_layout_descs = (
             self._ctx.layout_desc_registry.find_group_unfull_chunk_layout_descs(
