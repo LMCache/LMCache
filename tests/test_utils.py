@@ -13,6 +13,8 @@ import pytest
 import torch
 
 # First Party
+from lmcache.utils import EngineType as LegacyEngineType
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.utils import get_version, round_down, round_up
 from lmcache.v1.distributed.utils import (
     DaxDeviceGeometry,
@@ -26,6 +28,11 @@ from lmcache.v1.distributed.utils import (
     parse_mixed_slot_mapping,
 )
 import lmcache.v1.distributed.utils as lmcache_utils
+
+
+def test_engine_type_legacy_import() -> None:
+    """Legacy consumers must receive the canonical enum, preserving identity."""
+    assert LegacyEngineType is EngineType
 
 
 # ============================================================
