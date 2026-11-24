@@ -71,13 +71,17 @@ void execute_object_group_transfer(
 bool batch_memcpy_supported();
 
 /**
- * Whether the direct copy path can address blocks of `engine_kv_format`.
+ * Whether the direct copy path can address blocks of `engine_kv_format` with
+ * the geometry `shape_desc`.
  *
  * True for token-major formats whose paged block is one contiguous
- * [bs, nh, hs] run (the affine formats of resolve_block_addressing). HND,
- * blocked-scale and per-layer (K, V)-tuple layouts return false.
+ * [bs, nh, hs] run (the affine formats of resolve_block_addressing), and for
+ * HND formats with a single head, whose block holds the same bytes as the
+ * NHD twin. Multi-head HND, blocked-scale and per-layer (K, V)-tuple layouts
+ * return false.
  */
-bool direct_copy_format_supported(EngineKVFormat engine_kv_format);
+bool direct_copy_format_supported(EngineKVFormat engine_kv_format,
+                                  const PageBufferShapeDesc& shape_desc);
 
 /**
  * Execute one object group's transfer through the copy engine.

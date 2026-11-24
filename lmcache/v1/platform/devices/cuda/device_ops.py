@@ -20,7 +20,7 @@ import math
 import torch
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.device_ops_helper import (
     transfer_with_address_kernel,

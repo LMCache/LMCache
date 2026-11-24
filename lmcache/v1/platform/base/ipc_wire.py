@@ -102,6 +102,10 @@ class VmmCudaIPCData(IPCData, tag="cuda_vmm"):
             raise ValueError("IPC fabric handle does not match allocation kind")
 
 
+class VmmRocmIPCData(VmmCudaIPCData, tag="rocm_vmm"):
+    """HIP VMM allocation descriptor; same fields as :class:`VmmCudaIPCData`."""
+
+
 class CpuShmIPCData(IPCData, tag="cpu_shm"):
     """Named CPU shared-memory descriptor."""
 
@@ -179,6 +183,7 @@ WireIPCData: TypeAlias = (
     CudaIPCData
     | RawCudaIPCData
     | VmmCudaIPCData
+    | VmmRocmIPCData
     | CpuShmIPCData
     | MusaIPCData
     | NpuIPCData
@@ -189,6 +194,7 @@ WRAPPER_TYPES: dict[type[msgspec.Struct], tuple[str, str]] = {
     CudaIPCData: ("cuda.ipc_wrapper", "CudaIPCWrapper"),
     RawCudaIPCData: ("cuda.ipc_wrapper", "RawCudaIPCWrapper"),
     VmmCudaIPCData: ("cuda.ipc_wrapper", "VmmCudaIPCWrapper"),
+    VmmRocmIPCData: ("rocm.ipc_wrapper", "VmmRocmIPCWrapper"),
     CpuShmIPCData: ("cpu.shm", "CpuShmTensorWrapper"),
     MusaIPCData: ("musa.ipc_wrapper", "MusaIPCWrapper"),
     NpuIPCData: ("npu.ipc_wrapper", "NpuIPCWrapper"),

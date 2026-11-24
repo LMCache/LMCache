@@ -6,12 +6,12 @@ from collections.abc import Sequence
 from pathlib import Path
 
 # First Party
-from lmcache.security.api_key import (
+from lmcache.v1.common.security.api_key import (
     APIKeyVerifier,
     load_api_keys_from_files,
     load_service_api_keys,
 )
-from lmcache.security.http import bearer_authorization_header
+from lmcache.v1.common.security.bearer import bearer_authorization_header
 
 
 def load_request_authentication(

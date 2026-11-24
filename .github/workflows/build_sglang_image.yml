@@ -1,7 +1,8 @@
 name: Build SGLang Image
 
 # Reusable workflow that builds lmcache/sglang (docker/Dockerfile.sglang): the
-# newest official SGLang release image plus the LMCache wheel from PyPI. Kept out of
+# newest official SGLang release image plus LMCache built from source in that
+# image's torch environment. Kept out of
 # publish-image so a failure here never blocks the vLLM / standalone images.
 # With push: false it only builds (the Dockerfile runs the smoke checks), which
 # is how changes to the Dockerfile can be validated before a release.
@@ -10,7 +11,7 @@ on:
     workflow_call:
         inputs:
             lmcache_version:
-                description: LMCache release on PyPI to install (e.g. v0.5.6 or v0.5.6rc1).
+                description: LMCache source release to build (e.g. v0.5.8 or v0.5.8rc1).
                 type: string
                 required: true
             push:
@@ -27,7 +28,7 @@ on:
     workflow_dispatch:
         inputs:
             lmcache_version:
-                description: LMCache release on PyPI to install (e.g. v0.5.6rc2).
+                description: LMCache source release to build (e.g. v0.5.8rc1).
                 type: string
                 required: true
 
@@ -42,7 +43,8 @@ jobs:
     # Resolved once so both architectures build on the same SGLang release and
     # the image label names it. Starts from the release tag lmsysorg/sglang:latest
     # points to (SGLang's GitHub release is tagged before its image is pushed) and
-    # walks back to the newest release pinning the torch LMCache is built against.
+    # selects that exact release. LMCache is compiled from source against the
+    # torch already installed in this image.
     resolve-sglang-version:
         name: Resolve the newest SGLang release image
         runs-on: ubuntu-24.04
@@ -60,32 +62,30 @@ jobs:
             - name: Checkout code
               uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
 
-            - name: Resolve the newest SGLang release with LMCache's torch
+            - name: Resolve the newest SGLang release
               id: resolve
               run: |
-                TORCH=$(python3 -c 'import re, tomllib; reqs = tomllib.load(open("pyproject.toml", "rb"))["build-system"]["requires"]; print(next(re.sub(r"^torch\s*==\s*", "", r) for r in reqs if re.match(r"^torch\s*==", r)))')
                 HUB=https://hub.docker.com/v2/repositories/lmsysorg/sglang/tags
                 LATEST=$(curl -fsSL "${HUB}/latest" | jq -r .digest)
                 VERSION=""
-                FOUND_LATEST=""
+                TORCH=""
                 for TAG in $(git ls-remote --tags --refs https://github.com/sgl-project/sglang.git \
                     | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$' | sort -rV); do
                   # A 404 means the release's image is not pushed yet.
                   DIGEST=$(curl -fsSL "${HUB}/${TAG}" | jq -r .digest) || continue
-                  [[ -n "${FOUND_LATEST}" || "${DIGEST}" == "${LATEST}" ]] || continue
-                  FOUND_LATEST=1
-                  SGLANG_TORCH=$(curl -fsSL "https://raw.githubusercontent.com/sgl-project/sglang/${TAG}/python/pyproject.toml" \
+                  [[ "${DIGEST}" == "${LATEST}" ]] || continue
+                  VERSION=${TAG}
+                  TORCH=$(curl -fsSL "https://raw.githubusercontent.com/sgl-project/sglang/${TAG}/python/pyproject.toml" \
                     | grep -m1 -oP '^\s*"torch==\K[^"]+')
-                  echo "${TAG}: torch ${SGLANG_TORCH}"
-                  if [[ "${SGLANG_TORCH}" == "${TORCH}" ]]; then VERSION=${TAG}; break; fi
+                  break
                 done
-                if [[ -z "${VERSION}" ]]; then
-                  echo "::error::No lmsysorg/sglang release at or below latest ships torch ${TORCH}"
+                if [[ -z "${VERSION}" || -z "${TORCH}" ]]; then
+                  echo "::error::Could not resolve the SGLang release and torch version behind lmsysorg/sglang:latest"
                   exit 1
                 fi
                 echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
                 echo "torch=${TORCH}" >> "$GITHUB_OUTPUT"
-                echo "Building on lmsysorg/sglang:${VERSION} (torch ${TORCH})"
+                echo "Building LMCache from source on lmsysorg/sglang:${VERSION} (torch ${TORCH})"
 
     build-sglang-image:
         name: Build lmcache/sglang (${{ matrix.arch }})
@@ -154,6 +154,7 @@ jobs:
                   --build-arg SGLANG_VERSION=${{ needs.resolve-sglang-version.outputs.version }} \
                   --build-arg LMCACHE_VERSION=${{ inputs.lmcache_version }} \
                   --build-arg EXPECTED_TORCH=${{ needs.resolve-sglang-version.outputs.torch }} \
+                  --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
                   --tag "${IMAGE}" \
                   ${{ inputs.push && '--push' || '' }} \
                   --file docker/Dockerfile.sglang .

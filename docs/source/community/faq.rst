@@ -55,6 +55,14 @@ reasons, the project currently maintains its own separate Kubernetes operator.
 
 *Answered by* `@ApostaC <https://github.com/ApostaC>`__.
 
+.. warning::
+
+   **Update:** The LMCache Kubernetes operator (``operator/``) is deprecated
+   and no longer maintained. It is expected to be removed from this repository
+   in 2027Q1. Existing release artifacts (e.g. ``operator-v*``
+   ``install.yaml``) will not receive fixes or updates. See
+   :doc:`/mp/operator` for details.
+
 Does deploying LMCache on Kubernetes require special permissions?
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 

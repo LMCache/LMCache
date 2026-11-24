@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 # --------------------------
 # Backend instance & Device detection

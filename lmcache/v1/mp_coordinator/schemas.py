@@ -12,6 +12,7 @@ This module holds HTTP models only.
 # Standard
 from typing import Annotated
 import base64
+import ipaddress
 
 # Third Party
 from pydantic import (
@@ -38,6 +39,36 @@ def _validate_matching_tags(value: dict[str, str]) -> dict[str, str]:
 
 
 MatchingTags = Annotated[dict[str, str], AfterValidator(_validate_matching_tags)]
+
+_URL_HOST_DELIMITERS = frozenset("/\\:?#@[]")
+
+
+def _validate_instance_host(value: str) -> str:
+    """Validate an MP server address without resolving it.
+
+    Args:
+        value: A bare IPv4 address, IPv6 address, or resolver host name.
+
+    Returns:
+        The unchanged address after validation.
+
+    Raises:
+        ValueError: If ``value`` contains URL syntax or control characters.
+    """
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        if any(
+            char in _URL_HOST_DELIMITERS
+            or char.isspace()
+            or ord(char) < 0x20
+            or ord(char) == 0x7F
+            for char in value
+        ):
+            raise ValueError(
+                "ip must be a bare IP address or host name without URL delimiters"
+            ) from None
+    return value
 
 
 def encode_tokens(tokens: "list[int] | np.ndarray") -> str:
@@ -88,8 +119,11 @@ class RegisterRequest(BaseModel):
     Attributes:
         instance_id: Identifier of the mp server. Optional -- if empty (or
             whitespace-only), the coordinator generates one and returns it.
-        ip: IP/host of the mp server's HTTP server. Whitespace is stripped and a
-            blank value is rejected, since the coordinator calls this address.
+        ip: Bare IPv4 address, IPv6 address, or resolver host name of the mp
+            server's HTTP API. Schemes, ports, paths, queries, fragments, and
+            userinfo are rejected because the coordinator combines this field
+            with ``http_port`` to build outbound URLs. Resolver-specific names
+            such as Docker service names containing underscores are accepted.
         http_port: Port of the mp server's HTTP server, which the coordinator
             calls to push work to this instance.
         metadata: Free-form registration hints.
@@ -109,6 +143,22 @@ class RegisterRequest(BaseModel):
     chunk_size: int | None = Field(default=None, ge=1)
     p2p_advertised_url: Annotated[str, StringConstraints(strip_whitespace=True)] = ""
     mq_port: int = Field(default=0, ge=0, le=65535)
+
+    @field_validator("ip")
+    @classmethod
+    def _validate_ip(cls, value: str) -> str:
+        """Reject URL components in the registered server address.
+
+        Args:
+            value: The stripped ``ip`` field.
+
+        Returns:
+            The unchanged address after validation.
+
+        Raises:
+            ValueError: If ``value`` contains URL delimiters or control characters.
+        """
+        return _validate_instance_host(value)
 
 
 class RegisterResponse(BaseModel):
@@ -622,23 +672,70 @@ class PrefetchResponse(BaseModel):
 class PinRequest(BaseModel):
     """Body of ``POST`` / ``DELETE /cache/pins`` on the coordinator.
 
-    Pinning protects the resolved keys from L2 eviction until unpinned. The
-    coordinator resolves ``token_ids`` to keys locally; L2 pins are fleet-wide
-    (per ``cache_salt``), so no target instance is needed.
+    Pinning protects keys from L2 eviction until unpinned. L2 pins are
+    fleet-wide (per ``cache_salt``), so no target instance is needed. Supply
+    exactly one of the two forms:
+
+    * ``keys`` — (un)pin these keys as given. Use it to pin a chunk in the
+      middle of a prompt without its prefix chunks: chunk hashes are
+      prefix-chained, so the tokens form always covers every chunk from
+      position 0.
+    * ``token_ids`` (with ``model_name`` / ``world_size``) — the coordinator
+      resolves the sequence to the keys of its complete chunks locally.
 
     Attributes:
-        model_name: Model whose rank fan-out to use when resolving keys.
-        world_size: World size selecting the per-rank fan-out.
-        token_ids: Prompt tokens whose complete chunks should be (un)pinned.
-        cache_salt: Per-tenant isolation salt applied to the produced keys.
-        tags: Matching tags supplied when the content was stored.
+        keys: The keys to (un)pin (keys form).
+        token_ids: Prompt tokens whose complete chunks should be (un)pinned
+            (tokens form).
+        model_name: Model whose rank fan-out to use when resolving keys
+            (tokens form).
+        world_size: World size selecting the per-rank fan-out (tokens form).
+        cache_salt: Per-tenant isolation salt applied to the produced keys
+            (tokens form).
+        tags: Matching tags supplied when the content was stored (tokens form).
     """
 
-    model_name: str
-    world_size: int = Field(ge=1)
+    keys: list[EncodedObjectKey] = Field(default_factory=list)
     token_ids: list[int] = Field(default_factory=list)
+    model_name: str = ""
+    world_size: int = Field(default=1, ge=1)
     cache_salt: str = ""
     tags: MatchingTags = Field(default_factory=dict)
+
+    @field_validator("keys")
+    @classmethod
+    def _validate_keys(cls, value: list[EncodedObjectKey]) -> list[EncodedObjectKey]:
+        """Reject undecodable keys at request validation (surfaced as 422).
+
+        Args:
+            value: The hydrated keys.
+
+        Returns:
+            The unchanged keys once each converts to an ``ObjectKey``.
+
+        Raises:
+            ValueError: If a key cannot convert into an ``ObjectKey``.
+        """
+        for encoded in value:
+            encoded.to_object_key()
+        return value
+
+    @model_validator(mode="after")
+    def _validate_one_form(self) -> "PinRequest":
+        """Enforce that exactly one form is supplied (surfaced as 422).
+
+        Returns:
+            The unchanged request once exactly one form is present.
+
+        Raises:
+            ValueError: If both or neither of ``keys`` / ``token_ids`` is
+                supplied, or ``token_ids`` comes without ``model_name``.
+        """
+        if bool(self.keys) == bool(self.token_ids):
+            raise ValueError("supply exactly one of 'keys' or 'token_ids'")
+        if self.token_ids and not self.model_name:
+            raise ValueError("'model_name' is required with 'token_ids'")
+        return self
 
 
 class PinResponse(BaseModel):

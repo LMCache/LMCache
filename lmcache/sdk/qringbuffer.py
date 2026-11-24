@@ -246,7 +246,12 @@ def attention_layer_names_from_vllm(
 
     attention_names: set[str] = set()
     for group in vllm_groups:
-        if isinstance(group.kv_cache_spec, AttentionSpec):
+        # vLLM with vllm-project/vllm#61452 keeps per-layer specs on the group.
+        specs = getattr(group, "kv_cache_specs", None)
+        group_specs = (
+            specs.values() if isinstance(specs, dict) else [group.kv_cache_spec]
+        )
+        if any(isinstance(spec, AttentionSpec) for spec in group_specs):
             attention_names.update(group.layer_names)
     return [name for name in kv_caches.keys() if name in attention_names]
 

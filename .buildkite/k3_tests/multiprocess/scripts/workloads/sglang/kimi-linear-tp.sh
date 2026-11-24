@@ -81,6 +81,7 @@ launch_sglang() {
         --page-size "$PAGE_SIZE" \
         --mamba-radix-cache-strategy extra_buffer \
         --mamba-track-interval "$MAMBA_TRACK_INTERVAL" \
+        --hybrid-cache-checkpoints-level 3 \
         --enable-lmcache \
         --lmcache-config-file "$SGLANG_LMCACHE_CONFIG_FILE" \
         > "$log_file" 2>&1 &

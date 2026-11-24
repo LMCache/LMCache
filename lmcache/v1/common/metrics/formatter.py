@@ -12,7 +12,7 @@ import inspect
 import json
 
 # First Party
-from lmcache.cli.metrics.section import Section, sections_to_dict
+from lmcache.v1.common.metrics.section import Section, sections_to_dict
 
 
 class MetricsFormatter(abc.ABC):
