@@ -225,7 +225,7 @@ class UnifiedLMCacheMPConnector:
             )
         host = str(config.mp_host)
         if "://" not in host:
-            host = f"tcp://{host}"
+            host = f"grpc://{host}"
         self.server_url = f"{host.rstrip(':')}:{config.mp_port}"
         self._mq_timeout = float(
             config.get_extra_config_value(

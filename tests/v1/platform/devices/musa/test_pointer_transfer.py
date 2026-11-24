@@ -10,8 +10,8 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.devices.musa import device_ops
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
 def test_pointer_operands_are_reconstructed_inside_musa_adapter(

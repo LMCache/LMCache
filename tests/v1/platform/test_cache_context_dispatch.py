@@ -21,9 +21,9 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.common.object_group_transfer import ObjectGroupTransfer
 from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 from lmcache.v1.platform.cache_context import create_cache_context
 
 
