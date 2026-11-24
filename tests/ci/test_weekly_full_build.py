@@ -146,6 +146,32 @@ def test_unsupported_workload_skip_fails_unless_expected(
     assert gate.evaluate(expected, builds, annotations)["passed"]
 
 
+def test_manifest_allows_expected_sglang_unsupported_skips(
+    gate: ModuleType, manifest: dict
+) -> None:
+    builds = _passing_builds(manifest)
+    annotations = {
+        "k3-multiprocess-test": [
+            {
+                "context": f"weekly-skip-{i}",
+                "body_html": (
+                    "<p>Skipped as unsupported: "
+                    f"<code>:compression: sglang / {workload} / grpc</code></p>"
+                ),
+            }
+            for i, workload in enumerate(
+                [
+                    "deadlock",
+                    "long_doc_qa_l2",
+                    "lm_eval_preemption / lmcache_driven",
+                    "lm_eval_preemption / engine_driven",
+                ]
+            )
+        ]
+    }
+    assert gate.evaluate(manifest, builds, annotations)["passed"]
+
+
 @pytest.mark.parametrize(
     "label",
     [

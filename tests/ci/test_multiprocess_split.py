@@ -377,6 +377,7 @@ r2=$?
 exit $((r1 == 0 && r2 == 1 ? 0 : 1))
 """
     env = os.environ.copy()
+    env.pop("CI_WEEKLY_FULL", None)
     env.update({"BUILDKITE_PULL_REQUEST": "42", "BUILDKITE_PULL_REQUEST_LABELS": ""})
     proc = subprocess.run([bash, "-c", script], env=env, check=False)
     assert proc.returncode == 0
@@ -416,6 +417,7 @@ _path_filter_get_changed_files() {{
 should_skip_multiprocess_heavy ".buildkite/k3_tests/multiprocess/pipeline.yml"
 """
     env = os.environ.copy()
+    env.pop("CI_WEEKLY_FULL", None)
     env.update({"BUILDKITE_PULL_REQUEST": "42", "BUILDKITE_PULL_REQUEST_LABELS": ""})
     proc = subprocess.run([bash, "-c", script], env=env, check=False)
     assert proc.returncode == expected_rc
