@@ -20,7 +20,6 @@ def _unexpected_block_kernel(*_args: object) -> None:
 
 
 def _install_fake_c_ops(monkeypatch: pytest.MonkeyPatch, **symbols: object) -> None:
-    # ensure_native requires the plugin to export the block kernel.
     symbols.setdefault("multi_layer_block_kv_transfer", _unexpected_block_kernel)
     fake_c_ops = types.ModuleType("lmcache_ascend.c_ops")
     for name, value in symbols.items():

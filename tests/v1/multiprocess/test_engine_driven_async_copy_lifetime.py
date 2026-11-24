@@ -8,9 +8,7 @@ symptom was corrupted content much later.
 
 These tests assert the ordering contract without a GPU, so they run in the
 CPU-only unit CI. The hardware reproductions live alongside them in
-``test_engine_driven_transfer.py`` and skip without CUDA. The scatter case is
-owned by the native block-transfer backend and is covered in
-``tests/v1/platform/test_native_block_transfer.py``.
+``test_engine_driven_transfer.py`` and skip without CUDA.
 """
 
 # Standard

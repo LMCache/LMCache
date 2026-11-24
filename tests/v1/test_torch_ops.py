@@ -18,6 +18,7 @@ from lmcache.v1.multiprocess.native_completion import (
 )
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform import torch_ops as _py_ops
+from lmcache.v1.platform.base.device_ops import DeviceOps
 import lmcache.lmcache_native as lmcache_native
 import lmcache.v1.platform as platform_pkg
 
@@ -1449,11 +1450,12 @@ def scenario_multi_layer_block_kv_transfer(
     """
     results = {}
 
-    # C++ bindings (cuda_ops, xpu_sycl_ops) expect uint64 pointer tensors for
+    # C++ bindings (cuda_ops) expect uint64 pointer tensors for
     # paged_buffer_ptrs_tensor and list[int] for lmcache_objects_ptrs.
     # The Python fallback also supports both modes on cpu/cuda (pointer inputs
-    # are reconstructed internally via _tensor_from_ptr).
-    use_tensor_list = device not in ("cpu", "cuda", "xpu")
+    # are reconstructed internally via _tensor_from_ptr). DeviceOps callers
+    # (xpu_sycl_ops resolves to XpuDeviceOps) use the tensor-only contract.
+    use_tensor_list = device not in ("cpu", "cuda", "xpu") or isinstance(ops, DeviceOps)
 
     def _alloc_chunks(shape: tuple[int, ...], count: int) -> list[torch.Tensor]:
         chunks = [torch.zeros(shape, dtype=dtype) for _ in range(count)]

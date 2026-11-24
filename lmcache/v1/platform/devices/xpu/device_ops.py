@@ -12,7 +12,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 # Third Party
 import torch
@@ -25,6 +25,10 @@ from lmcache.v1.platform.device_ops_helper import (
     transfer_with_address_kernel,
 )
 import lmcache.lmcache_native as lmcache_native
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.common.kv_format.types import DiscoverableKVCache
 
 logger = init_logger(__name__)
 
@@ -47,7 +51,6 @@ class XpuDeviceOps(DeviceOps):
             # First Party
             import lmcache.xpu_ops as sycl
         except ImportError:
-            # Not installed: stay on the torch baseline without retrying.
             self._native_bound = True
             logger.warning(
                 "lmcache.xpu_ops not built; XpuDeviceOps stays on the "
@@ -60,8 +63,8 @@ class XpuDeviceOps(DeviceOps):
 
     def multi_layer_block_kv_transfer(
         self,
-        paged_buffer_ptrs_tensor: torch.Tensor | list,
-        lmcache_objects_ptrs: list[int] | list[torch.Tensor],
+        paged_kv: DiscoverableKVCache,
+        chunks: list[torch.Tensor],
         block_ids: torch.Tensor | list[int],
         device: torch.device | str,
         direction: lmcache_native.TransferDirection,
@@ -71,8 +74,8 @@ class XpuDeviceOps(DeviceOps):
         skip_prefix_n_blocks: int,
     ) -> None:
         args = (
-            paged_buffer_ptrs_tensor,
-            lmcache_objects_ptrs,
+            paged_kv,
+            chunks,
             block_ids,
             device,
             direction,

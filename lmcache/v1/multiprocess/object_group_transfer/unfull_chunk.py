@@ -246,43 +246,40 @@ def transfer_unfull_chunk(
     ]
     if lead_group_ids:
         layout = get_unfull_chunk_layout_desc(cache_context, object_group_id)
-        offsets = list(
-            accumulate(
-                (
-                    shape.numel() * dtype.itemsize
-                    for shape, dtype in zip(layout.shapes, layout.dtypes, strict=True)
-                ),
-                initial=0,
-            )
-        )
-        regular_ptrs = [
-            object_buffer.data_ptr() + offset
-            for offset in offsets[: len(kernel_group_ids)]
+        region_sizes = [
+            shape.numel() * dtype.itemsize
+            for shape, dtype in zip(layout.shapes, layout.dtypes, strict=True)
         ]
-        lead_ptrs = {
-            kernel_group_id: object_buffer.data_ptr() + offset
-            for kernel_group_id, offset in zip(
-                lead_group_ids, offsets[len(kernel_group_ids) : -1], strict=True
-            )
+        offsets = list(accumulate(region_sizes, initial=0))
+        region_views = [
+            object_buffer.narrow(0, offsets[i], region_sizes[i])
+            .view(layout.dtypes[i])
+            .view(layout.shapes[i])
+            for i in range(len(layout.shapes))
+        ]
+        regular_buffers = region_views[: len(kernel_group_ids)]
+        lead_buffers = {
+            kernel_group_id: region_views[len(kernel_group_ids) + index]
+            for index, kernel_group_id in enumerate(lead_group_ids)
         }
     else:
-        regular_ptrs = [
-            cache_context.get_temp_kernel_group_buffer(0, kernel_group_id).data_ptr()
+        regular_buffers = [
+            cache_context.get_temp_kernel_group_buffer(0, kernel_group_id)
             for kernel_group_id in kernel_group_ids
         ]
-        lead_ptrs = {}
+        lead_buffers = {}
 
     if is_h2d:
         stage(engine, [memory_obj], [object_buffer], direction)
-    for kernel_group_id, regular_ptr in zip(
-        kernel_group_ids, regular_ptrs, strict=True
+    for kernel_group_id, regular_buffer in zip(
+        kernel_group_ids, regular_buffers, strict=True
     ):
         group_block_ids = block_ids_gpu[kernel_group_id]
         lead = lead_blocks[kernel_group_id]
         if lead:
             device_ops.multi_layer_block_kv_transfer(
-                cache_context.get_kernel_group_kv_pointers(kernel_group_id),
-                [lead_ptrs[kernel_group_id]],
+                cache_context.get_kernel_group_kv(kernel_group_id),
+                [lead_buffers[kernel_group_id]],
                 group_block_ids[:lead],
                 cache_context.device,
                 direction,
@@ -294,8 +291,8 @@ def transfer_unfull_chunk(
                 0,
             )
         device_ops.multi_layer_block_kv_transfer(
-            cache_context.get_kernel_group_kv_pointers(kernel_group_id),
-            [regular_ptr],
+            cache_context.get_kernel_group_kv(kernel_group_id),
+            [regular_buffer],
             group_block_ids[lead:],
             cache_context.device,
             direction,
