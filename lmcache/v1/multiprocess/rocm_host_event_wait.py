@@ -107,6 +107,16 @@ def current_run_entry() -> Any:
     return _RELEASED if entry is None else entry
 
 
+def _import_for_query(backend: Any, handle: bytes, device: object) -> object:
+    """Import the event the waiter polls; it is never passed to a stream wait.
+
+    A backend with ``import_event_for_query`` (ROCm) opens it without holding
+    the GIL.
+    """
+    opener = getattr(backend, "import_event_for_query", None)
+    return (backend.import_event if opener is None else opener)(handle, device)
+
+
 class _HostWaitEventBackend:
     """An instance's event backend while the host event wait is enabled.
 
@@ -248,7 +258,7 @@ class HostEventWaiter:
             )
             return fail()
         backend = entry.event_backend
-        event = backend.import_event(handle, entry.cache_context.device)
+        event = _import_for_query(backend, handle, entry.cache_context.device)
         # Weak: unregistering releases the entry's IPC-imported KV memory
         # only once it holds the last reference (see _release_entries).
         entry_ref = weakref.ref(entry)

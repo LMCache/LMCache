@@ -740,3 +740,48 @@ def test_affinity_pool_completes_future_from_deferred_response() -> None:
             second.result(timeout=5)
     finally:
         pool.shutdown()
+
+
+class _QueryImportBackend(_Backend):
+    """Backend with a separate import for events that are only polled."""
+
+    def import_event_for_query(self, handle: bytes, device: object) -> object:
+        event = ("polled", handle)
+        self.calls.append(("import_for_query", handle, device, event))
+        return event
+
+
+def test_waiter_polls_an_event_imported_for_query_and_never_imports_it_again(
+    waiters: Any,
+) -> None:
+    waiter = waiters()
+    backend = _QueryImportBackend()
+    entry = _Entry(
+        event_backend=waiter.wrap(backend), cache_context=SimpleNamespace(device=3)
+    )
+
+    def run() -> str:
+        event = entry.event_backend.import_event(b"s", 3)
+        entry.event_backend.wait_event(event, "stream")
+        return "ran"
+
+    response = waiter.submit_after_event(1, entry, b"s", run, lambda: "failed")
+    assert isinstance(response, DeferredResponse)
+    backend.done.add(b"s")
+    assert response.result(timeout=5) == "ran"
+    kinds = _kinds(backend)
+    assert kinds[0] == "import_for_query"
+    assert set(kinds) == {"import_for_query", "query"}  # one open, no stream wait
+    assert waiter.stats()["device_waits"] == 0
+
+
+def test_direct_import_and_stream_wait_open_the_handle_once(waiters: Any) -> None:
+    """Blend store / retrieve: ``import_event`` then ``wait_event``, no waiter."""
+    waiter = waiters()
+    backend = _QueryImportBackend()
+    wrapped = waiter.wrap(backend)
+    event = wrapped.import_event(b"r", 2)
+    wrapped.wait_event(event, "stream")
+    assert _kinds(backend) == ["import", "wait"]
+    assert backend.calls[1] == ("wait", event, "stream")
+    assert waiter.stats()["device_waits"] == 1
