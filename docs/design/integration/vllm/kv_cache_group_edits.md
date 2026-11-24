@@ -71,13 +71,17 @@ count so that one row fits the transfer kernel. At the moment the only
 block-transfer kernel that copies format 17 is the Ascend kernel, and a
 184320-byte one-slot PLE row exceeds its 128 KiB unified-buffer floor. Like
 `_MambaUnifiedViewEdit._compressed_slots`, slot compression is lossless because
-every MP path (full chunks and `unfull_chunk` boundary-state blocks via
-`multi_layer_block_kv_transfer`; `vLLM <= v0.29` without
-`kv_connector_block_state` rejects `save_unfull_chunk` at startup) transfers
-recurrent-state blocks whole. The output shape is what LMCache's format
-detector recognizes as format 17 (opaque sub-planes). The edit does not copy or
-pad bytes; the transfer kernel checks alignment, row size, and plane count when
-store/load runs.
+every MP path copies recurrent-state blocks whole:
+
+* full chunks and `unfull_chunk` boundary-state blocks, both copied by
+  `multi_layer_block_kv_transfer`. For align-mode Mamba the unfull block is
+  the boundary-state block vLLM provides.
+* startup rejection of `save_unfull_chunk` for align-mode Mamba when
+  `SchedulerOutput` has no `kv_connector_block_state`.
+
+The output shape is what LMCache's format detector recognizes as format 17 (opaque
+sub-planes). The edit does not copy or pad bytes; the transfer kernel checks alignment,
+row size, and plane count when store/load runs.
 
 ### 2. Sub-paged full attention
 
