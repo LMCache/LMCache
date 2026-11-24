@@ -8,10 +8,10 @@ geometry helpers.
 
 # First Party
 from lmcache import device_ops
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
 from lmcache.v1.common.utils import (
     get_concrete_engine_kv_shape_from_shape_desc,
 )
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 

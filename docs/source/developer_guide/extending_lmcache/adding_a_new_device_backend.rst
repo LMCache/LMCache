@@ -692,7 +692,7 @@ References
    * - Torch ops baseline
      - ``lmcache/v1/platform/torch_ops.py``
    * - Ops types and enums
-     - ``lmcache/v1/platform/ops_types.py``
+     - ``lmcache/v1/common/ops_types.py``
    * - Event IPC base
      - ``lmcache/v1/platform/base/event_ipc.py``
    * - Backend loading (``resolve_device_ops`` / ``_detect_device``)
