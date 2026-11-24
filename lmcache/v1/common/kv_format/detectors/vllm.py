@@ -9,7 +9,6 @@ from typing import Optional
 import torch
 
 # First Party
-from lmcache import torch_device_type
 from lmcache.utils import EngineType
 from lmcache.v1.common.kv_format.detectors.base import (
     EngineDetector,
@@ -24,6 +23,9 @@ from lmcache.v1.common.logging import init_logger
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
+
+# Set by lmcache.v1.platform, which common must not import.
+torch_device_type = "cpu"
 
 
 def resolve_vllm_kv_layout(

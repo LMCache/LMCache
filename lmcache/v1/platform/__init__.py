@@ -227,4 +227,10 @@ def synchronize_device(device: torch.device) -> None:
 
 torch_dev, torch_device_type = get_torch_device()
 
+if torch_dev is not None:
+    # First Party
+    from lmcache.v1.common.kv_format.detectors import vllm as _vllm_detector
+
+    _vllm_detector.torch_device_type = torch_device_type
+
 current_device_spec: DeviceSpec = _current_device_spec_fn()
