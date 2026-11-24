@@ -47,8 +47,8 @@ Requirements, checked at startup:
 
 - LMCache-driven transfer mode (the CUDA default).
 - No speculative decoding, no `lmcache.mp.lazy_offload`.
-- No compressed-attention model with a per-request ring (DeepSeek-V4.1,
-  GLM-5.3, Qwen3.8-Flash-Next; see [Limits](#limits)).
+- No prefill-context parallelism for a model with a per-request ring (see
+  [Per-request ring](#per-request-ring)).
 - For Mamba hybrids, a vLLM whose `SchedulerOutput` has
   `kv_connector_block_state`.
 
@@ -108,6 +108,8 @@ Wire / IPC:
 | QUERY_PREFETCH_STATUS / WAIT_PREFETCH_STATUS reply | **Always a token count** now, for every lookup (was a chunk count). It is a multiple of `C` unless the hit ends with a tail. Every MP client is updated (vLLM `LookupState`, SGLang, TensorRT-LLM, ATOM, SDK, `lmcache bench server`); server and clients must be upgraded together. |
 | STORE / RETRIEVE on the LMCache-driven path | An unaligned `end` now also stores or loads the tail `[kC, end)`; its block IDs follow the full chunks' in every group. vLLM, SGLang, TensorRT-LLM, the SDK and the bench send aligned ends unless they mean a tail; ATOM's ranges come from ATOM. |
 | FREE_LOOKUP_LOCKS | An unaligned `end` also frees the tail ending exactly there, if this request's lookup locked it. |
+| REGISTER_KV_CACHE layout hints | New key `per_request_ring_hints`: `[{"engine_group_id", "layer_indices"}]`, sent when `save_unfull_chunk` is on. The ring layers stay in no KV group. |
+| STORE / RETRIEVE block IDs | A transfer ending with a tail off the prefix-cache grid appends the request's ring block per ring group after the KV groups' lists. |
 
 Server:
 
@@ -118,9 +120,10 @@ Server:
 | `LookupModule.query_prefetch_status` / `wait_prefetch_status` / `free_lookup_locks` | Token reply and tail release as above. |
 | `LayoutDescRegistry.register` | New argument `group_unfull_chunk_layout_descs`. New `find_group_unfull_chunk_layout_descs()`, which falls back to the full-chunk layouts. |
 | `StorageManager` | `reserve_write` gets `is_temporary: bool = False`. |
-| `group_view.slice_block_ids_per_group` | New keyword `include_unfull_chunk`: `end` may be unaligned, and the slice keeps the block holding the last token (ceil instead of floor). |
+| `common.group_view.slice_block_ids_per_group` | New keyword `include_unfull_chunk`: `end` may be unaligned, and the slice keeps the block holding the last token (ceil instead of floor). New keyword `ring_group_ids`: with `include_unfull_chunk`, those scratch groups keep all their blocks (a ring's one block); other scratch groups stay empty. |
+| `KVLayerGroupsManager` | New argument `per_request_ring_hints` and property `per_request_ring_groups` (`PerRequestRingGroup`: engine group, layer tensors, `page_bytes`). |
 | `BaseCacheContext` (CPU, CUDA, NPU, MUSA) | New `get_temp_staging_buffer(num_bytes)`: the start of the transfer staging buffer as one flat region (GDS-registered where the buffer is), or `None` if the buffer is smaller. Tail objects with a lead block stage there. |
-| `object_group_transfer` | New functions: `has_unfull_chunk_lead_block`, `get_unfull_chunk_layout_desc`, `trim_and_stage_unfull_chunk_block_ids`, `get_unfull_chunk_staging_buffer`, `transfer_unfull_chunk`, `split_unfull_chunk_block_ids`. The CUDA copy kernel is **unchanged**. |
+| `object_group_transfer` | New functions: `has_unfull_chunk_lead_block`, `get_unfull_chunk_layout_desc`, `get_unfull_chunk_ring_groups`, `trim_and_stage_unfull_chunk_block_ids`, `get_unfull_chunk_staging_buffer`, `transfer_unfull_chunk`, `split_unfull_chunk_block_ids`. The CUDA copy kernel is **unchanged**. |
 | `MP_LOOKUP_PREFETCH_END` event | New fields `unfull_chunk_boundary`, `unfull_chunk_probes` (tail lengths checked). |
 
 vLLM integration:
@@ -130,7 +133,7 @@ vLLM integration:
 | `LMCacheMPSchedulerAdapter.maybe_submit_lookup_request` | New argument `include_unfull_chunk`: send the unaligned lookup length instead of flooring it. The only adapter change. |
 | `LMCacheMPRequestTracker` | New fields `unfull_chunk_boundaries` (tails already stored or hit) and `ends_at_prompt` (`max_tokens == 1`). |
 | `LMCacheMPRequestMetadata` | New `GetUnfullChunkStoreMetadata(...)`: builds the tail store ops. |
-| `kv_cache_groups` | New `is_per_request_state_spec`, `is_align_mode_mamba_spec`. |
+| `kv_cache_groups` | New `is_per_request_ring_spec`, `is_align_mode_mamba_spec`, `get_per_request_ring_hints`. |
 
 ## How it works
 
@@ -280,6 +283,10 @@ lock release.
 A tail is one object per object group with the **same layout as a full
 chunk**, so no new kernel is needed. It just has fewer real blocks.
 
+Below, a *region* is one entry of the object's `MemoryLayoutDesc` (a shape
+and dtype) at its byte offset: one per kernel group, plus any lead and ring
+entries. It is not a registered memory region (GDS, RDMA).
+
 The copy kernel expects exactly `keep` blocks per object (`keep` = all blocks
 of a chunk for full attention, the window's blocks for sliding window, one
 block for Mamba). The block list is cut to its last `min(n, keep)` blocks and
@@ -342,6 +349,63 @@ multiple of `T`.)
   need a lead block. The lead block matters for models whose grid is finer
   than their window blocks, and for exact tails.
 
+#### Per-request ring
+
+Compressed-attention models (DeepSeek-V4.1 compressor, GLM-5-Next kpool
+indexer, Step-5 CSA, Qwen4-Exp QSA) merge every `r` tokens into one cached
+row. The raw rows of the group still open live in a per-request ring
+(`CircularBufferSpec`): one block per request, row `pos` at slot
+`pos % capacity`, never prefix-cached. A tail must carry it when the open
+group is not empty at `B`:
+
+```text
+r = 2, exact tail B = P = 301
+  compressed rows  c0 .. c149   tokens [0, 300)    in the tail's KV blocks
+  ring             row 300      token 300 (open)   only in the ring block
+```
+
+- **Which tails carry it**: only a tail ending off the prefix-cache grid
+  `g`, i.e. an exact tail with `B % g != 0`. vLLM requires `g` to be a
+  multiple of every compression ratio, so a grid boundary closes every
+  group and a grid tail needs no ring. The tail key hashes its token count,
+  so the layout is a function of `B` and a key never has two layouts. On
+  DeepSeek-V4.1-Flash (3 ring layers × 32 KB) the ring would add about 21%
+  to every tail object under SWA bounded replay (it rides with the
+  compressed and indexer caches there), all of it unread on grid tails.
+- **Layout**: object group 0's tail object appends one
+  `(1, layers, 1, page_bytes)` byte region per ring group, after the lead
+  regions, so the object stages at the start of the staging buffer. A
+  retrieve whose object size does not match the layout (stored under a
+  different grid) fails instead of writing stale bytes into the ring.
+- **Copy**: the request's ring block of every layer is copied element by
+  element through that layer's block view (a ring block may be padded
+  inside), on the transfer stream. Retrieve writes the decode request's own
+  ring block, which vLLM claimed before the load. Rows are addressed by
+  `pos % capacity`, so the same model config on both sides puts every row
+  in its slot. The decode recomputes token `P - 1` and rewrites its row with
+  the same value.
+- **Block IDs**: the connector slices a ring group's blocks only for a
+  range ending with a tail off the grid; the worker appends the groups named
+  in `per_request_ring_hints` after the KV groups' lists when they are
+  non-empty; the server splits them off before the tail's block fitting and
+  picks the layout with rings when there are any.
+- **Which models read it today** (vLLM 0.33): DeepSeek-V4.1 with
+  `--no-swa-bounded-replay`. Under SWA bounded replay (its default) a
+  full-prompt hit is floored to a chunk, so the exact tail is dropped and
+  only grid tails serve hits. GLM-5-Next and Qwen4-Exp are Mamba hybrids:
+  the decode looks up `P - 1`, so their exact tail is not hit until the
+  prefill stops at `P - 1` (see [Which tails are stored](#which-tails-are-stored)).
+  vLLM lets Step-5 use only the Mooncake or NIXL connector.
+- **Prefill-context parallelism**: rejected at startup with a ring until it
+  is run end to end. Only DeepSeek-V4.1 runs PCP with a ring (vLLM rejects
+  PCP for the other three ring backends). Its compressor gathers each
+  request's newest open row on every PCP rank, so every rank's ring should
+  be equal and each rank's tail carry a full copy.
+- Validated on a 4-layer DeepSeek-V4.1-Flash (dummy weights,
+  `--kv-cache-dtype fp8_ds_mla --no-swa-bounded-replay`, 10,003-token
+  prompt): the decode hit 10,002 tokens, and its ring block held the
+  prefill's bytes after the retrieve (stale before).
+
 ### Temporary tails and locks
 
 - `"lmcache.temporary_unfull_chunk": true` stores the request's tail as
@@ -355,11 +419,8 @@ multiple of `T`.)
 
 ## Limits
 
-- **Compressed-attention models are not supported** (QSA, DSA kpool, DSV4.1
-  compressor) and are rejected at startup. Resuming mid-chunk needs the raw
-  keys of the open compression group, which vLLM keeps in a per-request ring
-  (`CircularBufferSpec`) that LMCache does not store (#5042). Storing the ring
-  is a follow-up.
+- **A per-request ring model with prefill-context parallelism** is rejected
+  at startup until a PCP run validates the ring on every rank.
 - Tails are served from L1 only. A persistent tail copied to L2 is not looked
   up there, and tails are not shared over P2P L1. P2P lookup of tails is a
   follow-up for LMCache-native PD.

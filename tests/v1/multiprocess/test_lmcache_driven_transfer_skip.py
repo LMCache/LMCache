@@ -515,7 +515,7 @@ def _make_unfull_store_module(monkeypatch, obj_keys):
     monkeypatch.setattr(
         mod,
         "transfer_unfull_chunk",
-        lambda cc, block_ids, skips, leads, memory_obj, group, buffer, direction: (
+        lambda cc, block_ids, skips, leads, obj, group, buffer, direction, rings: (
             unfull_transfers.append((group, list(block_ids), list(skips)))
         ),
     )
@@ -552,7 +552,7 @@ def test_store_skips_an_unfull_chunk_that_does_not_fit_the_staging_buffer(
     monkeypatch.setattr(
         mod,
         "get_unfull_chunk_staging_buffer",
-        lambda cc, group: None if group == 1 else object(),
+        lambda cc, group, carries_rings: None if group == 1 else object(),
     )
 
     _handle, ok, _mask = module.store_with_chunk_mask(
@@ -567,6 +567,39 @@ def test_store_skips_an_unfull_chunk_that_does_not_fit_the_staging_buffer(
     assert (["g0c0"], False) in reserved
     assert all(keys not in (["g0u"], ["g1u"]) for keys, _ in reserved)
     assert unfull_transfers == []
+
+
+def test_unfull_chunk_store_hands_the_ring_blocks_to_the_copy(monkeypatch):
+    """Lists past the kernel groups' are the request's ring blocks: they are
+    split off before the block fitting and select the layout with rings."""
+    module, _reserved, unfull_transfers = _make_unfull_store_module(
+        monkeypatch, [["g0u"], ["g1u"]]
+    )
+    rings: list[list] = []
+    monkeypatch.setattr(
+        mod,
+        "transfer_unfull_chunk",
+        lambda cc, block_ids, skips, leads, obj, group, buffer, direction, ring: (
+            unfull_transfers.append((group, list(block_ids), list(skips)))
+            or rings.append(list(ring))
+        ),
+    )
+    layouts: list[bool] = []
+    monkeypatch.setattr(
+        mod,
+        "get_unfull_chunk_layout_desc",
+        lambda cc, group, carries_rings: layouts.append(carries_rings) or object(),
+    )
+
+    _handle, ok, _mask = module.store_with_chunk_mask(
+        _unfull_key(request_configs=None), 1, [[5], [6], [7], [9]], b"producer"
+    )
+
+    assert ok
+    fitted = ([[5, 5], [6, 6], [7, 7]], [1, 1, 1])
+    assert unfull_transfers == [(0, *fitted), (1, *fitted)]
+    assert rings == [[[9]], [[9]]]
+    assert layouts == [True, True]
 
 
 def test_store_appends_the_unfull_chunk_after_full_chunks(monkeypatch):
@@ -603,11 +636,20 @@ def test_retrieve_of_only_an_unfull_chunk_skips_aux_groups(monkeypatch):
         lambda cc, b, num_tokens, skip_tokens: (b, [0] * len(b), [0] * len(b)),
     )
     monkeypatch.setattr(mod, "get_unfull_chunk_staging_buffer", lambda *a: object())
+    # Matches the 10-byte objects ``unsafe_read`` returns.
+    monkeypatch.setattr(
+        mod,
+        "get_unfull_chunk_layout_desc",
+        lambda *a: SimpleNamespace(
+            shapes=[SimpleNamespace(numel=lambda: 10)],
+            dtypes=[SimpleNamespace(itemsize=1)],
+        ),
+    )
     unfull_transfers: list[int] = []
     monkeypatch.setattr(
         mod,
         "transfer_unfull_chunk",
-        lambda cc, block_ids, skips, leads, memory_obj, group, buffer, direction: (
+        lambda cc, block_ids, skips, leads, obj, group, buffer, direction, rings: (
             unfull_transfers.append(group)
         ),
     )
@@ -618,6 +660,47 @@ def test_retrieve_of_only_an_unfull_chunk_skips_aux_groups(monkeypatch):
     assert read_calls == [["g0u", "g1u"]]
     assert transfer_calls == []
     assert unfull_transfers == [0, 1]
+
+
+def test_unfull_chunk_retrieve_hands_the_ring_blocks_to_the_copy(monkeypatch):
+    """A retrieve's lists past the kernel groups' reach the copy as the ring
+    blocks, not as a kernel group's blocks."""
+    module, _read_calls, _transfer_calls = _make_module(
+        monkeypatch, 1, num_chunks_in_sw=[1, -1], group_kinds=("recurrent", "attention")
+    )
+    module.context.resolve_obj_keys.return_value = [[], []]
+    module.context.resolve_unfull_chunk_obj_keys.return_value = ["g0u", "g1u"]
+    fitted: list[list] = []
+    monkeypatch.setattr(
+        mod,
+        "trim_and_stage_unfull_chunk_block_ids",
+        lambda cc, b, num_tokens, skip_tokens: (
+            fitted.append(list(b)) or (b, [0] * len(b), [0] * len(b))
+        ),
+    )
+    monkeypatch.setattr(mod, "get_unfull_chunk_staging_buffer", lambda *a: object())
+    monkeypatch.setattr(
+        mod,
+        "get_unfull_chunk_layout_desc",
+        lambda *a: SimpleNamespace(
+            shapes=[SimpleNamespace(numel=lambda: 10)],
+            dtypes=[SimpleNamespace(itemsize=1)],
+        ),
+    )
+    rings: list[list] = []
+    monkeypatch.setattr(
+        mod,
+        "transfer_unfull_chunk",
+        lambda cc, block_ids, skips, leads, obj, group, buffer, direction, ring: (
+            rings.append(list(ring))
+        ),
+    )
+
+    _handle, ok = module.retrieve(_unfull_key(), 1, [[4], [5], [9]], b"x")
+
+    assert ok is True
+    assert fitted == [[[4], [5]]]
+    assert rings == [[[9]], [[9]]]
 
 
 def _no_unfull(chunk_size: int) -> bool:

@@ -930,6 +930,41 @@ def test_submit_store_request_expands_block_ids_to_views(fake_adapter, monkeypat
     ]
 
 
+@pytest.mark.parametrize(
+    ("ring_blocks", "sent_after_kernel_groups"), [([7], [[7]]), ([], [])]
+)
+def test_submit_store_request_appends_the_ring_blocks_the_scheduler_sliced(
+    fake_adapter, monkeypatch, ring_blocks, sent_after_kernel_groups
+):
+    """A tail carrying rings sends each ring group's block after the kernel
+    groups' lists; a tail whose ring lists the scheduler left empty sends none."""
+    adapter, _send_mock, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.kv_caches = {"layer.0": fake_tensor}
+    adapter.engine_group_infos = [EngineGroupInfo(0, (0,)), EngineGroupInfo(1, (1,))]
+    adapter._layout_hints = {
+        "per_request_ring_hints": [{"engine_group_id": 2, "layer_indices": [2]}]
+    }
+    transfer_ctx = MagicMock()
+    adapter.transfer_ctx = transfer_ctx
+    op = LoadStoreOp(
+        token_bytes=pack_token_ids([1, 2, 3]),
+        block_ids=[[0], [10], ring_blocks],
+        start=0,
+        end=3,
+    )
+
+    adapter.submit_store_request("req-1", op, event=MagicMock())
+
+    assert transfer_ctx.submit_store.call_args.args[3] == [
+        [0],
+        [10],
+        *sent_after_kernel_groups,
+    ]
+
+
 @pytest.mark.parametrize("store_result", [True, False, None])
 def test_lazy_store_preserves_completion_and_failure_reporting(
     fake_adapter,

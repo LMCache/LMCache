@@ -11,6 +11,7 @@ import torch
 # First Party
 from lmcache import device_ops
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.kv_layer_groups import PerRequestRingGroup
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.object_group_transfer.engines import (
     select_engine,
@@ -47,25 +48,32 @@ def has_unfull_chunk_lead_block(
 
 
 def get_unfull_chunk_layout_desc(
-    cache_context: BaseCacheContext, object_group_id: int
+    cache_context: BaseCacheContext,
+    object_group_id: int,
+    carries_rings: bool = False,
 ) -> MemoryLayoutDesc:
     """Return the memory layout of an object group's unfull-chunk objects.
 
     Args:
         cache_context: The cache context containing the KV cache information.
         object_group_id: Index of the object group whose layout to build.
+        carries_rings: Whether the tail carries the per-request rings (a
+            tail ending off the prefix-cache grid).
 
     Returns:
         The object group's full-chunk layout followed by one single-block
         entry per kernel group with a lead block (see
-        :func:`has_unfull_chunk_lead_block`); the full-chunk layout itself
-        when there is none.
+        :func:`has_unfull_chunk_lead_block`), then one byte entry per
+        per-request ring group the object group carries (see
+        :func:`get_unfull_chunk_ring_groups`); the full-chunk layout itself
+        when there is neither.
 
     Notes:
         Assumes the ``2LTD`` object layout: the token (slot) dimension is the
         second to last of every shape, so a one-block entry replaces it with
-        the block's slots. Entries are appended, so every regular region keeps
-        its full-chunk offset.
+        the block's slots, and a ring entry is ``(1, layers, 1, page_bytes)``
+        bytes. Entries are appended, so every regular region keeps its
+        full-chunk offset.
     """
     kv_groups_manager = cache_context.kv_layer_groups_manager
     kernel_group_ids = kv_groups_manager.object_groups[
@@ -88,7 +96,39 @@ def get_unfull_chunk_layout_desc(
                 torch.Size((*shapes[index][:-2], slots_per_block, shapes[index][-1]))
             )
             dtypes.append(dtypes[index])
+    for ring_group in get_unfull_chunk_ring_groups(
+        cache_context, object_group_id, carries_rings
+    ):
+        shapes.append(torch.Size((1, len(ring_group.layers), 1, ring_group.page_bytes)))
+        dtypes.append(torch.uint8)
     return MemoryLayoutDesc(shapes=shapes, dtypes=dtypes)
+
+
+def get_unfull_chunk_ring_groups(
+    cache_context: BaseCacheContext, object_group_id: int, carries_rings: bool
+) -> list[PerRequestRingGroup]:
+    """Return the per-request ring groups an object group's unfull chunk carries.
+
+    Args:
+        cache_context: The cache context containing the KV cache information.
+        object_group_id: Index of the object group.
+        carries_rings: Whether the tail carries the per-request rings.
+
+    Returns:
+        Every ring group for object group 0 of a tail that carries rings,
+        none otherwise.
+
+    Notes:
+        A ring holds the open compression group at the request's last
+        computed token, so only a tail ending off the prefix-cache grid
+        needs it: vLLM requires the grid to be a multiple of every
+        compression ratio, so a grid boundary closes every group. The tail
+        key hashes its token count, so a key always has one layout. One
+        object group carries the rings, so a tail adds them once.
+    """
+    if object_group_id != 0 or not carries_rings:
+        return []
+    return cache_context.kv_layer_groups_manager.per_request_ring_groups
 
 
 def trim_and_stage_unfull_chunk_block_ids(
@@ -167,21 +207,25 @@ def trim_and_stage_unfull_chunk_block_ids(
 
 
 def get_unfull_chunk_staging_buffer(
-    cache_context: BaseCacheContext, object_group_id: int
+    cache_context: BaseCacheContext,
+    object_group_id: int,
+    carries_rings: bool = False,
 ) -> torch.Tensor | None:
     """Return the staging region an object group's unfull-chunk object uses.
 
     Args:
         cache_context: The GPU cache context containing the KV cache information.
         object_group_id: Index of the object group being copied.
+        carries_rings: Whether the tail carries the per-request rings.
 
     Returns:
         The object group's first (batch, object-group) slot when no kernel
-        group has a lead block. Otherwise the start of the staging buffer,
-        sized to the object; None when the object does not fit there.
+        group has a lead block and the object carries no ring. Otherwise the
+        start of the staging buffer, sized to the object; None when the
+        object does not fit there.
 
     Notes:
-        An object with lead-block regions is larger than one slot, so it
+        An object with lead-block or ring regions is larger than one slot, so it
         stages at the start of the staging buffer
         (:meth:`BaseCacheContext.get_temp_staging_buffer`), spanning the
         following slots; transfers on the stream run in order, so nothing
@@ -191,12 +235,14 @@ def get_unfull_chunk_staging_buffer(
     kernel_group_ids = cache_context.kv_layer_groups_manager.object_groups[
         object_group_id
     ].kernel_group_indices
-    if not any(
+    if not get_unfull_chunk_ring_groups(
+        cache_context, object_group_id, carries_rings
+    ) and not any(
         has_unfull_chunk_lead_block(cache_context, kernel_group_id)
         for kernel_group_id in kernel_group_ids
     ):
         return cache_context.get_temp_object_group_buffer(0, object_group_id)
-    layout = get_unfull_chunk_layout_desc(cache_context, object_group_id)
+    layout = get_unfull_chunk_layout_desc(cache_context, object_group_id, carries_rings)
     return cache_context.get_temp_staging_buffer(
         sum(
             shape.numel() * dtype.itemsize
@@ -214,6 +260,7 @@ def transfer_unfull_chunk(
     object_group_id: int,
     object_buffer: torch.Tensor,
     direction: "lmcache_native.TransferDirection",
+    ring_block_ids: Sequence[Sequence[int]] = (),
 ) -> None:
     """Copy one object group's unfull-chunk object to or from the GPU.
 
@@ -227,12 +274,16 @@ def transfer_unfull_chunk(
         object_buffer: The object's staging region, from
             :func:`get_unfull_chunk_staging_buffer`.
         direction: H2D (retrieve) or D2H (store).
+        ring_block_ids: The request's ring block (a one-element list) per
+            per-request ring group, in registration order, for a tail that
+            carries rings; empty otherwise.
 
     Raises:
         NotImplementedError: If an object is owned by a peer.
 
     Notes:
-        Always staged, by the engine ``memory_obj`` selects.
+        Always staged, by the engine ``memory_obj`` selects. Ring blocks are
+        copied packed, on the current stream, ordered with the staging copies.
     """
     kernel_group_ids = cache_context.kv_layer_groups_manager.object_groups[
         object_group_id
@@ -244,8 +295,15 @@ def transfer_unfull_chunk(
         for kernel_group_id in kernel_group_ids
         if has_unfull_chunk_lead_block(cache_context, kernel_group_id)
     ]
-    if lead_group_ids:
-        layout = get_unfull_chunk_layout_desc(cache_context, object_group_id)
+    carries_rings = bool(ring_block_ids)
+    ring_groups = get_unfull_chunk_ring_groups(
+        cache_context, object_group_id, carries_rings
+    )
+    ring_offsets: list[int] = []
+    if lead_group_ids or ring_groups:
+        layout = get_unfull_chunk_layout_desc(
+            cache_context, object_group_id, carries_rings
+        )
         offsets = list(
             accumulate(
                 (
@@ -259,12 +317,16 @@ def transfer_unfull_chunk(
             object_buffer.data_ptr() + offset
             for offset in offsets[: len(kernel_group_ids)]
         ]
+        num_regular_and_lead = len(kernel_group_ids) + len(lead_group_ids)
         lead_ptrs = {
             kernel_group_id: object_buffer.data_ptr() + offset
             for kernel_group_id, offset in zip(
-                lead_group_ids, offsets[len(kernel_group_ids) : -1], strict=True
+                lead_group_ids,
+                offsets[len(kernel_group_ids) : num_regular_and_lead],
+                strict=True,
             )
         }
+        ring_offsets = offsets[num_regular_and_lead:-1]
     else:
         regular_ptrs = [
             cache_context.get_temp_kernel_group_buffer(0, kernel_group_id).data_ptr()
@@ -304,6 +366,21 @@ def transfer_unfull_chunk(
             cache_context.get_engine_kv_format(kernel_group_id),
             skip_blocks[kernel_group_id],
         )
+    # Every object group's copy gets the ring blocks; only one carries rings.
+    for ring_group, (ring_block_id,), ring_offset in zip(
+        ring_groups, ring_block_ids if ring_groups else (), ring_offsets, strict=True
+    ):
+        ring_region = object_buffer[
+            ring_offset : ring_offset + ring_group.num_bytes
+        ].view(len(ring_group.layers), ring_group.page_bytes)
+        for layer, layer_region in zip(ring_group.layers, ring_region, strict=True):
+            # A block may be padded inside, so copy through its own view.
+            block = layer[ring_block_id]
+            packed = layer_region.view(layer.dtype).view(block.shape)
+            if is_h2d:
+                block.copy_(packed)
+            else:
+                packed.copy_(block)
     if not is_h2d:
         stage(engine, [memory_obj], [object_buffer], direction)
 
@@ -320,19 +397,25 @@ def split_unfull_chunk_block_ids(
     every kernel group.
 
     Args:
-        block_ids: Block IDs per kernel group for the whole transfer.
+        block_ids: Block IDs per kernel group for the whole transfer. A
+            transfer ending with an unfull chunk may append the request's
+            ring block per per-request ring group.
         blocks_per_chunk: Blocks in one full chunk per kernel group.
         num_chunks: Number of full chunks in the transfer.
         has_unfull_chunk: Whether the transfer ends with an unfull chunk.
 
     Returns:
-        ``(full_chunk_block_ids, unfull_chunk_block_ids)``; the second is
-        empty when ``has_unfull_chunk`` is False.
+        ``(full_chunk_block_ids, unfull_chunk_block_ids)``: the first per
+        kernel group; the second per kernel group followed by the ring
+        blocks, or empty when ``has_unfull_chunk`` is False.
     """
     if not has_unfull_chunk:
         return block_ids, []
+    num_kernel_groups = len(blocks_per_chunk)
+    kernel_block_ids = block_ids[:num_kernel_groups]
     full_lengths = [num_chunks * bpc for bpc in blocks_per_chunk]
     return (
-        [ids[:n] for ids, n in zip(block_ids, full_lengths, strict=True)],
-        [ids[n:] for ids, n in zip(block_ids, full_lengths, strict=True)],
+        [ids[:n] for ids, n in zip(kernel_block_ids, full_lengths, strict=True)],
+        [ids[n:] for ids, n in zip(kernel_block_ids, full_lengths, strict=True)]
+        + block_ids[num_kernel_groups:],
     )

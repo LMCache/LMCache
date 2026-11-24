@@ -1647,7 +1647,17 @@ class LMCacheMPWorkerAdapter:
                 self._kv_caches_released = False
 
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
-        return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
+        block_ids = expand_engine_block_ids(self.engine_group_infos, op.block_ids)
+        # A tail ending off the prefix-cache grid carries the request's ring
+        # blocks after the kernel groups' lists; the scheduler leaves the ring
+        # lists empty otherwise.
+        ring_block_ids = [
+            list(op.block_ids[ring["engine_group_id"]])
+            for ring in (self._layout_hints or {}).get("per_request_ring_hints", ())
+        ]
+        if all(ring_block_ids):
+            block_ids += ring_block_ids
+        return block_ids
 
     def _create_transfer_context(self, kv_caches: dict) -> TransferContext:
         """Build the worker-side transfer context; subclasses swap transports."""

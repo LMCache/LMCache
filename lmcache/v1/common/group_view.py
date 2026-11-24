@@ -16,7 +16,7 @@ corresponding ``lmcache.integration.<engine>`` package, not here.
 """
 
 # Standard
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import cast
 
 # Third Party
@@ -222,6 +222,7 @@ def slice_block_ids_per_group(
     end_token_idx: int,
     *,
     include_unfull_chunk: bool = False,
+    ring_group_ids: Collection[int] = (),
 ) -> list[list[int]]:
     """Slice each engine group's block IDs for a token range.
 
@@ -243,6 +244,9 @@ def slice_block_ids_per_group(
         include_unfull_chunk: The range ends with an unfull chunk, so
             ``end_token_idx`` need not align: each group covers it with the
             block holding its last token.
+        ring_group_ids: Scratch groups that are per-request rings. With
+            ``include_unfull_chunk``, each slices to all of its blocks (the
+            request's one ring block) instead of an empty list.
 
     Returns:
         One block-ID list per engine group, in engine-group order.
@@ -253,7 +257,11 @@ def slice_block_ids_per_group(
     sliced: list[list[int]] = []
     for engine_group_idx, tokens_per_block in enumerate(group_tokens_per_block):
         if tokens_per_block == 0:
-            sliced.append([])
+            sliced.append(
+                list(allocated_block_ids.get(engine_group_idx, []))
+                if include_unfull_chunk and engine_group_idx in ring_group_ids
+                else []
+            )
             continue
         if start_token_idx % tokens_per_block != 0 or (
             end_token_idx % tokens_per_block != 0 and not include_unfull_chunk

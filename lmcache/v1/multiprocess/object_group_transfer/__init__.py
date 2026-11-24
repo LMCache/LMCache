@@ -20,6 +20,7 @@ from lmcache.v1.multiprocess.object_group_transfer.planning import (
 )
 from lmcache.v1.multiprocess.object_group_transfer.unfull_chunk import (
     get_unfull_chunk_layout_desc,
+    get_unfull_chunk_ring_groups,
     get_unfull_chunk_staging_buffer,
     has_unfull_chunk_lead_block,
     split_unfull_chunk_block_ids,
@@ -32,6 +33,7 @@ __all__ = [
     "direct_transfer_supported",
     "downsample_and_stage_block_ids",
     "get_unfull_chunk_layout_desc",
+    "get_unfull_chunk_ring_groups",
     "get_unfull_chunk_staging_buffer",
     "has_unfull_chunk_lead_block",
     "run_direct_transfer",

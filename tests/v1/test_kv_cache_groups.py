@@ -203,6 +203,20 @@ def test_slice_block_ids_scratch_group_yields_empty():
     assert sliced == [[0, 1], []]
 
 
+def test_slice_block_ids_unfull_chunk_keeps_only_the_rings_blocks():
+    """A range ending with an unfull chunk carries a per-request ring's block;
+    any other scratch group stays empty."""
+    sliced = slice_block_ids_per_group(
+        {0: [0, 1], 1: [7], 2: [3, 4, 5]},
+        group_tokens_per_block=[16, 0, 0],
+        start_token_idx=16,
+        end_token_idx=20,
+        include_unfull_chunk=True,
+        ring_group_ids={1},
+    )
+    assert sliced == [[1], [7], []]
+
+
 def test_slice_block_ids_unfull_chunk_takes_the_block_of_the_last_token():
     """An unaligned end ends with the block holding its last token."""
     allocated = {0: list(range(32)), 1: list(range(4))}
