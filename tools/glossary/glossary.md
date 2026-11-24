@@ -90,7 +90,7 @@ publish: yes
 -->
 ### Token
 
-**A token is the unit of text a model actually operates on** — a whole word, a piece of a word, punctuation, whitespace, or another recurring fragment, drawn from the model's fixed vocabulary.
+**A token is the unit of text a model actually operates on** — a whole word, a piece of a word, punctuation, whitespace, or another recurring fragment — drawn from the model's fixed vocabulary.
 
 In English text, a token averages about four characters, or roughly three-quarters of a word; the ratio differs between tokenizers and between languages.
 Common words are usually a single token; rarer ones get split into pieces.
@@ -110,7 +110,7 @@ publish: yes
 
 **Tokenization is the step that splits raw text into tokens the model recognizes.**
 
-It happens before any model computation.
+Tokenizing happens before any model computation.
 The tokenizer is specific to the model, so the same sentence can produce a different number of tokens under different tokenizers.
 For that reason, token counts from one vendor's model do not carry over exactly to another vendor's model.
 
@@ -256,7 +256,7 @@ publish: yes
 
 This one-way flow is what makes caching possible.
 Because a later token cannot change what an earlier token saw, extending a prefix with a new token does not invalidate the Keys and Values already computed for the earlier positions.
-The new token attends to them; the model never has to build them again.
+The new token attends to them so the model never has to build them again.
 
 The mask also lets prefill process an entire prompt in one parallel pass, because no position can see the tokens that come after it.
 
