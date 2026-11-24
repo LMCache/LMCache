@@ -446,16 +446,34 @@ def lmcache_memcpy_async(
     libcudart = _get_copy_lib()
     if libcudart is not None and hasattr(libcudart, "cudaMemcpy"):
         try:
-            # Synchronous cudaMemcpy handles cross-cudaHostRegister boundaries
-            # internally — no manual alignment splitting needed.
-            ret = libcudart.cudaMemcpy(
-                ctypes.c_void_p(dest),
-                ctypes.c_void_p(src),
-                ctypes.c_size_t(nbytes),
-                ctypes.c_int(4),  # cudaMemcpyDefault
-            )
-            if ret != 0:
-                raise RuntimeError(f"cudaMemcpy failed with error code {ret}")
+            # Split host<->device copies at every cudaHostRegister boundary:
+            # LazyMemoryAllocator pins host_buffer_alignments-sized chunks
+            # separately, and one cudaMemcpy spanning two registered chunks
+            # fails with cudaErrorInvalidValue — unlike what the old comment
+            # claimed, synchronous cudaMemcpy does NOT handle that case
+            # (context: LMCache/LMCache#6617). The C++ lmcache_memcpy_async
+            # in csrc/cuda/mem_kernels.cu already splits the same way.
+            base_off = int(host_buffer_offset) if host_buffer_offset else 0
+            align = int(host_buffer_alignments) if host_buffer_alignments else 0
+            remaining = int(nbytes)
+            done = 0
+            while remaining > 0:
+                piece = remaining
+                if align > 0:
+                    piece = min(piece, align - ((base_off + done) % align))
+                ret = libcudart.cudaMemcpy(
+                    ctypes.c_void_p(dest + done),
+                    ctypes.c_void_p(src + done),
+                    ctypes.c_size_t(piece),
+                    ctypes.c_int(4),  # cudaMemcpyDefault
+                )
+                if ret != 0:
+                    raise RuntimeError(
+                        f"cudaMemcpy failed with error code {ret} "
+                        f"(offset={done} piece={piece} nbytes={nbytes})"
+                    )
+                done += piece
+                remaining -= piece
         except AttributeError:
             raise
     else:
