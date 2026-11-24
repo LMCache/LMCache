@@ -10,6 +10,7 @@ import torch
 
 # First Party
 from lmcache.utils import EngineType
+from lmcache.v1.common import device_type
 from lmcache.v1.common.kv_format.detectors.base import (
     EngineDetector,
     measure_list_depth_until_tensor,
@@ -23,9 +24,6 @@ from lmcache.v1.common.logging import init_logger
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
-
-# Set by lmcache.v1.platform, which common must not import.
-torch_device_type = "cpu"
 
 
 def resolve_vllm_kv_layout(
@@ -60,7 +58,7 @@ class VLLM_Detector(EngineDetector):
         layout_hints: LayoutHints,
     ) -> "tuple[Optional[lmcache_native.EngineKVFormat], DiscoverableKVCache]":
         kv_layout = resolve_vllm_kv_layout(
-            layout_hints, cpu_attention_backend=torch_device_type == "cpu"
+            layout_hints, cpu_attention_backend=device_type.torch_device_type == "cpu"
         )
         is_hnd = kv_layout in ("HND", "BLHNC")
 

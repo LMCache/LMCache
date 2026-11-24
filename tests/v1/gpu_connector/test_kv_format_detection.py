@@ -41,7 +41,7 @@ def test_vllm_cross_layer():
 
 # The CPU-HND safeguard forces HND regardless of hint when running on a CPU
 # host; bypass it so the hint-driven NHD/HND branch is exercised on any host.
-_VLLM_DEV = "lmcache.v1.common.kv_format.detectors.vllm.torch_device_type"
+_VLLM_DEV = "lmcache.v1.common.device_type.torch_device_type"
 _MOCK_DEVICE_TYPE = "cuda" if torch_device_type == "cpu" else torch_device_type
 
 

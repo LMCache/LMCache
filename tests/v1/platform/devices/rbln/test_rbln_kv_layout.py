@@ -24,7 +24,7 @@ import torch
 
 # First Party
 from lmcache.utils import EngineType
-from lmcache.v1.common.kv_format.detectors import vllm as vllm_detector
+from lmcache.v1.common import device_type as common_device_type
 from lmcache.v1.common.kv_format.types import (
     DiscoverableKVCache,
     LayoutHints,
@@ -65,7 +65,7 @@ def _discover(
     layout_hints: "LayoutHints | None" = None,
 ):
     """Run discovery against a chosen device type."""
-    with patch.object(vllm_detector, "torch_device_type", device_type):
+    with patch.object(common_device_type, "torch_device_type", device_type):
         return normalize_kv_and_discover_format(
             cast("DiscoverableKVCache", kv_caches),
             EngineType.VLLM,
