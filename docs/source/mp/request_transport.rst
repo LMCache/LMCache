@@ -194,16 +194,14 @@ Migrate in this order:
       {"lmcache.mp.host": "grpc://lmcache-server", "lmcache.mp.port": 5555}
 
    ``bench server --rpc-url`` and the SGLang ``mp_host`` setting take the same
-   scheme. A ``tcp://`` URL keeps working until the removal release.
+   scheme. A ``tcp://`` URL still selects ZMQ while ZMQ is supported.
 
 3. **Watch the logs.** Selecting ZMQ logs a deprecation warning on the server
    and in each client process. A deployment that logs no warning is already on
    gRPC.
 
-4. **Remove the ZMQ settings** before the removal release. After it, a
-   ``tcp://``, ``ipc://`` or ``inproc://`` request URL and a
-   ``--transport zmq`` server fail with an error that points at this section
-   rather than at a stack trace.
+4. **Remove the ZMQ settings** before the removal release, since
+   ``--transport zmq`` goes away with it.
 
 .. list-table::
    :header-rows: 1
