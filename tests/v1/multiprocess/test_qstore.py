@@ -457,13 +457,11 @@ def test_store_q_tracks_its_blocks_until_completed(stub_device, monkeypatch) -> 
     )
     monkeypatch.setattr(qstore_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     transfers: list[int] = []
-    monkeypatch.setattr(
-        qstore_mod,
-        "transfer_kv_per_object_group",
-        lambda *a, object_group_id, **kw: transfers.append(object_group_id),
-    )
     module = _module(ctx)
     cache_context = MagicMock()
+    cache_context.transfer_object_group.side_effect = (
+        lambda *a, object_group_id, **kw: transfers.append(object_group_id)
+    )
     cache_context.kv_layer_groups_manager.num_object_groups = 1
     cache_context.kv_layer_groups_manager.num_kernel_groups = 1
     cache_context.calculate_num_blocks.return_value = 2

@@ -33,7 +33,7 @@ import random
 from lmcache.cli.commands.bench.engine_bench.tokenizers import (
     build_single_token_pool,
 )
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 

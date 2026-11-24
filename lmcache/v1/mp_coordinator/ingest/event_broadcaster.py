@@ -14,7 +14,7 @@ from typing import Protocol, runtime_checkable
 import time
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 
