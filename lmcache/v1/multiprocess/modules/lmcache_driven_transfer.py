@@ -12,16 +12,12 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.utils import (
-    EngineType,
-    _lmcache_nvtx_annotate,
-)
-from lmcache.v1.common.custom_types import IPCCacheServerKey, KVEventProfile
+from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey, KVEventProfile
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
-from lmcache.v1.common.utils import LayoutHints
+from lmcache.v1.common.utils import LayoutHints, _lmcache_nvtx_annotate
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,

@@ -5,11 +5,11 @@
 from typing import Protocol
 
 # First Party
-from lmcache.utils import EngineType
 from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
     CBUnifiedLookupResult,
+    EngineType,
     IPCCacheServerKey,
     KVEventBatch,
     KVEventProfile,

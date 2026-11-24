@@ -37,10 +37,9 @@ import uvicorn
 import zmq
 
 # First Party
-from lmcache.utils import EngineType
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import TransferContext, create_transfer_context
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher

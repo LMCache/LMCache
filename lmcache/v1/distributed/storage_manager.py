@@ -13,9 +13,8 @@ import time
 
 # First Party
 from lmcache.lmcache_native import PeriodicEventNotifier
-from lmcache.utils import lmcache_deprecate
 from lmcache.v1.common.errors import LMCacheTimeoutError
-from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.logging import init_logger, lmcache_deprecate
 from lmcache.v1.distributed.api import (
     CapacitySnapshot,
     L1BackendType,

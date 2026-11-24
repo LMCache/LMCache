@@ -21,7 +21,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import EngineType
 
 pytest.importorskip("cupy", reason="GPU cache context tests require cupy")
 pytest.importorskip("lmcache.cuda_ops", reason="Requires lmcache.cuda_ops")

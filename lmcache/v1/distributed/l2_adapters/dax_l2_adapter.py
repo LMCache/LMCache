@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.utils import get_device_identity
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
@@ -47,6 +46,7 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigureError,
     L2ReconfigureStatus,
 )
+from lmcache.v1.distributed.utils import get_device_identity
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
 

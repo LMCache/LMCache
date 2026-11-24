@@ -20,11 +20,6 @@ import zlib
 import torch
 
 # First Party
-from lmcache.utils import (
-    STR_DTYPE_TO_TORCH_DTYPE,
-    TORCH_DTYPE_TO_STR_DTYPE,
-    DiskCacheMetadata,
-)
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.l2_adapters.raw_block.io_engine import (
     DEFAULT_IOURING_QUEUE_DEPTH,
@@ -40,6 +35,11 @@ from lmcache.v1.distributed.l2_adapters.raw_block.io_engine import (
 from lmcache.v1.distributed.l2_adapters.raw_block.key_codec import (
     RawBlockKeySpec,
     object_key_slot_identity,
+)
+from lmcache.v1.distributed.utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
+    TORCH_DTYPE_TO_STR_DTYPE,
+    DiskCacheMetadata,
 )
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 

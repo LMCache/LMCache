@@ -65,7 +65,7 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
 )
 from lmcache.v1.multiprocess.config import add_mp_server_args
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-import lmcache.utils as lmcache_utils
+import lmcache.v1.distributed.utils as lmcache_utils
 import lmcache.v1.memory_management as memory_management
 
 
