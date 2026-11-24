@@ -8,9 +8,9 @@ from typing import TypedDict
 import threading
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.attn_window import DEFAULT_ATTN_WINDOW_DESC, AttnWindowDesc
 from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
@@ -21,6 +21,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.session import SessionManager
 
@@ -53,6 +54,42 @@ class _LayoutDescEntry:
     shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC
     """How each object group is spread over the kv ranks; the default stores
     every group per rank."""
+
+
+def check_chunk_hash_key(ctx: "MPCacheServerContext", key: IPCCacheServerKey) -> None:
+    """Reject a chunk-hash key the server cannot use.
+
+    KV-event and coordinator reporting bind every stored chunk to its token
+    ids (``MP_TOKENS``) and drop store records that have none. A key carrying
+    client-computed chunk hashes has no token ids, so its stores would never
+    be reported. Its hashes must also be one per complete chunk of
+    ``[0, end)`` at the registration's chunk size (see
+    :meth:`IPCCacheServerKey.check_chunk_hash_count`); an unregistered key is
+    left to the caller.
+
+    Args:
+        ctx: The server context.
+        key: Key of an incoming lookup, lock release or transfer.
+
+    Raises:
+        ValueError: If ``key`` carries ``chunk_hashes`` while token bindings
+            have subscribers, or not one per complete chunk of ``[0, end)``.
+    """
+    if not key.chunk_hashes:
+        return
+    if ctx.event_bus.has_subscribers(EventType.MP_TOKENS):
+        raise ValueError(
+            "Keys carrying client-computed chunk hashes have no token ids, "
+            "which KV-event and coordinator reporting need; start the server "
+            "with --kv-event-log-size 0 (or --disable-observability) and "
+            "without --coordinator-event-reporting or --trace-level events, "
+            "or turn off client chunk hashes"
+        )
+    registry = ctx.layout_desc_registry
+    if registry.find(key.model_name, key.world_size) is not None:
+        key.check_chunk_hash_count(
+            registry.get_chunk_size(key.model_name, key.world_size)
+        )
 
 
 def finish_lookup_read(
@@ -270,6 +307,25 @@ class LayoutDescRegistry:
             if entry is None:
                 return None
             return entry.group_layout_descs
+
+    def find_group_shard_geometry(
+        self, model_name: str, world_size: int
+    ) -> tuple[tuple[int, ...], ShardReplicationDesc] | None:
+        """Read the object group IDs and shard replication from one registration.
+
+        Args:
+            model_name: Registered model name.
+            world_size: Registered KV world size.
+
+        Returns:
+            The group IDs and their replication descriptor, or None when the
+            registration is absent or has no groups.
+        """
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None or not entry.group_layout_descs:
+                return None
+            return tuple(entry.group_layout_descs), entry.shard_replication_desc
 
     def find_group_unfull_chunk_layout_descs(
         self, model_name: str, world_size: int
@@ -562,7 +618,8 @@ class MPCacheServerContext:
         """Resolve per-object-group object keys from an IPC cache key.
 
         Uses the session manager to track token state and the token hasher
-        to compute chunk hashes for the requested range. A partial chunk
+        to compute chunk hashes for the requested range; a key carrying
+        client-computed chunk hashes supplies them directly. A partial chunk
         past the last chunk boundary is not included; see
         :meth:`resolve_unfull_chunk_obj_keys`.
 
@@ -575,9 +632,13 @@ class MPCacheServerContext:
             ``object_group_ids[i]``.
 
         Raises:
-            ValueError: If ``key.worker_id`` is ``None``, or no KV cache is
-                registered for the key's ``(model_name, world_size)``.
+            ValueError: If ``key.worker_id`` is ``None``, no KV cache is
+                registered for the key's ``(model_name, world_size)``, or
+                the key carries chunk hashes while cache events need token
+                ids or not one per complete chunk of ``[0, end)`` (see
+                :func:`check_chunk_hash_key`).
         """
+        check_chunk_hash_key(self, key)
         chunk_size = self.layout_desc_registry.get_chunk_size(
             key.model_name, key.world_size
         )
@@ -585,7 +646,7 @@ class MPCacheServerContext:
             key.model_name, key.world_size
         )
         session = self.session_manager.get_or_create(key.request_id, token_hasher)
-        session.set_tokens(key.token_bytes)
+        session.update_from_key(key)
         if session.lookup_ipc_key is None:
             session.lookup_ipc_key = key.no_worker_id_version()
         # A partial chunk past the last chunk boundary is not a full chunk;

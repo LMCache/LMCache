@@ -2,6 +2,7 @@
 """Engine-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 import threading
@@ -11,7 +12,6 @@ import time
 import torch
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.client.transfer_context.base import EngineDrivenContextMetadata
 from lmcache.v1.common.attn_window import AttnWindowDesc
@@ -21,6 +21,12 @@ from lmcache.v1.common.custom_types import (
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
+)
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.periodic_thread import (
+    ThreadLevel,
+    ThreadRunSummary,
+    create_periodic_thread,
 )
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
@@ -32,11 +38,6 @@ from lmcache.v1.multiprocess.engine_module import (
     ModuleBuildContext,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.periodic_thread import (
-    ThreadLevel,
-    ThreadRunSummary,
-    create_periodic_thread,
-)
 
 # Local
 from .server_transfer import (
@@ -113,6 +114,10 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._pending_transfers: dict[
             tuple[EventType, int, str, IPCCacheServerKey], tuple[Event, float]
         ] = {}
+        self._unread_retrieve_pages: dict[
+            tuple[int, str, IPCCacheServerKey],
+            tuple[int, "list[list[ObjectKey]] | None", list[int]],
+        ] = {}
         self._observation_cleanup = create_periodic_thread(
             name=f"lmcache-mp-transfer-observations-{id(self):x}",
             interval=_TRANSFER_OBSERVATION_TIMEOUT_SECONDS / 4,
@@ -160,6 +165,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             self._strategies.clear()
             pending = list(self._pending_transfers.values())
             self._pending_transfers.clear()
+            self._unread_retrieve_pages.clear()
         for event, _ in pending:
             self._publish_transfer_end(event, False)
 
@@ -268,8 +274,15 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         with self._lock:
             stale = [k for k in self._pending_transfers if k[1] == instance_id]
             pending = [self._pending_transfers.pop(k) for k in stale]
+            unread = [
+                (k[2], self._unread_retrieve_pages.pop(k))
+                for k in list(self._unread_retrieve_pages)
+                if k[0] == instance_id
+            ]
         for event, _ in pending:
             self._publish_transfer_end(event, False)
+        for key, pages in unread:
+            self._release_pages_from(key, *pages)
         with self._pending_shm_lock:
             stale_writes = [k for k in self._pending_shm_writes if k[0] == instance_id]
             stale_reads = [k for k in self._pending_shm_reads if k[0] == instance_id]
@@ -600,26 +613,37 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         key: IPCCacheServerKey,
         instance_id: int,
         cpu_data: bytes,
+        chunk_start: int = 0,
+        chunk_count: int = 0,
     ) -> bool:
         """Commit CPU chunks and publish completion, including failed commits.
+
+        A large inline store arrives as several pages of the same prepared
+        key. The transfer completes on the page that reaches the last chunk,
+        or on the first failed page.
 
         Args:
             key: Cache key for the token range to store.
             instance_id: Worker instance identifier.
             cpu_data: Typed inline CPU tensor payload produced by the worker.
+            chunk_start: First chunk position of this page within ``key``.
+            chunk_count: Chunks in this page; ``0`` means through the last
+                chunk, so the default commits the whole range.
 
         Returns:
             ``True`` when all reserved objects are written, otherwise ``False``.
 
         Raises:
             ValueError: If no non-GPU context is registered for the given
-                instance ID.
+                instance ID, or the page is outside the key's chunks.
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
+        last_page = chunk_count == 0
         session = self._ctx.session_manager.get_or_create(key.request_id)
-        st = session.extras.pop("store_start_time", None)
+        st = None
         result = False
         try:
+            chunk_range = self._page_range(key, chunk_start, chunk_count)
             result = strategy.commit_store(
                 key=key,
                 instance_id=instance_id,
@@ -627,10 +651,15 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 context=entry.metadata,
                 resolve_obj_keys=self._resolve_single_group_obj_keys,
                 group_keys=self._group_keys_for(entry, key),
+                chunk_range=chunk_range,
             )
         finally:
-            self._finish_transfer(key, instance_id, EventType.MP_STORE_START, result)
-        if st is not None and result:
+            if last_page or not result:
+                st = session.extras.pop("store_start_time", None)
+                self._finish_transfer(
+                    key, instance_id, EventType.MP_STORE_START, result
+                )
+        if last_page and st is not None and result:
             num_tokens = (
                 len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
             )
@@ -641,6 +670,23 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             )
         return result
 
+    def _page_range(
+        self, key: IPCCacheServerKey, chunk_start: int, chunk_count: int
+    ) -> tuple[int, int]:
+        """Resolve a page to ``[start, end)`` chunk positions within ``key``.
+
+        Raises:
+            ValueError: If the page is outside the key's chunks.
+        """
+        total = (key.end - key.start) // self._ctx.chunk_size
+        end = total if chunk_count == 0 else chunk_start + chunk_count
+        if chunk_start < 0 or chunk_count < 0 or end > total or chunk_start > end:
+            raise ValueError(
+                f"chunk page start={chunk_start} count={chunk_count} is outside "
+                f"the key's {total} chunks"
+            )
+        return chunk_start, end
+
     @request_handler(
         HandlerType.BLOCKING,
         requires_client_affinity=True,
@@ -650,21 +696,38 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self,
         key: IPCCacheServerKey,
         instance_id: int,
+        chunk_start: int = 0,
+        chunk_count: int = 0,
     ) -> PrepareRetrieveResponse:
         """Prepare prefetched chunks and begin observing a successful transfer.
+
+        A large inline retrieve is read as several pages. Windows are
+        computed over the whole key, so each page returns its part of every
+        group's window. The transfer starts on the first page. A page that
+        fails, or succeeds without inline data (an SHM server's answer, which
+        an inline worker cannot read), ends it and releases the read locks of
+        the pages after it, which the worker no longer requests. If the worker
+        stops after a successful page instead, ``commit_retrieve`` releases the
+        unread pages and records the transfer as failed.
 
         Args:
             key: Cache key for the token range to retrieve.
             instance_id: Worker instance identifier.
+            chunk_start: First chunk position of this page within ``key``.
+            chunk_count: Chunks in this page; ``0`` means through the last
+                chunk, so the default reads the whole range.
 
         Returns:
             PrepareRetrieveResponse with serialized data on hit.
 
         Raises:
             ValueError: If no non-GPU context is registered for the given
-                instance ID.
+                instance ID, or the page is outside the key's chunks.
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
+        start, end = self._page_range(key, chunk_start, chunk_count)
+        total = (key.end - key.start) // self._ctx.chunk_size
+        whole = (start, end) == (0, total)
         group_keys = self._group_keys_for(entry, key)
         group_first_chunk: list[int] = []
         windows = entry.metadata.group_windows
@@ -678,25 +741,113 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 group_first_chunk.append(first)
                 narrowed.append(g_keys[first:])
             group_keys = narrowed
-        response = strategy.prepare_retrieve(
-            key=key,
-            instance_id=instance_id,
-            resolve_obj_keys=self._resolve_single_group_obj_keys,
-            group_keys=group_keys,
-            group_first_chunk=group_first_chunk,
+        window_keys = group_keys
+        window_firsts = group_first_chunk
+        resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]] = (
+            self._resolve_single_group_obj_keys
         )
-        session = self._ctx.session_manager.get_or_create(key.request_id)
-        session.extras["retrieve_start_time"] = time.perf_counter()
-        if response.success:
-            self._start_transfer(
-                key,
-                instance_id,
-                entry,
-                EventType.MP_RETRIEVE_START,
-                response.context,
-                group_keys,
+        if not whole:
+            if group_keys is not None:
+                firsts = group_first_chunk or [0] * len(group_keys)
+                group_keys = [
+                    g_keys[max(start, first) - first : max(end, first) - first]
+                    for g_keys, first in zip(group_keys, firsts, strict=True)
+                ]
+                group_first_chunk = [max(start, first) for first in firsts]
+            else:
+
+                def page_keys(key: IPCCacheServerKey) -> list[ObjectKey]:
+                    return self._resolve_single_group_obj_keys(key)[start:end]
+
+                resolve_obj_keys = page_keys
+
+        try:
+            response = strategy.prepare_retrieve(
+                key=key,
+                instance_id=instance_id,
+                resolve_obj_keys=resolve_obj_keys,
+                group_keys=group_keys,
+                group_first_chunk=group_first_chunk,
             )
+        except Exception:
+            if not whole:
+                self._abandon_retrieve(
+                    key, instance_id, chunk_start, end, window_keys, window_firsts
+                )
+            raise
+        session = self._ctx.session_manager.get_or_create(key.request_id)
+        if chunk_start == 0:
+            session.extras["retrieve_start_time"] = time.perf_counter()
+            if response.success:
+                self._start_transfer(
+                    key,
+                    instance_id,
+                    entry,
+                    EventType.MP_RETRIEVE_START,
+                    response.context,
+                    window_keys,
+                )
+        if whole:
+            return response
+        if not (response.success and response.data):
+            self._abandon_retrieve(
+                key, instance_id, chunk_start, end, window_keys, window_firsts
+            )
+        else:
+            page_key = (instance_id, key.request_id, key)
+            with self._lock:
+                if end < total:
+                    self._unread_retrieve_pages[page_key] = (
+                        end,
+                        window_keys,
+                        window_firsts,
+                    )
+                else:
+                    self._unread_retrieve_pages.pop(page_key, None)
         return response
+
+    def _abandon_retrieve(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        chunk_start: int,
+        end: int,
+        window_keys: "list[list[ObjectKey]] | None",
+        window_firsts: list[int],
+    ) -> None:
+        """End a paged retrieve after page ``[chunk_start, end)``.
+
+        The page's own locks are released by the strategy or at
+        ``commit_retrieve``; the pages after it are never requested, so their
+        prefetch read locks are released here.
+        """
+        with self._lock:
+            self._unread_retrieve_pages.pop((instance_id, key.request_id, key), None)
+        if chunk_start > 0:
+            self._finish_transfer(key, instance_id, EventType.MP_RETRIEVE_START, False)
+        self._release_pages_from(key, end, window_keys, window_firsts)
+
+    def _release_pages_from(
+        self,
+        key: IPCCacheServerKey,
+        end: int,
+        window_keys: "list[list[ObjectKey]] | None",
+        window_firsts: list[int],
+    ) -> None:
+        """Release the prefetch read locks of chunks at ``end`` and later."""
+        if window_keys is None:
+            remaining = self._resolve_single_group_obj_keys(key)[end:]
+        else:
+            firsts = window_firsts or [0] * len(window_keys)
+            remaining = [
+                obj_key
+                for g_keys, first in zip(window_keys, firsts, strict=True)
+                for obj_key in g_keys[max(end, first) - first :]
+            ]
+        if remaining:
+            self._ctx.storage_manager.finish_read_prefetched(
+                remaining, l1_owners=self._ctx.get_read_owners(key.request_id)
+            )
 
     @request_handler(
         HandlerType.BLOCKING,
@@ -707,22 +858,32 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self,
         key: IPCCacheServerKey,
         instance_id: int,
+        failed: bool = False,
     ) -> bool:
         """Finalize a retrieve and publish its transfer completion.
 
         Args:
             key: Cache key identifying the prepared retrieve.
             instance_id: Worker instance identifier.
+            failed: The worker did not get or apply the data, so the transfer
+                is recorded as failed.
 
         Returns:
-            Always ``True``.
+            Whether the transfer is recorded as successful.
         """
         _, strategy = self._resolve_for_transfer(instance_id)
         session = self._ctx.session_manager.get_or_create(key.request_id)
         st = session.extras.pop("retrieve_start_time", None)
+        with self._lock:
+            unread = self._unread_retrieve_pages.pop(
+                (instance_id, key.request_id, key), None
+            )
         result = False
         try:
+            if unread is not None:
+                self._release_pages_from(key, *unread)
             result = strategy.commit_retrieve(key=key, instance_id=instance_id)
+            result = result and unread is None and not failed
         finally:
             self._finish_transfer(key, instance_id, EventType.MP_RETRIEVE_START, result)
         if st is not None:
