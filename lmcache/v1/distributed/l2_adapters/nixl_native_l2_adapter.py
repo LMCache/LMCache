@@ -6,6 +6,7 @@ from __future__ import annotations
 
 # Standard
 from typing import TYPE_CHECKING, Any
+import hashlib
 import re
 
 if TYPE_CHECKING:
@@ -14,7 +15,13 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.v1.common.logging import init_logger
-from lmcache.v1.distributed.api import MemoryResidency, MemorySegment, MemoryTags
+from lmcache.v1.distributed.api import (
+    MemoryResidency,
+    MemorySegment,
+    MemoryTags,
+    ObjectKey,
+)
+from lmcache.v1.distributed.key_codec import encode_storage_key
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -28,7 +35,7 @@ _BACKEND_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
 # The lmcache_nixl Python API this adapter is written against. It must equal the
 # module's API_VERSION (csrc/storage_backends/nixl/pybind.cpp); bump both
 # together.
-NIXL_CONNECTOR_API_VERSION = 1
+NIXL_CONNECTOR_API_VERSION = 2
 # lmcache-nixl is published only at release versions, at lmcache's version.
 _INSTALL_HINT = (
     'on a release, install it with `pip install "lmcache[nixl]==<lmcache version>"`'
@@ -36,6 +43,10 @@ _INSTALL_HINT = (
 # GDS backends still load through the host L1 buffers, so they are plain
 # local storage like POSIX.
 _LOCAL_BACKENDS = ("GDS", "GDS_MT", "POSIX")
+
+
+def _encode_memos_object_name(key: ObjectKey) -> str:
+    return hashlib.sha256(encode_storage_key(key).encode("utf-8")).hexdigest()[:32]
 
 
 def nixl_backend_memory_tags(backend: str, shared: bool) -> MemoryTags:
@@ -282,6 +293,11 @@ def _create_nixl_native_l2_adapter(
         type_name="nixl_native",
         extra_status=status,
         pad_buffers_to_alignment=pad_buffers_to_alignment,
+        encode_key=(
+            _encode_memos_object_name
+            if config.backend == "DOCA_MEMOS" and native_client.storage_type == "OBJECT"
+            else encode_storage_key
+        ),
     )
 
 

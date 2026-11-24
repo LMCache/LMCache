@@ -22,6 +22,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from collections.abc import Callable
 from functools import cache
 from typing import Any
 import ctypes
@@ -140,6 +141,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         type_name: str = "",
         extra_status: dict[str, Any] | None = None,
         pad_buffers_to_alignment: bool = False,
+        encode_key: Callable[[ObjectKey], str] = _object_key_to_string,
     ) -> None:
         """Initialize the adapter over a native connector client.
 
@@ -160,6 +162,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 native connectors whose I/O path requires aligned buffer
                 lengths (e.g. O_DIRECT file storage). See
                 ``_obj_to_memoryview``.
+            encode_key: Convert a logical object key to the string expected
+                by the native client. Defaults to the canonical L2 wire key.
         """
         super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
         self._client = native_client
@@ -168,6 +172,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._extra_status: dict[str, Any] = dict(extra_status or {})
         self._pad_buffers_to_alignment = pad_buffers_to_alignment
         self._memory_tags = memory_tags
+        self._encode_key = encode_key
 
         # 3 distinct cross-platform notifiers for the L2 adapter
         # interface
@@ -245,7 +250,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
-        key_strings = [_object_key_to_string(k) for k in keys]
+        key_strings = [self._encode_key(key) for key in keys]
         memviews = [
             _obj_to_memoryview(obj, self._pad_buffers_to_alignment) for obj in objects
         ]
@@ -287,7 +292,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         group_layout_descs: dict[int, MemoryLayoutDesc],
     ) -> L2TaskId:
-        key_strings = [_object_key_to_string(k) for k in keys]
+        key_strings = [self._encode_key(key) for key in keys]
 
         with self._lock:
             task_id = self._get_next_task_id()
@@ -324,7 +329,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
-        key_strings = [_object_key_to_string(k) for k in keys]
+        key_strings = [self._encode_key(key) for key in keys]
         memviews = [
             _obj_to_memoryview(obj, self._pad_buffers_to_alignment) for obj in objects
         ]
@@ -363,7 +368,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         if not keys or not self._has_delete:
             return
 
-        key_strings = [_object_key_to_string(k) for k in keys]
+        key_strings = [self._encode_key(key) for key in keys]
         done_event = threading.Event()
 
         with self._lock:

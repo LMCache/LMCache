@@ -229,10 +229,12 @@ rejects separators in salt. Names longer than the filesystem component limit
 are rejected. Compatibility with `fs_native` is intentionally not provided;
 that connector retains its established `.data` identity.
 
-For the `DOCA_MEMOS` object plugin, the strategy uses the first 16 bytes of
-SHA-256 over the canonical L2 wire key, rendered as 32 lowercase hex
-characters. Store, lookup, and load apply the same mapping. Hashing the wire
-key includes the salt and the versioned identity-tags field when present.
+For `DOCA_MEMOS`, the Python adapter uses `hashlib` at the submission
+boundary to hash the canonical L2 wire key, including any salt and identity
+tags. It passes the first 16 bytes of SHA-256 as 32 lowercase hex characters
+for store, lookup, and load. The OBJECT strategy validates this name and uses
+it directly in NIXL descriptors and queries. Connector API version 2
+defines the pre-encoded DOCA_MEMOS key contract.
 
 ## Optional dependency boundary
 

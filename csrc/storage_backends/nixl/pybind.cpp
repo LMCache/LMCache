@@ -12,8 +12,9 @@ PYBIND11_MODULE(lmcache_nixl, module) {
   // installed next to a different lmcache. Bump API_VERSION, and
   // NIXL_CONNECTOR_API_VERSION in nixl_native_l2_adapter.py, whenever the
   // Python API changes: the constructor below or
-  // LMCACHE_BIND_CONNECTOR_METHODS.
-  module.attr("API_VERSION") = 1;
+  // LMCACHE_BIND_CONNECTOR_METHODS. API 2 accepts pre-encoded DOCA_MEMOS
+  // names in those methods.
+  module.attr("API_VERSION") = 2;
   py::class_<lmcache::connector::NixlConnector>(module, "LMCacheNixlClient")
       .def(py::init<std::string, std::unordered_map<std::string, std::string>,
                     int, uintptr_t, size_t, size_t>(),

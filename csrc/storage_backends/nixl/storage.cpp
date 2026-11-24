@@ -2,7 +2,6 @@
 
 #include "storage.h"
 
-#include <openssl/sha.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
@@ -433,28 +432,12 @@ class NixlFileStorage final : public NixlStorageStrategy {
   bool shard_directories_;
 };
 
-std::string memos_object_identity(const std::string& key) {
-  constexpr size_t identity_bytes = 16;
-  constexpr char hex[] = "0123456789abcdef";
-  unsigned char digest[SHA256_DIGEST_LENGTH];
-  if (SHA256(reinterpret_cast<const unsigned char*>(key.data()), key.size(),
-             digest) == nullptr) {
-    throw std::runtime_error("SHA-256 failed for a DOCA_MEMOS object key");
-  }
-  std::string identity(identity_bytes * 2, '0');
-  for (size_t i = 0; i < identity_bytes; ++i) {
-    identity[i * 2] = hex[digest[i] >> 4];
-    identity[i * 2 + 1] = hex[digest[i] & 0x0f];
-  }
-  return identity;
-}
-
 class NixlObjectStorage final : public NixlStorageStrategy {
  public:
   NixlObjectStorage(
       const std::string& backend_name,
       const std::unordered_map<std::string, std::string>& backend_params)
-      : use_memos_identity_(backend_name == "DOCA_MEMOS"),
+      : expects_memos_object_name_(backend_name == "DOCA_MEMOS"),
         shard_directories_(
             parse_bool_parameter(backend_params, "shard_dirs", false)) {}
 
@@ -540,11 +523,19 @@ class NixlObjectStorage final : public NixlStorageStrategy {
 
  private:
   std::string identity_for_key(const std::string& key) const {
-    if (use_memos_identity_) return memos_object_identity(key);
-    return key_to_filename(key, shard_directories_);
+    if (!expects_memos_object_name_) {
+      return key_to_filename(key, shard_directories_);
+    }
+    if (key.size() != 32 ||
+        key.find_first_not_of("0123456789abcdef") != std::string::npos) {
+      throw std::runtime_error(
+          "DOCA_MEMOS requires a 32-character lowercase hexadecimal object "
+          "name");
+    }
+    return key;
   }
 
-  const bool use_memos_identity_;
+  const bool expects_memos_object_name_;
   const bool shard_directories_;
 };
 
@@ -557,8 +548,7 @@ std::unique_ptr<NixlStorageStrategy> make_nixl_storage_strategy(
     case NixlStorageKind::File:
       return std::make_unique<NixlFileStorage>(backend_params);
     case NixlStorageKind::Object:
-      return std::make_unique<NixlObjectStorage>(backend_name,
-                                                 backend_params);
+      return std::make_unique<NixlObjectStorage>(backend_name, backend_params);
   }
   throw std::runtime_error("unsupported inferred NIXL storage kind");
 }

@@ -4,6 +4,8 @@
 # Standard
 from collections.abc import Sequence
 from types import ModuleType
+from typing import cast
+from unittest.mock import Mock
 import importlib.abc
 import importlib.machinery
 import importlib.util
@@ -14,6 +16,7 @@ import sys
 import pytest
 
 # First Party
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
@@ -27,6 +30,7 @@ from lmcache.v1.distributed.l2_adapters.nixl_native_l2_adapter import (
     NIXL_CONNECTOR_API_VERSION,
     NixlNativeL2AdapterConfig,
 )
+from lmcache.v1.memory_management import MemoryObj
 
 
 @pytest.mark.parametrize(
@@ -145,6 +149,65 @@ class _FakeNixlClient:
         os.close(self.write_fd)
 
 
+@pytest.mark.parametrize(
+    ("backend", "expected"),
+    [
+        (
+            "DOCA_MEMOS",
+            [
+                "6cc0015ab0a976200e5050447d4661e6",
+                "37e1c659672d91caea9a0b71665944ae",
+                "04de359e85b6e3f741a8ab929bab7e5c",
+            ],
+        ),
+        (
+            "OBJ",
+            [
+                "org/model@0000002a@7@00112233",
+                "org/model@0000002a@7@00112233@tenant",
+                "org/model@0000002a@7@00112233@tenant@x1-eyJ4IjoieSJ9",
+            ],
+        ),
+    ],
+)
+def test_object_keys_at_native_boundary(
+    monkeypatch: pytest.MonkeyPatch, backend: str, expected: list[str]
+) -> None:
+    """Send identical persistent identities for store, lookup, and load."""
+    native_module = ModuleType("lmcache.lmcache_nixl")
+    client = _FakeNixlClient()
+    store = Mock(return_value=1)
+    lookup = Mock(return_value=2)
+    load = Mock(return_value=3)
+    monkeypatch.setattr(client, "submit_batch_set", store, raising=False)
+    monkeypatch.setattr(client, "submit_batch_exists", lookup, raising=False)
+    monkeypatch.setattr(client, "submit_batch_get", load, raising=False)
+    native_module.LMCacheNixlClient = lambda **kwargs: client  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "lmcache.lmcache_nixl", native_module)
+    base_key = ObjectKey(bytes.fromhex("00112233"), "org/model", 42, 7)
+    keys = [
+        base_key,
+        ObjectKey(identity=base_key.identity, cache_salt="tenant"),
+        ObjectKey(identity=base_key.identity, cache_salt="tenant", tags={"x": "y"}),
+    ]
+    objects = [
+        cast(MemoryObj, Mock(spec=MemoryObj, byte_array=memoryview(bytearray(4))))
+        for _ in keys
+    ]
+
+    config = NixlNativeL2AdapterConfig.from_dict({"backend": backend})
+    adapter = create_l2_adapter(config, L1MemoryDesc(4096, 8192, 4096))
+    try:
+        adapter.submit_store_task(keys, objects)
+        adapter.submit_lookup_and_lock_task(keys, {})
+        adapter.submit_load_task(keys, objects)
+        assert store.call_args.args[0] == expected
+        lookup.assert_called_once_with(expected)
+        assert load.call_args.args[0] == expected
+    finally:
+        adapter.close()
+
+
 class _ImportScenario(importlib.abc.MetaPathFinder, importlib.abc.Loader):
     """Simulate how the two connector modules and the nixl wheel load.
 
@@ -243,6 +306,7 @@ def test_factory_wheel_imports_nixl_first(
     ("api_version", "accepted"),
     [
         (NIXL_CONNECTOR_API_VERSION, True),
+        (NIXL_CONNECTOR_API_VERSION - 1, False),
         (NIXL_CONNECTOR_API_VERSION + 1, False),
         (None, False),
     ],

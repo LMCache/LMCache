@@ -46,8 +46,7 @@ RHEL/Alma/Rocky 8 install ``openssl3-libs`` from EPEL.
 
 A source installation can build the connector into LMCache instead. The minimum
 supported NIXL version is 1.3.0, and the NIXL installation must provide the
-public C++ headers as well as ``libnixl``. The native connector also needs
-OpenSSL development headers and ``libcrypto``. Build LMCache with:
+public C++ headers as well as ``libnixl``. Build LMCache with:
 
 .. code-block:: bash
 

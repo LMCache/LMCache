@@ -782,11 +782,15 @@ def test_object_public_round_trip_and_capabilities(backend: str) -> None:
                 "set LMCACHE_NIXL_MEMOS_TEST_PARAMS to isolated namespace parameters"
             )
         backend_params = json.loads(params_json)
+        # The round trip asserts both a hit and a miss from the plugin.
+        backend_params["query_mem_mode"] = "actual"
     else:
         endpoint = os.environ.get("LMCACHE_NIXL_OBJECT_ENDPOINT")
         bucket = os.environ.get("LMCACHE_NIXL_OBJECT_BUCKET")
         if not endpoint or not bucket:
-            pytest.skip("OBJ integration requires endpoint and bucket environment values")
+            pytest.skip(
+                "OBJ integration requires endpoint and bucket environment values"
+            )
         backend_params = {
             "bucket": bucket,
             "endpoint_override": endpoint,
