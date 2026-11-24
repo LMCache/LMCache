@@ -13,7 +13,7 @@ native = pytest.importorskip("lmcache.musa_ops")
 # First Party
 from lmcache.v1.platform.torch_ops import cachegen_kernels as reference  # noqa: E402
 
-pytestmark = [pytest.mark.musa, pytest.mark.no_shared_allocator]
+pytestmark = pytest.mark.musa
 
 
 def check_roundtrip(tokens: int, channels: int, skew: bool, device: str) -> None:

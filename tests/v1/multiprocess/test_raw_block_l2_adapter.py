@@ -395,7 +395,6 @@ def test_raw_block_meta_checkpoint_placement_id_reaches_core_config() -> None:
     assert config.to_core_config().meta_checkpoint_placement_id == 7
 
 
-@pytest.mark.no_shared_allocator
 @pytest.mark.parametrize("operation", ["store", "lookup", "load"])
 def test_raw_block_l2_adapter_completes_failed_tasks_without_dispatch(
     operation: str,
@@ -454,7 +453,6 @@ def test_raw_block_l2_adapter_completes_failed_tasks_without_dispatch(
         adapter.close()
 
 
-@pytest.mark.no_shared_allocator
 def test_raw_block_l2_adapter_failed_store_bypasses_busy_pool() -> None:
     """New failures complete without retiring a store that is still running."""
     fake_core = _FakeFdpCore()

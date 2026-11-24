@@ -18,8 +18,6 @@ from lmcache.v1.platform.devices.mlu import MluDeviceSpec
 from lmcache.v1.platform.devices.mlu.device_ops import MluDeviceOps
 from lmcache.v1.platform.transfer_mode import MPTransferMode
 
-pytestmark = pytest.mark.no_shared_allocator
-
 
 def test_discovery_and_capabilities() -> None:
     """Discovery finds MLU without advertising an unimplemented IPC stack."""

@@ -14,8 +14,6 @@ from lmcache.v1.platform.base.event_ipc import EventIPCBackend
 from lmcache.v1.platform.devices.npu import NpuDeviceSpec, event_ipc
 from lmcache.v1.platform.devices.npu.event_ipc import NpuEventIPCBackend
 
-pytestmark = pytest.mark.no_shared_allocator
-
 
 class _FakeEvent:
     """torch.npu-style Event with the CUDA interprocess ABI."""

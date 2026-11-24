@@ -43,7 +43,6 @@ from lmcache.v1.common.token_codec import (  # noqa: E402
 )
 
 IMAGE_PLACEHOLDER_ID = 99
-pytestmark = pytest.mark.no_shared_allocator
 
 
 @dataclass

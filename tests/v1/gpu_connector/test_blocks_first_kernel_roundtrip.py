@@ -16,6 +16,8 @@ import torch
 from lmcache import device_ops, torch_dev, torch_device_type
 from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.kv_format import detect_format
+from lmcache.v1.common.utils import make_page_buffer_shape_desc
+from lmcache.v1.platform.native_block_transfer import transfer_with_address_kernel
 import lmcache.lmcache_native as lmcache_native
 
 cuda_only = pytest.mark.skipif(
@@ -34,7 +36,7 @@ def make_pool(
     inner = (NH, BS, CS) if order == "BLHNC" else (BS, NH, CS)
     total = NL + pad_layers
     buf = torch.arange(
-        NB * total * NH * BS * CS, dtype=torch.float32, device="cuda"
+        NB * total * NH * BS * CS, dtype=torch.float32, device=torch_device_type
     ).reshape(NB, total, *inner)
     return buf, [buf[:, layer] for layer in range(NL)]
 
@@ -75,52 +77,34 @@ def test_kernel_roundtrip_matches_torch(order, pad_layers):
     )
     assert fmt == expected_fmt
     assert kv[0].stride(0) == buf.stride(0)
-    ptrs = torch.tensor([v.data_ptr() for v in kv], dtype=torch.int64, device="cuda")
-    # A blocks-first pool always needs its real step: every block packs all
-    # layers, so stride(0) exceeds the per-layer tight step even unpadded.
-    block_stride = kv[0].stride(0)
-    slots = torch.tensor([5, 6, 7, 12, 13, 14, 15, 28], device="cuda")
-    staging = torch.zeros(1, NL, len(slots), SPT, dtype=torch.float32, device="cuda")
-
-    device_ops.multi_layer_kv_transfer(
-        staging,
-        ptrs,
-        slots,
-        torch.device("cuda:0"),
-        NB * BS,
-        int(lmcache_native.TransferDirection.D2H),
-        int(fmt),
-        BS,
-        CS // 2,
-        0,
-        block_stride,
+    desc = make_page_buffer_shape_desc(
+        kv, fmt, 0, NL, NB, BS, block_stride_elems=kv[0].stride(0)
     )
-    torch_dev.synchronize()
-    ref = torch_gather(buf, order, slots.cpu())
-    assert torch.equal(staging.cpu(), ref.cpu())
+    blocks = [7, 1, 3]
+    slots = torch.tensor(
+        [block * BS + offset for block in blocks for offset in range(BS)]
+    )
+    staging = torch.zeros(1, NL, len(slots), SPT, dtype=buf.dtype, pin_memory=True)
 
-    # Zero the touched blocks, write back, expect original bytes restored.
+    def transfer(direction: lmcache_native.TransferDirection) -> None:
+        transfer_with_address_kernel(
+            device_ops.multi_layer_block_kv_transfer,
+            kv,
+            [staging],
+            blocks,
+            buf.device,
+            direction,
+            desc,
+            len(slots),
+            fmt,
+            0,
+        )
+        torch_dev.synchronize()
+
+    transfer(lmcache_native.TransferDirection.D2H)
+    assert torch.equal(staging, torch_gather(buf, order, slots).cpu())
+
     original = buf.clone()
-    for b in {int(s) // BS for s in slots.cpu()}:
-        buf[b, :NL].zero_()
-    device_ops.multi_layer_kv_transfer(
-        staging,
-        ptrs,
-        slots,
-        torch.device("cuda:0"),
-        NB * BS,
-        int(lmcache_native.TransferDirection.H2D),
-        int(fmt),
-        BS,
-        CS // 2,
-        0,
-        block_stride,
-    )
-    torch_dev.synchronize()
-    touched = sorted({int(s) // BS for s in slots.cpu()})
-    for b in touched:
-        used = [int(s) % BS for s in slots.cpu() if int(s) // BS == b]
-        if order == "BLHNC":
-            assert torch.equal(buf[b, :NL, :, used], original[b, :NL, :, used])
-        else:
-            assert torch.equal(buf[b, :NL, used], original[b, :NL, used])
+    buf[blocks, :NL] = 0
+    transfer(lmcache_native.TransferDirection.H2D)
+    assert torch.equal(buf, original)

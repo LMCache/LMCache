@@ -557,7 +557,6 @@ class TestSingleAdapterPrefetch:
 # =============================================================================
 
 
-@pytest.mark.no_shared_allocator
 class TestRawBlockWorkerFailure:
     @pytest.mark.parametrize("failure_phase", ["lookup", "load"])
     def test_worker_failure_preserves_other_hits_and_releases_resources(
