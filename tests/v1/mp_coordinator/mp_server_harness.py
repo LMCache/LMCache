@@ -334,7 +334,7 @@ class MPServer:
     @property
     def rpc_url(self) -> str:
         """The request port a :class:`KVClient` connects to."""
-        return f"tcp://127.0.0.1:{self._rpc_port}"
+        return f"grpc://127.0.0.1:{self._rpc_port}"
 
     @property
     def http_url(self) -> str:
@@ -426,7 +426,7 @@ class MPServer:
             "--http-port",
             str(self._http_port),
             "--transport",
-            "zmq",
+            "grpc",
             "--chunk-size",
             str(CHUNK_SIZE),
             "--l1-size-gb",
