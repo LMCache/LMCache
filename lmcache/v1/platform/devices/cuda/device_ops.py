@@ -12,7 +12,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 import ctypes
 import math
 
@@ -28,6 +28,10 @@ from lmcache.v1.platform.device_ops_helper import (
 )
 from lmcache.v1.platform.torch_ops._tensor_from_ptr import _get_copy_lib
 import lmcache.lmcache_native as lmcache_native
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.common.kv_format.types import DiscoverableKVCache
 
 _DTYPE_TO_TYPESTR = {
     torch.float16: "<f2",
@@ -141,7 +145,6 @@ class CudaDeviceOps(DeviceOps):
             # First Party
             import lmcache.cuda_ops as native
         except ImportError:
-            # Not installed: stay on the torch baseline without retrying.
             self._native_bound = True
             logger.warning(
                 "lmcache.cuda_ops compiled extension not found; "
@@ -154,8 +157,8 @@ class CudaDeviceOps(DeviceOps):
 
     def multi_layer_block_kv_transfer(
         self,
-        paged_buffer_ptrs_tensor: torch.Tensor | list,
-        lmcache_objects_ptrs: list[int] | list[torch.Tensor],
+        paged_kv: DiscoverableKVCache,
+        chunks: list[torch.Tensor],
         block_ids: torch.Tensor | list[int],
         device: torch.device | str,
         direction: lmcache_native.TransferDirection,
@@ -165,8 +168,8 @@ class CudaDeviceOps(DeviceOps):
         skip_prefix_n_blocks: int,
     ) -> None:
         args = (
-            paged_buffer_ptrs_tensor,
-            lmcache_objects_ptrs,
+            paged_kv,
+            chunks,
             block_ids,
             device,
             direction,

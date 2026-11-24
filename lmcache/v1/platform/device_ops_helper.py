@@ -16,7 +16,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 # Third Party
 import numpy as np
@@ -56,9 +56,6 @@ def _paged_pointer_table(
     kept in ``cache`` (owned by the calling backend) so a paged set whose
     addresses have not changed does not repeat the blocking device upload.
     """
-    # Imported lazily, not at module scope: the specs package reads
-    # ``lmcache.device_ops``, which is resolved only once the backends that
-    # import this module have been imported.
     # First Party
     from lmcache.v1.common.kv_format.specs.registry import get_spec
 
@@ -68,7 +65,6 @@ def _paged_pointer_table(
     key = (addresses, device)
     table = cache.pop(key, None)
     if table is None:
-        # Addresses are unsigned; the kernel reads the same bits as int64.
         as_int64 = np.array(addresses, dtype=np.uint64).view(np.int64)
         table = torch.from_numpy(as_int64).to(device=device)
     if len(cache) >= _MAX_PAGED_TABLE_CACHE_ENTRIES:
@@ -90,15 +86,15 @@ def _stage_unpinned_host_chunks(
 ) -> tuple[list[torch.Tensor], bool]:
     """Give the kernel chunks it can reach, and say whether a sync is owed.
 
-    Pinned chunks pass through. Unpinned host chunks are staged through
-    pinned buffers (``D2H`` — the caller's tensors must stay unpinned for
-    the in-place fill) or pinned into temporaries (``H2D``). Staging owes
-    a device sync: the kernel reaches the buffers through raw addresses
-    that torch cannot track.
+    Device-resident and pinned chunks pass through. Unpinned host chunks
+    are staged through pinned buffers (``D2H`` — the caller's tensors must
+    stay unpinned for the in-place fill) or pinned into temporaries
+    (``H2D``). Staging owes a device sync: the kernel reaches the buffers
+    through raw addresses that torch cannot track.
 
     Returns ``(kernel_chunks, needs_sync)``.
     """
-    unstaged = [not c.is_pinned() for c in chunks]
+    unstaged = [c.device.type == "cpu" and not c.is_pinned() for c in chunks]
     if not any(unstaged):
         return chunks, False
     if is_d2h:
@@ -160,8 +156,8 @@ def _launch_block_transfer_batches(
 
 def transfer_with_address_kernel(
     kernel: Callable[..., None],
-    paged_buffer_ptrs_tensor: torch.Tensor | list,
-    lmcache_objects_ptrs: list[int] | list[torch.Tensor],
+    paged_kv: DiscoverableKVCache,
+    chunks: list[torch.Tensor],
     block_ids: torch.Tensor | list[int],
     device: torch.device | str,
     direction: lmcache_native.TransferDirection,
@@ -174,12 +170,11 @@ def transfer_with_address_kernel(
 ) -> None:
     """Serve :meth:`DeviceOps.multi_layer_block_kv_transfer` on an address kernel.
 
-    Operands follow :meth:`DeviceOps.multi_layer_block_kv_transfer`. Tensor
-    operands are lowered to the kernel's address form in launches of at most
+    Operands follow :meth:`DeviceOps.multi_layer_block_kv_transfer` and are
+    lowered to the kernel's address form in launches of at most
     ``max_chunks_per_launch`` chunks. Chunks that forced staging or pinning
     synchronize ``device`` before returning; pinned and device-resident
-    chunks keep the asynchronous path. The legacy address form is forwarded
-    to the kernel unchanged.
+    chunks keep the asynchronous path.
 
     Args:
         kernel: The compiled ``multi_layer_block_kv_transfer``; the
@@ -187,27 +182,8 @@ def transfer_with_address_kernel(
         max_chunks_per_launch: Chunks one kernel launch can address; each
             backend passes its own limit.
         paged_table_cache: The backend's cache of uploaded paged pointer
-            tables, keyed on the addresses themselves. Unused for the
-            forwarded address form.
+            tables, keyed on the addresses themselves.
     """
-    if not all(isinstance(chunk, torch.Tensor) for chunk in lmcache_objects_ptrs):
-        # LMCache-driven callers still pass addresses they batched
-        # themselves; forward them untouched until #4465 step 3.10.
-        kernel(
-            paged_buffer_ptrs_tensor,
-            lmcache_objects_ptrs,
-            block_ids,
-            device,
-            direction,
-            shape_desc,
-            lmcache_chunk_size,
-            engine_kv_format,
-            skip_prefix_n_blocks,
-        )
-        return
-
-    paged_kv = cast("DiscoverableKVCache", paged_buffer_ptrs_tensor)
-    chunks = cast("list[torch.Tensor]", lmcache_objects_ptrs)
     device = torch.device(device)
     is_d2h = int(direction) == int(lmcache_native.TransferDirection.D2H)
     kernel_chunks, needs_sync = _stage_unpinned_host_chunks(chunks, is_d2h)

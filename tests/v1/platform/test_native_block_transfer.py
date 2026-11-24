@@ -115,6 +115,7 @@ def _host_chunk(address: int, pinned: bool = True) -> MagicMock:
     chunk = MagicMock(spec=torch.Tensor)
     chunk.is_pinned.return_value = pinned
     chunk.data_ptr.return_value = address
+    chunk.device = CPU
     return chunk
 
 

@@ -827,6 +827,9 @@ class _StubCacheContext:
     def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> list[torch.Tensor]:
         return self.paged_layers[kernel_group_idx]
 
+    def get_kernel_group_kv(self, kernel_group_idx: int) -> list[torch.Tensor]:
+        return self.paged_layers[kernel_group_idx]
+
     def get_shape_desc(self, kernel_group_idx: int) -> torch_ops.PageBufferShapeDesc:
         shape_desc = torch_ops.PageBufferShapeDesc()
         shape_desc.nl = _NUM_LAYERS
