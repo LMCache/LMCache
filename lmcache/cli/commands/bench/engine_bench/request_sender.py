@@ -89,8 +89,11 @@ class RequestSender:
         on_finished: list[OnFinishedCallback] = [],  # noqa: B006
         ignore_eos: bool = False,
         extra_body: dict[str, object] = {},  # noqa: B006
+        max_retries: int = 0,
     ) -> None:
         """Initialize the sender and its OpenAI client.
+
+        SDK retries default to zero so each scheduled request has one attempt.
 
         Args:
             engine_url: Base URL of the inference engine.
@@ -105,10 +108,15 @@ class RequestSender:
                 options the OpenAI client has no parameter for (notably
                 ``chat_template_kwargs``).  Copied, and sent verbatim, so the
                 caller owns their compatibility with the backend.
+            max_retries: Maximum SDK retries per request, including warmup.
+                Must be non-negative. Defaults to zero for accurate offered load.
 
         Raises:
+            ValueError: If max_retries is negative.
             RuntimeError: If the optional OpenAI dependency is unavailable.
         """
+        if max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
         self._model = model
         self._completions_mode = completions_mode
         self._on_finished = list(on_finished)
@@ -133,6 +141,7 @@ class RequestSender:
             base_url=base_url,
             api_key=api_key,
             timeout=None,
+            max_retries=max_retries,
         )
 
     def add_on_finished_callback(self, callback: OnFinishedCallback) -> None:
