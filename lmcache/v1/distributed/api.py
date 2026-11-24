@@ -212,7 +212,9 @@ def get_request_tags(
         ValueError: A matching tag name is empty or its value is not a string.
     """
     tags: dict[str, str] = {}
-    for name, value in (request_configs or {}).items():
+    if not isinstance(request_configs, Mapping):
+        return freeze_dict(tags)
+    for name, value in request_configs.items():
         if not name.startswith("lmcache.tag."):
             continue
         if not isinstance(value, str):
@@ -339,7 +341,7 @@ class ObjectKey:
         object.__setattr__(
             self,
             "extra_attributes",
-            dict(extra_attributes) if extra_attributes is not None else {},
+            dict(extra_attributes) if isinstance(extra_attributes, Mapping) else {},
         )
 
     def __hash__(self) -> int:
@@ -890,7 +892,7 @@ def ipc_key_to_object_keys(
     """
     cache_salt = ipc_key.cache_salt
     extra_attributes = (
-        ipc_key.request_configs if ipc_key.request_configs is not None else {}
+        ipc_key.request_configs if isinstance(ipc_key.request_configs, Mapping) else {}
     )
     tags = get_request_tags(ipc_key.request_configs)
 
@@ -961,7 +963,7 @@ def ipc_key_to_grouped_object_keys(
     """
     tags = get_request_tags(ipc_key.request_configs)
     extra_attributes = (
-        ipc_key.request_configs if ipc_key.request_configs is not None else {}
+        ipc_key.request_configs if isinstance(ipc_key.request_configs, Mapping) else {}
     )
     rows: list[GroupedObjectKeys] = []
     for object_group_id in object_group_ids:

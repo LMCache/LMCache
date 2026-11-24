@@ -34,6 +34,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess import object_group_transfer
 from lmcache.v1.multiprocess.engine_context import (
     LayoutDescRegistry,
@@ -47,7 +48,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     transfer_unfull_chunk,
     trim_and_stage_unfull_chunk_block_ids,
 )
-from lmcache.v1.multiprocess.session import SessionManager
+from lmcache.v1.multiprocess.session import Session, SessionManager
 from lmcache.v1.platform import torch_ops
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
@@ -749,3 +750,443 @@ def _assert_moved(
                 )
             untouched = [b for b in range(_NUM_BLOCKS) if b not in block_map]
             assert not decode[group][layer][:, untouched].any()
+
+
+@pytest.mark.parametrize(
+    "bad_grid",
+    ["x", [], None, -1, True, False, 1.5, float("inf"), float("-inf"), {}, [1, 2]],
+)
+def test_non_integer_unfull_chunk_grid_does_not_hang_or_leak(lookup_module, bad_grid):
+    """When a lookup request carries an invalid unfull_chunk_grid hint,
+    the lookup should safely ignore the hint (fallback to 0), resolve full-chunk
+    hits without error, clean up the prefetch job, and allow locks to be freed."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    lookup_tokens = len(tokens)
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+
+    key = IPCCacheServerKey(
+        model_name=MODEL,
+        world_size=1,
+        worker_id=None,
+        token_bytes=pack_token_ids(tokens),
+        start=0,
+        end=lookup_tokens,
+        request_id="bad-grid-test",
+        request_configs={"lmcache.hint.unfull_chunk_grid": bad_grid},
+    )
+    module.lookup(key, tp_size=1)
+    # Prefetch status resolves to full chunks (32 tokens) without ValueError
+    hits = module.query_prefetch_status("bad-grid-test")
+    assert hits == 2 * CHUNK_SIZE
+
+    # The job must be removed from active prefetch jobs immediately
+    assert "bad-grid-test" not in module._prefetch_jobs
+
+    # Subsequent queries must return 0 (already consumed), never None (hang)
+    assert module.query_prefetch_status("bad-grid-test") == 0
+
+    # Read locks are recorded on the session and can be freed without error
+    session = module._ctx.session_manager.get_or_create("bad-grid-test")
+    assert session.prefetch_hit_chunks == 2
+    module.free_lookup_locks(key, tp_size=1)
+
+
+@pytest.mark.parametrize(
+    "bad_engine_tokens",
+    ["x", [], None, -5, True, False, 1.5, float("inf"), float("-inf"), {}, [1, 2]],
+)
+def test_non_integer_engine_computed_tokens_does_not_crash(
+    lookup_module, bad_engine_tokens
+):
+    """When a lookup request carries an invalid engine_computed_tokens hint,
+    the lookup should safely default to 0 and resolve without crashing or leaking."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    lookup_tokens = len(tokens)
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+
+    key = IPCCacheServerKey(
+        model_name=MODEL,
+        world_size=1,
+        worker_id=None,
+        token_bytes=pack_token_ids(tokens),
+        start=0,
+        end=lookup_tokens,
+        request_id="bad-engine-test",
+        request_configs={"lmcache.hint.engine_computed_tokens": bad_engine_tokens},
+    )
+    module.lookup(key, tp_size=1)
+    hits = module.query_prefetch_status("bad-engine-test")
+    assert hits == 2 * CHUNK_SIZE
+    assert "bad-engine-test" not in module._prefetch_jobs
+    module.free_lookup_locks(key, tp_size=1)
+
+
+@pytest.mark.parametrize("bad_configs", ["not_a_mapping", [1, 2], 123])
+def test_non_mapping_request_configs_does_not_crash(lookup_module, bad_configs):
+    """When request_configs is not a Mapping (e.g. string or list),
+    lookup hint parsers should safely treat it as absent."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    lookup_tokens = len(tokens)
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+
+    key = IPCCacheServerKey(
+        model_name=MODEL,
+        world_size=1,
+        worker_id=None,
+        token_bytes=pack_token_ids(tokens),
+        start=0,
+        end=lookup_tokens,
+        request_id="bad-configs-test",
+        request_configs=bad_configs,
+    )
+    module.lookup(key, tp_size=1)
+    hits = module.query_prefetch_status("bad-configs-test")
+    assert hits == 2 * CHUNK_SIZE
+    assert "bad-configs-test" not in module._prefetch_jobs
+    module.free_lookup_locks(key, tp_size=1)
+
+
+def test_concurrent_query_and_free_lookup_locks(lookup_module):
+    """When query_prefetch_status and free_lookup_locks compete for a job,
+    consume_lock ensures exactly-once retrieval from storage_manager and
+    neither call hangs or leaks locks."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    lookup_tokens = len(tokens)
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+
+    key = IPCCacheServerKey(
+        model_name=MODEL,
+        world_size=1,
+        worker_id=None,
+        token_bytes=pack_token_ids(tokens),
+        start=0,
+        end=lookup_tokens,
+        request_id="race-test",
+        request_configs={"lmcache.hint.unfull_chunk_grid": 16},
+    )
+    module.lookup(key, tp_size=1)
+    with module._prefetch_job_lock:
+        job = module._prefetch_jobs["race-test"]
+
+    # Verify that multiple calls to _consume_prefetch_result return the cached hit
+    res1 = module._consume_prefetch_result(job)
+    assert res1 == 2 * CHUNK_SIZE
+    assert job.consumed
+    res2 = module._consume_prefetch_result(job)
+    assert res2 == res1
+
+    # free_lookup_locks runs cleanly
+    module.free_lookup_locks(key, tp_size=1)
+
+
+def test_consume_prefetch_result_fallback_when_fold_fails(lookup_module, monkeypatch):
+    """If fold_unfold_grouped fails before session.record_prefetch_result,
+    the fallback handler must immediately release result.l1_owners so
+    L1 read locks are never orphaned even if the client disconnects."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    lookup_tokens = len(tokens)
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+
+    released_keys = []
+    original_finish = storage_manager.finish_read_prefetched
+
+    def _spy_finish(keys, *args, **kwargs):
+        released_keys.extend(keys)
+        return original_finish(keys, *args, **kwargs)
+
+    monkeypatch.setattr(storage_manager, "finish_read_prefetched", _spy_finish)
+
+    # First Party
+    import lmcache.v1.multiprocess.modules.lookup as lookup_mod
+
+    def _fail_fold(*args, **kwargs):
+        raise RuntimeError("simulated fold failure")
+
+    monkeypatch.setattr(lookup_mod, "fold_unfold_grouped", _fail_fold)
+
+    key = IPCCacheServerKey(
+        model_name=MODEL,
+        world_size=1,
+        worker_id=None,
+        token_bytes=pack_token_ids(tokens),
+        start=0,
+        end=lookup_tokens,
+        request_id="fold-fail-test",
+        request_configs={"lmcache.hint.unfull_chunk_grid": 16},
+    )
+    module.lookup(key, tp_size=1)
+    with pytest.raises(RuntimeError, match="simulated fold failure"):
+        module.query_prefetch_status("fold-fail-test")
+
+    # The fallback handler immediately released the L1 read locks
+    assert len(released_keys) > 0
+
+    session = module._ctx.session_manager.get_or_create("fold-fail-test")
+    assert session.prefetch_hit_chunks == 0
+    assert "fold-fail-test" not in module._prefetch_jobs
+    # free_lookup_locks runs cleanly without error or double-free
+    module.free_lookup_locks(key, tp_size=1)
+
+
+def test_consume_prefetch_result_fallback_releases_unfull_chunk_owners(
+    lookup_module, monkeypatch
+):
+    """If an exception occurs after _lock_unfull_chunk acquires unfull chunk
+    locks (e.g. during event_bus.publish), the fallback handler must release
+    both full-chunk and unfull-chunk L1 read locks using finish_lookup_read."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(CHUNK_SIZE + 5))
+    lookup_tokens = len(tokens)
+    _write(storage_manager, _chunk_keys(hasher, tokens, 1), is_temporary=False)
+    _write(
+        storage_manager, _unfull_keys(hasher, tokens, lookup_tokens), is_temporary=True
+    )
+
+    released_keys = []
+    original_finish = storage_manager.finish_read_prefetched
+
+    def _spy_finish(keys, *args, **kwargs):
+        released_keys.extend(keys)
+        return original_finish(keys, *args, **kwargs)
+
+    monkeypatch.setattr(storage_manager, "finish_read_prefetched", _spy_finish)
+
+    def _fail_publish(event, *args, **kwargs):
+        if getattr(event, "event_type", None) == EventType.MP_LOOKUP_PREFETCH_END:
+            raise RuntimeError("simulated publish failure")
+        return None
+
+    monkeypatch.setattr(module._ctx.event_bus, "publish", _fail_publish)
+
+    key = IPCCacheServerKey(
+        model_name=MODEL,
+        world_size=1,
+        worker_id=None,
+        token_bytes=pack_token_ids(tokens),
+        start=0,
+        end=lookup_tokens,
+        request_id="unfull-fail-test",
+        request_configs={"lmcache.hint.unfull_chunk_grid": 1},
+    )
+    module.lookup(key, tp_size=1)
+    with pytest.raises(RuntimeError, match="simulated publish failure"):
+        module.query_prefetch_status("unfull-fail-test")
+
+    # Both full chunk and unfull chunk locks were released
+    assert len(released_keys) >= 2
+    session = module._ctx.session_manager.get_or_create("unfull-fail-test")
+    assert session.prefetch_hit_chunks == 0
+    module.free_lookup_locks(key, tp_size=1)
+
+
+def test_wait_prefetch_status_returns_cached_hit_when_already_consumed(
+    lookup_module, monkeypatch
+):
+    """When wait_prefetch_status is called on a job where job.consumed is True
+    or storage_manager.wait_prefetch_status returns False because results were
+    already popped, wait_prefetch_status must return the cached hit tokens."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    lookup_tokens = len(tokens)
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+
+    key = IPCCacheServerKey(
+        model_name=MODEL,
+        world_size=1,
+        worker_id=None,
+        token_bytes=pack_token_ids(tokens),
+        start=0,
+        end=lookup_tokens,
+        request_id="wait-race-test",
+        request_configs={"lmcache.hint.unfull_chunk_grid": 16},
+    )
+    module.lookup(key, tp_size=1)
+    with module._prefetch_job_lock:
+        job = module._prefetch_jobs["wait-race-test"]
+
+    # Mark job as consumed and simulate storage_manager.wait_prefetch_status
+    # returning False
+    job.consumed = True
+    job.consumed_hit_tokens = 2 * CHUNK_SIZE
+    monkeypatch.setattr(
+        module._ctx.storage_manager,
+        "wait_prefetch_status",
+        lambda handle, timeout: False,
+    )
+
+    # Calling wait_prefetch_status should return the cached hit tokens instead of None
+    assert module.wait_prefetch_status("wait-race-test", timeout=0.1) == 2 * CHUNK_SIZE
+    module.free_lookup_locks(key, tp_size=1)
+
+
+def test_unfull_chunk_grid_candidate_budget_capped(lookup_module, monkeypatch):
+    """When grid is very small (e.g. 1) across a large unfull tail,
+    the candidate boundaries probed must be capped at 32."""
+    module, storage_manager, _ = lookup_module
+    hasher_64 = TokenHasher(chunk_size=64)
+    session = Session("cap-test", hasher_64)
+    monkeypatch.setattr(
+        module._ctx.layout_desc_registry,
+        "get_chunk_size",
+        lambda *args, **kwargs: 64,
+    )
+
+    l1_unfull_probes = []
+    original_submit = module._ctx.storage_manager.submit_prefetch_task
+
+    def _spy_submit(spec, external_request_id):
+        if spec.allowed_l2_memory_tags == frozenset():
+            l1_unfull_probes.append(spec)
+        return original_submit(spec, external_request_id=external_request_id)
+
+    monkeypatch.setattr(
+        module._ctx.storage_manager, "submit_prefetch_task", _spy_submit
+    )
+
+    # 64-token chunk + 100 extra tokens creates an unfull chunk spanning tokens 64..127.
+    # With grid=1, range(127, 64, -1) would produce 63 candidates.
+    tokens = list(range(64 + 100))
+    key = IPCCacheServerKey(
+        model_name=MODEL,
+        world_size=1,
+        worker_id=None,
+        token_bytes=pack_token_ids(tokens),
+        start=0,
+        end=len(tokens),
+        request_id="cap-test",
+        request_configs={"lmcache.hint.unfull_chunk_grid": 1},
+    )
+    session.set_tokens(key.token_bytes)
+    attn_desc = AttnWindowDesc(num_chunks_in_sw=[-1])
+    boundary, probes, owners = module._lock_unfull_chunk(
+        key, hit_chunks=1, attn_desc=attn_desc, session=session
+    )
+    # The grid generated 63 candidates (> 32); capping limits probes to exactly 32
+    assert probes == 32
+    assert len(l1_unfull_probes) == 32
+    module.free_lookup_locks(key, tp_size=1)
+
+
+def test_unfull_chunk_lock_exception_does_not_leak_or_hang(lookup_module, monkeypatch):
+    """If _lock_unfull_chunk raises an unexpected exception, the lookup
+    should log a warning, preserve full-chunk hits, pop the prefetch job,
+    and record session locks so they can be freed."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    lookup_tokens = len(tokens)
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("simulated unfull chunk lock failure")
+
+    monkeypatch.setattr(module, "_lock_unfull_chunk", _raise)
+
+    key = IPCCacheServerKey(
+        model_name=MODEL,
+        world_size=1,
+        worker_id=None,
+        token_bytes=pack_token_ids(tokens),
+        start=0,
+        end=lookup_tokens,
+        request_id="exc-test",
+        request_configs={"lmcache.hint.unfull_chunk_grid": 16},
+    )
+    module.lookup(key, tp_size=1)
+    hits = module.query_prefetch_status("exc-test")
+    # Returns the full-chunk hit count
+    assert hits == 2 * CHUNK_SIZE
+    # Job was popped
+    assert "exc-test" not in module._prefetch_jobs
+    # Session recorded the 2 hit chunks
+    session = module._ctx.session_manager.get_or_create("exc-test")
+    assert session.prefetch_hit_chunks == 2
+    # free_lookup_locks frees the locks cleanly
+    module.free_lookup_locks(key, tp_size=1)
+
+
+@pytest.mark.parametrize(
+    "first,second", [("query", "query"), ("query", "free"), ("free", "query")]
+)
+def test_overlapping_consumers_keep_one_shot_result_and_release_real_l1(
+    lookup_module, monkeypatch, first, second
+):
+    # Standard
+    import sys
+    import threading
+
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE))
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=True)
+    key = _key(tokens, 0, len(tokens), "overlap")
+    entered, release, second_captured_job = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+    original_query = storage_manager.query_prefetch_status
+    calls, results, errors = [], {}, []
+
+    def hold_completed_result(handle):
+        calls.append(handle)
+        if len(calls) != 1:
+            return original_query(handle)
+        assert storage_manager.wait_prefetch_status(handle, 5)
+        result = original_query(handle)
+        assert result is not None
+        entered.set()
+        assert release.wait(5)
+        return result
+
+    monkeypatch.setattr(storage_manager, "query_prefetch_status", hold_completed_result)
+    module.lookup(key, tp_size=1)
+
+    def invoke(label, operation):
+        def observe(frame, event, arg):
+            # Observe entry only: the actual job/lock and handler stay unchanged.
+            # This prevents releasing the first consumer before the second has
+            # obtained the same live job through its public handler.
+            if event == "call" and frame.f_code.co_name == "_consume_prefetch_result":
+                second_captured_job.set()
+
+        try:
+            if label == "second":
+                sys.setprofile(observe)
+            if operation == "query":
+                results[label] = module.query_prefetch_status(key.request_id)
+            else:
+                results[label] = module.free_lookup_locks(key, tp_size=1)
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            sys.setprofile(None)
+
+    one = threading.Thread(target=invoke, args=("first", first))
+    two = threading.Thread(target=invoke, args=("second", second))
+    try:
+        one.start()
+        assert entered.wait(5)
+        two.start()
+        assert second_captured_job.wait(5)
+        # Give an incorrectly unlocked consumer time to finish while the first
+        # holds the real one-shot result; the correct consumer remains blocked.
+        two.join(0.1)
+    finally:
+        release.set()
+        one.join(5)
+        if two.ident is not None:
+            two.join(5)
+    assert not one.is_alive() and not two.is_alive()
+    assert not errors
+    assert len(calls) == 1
+    for label, operation in [("first", first), ("second", second)]:
+        assert results[label] == (len(tokens) if operation == "query" else None)
+    monkeypatch.setattr(storage_manager, "query_prefetch_status", original_query)
+    if first == second == "query":
+        module.free_lookup_locks(key, tp_size=1)
+    # Real temporary L1 objects disappear after their final lookup lock releases.
+    assert _lookup(module, tokens, len(tokens), request_id="after-release") == 0

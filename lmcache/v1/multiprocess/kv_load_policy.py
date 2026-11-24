@@ -99,7 +99,9 @@ class DefaultKVLoadPolicy(KVLoadPolicy):
         Returns:
             Whether the request did not set ``lmcache.skip_load``.
         """
-        return not (ctx.request_configs or {}).get("lmcache.skip_load", False)
+        if not isinstance(ctx.request_configs, Mapping):
+            return True
+        return not ctx.request_configs.get("lmcache.skip_load", False)
 
 
 _BUILTIN_POLICIES: dict[str, type[KVLoadPolicy]] = {
