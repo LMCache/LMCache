@@ -1074,3 +1074,65 @@ def test_sparse_classify_repeated_missing_chunk_takes_one_strike():
     )
 
     assert eng._stale_strike == {b"gone": 1}
+
+
+class _PendingSparseStorageManager(_LockCountingStorageManager):
+    """A sparse prefetch that never finishes; records specs and cancels."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.specs: list = []
+        self.handles: list = []
+        self.cancelled: list = []
+
+    def submit_prefetch_task(self, spec, external_request_id=None):
+        handle = super().submit_prefetch_task(spec, external_request_id)
+        self.specs.append(spec)
+        self.handles.append(handle)
+        return handle
+
+    def query_prefetch_status(self, handle):
+        return None
+
+    def cancel_prefetch_task(self, handle) -> None:
+        self.cancelled.append(handle)
+
+
+def test_session_end_cancels_a_lookup_still_polling_its_sparse_leg():
+    """A request that ends while its sparse leg is still loading cancels that
+    prefetch and drops the lookup; a sparse leg with no prefix leg before it
+    opens the lookup, so it is admitted as NEW."""
+    # First Party
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
+    from lmcache.v1.distributed.api import PrefetchAdmission
+
+    storage = _PendingSparseStorageManager()
+    ctx = _unretrieved_ctx(storage)
+    blend = _unretrieved_blend(ctx)
+    n_tokens = _UNRETRIEVED_N_CHUNKS * _UNRETRIEVED_CHUNK
+    stored_tokens = list(range(1000, 1000 + n_tokens))
+    blend._token_range_matcher.on_new_token_hashes(
+        stored_tokens,
+        [f"pending-hash{i}".encode() for i in range(_UNRETRIEVED_N_CHUNKS)],
+        position_offset=0,
+    )
+    query = list(range(50_000, 50_128)) + stored_tokens
+    key = IPCCacheServerKey(
+        model_name="m",
+        world_size=1,
+        worker_id=None,
+        token_bytes=pack_token_ids(query),
+        start=0,
+        end=len(query),
+        request_id="req-pending",
+    )
+
+    assert blend.cb_unified_lookup(key, tp_size=1) is None
+    assert [spec.admission for spec in storage.specs] == [PrefetchAdmission.NEW]
+    assert blend.report_status()["active_cb_lookups"] == 1
+
+    ctx.session_manager.get_or_create("req-pending")
+    ctx.session_manager.remove("req-pending")
+
+    assert storage.cancelled == storage.handles
+    assert blend.report_status()["active_cb_lookups"] == 0

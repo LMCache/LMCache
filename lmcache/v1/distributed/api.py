@@ -672,6 +672,26 @@ class PrefetchLockMode(enum.Enum):
     NO_LOCK = enum.auto()
 
 
+class PrefetchAdmission(enum.Enum):
+    """How a prefetch request is admitted against the L1 budget.
+
+    ``NEW`` -- the request opens a new lookup. It waits in arrival order
+    until L1 has room for it under the in-flight and retained watermarks.
+
+    ``CONTINUATION`` -- the request is a later leg of a lookup that was
+    already admitted (e.g. the CacheBlend sparse leg after its prefix leg).
+    It has strict priority: no ``NEW`` request starts while a continuation
+    waits. It passes the same watermark checks, which it can always meet
+    once in-flight lookups settle, because its lookup's first leg was
+    admitted at the worst-case size of the whole prompt. Without the
+    priority, new requests could take the budget that the continued lookup
+    needs to finish, and that lookup would never release what it holds.
+    """
+
+    NEW = enum.auto()
+    CONTINUATION = enum.auto()
+
+
 @dataclass(frozen=True)
 class GroupedObjectKeys:
     """The object keys of one ``(object group, kv rank)`` row of a prefetch.
@@ -728,6 +748,7 @@ class PrefetchTaskSpec:
         allowed_l2_memory_tags: Memory tags of the L2 adapters to look up and
             load from. ``None`` allows every L2 adapter; an empty set allows
             none.
+        admission: See :class:`PrefetchAdmission`.
 
     Note:
         Every key group holds the same number of keys (``group_size``). The
@@ -744,6 +765,7 @@ class PrefetchTaskSpec:
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
     allowed_l1_memory_tags: frozenset[MemoryTags] | None = None
     allowed_l2_memory_tags: frozenset[MemoryTags] | None = None
+    admission: PrefetchAdmission = PrefetchAdmission.NEW
 
     def __post_init__(self) -> None:
         if not self.key_groups:

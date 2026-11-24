@@ -295,6 +295,10 @@ def _lookup_ctx(n_chunks: int) -> MagicMock:
         DEFAULT_SHARD_REPLICATION_DESC
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
+    # A fresh session: no earlier lookup result recorded.
+    ctx.session_manager.get_or_create.return_value.has_lookup_result.return_value = (
+        False
+    )
     return ctx
 
 
@@ -383,3 +387,57 @@ def test_serde_wrapper_forwards_touch_to_the_inner_adapter():
     SerdeL2AdapterWrapper.submit_touch(wrapper, keys)
 
     inner.submit_touch.assert_called_once_with(keys)
+
+
+def test_first_lookup_is_new_and_repeat_lookup_is_a_continuation():
+    """A request's first lookup waits for prefetch budget like any new one; a
+    repeat lookup (an earlier result is recorded on the session) has priority,
+    since the request may hold budget only it can release."""
+    # First Party
+    from lmcache.v1.distributed.api import PrefetchAdmission
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    ctx = _lookup_ctx(4)
+    LookupModule(ctx).lookup(_make_key(4), 1)
+    (spec,), _ = ctx.storage_manager.submit_prefetch_task.call_args
+    assert spec.admission == PrefetchAdmission.NEW
+
+    repeat_ctx = _lookup_ctx(4)
+    repeat_session = repeat_ctx.session_manager.get_or_create.return_value
+    repeat_session.has_lookup_result.return_value = True
+    LookupModule(repeat_ctx).lookup(_make_key(4), 1)
+    (spec,), _ = repeat_ctx.storage_manager.submit_prefetch_task.call_args
+    assert spec.admission == PrefetchAdmission.CONTINUATION
+
+
+def test_end_session_cancels_an_unconsumed_prefetch():
+    """A request that ends before its lookup result was consumed cancels the
+    prefetch, so its locks and budget do not wait for the read-lock TTL."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    ctx = _lookup_ctx(4)
+    module = LookupModule(ctx)
+    module.lookup(_make_key(4), 1)
+    handle = ctx.storage_manager.submit_prefetch_task.return_value
+    ctx.session_manager.remove.return_value = None
+
+    module.end_session("r")
+
+    ctx.storage_manager.cancel_prefetch_task.assert_called_once_with(handle)
+    assert module.report_status()["active_prefetch_jobs"] == 0
+
+
+def test_end_session_after_consumed_result_cancels_nothing():
+    """Once the result was consumed the session owns its locks: ending the
+    session does not cancel anything."""
+    # First Party
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
+
+    ctx = _lookup_ctx(4)
+    module = LookupModule(ctx)
+    ctx.session_manager.remove.return_value = None
+
+    module.end_session("r")
+
+    ctx.storage_manager.cancel_prefetch_task.assert_not_called()

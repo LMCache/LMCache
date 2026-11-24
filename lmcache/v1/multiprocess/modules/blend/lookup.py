@@ -30,6 +30,7 @@ from lmcache.v1.distributed.api import (
     FULL_ATTENTION_WINDOW_CHUNKS,
     MemoryLayoutDesc,
     ObjectKey,
+    PrefetchAdmission,
     PrefetchTaskSpec,
     get_request_tags,
     ipc_key_to_grouped_object_keys,
@@ -180,11 +181,20 @@ class LookupMixin:
             "tuple[_BlendReadGroups, dict[int, MemoryLayoutDesc], AttnWindowDesc]"
         ),
         matches: list[CBMatchResult],
+        admission: PrefetchAdmission,
     ) -> "tuple[PrefetchHandle, dict[bytes, list], dict[bytes, int]]":
         """Coalesce all matches into one sparse L2->L1 prefetch (non-blocking).
 
         The caller polls ``query_prefetch_status(handle)`` then calls
         :meth:`_sparse_classify` with the found rows.
+
+        Args:
+            key: The request's lookup key.
+            resolved: The CB read groups, their layouts and the attention
+                window descriptor, from :meth:`_resolve_cb_read_layouts`.
+            matches: The non-prefix matches to fetch.
+            admission: ``CONTINUATION`` when this request's prefix leg was
+                submitted (the lookup is already admitted), else ``NEW``.
 
         Returns:
             The prefetch handle, per-hash object keys (one per blend read
@@ -225,6 +235,7 @@ class LookupMixin:
             PrefetchTaskSpec(
                 key_groups=key_groups,
                 fetching_policy="whole_chunk",
+                admission=admission,
             ),
             external_request_id=key.request_id,
         )
@@ -626,7 +637,17 @@ class LookupMixin:
                         job.handle,
                         job.per_hash_obj_keys,
                         job.hash_to_col,
-                    ) = self._sparse_prefetch_submit(key, resolved, job.non_prefix)
+                    ) = self._sparse_prefetch_submit(
+                        key,
+                        resolved,
+                        job.non_prefix,
+                        # The prefix leg admitted this lookup: the sparse leg
+                        # must not queue behind new requests (see
+                        # PrefetchAdmission.CONTINUATION).
+                        PrefetchAdmission.CONTINUATION
+                        if job.prefix_handle is not None
+                        else PrefetchAdmission.NEW,
+                    )
                     # Trace the span only when the prefetch actually reads L2.
                     job.l2_keys = job.handle.total_requested_keys
                     if job.l2_keys > 0:

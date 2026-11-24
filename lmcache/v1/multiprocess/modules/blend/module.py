@@ -305,7 +305,18 @@ class BlendModule(
         Without this, a request that never sends CB_RETRIEVE_PRE_COMPUTED
         would pin its sparse-prefetched chunks in L1 forever. Session
         destruction is the safe release point: no retrieve can arrive after.
+
+        A lookup the request abandoned mid-way (still polling its legs) is
+        dropped, and its prefetches are cancelled so that queued legs never
+        run and running or unconsumed ones return their locks.
         """
+        with self._cb_jobs_lock:
+            job = self._cb_jobs.pop(session.request_id, None)
+        if job is not None:
+            # Cancelling a leg whose result was consumed is a no-op.
+            for handle in (job.prefix_handle, job.handle):
+                if handle is not None:
+                    self._ctx.storage_manager.cancel_prefetch_task(handle)
         stash = session.extras.pop(self.UNRETRIEVED_KEYS_EXTRA, None)
         if not stash:
             return

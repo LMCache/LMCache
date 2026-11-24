@@ -13,7 +13,8 @@ concrete classes in `lmcache/v1/distributed/l1_manager/` (see
   for writes and reads, including the combined `finish_write_and_reserve_read`
   and `finish_write_and_delete`; `unsafe_read`, `delete`, `clear`,
   `touch_keys`, `is_key_evictable`, `register_listener`; `get_memory_usage`,
-  `get_staging_memory_usage`, `get_capacity_bytes`, `get_l1_memory_desc`,
+  `get_staging_memory_usage`, `charge_prefetch_retained`,
+  `get_prefetch_retained_bytes`, `get_capacity_bytes`, `get_l1_memory_desc`,
   `get_memory_tags`, `report_status`, `memcheck`, `close`; and the
   `l1_manager_id`, `config` and `backend_type` (`L1BackendType`) properties.
   An implementation that cannot honour a call answers with the documented

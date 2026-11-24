@@ -267,6 +267,7 @@ class StorageManager:
                 adapter_descriptors=list(self._adapter_descriptors.values()),
                 policy=create_prefetch_policy(config.prefetch_policy),
                 inflight_watermark=config.prefetch_inflight_watermark,
+                retained_watermark=config.prefetch_retained_watermark,
             )
             self._prefetch_controller.start()
             cleanup.callback(self._prefetch_controller.stop)
@@ -600,6 +601,22 @@ class StorageManager:
             submit_time=time.monotonic(),
             sliding_windows=tuple(row.sliding_window_size for row in spec.key_groups),
         )
+
+    def cancel_prefetch_task(self, handle: PrefetchHandle) -> None:
+        """Cancel a prefetch task whose result will never be consumed.
+
+        Use it when the request behind the task is gone (finished or aborted)
+        before it consumed the result. A task still waiting for admission is
+        dropped without touching L2; a running task, or a finished one whose
+        result was not consumed, has its locks released. A task whose result
+        was already consumed is not affected: the consumer owns its locks.
+
+        Args:
+            handle (PrefetchHandle): The handle of the prefetch task.
+        """
+        if handle.prefetch_request_id == -1:
+            return
+        self._prefetch_controller.cancel_prefetch_request(handle.prefetch_request_id)
 
     def query_prefetch_status(self, handle: PrefetchHandle) -> PrefetchResult | None:
         """

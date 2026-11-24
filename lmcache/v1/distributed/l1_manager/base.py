@@ -102,6 +102,13 @@ class L1ObjectState:
     between (``MemoryObj.set_used_size`` after serialization) does not
     leave phantom staging bytes behind. """
 
+    retained_charge: int = 0
+    """ Bytes this object adds to the prefetch-retained counter.
+
+    Set by ``charge_prefetch_retained`` and subtracted unchanged when the
+    charge is dropped, for the same reason as ``staging_charge``. 0 when the
+    object is not charged. """
+
 
 def l1_mgr_synchronized(func):
     """
@@ -127,6 +134,13 @@ def _l1_usage_ratio_or_zero(target: "BaseL1Manager | None") -> float:
     if total <= 0:
         return 0.0
     return used / total
+
+
+def _l1_prefetch_retained_bytes_or_zero(target: "BaseL1Manager | None") -> int:
+    """Return ``target.get_prefetch_retained_bytes()``, or 0 for no target."""
+    if target is None:
+        return 0
+    return target.get_prefetch_retained_bytes()
 
 
 def _l1_staging_bytes_or_zero(target: "BaseL1Manager | None") -> int:
@@ -219,6 +233,11 @@ class BaseL1Manager(L1ManagerInterface):
         self._staging: dict[ObjectKey, dict[str, L1ObjectState]] = {}
         # Bytes held by staging objects (kept in sync with ``_staging``).
         self._staging_bytes: int = 0
+        # Objects a prefetch loaded from L2 that are still read-locked for
+        # their request: key -> the charged object. Kept in sync with
+        # ``_prefetch_retained_bytes``; see charge_prefetch_retained.
+        self._prefetch_retained: dict[ObjectKey, L1ObjectState] = {}
+        self._prefetch_retained_bytes: int = 0
 
         self._memory_manager = memory_manager
 
@@ -257,6 +276,15 @@ class BaseL1Manager(L1ManagerInterface):
                     "lmcache_mp.l1_staging_bytes",
                     "Bytes held by L1 staging objects (write-reserved, not admitted)",
                     lambda: BaseL1Manager._observations(_l1_staging_bytes_or_zero),
+                )
+                register_gauge(
+                    "lmcache.l1_manager",
+                    "lmcache_mp.l1_prefetch_retained_bytes",
+                    "Bytes L2 prefetches loaded into L1 that are still read-locked "
+                    "for requests that have not consumed them",
+                    lambda: BaseL1Manager._observations(
+                        _l1_prefetch_retained_bytes_or_zero
+                    ),
                 )
 
     @property
@@ -437,6 +465,8 @@ class BaseL1Manager(L1ManagerInterface):
             # overhead (TTLLock is C++ std::atomic).
             for _ in range(total):
                 entry.read_lock.unlock()
+            if not entry.read_lock.is_locked():
+                self._drop_retained_charge(key, entry)
             if entry.is_temporary and not entry.read_lock.is_locked():
                 need_to_free.append(entry.memory_obj)
                 need_to_free_keys.append(key)
@@ -809,6 +839,7 @@ class BaseL1Manager(L1ManagerInterface):
                 logger.warning("L1Manager: force-deleting locked key %s", key)
 
             need_to_free.append(entry.memory_obj)
+            self._drop_retained_charge(key, entry)
             del self._objects[key]
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
@@ -906,6 +937,8 @@ class BaseL1Manager(L1ManagerInterface):
             all_meta = [self._object_meta(obj) for obj in all_memory_objs]
             self._memory_manager.free(all_memory_objs)
             self._objects.clear()
+            self._prefetch_retained.clear()
+            self._prefetch_retained_bytes = 0
             for listener in self._registered_listeners:
                 listener.on_l1_keys_deleted_by_manager(all_keys)
             self._event_bus.publish(
@@ -1017,6 +1050,56 @@ class BaseL1Manager(L1ManagerInterface):
         """
         return self._staging_bytes
 
+    @l1_mgr_synchronized
+    def charge_prefetch_retained(self, keys: list[ObjectKey]) -> None:
+        """Count the given resident, read-locked objects as prefetch-retained.
+
+        The prefetch controller calls this for the objects it just loaded
+        from L2 and read-locked for a request that has not consumed them yet.
+        Each object is charged at most once, however many requests lock it.
+        The charge is dropped as soon as the object is no longer read-locked
+        (its last reader finished, or the read TTL expired) or it leaves L1.
+
+        Args:
+            keys: Keys of objects to charge. Keys that are not resident or
+                not read-locked are skipped.
+        """
+        for key in keys:
+            entry = self._objects.get(key, None)
+            if entry is None or not entry.read_lock.is_locked():
+                continue
+            if self._prefetch_retained.get(key, None) is entry:
+                continue
+            stale = self._prefetch_retained.get(key, None)
+            if stale is not None:
+                self._drop_retained_charge(key, stale)
+            entry.retained_charge = entry.memory_obj.get_size()
+            self._prefetch_retained[key] = entry
+            self._prefetch_retained_bytes += entry.retained_charge
+
+    @l1_mgr_synchronized
+    def get_prefetch_retained_bytes(self) -> int:
+        """Get the bytes of prefetched objects still held for their requests.
+
+        Counts the objects charged by :meth:`charge_prefetch_retained` that
+        are still resident and read-locked. Charges whose read lock expired
+        (TTL) or whose object left L1 are dropped first.
+
+        Returns:
+            The total size in bytes of the charged objects.
+
+        Note:
+            Like :meth:`get_staging_memory_usage`, the value is part of
+            :meth:`get_memory_usage`'s used bytes, not in addition to it. It
+            does not overlap with the staging bytes.
+        """
+        for key, entry in list(self._prefetch_retained.items()):
+            if self._objects.get(key, None) is not entry or (
+                not entry.read_lock.is_locked()
+            ):
+                self._drop_retained_charge(key, entry)
+        return self._prefetch_retained_bytes
+
     def get_capacity_bytes(self) -> int:
         """Return the current declared L1 capacity in bytes.
 
@@ -1052,6 +1135,8 @@ class BaseL1Manager(L1ManagerInterface):
             self._objects.clear()
             self._staging.clear()
             self._staging_bytes = 0
+            self._prefetch_retained.clear()
+            self._prefetch_retained_bytes = 0
 
         self._memory_manager.close()
         with BaseL1Manager._gauge_lock:
@@ -1094,6 +1179,7 @@ class BaseL1Manager(L1ManagerInterface):
             "temporary_count": temporary,
             "staging_object_count": staging,
             "staging_bytes": self._staging_bytes,
+            "prefetch_retained_bytes": self._prefetch_retained_bytes,
             "memory_used_bytes": used,
             "memory_total_bytes": total,
             "memory_configured_bytes": self.get_capacity_bytes(),
@@ -1147,6 +1233,14 @@ class BaseL1Manager(L1ManagerInterface):
         if per_tag is None:
             return None
         return per_tag.get(tag, None)
+
+    def _drop_retained_charge(self, key: ObjectKey, entry: L1ObjectState) -> None:
+        """Drop ``entry``'s prefetch-retained charge if ``key`` holds it."""
+        if self._prefetch_retained.get(key, None) is not entry:
+            return
+        del self._prefetch_retained[key]
+        self._prefetch_retained_bytes -= entry.retained_charge
+        entry.retained_charge = 0
 
     def _put_staging(self, key: ObjectKey, tag: str, entry: L1ObjectState) -> None:
         """Store ``entry`` as ``tag``'s staging object for ``key``."""

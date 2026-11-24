@@ -226,6 +226,17 @@ class Session:
             self.chunk_hashes.append(h)
             self.num_chunks_processed += 1
 
+    def has_lookup_result(self) -> bool:
+        """Return whether a lookup result is recorded for the current lookup.
+
+        Returns:
+            True once :meth:`record_prefetch_result` ran after the last
+            :meth:`begin_lookup`, i.e. an earlier lookup of this request
+            completed and its result was consumed.
+        """
+        with self._lock:
+            return self.prefetch_hit_chunks >= 0
+
     def begin_lookup(self, key: IPCCacheServerKey) -> None:
         """Record a new lookup and reset the previous lookup's result."""
         with self._lock:

@@ -23,6 +23,7 @@ import enum
 import itertools
 import select
 import threading
+import time
 
 # First Party
 from lmcache.lmcache_native import Bitmap
@@ -34,6 +35,7 @@ from lmcache.v1.distributed.api import (
     MemoryResidency,
     MemoryTags,
     ObjectKey,
+    PrefetchAdmission,
     PrefetchLockMode,
     PrefetchResult,
     PrefetchTaskSpec,
@@ -74,6 +76,13 @@ logger = init_logger(__name__)
 
 # Poll timeout in milliseconds for the prefetch loop
 PREFETCH_LOOP_POLL_TIMEOUT_MS = 500
+
+# With no prefetch in flight, a head request blocked this long only by
+# retained bytes is admitted anyway. Retained bytes drain as engines consume
+# their prefetches, so a block this long means the engine is waiting on the
+# blocked request itself (it does not skip pending lookups); admitting one
+# request at a time keeps such an engine moving.
+PREFETCH_STALL_ADMIT_SECONDS = 30.0
 
 PrefetchRequestId = int
 
@@ -488,6 +497,10 @@ class InFlightPrefetchRequest:
     # the plan trims anything; reported as found_cells at finish.
     found_cells: Bitmap2D = field(init=False)
 
+    # Set when the caller cancelled the request while it was in flight: at
+    # finish its locks are released instead of published.
+    cancelled: bool = False
+
     # private fields
     _flattened_keys: list[ObjectKey] = field(init=False, repr=False)
     _max_load_bytes: int = field(init=False, repr=False)
@@ -562,6 +575,11 @@ class PrefetchController(StorageControllerInterface):
         inflight_watermark: Fraction of an L1 manager's capacity that
             in-flight prefetch requests may stage before new requests wait,
             in ``(0, 1]``.
+        retained_watermark: Fraction of an L1 manager's capacity, in
+            ``(0, 1]``, that prefetch may hold in total -- staged, being
+            looked up, and loaded but still read-locked for an unconsumed
+            request -- before new requests wait. 1.0 bounds it by the
+            capacity alone.
     """
 
     # Singleton dispatch for the in-flight load gauges: tests may construct
@@ -579,6 +597,7 @@ class PrefetchController(StorageControllerInterface):
         adapter_descriptors: list[L2AdapterDescriptor],
         policy: PrefetchPolicy,
         inflight_watermark: float = 0.5,
+        retained_watermark: float = 1.0,
     ) -> None:
         self._l1_managers: dict[int, L1ManagerInterface] = {
             desc.index: mgr
@@ -602,6 +621,7 @@ class PrefetchController(StorageControllerInterface):
         }
 
         self._inflight_watermark = inflight_watermark
+        self._retained_watermark = retained_watermark
 
         # Adapters being removed: adapter id -> event set once detached.
         self._draining: dict[int, threading.Event] = {}
@@ -615,10 +635,20 @@ class PrefetchController(StorageControllerInterface):
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
         self._pending_queue: deque[tuple[PrefetchRequestId, PrefetchTaskSpec]] = deque()
+        # CONTINUATION requests: strict priority over pending NEW requests.
+        self._continuation_queue: deque[tuple[PrefetchRequestId, PrefetchTaskSpec]] = (
+            deque()
+        )
+        # When the pending head was first refused (None while it is not
+        # blocked) and how many heads the stall rule admitted.
+        self._head_blocked_since: float | None = None
+        self._stall_admissions = 0
 
         # Thread-safe submission queue (external -> background)
         self._submission_lock = threading.Lock()
         self._submission_queue: list[tuple[PrefetchRequestId, PrefetchTaskSpec]] = []
+        # Request IDs cancelled by callers, handled by the loop thread.
+        self._cancel_queue: list[PrefetchRequestId] = []
         self._next_request_id: PrefetchRequestId = 0
         self._submission_efd = create_event_notifier()
 
@@ -628,6 +658,9 @@ class PrefetchController(StorageControllerInterface):
         self._prefetch_results_lock = threading.Lock()
         self._prefetch_results_cv = threading.Condition(self._prefetch_results_lock)
         self._completed_results: dict[PrefetchRequestId, PrefetchResult] = {}
+        # The finished requests behind unconsumed LOCK results, kept so a
+        # cancel can return their locks. Guarded by the results lock.
+        self._published_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
 
         # Map eventfds to adapter indices for quick lookup in poll.
         # Relies on the L2AdapterInterface contract that every adapter
@@ -747,7 +780,30 @@ class PrefetchController(StorageControllerInterface):
             already retrieved.
         """
         with self._prefetch_results_lock:
+            self._published_requests.pop(request_id, None)
             return self._completed_results.pop(request_id, None)
+
+    def cancel_prefetch_request(self, request_id: PrefetchRequestId) -> None:
+        """Cancel a prefetch request whose result the caller will not consume.
+
+        Thread-safe. Handled asynchronously by the loop thread:
+
+        - a request still waiting for admission is dropped, with no L2
+          lookup issued;
+        - a request in flight finishes with its locks released, and its
+          result is not published;
+        - a finished request whose result was not consumed yet has the
+          result dropped and its locks released.
+
+        A request whose result was already consumed, or an unknown ID, is
+        ignored: its locks belong to whoever consumed the result.
+
+        Args:
+            request_id: The request ID from submit_prefetch_request.
+        """
+        with self._submission_lock:
+            self._cancel_queue.append(request_id)
+            self._submission_efd.notify()
 
     def wait_prefetch_result(
         self, request_id: PrefetchRequestId, timeout: float
@@ -788,8 +844,11 @@ class PrefetchController(StorageControllerInterface):
             "is_healthy": is_healthy,
             "thread_alive": is_healthy,
             "inflight_watermark": self._inflight_watermark,
+            "retained_watermark": self._retained_watermark,
             "submission_queue_size": submission_queue_size,
             "pending_queue_size": len(self._pending_queue),
+            "continuation_queue_size": len(self._continuation_queue),
+            "stall_admissions": self._stall_admissions,
             "in_flight_request_count": len(in_flight),
             "lookup_phase_count": lookup_phase_count,
             "load_phase_count": len(in_flight) - lookup_phase_count,
@@ -1123,39 +1182,97 @@ class PrefetchController(StorageControllerInterface):
     # =========================================================================
 
     def _drain_submission_queue(self) -> None:
-        """Move items from the thread-safe submission queue to the
-        pending queue."""
+        """Move items from the thread-safe submission queue to the pending
+        and continuation queues, then apply the queued cancels."""
         with self._submission_lock:
             items = self._submission_queue
             self._submission_queue = []
-        self._pending_queue.extend(items)
+            cancels = self._cancel_queue
+            self._cancel_queue = []
+        for item in items:
+            if item[1].admission == PrefetchAdmission.CONTINUATION:
+                self._continuation_queue.append(item)
+            else:
+                self._pending_queue.append(item)
+        for request_id in cancels:
+            self._apply_cancel(request_id)
+
+    def _apply_cancel(self, request_id: PrefetchRequestId) -> None:
+        """Cancel one request on the loop thread (see
+        ``cancel_prefetch_request``)."""
+        for queue in (self._pending_queue, self._continuation_queue):
+            for item in queue:
+                if item[0] == request_id:
+                    queue.remove(item)
+                    self._head_blocked_since = None
+                    logger.debug("Dropped queued prefetch request %d", request_id)
+                    return
+        request = self._in_flight_requests.get(request_id)
+        if request is not None:
+            request.cancelled = True
+            return
+        with self._prefetch_results_lock:
+            self._completed_results.pop(request_id, None)
+            published = self._published_requests.pop(request_id, None)
+        if published is not None:
+            self._release_all_locks(published)
+
+    def _start_request(
+        self, request_id: PrefetchRequestId, spec: PrefetchTaskSpec
+    ) -> None:
+        """Start one dequeued request, aborting it if the start fails."""
+        try:
+            self._start_lookup_phase(request_id, spec)
+        except Exception:
+            logger.exception("Failed starting prefetch request %d", request_id)
+            request = self._in_flight_requests.get(request_id)
+            if request is not None:
+                self._abort_request(request)
 
     def _start_pending_requests(self) -> None:
-        """Start pending requests in arrival order while L1 can admit the
-        head of the queue (see ``_can_admit_new_prefetch``)."""
-        while self._pending_queue and self._can_admit_new_prefetch(
-            self._pending_queue[0][1]
-        ):
-            request_id, spec = self._pending_queue.popleft()
-            try:
-                self._start_lookup_phase(request_id, spec)
-            except Exception:
-                logger.exception("Failed starting prefetch request %d", request_id)
-                request = self._in_flight_requests.get(request_id)
-                if request is not None:
-                    self._abort_request(request)
+        """Start queued requests while L1 can admit them (see
+        ``_can_admit_new_prefetch``): continuations first, in arrival order,
+        then pending NEW requests, none of which starts while a continuation
+        waits.
+
+        With no request in flight, a head refused for
+        ``PREFETCH_STALL_ADMIT_SECONDS`` is admitted anyway.
+        """
+        while self._continuation_queue or self._pending_queue:
+            queue = self._continuation_queue or self._pending_queue
+            if not self._can_admit_new_prefetch(queue[0][1]):
+                now = time.monotonic()
+                if self._head_blocked_since is None:
+                    self._head_blocked_since = now
+                if (
+                    self._in_flight_requests
+                    or now - self._head_blocked_since < PREFETCH_STALL_ADMIT_SECONDS
+                ):
+                    return
+                self._stall_admissions += 1
+                logger.warning(
+                    "Prefetch request %d waited %.0f s with nothing in flight; "
+                    "admitting it over the watermarks",
+                    queue[0][0],
+                    now - self._head_blocked_since,
+                )
+            self._head_blocked_since = None
+            self._start_request(*queue.popleft())
 
     def _can_admit_new_prefetch(self, spec: PrefetchTaskSpec) -> bool:
         """Return whether the pending request ``spec`` may start now.
 
-        The request can be admitted when both of the following conditions
+        The request can be admitted when all of the following conditions
         are met:
 
         1. staging bytes + lookup bytes < ``inflight_watermark`` * capacity.
         2. free bytes - lookup bytes >= request bytes.
+        3. staging bytes + retained bytes + lookup bytes + request bytes
+           <= ``retained_watermark`` * capacity.
 
-        With no request in flight, ``spec`` is admitted regardless, so a
-        request that can never fit does not block the queue.
+        With no request in flight and no retained bytes, ``spec`` is admitted
+        regardless, so a request that can never fit does not block the
+        queue.
 
         Args:
             spec: The request at the head of the pending queue.
@@ -1163,8 +1280,6 @@ class PrefetchController(StorageControllerInterface):
         Returns:
             True if ``spec`` may start.
         """
-        if not self._in_flight_requests:
-            return True
         request_bytes = _get_max_load_bytes(spec.key_groups)
         lookup_bytes = sum(
             request.get_max_load_bytes()
@@ -1176,15 +1291,24 @@ class PrefetchController(StorageControllerInterface):
             for adapter_idx in self._l2_adapters
             if adapter_idx not in self._draining
         }
+        idle = not self._in_flight_requests
         for l1_idx in target_l1_indices:
             l1_manager = self._l1_managers[l1_idx]
             used_bytes, total_bytes = l1_manager.get_memory_usage()
             if total_bytes == 0:
                 continue  # a shadow L1: views cost no local bytes
+            retained_bytes = l1_manager.get_prefetch_retained_bytes()
+            if idle and retained_bytes == 0:
+                continue  # nothing of prefetch's to wait for in this L1
             staged_bytes = l1_manager.get_staging_memory_usage() + lookup_bytes
             if staged_bytes >= self._inflight_watermark * total_bytes:
                 return False
             if total_bytes - used_bytes - lookup_bytes < request_bytes:
+                return False
+            if (
+                staged_bytes + retained_bytes + request_bytes
+                > self._retained_watermark * total_bytes
+            ):
                 return False
         return True
 
@@ -1637,6 +1761,11 @@ class PrefetchController(StorageControllerInterface):
                     l1_manager.finish_write_and_reserve_read(
                         keys, read_locks=row.num_kv_readers, tag=tag
                     )
+            # Count the loads against the retained budget until their reader
+            # is done with them; under NO_LOCK, _finish_request's release
+            # drops the charge right away.
+            if loaded_keys:
+                l1_manager.charge_prefetch_retained(loaded_keys)
             if failed_keys:
                 l1_manager.finish_write_and_delete(failed_keys, tag=tag)
 
@@ -1713,6 +1842,10 @@ class PrefetchController(StorageControllerInterface):
             Reads and writes only ``request.key_states`` and the result
             store.
         """
+        if request.cancelled:
+            self._release_all_locks(request)
+            logger.debug("Prefetch request %d cancelled in flight", request.request_id)
+            return
         states = request.key_states
         # A failed load can leave less in L1 than was planned; the policy
         # decides what the cells that did land still serve.
@@ -1768,6 +1901,8 @@ class PrefetchController(StorageControllerInterface):
         """Store the request's result and wake any waiter."""
         with self._prefetch_results_lock:
             self._completed_results[request.request_id] = result
+            if request.lock_mode == PrefetchLockMode.LOCK:
+                self._published_requests[request.request_id] = request
             # Wake any WAIT_PREFETCH_STATUS handler blocked on this result.
             self._prefetch_results_cv.notify_all()
 
@@ -1775,6 +1910,9 @@ class PrefetchController(StorageControllerInterface):
         """Give up on a request after an error: return everything it holds,
         report a miss for every cell, and drop it from the in-flight table."""
         self._release_all_locks(request)
+        if request.cancelled:
+            self._retire_request(request)
+            return
         empty = Bitmap2D.zeros(len(request.key_groups), len(request.key_groups[0].keys))
         self._publish_result(
             request,

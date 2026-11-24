@@ -91,11 +91,13 @@ is read-locked its row's `num_kv_readers` times for the caller.
 Pending requests start while L1 has room for their loads, not up to a fixed
 count. `_can_admit_new_prefetch(spec)` admits the request at the head of the
 queue when, for every L1 manager that receives loads from a non-draining L2
-adapter, both conditions hold:
+adapter, all three conditions hold:
 
 ```
 (1) staging_bytes + lookup_bytes < inflight_watermark * total_bytes
 (2) total_bytes - used_bytes - lookup_bytes >= request_bytes
+(3) staging_bytes + retained_bytes + lookup_bytes + request_bytes
+        <= retained_watermark * total_bytes
 ```
 
 - `staging_bytes` is `BaseL1Manager.get_staging_memory_usage()`: buffers reserved
@@ -107,12 +109,48 @@ adapter, both conditions hold:
 - `request_bytes` is the same worst case for the head request.
 - `used_bytes, total_bytes` come from `get_memory_usage()`, the same numbers
   eviction uses (the total is the grown heap on the lazy tier).
-- With no request in flight the head request is admitted regardless, so a
-  request that can never fit does not block the queue; its reservations then
-  fail per cell as before (`l1_oom`).
+- `retained_bytes` is `get_prefetch_retained_bytes()`: objects this
+  controller loaded from L2 that are still read-locked because their request
+  has not consumed them. They are charged with `charge_prefetch_retained` when
+  each load is admitted (objects L1 already held are not charged), and the
+  charge drops when the read lock is released or expires, or the object
+  leaves L1.
+- With no request in flight and no retained bytes, the head request is
+  admitted regardless, so a request that can never fit does not block the
+  queue; its reservations then fail per cell as before (`l1_oom`).
 
-Condition (1) bounds how much of L1 prefetch may occupy; condition (2) keeps a
-request from starting when L1, full of resident data, could not hold its loads.
+Condition (1) bounds how much of L1 in-flight prefetch may occupy; condition
+(2) keeps a request from starting when L1, full of resident data, could not
+hold its loads; condition (3) bounds everything prefetch pins for requests that
+have not run yet. Without (3), a burst of lookups (an engine looks up every
+waiting request, not only the ones about to run) fills L1 with read-locked
+data for requests minutes away from running, and new prefetches and stores
+fail. `retained_watermark` (`--l2-prefetch-retained-watermark`, default 0.6 in
+the server config, 1.0 for a directly built controller) turns this into
+lookahead sized by L1 rather than by a request count. See
+[prefetch_retained_budget.md](prefetch_retained_budget.md).
+
+**Continuations.** A spec with `admission=PrefetchAdmission.CONTINUATION` (a
+later leg of an admitted lookup, such as the CacheBlend sparse leg or a repeat
+lookup) waits in a separate queue with strict priority: no `NEW` request
+starts while a continuation waits. Continuations pass the same checks. A
+`NEW` leg is charged at the worst case of the whole prompt, so once in-flight
+lookups settle, its continuation fits in what it was charged.
+
+**Stall rule.** With nothing in flight, a head refused for
+`PREFETCH_STALL_ADMIT_SECONDS` (30 s) is admitted anyway (`stall_admissions`
+in `report_status`). Retained bytes drain only as engines consume their
+prefetches, so this keeps an engine that waits on lookups in order (instead
+of skipping pending ones as vLLM does) from deadlocking.
+
+**Cancel.** `cancel_prefetch_request(id)` (via
+`StorageManager.cancel_prefetch_task`) drops a queued request without
+touching L2. A request in flight finishes with its locks released and no
+result. A finished request whose result was not consumed has the result
+dropped and its locks released, because the controller keeps the finished
+request beside each unconsumed `LOCK` result. A consumed result is not
+affected. `LookupModule.end_session` and the CacheBlend session-destroy
+listener cancel lookups whose results their request never consumed.
 
 The check runs at the end of every loop iteration, so a completed load (which
 wakes the loop) admits the next requests immediately. Staging held only by
