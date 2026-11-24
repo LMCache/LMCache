@@ -10,6 +10,7 @@ zero changes to this file.
 from pathlib import Path
 from types import ModuleType
 import importlib.util
+import os
 import re
 import sys
 
@@ -95,6 +96,14 @@ if __name__ == "__main__":
     policy = BuildPolicy()
     profile = policy.resolve_profile()
     ext_modules, cmdclass, req_file = policy.collect_extensions(profile)
+    if os.environ.get("LMCACHE_CLIENT_BUILD") == "1":
+        # Platform ops retain their profile-specific names; storage extensions
+        # are server-only. All current device extensions use the _ops suffix.
+        ext_modules = [
+            ext
+            for ext in ext_modules
+            if ext.name == "lmcache.lmcache_native" or ext.name.endswith("_ops")
+        ]
     cmdclass["build_py"] = _BuildPyWithGrpcStubs
     cmdclass["egg_info"] = _EggInfoWithNixlConnector
 
