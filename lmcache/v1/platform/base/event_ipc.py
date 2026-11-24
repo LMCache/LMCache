@@ -186,10 +186,18 @@ class DefaultEventIPCBackend(EventIPCBackend):
         self,
         event_module: object | None = None,
         device_type: str | None = None,
+        exported_event_ring_size: int | None = None,
     ) -> None:
         self._event_module = event_module if event_module is not None else torch_dev
         self.device_type = device_type if device_type is not None else torch_device_type
-        self._exported_events: deque[object] = deque(maxlen=_EXPORTED_EVENT_RING_SIZE)
+        # Backends whose driver events are scarce (e.g. Ascend NPU) shrink the
+        # liveness window; the default keeps the historical CUDA ring size.
+        self._exported_event_ring_size = (
+            exported_event_ring_size
+            if exported_event_ring_size is not None
+            else _EXPORTED_EVENT_RING_SIZE
+        )
+        self._exported_events: deque[object] = deque()
 
     def check_event_support(self, device: object) -> None:
         """Raise ``RuntimeError`` if interprocess events are unsupported.
@@ -234,7 +242,7 @@ class DefaultEventIPCBackend(EventIPCBackend):
             The IPC handle bytes for ``event``.
         """
         handle = event.ipc_handle()  # type: ignore[attr-defined]
-        self._exported_events.append(event)
+        self._retain_exported_event(event)
         return handle
 
     def import_event(self, handle: bytes, device: object) -> object:
@@ -258,6 +266,28 @@ class DefaultEventIPCBackend(EventIPCBackend):
     def synchronize_event(self, event: object, device: object) -> None:
         """Block the host until ``event`` completes."""
         event.synchronize()  # type: ignore[attr-defined]
+
+    def _on_event_evicted(self, event: object) -> None:
+        """Release an event aging out of the exported-event liveness window.
+
+        The base backend only drops the reference (matching the historical
+        unbounded-window behavior). Backends whose driver events are scarce
+        (e.g. Ascend NPU) override this to settle the event before release.
+
+        Args:
+            event: The evicted backend-native event.
+        """
+        return None
+
+    def _retain_exported_event(self, event: object) -> None:
+        """Pin ``event`` for as long as the exported-event window allows.
+
+        Args:
+            event: Backend-native event whose IPC handle was just exported.
+        """
+        while len(self._exported_events) >= self._exported_event_ring_size:
+            self._on_event_evicted(self._exported_events.popleft())
+        self._exported_events.append(event)
 
 
 def get_event_ipc_backend(device: object) -> EventIPCBackend:

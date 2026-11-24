@@ -7,6 +7,7 @@ spawn round-trip test gated on real Ascend hardware.
 """
 
 # Standard
+import contextlib
 import multiprocessing as mp
 
 # Third Party
@@ -185,6 +186,21 @@ def test_to_tensor_restores_registration_form(
 ) -> None:
     """``to_tensor`` restores the registered form: bare stays bare, a
     1-tuple stays a 1-tuple."""
+
+    class _FakeNpu:
+        """Stand-in for ``torch.npu`` accepting the CPU fake index.
+
+        The CPU-based fixture resolves ``device_index`` to ``"cpu"``; a real
+        torch_npu rejects that, so the device guard must be neutralized the
+        same way :func:`test_to_tensor_switches_device_context_per_handle`
+        does.
+        """
+
+        @staticmethod
+        def device(device_index: object) -> object:
+            return contextlib.nullcontext()
+
+    monkeypatch.setattr(torch, "npu", _FakeNpu, raising=False)
     _patch_cpu_share(monkeypatch)
     tensor = torch.zeros(2, 3)
 
@@ -197,6 +213,43 @@ def test_to_tensor_restores_registration_form(
     assert isinstance(out_tupled[0], torch.Tensor)
     assert tuple(out_bare.shape) == (2, 3)
     assert tuple(out_tupled[0].shape) == (2, 3)
+
+
+def test_to_tensor_switches_device_context_per_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every handle must be opened under the wrapper's own device context.
+
+    Regression guard for 107017 (invalid handle): a server thread that
+    just served another device used to open the event handle under the
+    stale device context because ``_new_shared_npu`` resolves the device
+    from the thread's current context, not its ``device_index`` argument.
+    """
+    entered: list[object] = []
+
+    class _FakeNpu:
+        """Stand-in for ``torch.npu`` recording context switches."""
+
+        @staticmethod
+        def device(device_index: object) -> object:
+            class _Ctx:
+                def __enter__(self) -> object:
+                    entered.append(device_index)
+                    return device_index
+
+                def __exit__(self, *args: object) -> None:
+                    pass
+
+            return _Ctx()
+
+    monkeypatch.setattr(torch, "npu", _FakeNpu, raising=False)
+    _patch_cpu_share(monkeypatch)
+
+    wrapper = NpuIPCWrapper.wrap((torch.zeros(2, 3), torch.zeros(2, 3)))
+    wrapper.to_tensor()
+
+    device_index = wrapper._get_device_index_from_uuid(wrapper.device_uuid)
+    assert entered == [device_index, device_index]
 
 
 def test_equality_distinguishes_registration_form() -> None:

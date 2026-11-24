@@ -125,13 +125,20 @@ def test_event_operations_delegate_to_torch_npu() -> None:
     assert backend.export_event(event, device) == b"npu-handle"
     remote = backend.import_event(b"npu-handle", device)
     assert isinstance(remote, _FakeEvent)
-    backend.record_event(event, "STREAM")
-    backend.wait_event(remote, "STREAM")
+    class _FakeStream:
+        """Minimal torch.Stream stand-in: record/wait pin the stream's device."""
+
+        def __init__(self, device: Any) -> None:
+            self.device = device
+
+    stream = _FakeStream(device)
+    backend.record_event(event, stream)
+    backend.wait_event(remote, stream)
     assert backend.query_event(remote) is True
     backend.synchronize_event(remote, device)
 
-    assert ("record", "STREAM") in event.calls
-    assert ("wait", "STREAM") in remote.calls
+    assert ("record", stream) in event.calls
+    assert ("wait", stream) in remote.calls
     assert ("query",) in remote.calls
     assert ("synchronize",) in remote.calls
     assert ("from_ipc_handle", device, b"npu-handle") in remote.calls

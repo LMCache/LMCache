@@ -197,6 +197,27 @@ def connectors(
         scheduler.shutdown()
 
 
+def test_register_kv_caches_starts_heartbeat(mock_io: SimpleNamespace) -> None:
+    """Registration must start the heartbeat immediately.
+
+    A worker whose heartbeat only starts on its first store/retrieve sends no
+    PING while idle, so the server reaps its registration after the
+    registration grace period (observed: 16 idle ranks reaped after 1h).
+    """
+    config = _config(
+        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
+    )
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    heartbeat_cls = adapter_mod.HeartbeatThread
+    assert not heartbeat_cls.called
+    try:
+        worker.register_kv_caches(mock_io.kv_caches)
+        assert heartbeat_cls.called
+        assert heartbeat_cls.return_value.start.called
+    finally:
+        worker.shutdown()
+
+
 @pytest.mark.parametrize("save_decode_cache", [None, False, True])
 @pytest.mark.parametrize("lazy", [False, True])
 def test_decode_store_policy_through_scheduler(
