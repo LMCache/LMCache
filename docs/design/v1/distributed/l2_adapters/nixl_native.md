@@ -206,10 +206,12 @@ as unsupported, its delete entry point returns a clear error, status contains
 ### Multiple endpoints
 
 The OBJ backend accepts an adapter-level `endpoints` list, for example
-`"endpoints": ["http://10.0.0.1:9020", "http://10.0.0.2:9020"]`. Each endpoint
-must include the scheme (`http://` or `https://`). The adapter turns it into
-one `{"endpoint_override": <entry>}` map per entry and passes the list to the
-connector as `worker_backend_params`. The connector is generic: worker `i`
+`"endpoints": ["http://10.0.0.1:9020", "http://10.0.0.2:9020"]`. Entries are
+forwarded verbatim and take the same forms as `endpoint_override`: NIXL hands
+the value to the AWS SDK, which uses a full URL as is and prefixes a bare
+`host:port` with `backend_params.scheme` (default `https`). The adapter turns
+the list into one `{"endpoint_override": <entry>}` map per entry and passes it
+to the connector as `worker_backend_params`. The connector is generic: worker `i`
 merges `worker_backend_params[i % n]` over the shared `backend_params` and
 never interprets the keys. `endpoints` and `backend_params.endpoint_override`
 are mutually exclusive, so a plain `endpoint_override` keeps its original NIXL

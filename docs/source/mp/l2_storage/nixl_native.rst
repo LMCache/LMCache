@@ -244,6 +244,9 @@ separate load balancer, replace ``endpoint_override`` with ``endpoints``:
      "num_workers": 4
    }
 
+Each entry is used as that worker's ``endpoint_override`` and accepts the same
+forms: ``host:port`` takes its scheme from ``backend_params.scheme`` (default
+``https``), and a full URL such as ``http://10.0.0.1:9020`` sets its own scheme.
 Worker ``i`` connects to ``endpoints[i % 2]``, so workers 0 and 2 use the first
 endpoint and workers 1 and 3 the second. All endpoints must serve the same
 bucket, because any worker may read an object another worker wrote. Startup

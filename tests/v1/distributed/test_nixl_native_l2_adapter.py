@@ -506,8 +506,6 @@ _ENDPOINT_BASE = {"backend": "OBJ", "backend_params": {"bucket": "b"}}
         ({"endpoints": "http://a,http://b"}, "non-empty list"),
         ({"endpoints": ["http://a", " "]}, "non-blank"),
         ({"endpoints": ["http://a", 1]}, "non-blank"),
-        ({"endpoints": ["10.0.0.1:9020"]}, "must include the scheme"),
-        ({"endpoints": ["http://a", "10.0.0.2:9020"]}, "must include the scheme"),
         (
             {
                 "endpoints": ["http://a"],
@@ -539,10 +537,21 @@ def test_endpoint_override_in_backend_params_is_unchanged() -> None:
         assert config.backend_params == {"endpoint_override": value}
 
 
+@pytest.mark.parametrize(
+    ("endpoints", "expected"),
+    [
+        ([" http://a:9020 ", "https://b:9020"], ["http://a:9020", "https://b:9020"]),
+        (["10.0.0.1:9020", "http://b:9020"], ["10.0.0.1:9020", "http://b:9020"]),
+    ],
+)
 def test_endpoints_are_forwarded_as_per_worker_params(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, endpoints: list[str], expected: list[str]
 ) -> None:
-    """Each endpoint becomes one per-worker override; shared params stay put."""
+    """Each endpoint becomes one per-worker override; shared params stay put.
+
+    Entries are forwarded verbatim (after stripping whitespace), with or without
+    a URL scheme, exactly like a single ``endpoint_override``.
+    """
     captured: dict[str, object] = {}
 
     def fake_client_factory(**kwargs: object) -> _FakeNixlClientForPadding:
@@ -554,7 +563,7 @@ def test_endpoints_are_forwarded_as_per_worker_params(
     monkeypatch.setitem(sys.modules, "lmcache.lmcache_nixl", fake_module)
 
     config = NixlNativeL2AdapterConfig.from_dict(
-        {**_ENDPOINT_BASE, "endpoints": [" http://a:9020 ", "http://b:9020"]}
+        {**_ENDPOINT_BASE, "endpoints": endpoints}
     )
     adapter = create_l2_adapter(
         config, L1MemoryDesc(ptr=0x12340000, size=0x400000, align_bytes=0x1000)
@@ -562,8 +571,7 @@ def test_endpoints_are_forwarded_as_per_worker_params(
     try:
         assert captured["backend_params"] == {"bucket": "b"}
         assert captured["worker_backend_params"] == [
-            {"endpoint_override": "http://a:9020"},
-            {"endpoint_override": "http://b:9020"},
+            {"endpoint_override": endpoint} for endpoint in expected
         ]
     finally:
         adapter.close()
