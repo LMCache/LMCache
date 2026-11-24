@@ -251,8 +251,7 @@ fn parse_use_iouring(io_engine: Option<String>, use_iouring: bool) -> PyResult<b
 
 ///Per batch tracking for in flight I/O operation
 type BatchTracking = (Arc<AtomicU64>, Arc<Condvar>);
-type IoUringCompletionErrors = Vec<(usize, String)>;
-type IoUringBatchResults = (Vec<bool>, IoUringCompletionErrors);
+type IoUringBatchResults<E> = (Vec<bool>, Vec<(usize, E)>);
 
 /// One kernel-registered fixed-buffer region.
 ///
@@ -1008,7 +1007,7 @@ impl IoCompletion {
 // Convert a batch's completion objects into a success bitmap and sparse errors.
 fn collect_iouring_completion_results(
     completions: Option<Vec<Arc<IoCompletion>>>,
-) -> IoUringBatchResults {
+) -> IoUringBatchResults<PyErr> {
     let Some(completions) = completions else {
         return (Vec::new(), Vec::new());
     };
@@ -1020,7 +1019,7 @@ fn collect_iouring_completion_results(
             Ok(()) => results.push(true),
             Err(error) => {
                 results.push(false);
-                errors.push((operation_index, error.to_string()));
+                errors.push((operation_index, error));
             }
         }
     }
@@ -1258,6 +1257,26 @@ fn fail_submissions(
     shutdown.store(true, Ordering::Relaxed);
 }
 
+pyo3::create_exception!(
+    lmcache_rust_raw_block_io,
+    NvmeUnrecoveredReadError,
+    PyOSError
+);
+
+fn nvme_completion_error(sub: &IoSubmission, status: i32) -> PyErr {
+    if is_unrecovered_read_error(sub.nvme_cmd_data.is_some(), sub.is_write, status) {
+        NvmeUnrecoveredReadError::new_err((
+            status,
+            format!(
+                "offset={} len={} status=0x{status:04x}",
+                sub.offset, sub.len
+            ),
+        ))
+    } else {
+        PyOSError::new_err((status, "io_uring_cmd NVMe error"))
+    }
+}
+
 /// Return whether a completion result is an NVMe Unrecovered Read Error.
 ///
 /// UECC is only observable on passthrough (`io_uring_cmd`) reads: plain
@@ -1280,6 +1299,47 @@ mod unrecovered_read_error_tests {
         assert!(is_unrecovered_read_error(true, false, 0x0281));
         // DNR set in bit 14 (0x4000) is ignored by the status mask.
         assert!(is_unrecovered_read_error(true, false, 0x4281));
+    }
+
+    #[test]
+    fn batch_reports_uecc_on_only_the_failed_entry() {
+        pyo3::prepare_freethreaded_python();
+        let sub = IoSubmission {
+            offset: 8192,
+            len: 4096,
+            nvme_cmd_data: Some(NvmeCmdData {
+                nsid: 1,
+                lba_shift: 12,
+                dtype: 0,
+                dspec: 0,
+            }),
+            ..IoSubmission::default()
+        };
+        let sibling = Arc::new(IoCompletion::new());
+        sibling.set(Ok(()));
+        sub.completion.set(Err(nvme_completion_error(&sub, 0x4281)));
+        let (hits, errors) =
+            collect_iouring_completion_results(Some(vec![sibling, sub.completion]));
+        assert_eq!(hits, vec![true, false]);
+        assert_eq!(errors.len(), 1);
+        let (index, error) = &errors[0];
+        assert_eq!(*index, 1);
+        Python::with_gil(|py| {
+            assert!(error.is_instance_of::<NvmeUnrecoveredReadError>(py));
+            let value = error.value(py);
+            assert_eq!(
+                value.getattr("errno").unwrap().extract::<i32>().unwrap(),
+                0x4281
+            );
+            assert_eq!(
+                value
+                    .getattr("strerror")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "offset=8192 len=4096 status=0x4281"
+            );
+        });
     }
 
     #[test]
@@ -1779,9 +1839,8 @@ impl RawBlockDevice {
                 } else if is_uring_cmd {
                     // Non-zero result indicates NVMe command error
                     if cqe_result != 0 {
-                        let code = cqe_result;
                         let _ = sub.bounce.take();
-                        Err(PyOSError::new_err((code, "io_uring_cmd NVMe error")))
+                        Err(nvme_completion_error(sub, cqe_result))
                     } else {
                         // io_uring_cmd successful completion (result == 0)
                         // For reads with bounce buffer, copy data back to original buffer
@@ -2950,7 +3009,25 @@ impl RawBlockDevice {
     /// batch ID is returned, I/O completion failures are reported in both
     /// returned collections.
     #[pyo3(signature = (batch_id))]
-    fn wait_iouring(&self, py: Python<'_>, batch_id: u64) -> PyResult<IoUringBatchResults> {
+    fn wait_iouring(&self, py: Python<'_>, batch_id: u64) -> PyResult<IoUringBatchResults<String>> {
+        let (results, errors) = self.wait_iouring_exceptions(py, batch_id)?;
+        Ok((
+            results,
+            errors
+                .into_iter()
+                .map(|(i, err)| (i, err.to_string()))
+                .collect(),
+        ))
+    }
+
+    /// Consume a batch like wait_iouring, returning the original Python exception
+    /// objects in the sparse (operation_index, exception) list.
+    #[pyo3(signature = (batch_id))]
+    fn wait_iouring_exceptions(
+        &self,
+        py: Python<'_>,
+        batch_id: u64,
+    ) -> PyResult<IoUringBatchResults<PyErr>> {
         if !self.use_iouring {
             return Ok((Vec::new(), Vec::new()));
         }
@@ -3932,7 +4009,11 @@ impl Drop for RawBlockDevice {
 }
 
 #[pymodule]
-fn lmcache_rust_raw_block_io(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn lmcache_rust_raw_block_io(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add(
+        "NvmeUnrecoveredReadError",
+        py.get_type::<NvmeUnrecoveredReadError>(),
+    )?;
     m.add_class::<RawBlockDevice>()?;
     Ok(())
 }
