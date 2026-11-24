@@ -15,16 +15,19 @@ on:
           nightly-aggregate-vllm-verify.sh can decide what to pin.
         type: boolean
         default: false
+      os:
+        description: >-
+          JSON array of runner OSes, a subset of
+          '["ubuntu-22.04", "macos-latest"]'. Empty runs both.
+        type: string
+        default: ""
     secrets:
       hf_token:
         description: Hugging Face token used to download gated test models.
         required: false
   workflow_dispatch:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches:
-      - "dev"
-      - "release-**"
+  # PR runs are started by code_quality_checks.yml after pre-commit passes,
+  # with the OSes the PR author picked.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -54,7 +57,33 @@ jobs:
           github.event_name == 'workflow_dispatch' ||
           steps.filter.outputs.lmcache == 'true'
         }}
+      os: ${{ steps.os.outputs.os }}
+      extra_legs: ${{ steps.os.outputs.extra_legs }}
     steps:
+      # One representative leg for ZMQ and for each explicit gRPC server mode
+      # covers the CPU request path without duplicating every OS/model
+      # combination. They run on Ubuntu, so they are added only when Ubuntu
+      # is selected.
+      - name: Select runner OSes
+        id: os
+        env:
+          SELECTED: ${{ inputs.os }}
+        run: |
+          os=${SELECTED:-'["ubuntu-22.04", "macos-latest"]'}
+          opt_125m='{"name": "opt-125m", "id": "facebook/opt-125m",
+            "tarball_url": "https://github.com/LMCache/opt-125m/releases/download/v1.0/opt-125m.tar.gz",
+            "cache_marker": "pytorch_model.bin", "load_format": "", "hf_overrides": "",
+            "trust_remote_code": "0", "mla_disable": "0", "run_engine_driven_e2e": true}'
+          extra_legs=$(jq -nc --argjson os "$os" --argjson model "$opt_125m" '
+            if ($os | index("ubuntu-22.04")) then
+              ["zmq", "grpc-aio", "grpc-native"]
+              | map({os: "ubuntu-22.04", request_transport: ., model: $model})
+            else [] end')
+          {
+            echo "os=$(jq -c . <<<"$os")"
+            echo "extra_legs=$extra_legs"
+          } | tee -a "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         if: github.event_name == 'push'
         with:
@@ -93,7 +122,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-latest]
+        os: ${{ fromJSON(needs.changes.outputs.os) }}
         request_transport: [grpc]
         # Each entry is a self-contained model profile the e2e steps
         # thread through env vars. Adding a new model = adding a new
@@ -133,46 +162,9 @@ jobs:
             trust_remote_code: "1"
             mla_disable: "0"
             run_engine_driven_e2e: true
-        # One representative leg each for the ZMQ transport and
-        # the explicit gRPC server modes covers the CPU request path without
-        # duplicating every OS/model combination.
-        include:
-          - os: ubuntu-22.04
-            request_transport: zmq
-            model:
-              name: opt-125m
-              id: facebook/opt-125m
-              tarball_url: https://github.com/LMCache/opt-125m/releases/download/v1.0/opt-125m.tar.gz
-              cache_marker: pytorch_model.bin
-              load_format: ""
-              hf_overrides: ""
-              trust_remote_code: "0"
-              mla_disable: "0"
-              run_engine_driven_e2e: true
-          - os: ubuntu-22.04
-            request_transport: grpc-aio
-            model:
-              name: opt-125m
-              id: facebook/opt-125m
-              tarball_url: https://github.com/LMCache/opt-125m/releases/download/v1.0/opt-125m.tar.gz
-              cache_marker: pytorch_model.bin
-              load_format: ""
-              hf_overrides: ""
-              trust_remote_code: "0"
-              mla_disable: "0"
-              run_engine_driven_e2e: true
-          - os: ubuntu-22.04
-            request_transport: grpc-native
-            model:
-              name: opt-125m
-              id: facebook/opt-125m
-              tarball_url: https://github.com/LMCache/opt-125m/releases/download/v1.0/opt-125m.tar.gz
-              cache_marker: pytorch_model.bin
-              load_format: ""
-              hf_overrides: ""
-              trust_remote_code: "0"
-              mla_disable: "0"
-              run_engine_driven_e2e: true
+        # One representative leg each for the ZMQ transport and the explicit
+        # gRPC server modes, built in the changes job from the selected OSes.
+        include: ${{ fromJSON(needs.changes.outputs.extra_legs) }}
 
     env:
       # Threaded to run-cpu-e2e-validation.sh; server_bench ignores them.
