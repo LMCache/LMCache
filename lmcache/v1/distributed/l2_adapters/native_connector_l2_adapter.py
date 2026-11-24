@@ -205,7 +205,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         self._key_sizes: dict[ObjectKey, int] = {}
         # Pending store sizes: native future_id -> (keys, per_key_sizes).
         # Bridges the async store submit → demux completion gap so the
-        # demux thread can fire ``_notify_keys_stored(keys, sizes)``.
+        # demux thread can account for successful stores before signaling them.
         self._pending_store_sizes: dict[int, tuple[list[ObjectKey], list[int]]] = {}
 
         # Task ID counter
@@ -477,9 +477,9 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 continue
 
             # Collect listener notifications to fire after
-            # releasing the lock. Sizes are collected in parallel so
-            # ``_notify_keys_*`` can update the base class's byte
-            # accounting in one shot.
+            # releasing the lock. Account for the whole store batch before
+            # waking callers, including callers that poll completed tasks.
+            store_completions = 0
             keys_stored: list[ObjectKey] = []
             sizes_stored: list[int] = []
             keys_accessed: list[ObjectKey] = []
@@ -536,7 +536,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                     keys_stored.append(key)
                                     sizes_stored.append(0)
                         self._completed_stores[task_id] = L2StoreResult(ok, task_bytes)
-                        self._store_efd.notify()
+                        store_completions += 1
 
                     elif op_type == self._OP_LOOKUP:
                         bitmap = Bitmap(num_keys)
@@ -585,10 +585,15 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                         if evt is not None:
                             delete_done_events.append(evt)
 
+                if keys_stored:
+                    self._account_stored_bytes(keys_stored, sizes_stored)
+                for _ in range(store_completions):
+                    self._store_efd.notify()
+
             # Fire listener notifications outside the lock so a slow
             # listener cannot stall further demux iterations.
             if keys_stored:
-                self._notify_keys_stored(keys_stored, sizes_stored)
+                self._emit_keys_stored(keys_stored, sizes_stored)
             if keys_accessed:
                 self._notify_keys_accessed(keys_accessed)
             if keys_deleted:
