@@ -19,11 +19,11 @@ import torch
 
 # First Party
 from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.base.device_ops import DeviceOps
 from lmcache.v1.platform.device_ops_helper import (
     transfer_with_address_kernel,
 )
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)

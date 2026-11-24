@@ -48,7 +48,7 @@ from lmcache.v1.transport.request_client import RequestClient
 
 logger = init_logger(__name__)
 
-DEFAULT_SERVER_URL = "ipc:///tmp/lmcache.sock"
+DEFAULT_SERVER_URL = "grpc://localhost:5555"
 DEFAULT_MQ_TIMEOUT: float = 300.0
 
 
@@ -365,6 +365,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             EngineType.TRTLLM,
             layout_hints,
             [],
+            None,
         )
 
         try:

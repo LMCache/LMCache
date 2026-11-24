@@ -834,17 +834,6 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
         scatter_cpu_to_paged_kv,
     )
 
-    def _vllm_detector_device_type() -> str:
-        """Keep the detector on the active accelerator, but bypass CPU hosts."""
-
-        return torch_device_type if torch_device_type != "cpu" else "cuda"
-
-    # Keep format discovery independent of the host running the test.
-    monkeypatch.setattr(
-        "lmcache.v1.common.kv_format.detectors.vllm.torch_device_type",
-        _vllm_detector_device_type(),
-    )
-
     source = {k: v.to(torch_device_type) for k, v in builder_fn().items()}
     (
         block_size,
@@ -901,10 +890,6 @@ def test_explicit_cpu_nhd_layout_preserves_physical_geometry(
         compute_kv_layout,
     )
 
-    monkeypatch.setattr(
-        "lmcache.v1.common.kv_format.detectors.vllm.torch_device_type",
-        "cpu",
-    )
     source = _make_fused_nhd_kv_caches(
         num_layers=2,
         num_blocks=16,
@@ -1166,14 +1151,6 @@ def test_gather_sliding_window_allocates_window_sized_chunks(
     from lmcache.v1.client.transfer_context.base import (
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
-    )
-
-    def _vllm_detector_device_type() -> str:
-        return torch_device_type if torch_device_type != "cpu" else "cuda"
-
-    monkeypatch.setattr(
-        "lmcache.v1.common.kv_format.detectors.vllm.torch_device_type",
-        _vllm_detector_device_type(),
     )
 
     num_layers, block_size, hidden_dim = 2, 4, 16

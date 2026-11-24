@@ -11,6 +11,9 @@ import types
 import pytest
 import torch
 
+# First Party
+from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
+
 
 class _FakeKVLayerGroupsManager:
     """Minimal manager stub: one full-attention object group."""
@@ -108,6 +111,9 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
         engine_type: object = None,
         separate_object_groups: bool = False,
         full_sw_kv: bool = False,
+        *,
+        object_group_transfer: ObjectGroupTransfer | None = None,
+        buffer_registration: object = None,
     ) -> _FakeGPUContext:
         """Return a fake cache context without touching CUDA or wrappers."""
         return _FakeGPUContext()
@@ -148,8 +154,12 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     )
 
     module = lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx)
-    module.register_kv_cache(1, [], "shared-model", 1, EngineType.VLLM, {}, [])
-    module.register_kv_cache(2, [], "shared-model", 1, EngineType.VLLM, {}, [])
+    module.register_kv_cache(
+        1, [], "shared-model", 1, EngineType.VLLM, {}, [], event_profile=None
+    )
+    module.register_kv_cache(
+        2, [], "shared-model", 1, EngineType.VLLM, {}, [], event_profile=None
+    )
     assert ctx.layout_desc_registry.find("shared-model", 1) is layout_desc
 
     module.unregister_kv_cache(1)

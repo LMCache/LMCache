@@ -18,8 +18,8 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.base.device_ops import DeviceOps
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 
 class MluDeviceOps(DeviceOps):
