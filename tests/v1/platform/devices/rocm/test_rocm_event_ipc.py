@@ -5,9 +5,12 @@
 from enum import IntEnum
 from typing import Any
 import gc
+import time
 
 # Third Party
 import pytest
+import torch
+import torch.multiprocessing as mp
 
 # First Party
 from lmcache.v1.platform.base.event_ipc import DefaultEventIPCBackend
@@ -93,6 +96,23 @@ class _TorchEventModule:
 
 def _handle(tag: bytes) -> bytes:
     return tag.ljust(64, b"\0")
+
+
+def _export_pending_event(handle_q: Any, release: Any) -> None:
+    """Export a real ROCm IPC event and keep its producer alive."""
+    try:
+        torch.cuda.set_device(0)
+        stream = torch.cuda.Stream()
+        event = torch.cuda.Event(interprocess=True)
+        with torch.cuda.stream(stream):
+            torch.cuda._sleep(1_000_000_000)
+            event.record(stream)
+        handle_q.put(("ok", bytes(event.ipc_handle())))
+        stream.synchronize()
+        release.wait(180)
+    except BaseException as exc:
+        handle_q.put(("error", repr(exc)))
+        raise
 
 
 @pytest.fixture
@@ -194,6 +214,49 @@ def test_hip_event_is_destroyed_when_released(
     del event
     gc.collect()
     assert hip.destroyed == [1]
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.version.hip is None,
+    reason="requires a ROCm device",
+)
+def test_real_rocm_query_import_opens_a_torch_ipc_handle() -> None:
+    """Exercise the generated binding with PyTorch's real 64-byte handle."""
+    ctx = mp.get_context("spawn")
+    handle_q = ctx.Queue()
+    release = ctx.Event()
+    producer = ctx.Process(target=_export_pending_event, args=(handle_q, release))
+    producer.start()
+
+    imported = None
+    try:
+        status, payload = handle_q.get(timeout=180)
+        assert status == "ok", payload
+
+        backend = RocmEventIPCBackend(
+            event_module=torch.cuda,
+            device_type="cuda",
+        )
+        imported = backend.import_event_for_query(payload, torch.device("cuda:0"))
+        assert isinstance(imported, HipIpcEvent)
+
+        deadline = time.monotonic() + 180
+        while not backend.query_event(imported):
+            assert time.monotonic() < deadline, "timed out waiting for the IPC event"
+            time.sleep(0.001)
+
+        del imported
+        imported = None
+        gc.collect()
+    finally:
+        release.set()
+        producer.join(timeout=60)
+        if producer.is_alive():
+            producer.terminate()
+            producer.join(timeout=10)
+        del imported
+
+    assert producer.exitcode == 0
 
 
 @pytest.fixture
