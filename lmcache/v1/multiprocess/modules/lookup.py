@@ -286,7 +286,11 @@ class LookupModule(DiscoverableModule):
             model_name, world_size
         )
         chunk_hashes = _key_chunk_hashes(token_hasher, key, end=key.end)
-        if not chunk_hashes:
+        # A prompt shorter than one chunk has no full-chunk hash. A connector
+        # that loads unfull chunks still sends its unaligned length, so carry
+        # on: the empty job below probes the tail stored inside chunk 0. An
+        # aligned end (0 here) asks for no tail, so it returns now.
+        if not chunk_hashes and key.end % chunk_size == 0:
             self._register_empty_prefetch_job(
                 key,
                 chunk_size=chunk_size,
@@ -302,9 +306,7 @@ class LookupModule(DiscoverableModule):
         # ``save_unfull_chunk``), so they join its hit-rate denominator; a
         # connector that does not load unfull chunks sends an aligned end,
         # which leaves none.
-        unfull_tail_tokens = max(
-            0, min(key.end, num_packed_tokens(key.token_bytes)) - requested_tokens
-        )
+        unfull_tail_tokens = max(0, min(key.end, key.num_tokens) - requested_tokens)
 
         # Guard with has_subscribers() to avoid allocating the metadata dict
         # (including dtype/shape list comprehensions) when no subscriber is
@@ -409,8 +411,9 @@ class LookupModule(DiscoverableModule):
         # Prefetch only [start, end); status offsets hits back to absolute.
         suffix_hashes = chunk_hashes[start_chunk:]
         if not suffix_hashes:
-            # Everything is engine-covered: nothing to lock or prefetch. The
-            # empty job still reports the covered prefix as the hit.
+            # Every full chunk is engine-covered, or there is none: nothing to
+            # lock or prefetch. The empty job still reports the covered prefix
+            # as the hit and probes the unfull chunk after it.
             self._register_empty_prefetch_job(
                 key,
                 requested_tokens=probed_tokens,
@@ -761,7 +764,8 @@ class LookupModule(DiscoverableModule):
                 submitting a prefetch; empty when the lookup simply had
                 nothing to fetch.
             probe_unfull_chunk: Probe the unfull chunk after the hit prefix;
-                set when every full chunk is engine-covered.
+                set when every full chunk is engine-covered or the prompt has
+                no full chunk.
         """
         self._register_prefetch_job(
             _PrefetchJob(
