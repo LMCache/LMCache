@@ -665,9 +665,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config, kv_cache_config
         )
         self._prefix_replay_tokens = get_prefix_replay_tokens(kv_cache_config)
-        # A full-prompt hit is reported as P - 1 when a group keeps only a
-        # window, as vLLM's Offloading connector does (see
-        # get_num_new_matched_tokens).
+        # Windowed groups need a full-prompt hit reported as P - 1.
         self._full_hit_holds_back_last_token = kv_cache_config is not None and any(
             is_windowed_group(group) for group in kv_cache_config.kv_cache_groups
         )
@@ -1107,9 +1105,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         for meta in metadata.requests:
             if meta.direction != "RETRIEVE":
-                continue
-            if meta.fail_load:
-                self.worker_adapter.fail_retrieve_request(meta.request_id, meta.op)
                 continue
             request_ids.append(meta.request_id)
             ops.append(meta.op)
@@ -1562,15 +1557,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 need_to_load,
             )
 
-        # A full-prompt hit reports every token, as vLLM's Offloading and Nixl
-        # connectors do for full attention: the load is async, so vLLM
-        # allocates the whole hit and recomputes the last token itself
-        # afterwards. Holding that token back left its block unallocated while
-        # the retrieve covered it (#6751).
+        # A full-prompt hit reports every token, unless vLLM would then not
+        # allocate or not keep a block the hit needs.
         if ret == len(request.all_token_ids):
             if self._prefix_replay_tokens > 0:
-                # SWA bounded replay floors the hit to a block boundary before
-                # allocating, so give back a whole chunk.
+                # SWA bounded replay floors the hit to a block, so give back a chunk.
                 chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
                 aligned = max(0, (ret - 1) // chunk * chunk)
                 if aligned < ret:
@@ -1578,29 +1569,29 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     tracker.num_lmcache_hit_tokens = aligned
                 need_to_load = max(0, aligned - num_computed_tokens)
             elif self._full_hit_holds_back_last_token:
-                # A windowed group (sliding window, chunked local, Mamba) keeps
-                # P - 1, as Offloading does: with P, vLLM null-pads the window
-                # block that recomputing token P - 1 reads. When token P - 1
-                # starts a block vLLM then does not allocate, load only the
-                # full chunks and release the tail's lock.
-                if ret != full_chunk_tokens and any(
-                    tokens_per_block > 0 and (ret - 1) % tokens_per_block == 0
-                    for tokens_per_block in self._group_tokens_per_block
-                ):
+                # Report P - 1, or only the full chunks when P - 1 would leave
+                # the last token's block unallocated.
+                if ret != full_chunk_tokens and self._starts_a_block(ret - 1):
                     tracker.pending_free_ranges.append((full_chunk_tokens, ret))
                     tracker.num_lmcache_hit_tokens = full_chunk_tokens
                     need_to_load = max(0, full_chunk_tokens - num_computed_tokens)
                 else:
                     need_to_load = max(0, need_to_load - 1)
             elif need_to_load == 1:
-                # vLLM already holds P - 1 tokens and recomputes the last one:
-                # load nothing, so update_state_after_alloc frees every lock.
+                # vLLM already holds P - 1 tokens and recomputes the last one.
                 need_to_load = 0
 
         logger.debug(
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
         )
         return need_to_load, need_to_load > 0
+
+    def _starts_a_block(self, token_idx: int) -> bool:
+        """Return whether ``token_idx`` is the first token of a block in any group."""
+        return any(
+            tokens_per_block > 0 and token_idx % tokens_per_block == 0
+            for tokens_per_block in self._group_tokens_per_block
+        )
 
     def on_new_request(self, request: "Request") -> None:
         """Submit an LMCache lookup when a request enters the waiting queue.

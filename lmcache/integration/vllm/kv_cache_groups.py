@@ -18,6 +18,14 @@ from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 
+# vLLM spec and manager classes whose groups keep only a window of tokens.
+_WINDOWED_SPECS = ("SlidingWindowSpec", "ChunkedLocalAttentionSpec", "MambaSpec")
+_WINDOWED_MANAGERS = (
+    "SlidingWindowManager",
+    "ChunkedLocalAttentionManager",
+    "MambaManager",
+)
+
 
 def _is_attention_spec(spec: Any) -> bool:
     """Return whether the KV cache spec is a vLLM attention spec.
@@ -262,14 +270,6 @@ def is_windowed_group(group: Any) -> bool:
         for spec in group_specs(group)
         for cls in type(spec).__mro__
     )
-
-
-_WINDOWED_SPECS = ("SlidingWindowSpec", "ChunkedLocalAttentionSpec", "MambaSpec")
-_WINDOWED_MANAGERS = (
-    "SlidingWindowManager",
-    "ChunkedLocalAttentionManager",
-    "MambaManager",
-)
 
 
 def tokens_per_group_block(group: Any, dcp_size: int) -> int:

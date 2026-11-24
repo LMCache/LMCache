@@ -12,7 +12,6 @@ import pytest
 from lmcache.v1.common import group_view
 from lmcache.v1.common.group_view import (
     EngineGroupInfo,
-    block_index_range,
     expand_engine_block_ids,
     get_engine_group_indices,
     is_kv_writer,
@@ -215,13 +214,6 @@ def test_slice_block_ids_unfull_chunk_takes_the_block_of_the_last_token():
         include_unfull_chunk=True,
     )
     assert sliced == [list(range(8, 19)), [1, 2]]
-
-
-def test_block_index_range_floors_the_start_and_rounds_up_the_end():
-    """The slice and the retrieve's allocation check share this range."""
-    assert block_index_range(16, 128, 300) == (8, 19)
-    assert block_index_range(16, 128, 304) == (8, 19)
-    assert block_index_range(128, 0, 256) == (0, 2)
 
 
 def test_slice_block_ids_unaligned_end_needs_unfull_chunk():

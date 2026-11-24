@@ -215,15 +215,6 @@ def expand_engine_block_ids(
     ]
 
 
-def block_index_range(
-    tokens_per_block: int, start_token_idx: int, end_token_idx: int
-) -> tuple[int, int]:
-    """Return the ``[first, last)`` block indices of a group with
-    ``tokens_per_block`` tokens per block that cover ``[start, end)``: the
-    start floored, the end rounded up to hold an unfull chunk's last token."""
-    return start_token_idx // tokens_per_block, -(-end_token_idx // tokens_per_block)
-
-
 def slice_block_ids_per_group(
     allocated_block_ids: Mapping[int, Sequence[int]],
     group_tokens_per_block: Sequence[int],
@@ -273,10 +264,15 @@ def slice_block_ids_per_group(
                 f"{tokens_per_block}"
             )
         group_block_ids = allocated_block_ids.get(engine_group_idx, [])
-        first, last = block_index_range(
-            tokens_per_block, start_token_idx, end_token_idx
+        sliced.append(
+            list(
+                group_block_ids[
+                    start_token_idx // tokens_per_block : -(
+                        -end_token_idx // tokens_per_block
+                    )
+                ]
+            )
         )
-        sliced.append(list(group_block_ids[first:last]))
     return sliced
 
 

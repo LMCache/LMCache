@@ -128,9 +128,6 @@ vLLM integration:
 | `LMCacheMPRequestTracker` | New fields `unfull_chunk_boundaries` (tails already stored or hit) and `ends_at_prompt` (`max_tokens == 1`). |
 | `LMCacheMPRequestMetadata` | New `GetUnfullChunkStoreMetadata(...)`: builds the tail store ops. |
 | `kv_cache_groups` | New `is_per_request_state_spec`, `is_align_mode_mamba_spec`, `is_windowed_group` (a prefix-cacheable sliding-window, chunked-local or Mamba group; see [Full-prompt hit](#full-prompt-hit)). |
-| `group_view` | New `block_index_range(tokens_per_block, start, end)`: the `[first, last)` block indices of a token range, shared by `slice_block_ids_per_group` and the retrieve's allocation check. |
-| `LMCacheMPRequestMetadata` (RETRIEVE) | New field `fail_load`: the allocated blocks cannot hold the range, so the worker reports the load as failed instead of loading it. |
-| `LMCacheMPWorkerAdapter` | New `fail_retrieve_request(request_id, op)`: flags `op`'s blocks and the request for vLLM's load-failure recovery without submitting the retrieve; `get_finished` reports the request once. The unhealthy early return of `submit_retrieve_request` uses it too. |
 
 ## How it works
 
@@ -293,16 +290,11 @@ Why windowed groups keep `P - 1`: with `P` reported, vLLM's
 recomputes token `P - 1`, whose window starts at `P - W`. When
 `P = W - 1 (mod T)` that token's block is the null block (`T = 16`,
 `W = 64`: `P = 207, 223, ...`). With `P - 1` reported, only the blocks
-wholly below token `P - W` are null-padded. Holding a token back leaves the block of token `P - 1`
-unallocated when that token starts a block (#6751), so that case loads only
-the full chunks and vLLM recomputes the tail.
-
-Backstop: `GetRetrieveMetadata` checks each group's allocated blocks against
-`block_index_range(T, start, end)`. If any group is short, it sets
-`fail_load` and logs an error instead of loading a truncated block list (the
-KV would land in the wrong blocks) or raising (which would kill the engine
-core). The worker then calls `fail_retrieve_request`, and vLLM's
-`kv_load_failure_policy` fails or recomputes that request alone.
+wholly below token `P - W` are null-padded. Holding a token back leaves the
+block of token `P - 1` unallocated when that token starts a block (#6751), so
+that case loads only the full chunks and vLLM recomputes the tail. Since the
+chunk size is a multiple of every group's block, every case above retrieves
+only into blocks vLLM allocated.
 
 ### Object layout
 

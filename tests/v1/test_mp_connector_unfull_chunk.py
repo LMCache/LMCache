@@ -19,13 +19,9 @@ from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     LMCacheMPConnector,
 )
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
-    LMCacheMPConnectorMetadata,
     LMCacheMPRequestMetadata,
     LMCacheMPRequestState,
     LMCacheMPRequestTracker,
-)
-from lmcache.integration.vllm.vllm_multi_process_adapter import (  # noqa: E402
-    LoadStoreOp,
 )
 
 CHUNK = 128
@@ -252,7 +248,6 @@ def test_full_prompt_hit_loads_every_token_into_the_blocks_vllm_allocates(
     meta = LMCacheMPRequestMetadata.GetRetrieveMetadata(tracker, CHUNK, [GRID])
 
     assert meta is not None
-    assert not meta.fail_load
     assert (meta.op.start, meta.op.end) == (0, prompt)
     assert meta.op.block_ids == [blocks]
 
@@ -293,7 +288,6 @@ def test_full_prompt_hit_fits_the_blocks_of_every_group(prompt: int):
     )
 
     assert meta is not None
-    assert not meta.fail_load
     assert (meta.op.start, meta.op.end) == (0, prompt)
     assert meta.op.block_ids == blocks
 
@@ -387,7 +381,6 @@ def test_full_prompt_hit_keeps_the_sliding_window_vllm_recomputes_with(prompt: i
         connector.request_trackers["req-0"], CHUNK, [GRID]
     )
     assert meta is not None
-    assert not meta.fail_load
     assert (meta.op.start, meta.op.end) == (0, full_chunks if trimmed else prompt)
     assert meta.op.block_ids == [blocks[: -(-meta.op.end // GRID)]]
 
@@ -406,55 +399,6 @@ def test_mamba_hit_capped_by_the_reserved_last_token_is_not_reduced_again():
     ) == (prompt - 1, True)
     kwargs = scheduler_adapter.maybe_submit_lookup_request.call_args.kwargs
     assert kwargs["reserve_last_token"] is True
-
-
-def test_retrieve_past_the_allocated_blocks_is_reported_as_a_failed_load():
-    """A retrieve the allocated blocks cannot hold must not load a shorter
-    block list (the tail's KV would land in the wrong blocks) nor raise in
-    the scheduler (that kills the engine core): the load is flagged failed,
-    so vLLM fails or recomputes this request alone."""
-    prompt = 2 * CHUNK + GRID + 1
-    allocated = list(range((prompt - 1) // GRID))
-    tracker = LMCacheMPRequestTracker(_request(prompt_tokens=prompt))
-    tracker.append_block_ids((allocated,))
-    tracker.num_lmcache_hit_tokens = prompt
-    tracker.state = LMCacheMPRequestState.WAITING_FOR_LOAD
-
-    meta = LMCacheMPRequestMetadata.GetRetrieveMetadata(tracker, CHUNK, [GRID])
-
-    assert meta is not None
-    assert meta.fail_load
-    # The failure names every block vLLM allocated for the load.
-    assert meta.op.block_ids == [allocated]
-
-
-def test_worker_reports_a_flagged_retrieve_as_failed_instead_of_loading_it():
-    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
-    connector._delay_free_req_ids = set()
-    connector.worker_adapter = MagicMock()
-    metadata = LMCacheMPConnectorMetadata()
-    failed, loaded = (
-        LMCacheMPRequestMetadata(
-            request_id=request_id,
-            direction="RETRIEVE",
-            op=LoadStoreOp(token_bytes=b"", block_ids=[[1]], start=0, end=CHUNK),
-            fail_load=fail_load,
-        )
-        for request_id, fail_load in (("req-failed", True), ("req-loaded", False))
-    )
-    metadata.add_request_metadata(failed)
-    metadata.add_request_metadata(loaded)
-    connector._get_connector_metadata = lambda: metadata
-
-    connector.start_load_kv(MagicMock())
-
-    connector.worker_adapter.fail_retrieve_request.assert_called_once_with(
-        "req-failed", failed.op
-    )
-    (request_ids, ops, _event), _ = (
-        connector.worker_adapter.batched_submit_retrieve_requests.call_args
-    )
-    assert (request_ids, ops) == (["req-loaded"], [loaded.op])
 
 
 def test_boundary_state_block_is_pinned_until_the_request_is_sent():
