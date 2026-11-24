@@ -23,6 +23,7 @@ import threading
 import torch
 
 # First Party
+from lmcache.v1.common.buffer_registration import BufferRegistration
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.gpu_connector._gds_backends import create_backend
@@ -125,6 +126,16 @@ def deregister_gds_gpu_buffer(buffer: torch.Tensor) -> None:
         contexts = [get_gds_context(), *_owner_contexts.values()]
     for context in contexts:
         context.deregister_gpu_buffer(buffer)
+
+
+class GDSBufferRegistration(BufferRegistration):
+    """Connect cache-context staging buffers to the server's live GDS slabs."""
+
+    def register(self, buffer: torch.Tensor) -> None:
+        register_gds_gpu_buffer(buffer)
+
+    def deregister(self, buffer: torch.Tensor) -> None:
+        deregister_gds_gpu_buffer(buffer)
 
 
 class SlabDirection(enum.Enum):

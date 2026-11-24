@@ -530,6 +530,29 @@ that hook; the default ``DeviceSpec.create_cache_context`` raises
 of silently falling back.  The cache context itself manages the KV
 cache layout and pointers used for IPC transfer.
 
+The KV and Q-ring server factories pass their default ``ObjectGroupTransfer``
+callback as the keyword-only ``object_group_transfer`` constructor argument.
+Custom contexts must accept and forward it to ``BaseCacheContext.__init__``
+when using the default full-chunk transfer implementation. A custom
+``LMCacheDrivenTransferModule._create_cache_context`` override must supply the
+callback when constructing such a context. ``transfer_object_group`` remains
+the device override point. The callback defaults to ``None`` for layout-only
+contexts; invoking the base transfer method without it raises ``RuntimeError``.
+Transfer completion and storage commit remain the caller's responsibility.
+
+Storage registration is supplied separately by the server through
+``create_cache_context(..., buffer_registration=...)``. The factory builds
+the context with the existing ``DeviceSpec`` arguments, then invokes
+``BaseCacheContext.register_staging_buffer``. A device with a registerable
+staging allocation overrides this hook, registers on its transfer stream,
+and retains the supplied ``common.buffer_registration.BufferRegistration``
+implementation only after success. Its ``close`` drains the stream and
+deregisters before releasing the allocation. The default hook is a no-op.
+If registration fails, the factory closes the context before propagating
+the error. Direct CUDA/MUSA context construction does not implicitly
+register with GDS; custom server factories using GDS must supply the adapter
+or invoke the registration hook before submitting transfers.
+
 Host-side pinning via ``pin_memory_backend`` is *optional* and only
 affects staging-buffer performance; it is not required to enable
 LMCache-driven mode.

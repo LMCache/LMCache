@@ -212,6 +212,8 @@ Source: ``lmcache/v1/multiprocess/config.py``
        Publication while idle requires vLLM to call ``take_events()`` while idle.
        Events still carry LMCache chunk hashes and chunk size; native engine
        block identities are separate work.
+       Must be ``0`` for clients that send chunk hashes instead of tokens;
+       see :ref:`mp-client-chunk-hashes`.
        With the channel enabled, Stored requires a committed L1 copy of every
        distinct shard of each registered object group, as determined by its
        TP replication and DCP sharding, within the same salt and identity tags.
@@ -305,6 +307,47 @@ Observability group.
      - ``100``
      - Max number of log files to keep.  Oldest files are deleted
        when this limit is exceeded.
+
+.. _mp-client-chunk-hashes:
+
+Client-Computed Chunk Hashes
+----------------------------
+
+Source: ``lmcache/v1/client/chunk_hashes.py``
+
+By default every lookup, lock release, store and retrieve key carries the
+request's whole token prefix, and the server decodes it and hashes it chunk
+by chunk. A client may instead send the hashes itself
+(``IPCCacheServerKey.chunk_hashes``): the rolling hash of every complete
+chunk in ``[0, end)``, computed with the server's own ``TokenHasher`` so the
+keys are byte-identical. The server then neither decodes nor hashes tokens.
+The ATOM adapters send them when built with ``client_chunk_hashes=True``;
+other clients keep sending tokens. This key form has these requirements:
+
+- **blake3 only.** Client hashes are blake3. A server started with another
+  ``--hash-algorithm`` rejects such keys.
+- **No unfull chunk.** The hashes cover complete chunks only, so such a key
+  never stores or loads the unfull chunk at an unaligned ``end``; its ``end``
+  is floored to a chunk boundary as before unfull chunks existed. The key must
+  carry exactly ``end // chunk_size`` hashes at the registration's chunk size;
+  the server rejects any other count.
+- **Upgrade the server first.** An older server does not know the field and
+  sees an empty token prefix: lookups report no hit and stores and retrieves
+  fail. Turn the client option on only after every server it talks to runs a
+  version that supports it.
+- **KV events and coordinator reporting must be off.** Both bind every stored
+  chunk to its token ids, which these keys do not have, and the KV-event
+  channel is on by default (``--kv-event-log-size 32768``). While either is
+  enabled, the server rejects these keys with an error naming the flags. Start
+  the server with ``--kv-event-log-size 0`` (or ``--disable-observability``),
+  without ``--coordinator-event-reporting``, and without
+  ``--trace-level events``.
+
+Example:
+
+.. code-block:: bash
+
+   lmcache server        --hash-algorithm blake3        --kv-event-log-size 0
 
 HTTP Frontend
 -------------
@@ -1320,6 +1363,48 @@ Full Example
         --metrics-sample-rate 0.01 \
         --enable-tracing \
         --otlp-endpoint http://localhost:4317
+
+KV-event registration
+---------------------
+
+``register_kv_cache`` takes a required final ``event_profile`` argument and
+returns the profile recorded for the registration. Every current integration
+passes ``None``; caching and router-visible events are unchanged. There is no
+configuration knob for enabling a native profile in this PR.
+
+``KVEventProfile(profile_id, block_size)`` is an immutable contract with a
+nonempty opaque identity and a positive engine event block size. Before any
+context, layout or liveness state changes, the server validates:
+
+* positive world size and a block size that divides the server chunk size;
+* one full-attention engine block address space with the declared block size;
+* agreement across active registrations for the same model and world size,
+  including whether a profile is present;
+* no model/world change for an existing instance when a profile is involved.
+
+A rejection raises ``MPRequestError`` with the server's reason. Its code is
+``INVALID_ARGUMENT`` on gRPC and ``invalid_argument`` on ZMQ; ZMQ details also
+include the operation name. Transport failures keep their existing behavior:
+gRPC raises ``MPServerUnavailableError``, while a ZMQ wait can expire with
+``LMCacheTimeoutError``.
+
+With ``None``, gRPC's optional request field is absent and the response is
+empty, preserving both byte strings. ZMQ registration always includes one
+additional payload frame, so behavior is identical but request bytes are not.
+Its ``None`` success reply still contains no payload frame. QStore's request
+and response bytes are unchanged.
+
+* An older gRPC worker can register with a newer server: absence means ``None``.
+* A newer gRPC worker can register with an older server, but its returned
+  profile is absent. A future profile sender must compare the returned value.
+* An older ZMQ worker receives an explicit payload-count rejection from a
+  newer server. A newer worker calling an older server times out because that
+  server cannot answer the longer request. Upgrade ZMQ deployments together.
+
+There is no handshake or fallback. Profiles live until unregister, reap or
+shutdown. STORE bindings, the first integration sending and checking a
+profile, and native event records remain later steps of
+`issue #5932 <https://github.com/LMCache/LMCache/issues/5932>`_.
 
 Anonymous Usage Statistics
 --------------------------
