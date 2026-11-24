@@ -88,14 +88,14 @@ func TestDisableOrdering_ReconcilePurgesOnlyAfterSelectorIsClean(t *testing.T) {
 	if err := c.Get(ctx, req.NamespacedName, ds); err != nil {
 		t.Fatal(err)
 	}
-	if ds.Spec.Template.Spec.NodeSelector[key] != resources.WorkloadLabelValueBase {
+	if ds.Spec.Template.Spec.NodeSelector[key] != resources.WorkloadLabelValue {
 		t.Fatalf("DS selector must reference the managed label while enabled")
 	}
 	node := &corev1.Node{}
 	if err := c.Get(ctx, client.ObjectKey{Name: "gpu-a"}, node); err != nil {
 		t.Fatal(err)
 	}
-	if node.Labels[key] != resources.WorkloadLabelValueBase {
+	if node.Labels[key] != resources.WorkloadLabelValue {
 		t.Fatalf("node label missing after enabled reconcile")
 	}
 
@@ -164,7 +164,7 @@ func TestDisableOrdering_GuardRefusesWhileSelectorReferencesThem(t *testing.T) {
 	if ds.Spec.Template.Spec.NodeSelector == nil {
 		ds.Spec.Template.Spec.NodeSelector = map[string]string{}
 	}
-	ds.Spec.Template.Spec.NodeSelector[key] = resources.WorkloadLabelValueBase
+	ds.Spec.Template.Spec.NodeSelector[key] = resources.WorkloadLabelValue
 	if err := c.Patch(ctx, ds, patch); err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestDisableOrdering_GuardRefusesWhileSelectorReferencesThem(t *testing.T) {
 	if err := c.Get(ctx, client.ObjectKey{Name: "gpu-a"}, node); err != nil {
 		t.Fatal(err)
 	}
-	if node.Labels[key] != resources.WorkloadLabelValueBase {
+	if node.Labels[key] != resources.WorkloadLabelValue {
 		t.Fatal("refusing guard must not purge labels")
 	}
 }
@@ -208,7 +208,7 @@ func TestFullReconcile_PlacementStatusSurvivesUpdateStatus(t *testing.T) {
 	// pre-labeled node carrying no wanted bookkeeping — a node the workload
 	// left BEFORE the operator ever saw it).
 	pre := nodeNamed("gpu-b")
-	pre.Labels[key] = resources.WorkloadLabelValueBase
+	pre.Labels[key] = resources.WorkloadLabelValue
 	if err := c.Update(ctx, pre); err != nil {
 		t.Fatal(err)
 	}

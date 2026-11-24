@@ -39,7 +39,7 @@ func nodeUpdate(old, new *corev1.Node) event.UpdateEvent {
 // for the stranded-engine leak: a pod moving to Succeeded/Failed changes
 // no watched field except Status.Phase, so the predicate must fire on it —
 // otherwise a finished Job pod (lingering on ttlSecondsAfterFinished)
-// keeps its node's label and engine forever, and inflates its DRA tier.
+// keeps its node's label and engine forever.
 func TestPodPredicate_TerminalPhaseTriggersReconcile(t *testing.T) {
 	p := workloadPlacementPodPredicate()
 	base := boundPod(wlasTestNamespace, "p1", "gpu-a", map[string]string{"app": "predictor"})
@@ -82,9 +82,9 @@ func TestNodePredicate_OnlyWlasLabelChangesFire(t *testing.T) {
 		t.Fatal("non-wlas churn on a labeled node must not trigger a reconcile")
 	}
 
-	retiered := labeled.DeepCopy()
-	retiered.Labels[key] = "2"
-	if !p.Update(nodeUpdate(labeled, retiered)) {
+	foreignValue := labeled.DeepCopy()
+	foreignValue.Labels[key] = "foreign"
+	if !p.Update(nodeUpdate(labeled, foreignValue)) {
 		t.Fatal("wlas label value change must trigger a reconcile")
 	}
 

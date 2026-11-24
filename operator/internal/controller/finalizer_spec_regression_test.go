@@ -166,6 +166,3 @@ func TestCoordinatorRefSurvivesDisable(t *testing.T) {
 		t.Fatalf("engine permanently invalid after disable (the brick): %v", errs)
 	}
 }
-
-// silence metav1 if only used in future edits of this file
-var _ = metav1.Now

@@ -108,7 +108,7 @@ func labelSnapshot(ctx context.Context, t *testing.T, c client.Client, key strin
 		t.Fatal(err)
 	}
 	for _, n := range nodes.Items {
-		if v, ok := n.Labels[key]; ok && v == resources.WorkloadLabelValueBase {
+		if v, ok := n.Labels[key]; ok && v == resources.WorkloadLabelValue {
 			out[n.Name] = true
 		}
 	}
@@ -220,7 +220,7 @@ func TestWorkloadPlacement_UntrackedLabelGetsFullWindow(t *testing.T) {
 	e := newWlasEngine("engine", 300)
 	key := resources.WorkloadPlacementLabel("mlservices", "engine")
 	preLabeled := nodeNamed("gpu-a")
-	preLabeled.Labels[key] = resources.WorkloadLabelValueBase
+	preLabeled.Labels[key] = resources.WorkloadLabelValue
 	c := wlasClient(t, e, preLabeled) // no workload pods at all
 
 	t0 := time.Now()
@@ -362,7 +362,7 @@ func TestWorkloadPlacement_PreGapAbsenceEntryHonoredAcrossGap(t *testing.T) {
 		e := newWlasEngine("engine", 300)
 		key := resources.WorkloadPlacementLabel(wlasTestNamespace, "engine")
 		pre := nodeNamed("gpu-a")
-		pre.Labels[key] = resources.WorkloadLabelValueBase
+		pre.Labels[key] = resources.WorkloadLabelValue
 		c := wlasClient(t, e, pre) // no matching pods; label pre-seeded
 
 		gapStart := time.Now().Add(-400 * time.Second)
@@ -383,7 +383,7 @@ func TestWorkloadPlacement_PreGapAbsenceEntryHonoredAcrossGap(t *testing.T) {
 		e := newWlasEngine("engine", 300)
 		key := resources.WorkloadPlacementLabel(wlasTestNamespace, "engine")
 		pre := nodeNamed("gpu-a")
-		pre.Labels[key] = resources.WorkloadLabelValueBase
+		pre.Labels[key] = resources.WorkloadLabelValue
 		c := wlasClient(t, e, pre)
 
 		gapStart := time.Now().Add(-60 * time.Second)

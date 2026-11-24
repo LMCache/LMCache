@@ -269,10 +269,10 @@ func ensureDesiredWorkloadLabels(
 			target = fresh
 		}
 
-		// addWorkloadLabel is a no-op when the node already carries the
-		// base value; every other case is a first placement or a
+		// addWorkloadLabel is a no-op when the node already carries
+		// WorkloadLabelValue; every other case is a first placement or a
 		// foreign-value correction, both applied immediately.
-		errs = append(errs, addWorkloadLabel(ctx, c, target, key, resources.WorkloadLabelValueBase))
+		errs = append(errs, addWorkloadLabel(ctx, c, target, key, resources.WorkloadLabelValue))
 		delete(absentSince, node)
 	}
 	return errors.Join(errs...)

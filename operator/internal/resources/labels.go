@@ -57,12 +57,10 @@ func MergeLabels(labelMaps ...map[string]string) map[string]string {
 // watch predicate, which acts on any label carrying this prefix.
 const WorkloadLabelPrefix = "lmcache.ai/wlas-"
 
-// WorkloadLabelValueBase is the label value stamped on every node hosting
-// the engine's workload — a constant presence marker the DaemonSet
-// nodeSelector selects. Kept numeric (rather than "true") so a later
-// feature can widen the value space without changing the base selector's
-// semantics.
-const WorkloadLabelValueBase = "1"
+// WorkloadLabelValue is the label value stamped on every node hosting the
+// engine's workload — a constant presence marker the DaemonSet
+// nodeSelector selects.
+const WorkloadLabelValue = "1"
 
 // EffectiveNodeSelector returns the DaemonSet nodeSelector for an engine:
 // spec.nodeSelector alone, or — when workload-aware scheduling is enabled —
@@ -72,7 +70,7 @@ const WorkloadLabelValueBase = "1"
 func EffectiveNodeSelector(namespace, name string, spec *lmcachev1alpha1.LMCacheEngineSpec) map[string]string {
 	if w := spec.WorkloadAwareScheduling; w != nil && w.Enabled {
 		key := WorkloadPlacementLabel(namespace, name)
-		return MergeLabels(spec.NodeSelector, map[string]string{key: WorkloadLabelValueBase})
+		return MergeLabels(spec.NodeSelector, map[string]string{key: WorkloadLabelValue})
 	}
 	return spec.NodeSelector
 }
@@ -82,7 +80,7 @@ func EffectiveNodeSelector(namespace, name string, spec *lmcachev1alpha1.LMCache
 // 16-hex fnv64a hash of "namespace/name" (the full uint64 as %x):
 // deterministic, collision-safe for practical fleet sizes, and still
 // well inside the 63-char key budget. The label's value is the constant
-// WorkloadLabelValueBase.
+// WorkloadLabelValue.
 func WorkloadPlacementLabel(namespace, name string) string {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(namespace + "/" + name))
