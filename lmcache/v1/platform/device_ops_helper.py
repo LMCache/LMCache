@@ -25,7 +25,6 @@ import torch
 # First Party
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.ops_types import PageBufferShapeDesc
-from lmcache.v1.platform import synchronize_device
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
@@ -73,6 +72,12 @@ def _paged_pointer_table(
         as_int64 = np.array(addresses, dtype=np.uint64).view(np.int64)
         table = torch.from_numpy(as_int64).to(device=device)
     if len(cache) >= _MAX_PAGED_TABLE_CACHE_ENTRIES:
+        # First Party
+        # Function-local: device spec discovery imports this module while
+        # platform/__init__ is still initializing, before synchronize_device
+        # is defined.
+        from lmcache.v1.platform import synchronize_device
+
         oldest_key = next(iter(cache))
         synchronize_device(cache[oldest_key].device)
         cache.pop(oldest_key)
@@ -229,6 +234,9 @@ def transfer_with_address_kernel(
         # The kernel reaches these buffers through raw addresses that torch's
         # stream tracking cannot see: wait before the host reads the staging
         # copies (D2H) or the pinned temporaries are released (H2D).
+        # First Party
+        from lmcache.v1.platform import synchronize_device
+
         synchronize_device(device)
         if is_d2h:
             for dst, src in zip(chunks, kernel_chunks, strict=True):

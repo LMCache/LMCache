@@ -23,7 +23,6 @@ from lmcache.v1.common.utils import (
     make_page_buffer_shape_desc,
     normalize_kv_and_discover_format,
 )
-from lmcache.v1.platform import device_ops_helper
 from lmcache.v1.platform.device_ops_helper import transfer_with_address_kernel
 import lmcache.lmcache_native as lmcache_native
 
@@ -194,7 +193,7 @@ def test_pinned_chunks_keep_the_async_path(monkeypatch: pytest.MonkeyPatch) -> N
     """Already pinned chunks are passed as-is and nothing synchronizes."""
     kernel = _RecordingKernel()
     syncs: list[torch.device] = []
-    monkeypatch.setattr(device_ops_helper, "synchronize_device", syncs.append)
+    monkeypatch.setattr("lmcache.v1.platform.synchronize_device", syncs.append)
     paged, fmt, desc = _paged_kv(num_blocks=2)
 
     transfer_with_address_kernel(
@@ -228,8 +227,7 @@ def test_unpinned_h2d_chunks_sync_after_launch(
     kernel = _RecordingKernel()
     syncs: list[int] = []
     monkeypatch.setattr(
-        device_ops_helper,
-        "synchronize_device",
+        "lmcache.v1.platform.synchronize_device",
         lambda _device: syncs.append(len(kernel.launches)),
     )
     unpinned = _host_chunk(0, pinned=False)
