@@ -25,12 +25,33 @@ The benchmark runs as **two separate processes**:
 A side-channel is needed because the transfer channel handshake only exchanges
 the whole-buffer registration, not per-object offsets.
 
-> Only the `nixl` transfer channel type is registered today. The tool is generic
-> over `--transfer-channel-type`; an unknown type raises a clear error.
+The tool selects a registered backend with `--transfer-channel-type`, including
+`nixl`, `mooncake_te`, and `hixl`. Each backend requires its own runtime and
+compatible memory allocation. An unknown type raises a clear error.
 
 ## Usage
 
 Run via the module or the `lmcache` CLI. Start the server first.
+
+### HIXL on Ascend
+
+For HIXL with ACL Host memory, use the thin benchmark entry point from a
+compatible LMCache-Ascend installation:
+
+```bash
+LMCACHE_ASCEND_MP_HOST_MEMORY_ALLOCATOR=aclrt_malloc_host python -m lmcache_ascend.v1.mp_transfer_channel_benchmark --help
+```
+
+Use the same server/client arguments below with `--transfer-channel-type hixl`.
+Configure a distinct `LMCACHE_HIXL_ENGINE_ID` for each process and select its
+logical NPU with `LMCACHE_HIXL_DEVICE_ID` (default `0`). The entry point disables
+the benchmark's named SHM when the ACL allocator is selected, then delegates
+transfers, `--op read` / `--op write`, verification and cleanup to this tool.
+Do not pass `--use-lazy` with this allocator.
+
+See the [P2P user guide](../../../docs/source/mp/p2p.rst) and
+[LMCache-Ascend MP documentation](https://github.com/LMCache/LMCache-Ascend/tree/main/docs/mp_mode)
+for backend prerequisites and deployment. The examples below use NIXL.
 
 ### `python -m`
 

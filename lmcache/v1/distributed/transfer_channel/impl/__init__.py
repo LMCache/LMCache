@@ -7,8 +7,14 @@ self-registers its factory via ``register_transfer_channel_factory``.
 
 # First Party
 from lmcache.v1.distributed.transfer_channel.impl import (  # noqa: F401
-    hixl_impl,
     nixl_impl,
+)
+
+# Keep NIXL registration before HIXL when this package is imported.
+# isort: split
+# First Party
+from lmcache.v1.distributed.transfer_channel.impl import (  # noqa: F401
+    hixl_impl,
 )
 
 try:

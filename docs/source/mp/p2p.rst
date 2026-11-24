@@ -134,6 +134,9 @@ selected per server with ``--p2p-transfer-engine``.
    * - ``mooncake_te``
      - Uses Mooncake Transfer Engine for P2P transfers. It uses TCP by default
        and can use RDMA when configured through environment variables.
+   * - ``hixl``
+     - Host-to-host transfers over Ascend device RoCE using the native HIXL
+       bindings and ACL runtime helpers provided by LMCache-Ascend.
 
 Mooncake Transfer Engine
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -153,6 +156,31 @@ when starting each server. For example:
 
 Replace ``mlx5_0`` with the RDMA device available on the node. Both variables
 must be set for RDMA; when they are omitted, Mooncake Transfer Engine uses TCP.
+
+HIXL on Ascend
+~~~~~~~~~~~~~~
+
+Select ``--p2p-transfer-engine hixl`` with a compatible, HIXL-enabled
+LMCache-Ascend installation. This backend supports READ and WRITE without
+requiring Mooncake Transfer Engine. Its Ascend dependencies are loaded when
+the HIXL context is created, not when other transfer backends are discovered.
+
+Each LMCache process uses one logical NPU and one fixed, contiguous Host L1
+allocation. Set ``LMCACHE_HIXL_ENGINE_ID`` to a unique, reachable ``IP:port``;
+this is the native HIXL listener, separate from ``--p2p-advertise-url``.
+``LMCACHE_HIXL_DEVICE_ID`` selects the logical device within the process's
+visible devices and defaults to ``0``.
+
+For the ACL Host allocator supplied by LMCache-Ascend, set
+``LMCACHE_ASCEND_MP_HOST_MEMORY_ALLOCATOR=aclrt_malloc_host``, use
+``--no-l1-use-lazy``, and leave ``--shm-name`` empty. The allocation must remain
+alive until the channel has been closed; local transfers and remote access
+must stop before shutdown. Extra registered regions and direct NPU device
+memory transfers are not supported by this backend.
+
+See the `LMCache-Ascend MP documentation
+<https://github.com/LMCache/LMCache-Ascend/tree/main/docs/mp_mode>`_ for
+Ascend installation and deployment instructions.
 
 Running a multi-node deployment
 -------------------------------
