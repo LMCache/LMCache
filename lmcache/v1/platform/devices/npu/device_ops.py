@@ -81,6 +81,9 @@ class NpuDeviceOps(DeviceOps):
         # A missing plugin makes ensure_native() raise rather than fall back,
         # so it is None only on an instance that has not been initialized.
         self._block_transfer_kernel: Callable[..., None] | None = None
+        self._paged_table_cache: dict[
+            tuple[tuple[int, ...], torch.device], torch.Tensor
+        ] = {}
 
     def ensure_native(self) -> None:
         if self._native_bound:
@@ -131,6 +134,7 @@ class NpuDeviceOps(DeviceOps):
             self._block_transfer_kernel,
             *args,
             max_chunks_per_launch=MAX_CHUNKS_PER_LAUNCH,
+            paged_table_cache=self._paged_table_cache,
         )
 
     def record_completion_on_stream(
