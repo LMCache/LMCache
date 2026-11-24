@@ -368,7 +368,7 @@ def test_unfull_chunk_round_trip_copies_slot_compressed_mamba_slice_whole(
     if not hasattr(lmcache_native.EngineKVFormat, "NL_X_NP_X_NB_BS_ONE_HS"):
         pytest.skip("extension lacks NL_X_NP_X_NB_BS_ONE_HS")
     monkeypatch.setattr(
-        object_group_transfer,
+        object_group_transfer.unfull_chunk,
         "device_ops",
         SimpleNamespace(
             multi_layer_block_kv_transfer=torch_ops.multi_layer_block_kv_transfer
