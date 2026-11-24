@@ -17,8 +17,7 @@ from cachetools import TTLCache as _TTLCache  # type: ignore
 import torch
 
 # First Party
-# Kept for vLLM: its lmcache_mp_connector imports init_logger from this module.
-from lmcache.v1.common.logging import init_logger as init_logger
+from lmcache.v1.common.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party
