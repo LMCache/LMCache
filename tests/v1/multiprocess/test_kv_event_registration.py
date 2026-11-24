@@ -292,7 +292,17 @@ def test_none_profile_preserves_protobuf_request_and_success_bytes() -> None:
         world_size=2,
         engine_type="vllm",
     )
-    payload: tuple[Any, ...] = (1, [], "model", 2, EngineType.VLLM, {}, [], None)
+    payload: tuple[Any, ...] = (
+        1,
+        [],
+        "model",
+        2,
+        EngineType.VLLM,
+        {},
+        [],
+        None,
+        None,
+    )
     request = codec.request_encoder(payload, {})
     assert request.SerializeToString() == old.SerializeToString()
     assert codec.request_decoder(request) == payload
@@ -305,17 +315,21 @@ def test_none_profile_preserves_protobuf_request_and_success_bytes() -> None:
     qstore = get_method_codec_registry().by_full_name[
         "lmcache.mp.QStoreService.RegisterQCache"
     ]
+    qstore_payload = (*payload[:7], None)
     assert (
-        qstore.request_encoder(payload[:-1], {}).SerializeToString()
+        qstore.request_encoder(qstore_payload, {}).SerializeToString()
         == old.SerializeToString()
     )
     assert (
-        qstore.request_decoder(qstore.request_encoder(payload[:-1], {})) == payload[:-1]
+        qstore.request_decoder(qstore.request_encoder(qstore_payload, {}))
+        == qstore_payload
     )
     assert qstore.response_encoder(None).SerializeToString() == b""
     assert qstore.response_decoder(qstore.response_encoder(None)) is None
     native = codec.request_encoder(_payload(), {})
-    assert codec.request_decoder(native)[-1] == PROFILE
+    decoded = codec.request_decoder(native)
+    assert decoded[-2] == PROFILE
+    assert decoded[-1] is None
 
 
 def test_zmq_missing_profile_reports_arity_not_union_attribute_error() -> None:
