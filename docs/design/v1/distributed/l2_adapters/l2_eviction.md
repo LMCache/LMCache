@@ -190,8 +190,10 @@ To support eviction in a new adapter:
    storage (e.g., after a store task completes).
 
 3. **Fire `_notify_keys_deleted(keys)`** inside `delete()` after keys are
-   removed. Only fire for keys that were actually removed — skip keys not found
-   and keys skipped due to pinning.
+   removed. Fire for every key that is no longer in storage, including keys
+   the backend reports as not found (another instance sharing the storage may
+   have deleted them): the policy keeps selecting a key it still tracks. Skip
+   keys skipped due to pinning and keys whose delete failed.
 
 4. **Fire `_notify_keys_accessed(keys)`** when a lookup or load marks a key as
    recently used (optional — improves LRU accuracy).
@@ -221,7 +223,10 @@ capacity) can omit steps 2–6 and rely on the base class no-op defaults.
 
 1. The underlying C++ connector must implement `do_single_delete()` (built-in Redis
    and FS connectors do; third-party plugins may not — in which case `delete()` is a
-   no-op).
+   no-op). A connector that overrides `do_single_delete_result()` instead (built-in
+   FS and HF3FS) also reports a key that is already absent as `NOT_FOUND`, and the
+   adapter stops tracking it. Other connectors report such a key as not deleted,
+   like a failed delete, so it stays tracked.
 2. The adapter must be configured with `max_capacity_gb > 0` to enable client-side
    size tracking for `get_usage()`. Without it, `get_usage()` returns `(-1, -1)` and
    the eviction controller will not trigger.

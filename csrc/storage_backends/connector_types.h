@@ -30,6 +30,14 @@ enum class Op : uint8_t {
   BATCH_TILE_DELETE
 };
 
+// Per-key result of a batch DELETE. Python reads any non-zero value as
+// "the key is gone".
+enum class DeleteResult : uint8_t {
+  NOT_DELETED = 0,  // failed or unsupported: the key may still exist
+  DELETED = 1,      // the key existed and was removed
+  NOT_FOUND = 2     // the key was already absent
+};
+
 /*
 shared communication state between threads executing a single batch operation.
 all threads need to complete before the completion is sent.
@@ -48,6 +56,7 @@ struct BatchState {
   // For EXISTS: 1 = key found, 0 = not found.
   // For GET: 1 = read succeeded, 0 = read failed (e.g. file
   //   not found).  This enables per-key error tolerance on loads.
+  // For DELETE: a DeleteResult value.
   // IMPORTANT: not vector<bool> due to concurrent write data race
   std::vector<uint8_t> per_key_results;
 
