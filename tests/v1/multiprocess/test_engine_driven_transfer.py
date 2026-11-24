@@ -30,6 +30,7 @@ from lmcache.v1.client.transfer_context.tensor_wire import (
     encode_tensors,
 )
 from lmcache.v1.common.custom_types import (
+    GroupLayout,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextResponse,
@@ -1595,6 +1596,42 @@ def test_server_register_and_find_non_cuda_context_layout(
     layout = ctx.layout_desc_registry.find("m", 1)
     assert layout is not None
     assert layout.shapes[0] == torch.Size([2, 2, 16, 16])
+
+
+@pytest.mark.parametrize(
+    "num_groups", [pytest.param(0, id="legacy"), pytest.param(2, id="grouped")]
+)
+def test_server_retries_rejected_engine_driven_registration(
+    server_module_factory: ServerModuleFactory, num_groups: int
+) -> None:
+    """A rejected registration leaves the instance ID available for retry."""
+    module, _, _, ctx = server_module_factory()
+    payload = _default_register_payload()
+    if num_groups:
+        payload.group_layouts = [
+            GroupLayout(
+                num_layers=1,
+                hidden_dim_size=payload.hidden_dim_size,
+                dtype_str=payload.dtype_str,
+                tokens_per_block=payload.block_size,
+            )
+            for _ in range(num_groups)
+        ]
+
+    with pytest.raises(ValueError, match="world_size must be >= 1"):
+        module.register_kv_cache_engine_driven_context(
+            msgspec.structs.replace(payload, world_size=0)
+        )
+    assert module.tracked_instance_count() == 0
+
+    module.register_kv_cache_engine_driven_context(payload)
+
+    assert module.tracked_instance_count() == 1
+    group_layouts = ctx.layout_desc_registry.find_group_layout_descs(
+        payload.model_name, payload.world_size
+    )
+    assert group_layouts is not None
+    assert len(group_layouts) == max(1, num_groups)
 
 
 def test_server_register_uses_worker_physical_slots(

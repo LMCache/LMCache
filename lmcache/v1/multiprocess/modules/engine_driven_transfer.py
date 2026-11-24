@@ -340,14 +340,21 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     ) -> RegisterEngineDrivenContextResponse:
         """Register non-CUDA KV layout metadata for non-GPU context mode.
 
+        Publish the instance only after its layout is registered, so a
+        rejected registration leaves the instance ID available for retry.
+
         Args:
             payload: Struct containing all registration fields
                 (instance_id, model_name, world_size, block_size,
                 num_layers, hidden_dim_size, dtype_str, use_mla,
-                num_physical_slots).
+                num_physical_slots, and optional group layouts).
+
+        Returns:
+            The SHM pool metadata and null block ID for the worker.
 
         Raises:
-            ValueError: If ``payload.dtype_str`` is not a valid torch dtype name.
+            ValueError: If the payload contains invalid layout metadata or
+                conflicts with an existing model layout registration.
         """
         shm_name = self._shm_pool_info["shm_name"]
         pool_size = self._shm_pool_info["pool_size"]
@@ -441,9 +448,6 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             group_layouts=group_layouts,
             group_windows=group_windows,
         )
-        # Build the entry and strategy outside the lock, then insert the pair
-        # atomically so a concurrent reap can never strand one without the
-        # other. REGISTER is SERIALIZED, so it is the sole inserter.
         entry = EngineDrivenContextEntry(
             metadata=metadata,
             model_name=payload.model_name,
@@ -461,17 +465,6 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             pending_lock=self._pending_shm_lock,
             transfer_key_factory=self._make_transfer_key,
         )
-        with self._lock:
-            self._engine_driven_contexts[payload.instance_id] = entry
-            self._strategies[payload.instance_id] = strategy
-
-        logger.info(
-            "Registered non-GPU context for instance %d (model=%s, world_size=%d)",
-            payload.instance_id,
-            payload.model_name,
-            payload.world_size,
-        )
-
         if group_layouts:
             # The lookup/prefetch path fans its object-group lookups out over
             # the registered AttnWindowDesc's group count. A hybrid-KV worker
@@ -510,6 +503,19 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 self._ctx.chunk_size,
                 self._ctx.hash_algorithm_name,
             )
+
+        # The registry can reject the layout. Publish the pair only after it
+        # succeeds so retries and the reaper can only see complete registrations.
+        with self._lock:
+            self._engine_driven_contexts[payload.instance_id] = entry
+            self._strategies[payload.instance_id] = strategy
+
+        logger.info(
+            "Registered non-GPU context for instance %d (model=%s, world_size=%d)",
+            payload.instance_id,
+            payload.model_name,
+            payload.world_size,
+        )
         return RegisterEngineDrivenContextResponse(
             shm_name=shm_name,
             pool_size=pool_size,
