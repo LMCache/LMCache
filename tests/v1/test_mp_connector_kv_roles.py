@@ -910,15 +910,10 @@ def test_scheduler_kv_events_preserve_store_remove_store(
 def test_full_prompt_hit_stays_chunk_aligned_under_prefix_replay(
     mock_io: SimpleNamespace, replay: int
 ) -> None:
-    """A full-prompt hit must not retrieve past what vLLM allocates.
-
-    With SWA bounded replay vLLM floors the external hit to the scheduler
-    block boundary before allocating, so a full hit would leave the
-    retrieve one block past the allocation. Under replay the connector gives
-    back the last chunk instead (retrieve end 8 of 12, lock on [8, 12)
-    released); without replay the whole prompt is reported and loaded, and
-    vLLM recomputes the last token after the async load.
-    """
+    """A full-prompt hit must not retrieve past what vLLM allocates. SWA
+    replay floors the hit to a block boundary, so the connector gives back the
+    last chunk (retrieve end 8 of 12, [8, 12) released); without replay the
+    whole prompt is loaded and vLLM recomputes the last token."""
     config = _config(
         KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
     )

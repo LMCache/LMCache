@@ -1555,14 +1555,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 need_to_load,
             )
 
-        # A full-prompt hit reports every prompt token, as vLLM's Offloading
-        # and Nixl connectors do. The load is always async, so vLLM allocates
-        # blocks for the whole hit and, once the load finishes, rolls
-        # num_computed_tokens back to num_tokens - 1 itself to recompute the
-        # last token. (Its `assert num_new_tokens > 0` guards sync loads only.)
-        # Holding back the last token instead left its block unallocated when
-        # that token starts a new block, while the retrieve still covered it
-        # (#6751).
+        # A full-prompt hit reports every token, as vLLM's Offloading and Nixl
+        # connectors do: the load is async, so vLLM allocates the whole hit and
+        # recomputes the last token itself afterwards. Holding that token back
+        # left its block unallocated while the retrieve covered it (#6751).
         if ret == len(request.all_token_ids) and self._prefix_replay_tokens > 0:
             # SWA bounded replay floors the hit to a block boundary before
             # allocating, so give back a whole chunk.

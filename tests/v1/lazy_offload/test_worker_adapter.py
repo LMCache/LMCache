@@ -218,10 +218,9 @@ def test_unhealthy_drain_receipts_all_outstanding_stores() -> None:
 
 
 def test_failed_retrieve_is_reported_once_with_its_blocks() -> None:
-    """A retrieve the scheduler flagged as failed is never submitted. It must
-    still be reported finished exactly once (or the request waits forever in
-    WAITING_FOR_REMOTE_KVS), with its blocks reported as load errors so vLLM
-    fails or recomputes the request instead of reading unloaded KV.
+    """A retrieve flagged as failed is never submitted, yet is reported
+    finished exactly once (or the request waits forever), with its blocks as
+    load errors so vLLM fails or recomputes it instead of reading unloaded KV.
     """
     adapter = _make_worker_adapter()
     _prepare_for_get_finished(adapter)

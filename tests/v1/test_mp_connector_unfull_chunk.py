@@ -229,12 +229,10 @@ def test_retrieve_of_a_tail_vllm_partly_holds_skips_vllms_tokens():
 def test_full_prompt_hit_loads_every_token_into_the_blocks_vllm_allocates(
     prompt: int,
 ):
-    """A full-prompt hit reports every prompt token, as vLLM's Offloading
-    and Nixl connectors do: the load is async, so vLLM allocates blocks for
-    the whole hit and recomputes the last token itself once the load
-    finishes. Holding back the last token left its block unallocated when
-    that token starts a new block, while the retrieve still covered it
-    (#6751)."""
+    """A full-prompt hit reports every prompt token, as vLLM's Offloading and
+    Nixl connectors do, so vLLM allocates the whole hit and recomputes the
+    last token itself. Holding that token back left its block unallocated
+    while the retrieve covered it (#6751)."""
     connector, _ = _connector(lookup_hit=prompt)
     connector._prefix_replay_tokens = 0
 
@@ -312,12 +310,10 @@ def test_full_prompt_hit_fits_the_blocks_of_every_group(prompt: int):
     ],
 )
 def test_full_prompt_hit_past_a_vllm_hit_of_all_but_the_last_token(prompt: int):
-    """vLLM's prefix cache stops at P - 1, which is block-aligned when the
-    last token starts a block. Only that token is then loaded: vLLM
-    allocates its block and, after the load, rolls back to P - 1 to
-    recompute it, so the one-token load is redundant but correct. The
-    retrieve starts at the tail's chunk and skips vLLM's tokens in it, so it
-    never writes the blocks vLLM shares from its prefix cache."""
+    """vLLM's prefix hit stops at P - 1, so only the last token is loaded
+    (redundant, as vLLM recomputes it, but correct). The retrieve starts at
+    the tail's chunk and skips vLLM's tokens, so it never writes the blocks
+    vLLM shares from its prefix cache."""
     vllm_hit = prompt - 1
     connector, _ = _connector(lookup_hit=prompt)
     connector._prefix_replay_tokens = 0

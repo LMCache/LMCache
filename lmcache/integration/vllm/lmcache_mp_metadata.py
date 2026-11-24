@@ -613,9 +613,6 @@ class LMCacheMPRequestMetadata:
         Note:
             A hit that does not end on a chunk boundary ends with the unfull
             chunk the lookup found; it is retrieved with the full chunks.
-            When the blocks vLLM allocated cannot hold the range, the
-            metadata has ``fail_load`` set and the worker reports the load as
-            failed instead of loading it.
         """
         if not tracker.is_ready_for_retrieving():
             return None
@@ -644,11 +641,10 @@ class LMCacheMPRequestMetadata:
                 end_token_idx,
                 include_unfull_chunk=include_unfull_chunk,
             )
-            # The slice silently drops blocks vLLM never allocated. Loading a
-            # shorter list would write the KV into the wrong blocks, and
-            # loading less than vLLM counts as computed would leave tokens
-            # without KV, so the load is reported as failed for this request
-            # only. Raising here would kill the engine core.
+            # The slice silently drops blocks vLLM never allocated. A shorter
+            # load would put KV in the wrong blocks or leave computed tokens
+            # without KV, and raising would kill the engine core, so this
+            # request's load is reported as failed.
             fail_load = False
             for engine_group_idx, (tokens_per_block, group_block_ids) in enumerate(
                 zip(group_tokens_per_block, block_ids, strict=True)
