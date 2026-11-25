@@ -170,7 +170,7 @@ var _ = Describe("LMCachePodInjector", func() {
 			Expect(shmMount).NotTo(BeNil())
 			Expect(shmMount.MountPath).To(Equal("/dev/shm"))
 
-			By("--kv-transfer-config carries LMCacheMPConnector + tcp:// host")
+			By("--kv-transfer-config carries LMCacheMPConnector + grpc:// host")
 			kv := argsFlagValue(c.Args, lmcFlagKVTransferConfig)
 			Expect(kv).NotTo(BeEmpty())
 			Expect(kv).To(ContainSubstring("LMCacheMPConnector"))

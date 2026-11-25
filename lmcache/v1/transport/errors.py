@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Errors a request client raises when a request does not succeed."""
+"""Request failure and handler rejection contracts shared by transports."""
+
+
+class InvalidRequestError(ValueError):
+    """A validated request was refused without changing handler state."""
 
 
 class MPServerUnavailableError(TimeoutError, ConnectionError):

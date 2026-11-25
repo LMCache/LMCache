@@ -13,7 +13,7 @@ from lmcache.v1.platform import _device_detect
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
 from lmcache.v1.platform.devices.rocm import RocmDeviceSpec
-import lmcache.v1.utils.subclass_discovery as subclass_discovery_module
+import lmcache.v1.common.subclass_discovery as subclass_discovery_module
 
 
 class _ExternalDeviceSpec(DeviceSpec):

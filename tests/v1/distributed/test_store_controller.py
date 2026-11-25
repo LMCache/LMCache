@@ -825,15 +825,19 @@ class TestStoreBudget:
                 lambda: ctrl.report_status()["pending_keys_count"] == 0
             )
         assert wait_for_condition(
-            lambda: ctrl.report_status()["queued_keys_count"] == 4
-            and ctrl.report_status()["in_flight_task_count"] == 2
+            lambda: (
+                ctrl.report_status()["queued_keys_count"] == 4
+                and ctrl.report_status()["in_flight_task_count"] == 2
+            )
         )
 
         deleted = l1_manager.delete(groups[2])
         assert all(err == L1Error.SUCCESS for err in deleted.values())
         assert wait_for_condition(
-            lambda: ctrl.report_status()["queued_keys_count"] == 0
-            and ctrl.report_status()["in_flight_task_count"] == 2
+            lambda: (
+                ctrl.report_status()["queued_keys_count"] == 0
+                and ctrl.report_status()["in_flight_task_count"] == 2
+            )
         )
         assert wait_for_condition(
             lambda: ctrl.report_status()["in_flight_task_count"] == 0, timeout=10.0
@@ -908,8 +912,10 @@ class TestStoreBudget:
                 lambda: ctrl.report_status()["pending_keys_count"] == 0
             )
         assert wait_for_condition(
-            lambda: ctrl.report_status()["in_flight_task_count"] == 1
-            and ctrl.report_status()["queued_keys_count"] == 4
+            lambda: (
+                ctrl.report_status()["in_flight_task_count"] == 1
+                and ctrl.report_status()["queued_keys_count"] == 4
+            )
         )
         assert wait_for_condition(
             lambda: all(adapter.debug_has_key(k) for k in large + small),
@@ -1039,8 +1045,10 @@ class TestStoreBudget:
                 lambda: ctrl.report_status()["pending_keys_count"] == 0
             )
         assert wait_for_condition(
-            lambda: ctrl.report_status()["in_flight_task_count"] == 1
-            and ctrl.report_status()["queued_keys_count"] == 8
+            lambda: (
+                ctrl.report_status()["in_flight_task_count"] == 1
+                and ctrl.report_status()["queued_keys_count"] == 8
+            )
         )
         assert wait_for_condition(
             lambda: all(adapter.debug_has_key(k) for g in groups for k in g),
@@ -1077,8 +1085,10 @@ class TestStoreBudget:
                 lambda: ctrl.report_status()["pending_keys_count"] == 0
             )
         assert wait_for_condition(
-            lambda: ctrl.report_status()["in_flight_task_count"] == 1
-            and ctrl.report_status()["queued_keys_count"] == 8
+            lambda: (
+                ctrl.report_status()["in_flight_task_count"] == 1
+                and ctrl.report_status()["queued_keys_count"] == 8
+            )
         )
 
         ctrl.stop()
@@ -1155,8 +1165,10 @@ class TestStoreBudget:
         later = [make_object_key(i, kv_rank=r) for r in (1, 2) for i in range(4)]
         write_keys_to_l1(short_ttl_l1_manager, later, make_layout())
         assert wait_for_condition(
-            lambda: ctrl.report_status()["in_flight_task_count"] == 1
-            and ctrl.report_status()["queued_keys_count"] == 4
+            lambda: (
+                ctrl.report_status()["in_flight_task_count"] == 1
+                and ctrl.report_status()["queued_keys_count"] == 4
+            )
         )
 
         ctrl.stop()

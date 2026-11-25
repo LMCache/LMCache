@@ -43,7 +43,7 @@ from lmcache.cli.commands.bench.engine_bench.workloads import (
     validate_max_output_length_supported,
 )
 from lmcache.cli.commands.bench.engine_bench.workloads.base import BaseWorkload
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party

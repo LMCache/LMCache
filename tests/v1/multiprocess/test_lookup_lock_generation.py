@@ -215,7 +215,10 @@ def retriever(lookup, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(device_ops, "drain_recorded_completions", lambda: [])
     module = LMCacheDrivenTransferModule(ctx)
     entry = SimpleNamespace(
-        cache_context=cache, model_name="model", event_backend=backend
+        cache_context=cache,
+        model_name="model",
+        event_backend=backend,
+        chunk_size=ctx.chunk_size,
     )
     monkeypatch.setattr(
         module, "get_and_touch_context_entry", MagicMock(return_value=entry)
