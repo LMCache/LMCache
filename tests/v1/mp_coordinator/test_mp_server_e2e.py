@@ -355,3 +355,59 @@ def test_a_prefetch_through_the_coordinator_warms_l1(tmp_path: pathlib.Path) -> 
                 }
                 assert settle(status, finished) == finished
                 assert settle(lambda: directory(url), l1 | l2) == l1 | l2
+
+
+def test_a_stored_request_is_recoverable_by_id(tmp_path: pathlib.Path) -> None:
+    """MP-8: a request's tokens and placements come back by request id,
+    including a prefix an earlier request stored."""
+    longer = list(range(1, 13))
+    with running_coordinator() as url:
+        with running_server(url, tmp_path, "mp-1", [local_l2()]) as server:
+            endpoint = urlsplit(server.rpc_url)
+            with kv_client(f"{endpoint.hostname}:{endpoint.port}", MODEL) as client:
+                client.store(TOKENS, request_id="req-a")
+                client.store(longer, request_id="req-b")
+
+            def recovered(request_id: str) -> tuple[list[int], list[set[str]]]:
+                """The request's tokens and each chunk's placement tiers."""
+                resp = httpx.get(f"{url}/requests/mp-1/{request_id}")
+                if resp.status_code != 200:
+                    return [], []
+                body = resp.json()
+                assert body["complete"] is True
+                return body["token_ids"], [
+                    {p["tier"] for k in chunk["keys"] for p in k["placements"]}
+                    for chunk in body["chunks"]
+                ]
+
+            both_tiers = {"l1", "l2"}
+            expected_a = (TOKENS, [both_tiers] * 2)
+            expected_b = (longer, [both_tiers] * 3)
+            assert settle(lambda: recovered("req-a"), expected_a) == expected_a
+            assert settle(lambda: recovered("req-b"), expected_b) == expected_b
+
+
+def test_a_full_hit_request_is_recoverable(tmp_path: pathlib.Path) -> None:
+    """MP-9: a request served entirely from cache stores nothing, yet comes
+    back by id with the storing request's keys."""
+    with running_coordinator() as url:
+        with running_server(url, tmp_path, "mp-1", [local_l2()]) as server:
+            endpoint = urlsplit(server.rpc_url)
+            with kv_client(f"{endpoint.hostname}:{endpoint.port}", MODEL) as client:
+                client.store(TOKENS, request_id="writer")
+                settle(
+                    lambda: httpx.get(f"{url}/requests/mp-1/writer").status_code, 200
+                )
+                assert client.lookup(TOKENS, request_id="reader") == len(TOKENS)
+
+            def keys_of_request(request_id: str) -> list[dict]:
+                resp = httpx.get(f"{url}/requests/mp-1/{request_id}")
+                if resp.status_code != 200:
+                    return []
+                return [k["key"] for c in resp.json()["chunks"] for k in c["keys"]]
+
+            writer_keys = keys_of_request("writer")
+            assert len(writer_keys) == 2
+            assert settle(lambda: keys_of_request("reader"), writer_keys) == (
+                writer_keys
+            )
