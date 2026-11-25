@@ -64,8 +64,6 @@ py-modules = [
     "lmcache.__init__",
     "lmcache._version",
     "lmcache.v1.__init__",
-
-    "lmcache.v1.kv_layer_groups",
 ]
 
 [tool.setuptools.packages.find]
