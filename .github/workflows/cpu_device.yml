@@ -99,6 +99,7 @@ jobs:
               - 'lmcache/**'
               - 'pyproject.toml'
               - 'setup.py'
+              - 'pyproject_client.toml'
               - 'requirements/**.txt'
               - '.github/workflows/cpu_device.yml'
               - '.github/scripts/cpu_device_test.sh'
@@ -107,6 +108,7 @@ jobs:
               - '.github/scripts/install_vllm_cpu.sh'
               - '.github/scripts/cpu_nightly.py'
               - '.github/scripts/install_lmcache_cpu.sh'
+              - '.github/scripts/build_client_wheel.sh'
               - '.github/scripts/download_model.sh'
               - '.github/scripts/download_gh_release_model.sh'
               - '.github/scripts/run-cpu-e2e-validation.sh'
@@ -184,6 +186,13 @@ jobs:
       # Request/RPC transport between vLLM and the LMCache MP server.
       # This is independent of the worker-side KV data transfer mode.
       LMCACHE_REQUEST_TRANSPORT: ${{ matrix.request_transport }}
+      # The ubuntu opt-125m gRPC leg runs vLLM on the lmcache-client wheel and
+      # the server on the full wheel in this venv; see install_lmcache_cpu.sh.
+      LMCACHE_SERVER_VENV: >-
+        ${{ matrix.os == 'ubuntu-22.04' && matrix.model.name == 'opt-125m'
+            && matrix.request_transport == 'grpc'
+            && '/tmp/lmcache-server-venv' || '' }}
+      LMCACHE_TRACK_USAGE: "false"
 
     steps:
       - name: Harden Runner
