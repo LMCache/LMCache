@@ -13,6 +13,7 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import (
+    L1_ONLY_ATTRIBUTE,
     MemoryResidency,
     MemorySegment,
     MemoryTags,
@@ -23,6 +24,7 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConf
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     DefaultStorePolicy,
+    StoreAction,
     create_store_policy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
@@ -52,83 +54,76 @@ def make_descriptor(index: int) -> L2AdapterDescriptor:
 # =============================================================================
 
 
-class TestDefaultStorePolicyTargets:
-    """Test DefaultStorePolicy.select_store_targets behavior."""
+def make_l1_only_key(chunk_id: int) -> ObjectKey:
+    """Create a key marked L1-only, as the server marks an unfull-chunk tail."""
+    return ObjectKey(
+        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+        model_name="test_model",
+        kv_rank=0,
+        extra_attributes={L1_ONLY_ATTRIBUTE: True},
+    )
 
-    def test_single_adapter_all_keys(self):
-        """All keys should be sent to the single adapter."""
+
+class TestDefaultStorePolicy:
+    """Test DefaultStorePolicy.get_store_actions behavior."""
+
+    def test_every_key_to_every_adapter_and_kept_in_l1(self):
         policy = DefaultStorePolicy([])
         keys = [make_object_key(i) for i in range(3)]
-        adapters = [make_descriptor(0)]
 
-        result = policy.select_store_targets(keys, adapters)
+        actions = policy.get_store_actions(
+            keys, [make_descriptor(0), make_descriptor(1)]
+        )
 
-        assert 0 in result
-        assert result[0] == keys
+        assert actions == [
+            StoreAction(keys=keys, destination=0, l1_delete=False),
+            StoreAction(keys=keys, destination=1, l1_delete=False),
+        ]
 
-    def test_multiple_adapters_all_keys_to_each(self):
-        """All keys should be sent to every adapter."""
+    def test_no_adapters_means_no_actions(self):
         policy = DefaultStorePolicy([])
-        keys = [make_object_key(i) for i in range(3)]
-        adapters = [make_descriptor(0), make_descriptor(1)]
 
-        result = policy.select_store_targets(keys, adapters)
-
-        assert len(result) == 2
-        assert result[0] == keys
-        assert result[1] == keys
-
-    def test_empty_adapters_returns_empty(self):
-        """No adapters means no store targets."""
-        policy = DefaultStorePolicy([])
-        keys = [make_object_key(0)]
-
-        result = policy.select_store_targets(keys, [])
-
-        assert result == {}
-
-    def test_empty_keys_returns_empty_lists(self):
-        """Empty keys list should produce empty lists for each adapter."""
-        policy = DefaultStorePolicy([])
-        adapters = [make_descriptor(0)]
-
-        result = policy.select_store_targets([], adapters)
-
-        assert 0 in result
-        assert result[0] == []
+        assert policy.get_store_actions([make_object_key(0)], []) == []
 
     def test_returns_copies_not_references(self):
-        """Returned lists should be independent copies of the input."""
+        """Returned key lists are independent copies of the input."""
         policy = DefaultStorePolicy([])
         keys = [make_object_key(0)]
-        adapters = [make_descriptor(0)]
 
-        result = policy.select_store_targets(keys, adapters)
+        (action,) = policy.get_store_actions(keys, [make_descriptor(0)])
+        action.keys.append(make_object_key(99))
 
-        # Mutating the result should not affect the input
-        result[0].append(make_object_key(99))
         assert len(keys) == 1
 
 
-class TestDefaultStorePolicyDeletions:
-    """Test DefaultStorePolicy.select_l1_deletions behavior."""
+class TestBufferOnlyStorePolicy:
+    """Test the ``skip_l1`` policy, meant for noop eviction."""
 
-    def test_never_deletes(self):
-        """DefaultStorePolicy should never delete from L1."""
-        policy = DefaultStorePolicy([])
-        keys = [make_object_key(i) for i in range(5)]
+    def test_every_key_to_every_adapter_then_out_of_l1(self):
+        policy = create_store_policy("skip_l1", [])
+        keys = [make_object_key(i) for i in range(2)]
 
-        result = policy.select_l1_deletions(keys, make_descriptor(0))
+        actions = policy.get_store_actions(
+            keys, [make_descriptor(0), make_descriptor(1)]
+        )
 
-        assert result == []
+        assert actions == [
+            StoreAction(keys=keys, destination=0, l1_delete=True),
+            StoreAction(keys=keys, destination=1, l1_delete=True),
+        ]
 
-    def test_empty_keys_returns_empty(self):
-        """Empty input should return empty output."""
-        policy = DefaultStorePolicy([])
+    @pytest.mark.parametrize(
+        "adapters",
+        [pytest.param([], id="no-adapters"), pytest.param([make_descriptor(0)])],
+    )
+    def test_l1_only_keys_leave_l1_right_away(self, adapters):
+        """Nothing else would free an L1-only key under noop eviction."""
+        policy = create_store_policy("skip_l1", [])
+        keys = [make_l1_only_key(i) for i in range(2)]
 
-        result = policy.select_l1_deletions([], make_descriptor(0))
+        actions = policy.get_store_actions(keys, adapters)
 
-        assert result == []
+        assert actions == [StoreAction(keys=keys, destination=None, l1_delete=True)]
 
 
 # =============================================================================
@@ -172,7 +167,12 @@ def make_p2p_policy(used_bytes: int, tags: MemoryTags = _LOCAL_DRAM):
     return create_store_policy("p2p", [l1_manager])
 
 
-class TestP2PStorePolicyTargets:
+def peer_destinations(actions: list[StoreAction]) -> list[int | None]:
+    """Destinations of the actions that drop their keys from L1."""
+    return [a.destination for a in actions if a.l1_delete]
+
+
+class TestP2PStorePolicy:
     """Test where P2PStorePolicy sends newly written keys."""
 
     @pytest.mark.parametrize(
@@ -188,27 +188,27 @@ class TestP2PStorePolicyTargets:
         self, used_bytes: int, threshold: float, stored_to_peer: bool
     ):
         """Objects stay local while the DRAM L1 has room; other adapters get
-        every key either way."""
+        every key either way and keep the L1 copy. A peer store drops it."""
         policy = make_p2p_policy(used_bytes)
         keys = [make_object_key(i) for i in range(3)]
         adapters = [make_descriptor(0), make_peer_descriptor(1, threshold=threshold)]
 
-        targets = policy.select_store_targets(keys, adapters)
+        actions = policy.get_store_actions(keys, adapters)
 
-        assert targets[0] == keys
-        assert (targets.get(1) == keys) is stored_to_peer
-        assert set(targets) == ({0, 1} if stored_to_peer else {0})
+        expected = [StoreAction(keys=keys, destination=0, l1_delete=False)]
+        if stored_to_peer:
+            expected.append(StoreAction(keys=keys, destination=1, l1_delete=True))
+        assert actions == expected
 
     def test_write_disabled_peer_never_gets_keys(self):
         """A peer this server only reads from gets no store task at all."""
         policy = make_p2p_policy(used_bytes=1000)
-        keys = [make_object_key(0)]
 
-        targets = policy.select_store_targets(
-            keys, [make_peer_descriptor(0, write_enabled=False)]
+        actions = policy.get_store_actions(
+            [make_object_key(0)], [make_peer_descriptor(0, write_enabled=False)]
         )
 
-        assert targets == {}
+        assert actions == []
 
     def test_write_enabled_peers_take_turns(self):
         """Each store task goes to exactly one peer, rotating over the peers
@@ -221,7 +221,7 @@ class TestP2PStorePolicyTargets:
         ]
 
         chosen = [
-            sorted(policy.select_store_targets([make_object_key(i)], adapters))
+            peer_destinations(policy.get_store_actions([make_object_key(i)], adapters))
             for i in range(4)
         ]
 
@@ -231,34 +231,8 @@ class TestP2PStorePolicyTargets:
         """Only the local DRAM L1 is transferable to a peer."""
         policy = make_p2p_policy(used_bytes=1000, tags=_LOCAL_CXL)
 
-        targets = policy.select_store_targets(
+        actions = policy.get_store_actions(
             [make_object_key(0)], [make_peer_descriptor(0)]
         )
 
-        assert targets == {}
-
-
-class TestP2PStorePolicyDeletions:
-    """Test which L1 copies P2PStorePolicy drops after a store."""
-
-    @pytest.mark.parametrize(
-        ("adapter", "deleted"),
-        [
-            pytest.param(make_peer_descriptor(0), True, id="write-enabled-peer"),
-            pytest.param(
-                make_peer_descriptor(0, write_enabled=False),
-                False,
-                id="write-disabled-peer",
-            ),
-            pytest.param(make_descriptor(0), False, id="other-adapter"),
-        ],
-    )
-    def test_local_copy_is_dropped_only_after_a_store_into_a_peer(
-        self, adapter: L2AdapterDescriptor, deleted: bool
-    ):
-        policy = make_p2p_policy(used_bytes=900)
-        keys = [make_object_key(i) for i in range(2)]
-
-        result = policy.select_l1_deletions(keys, adapter)
-
-        assert result == (keys if deleted else [])
+        assert actions == []

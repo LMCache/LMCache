@@ -21,7 +21,11 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import (
+    L1_ONLY_ATTRIBUTE,
+    MemoryLayoutDesc,
+    ObjectKey,
+)
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -36,6 +40,10 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
 )
+from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
+from lmcache.v1.distributed.storage_controllers.p2p_store_policy import (
+    P2PStorePolicy,
+)
 from lmcache.v1.distributed.storage_controllers.store_controller import (
     StoreController,
     StoreListener,
@@ -43,6 +51,7 @@ from lmcache.v1.distributed.storage_controllers.store_controller import (
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     BufferOnlyStorePolicy,
     DefaultStorePolicy,
+    StoreAction,
     StorePolicy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
@@ -68,6 +77,16 @@ def make_object_key(chunk_id: int, kv_rank: int = 0) -> ObjectKey:
         chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
         model_name="test_model",
         kv_rank=kv_rank,
+    )
+
+
+def make_l1_only_key(chunk_id: int) -> ObjectKey:
+    """Create a key marked L1-only, as the server marks an unfull-chunk tail."""
+    return ObjectKey(
+        chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
+        model_name="test_model",
+        kv_rank=0,
+        extra_attributes={L1_ONLY_ATTRIBUTE: True},
     )
 
 
@@ -346,6 +365,41 @@ class TestStoreControllerSingleAdapter:
 
         assert adapter.debug_get_stored_object_count() == 0
         assert l1_manager.delete(keys)[keys[0]] == L1Error.SUCCESS
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_l1_only_key_is_not_stored_to_l2(self, l1_manager):
+        """A key marked L1-only stays in L1 and never reaches an adapter, even
+        though the policy targets adapter 0 for every key; a full chunk
+        committed in the same call is still stored (#6747)."""
+
+        class StoreEverythingPolicy(StorePolicy):
+            def get_store_actions(self, keys, adapters):
+                return [StoreAction(keys=list(keys), destination=0, l1_delete=False)]
+
+        adapter = make_adapter()
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=StoreEverythingPolicy([l1_manager]),
+        )
+        ctrl.start()
+
+        tail, full = make_l1_only_key(0), make_object_key(1)
+        assert write_keys_to_l1(l1_manager, [tail, full], make_layout()) == [
+            tail,
+            full,
+        ]
+
+        assert wait_for_condition(lambda: adapter.debug_has_key(full))
+        time.sleep(0.3)
+        assert not adapter.debug_has_key(tail)
+        assert adapter.debug_get_stored_object_count() == 1
+        # The tail is still resident in L1.
+        assert l1_manager.reserve_read([tail])[tail][0] == L1Error.SUCCESS
+        l1_manager.finish_read([tail])
 
         ctrl.stop()
         adapter.close()
@@ -986,10 +1040,7 @@ class TestStoreControllerCustomPolicy:
         class SkipAllPolicy(StorePolicy):
             """Never store to L2."""
 
-            def select_store_targets(self, keys, adapters):
-                return {}
-
-            def select_l1_deletions(self, keys, adapter):
+            def get_store_actions(self, keys, adapters):
                 return []
 
         adapter = make_adapter()
@@ -1015,17 +1066,43 @@ class TestStoreControllerCustomPolicy:
         ctrl.stop()
         adapter.close()
 
+    def test_action_without_destination_deletes_from_l1_now(self, l1_manager):
+        """An action with no destination stores nothing; with l1_delete it
+        drops its keys from L1 right away."""
+
+        class DropPolicy(StorePolicy):
+            def get_store_actions(self, keys, adapters):
+                return [StoreAction(keys=list(keys), destination=None, l1_delete=True)]
+
+        adapter = make_adapter()
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DropPolicy([l1_manager]),
+        )
+        ctrl.start()
+
+        key = make_object_key(0)
+        write_keys_to_l1(l1_manager, [key], make_layout())
+
+        assert wait_for_condition(lambda: l1_manager.get_object_state(key) is None)
+        assert adapter.debug_get_stored_object_count() == 0
+
+        ctrl.stop()
+        adapter.close()
+
     def test_policy_that_deletes_from_l1(self, l1_manager):
         """A policy that requests L1 deletion should result in deleted keys."""
 
         class DeleteAfterStorePolicy(StorePolicy):
             """Delete all keys from L1 after storing to L2."""
 
-            def select_store_targets(self, keys, adapters):
-                return {ad.index: list(keys) for ad in adapters}
-
-            def select_l1_deletions(self, keys, adapter):
-                return list(keys)
+            def get_store_actions(self, keys, adapters):
+                return [
+                    StoreAction(keys=list(keys), destination=ad.index, l1_delete=True)
+                    for ad in adapters
+                ]
 
         adapter = make_adapter()
         ctrl = StoreController(
@@ -1064,46 +1141,37 @@ class TestStoreControllerCustomPolicy:
         ctrl.stop()
         adapter.close()
 
-    def test_l1_deletion_decision_is_told_which_adapter_stored(self, l1_manager):
-        """The policy sees the adapter that finished, so it can decide per
-        adapter whether the L1 copy goes away."""
-        consulted: list[int] = []
+    def test_l1_delete_is_decided_per_action(self, l1_manager):
+        """Of two keys stored to two adapters, only the key whose action asks
+        for it leaves L1; both adapters store both keys."""
+        dropped, kept = make_object_key(0), make_object_key(1)
 
-        class DeleteAfterSecondAdapterPolicy(StorePolicy):
-            def select_store_targets(self, keys, adapters):
-                return {ad.index: list(keys) for ad in adapters}
-
-            def select_l1_deletions(self, keys, adapter):
-                consulted.append(adapter.index)
-                return list(keys) if adapter.index == 1 else []
+        class DeleteOneKeyPolicy(StorePolicy):
+            def get_store_actions(self, keys, adapters):
+                return [
+                    StoreAction(keys=[dropped], destination=0, l1_delete=False),
+                    StoreAction(keys=[dropped], destination=1, l1_delete=True),
+                    StoreAction(keys=[kept], destination=0, l1_delete=False),
+                    StoreAction(keys=[kept], destination=1, l1_delete=False),
+                ]
 
         adapters = [make_adapter(), make_adapter()]
         ctrl = StoreController(
             l1_manager=l1_manager,
             l2_adapters=adapters,
             adapter_descriptors=[make_descriptor(0), make_descriptor(1)],
-            policy=DeleteAfterSecondAdapterPolicy([l1_manager]),
+            policy=DeleteOneKeyPolicy([l1_manager]),
         )
         ctrl.start()
 
-        layout = make_layout()
-        keys = [make_object_key(0)]
-        write_keys_to_l1(l1_manager, keys, layout)
+        write_keys_to_l1(l1_manager, [dropped, kept], make_layout())
 
-        ok = wait_for_condition(lambda: sorted(consulted) == [0, 1], timeout=5.0)
-        assert ok, "The policy should be consulted once per finished adapter"
-        ok = wait_for_condition(
-            lambda: (
-                l1_manager.reserve_write(
-                    keys=keys,
-                    is_temporary=[False],
-                    layout_desc=layout,
-                )[keys[0]][1]
-                is not None
-            ),
-            timeout=5.0,
+        assert wait_for_condition(
+            lambda: all(a.debug_has_key(k) for a in adapters for k in (dropped, kept))
         )
-        assert ok, "The second adapter's store should delete the key from L1"
+        assert wait_for_condition(lambda: l1_manager.get_object_state(dropped) is None)
+        time.sleep(0.3)
+        assert l1_manager.get_object_state(kept) is not None
 
         ctrl.stop()
         for adapter in adapters:
@@ -1115,14 +1183,12 @@ class TestStoreControllerCustomPolicy:
         class FirstAdapterOnlyPolicy(StorePolicy):
             """Only store to adapter index 0."""
 
-            def select_store_targets(self, keys, adapters):
-                for ad in adapters:
-                    if ad.index == 0:
-                        return {0: list(keys)}
-                return {}
-
-            def select_l1_deletions(self, keys, adapter):
-                return []
+            def get_store_actions(self, keys, adapters):
+                return [
+                    StoreAction(keys=list(keys), destination=0, l1_delete=False)
+                    for ad in adapters
+                    if ad.index == 0
+                ]
 
         adapters = [make_adapter(), make_adapter()]
         descriptors = [make_descriptor(i) for i in range(2)]
@@ -1274,3 +1340,112 @@ class TestBufferOnlyMode:
 
         ctrl.stop()
         adapter.close()
+
+    def test_unfull_chunk_leaves_l1_without_l2_store(self, l1_manager):
+        """With nothing that evicts, a tail leaves L1 right away and never
+        reaches L2; a full chunk is stored, then leaves L1 as before."""
+        adapter = make_adapter()
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=BufferOnlyStorePolicy([l1_manager]),
+        )
+        ctrl.start()
+
+        tail, full = make_l1_only_key(0), make_object_key(1)
+        write_keys_to_l1(l1_manager, [tail, full], make_layout())
+
+        assert wait_for_condition(lambda: adapter.debug_has_key(full))
+        assert wait_for_condition(
+            lambda: l1_manager.get_object_state(tail) is None
+            and l1_manager.get_object_state(full) is None
+        )
+        time.sleep(0.3)
+        assert not adapter.debug_has_key(tail)
+        assert adapter.debug_get_stored_object_count() == 1
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_read_locked_unfull_chunk_deleted_after_reader_finishes(self, l1_manager):
+        """A tail still being read is not deleted under the reader; it
+        leaves L1 once the reader is done."""
+        locked = threading.Event()
+        asked = threading.Event()
+
+        class WaitingPolicy(BufferOnlyStorePolicy):
+            def get_store_actions(self, keys, adapters):
+                assert locked.wait(5.0)
+                asked.set()
+                return super().get_store_actions(keys, adapters)
+
+        adapter = make_adapter()
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=WaitingPolicy([l1_manager]),
+        )
+        ctrl.start()
+
+        tail = make_l1_only_key(0)
+        write_keys_to_l1(l1_manager, [tail], make_layout())
+        assert l1_manager.reserve_read([tail])[tail][0] == L1Error.SUCCESS
+        locked.set()
+
+        assert asked.wait(5.0)
+        time.sleep(0.3)
+        assert l1_manager.get_object_state(tail) is not None
+
+        l1_manager.finish_read([tail])
+        assert wait_for_condition(lambda: l1_manager.get_object_state(tail) is None)
+        assert not adapter.debug_has_key(tail)
+
+        ctrl.stop()
+        adapter.close()
+
+
+class TestP2PPolicyL1OnlyKeys:
+    """Under P2PStorePolicy an L1-only key stays local at any usage, while a
+    full chunk moves to a peer from the threshold on. A MockL2Adapter stands
+    in for the peer."""
+
+    @pytest.mark.parametrize(
+        ("threshold", "above"),
+        [
+            pytest.param(1e-9, True, id="above-the-threshold"),
+            pytest.param(1.0, False, id="below-the-threshold"),
+        ],
+    )
+    def test_tail_and_full_chunk(self, l1_manager, threshold: float, above: bool):
+        peer = make_adapter()
+        config = P2PL2AdapterConfig(
+            peer_mq_server_url="tcp://peer0:5555",
+            peer_transfer_channel_server_url="peer0:7600",
+            write_enabled=True,
+            write_l1_usage_threshold=threshold,
+        )
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[peer],
+            adapter_descriptors=[L2AdapterDescriptor(index=0, config=config)],
+            policy=P2PStorePolicy([l1_manager]),
+        )
+        ctrl.start()
+
+        tail, full = make_l1_only_key(0), make_object_key(1)
+        write_keys_to_l1(l1_manager, [tail, full], make_layout())
+
+        if above:
+            assert wait_for_condition(lambda: peer.debug_has_key(full))
+            assert wait_for_condition(lambda: l1_manager.get_object_state(full) is None)
+        else:
+            time.sleep(0.3)
+            assert l1_manager.get_object_state(full) is not None
+            assert not peer.debug_has_key(full)
+        assert l1_manager.get_object_state(tail) is not None
+        assert not peer.debug_has_key(tail)
+
+        ctrl.stop()
+        peer.close()

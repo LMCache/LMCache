@@ -185,6 +185,9 @@ _store_loop: every round, pop written and deleted keys together;
   ▼
 _process_new_keys(keys)
   │
+  ├─ 0. Split off L1-only keys: StorePolicy.get_store_actions(l1_only, [])
+  │     and delete those its destination-less actions drop; never stored.
+  │
   ├─ 1. Group keys by shape (today: (model_name, kv_rank); L1 is a shared
   │     pool so one drain may span models/parallelism configs with different
   │     KV shapes, and each submit_store_task must see uniform (shape, dtype)).
@@ -193,13 +196,14 @@ _process_new_keys(keys)
   │     read-lock less than the budget (see below); the rest wait unlocked.
   │
   ├─ 3. For each popped group:
-  │     StorePolicy.select_store_targets(group_keys, adapters)
-  │       → dict[adapter_index, list[ObjectKey]]
+  │     StorePolicy.get_store_actions(group_keys, adapters)
+  │       → list[StoreAction(keys, destination, l1_delete)]
   │
-  ├─ 4. For each adapter target:
-  │     BaseL1Manager.reserve_read(target_keys)  → get MemoryObj + read lock
+  ├─ 4. For each action with a destination:
+  │     BaseL1Manager.reserve_read(action.keys)  → get MemoryObj + read lock
   │     adapter.submit_store_task(keys, objs)
-  │     Track as InFlightStoreTask
+  │     Track as InFlightStoreTask (with l1_delete)
+  │     For an action without one: delete its keys from L1 if l1_delete
   │
   ▼ (later, for each adapter whose store_efd signaled)
 _drain_l2_store_completions(signaled_adapters)
@@ -215,8 +219,7 @@ _finalize_store(task_key, task)  [terminal execution]
   │
   ├─ 5. BaseL1Manager.finish_read(read_locked_keys)  → release read locks
   │
-  ├─ 6. If success: StorePolicy.select_l1_deletions(keys, adapter) → delete
-  │     from L1
+  ├─ 6. If success and the action's l1_delete: delete keys from L1
   │     If failure: log warning (best-effort, no retry)
   │
   ▼
@@ -272,15 +275,14 @@ keys that are still in L1. Dropped keys count in `lmcache_mp.l1_read_failure`
 
 ### StorePolicy
 
-The policy decides two things:
-
-1. **`select_store_targets(keys, adapters) → dict[int, list[ObjectKey]]`**
-   Which adapters get which keys. A key can go to multiple adapters.
-   `DefaultStorePolicy`: all keys → all adapters.
-
-2. **`select_l1_deletions(keys, adapter) → list[ObjectKey]`**
-   Which keys to evict from L1 after `adapter` stored them successfully.
-   `DefaultStorePolicy`: never delete (empty list).
+The policy has one method,
+**`get_store_actions(keys, adapters) → list[StoreAction]`**. Each
+`StoreAction(keys, destination, l1_delete)` sends `keys` to the adapter at
+index `destination` (or to none when it is `None`) and, with `l1_delete`,
+removes them from L1 once that store succeeds (right away without a
+destination). A key can go to multiple adapters; a key in no action stays in
+L1. `DefaultStorePolicy`: all keys → all adapters, never delete. Keys marked
+`L1_ONLY_ATTRIBUTE` are never sent to an adapter.
 
 A policy is constructed with the storage manager's L1 managers, so it can
 base its decisions on L1 state such as memory usage.
@@ -567,12 +569,12 @@ module discovery. **To add a new policy, create a single file in
 ### Store Policy
 
 1. Create a new file (e.g., `storage_controllers/store_policy_tiered.py`).
-2. Subclass `StorePolicy` and implement `select_store_targets()` and
-   `select_l1_deletions()`.
+2. Subclass `StorePolicy` and implement `get_store_actions()`.
 3. Call `register_store_policy("tiered", TieredStorePolicy)` at module level.
 
 ```python
 from lmcache.v1.distributed.storage_controllers.store_policy import (
+    StoreAction,
     StorePolicy,
     register_store_policy,
 )
@@ -583,12 +585,10 @@ from lmcache.v1.distributed.api import ObjectKey
 class TieredStorePolicy(StorePolicy):
     # The inherited constructor keeps the L1 managers in self._l1_managers.
 
-    def select_store_targets(self, keys, adapters):
-        # custom logic ...
-        ...
-
-    def select_l1_deletions(self, keys, adapter):
-        return []
+    def get_store_actions(self, keys, adapters):
+        # custom logic, e.g. store to the first adapter and keep L1:
+        return [StoreAction(keys=list(keys), destination=adapters[0].index,
+                            l1_delete=False)] if adapters else []
 
 
 register_store_policy("tiered", TieredStorePolicy)

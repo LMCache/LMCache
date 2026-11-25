@@ -246,6 +246,27 @@ class ObjectKeyIdentity:
         object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
 
+INTERNAL_ATTRIBUTE_PREFIX = "_lmcache_internal."
+"""Prefix of the ``extra_attributes`` entries only the server sets. Keys built
+from request configs never carry them (see :func:`ipc_key_to_object_keys`)."""
+
+L1_ONLY_ATTRIBUTE = INTERNAL_ATTRIBUTE_PREFIX + "l1_only"
+"""``extra_attributes`` flag on a key whose object is read from L1 only, so
+the store controller never sends it to an L2 adapter."""
+
+
+def is_l1_only(key: "ObjectKey") -> bool:
+    """Return whether ``key``'s object must never be stored to L2.
+
+    Args:
+        key: The object key to check.
+
+    Returns:
+        True when ``key.extra_attributes[L1_ONLY_ATTRIBUTE]`` is true.
+    """
+    return bool(key.extra_attributes.get(L1_ONLY_ATTRIBUTE, False))
+
+
 @dataclass(frozen=True, init=False)
 class ObjectKey:
     """
@@ -262,6 +283,9 @@ class ObjectKey:
     This field is excluded from equality, hashing, and ``repr``.
     Upstream modules may enrich it before dispatch.
     L1 managers and L2 adapters should not mutate it.
+    Entries named ``INTERNAL_ATTRIBUTE_PREFIX + ...`` are set by the server
+    only (for example :data:`L1_ONLY_ATTRIBUTE`, read by the store
+    controller); request configs cannot set them.
     """
 
     def __init__(
@@ -888,8 +912,10 @@ def ipc_key_to_object_keys(
     where a caller passes ``ipc_key`` but forgets the salt.
 
     ``request_configs`` is likewise read from ``ipc_key`` and exposed through
-    every produced key's ``extra_attributes`` field. Each key receives a
-    shallow copy so modules can enrich one key without affecting another.
+    every produced key's ``extra_attributes`` field, without entries named
+    ``INTERNAL_ATTRIBUTE_PREFIX + ...``, which only the server sets. Each key
+    receives a shallow copy so modules can enrich one key without affecting
+    another.
 
     Args:
         ipc_key: The IPC key providing model_name, world_size, worker_id,
@@ -905,9 +931,7 @@ def ipc_key_to_object_keys(
         for ``object_group_ids[i]``.
     """
     cache_salt = ipc_key.cache_salt
-    extra_attributes = (
-        ipc_key.request_configs if ipc_key.request_configs is not None else {}
-    )
+    extra_attributes = _request_extra_attributes(ipc_key.request_configs)
     tags = get_request_tags(ipc_key.request_configs)
 
     return [
@@ -972,13 +996,11 @@ def ipc_key_to_grouped_object_keys(
         A key without ``worker_id`` fans out to every kv rank of its world
         size; a worker-specific key yields that rank only. ``cache_salt`` is
         taken from ``ipc_key``. Every produced key receives a shallow copy of
-        ``ipc_key.request_configs`` through ``extra_attributes`` when request
-        configs are present.
+        ``ipc_key.request_configs``, without server-internal entries, through
+        ``extra_attributes`` when request configs are present.
     """
     tags = get_request_tags(ipc_key.request_configs)
-    extra_attributes = (
-        ipc_key.request_configs if ipc_key.request_configs is not None else {}
-    )
+    extra_attributes = _request_extra_attributes(ipc_key.request_configs)
     rows: list[GroupedObjectKeys] = []
     for object_group_id in object_group_ids:
         layout_desc = group_layout_descs.get(object_group_id)
@@ -1020,3 +1042,17 @@ def ipc_key_to_grouped_object_keys(
                 )
             )
     return rows
+
+
+def _request_extra_attributes(
+    request_configs: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Return ``request_configs`` without server-internal entries, as the
+    ``extra_attributes`` of keys built from a request."""
+    if not request_configs:
+        return {}
+    return {
+        name: value
+        for name, value in request_configs.items()
+        if not name.startswith(INTERNAL_ATTRIBUTE_PREFIX)
+    }

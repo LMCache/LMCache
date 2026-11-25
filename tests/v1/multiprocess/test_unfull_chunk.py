@@ -10,8 +10,10 @@ bus are mocked.
 from types import SimpleNamespace
 from typing import cast
 from unittest import mock
+import time
 
 # Third Party
+import msgspec
 import pytest
 import torch
 
@@ -22,6 +24,7 @@ from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
+    L1_ONLY_ATTRIBUTE,
     MemoryLayoutDesc,
     ObjectKey,
     ipc_key_to_object_keys,
@@ -32,7 +35,12 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
+from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
+    MockL2Adapter,
+    MockL2AdapterConfig,
+)
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess import object_group_transfer
@@ -102,9 +110,9 @@ def test_key_has_unfull_chunk_only_with_an_unaligned_end():
     assert not key(32).has_unfull_chunk(CHUNK_SIZE)
 
 
-def test_server_resolves_full_chunk_keys_and_the_tail_key_of_an_unaligned_key():
-    """A STORE or RETRIEVE key ending inside a chunk resolves to the full
-    chunks below its end, plus the tail's key on its own."""
+def _resolving_context() -> MPCacheServerContext:
+    """A server context that resolves keys of ``MODEL``; its storage manager
+    is a mock."""
     with (
         mock.patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
         mock.patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
@@ -117,9 +125,13 @@ def test_server_resolves_full_chunk_keys_and_the_tail_key_of_an_unaligned_key():
         chunk_size=CHUNK_SIZE,
         hash_algorithm=ctx.hash_algorithm_name,
     )
-    hasher = TokenHasher(chunk_size=CHUNK_SIZE)
-    tokens = list(range(2 * CHUNK_SIZE + 5))
-    key = IPCCacheServerKey(
+    return ctx
+
+
+def _store_key(
+    tokens: list[int], request_configs: dict[str, object] | None = None
+) -> IPCCacheServerKey:
+    return IPCCacheServerKey(
         model_name=MODEL,
         world_size=1,
         worker_id=0,
@@ -127,12 +139,87 @@ def test_server_resolves_full_chunk_keys_and_the_tail_key_of_an_unaligned_key():
         start=0,
         end=len(tokens),
         request_id="store",
+        request_configs=request_configs,
     )
 
-    assert ctx.resolve_obj_keys(key, [0]) == [_chunk_keys(hasher, tokens, 2)]
-    assert ctx.resolve_unfull_chunk_obj_keys(key, [0]) == _unfull_keys(
-        hasher, tokens, len(tokens)
+
+def test_server_resolves_full_chunk_keys_and_the_tail_key_of_an_unaligned_key():
+    """A STORE or RETRIEVE key ending inside a chunk resolves to the full
+    chunks below its end, plus the tail's key on its own. Only the tail's key
+    carries the unfull-chunk mark, which leaves its identity unchanged."""
+    ctx = _resolving_context()
+    hasher = TokenHasher(chunk_size=CHUNK_SIZE)
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    key = _store_key(tokens)
+
+    full_keys = ctx.resolve_obj_keys(key, [0])
+    unfull_keys = ctx.resolve_unfull_chunk_obj_keys(key, [0])
+    assert full_keys == [_chunk_keys(hasher, tokens, 2)]
+    assert unfull_keys == _unfull_keys(hasher, tokens, len(tokens))
+    assert all(k.extra_attributes[L1_ONLY_ATTRIBUTE] is True for k in unfull_keys)
+    assert not any(L1_ONLY_ATTRIBUTE in k.extra_attributes for k in full_keys[0])
+
+
+@pytest.mark.parametrize(
+    "request_configs",
+    [
+        None,
+        # A request cannot keep its full chunks out of L2: request configs
+        # never set server-internal extra_attributes.
+        {L1_ONLY_ATTRIBUTE: True},
+    ],
+    ids=["plain", "config-spoofs-the-mark"],
+)
+def test_stored_tail_stays_in_l1_while_full_chunks_go_to_l2(request_configs):
+    """#6747: the tail mark survives the store's commit (the keys go through
+    the host-func dispatcher's msgpack round-trip, L1's finish_write and the
+    StoreListener) and the default store policy keeps the tail out of L2."""
+    ctx = _resolving_context()
+    key = _store_key(list(range(2 * CHUNK_SIZE + 5)), request_configs)
+    full_keys = ctx.resolve_obj_keys(key, [0])[0]
+    unfull_keys = ctx.resolve_unfull_chunk_obj_keys(key, [0])
+    assert not any(L1_ONLY_ATTRIBUTE in k.extra_attributes for k in full_keys)
+    manager = StorageManager(
+        StorageManagerConfig(
+            l1_manager_config=L1ManagerConfig(
+                memory_config=L1MemoryManagerConfig(
+                    size_in_bytes=16 * 1024 * 1024,
+                    use_lazy=False,
+                ),
+            ),
+            eviction_config=EvictionConfig(eviction_policy="LRU"),
+            l2_adapter_config=L2AdaptersConfig(
+                adapters=[MockL2AdapterConfig(max_size_gb=1, mock_bandwidth_gb=10)]
+            ),
+        )
     )
+    try:
+        reserved = manager.reserve_write(full_keys + unfull_keys, LAYOUT)
+        assert set(reserved) == set(full_keys + unfull_keys)
+        # As LMCacheDrivenTransferModule._finish_write receives them.
+        l1_owners = msgspec.msgpack.Decoder(type=dict[ObjectKey, int]).decode(
+            msgspec.msgpack.encode(l1_owners_of(reserved))
+        )
+        manager.finish_write(list(l1_owners), l1_owners=l1_owners)
+
+        ((_, adapter),) = manager.l2_adapters()
+        mock_adapter = cast(MockL2Adapter, adapter)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not all(
+            mock_adapter.debug_has_key(k) for k in full_keys
+        ):
+            time.sleep(0.05)
+        time.sleep(0.3)
+        assert all(mock_adapter.debug_has_key(k) for k in full_keys)
+        assert not any(mock_adapter.debug_has_key(k) for k in unfull_keys)
+        assert mock_adapter.debug_get_stored_object_count() == len(full_keys)
+        # The tail is still resident in L1.
+        (l1_manager,) = manager.l1_managers()
+        read = l1_manager.reserve_read(unfull_keys)
+        assert all(read[k][0] is L1Error.SUCCESS for k in unfull_keys)
+        l1_manager.finish_read(unfull_keys)
+    finally:
+        manager.close()
 
 
 def test_split_unfull_chunk_block_ids():
