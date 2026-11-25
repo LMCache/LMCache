@@ -16,18 +16,19 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.logging import init_logger
 from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.common.custom_types import (
     CBMatchResult,
     CBUnifiedLookupResult,
     IPCCacheServerKey,
 )
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.distributed.api import (
     FULL_ATTENTION_WINDOW_CHUNKS,
     MemoryLayoutDesc,
     ObjectKey,
+    PrefetchPriority,
     PrefetchTaskSpec,
     get_request_tags,
     ipc_key_to_grouped_object_keys,
@@ -179,11 +180,15 @@ class LookupMixin:
             "tuple[_BlendReadGroups, dict[int, MemoryLayoutDesc], AttnWindowDesc]"
         ),
         matches: list[CBMatchResult],
+        priority: PrefetchPriority,
     ) -> "tuple[PrefetchHandle, dict[bytes, list], dict[bytes, int]]":
         """Coalesce all matches into one sparse L2->L1 prefetch (non-blocking).
 
         The caller polls ``query_prefetch_status(handle)`` then calls
         :meth:`_sparse_classify` with the found rows.
+
+        ``priority`` is ``HIGH`` when the prefix leg already admitted this
+        lookup.
 
         Returns:
             The prefetch handle, per-hash object keys (one per blend read
@@ -224,6 +229,7 @@ class LookupMixin:
             PrefetchTaskSpec(
                 key_groups=key_groups,
                 fetching_policy="whole_chunk",
+                priority=priority,
             ),
             external_request_id=key.request_id,
         )
@@ -422,7 +428,7 @@ class LookupMixin:
         )
         row_windows = tuple(row.sliding_window_size for row in spec.key_groups)
         session = self._ctx.session_manager.get_or_create(rid)
-        session.set_tokens(key.token_bytes)
+        session.update_from_key(key)
         if not session.begin_lookup(key, tuple(attn_desc.num_chunks_in_sw)):
             return None, (), (), 0, False, False
         handle = self._ctx.storage_manager.submit_prefetch_task(
@@ -642,7 +648,14 @@ class LookupMixin:
                         job.handle,
                         job.per_hash_obj_keys,
                         job.hash_to_col,
-                    ) = self._sparse_prefetch_submit(key, resolved, job.non_prefix)
+                    ) = self._sparse_prefetch_submit(
+                        key,
+                        resolved,
+                        job.non_prefix,
+                        PrefetchPriority.HIGH
+                        if job.prefix_handle is not None
+                        else PrefetchPriority.NORMAL,
+                    )
                     # Trace the span only when the prefetch actually reads L2.
                     job.l2_keys = job.handle.total_requested_keys
                     if job.l2_keys > 0:

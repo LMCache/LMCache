@@ -94,6 +94,9 @@ the unfull chunk `[kC, end)`.
 A connector with the feature off sends an aligned LOOKUP `end` and no grid
 hint, so the server never hands it a tail it cannot load. The other transfer
 paths (engine-driven, qstore, server transfer) still floor an unaligned `end`.
+A key carrying client-computed `chunk_hashes` instead of tokens has hashes for
+complete chunks only, so it never addresses a tail on any path: its `end` is
+floored and the lookup does not probe tail lengths for it.
 
 ## Interface changes
 
@@ -101,7 +104,7 @@ Wire / IPC:
 
 | Interface | Change |
 |---|---|
-| `IPCCacheServerKey` | No new field. New method `has_unfull_chunk(chunk_size)`: `end % chunk_size != 0`. |
+| `IPCCacheServerKey` | No new field. New method `has_unfull_chunk(chunk_size)`: `end % chunk_size != 0` for a key carrying tokens; always false for a key carrying `chunk_hashes`. |
 | QUERY_PREFETCH_STATUS / WAIT_PREFETCH_STATUS reply | **Always a token count** now, for every lookup (was a chunk count). It is a multiple of `C` unless the hit ends with a tail. Every MP client is updated (vLLM `LookupState`, SGLang, TensorRT-LLM, ATOM, SDK, `lmcache bench server`); server and clients must be upgraded together. |
 | STORE / RETRIEVE on the LMCache-driven path | An unaligned `end` now also stores or loads the tail `[kC, end)`; its block IDs follow the full chunks' in every group. vLLM, SGLang, TensorRT-LLM, the SDK and the bench send aligned ends unless they mean a tail; ATOM's ranges come from ATOM. |
 | FREE_LOOKUP_LOCKS | An unaligned `end` also frees the tail ending exactly there, if this request's lookup locked it. |
@@ -127,7 +130,7 @@ vLLM integration:
 | `LMCacheMPSchedulerAdapter.maybe_submit_lookup_request` | New argument `include_unfull_chunk`: send the unaligned lookup length instead of flooring it. The only adapter change. |
 | `LMCacheMPRequestTracker` | New fields `unfull_chunk_boundaries` (tails already stored or hit) and `ends_at_prompt` (`max_tokens == 1`). |
 | `LMCacheMPRequestMetadata` | New `GetUnfullChunkStoreMetadata(...)`: builds the tail store ops. |
-| `kv_cache_groups` | New `is_per_request_state_spec`, `is_align_mode_mamba_spec`. |
+| `kv_cache_groups` | New `is_per_request_state_spec`, `is_align_mode_mamba_spec`, `is_windowed_group` (a prefix-cacheable sliding-window, chunked-local or Mamba group; see [Full-prompt hit](#full-prompt-hit)). |
 
 ## How it works
 
@@ -229,6 +232,10 @@ chunks, tries `336` first and hits. A next round with 900 tokens hits the same
 two chunks (round 1 stored no chunk `[256, 384)`), tries `368, 352, 336` and
 hits `336`.
 
+- A prompt shorter than one chunk (`L < C`) has no full chunk: stage 1 is
+  skipped (`k = 0`) and stage 2 searches chunk 0, so a repeat of the prompt
+  hits its own tail. With the feature off its lookup end is 0 and nothing is
+  probed (`early_exit_reason = "empty_chunk_hashes"`).
 - Stage 2 searches only the chunk after the full-chunk hit. With 256 tokens
   of chunks and a 32-token tail stored, a 1000-token lookup tries tail lengths
   between 256 and the next chunk boundary, never near 1000.
@@ -271,6 +278,30 @@ lock release.
   kernel's `skip_prefix_n_blocks`, and a lead block below `n` is not copied.
   `n` is aligned to every group's block, so the skip is whole blocks. The
   Mamba block (state at `B > n`) is always written.
+
+### Full-prompt hit
+
+A hit `e = P` covers the whole prompt. vLLM recomputes the last prompt token
+to sample the next one, and what the connector reports decides which blocks
+vLLM allocates:
+
+| Case | Reported | Retrieve |
+|---|---|---|
+| Full attention only (default) | `P`, as vLLM's Offloading and Nixl connectors do. The load is async; vLLM allocates blocks for `P` tokens and rolls back to `P - 1` itself. | `[start, P)` |
+| vLLM already holds `P - 1` tokens | `0` (load nothing, as before #6751) | none; FREE_LOOKUP_LOCKS with `end = P` frees every lock, the tail's included |
+| A windowed group: sliding window, chunked local or Mamba (`is_windowed_group`) | `P - 1`, the same condition under which vLLM's Offloading connector subtracts one | `[start, P)`; if token `P - 1` starts a block in some group (`(P - 1) % T == 0`), only the full chunks `[start, kC)` and the tail's lock is released |
+| SWA bounded replay (DeepSeek-V4.1) | the last chunk boundary below `P` | `[start, kC)`, `[kC, P)` released |
+
+Why windowed groups keep `P - 1`: with `P` reported, vLLM's
+`SlidingWindowManager` null-pads every block below token `P - W + 1`, then
+recomputes token `P - 1`, whose window starts at `P - W`. When
+`P = W - 1 (mod T)` that token's block is the null block (`T = 16`,
+`W = 64`: `P = 207, 223, ...`). With `P - 1` reported, only the blocks
+wholly below token `P - W` are null-padded. Holding a token back leaves the
+block of token `P - 1` unallocated when that token starts a block (#6751), so
+that case loads only the full chunks and vLLM recomputes the tail. Since the
+chunk size is a multiple of every group's block, every case above retrieves
+only into blocks vLLM allocated.
 
 ### Object layout
 
@@ -365,8 +396,6 @@ failed copies; expiration of the local read lease does not permit early reuse.
 - Tails are served from L1 only. A persistent tail copied to L2 is not looked
   up there, and tails are not shared over P2P L1. P2P lookup of tails is a
   follow-up for LMCache-native PD.
-- A prompt shorter than one chunk has no full chunk to look up, so its tail is
-  never tried.
 - A lookup tries up to `C / g` tail lengths, one L1-only prefetch (and one
   hash) each. The count is in `MP_LOOKUP_PREFETCH_END` (`unfull_chunk_probes`).
 - Requests with `max_tokens == 1` always store an exact tail. Without PD
