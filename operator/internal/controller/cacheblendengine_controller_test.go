@@ -173,7 +173,7 @@ var _ = Describe("CacheBlendEngine Controller", func() {
 			extra, ok := config["kv_connector_extra_config"].(map[string]any)
 			Expect(ok).To(BeTrue())
 			Expect(extra["lmcache.mp.host"]).To(Equal(
-				fmt.Sprintf("tcp://%s.default.svc.cluster.local", resourceName)))
+				fmt.Sprintf("grpc://%s.default.svc.cluster.local", resourceName)))
 			Expect(extra).To(HaveKey("lmcache.mp.port"))
 			Expect(extra).To(HaveKey("cb.check_layer"))
 			Expect(extra).To(HaveKey("cb.recomp_ratio"))

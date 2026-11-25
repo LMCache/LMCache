@@ -15,7 +15,7 @@ import re
 import stat
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 
@@ -227,6 +227,8 @@ class RawBlockIO(ABC):
         buffers: Sequence[Any],
         payload_lens: Sequence[int],
         total_lens: Sequence[int],
+        *,
+        unrecovered_reads: dict[int, str] | None = None,
     ) -> list[bool]:
         """Read one or more buffers through the engine's I/O path.
 
@@ -235,6 +237,8 @@ class RawBlockIO(ABC):
             buffers: Destination Python buffers.
             payload_lens: Logical payload lengths to expose to callers.
             total_lens: Physical I/O lengths for each read.
+            unrecovered_reads: Optional output mapping failed logical indices to
+                confirmed NVMe unrecovered read diagnostics.
 
         Returns:
             A per-read success boolean list aligned with ``offsets``.
@@ -506,6 +510,7 @@ class _RustRawBlockEngine(RawBlockIO):
         batch_id: int,
         expected_count: int,
         operation: str,
+        errors_out: list[tuple[int, BaseException]] | None = None,
     ) -> list[bool]:
         """Wait for an io_uring batch, log failures, and return its bitmap.
 
@@ -518,6 +523,8 @@ class _RustRawBlockEngine(RawBlockIO):
             expected_count: Number of individual I/O entries submitted in the
                 batch.
             operation: Human-readable operation name used in diagnostics.
+            errors_out: Optional destination for typed exceptions from bindings
+                that provide a typed batch wait.
 
         Returns:
             A per-entry success boolean list aligned with the batch. When the
@@ -527,7 +534,17 @@ class _RustRawBlockEngine(RawBlockIO):
         # Access ``self._raw`` directly rather than via ``_raw_device()``: to
         # wait for batch completion even if the worker has failed.
         raw_dev = self._raw
-        results, completion_errors = raw_dev.wait_iouring(batch_id)
+        # Older raw-block wheels expose only the message-based wait. Always
+        # drain the accepted batch, including when typed diagnostics are unavailable.
+        wait_exceptions = (
+            getattr(raw_dev, "wait_iouring_exceptions", None)
+            if errors_out is not None
+            else None
+        )
+        if wait_exceptions is not None:
+            results, completion_errors = wait_exceptions(batch_id)
+        else:
+            results, completion_errors = raw_dev.wait_iouring(batch_id)
         results = list(results)
         for operation_index, error in completion_errors:
             logger.error(
@@ -545,6 +562,8 @@ class _RustRawBlockEngine(RawBlockIO):
                 len(results),
             )
             return [False] * expected_count
+        if errors_out is not None and wait_exceptions is not None:
+            errors_out.extend(completion_errors)
         return [bool(result) for result in results]
 
     def close(self) -> None:
@@ -606,6 +625,8 @@ class PosixBlockIO(_RustRawBlockEngine):
         buffers: Sequence[Any],
         payload_lens: Sequence[int],
         total_lens: Sequence[int],
+        *,
+        unrecovered_reads: dict[int, str] | None = None,
     ) -> list[bool]:
         """Read each buffer synchronously with ``pread_into``.
 
@@ -878,6 +899,8 @@ class IoUringBlockIO(_RustRawBlockEngine):
         buffers: Sequence[Any],
         payload_lens: Sequence[int],
         total_lens: Sequence[int],
+        *,
+        unrecovered_reads: dict[int, str] | None = None,
     ) -> list[bool]:
         """Read buffers through the batched or io_uring_cmd path.
 
@@ -891,6 +914,7 @@ class IoUringBlockIO(_RustRawBlockEngine):
                 buffers,
                 payload_lens,
                 total_lens,
+                unrecovered_reads=unrecovered_reads,
             )
 
         batch_id = raw_dev.batched_read(
@@ -1036,6 +1060,8 @@ class IoUringBlockIO(_RustRawBlockEngine):
         buffers: Sequence[Any],
         payload_lens: Sequence[int],
         total_lens: Sequence[int],
+        *,
+        unrecovered_reads: dict[int, str] | None = None,
     ) -> list[bool]:
         """Read buffers as bounded NVMe raw-command chunks.
 
@@ -1109,13 +1135,25 @@ class IoUringBlockIO(_RustRawBlockEngine):
                 chunk_buffers,
                 chunk_lens,
             )
+            errors: list[tuple[int, BaseException]] = []
             chunk_results = self._wait_iouring_batch(
                 batch_id,
                 len(chunk_offsets),
                 "io_uring_cmd read",
+                errors_out=errors if unrecovered_reads is not None else None,
             )
         except Exception:
             return results
+
+        if unrecovered_reads is not None and errors:
+            # Third Party
+            from lmcache_rust_raw_block_io import NvmeUnrecoveredReadError
+
+            for chunk_idx, error in errors:
+                if isinstance(error, NvmeUnrecoveredReadError):
+                    unrecovered_reads[chunk_logical_indices[chunk_idx]] = (
+                        f"{type(error).__name__}: {error}"
+                    )
 
         for chunk_idx, logical_idx in enumerate(chunk_logical_indices):
             ok = chunk_idx < len(chunk_results) and bool(chunk_results[chunk_idx])
