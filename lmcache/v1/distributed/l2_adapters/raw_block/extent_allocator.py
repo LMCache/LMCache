@@ -30,9 +30,10 @@ class ExtentAllocator:
     Free space is a set of maximal free extents, indexed by start, by end
     (for O(1) coalescing on free) and by length (for best fit); Ceph
     BlueStore's AVL allocator keeps the same two orders in trees. An
-    allocation takes the head of the smallest free extent that fits, or fails
-    when none does. Freed ranges are coalesced with their free neighbours
-    immediately.
+    allocation takes the head of the smallest free extent that fits;
+    ``allocate_extents`` can instead serve a request no single free extent
+    fits from several, largest first. Freed ranges are coalesced with their
+    free neighbours immediately.
 
     Among equal candidates the most recently freed extent is taken, as a
     LIFO free list would.
@@ -138,6 +139,50 @@ class ExtentAllocator:
             return None
         return self._take(_last(self._by_len[self._lens[i]]), nbytes)
 
+    def allocate_extents(
+        self, nbytes: int, max_extents: int, *, min_first: int = 0
+    ) -> list[Extent] | None:
+        """Allocate ``nbytes`` as several extents when no single one fits.
+
+        Whole free extents are taken largest first until the remainder has a
+        best fit, so the first extent is the longest.
+
+        Args:
+            nbytes: Bytes to allocate; a positive multiple of ``unit``.
+            max_extents: Most extents the result may have; at least 2.
+            min_first: Least length of the first extent (e.g. an object
+                header that must not be split).
+
+        Returns:
+            Extents whose lengths sum to ``nbytes``, longest first, or None
+            when the ``max_extents`` longest free extents cannot hold it or
+            the longest is shorter than ``min_first``. Nothing is allocated on
+            None.
+
+        Raises:
+            ValueError: If ``nbytes`` is not a positive multiple of ``unit``
+                or ``max_extents`` is below 2.
+        """
+        if nbytes <= 0 or nbytes % self.unit:
+            raise ValueError("nbytes must be a positive multiple of unit")
+        if max_extents < 2:
+            raise ValueError("max_extents must be >= 2")
+        if (
+            not self._lens
+            or self._lens[-1] < min_first
+            or not self._fits_in(nbytes, max_extents)
+        ):
+            return None
+        extents: list[Extent] = []
+        remaining = nbytes
+        while remaining:
+            i = bisect.bisect_left(self._lens, remaining)
+            length = self._lens[i] if i < len(self._lens) else self._lens[-1]
+            take = min(length, remaining)
+            extents.append((self._take(_last(self._by_len[length]), take), take))
+            remaining -= take
+        return extents
+
     def free(self, offset: int, length: int, *, tag: int | None = None) -> None:
         """Return a range to free space, coalescing with free neighbours.
 
@@ -207,6 +252,20 @@ class ExtentAllocator:
     def free_extents(self) -> list[Extent]:
         """Return all free extents sorted by offset (for tests and status)."""
         return sorted(self._by_start.items())
+
+    def _fits_in(self, nbytes: int, max_extents: int) -> bool:
+        """Return whether the ``max_extents`` longest free extents cover nbytes."""
+        total = 0
+        count = 0
+        for length in reversed(self._lens):
+            n = min(len(self._by_len[length]), max_extents - count)
+            total += n * length
+            count += n
+            if total >= nbytes:
+                return True
+            if count == max_extents:
+                return False
+        return False
 
     def _take(self, start: int, nbytes: int) -> int:
         """Allocate the head of the free extent at ``start``."""

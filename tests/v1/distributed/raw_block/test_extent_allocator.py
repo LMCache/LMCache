@@ -269,3 +269,96 @@ def test_adversarial_size_patterns_near_full_match_reference_model(
         if step % 50 == 0:
             _check_against_model(alloc, occupied, 0)
     _check_against_model(alloc, occupied, 0)
+
+
+def _fewest_extents(runs: list[int], nbytes: int) -> int | None:
+    """Fewest free runs whose lengths cover ``nbytes`` (longest first)."""
+    total = 0
+    for count, length in enumerate(sorted(runs, reverse=True), start=1):
+        total += length
+        if total >= nbytes:
+            return count
+    return None
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_random_split_allocations_match_reference_model(seed: int):
+    rng = random.Random(seed)
+    base = 3 * UNIT
+    units = 400
+    max_extents = 4
+    min_first = 2 * UNIT
+    alloc = ExtentAllocator(base, units * UNIT, UNIT)
+    occupied = [False] * units
+    live: list[list[tuple[int, int]]] = []
+
+    for _ in range(3000):
+        if live and (rng.random() < 0.4 or alloc.free_bytes < UNIT):
+            extents = live.pop(rng.randrange(len(live)))
+            for offset, length in extents:
+                alloc.free(offset, length)
+            _mark(occupied, base, extents, False)
+        else:
+            want = rng.randint(1, 60) * UNIT
+            runs = [n * UNIT for _, n in _free_runs(occupied)]
+            before = alloc.free_extents()
+            got = alloc.allocate_extents(want, max_extents, min_first=min_first)
+            fewest = _fewest_extents(runs, want)
+            if (
+                fewest is None
+                or fewest > max_extents
+                or max(runs, default=0) < min_first
+            ):
+                assert got is None
+                assert alloc.free_extents() == before
+            else:
+                assert got is not None
+                assert sum(n for _, n in got) == want
+                # Longest first, so the header always fits in the first one.
+                assert got[0][1] >= min(min_first, want)
+                assert len(got) == min(fewest, len(got)) <= max_extents
+                _mark(occupied, base, got, True)
+                live.append(got)
+        _check_against_model(alloc, occupied, base)
+
+
+def _holes(*lengths: int) -> tuple[ExtentAllocator, list[int]]:
+    """An allocator whose only free space is holes of ``lengths`` units."""
+    alloc = ExtentAllocator(0, sum(n + 1 for n in lengths) * UNIT, UNIT)
+    holes = _separated(alloc, *lengths)
+    for offset, n in zip(holes, lengths, strict=True):
+        alloc.free(offset, n * UNIT)
+    return alloc, holes
+
+
+def test_split_allocation_takes_whole_extents_then_a_best_fit():
+    alloc, holes = _holes(8, 5, 3, 2)
+    got = alloc.allocate_extents(14 * UNIT, 8)
+    # The longest (8) whole; no hole fits the 6 left, so the longest left (5)
+    # whole; then 1 from the smallest hole that fits it (2).
+    assert got == [
+        (holes[0], 8 * UNIT),
+        (holes[1], 5 * UNIT),
+        (holes[3], UNIT),
+    ]
+
+
+@pytest.mark.parametrize(
+    "nbytes, max_extents, min_first",
+    [(19 * UNIT, 8, 0), (17 * UNIT, 3, 0), (10 * UNIT, 8, 9 * UNIT)],
+    ids=["more-than-free", "too-many-extents", "header-longer-than-any"],
+)
+def test_split_allocation_that_cannot_fit_changes_nothing(
+    nbytes, max_extents, min_first
+):
+    alloc, _ = _holes(8, 5, 3, 2)
+    before = alloc.free_extents()
+    assert alloc.allocate_extents(nbytes, max_extents, min_first=min_first) is None
+    assert alloc.free_extents() == before
+
+
+@pytest.mark.parametrize("max_extents", [0, 1])
+def test_split_allocation_needs_at_least_two_extents(max_extents):
+    alloc = ExtentAllocator(0, 8 * UNIT, UNIT)
+    with pytest.raises(ValueError):
+        alloc.allocate_extents(UNIT, max_extents)

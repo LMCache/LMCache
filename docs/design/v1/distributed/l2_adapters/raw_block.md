@@ -206,22 +206,39 @@ smaller one; a smaller slot rejects the larger objects outright.
 indexed by start and by end (O(1) coalescing on free) and by length (a sorted
 list of distinct lengths for best fit); Ceph BlueStore's AVL allocator keeps
 the same two orders in trees. The unit is `block_align`. An object needs
-`header_bytes + round_up(payload_len, block_align)` bytes, at one offset:
+`header_bytes + round_up(payload_len, block_align)` bytes, at one offset when
+a free extent is long enough:
 
 - Best fit: the head of the smallest free extent that fits; the remainder
   stays free. With same-size churn this is an exact fit, the same reuse
   pattern as slots. Among equal candidates the most recently freed is taken.
-- A store fails when no single free extent fits, even if the free bytes add
-  up; eviction then frees more (see Rejected alternatives for how often).
+- Fragmentation fallback: when no single free extent fits, the object takes
+  whole free extents longest first and best-fits the remainder, up to
+  `_MAX_EXTENTS_PER_OBJECT` (8), with the header in the first extent, which
+  must hold all of it (`header_bytes` can exceed `block_align`). This is the
+  multi-extent idea of SPDK blobs and BlueStore's `PExtentVector`, used only
+  when contiguity is impossible. The store fails only when those cannot hold
+  it either, and counts in `alloc_failure_count`.
 - Free: immediate coalescing with free neighbours. Freeing a range that starts
   or ends where free space does raises, which catches most double frees.
 - Cost under `_lock`: dictionary operations plus, when a length appears or
   disappears, one insert into or delete from the sorted length list (memmove,
   O(k) for k distinct free lengths).
 
-The object layout is the slot layout: header, then payload, as two write
-requests. Zero-copy direct views, in-place tail zeroing, bounce buffers,
-io_uring fixed buffers and io_uring_cmd splitting are unchanged.
+A one-extent object has the slot layout: header, then payload, as two write
+requests. A split object's payload continues after the header and through the
+later extents; every extent and the header are block multiples, so each
+payload segment starts block-aligned on the device and in the buffer, and only
+the last carries padding. Zero-copy direct views, in-place tail zeroing, bounce
+buffers, io_uring fixed buffers and io_uring_cmd splitting apply per segment.
+A load succeeds only if every segment does; an unrecovered read in any segment
+quarantines the whole object.
+
+The header in the first extent stands for all of it: its key, size and write
+generation are checked at recovery before any extent is trusted. Deleting a
+split object zeroes that header and only then frees every extent; if the
+write fails, every extent is retired. A failed or cancelled store frees every
+extent, and an unreadable header at startup retires every extent.
 
 The first `block_align` bytes of the data region hold a format marker (see
 Upgrades and downgrades); objects are allocated after it.
@@ -229,7 +246,10 @@ Upgrades and downgrades); objects are allocated after it.
 ### Checkpoint format
 
 Format version 2 drops `slot_bytes` and `next_slot`; an entry keeps `offset`
-and `size`, and its length follows from `size`. Recovery rebuilds free space
+and `size`, and its length follows from `size`. A split entry lists
+`extents: [[offset, length], ...]` instead of `offset`, and a checkpoint that
+holds one is written as version 3; without split objects it stays version 2.
+Recovery rebuilds free space
 as everything not held by a valid entry; entries outside the data region,
 off the block grid, or overlapping another entry are dropped (overlap means
 corruption, so both go).
@@ -253,6 +273,15 @@ marker next to a version 2 checkpoint stops startup rather than guess. The
 marker is written before an imported checkpoint is rewritten, so a crash in
 between imports it again.
 
+A binary without split objects (format 2 only) rejects a version 3
+checkpoint as a whole and, like any unloaded checkpoint, voids every metadata
+container before its first store. Reading it entry by entry would be
+unsafe: it would drop the split entries and reuse their later extents, while
+a crash before its own checkpoint would leave the version 3 checkpoint and
+the split objects' headers, still valid, to the next run. Going back from
+version 3 therefore loses the cache, as going back to fixed slots does; a
+version 2 checkpoint (no split object at the time) still loads.
+
 ### Rejected alternatives
 
 A trace simulation (`alloc_sim.py`, attached to #6954 with `pinned_sim.py`
@@ -273,8 +302,9 @@ does not do this; see "What ships" below. Hit rate / failed stores:
 | Log-uniform 4 KiB to 64 MiB | 0.069 / 0 % | 0.044 / 48 % | 0.259 / 0.6 % | 0.350 / 0 % | 0.379 / 0 % |
 | Two sizes 12 % apart (serde) | 0.356 / 0 % | 0.372 / 0 % | 0.356 / 0 % | 0.356 / 0 % | 0.372 / 0 % |
 
-Slabs carve 256 MiB segments per exact size and return a segment once it is
-empty. The 1.25x classes start at 64 KiB and top out at the largest object
+"This allocator" is one extent per object (see Why split objects for up to
+8). Slabs carve 256 MiB segments per exact size and return a segment once it
+is empty. The 1.25x classes start at 64 KiB and top out at the largest object
 (the full-slot class); "segments returned" carves them like the slabs,
 "no return" from one shared region with fallback to a larger class.
 Power-of-two classes do worse than 1.25x classes for most workloads (several
@@ -286,23 +316,23 @@ vs 6.5 MB).
 Random instead of LRU eviction order changes these by a few points.
 
 **What ships.** Eviction still starts only at the watermark: a store that
-finds no range long enough fails, and nothing is evicted for it. The same
-simulation without `--full-on-failure` (hit rate / failed stores):
+finds no space, even split over 8 free ranges (see Why split objects), fails,
+and nothing is evicted for it. The same simulation without
+`--full-on-failure` (hit rate / failed stores):
 
 | Workload | Fixed slot (before) | This allocator |
 |---|---|---|
 | Hybrid groups | 0.295 / 0 % | 0.362 / 0 % |
 | Several models and chunk sizes | 0.227 / 0 % | 0.373 / 0 % |
-| Model mix changes halfway | 0.158 / 0 % | 0.289 / 0.1 % |
+| Model mix changes halfway | 0.158 / 0 % | 0.289 / 0 % |
 | Log-uniform 4 KiB to 64 MiB | 0.069 / 0 % | 0.379 / 0 % |
 | Two sizes 12 % apart (serde) | 0.356 / 0 % | 0.372 / 0 % |
 
-
-At the default watermark the free space left keeps failures at 0.1 % or
-less. Evicting for failed stores below the watermark (an adapter signal to
-the eviction controller) changes nothing there, and around objects that
-cannot be evicted it drains the cache (see Known limitations); it is left
-out.
+Evicting for failed stores below the watermark (an adapter signal to the
+eviction controller) would change nothing at the default watermark, and
+around objects that cannot be evicted it drains the cache (`pinned_sim.py
+--evict-on-failure`, one extent per object: usage 0.74 to 0.55, small-object
+hit rate 0.153 to 0.107); it is left out.
 
 - Size classes (the proposal in issue #3392): no splitting, so each object
   wastes up to the gap to its class; power-of-two classes waste about a
@@ -315,14 +345,6 @@ out.
 - Exact-size slabs that return empty segments: an LRU rarely empties a whole
   segment, and with many distinct sizes each one holds segments of its own.
 - Buddy allocation: the same power-of-two rounding.
-- Multi-extent objects (SPDK blobs, BlueStore `PExtentVector`): splitting an
-  object across up to 8 free ranges when no single one fits split almost no
-  object at the default watermark (0.03 % of stores when the
-  model mix changes halfway, none otherwise). It costs more requests per object
-  and a header that must also pin the layout. Around locked objects (Known
-  limitations) it stored the large objects, but they were rarely hit and
-  evicted small ones (small-object hit rate 0.145 to 0.123, with the
-  failed-store eviction rule).
 - Deletes that write nothing: a deleted object a checkpoint copy may list is
   kept as a hazard, and the store that reuses its space covers its first byte,
   holds the rest of it until its write ends and writes that byte no later.
@@ -339,28 +361,55 @@ out.
   regions, which conflicts with the per-key LRU eviction controller and needs
   reinsertion of live objects.
 
+### Why split objects
+
+With one free range per object, the free space left below the watermark can be
+in pieces too short for the larger objects; eviction starts only at the
+watermark, so those stores keep failing. When no single free range fits, an
+object takes whole free extents longest first and a best-fit remainder, up to
+8, with its header in the first. Simulation (`alloc_sim.py`, 16 GiB, LRU, no
+eviction for failed stores; hit rate / failed stores, split stores):
+
+| Workload | Watermark | One extent | Up to 8 extents |
+|---|---|---|---|
+| Model mix changes halfway | 0.8 | 0.289 / 0.09 % | 0.289 / 0 %, 0.03 % split |
+| Other mixes of the table above | 0.8 | unchanged, 0 % | unchanged, none split |
+| Model mix changes halfway | 0.9 | 0.268 / 60 % | 0.327 / 0.1 %, 1.1 % split |
+| Several models and chunk sizes | 0.9 | 0.422 / 0.1 % | 0.422 / 0 %, 0.05 % split |
+| Two sizes 12 % apart | 0.9 | 0.420 / 0.5 % | 0.421 / 0 %, 0.4 % split |
+| Log-uniform 4 KiB to 64 MiB | 0.9 | 0.434 / 0.3 % | 0.429 / 0 %, 0.3 % split |
+
+(Watermark 0.9 with eviction ratio 0.1, the example in the user docs; fixed
+slots fail 28 %, 21 %, 0 % and 46 % of these stores.) When the model mix
+changes, the old sizes' holes are too short for the new objects; split
+across them, the new objects fit and hit rate rises.
+
+Objects that cannot be evicted split free space the same way. With
+`pinned_sim.py` (1 GiB, 1 MiB and 16 MiB objects, 5 % of requests for the
+large ones, one 1 MiB object locked for good every 8 MiB after a small-object
+warm-up, 10 % of the device), one extent lets 66 % of the 16 MiB stores fail
+(56 % with a lock every 4 MiB, 1.5 % without locks) and up to 8 extents none.
+Hit rate does not rise with it: the large objects stored are rarely hit in
+this workload (0.1 to 0.4 %), and they take space the small ones had while
+the large stores failed (small-object hit rate 0.153 to 0.123; 0.114 with
+the same traffic and no locks). Splitting here restores the behaviour of an
+unlocked device; it is not a hit-rate gain.
+
+The cap of 8 (watermark 0.9, eviction ratio 0.1, failed stores in % with at
+most 1 / 2 / 4 / 8 / 16 extents): model mix changes halfway 59.8 / 0.24 /
+0.14 / 0.06 / 0.07; the other mixes 0.06 to 0.5 with one extent and 0 with
+two or more. A lock every 4 MiB needs about 6 extents per 16 MiB object.
+Each extra extent costs one more I/O request; `multi_extent_alloc_count`
+counts stores that took several extents (failed ones included).
+
 ## Known limitations
 
-- **Unevictable objects split free space for good.** Delete skips locked keys,
-  and raw-block locks have no TTL, so leaked locks pin their objects until a
-  restart. With fixed slots each one pins a slot; here, locked objects spread
-  closer together than a large object leave no range long enough for it,
-  whatever is evicted. In a simulation with the real allocator
-  (`pinned_sim.py`, attached to #6954: 1 GiB, 1 MiB and 16 MiB objects,
-  one 1 MiB object locked every 8 MiB after a small-object warm-up, 10 % of the
-  device), 66 % of the 16 MiB stores fail (1.5 % without locked objects);
-  usage stays at 0.74 and the small objects keep their hit rate. Evicting on
-  every failing pass instead would let 33 % fail but drop usage to 0.55 and
-  the small objects' hit rate from 0.153 to 0.107. Locks at random places, or
-  held for a while and released, had little effect. A rising
+- **Objects that cannot be evicted still limit splitting.** Delete skips
+  locked keys, and raw-block locks have no TTL, so leaked locks pin their
+  objects until a restart. When the free gaps between locked objects are
+  shorter than an eighth of a large object, no 8 ranges hold it. A rising
   `alloc_failure_count` with a non-zero `locked_key_count` while idle shows
   the condition; the fix is the leak (for example #6791).
-- **High watermarks leave too little free space.** Above about 0.85 the free
-  space left is often split into ranges shorter than the larger objects, and
-  their stores fail until usage reaches the watermark again (in the
-  simulation at 0.9, 60 % of stores when the model mix changes halfway;
-  fixed slots fail often there too, 28 % in that case and 21 % with several
-  models). A rising `alloc_failure_count` shows the condition.
 - **A long delete round blocks the controller.** `adapter.delete()` runs
   under the controller's `_states_lock`, which `report_status()` also takes,
   so `/status` and the other L2 adapters' eviction wait for the round (as

@@ -171,21 +171,27 @@ the Rust wheel's version, so pin it yourself to guarantee a matching pair:
 Free space is kept as maximal free extents. A store takes the head of the
 smallest free extent that fits (best fit), so an object the size of one that
 was just evicted reuses exactly that space. Freed space merges with adjacent
-free space immediately. A store fails when no single free extent is long
-enough, even if the free bytes add up; ``alloc_failure_count`` counts these
-failures. Eviction is unchanged: it starts at ``trigger_watermark``, so at the
-default 0.8 the free space left keeps such failures rare (at most 0.1 % in the
-simulations and end-to-end runs of the design doc). With a higher
-``trigger_watermark`` (above about 0.85) less free space is left, and the
-larger objects can keep failing below the watermark. Objects that cannot be evicted
-(locked keys, see ``locked_key_count``) spread across the device have the same
-effect. A rising ``alloc_failure_count`` with ``largest_free_extent_bytes``
-below the object size shows it.
+free space immediately. When no single free extent is long enough, the object
+is split across up to 8 free extents, longest first, with its header in the
+first; each extra extent costs one more I/O request. A store fails when no
+free extent can hold the header or those 8 extents cannot hold it;
+``alloc_failure_count`` counts these failures. Eviction is unchanged: it
+starts at ``trigger_watermark``. At the default 0.8 objects are rarely split
+(at most 0.03 % of stores in the design doc's simulations without locked
+objects). Splitting keeps
+stores working when the free space left is in short pieces: with a higher
+``trigger_watermark``, after the object sizes change (another model), or
+around objects that cannot be evicted (locked keys, see
+``locked_key_count``). A rising ``alloc_failure_count`` with
+``largest_free_extent_bytes`` below the object size shows space that even
+splitting cannot use.
 
 The core status (``/status``, under the adapter's ``core``) reports
 ``usable_capacity_bytes``, ``allocated_bytes``, ``free_bytes``,
 ``free_extent_count``, ``largest_free_extent_bytes``,
 ``alloc_failure_count``,
+``multi_extent_alloc_count`` (stores that took several extents, failed ones
+included),
 ``header_invalidation_count``, ``header_invalidation_failure_count``,
 ``quarantined_bytes`` and
 ``quarantined_range_count``. The fixed-slot keys ``slot_bytes``,
@@ -272,6 +278,11 @@ marker, and this version then starts empty instead of trusting a checkpoint
 whose space the older run may have reused. It does not catch an older run
 that stopped before that first write reached the device while later writes
 did (one io_uring batch has no order, and posix runs several store workers).
+
+A checkpoint that lists a split object is written in a newer format still.
+A version that loads per-object checkpoints but cannot split objects rejects
+it and starts empty, voiding every metadata container before its first store, so
+going back to such a version also loses the cache.
 
 **Fixed-buffer registration and memlock:**
 

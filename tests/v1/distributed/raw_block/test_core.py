@@ -2742,6 +2742,211 @@ def test_uecc_cancels_a_write_in_flight_over_the_failed_space(tmp_path: Path) ->
 
 @pytest.mark.no_shared_allocator
 @requires_rust_raw_block_io
+def test_multi_extent_uring_cmd_writes_split_at_extent_boundaries(
+    tmp_path: Path,
+) -> None:
+    fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
+    core, _ = _fragmented_uring_cmd_core(tmp_path, fake)
+    key = encode_object_key(make_object_key(820))
+    payload = bytes(range(256)) * 48  # 12 KiB: needs two holes
+    try:
+        assert core.put_many([key], [make_memory_obj(payload)]).results == [True]
+        extents = core.entry_extents(key.encoded)
+        assert extents is not None and len(extents) == 2
+        (first, first_len), (second, second_len) = extents
+        assert first_len == second_len == RAW_BLOCK_CI_HEADER_BYTES + 4096
+        call = fake.batched_write_calls[-1]
+        # Header, then the payload continues after it and into the second
+        # extent, every request aligned and at most the transfer size.
+        assert call.offsets == [
+            first,
+            first + RAW_BLOCK_CI_HEADER_BYTES,
+            second,
+            second + 4096,
+        ]
+        assert call.total_lens == [4096] * 4
+        loaded = make_empty_memory_obj(len(payload))
+        assert core.load_many_into([key.encoded], [loaded]) == [True]
+        assert memory_obj_bytes(loaded) == payload
+        assert fake.last_read_offsets == call.offsets[1:]
+    finally:
+        core.close()
+
+
+@pytest.mark.no_shared_allocator
+@requires_rust_raw_block_io
+def test_uecc_in_a_later_extent_quarantines_the_whole_object(
+    tmp_path: Path,
+) -> None:
+    fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
+    core, kept = _fragmented_uring_cmd_core(tmp_path, fake)
+    big = encode_object_key(make_object_key(830))
+    payload = b"q" * (12 * 1024)
+    try:
+        assert core.put_many([big], [make_memory_obj(payload)]).results == [True]
+        extents = core.entry_extents(big.encoded)
+        assert extents is not None and len(extents) == 2
+        # Reads: three chunks of the big object then one of the kept one; the
+        # fake fails the middle one, inside the big object's second extent.
+        assert core.exists_many([big.encoded, kept[0].encoded], lock=True) == [
+            True,
+            True,
+        ]
+        fake.uecc_on_next_wait_batch = True
+        targets = [make_empty_memory_obj(len(payload)), make_empty_memory_obj(4096)]
+        assert core.load_many_into([big.encoded, kept[0].encoded], targets) == [
+            False,
+            True,
+        ]
+        assert extents[1][0] <= fake.last_read_offsets[2] < sum(extents[1])
+        core.unlock_many([big.encoded, kept[0].encoded])
+        status = core.report_status()
+        assert status["quarantined_range_count"] == 2
+        assert status["quarantined_bytes"] == sum(n for _, n in extents)
+        assert core.exists_many([big.encoded]) == [False]
+        # The two remaining holes are reusable; the retired ones are not.
+        for i in range(2):
+            spec = encode_object_key(make_object_key(840 + i))
+            assert core.put_many([spec], [make_memory_obj(b"n" * 4096)]).results == [
+                True
+            ]
+            offset = core.entry_offset(spec.encoded)
+            assert all(not (o <= offset < o + n) for o, n in extents)
+        spec = encode_object_key(make_object_key(842))
+        assert core.put_many([spec], [make_memory_obj(b"n")]).results == [False]
+    finally:
+        core.close()
+
+
+@pytest.mark.no_shared_allocator
+@pytest.mark.parametrize("use_uring_cmd", [False, True], ids=["uring", "uring-cmd"])
+def test_multi_extent_segments_stay_inside_the_source_allocation(
+    tmp_path: Path, use_uring_cmd: bool
+) -> None:
+    """io_uring fixed buffers apply to a request only when its whole range lies
+    in one registered region. Every payload segment of a multi-extent object
+    must therefore be a slice of the object's own L1 allocation, in order."""
+    fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
+    hole = RAW_BLOCK_CI_HEADER_BYTES + 4096
+    with patch.object(IoUringBlockIO, "validate_uring_cmd_device"):
+        core = _make_core_with_fake(
+            tmp_path / "raw-block",
+            fake,
+            "io_uring",
+            capacity_bytes=_DATA_START + 4 * hole,
+            use_odirect=True,
+            enable_zero_copy=True,
+            use_uring_cmd=use_uring_cmd,
+            max_data_transfer_size=4096 if use_uring_cmd else 0,
+        )
+    fillers = [encode_object_key(make_object_key(860 + i)) for i in range(4)]
+    try:
+        assert (
+            core.put_many(
+                fillers, [make_memory_obj(b"f" * 4096) for _ in range(4)]
+            ).results
+            == [True] * 4
+        )
+        assert core.delete_many([fillers[0].encoded, fillers[2].encoded]) == [True] * 2
+        key = encode_object_key(make_object_key(870))
+        payload = (bytes(range(256)) * 48)[:-100]  # 12 KiB minus padding
+        source = make_aligned_memory_obj(payload)
+        assert core.put_many([key], [source]).results == [True]
+        assert len(core.entry_extents(key.encoded) or []) == 2
+
+        call = fake.batched_write_calls[-1]
+        span = (len(payload) + 4095) // 4096 * 4096
+        payload_addrs = call.buffer_addresses[1:]  # [0] is the header
+        assert payload_addrs[0] == source.data_ptr
+        for addr, length in zip(payload_addrs, call.total_lens[1:], strict=True):
+            assert source.data_ptr <= addr and addr + length <= source.data_ptr + span
+        assert sum(call.total_lens[1:]) == span
+
+        dest = make_aligned_memory_obj(b"\0" * len(payload))
+        assert core.load_many_into([key.encoded], [dest]) == [True]
+        assert memory_obj_bytes(dest) == payload
+    finally:
+        core.close()
+
+
+@pytest.mark.no_shared_allocator
+@requires_rust_raw_block_io
+@pytest.mark.parametrize("failed_request", [0, 1, 2], ids=["first", "middle", "last"])
+def test_a_failed_segment_makes_the_whole_object_a_miss(
+    tmp_path: Path, failed_request: int
+) -> None:
+    """An ordinary read error (not an unrecovered media error) in any segment
+    of a split object must fail that key; other keys stay hits."""
+    fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
+    core, kept = _fragmented_uring_cmd_core(tmp_path, fake)
+    big = encode_object_key(make_object_key(880))
+    payload = b"m" * (12 * 1024)
+    try:
+        assert core.put_many([big], [make_memory_obj(payload)]).results == [True]
+        assert len(core.entry_extents(big.encoded) or []) == 2
+        # Reads: three 4 KiB requests of the big object, then the kept key's.
+        fake.fail_completion_entries = {failed_request}
+        targets = [make_empty_memory_obj(len(payload)), make_empty_memory_obj(4096)]
+        assert core.load_many_into([big.encoded, kept[0].encoded], targets) == [
+            False,
+            True,
+        ]
+        assert core.report_status()["quarantined_bytes"] == 0
+        fake.fail_completion_entries = set()
+        assert core.load_many_into([big.encoded], targets[:1]) == [True]
+        assert memory_obj_bytes(targets[0]) == payload
+    finally:
+        core.close()
+
+
+@pytest.mark.no_shared_allocator
+def test_multi_extent_zero_copy_reads_land_inside_the_destination(
+    tmp_path: Path,
+) -> None:
+    """Each payload segment of a split object is read straight into its slice
+    of the aligned destination, padding included, with no bounce buffer."""
+    fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
+    hole = RAW_BLOCK_CI_HEADER_BYTES + 4096
+    with patch.object(IoUringBlockIO, "validate_uring_cmd_device"):
+        core = _make_core_with_fake(
+            tmp_path / "raw-block",
+            fake,
+            "io_uring",
+            capacity_bytes=_DATA_START + 4 * hole,
+            use_odirect=True,
+            enable_zero_copy=True,
+        )
+    fillers = [encode_object_key(make_object_key(890 + i)) for i in range(4)]
+    try:
+        assert (
+            core.put_many(
+                fillers, [make_memory_obj(b"f" * 4096) for _ in range(4)]
+            ).results
+            == [True] * 4
+        )
+        assert core.delete_many([fillers[0].encoded, fillers[2].encoded]) == [True] * 2
+        key = encode_object_key(make_object_key(899))
+        payload = (bytes(range(256)) * 48)[:-100]  # 12 KiB minus padding
+        assert core.put_many([key], [make_aligned_memory_obj(payload)]).results == [
+            True
+        ]
+        assert len(core.entry_extents(key.encoded) or []) == 2
+        dest = make_aligned_memory_obj(b"\0" * len(payload))
+        assert core.load_many_into([key.encoded], [dest]) == [True]
+        assert memory_obj_bytes(dest) == payload
+        span = (len(payload) + 4095) // 4096 * 4096
+        assert sum(fake.last_read_lens) == span
+        assert fake.last_read_addresses[0] == dest.data_ptr
+        for addr, length in zip(
+            fake.last_read_addresses, fake.last_read_lens, strict=True
+        ):
+            assert dest.data_ptr <= addr and addr + length <= dest.data_ptr + span
+    finally:
+        core.close()
+
+
+@pytest.mark.no_shared_allocator
+@requires_rust_raw_block_io
 def test_header_invalidation_keeps_the_objects_placement_id(tmp_path: Path) -> None:
     """The delete's header write lands on the object's FDP placement, like the
     object did, so reuse affinity is not undone by the invalidation."""

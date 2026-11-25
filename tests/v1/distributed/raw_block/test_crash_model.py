@@ -129,9 +129,12 @@ def _prefix(rng: random.Random, n: int) -> int:
     return min(n, ALIGN * rng.randrange(0, n // ALIGN + 1))
 
 
-def _run_workload(core, versions, vcount, seed: int, ops: int = 120) -> _WriteLog:
-    """Three threads of puts (1-3 keys, batched on io_uring), forced deletes
-    and checkpoints on 24 keys; returns the log of every device write."""
+def _run_workload(
+    core, versions, vcount, seed: int, ops: int = 120, blocks=(1, 2, 3, 5, 7)
+) -> _WriteLog:
+    """Three threads of puts (1-3 keys of ``blocks`` blocks each, batched on
+    io_uring), forced deletes and checkpoints on 24 keys; returns the log of
+    every device write."""
     log = _WriteLog()
     vlock = threading.Lock()
     errors: list[BaseException] = []
@@ -145,9 +148,7 @@ def _run_workload(core, versions, vcount, seed: int, ops: int = 120) -> _WriteLo
                     keys = rng.sample(range(24), rng.randint(1, 3))
                     objs, specs = [], []
                     for k in keys:
-                        size = rng.choice([1, 2, 3, 5, 7]) * ALIGN - rng.choice(
-                            [0, 100]
-                        )
+                        size = rng.choice(blocks) * ALIGN - rng.choice([0, 100])
                         data = random.Random(next(vcount)).randbytes(size)
                         with vlock:
                             versions.setdefault(k, []).append(data)
@@ -207,24 +208,38 @@ ENGINE_PARAMS = pytest.mark.parametrize(
     [("posix", False), ("io_uring", False), ("io_uring", True)],
     ids=["posix", "uring", "uring-odirect"],
 )
+# A device too small for the objects to stay contiguous: stores split and
+# their deletes and recoveries cover several extents.
+LAYOUT_PARAMS = pytest.mark.parametrize(
+    "data_bytes,blocks",
+    [(640 * 1024, (1, 2, 3, 5, 7)), (384 * 1024, (1, 2, 9, 15))],
+    ids=["contiguous", "split"],
+)
+
+
+def _assert_split_if_expected(core, blocks) -> None:
+    if max(blocks) > 7:
+        assert core.report_status()["multi_extent_alloc_count"] > 0
 
 
 @ENGINE_PARAMS
+@LAYOUT_PARAMS
 @pytest.mark.parametrize("seed", [1, 2, 3])
 def test_crash_at_any_point_never_returns_bytes_of_another_write(
-    tmp_path, engine, odirect, seed
+    tmp_path, engine, odirect, data_bytes, blocks, seed
 ):
     """Concurrent puts (batched for io_uring), deletes and checkpoints on a
     small device so space is reused constantly. At sampled crash points the
     device image is built from the write log under the process-crash model,
     recovered, and every recovered key must load exactly the bytes of one
     write of that key."""
-    config = _config(tmp_path, engine, 640 * 1024, odirect)
+    config = _config(tmp_path, engine, data_bytes, odirect)
     versions: dict[int, list[bytes]] = {}
     vcount = itertools.count(seed * 1_000_000)
     core = RawBlockCore(config)
     base = Path(config.device_path).read_bytes()
-    log = _run_workload(core, versions, vcount, seed)
+    log = _run_workload(core, versions, vcount, seed, blocks=blocks)
+    _assert_split_if_expected(core, blocks)
     core.close()
 
     last = max(c["end"] for c in log.calls)
@@ -242,19 +257,21 @@ def test_crash_at_any_point_never_returns_bytes_of_another_write(
 
 
 @ENGINE_PARAMS
+@LAYOUT_PARAMS
 @pytest.mark.parametrize("seed", [1, 2])
 def test_second_crash_after_recovering_from_a_first_one(
-    tmp_path, engine, odirect, seed
+    tmp_path, engine, odirect, data_bytes, blocks, seed
 ):
     """Crash, recover (possibly past a torn checkpoint copy, with loaded
     entries listed by both containers), run again and crash again."""
-    config = _config(tmp_path, engine, 640 * 1024, odirect)
+    config = _config(tmp_path, engine, data_bytes, odirect)
     versions: dict[int, list[bytes]] = {}
     vcount = itertools.count(seed * 1_000_000)
     rng = random.Random(seed)
     core = RawBlockCore(config)
     base1 = Path(config.device_path).read_bytes()
-    log1 = _run_workload(core, versions, vcount, seed)
+    log1 = _run_workload(core, versions, vcount, seed, blocks=blocks)
+    _assert_split_if_expected(core, blocks)
     core.close()
     last1 = max(c["end"] for c in log1.calls)
     bad: list[str] = []
@@ -263,7 +280,7 @@ def test_second_crash_after_recovering_from_a_first_one(
         Path(config.device_path).write_bytes(log1.image(base1, t1, rng))
         core = RawBlockCore(config)
         base2 = Path(config.device_path).read_bytes()
-        log2 = _run_workload(core, versions, vcount, seed + t1, ops=60)
+        log2 = _run_workload(core, versions, vcount, seed + t1, ops=60, blocks=blocks)
         core.close()
         last2 = max(c["end"] for c in log2.calls)
         for t2 in sorted(rng.sample(range(1, last2 + 1), min(25, last2))):

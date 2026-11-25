@@ -476,6 +476,7 @@ class _RecordingRawDevice:
     uecc_on_next_wait_batch: bool = False
     last_read_offsets: list[int] = field(default_factory=list)
     last_read_lens: list[int] = field(default_factory=list)
+    last_read_addresses: list[int] = field(default_factory=list)
 
     def worker_error(self) -> str | None:
         """Return the terminal worker failure independently of per-I/O errors."""
@@ -593,6 +594,7 @@ class _RecordingRawDevice:
         )
         self.last_read_offsets = [int(off) for off in offsets]
         self.last_read_lens = [int(total) for total in total_lens]
+        self.last_read_addresses = [_address(buf) for buf in buffers]
         for off, buf, total in zip(offsets, buffers, total_lens, strict=True):
             self._copy_into(int(off), buf, int(total))
         return self._submit_batch(len(offsets))
