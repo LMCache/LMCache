@@ -17,7 +17,6 @@ from lmcache.v1.common.custom_types import (
     EventBinding,
     IPCCacheServerKey,
     KVEventBatch,
-    KVEventProfile,
     KVEventRecord,
 )
 from lmcache.v1.common.token_codec import TOKEN_STRIDE
@@ -40,6 +39,7 @@ from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
 )
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
+    StoreBindingRegistration,
 )
 from lmcache.v1.multiprocess.request_handler import request_handler
 from lmcache.v1.transport.errors import InvalidRequestError
@@ -63,6 +63,7 @@ def _chunk_key(key: ObjectKey) -> _ChunkKey:
 
 @dataclass
 class _BoundChunk:
+    registration: StoreBindingRegistration
     binding: EventBinding
     token_bytes: bytes
     pending: set[str] = field(default_factory=set)
@@ -188,6 +189,7 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
             for dependency in build_ctx.built:
                 if isinstance(dependency, LMCacheDrivenTransferModule):
                     dependency.bind_store_events = module.bind_store
+                    dependency.retire_store_bindings = module.retire_store_bindings
         return module
 
     def __init__(
@@ -211,7 +213,7 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
         self._kv_event_incarnation = time.time_ns()
         self._kv_event_next_seq = 1
         self._kv_event_dropped = self._kv_event_lost_markers = 0
-        self._discard_until_empty = False
+        self._discard_until_drain = 0
         self._kv_event_unbound_stores = 0
         self._kv_event_bindings: OrderedDict[
             bytes, tuple[tuple[int, ...], bytes | None]
@@ -219,7 +221,9 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
         self._residency = CommittedKVResidency(ctx.layout_desc_registry)
         self._announced: dict[_ChunkKey, int] = {}
         self._bound: dict[_ChunkKey, _BoundChunk] = {}
-        self._pending_stores: dict[str, tuple[_ChunkKey, ...]] = {}
+        self._pending_stores: dict[
+            str, tuple[StoreBindingRegistration, tuple[_ChunkKey, ...]]
+        ] = {}
         if not self._kv_events_enabled:
             return
         self._ctx.event_bus.subscribe_drops(self._record_kv_event_loss)
@@ -388,18 +392,22 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
         self,
         key: IPCCacheServerKey,
         objects: Sequence[ObjectKey],
-        profile: KVEventProfile | None,
+        registration: StoreBindingRegistration | None,
         chunk_size: int,
         transfer: str,
-    ) -> None:
+    ) -> bool:
         """Reserve a descriptor per complete chunk until host completion.
 
         Args:
             key: STORE range, packed tokens and engine-native block identities.
             objects: Keys for the first object group, in STORE order.
-            profile: Profile accepted for the worker's registered context.
+            registration: Live worker cohort and its accepted profile.
             chunk_size: Number of tokens per complete storage chunk.
             transfer: Process-unique STORE key from next_transfer_key().
+
+        Returns:
+            True if this transfer owns a pending binding. During event loss
+            recovery valid STOREs can proceed without native metadata.
 
         Raises:
             InvalidRequestError: The profile, range, chain or descriptors disagree.
@@ -409,9 +417,9 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
             raise InvalidRequestError("native STORE bindings require an unsalted key")
         if (
             not key.event_bindings
-            or profile is None
+            or registration is None
             or key.start % chunk_size
-            or key.end > key.num_tokens
+            or key.end * TOKEN_STRIDE > len(key.token_bytes)
             or not 0 <= key.start < key.end
             or len(objects) != len(key.event_bindings)
             or len(objects) != (key.end - key.start) // chunk_size
@@ -419,6 +427,7 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
             raise InvalidRequestError(
                 "native STORE binding profile or chunk range mismatch"
             )
+        profile = registration.profile
         prepared: dict[_ChunkKey, tuple[EventBinding, bytes]] = {}
         parent = key.event_bindings[0].parent_block_hash
         if (key.start == 0) != (parent is None):
@@ -446,30 +455,49 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
             prepared[chunk] = binding, packed
             parent = binding.block_hashes[-1]
         with self._kv_event_lock:
-            if (
-                self._discard_until_empty
-                or self._ctx.event_bus.dropped_events_count() > self._kv_event_dropped
-            ):
-                raise InvalidRequestError(
-                    "native STORE binding unavailable during event loss recovery"
-                )
+            if not registration.active or self._recovering_from_loss():
+                return False
             for chunk, (binding, packed) in prepared.items():
                 old = self._bound.get(chunk)
-                if old is not None and (
-                    old.binding != binding or old.token_bytes != packed
+                if (
+                    old is not None
+                    and old.registration is registration
+                    and (old.binding != binding or old.token_bytes != packed)
                 ):
                     raise InvalidRequestError("conflicting native STORE binding")
             for chunk, (binding, packed) in prepared.items():
-                self._bound.setdefault(chunk, _BoundChunk(binding, packed)).pending.add(
-                    transfer
-                )
-            self._pending_stores[transfer] = tuple(prepared)
+                state = self._bound.get(chunk)
+                if state is None or state.registration is not registration:
+                    state = self._bound[chunk] = _BoundChunk(
+                        registration, binding, packed
+                    )
+                state.pending.add(transfer)
+            self._pending_stores[transfer] = registration, tuple(prepared)
+            return True
+
+    def retire_store_bindings(self, registration: StoreBindingRegistration) -> None:
+        """Forget only the leaving cohort, including any outstanding releases."""
+        with self._kv_event_lock:
+            chunks = [
+                k for k, s in self._bound.items() if s.registration is registration
+            ]
+            for chunk in chunks:
+                del self._bound[chunk]
+            transfers = [
+                t
+                for t, (owner, _) in self._pending_stores.items()
+                if owner is registration
+            ]
+            for transfer in transfers:
+                del self._pending_stores[transfer]
 
     def get_store_binding(self, key: ObjectKey) -> tuple[EventBinding, bytes] | None:
         """Return the retained descriptor and packed chunk tokens, or None."""
         with self._kv_event_lock:
             state = self._bound.get(_chunk_key(key))
-            return (state.binding, state.token_bytes) if state is not None else None
+            if state is not None and state.registration.active:
+                return state.binding, state.token_bytes
+            return None
 
     def _collect_binding(self, chunk: _ChunkKey) -> None:
         state = self._bound.get(chunk)
@@ -516,22 +544,36 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
                 self._announced.clear()
                 self._append_kv_event(_KIND_LOST, "", [])
             # Read the drop count before the queue: later overflow stays detectable.
-            self._discard_until_empty = self._ctx.event_bus.queue_depth() > 0
+            bus = self._ctx.event_bus
+            self._discard_until_drain = (
+                bus.completed_drains() + 1 if bus.queue_depth() else 0
+            )
+
+    def _recovering_from_loss(self) -> bool:
+        """Check the drain thread's empty boundary while holding the event lock."""
+        bus = self._ctx.event_bus
+        if self._discard_until_drain:
+            if bus.completed_drains() < self._discard_until_drain:
+                return True
+            self._discard_until_drain = 0
+        return bus.dropped_events_count() > self._kv_event_dropped
 
     def _record_kv_event(self, event: Event) -> None:
         """Translate bus events to ordered records; token bindings precede writes."""
         with self._kv_event_lock:
-            if (
-                self._discard_until_empty
-                or self._ctx.event_bus.dropped_events_count() > self._kv_event_dropped
-            ):
+            if self._recovering_from_loss():
                 self._record_kv_event_loss()
                 return
             if event.event_type == EventType.MP_STORE_BINDINGS_RELEASED:
                 transfer = event.metadata["transfer_key"]
-                for chunk in self._pending_stores.pop(transfer, ()):
-                    self._bound[chunk].pending.discard(transfer)
-                    self._collect_binding(chunk)
+                pending = self._pending_stores.pop(transfer, None)
+                if pending is not None:
+                    registration, retained_chunks = pending
+                    for chunk in retained_chunks:
+                        state = self._bound.get(chunk)
+                        if state is not None and state.registration is registration:
+                            state.pending.remove(transfer)
+                            self._collect_binding(chunk)
                 return
             if event.event_type == EventType.MP_TOKENS:
                 for chunk_hash, tokens, parent in zip(

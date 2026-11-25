@@ -543,6 +543,58 @@ def test_profiled_store_rejects_conflicting_binding_until_eviction(
                 ):
                     raise
                 time.sleep(0.01)
+        # Rolling the last registration must not require clearing the warm L1.
+        client.unregister_kv_cache(instance).result(timeout=DEFAULT_TIMEOUT)
+        profile = KVEventProfile("engine-v2", 16)
+        assert (
+            client.register_kv_cache(
+                instance,
+                client_context.get_kv_cache(),
+                model,
+                1,
+                EngineType.VLLM,
+                {},
+                groups,
+                profile,
+                CHUNK_SIZE,
+            ).result(timeout=DEFAULT_TIMEOUT)
+            == profile
+        )
+        growing = IPCCacheServerKey.from_token_ids(
+            model,
+            1,
+            0,
+            [9] * CHUNK_SIZE + [10] * CHUNK_SIZE,
+            0,
+            2 * CHUNK_SIZE,
+            "new-engine",
+        )
+        growing = replace(
+            growing,
+            event_bindings=(
+                EventBinding(profile, tuple(range(16)), None),
+                EventBinding(profile, tuple(range(16, 32)), 15),
+            ),
+        )
+        assert (
+            client.store(growing, instance, [list(range(2 * BLOCKS_PER_KEY))], handle)
+            .to_device_future()
+            .result(timeout=DEFAULT_TIMEOUT)
+        )
+        # The device event can precede the host callback that makes the suffix readable.
+        deadline = time.monotonic() + DEFAULT_TIMEOUT
+        while True:
+            hits = lookup_all(client, [growing])
+            client.free_lookup_locks(growing.no_worker_id_version(), 1).result(
+                timeout=DEFAULT_TIMEOUT
+            )
+            if hits == 2:
+                break
+            assert time.monotonic() < deadline, (
+                f"Only {hits} of 2 chunks became readable"
+            )
+            time.sleep(0.01)
+        client.end_session(growing.request_id).result(timeout=DEFAULT_TIMEOUT)
     finally:
         client.clear(force=True).result(timeout=DEFAULT_TIMEOUT)
         client.unregister_kv_cache(instance).result(timeout=DEFAULT_TIMEOUT)

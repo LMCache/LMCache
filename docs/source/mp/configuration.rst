@@ -1410,8 +1410,20 @@ and response bytes are unchanged.
   server cannot answer the longer request. Upgrade ZMQ deployments together.
 
 There is no handshake or fallback. Profiles live until unregister, reap or
-shutdown. A profiled STORE may now carry native block bindings for complete
-chunks. Current integrations still send none and the publisher retains its
+shutdown. A profiled gRPC STORE may carry native block bindings for complete
+chunks. Use a bare host and port or an explicit ``grpc://host:port`` endpoint.
+With the KV-event channel disabled, a registered worker can store KV
+with well-formed binding metadata even for a salted key or without an event
+profile. The server ignores that metadata. With the channel enabled, supplied
+bindings require packed token IDs, an unsalted key and the worker's matching
+profile. A client-computed hash-only key has no token slice for a native
+binding. During event-bus loss recovery, valid STOREs continue without
+retaining bindings.
+Unregistering or reaping the last worker for a model and world size retires
+its bindings while preserving cached KV. A replacement engine can bind a
+warm prefix with different native IDs.
+
+Current integrations still send empty bindings and the publisher retains its
 existing chunk-level output. Engine-side preparation and native event records
 remain later steps of
 `issue #5932 <https://github.com/LMCache/LMCache/issues/5932>`_.

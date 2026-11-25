@@ -91,19 +91,32 @@ chunk. Each descriptor supplies the registered profile, ordered native block
 hashes and the first block's parent. Its token payload is the corresponding
 slice of the request's packed token bytes. Registration admits a single
 full-attention address space. The first engine sender and native event output
-are later steps in #5932.
+are later steps in #5932. The engine sender should include its initialized
+hash-seed fingerprint in the profile ID so overlapping workers with different
+hash chains are rejected at registration.
 
-A salted request can continue storing KV with empty bindings. A STORE that
-supplies native bindings must be unsalted. The server checks the whole batch against the worker registration and retained
-descriptors before reserving L1, touching the session or copying KV. The same
-descriptor can be submitted by overlapping transfers. A descriptor lives while
-any STORE still references it or any rank/group has a readable L1 owner in
-that model, world, salt and tag scope. A STORE with no reservations releases
+A salted request can continue storing KV with empty bindings. With the event
+channel enabled, a STORE that supplies bindings must be unsalted. Admission
+checks the whole batch before updating the request session or reserving L1.
+It reuses rolling hashes for matching packed prefix bytes, hashes the missing
+chunks once and passes the resolved keys to the copy path. Rejection leaves
+the session and its hash cache untouched.
+
+Overlapping workers registered for one model and world size share a binding
+lifetime. Within that lifetime a descriptor stays live while a STORE still
+references it or any rank/group has a readable L1 owner. The final worker's
+unregister or reap retires those descriptors even if L1 stays warm. A new
+registration can bind the warm prefix to new engine IDs. A late release from
+the retired registration cannot release the replacement.
+
+A STORE with no reservations releases
 only its own reference on return. A STORE with reservations keeps its reference
 until its stream-ordered host callback runs. That callback releases the binding
 after `finish_write` queues the L1 notifications, or after `abort_write` drops
 the reservations from a failed copy. A retry sees the original descriptor until
 then. Replay still uses the existing chunk records. Event loss drops
 pending and retained bindings together with the residency projection.
-Admission rejects supplied bindings while loss recovery is discarding queued
-events, since a release could otherwise be discarded without its reservation.
+During loss recovery a valid STORE proceeds without acquiring a binding or
+queuing a release. The bus records an empty boundary after dispatching the
+last popped event, including events with no KV subscriber. Native admission
+resumes after that boundary and any subsequent overflow is handled separately.

@@ -2,6 +2,8 @@
 """Tests for Session and SessionManager."""
 
 # Standard
+from dataclasses import replace
+from unittest.mock import Mock
 import threading
 import time
 
@@ -35,6 +37,87 @@ def session_manager(hasher: TokenHasher) -> SessionManager:
 
 
 class TestSession:
+    def test_native_admission_rechecks_hash_only_session_from_tokens(
+        self, session: Session
+    ) -> None:
+        supplied = IPCCacheServerKey.from_chunk_hashes(
+            "model", 1, 0, [b"x" * 32, b"y" * 32], 0, 8, session.request_id
+        )
+        session.update_from_key(supplied)
+        with_tokens = IPCCacheServerKey.from_token_ids(
+            "model", 1, 0, range(12), 8, 12, session.request_id
+        )
+        first, hashes = session.prepare_store_hashes(with_tokens)
+        expected = session.hasher.compute_chunk_hashes(list(range(12)))
+        assert first == 0 and hashes == expected
+        assert session.get_hashes(0, 8) == supplied.split_chunk_hashes()
+        session.accept_store_hashes(with_tokens, first, hashes)
+        assert (
+            session.client_hashed_tokens == 0 and session.get_hashes(0, 12) == expected
+        )
+
+    def test_profiled_chunked_prefill_hashes_each_chunk_once(
+        self, session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        tokens = list(range(256))
+        expected = session.hasher.compute_chunk_hashes(tokens)
+        hashed = Mock(wraps=session.hasher.hash_packed_chunk)
+        monkeypatch.setattr(session.hasher, "hash_packed_chunk", hashed)
+        for i in range(64):
+            start, end = i * 4, (i + 1) * 4
+            key = IPCCacheServerKey.from_token_ids(
+                "model", 1, 0, tokens[:end], start, end, session.request_id
+            )
+            first, hashes = session.prepare_store_hashes(key)
+            assert first == i and hashes == expected[i : i + 1]
+            assert session.num_chunks_processed == i
+            session.accept_store_hashes(key, first, hashes)
+        assert hashed.call_count == 64
+        # A late worker can read an earlier range without truncating the request.
+        early = IPCCacheServerKey.from_token_ids(
+            "model", 1, 0, tokens[:16], 4, 16, session.request_id
+        )
+        first, hashes = session.prepare_store_hashes(early)
+        assert (first, hashes) == (1, expected[1:4])
+        session.accept_store_hashes(early, first, hashes)
+        assert session.tokens == pack_token_ids(tokens) and hashed.call_count == 64
+
+    def test_store_preview_does_not_reuse_a_different_prefix(
+        self, session: Session
+    ) -> None:
+        key = IPCCacheServerKey.from_token_ids(
+            "model", 1, 0, range(12), 0, 12, session.request_id
+        )
+        first, hashes = session.prepare_store_hashes(key)
+        session.accept_store_hashes(key, first, hashes)
+        different = replace(
+            key, start=8, token_bytes=pack_token_ids([99, *range(1, 12)])
+        )
+        first, changed = session.prepare_store_hashes(different)
+        assert first == 0 and changed == session.hasher.compute_chunk_hashes(
+            [99, *range(1, 12)]
+        )
+        assert session.tokens == key.token_bytes and session.chunk_hashes == hashes
+        session.accept_store_hashes(different, first, changed)
+        assert session.get_hashes(0, 12) == changed
+        # A non-profiled lookup can also replace the token buffer.
+        session.set_tokens(key.token_bytes)
+        assert session.get_hashes(0, 12) == hashes
+
+    def test_admitted_suffix_seeds_a_recreated_request(self, session: Session) -> None:
+        key = IPCCacheServerKey.from_token_ids(
+            "model", 1, 0, range(12), 8, 12, session.request_id
+        )
+        session.set_tokens(key.token_bytes)
+        session.get_hashes(0, 8)
+        first, hashes = session.prepare_store_hashes(key)
+        assert first == 2
+        replacement = Session(key.request_id, session.hasher)
+        replacement.accept_store_hashes(key, first, hashes)
+        assert replacement.get_hashes(0, 12) == session.hasher.compute_chunk_hashes(
+            list(range(12))
+        )
+
     def test_set_tokens_replaces(self, session: Session) -> None:
         session.set_tokens(pack_token_ids([1, 2, 3]))
         assert unpack_token_ids(bytes(session.tokens)) == [1, 2, 3]

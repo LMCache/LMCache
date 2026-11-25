@@ -24,15 +24,21 @@ from lmcache.v1.common.custom_types import (
     KVEventProfile,
 )
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     ipc_key_to_object_keys,
 )
-from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+from lmcache.v1.multiprocess.engine_context import (
+    LayoutDescRegistry,
+    MPCacheServerContext,
+)
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as transfer
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.transport.errors import InvalidRequestError, MPRequestError
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
@@ -46,7 +52,11 @@ from lmcache.v1.transport.zmq.wire import (
     decode_operation,
     encode_operation,
 )
-from tests.v1.multiprocess.test_worker_liveness import _event_module
+from tests.v1.multiprocess.test_worker_liveness import (
+    _event_key,
+    _event_module,
+    _publish_kv,
+)
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 import lmcache.v1.transport.grpc._proto_gen.lmcache_driven_service_pb2 as transfer_pb2
 
@@ -113,6 +123,31 @@ def registration(
         module.close()
 
 
+def _stub_store_device(
+    ctx: MagicMock, cache: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> MagicMock:
+    """Capture device callbacks while exercising real session hashing and admission."""
+    ctx.session_manager = SessionManager(
+        ctx.layout_desc_registry.get_token_hasher("model", 2), cleanup_interval=None
+    )
+    ctx.resolve_obj_keys.side_effect = lambda k, g: (
+        MPCacheServerContext.resolve_obj_keys(ctx, k, g)
+    )
+    ctx.storage_manager.reserve_write.return_value = {}
+    ctx.event_bus.has_subscribers.return_value = False
+    cache.calculate_num_blocks.side_effect = (
+        lambda size, group: size // GROUP.tokens_per_block
+    )
+    cache.kv_layer_groups_manager.num_kernel_groups = 1
+    cache.kv_layer_groups_manager.object_groups = [
+        ObjectGroupInfo(kernel_group_indices=[0])
+    ]
+    monkeypatch.setattr(transfer, "downsample_and_stage_block_ids", lambda _, ids: ids)
+    submit = MagicMock()
+    monkeypatch.setattr(transfer, "submit_callback_to_stream", submit)
+    return submit
+
+
 def test_partial_copy_keeps_binding_until_abort_despite_duplicate_store(
     registration: tuple[transfer.LMCacheDrivenTransferModule, list[MagicMock]],
     monkeypatch: pytest.MonkeyPatch,
@@ -124,16 +159,8 @@ def test_partial_copy_keeps_binding_until_abort_despite_duplicate_store(
     module.bind_store_events = events.bind_store
     ctx = cast(MagicMock, module.context)
     ctx.event_bus.publish.side_effect = bus.publish
-    ctx.event_bus.has_subscribers.return_value = False
     cache = caches[0]
-    cache.calculate_num_blocks.return_value = 16
-    cache.kv_layer_groups_manager.num_kernel_groups = 1
-    cache.kv_layer_groups_manager.object_groups = [
-        ObjectGroupInfo(kernel_group_indices=[0])
-    ]
-    monkeypatch.setattr(transfer, "downsample_and_stage_block_ids", lambda _, ids: ids)
-    submit = MagicMock()
-    monkeypatch.setattr(transfer, "submit_callback_to_stream", submit)
+    submit = _stub_store_device(ctx, cache, monkeypatch)
 
     key = IPCCacheServerKey.from_token_ids(
         "model", 2, 1, range(512), start=0, end=512, request_id="first"
@@ -150,7 +177,6 @@ def test_partial_copy_keeps_binding_until_abort_despite_duplicate_store(
         [0],
         DEFAULT_SHARD_REPLICATION_DESC,
     )[0]
-    ctx.resolve_obj_keys.return_value = [objects]
     reserved = {obj: MagicMock() for obj in objects}
     for memory in reserved.values():
         memory.get_l1_manager.return_value = 3
@@ -173,7 +199,8 @@ def test_partial_copy_keeps_binding_until_abort_despite_duplicate_store(
     with pytest.raises(InvalidRequestError, match="conflict"):
         module.store(conflicting, 1, blocks, b"producer")
     assert module.context_entries_snapshot()[1].last_seen == last_seen
-    assert ctx.resolve_obj_keys.call_count == 2
+    assert ctx.session_manager.get("different") is None
+    ctx.resolve_obj_keys.assert_not_called()
     assert ctx.storage_manager.reserve_write.call_count == 2
     ctx.storage_manager.abort_write.assert_not_called()
 
@@ -192,6 +219,154 @@ def test_partial_copy_keeps_binding_until_abort_despite_duplicate_store(
     )
     assert all(events.get_store_binding(obj) is None for obj in objects)
     assert module.store(conflicting, 1, blocks, b"producer")[1]
+
+
+@pytest.mark.parametrize("end", ["unregister", "reap"])
+@pytest.mark.parametrize("new_profile", [PROFILE, KVEventProfile("another-engine", 16)])
+def test_new_registration_can_rebind_a_warm_prefix(
+    registration: tuple[transfer.LMCacheDrivenTransferModule, list[MagicMock]],
+    end: str,
+    new_profile: KVEventProfile,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, _ = registration
+    events, bus = _event_module(world_size=2)
+    delayed: list[transfer.StoreBindingRegistration] = []
+    module.retire_store_bindings = (
+        delayed.append if end == "reap" else events.retire_store_bindings
+    )
+    for worker in (1, 2):
+        module.register_kv_cache(*_payload(worker))
+    old = module.context_entries_snapshot()[1].store_registration
+    assert (
+        old is not None
+        and module.context_entries_snapshot()[2].store_registration is old
+    )
+    prefix, suffix = (_event_key(i, world_size=2) for i in (1, 2))
+    key = IPCCacheServerKey.from_token_ids("model", 2, 0, range(32), 0, 16, "restart")
+    bound = replace(key, event_bindings=(EventBinding(PROFILE, (1,), None),))
+    assert events.bind_store(bound, [prefix], old, 16, "first")
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[prefix], l1_tag="l1")
+    _publish_kv(bus, EventType.MP_STORE_BINDINGS_RELEASED, transfer_key="first")
+    module.unregister_kv_cache(1)
+    assert events.get_store_binding(prefix) is not None
+    assert events.bind_store(bound, [prefix], old, 16, "late")
+    if end == "unregister":
+        module.unregister_kv_cache(2)
+    else:
+        now = module.context_entries_snapshot()[2].last_seen + 10
+        monkeypatch.setattr(transfer.time, "monotonic", lambda: now)
+        assert module.reap_stale_instances(1, 1) == [2]
+    assert events.get_store_binding(prefix) is None
+    module.register_kv_cache(*_payload(2, new_profile))
+    current = module.context_entries_snapshot()[2].store_registration
+    bindings = (
+        EventBinding(new_profile, (7,), None),
+        EventBinding(new_profile, (8,), 7),
+    )
+    assert events.bind_store(
+        replace(key, end=32, event_bindings=bindings),
+        [prefix, suffix],
+        current,
+        16,
+        "new",
+    )
+    assert not events.bind_store(bound, [prefix], old, 16, "obsolete")
+    _publish_kv(bus, EventType.MP_STORE_BINDINGS_RELEASED, transfer_key="late")
+    # The reaper can finish its cleanup after new registrations start serving.
+    for retired in delayed:
+        events.retire_store_bindings(retired)
+    assert events.get_store_binding(prefix) == (bindings[0], key.token_bytes[:64])
+    assert events.get_store_binding(suffix) == (bindings[1], key.token_bytes[64:])
+
+
+@pytest.mark.parametrize("chunk_size", [128, 256])
+@pytest.mark.parametrize("overflow", [False, True])
+def test_bound_store_hashes_only_new_chunks_and_skips_metadata_during_loss(
+    registration: tuple[transfer.LMCacheDrivenTransferModule, list[MagicMock]],
+    monkeypatch: pytest.MonkeyPatch,
+    overflow: bool,
+    chunk_size: int,
+) -> None:
+    module, caches = registration
+    ctx = cast(MagicMock, module.context)
+    ctx.chunk_size = chunk_size
+    module.register_kv_cache(*_payload(chunk_size=chunk_size))
+    blocks_per_chunk = chunk_size // PROFILE.block_size
+    events, bus = _event_module(
+        world_size=2, bus=EventBus(EventBusConfig(max_queue_size=16))
+    )
+    module.bind_store_events = events.bind_store
+    hasher = ctx.layout_desc_registry.get_token_hasher("model", 2)
+    ctx.event_bus.publish.side_effect = bus.publish
+    _stub_store_device(ctx, caches[0], monkeypatch)
+    hashed = MagicMock(wraps=hasher.hash_packed_chunk)
+    monkeypatch.setattr(hasher, "hash_packed_chunk", hashed)
+    hash_only = IPCCacheServerKey.from_chunk_hashes(
+        "model", 2, 1, [b"h" * 32], 0, chunk_size, "missing-tokens"
+    )
+    with pytest.raises(InvalidRequestError, match="require packed token ids"):
+        module.store(
+            replace(
+                hash_only,
+                event_bindings=(
+                    EventBinding(PROFILE, tuple(range(blocks_per_chunk)), None),
+                ),
+            ),
+            1,
+            [list(range(1, blocks_per_chunk + 1))],
+            b"producer",
+        )
+    assert ctx.session_manager.get("missing-tokens") is None
+    for index in range(64):
+        start, end = index * chunk_size, (index + 1) * chunk_size
+        key = IPCCacheServerKey.from_token_ids(
+            "model", 2, 1, range(end), start, end, "prefill"
+        )
+        binding = EventBinding(
+            PROFILE,
+            tuple(range(start // 16, end // 16)),
+            start // 16 - 1 if start else None,
+        )
+        losing_events = overflow and index == 1
+        if losing_events:
+            for _ in range(17):
+                bus.publish(Event(EventType.MP_STORE_START))
+        ctx.event_bus.publish.reset_mock()
+        assert module.store(
+            replace(key, event_bindings=(binding,)),
+            1,
+            [list(range(1, blocks_per_chunk + 1))],
+            b"producer",
+        )[1]
+        releases = [
+            c
+            for c in ctx.event_bus.publish.call_args_list
+            if c.args[0].event_type == EventType.MP_STORE_BINDINGS_RELEASED
+        ]
+        assert len(releases) == (0 if losing_events else 1)
+        bus.stop()
+    assert ctx.storage_manager.reserve_write.call_count == 64
+    assert hashed.call_count == 64
+
+
+def test_disabled_channel_ignores_bindings_on_an_unprofiled_salted_store(
+    registration: tuple[transfer.LMCacheDrivenTransferModule, list[MagicMock]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, caches = registration
+    module.register_kv_cache(*_payload(profile=None))
+    ctx = cast(MagicMock, module.context)
+    _stub_store_device(ctx, caches[0], monkeypatch)
+    key = IPCCacheServerKey.from_token_ids(
+        "model", 2, 1, range(256), 0, 256, "plain", cache_salt="tenant"
+    )
+    bound = replace(
+        key, event_bindings=(EventBinding(PROFILE, tuple(range(16)), None),)
+    )
+    assert module.bind_store_events is None
+    assert module.store(bound, 1, [list(range(1, 17))], b"producer")[1]
+    ctx.storage_manager.reserve_write.assert_called_once()
 
 
 @pytest.mark.parametrize("profile_id,block_size", [("", 16), ("v1", 0), ("v1", -1)])
