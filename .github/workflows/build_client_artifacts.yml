@@ -88,7 +88,7 @@ jobs:
 
             - name: Build lmcache-client wheel
               run: |
-                NO_GPU_EXT=1 .github/scripts/build_client_wheel.sh dist --no-isolation
+                .github/scripts/build_client_wheel.sh dist --no-isolation
                 test -z "$(git status --porcelain)"
 
             - name: Install the wheel in a clean venv

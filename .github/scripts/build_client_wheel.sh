@@ -25,5 +25,7 @@ cp "$stage/pyproject_client.toml" "$stage/pyproject.toml"
 
 echo "Building lmcache-client ${version} from $(git -C "$repo" rev-parse --short HEAD)"
 cd "$stage"
+# NO_GPU_EXT=1 keeps a caller's BUILD_WITH_<device> or NO_GPU_EXT=0 from selecting
+# a device profile: this wheel is the CPU build.
 SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE_CLIENT="$version" LMCACHE_CLIENT_BUILD=1 \
-    "$python" -m build --wheel --outdir "$out_dir" "$@"
+    NO_GPU_EXT=1 "$python" -m build --wheel --outdir "$out_dir" "$@"
