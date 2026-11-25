@@ -11,9 +11,8 @@ name: Weekly full build
 # over the following six hours.
 
 on:
-  # Enable after validating manual runs:
-  # schedule:
-  #   - cron: '0 8 * * 0'
+  schedule:
+    - cron: '0 8 * * 0'
   workflow_dispatch:
 
 permissions:
