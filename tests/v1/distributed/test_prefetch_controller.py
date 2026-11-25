@@ -80,11 +80,16 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.mp_observability.event import Event as ObservabilityEvent
+from lmcache.v1.mp_observability.event import EventType
+from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
+from lmcache.v1.mp_observability.subscribers.metrics.l2 import L2MetricsSubscriber
 from tests.v1.distributed.borrowing_mock import (
     BorrowingMockL2Adapter,
     BorrowingMockL2AdapterConfig,
 )
 from tests.v1.distributed.utils import should_use_lazy_alloc
+from tests.v1.mp_observability.subscribers.metrics.otel_setup import histogram_count
 
 if not torch_dev.is_available():
     pytest.skip(
@@ -936,10 +941,20 @@ class TestAdmission:
         assert l1_manager.get_staging_memory_usage() == 0
         l1_manager.finish_read(all_keys)
 
-    def test_watermark_holds_back_requests(self):
-        """Once in-flight requests reach the watermark, later requests wait
-        in the pending queue; the first is admitted even though it alone
-        exceeds the budget, and every request completes."""
+    def test_watermark_holds_back_requests(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The watermark queues later requests and each L2 lookup records its wait."""
+        bus = EventBus(EventBusConfig(enabled=True))
+        bus.register_subscriber(L2MetricsSubscriber())
+        lookup_events: list[ObservabilityEvent] = []
+        bus.subscribe(EventType.L2_PREFETCH_LOOKUP_SUBMITTED, lookup_events.append)
+        monkeypatch.setattr(
+            "lmcache.v1.distributed.storage_controllers.prefetch_controller.get_event_bus",
+            lambda: bus,
+        )
+        metric = "lmcache_mp.l2_prefetch_queue_wait"
+        before = histogram_count(metric)
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
         l1_manager = DramL1Manager(
@@ -958,21 +973,33 @@ class TestAdmission:
                 )
                 for i in range(4)
             ]
+            all_submitted_at = time.monotonic()
             assert wait_for_condition(
                 lambda: (
                     ctrl.report_status()["pending_queue_size"] == 3
                     and ctrl.report_status()["in_flight_request_count"] == 1
                 )
             ), ctrl.report_status()
+            # The last request must still wait for the earlier queued requests.
+            elapsed_at_pending = time.monotonic() - all_submitted_at
             results = [wait_for_result(ctrl, r, timeout=15.0) for r in req_ids]
 
             assert [row_bits(r) for r in results] == [[0, 1]] * 4
             assert l1_manager.get_staging_memory_usage() == 0
             l1_manager.finish_read(all_keys)
+            l1_only = ctrl.submit_prefetch_request(
+                single_row_spec(all_keys, allowed_l2_memory_tags=frozenset())
+            )
+            wait_for_result(ctrl, l1_only)
         finally:
             ctrl.stop()
             adapter.close()
             l1_manager.close()
+            bus.stop()
+
+        assert [event.metadata["request_id"] for event in lookup_events] == req_ids
+        assert histogram_count(metric) - before == len(req_ids)
+        assert lookup_events[-1].metadata["queue_wait_seconds"] >= elapsed_at_pending
 
     def test_request_waits_for_l1_free_space(self):
         """Below the watermark, a request still waits while L1 lacks free
