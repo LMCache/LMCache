@@ -28,7 +28,18 @@ def main() -> None:
         for path in files
     )
     assert "lmcache/v1/multiprocess/server.py" not in files
-    assert not any(path.startswith("lmcache/inprocess/") for path in files)
+    assert not any(
+        path.startswith(
+            (
+                "lmcache/inprocess/",
+                "lmcache/v1/gpu_connector/",
+                "lmcache/v1/distributed/",
+                "lmcache/v1/mp_coordinator/",
+                "lmcache/v1/mp_observability/",
+            )
+        )
+        for path in files
+    )
     for module in (
         "lmcache.sdk",
         "lmcache.v1.client.worker_transfer",
