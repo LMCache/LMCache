@@ -15,7 +15,13 @@ from lmcache.v1.platform.devices.npu.device_ops import NpuDeviceOps
 pytestmark = pytest.mark.no_shared_allocator
 
 
+def _unexpected_block_kernel(*_args: object) -> None:
+    raise AssertionError("block kernel must not run in this test")
+
+
 def _install_fake_c_ops(monkeypatch: pytest.MonkeyPatch, **symbols: object) -> None:
+    # ensure_native requires the plugin to export the block kernel.
+    symbols.setdefault("multi_layer_block_kv_transfer", _unexpected_block_kernel)
     fake_c_ops = types.ModuleType("lmcache_ascend.c_ops")
     for name, value in symbols.items():
         setattr(fake_c_ops, name, value)

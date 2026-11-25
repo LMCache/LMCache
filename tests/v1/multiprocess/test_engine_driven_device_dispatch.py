@@ -99,12 +99,7 @@ def test_cpu_and_cuda_kv_can_share_one_process(
         gpu_first: Exercise native-first as well as CPU-first capability caching.
         output_kind: Allocate chunks or use unpinned shared-memory output buffers.
     """
-    native = pytest.importorskip("lmcache.cuda_ops")
-    if (
-        lmcache.device_ops.multi_layer_block_kv_transfer
-        is not native.multi_layer_block_kv_transfer
-    ):
-        pytest.skip("requires the native CUDA transfer backend")
+    pytest.importorskip("lmcache.cuda_ops")
     devices = ("cuda", "cpu", "cuda") if gpu_first else ("cpu", "cuda", "cpu")
     for device in devices:
         _assert_roundtrip(device, torch.float16, output_kind)
@@ -117,12 +112,7 @@ def test_cpu_and_cuda_kv_can_share_one_process(
 def test_cuda_kv_roundtrips_through_registered_host_memory() -> None:
     """Gather/scatter must work on slot views of a ``pin_memory``-registered
     pool, as used by ``EngineDrivenContextShm``."""
-    native = pytest.importorskip("lmcache.cuda_ops")
-    if (
-        lmcache.device_ops.multi_layer_block_kv_transfer
-        is not native.multi_layer_block_kv_transfer
-    ):
-        pytest.skip("requires the native CUDA transfer backend")
+    pytest.importorskip("lmcache.cuda_ops")
     source = {
         f"layer.{i}": (
             torch.arange(2 * 6 * 4 * 2 * 8).reshape(2, 6, 4, 2, 8) + i * 1024
