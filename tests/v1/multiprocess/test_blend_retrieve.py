@@ -72,7 +72,7 @@ def _build_plan_engine_and_context(
 
     # First Party
     from lmcache.v1.common.attn_window import AttnWindowDesc
-    from lmcache.v1.kv_layer_groups import ObjectGroupInfo
+    from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
 
     hidden_dim = n_heads * head_size
     gpu_context = MagicMock()

@@ -422,6 +422,7 @@ def test_mq_register_kv_cache():
             {"vllm_block_size": 16},
             [],
             None,
+            256,
         ],
         expected_response=None,
         num_requests=1,

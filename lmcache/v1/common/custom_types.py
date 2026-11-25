@@ -330,19 +330,18 @@ class GroupLayout(msgspec.Struct):
         recurrent: Whether the group's pages hold recurrent state snapshots
             (Mamba/GDN/linear attention) rather than per-token attention KV.
         num_physical_slots: Physical slots stored per chunk, after windowing
-            and slot compression. ``None`` retains the legacy one-slot-per-token
-            layout derived from ``window_tokens``.
+            and slot compression.
     """
 
     num_layers: int
     hidden_dim_size: int
     dtype_str: str
     tokens_per_block: int
+    num_physical_slots: int
     window_tokens: int = 0
     kv_size: int = 0
     window_chunks: int = 0
     recurrent: bool = False
-    num_physical_slots: int | None = None
 
 
 class RegisterEngineDrivenContextPayload(msgspec.Struct):
@@ -357,9 +356,9 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         hidden_dim_size: Flattened hidden dimension per token.
         dtype_str: Torch dtype name (e.g. ``"float16"``).
         use_mla: Whether the worker KV format is MLA.
+        chunk_size: Effective logical tokens per LMCache chunk.
         num_physical_slots: Number of physical KV slots gathered into one
-            LMCache chunk. ``None`` accepts the legacy protocol, where the
-            server assumed one physical slot per logical token.
+            LMCache chunk.
         group_layouts: Per-group layouts for multi-group (hybrid-KV) workers,
             in protocol group order. Empty means legacy single-group; the
             top-level ``num_layers``/``hidden_dim_size``/``dtype_str`` then
@@ -374,7 +373,8 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     hidden_dim_size: int
     dtype_str: str
     use_mla: bool
-    num_physical_slots: int | None = None
+    chunk_size: int
+    num_physical_slots: int
     group_layouts: list[GroupLayout] = []
 
 
