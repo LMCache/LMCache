@@ -151,22 +151,13 @@ def sparse_recurrent_chunk_masks(
     num_chunks: int,
     chunk_size: int,
 ) -> list[list[bool]] | None:
-    """Mark, per object group, the full chunks whose windowed objects are not stored.
+    """Mark, per object group, the full chunks the STORE's keep hint leaves out.
 
-    With ``lmcache.hint.sparse_state_keep`` in the key's request configs
-    (``lmcache.mp.sparse_state_every_n_chunks``), an object group whose window
-    is at most one chunk (recurrent state, or a sliding window of
-    ``sw_size_chunks == 1``; never aux or full attention) stores a full chunk
-    only when the hint names its end. The engine connector picks the ends
-    among the chunks that hold a state; see
-    :func:`lmcache.v1.common.sparse_state.keeps_state_at`. A longer sliding
-    window is stored for every chunk: a hit at a kept end reads the chunks
-    before it too. The window-aware lookup then serves a prefix only at a
-    kept end. Unfull chunk objects are stored separately and are not affected.
+    Only groups whose window is at most one chunk follow the hint
+    (``lmcache.hint.sparse_state_keep``); other groups store every chunk.
 
     Args:
-        key: The STORE key; its full chunks start at ``key.start``
-            (chunk-aligned).
+        key: The STORE key; its full chunks start at ``key.start``.
         object_groups: The object groups, indexed by object-group id.
         num_chunks: Number of full chunks in the STORE.
         chunk_size: LMCache chunk size in tokens.

@@ -1,15 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Keep rule of ``lmcache.mp.sparse_state_every_n_chunks``.
+"""Sparse stores of windowed objects (recurrent state, short sliding windows).
 
-A full chunk's windowed objects (recurrent state, sliding-window KV of at most
-one chunk) are only needed where a prefix hit can end. With the option N > 0
-the engine connector keeps them only for some chunk ends and names those in
-the STORE's ``lmcache.hint.sparse_state_keep`` request config; the server
-skips the windowed objects of every other full chunk of that STORE.
-
-The connector decides, because a chunk end holds a usable state only where a
-scheduler step ended on it, and only the scheduler knows where its steps end.
-A fixed grid of chunk ends would keep nothing when the steps never end on it.
+A STORE can name the chunk ends whose windowed objects are kept in its
+``lmcache.hint.sparse_state_keep`` request config. The engine connector picks
+them, since only the scheduler knows where a chunk end holds a usable state.
 """
 
 # Standard
@@ -55,11 +49,8 @@ def merge_sparse_state_keep(
         request_configs: The configs of the STOREs, in order.
 
     Returns:
-        The first STORE's configs. When any STORE carries
-        ``lmcache.hint.sparse_state_keep``, a copy whose hint names the kept
-        chunk ends of all of them. The connector puts the hint on every
-        full-chunk STORE of a request or on none, so a STORE without it adds
-        no kept end.
+        The first STORE's configs, with the kept chunk ends of all the STOREs
+        in its hint when any of them carries one.
     """
     configs = list(request_configs)
     first = configs[0] if configs else None
@@ -85,13 +76,11 @@ def keeps_state_at(
     """Whether the windowed objects of a chunk that holds a state are kept.
 
     Args:
-        chunk_end: Absolute token position where the chunk ends. The caller
-            has checked that the chunk's state blocks are real.
-        last_kept_end: The request's last chunk end known to have its state
-            in the cache: its last kept chunk end, or its cache hit before it
-            kept any.
+        chunk_end: Absolute token position where the chunk ends.
+        last_kept_end: The request's last chunk end whose state is in the
+            cache (kept earlier, or its cache hit).
         chunk_size: LMCache chunk size in tokens.
-        every_n: The option N; ``<= 0`` keeps every state.
+        every_n: Chunks between kept states; ``<= 0`` keeps every state.
         prompt_tokens: Prompt length in tokens (0 if unknown).
 
     Returns:

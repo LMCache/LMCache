@@ -270,7 +270,7 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
     [
         # No hint: every chunk that holds a state stores it.
         (None, ["g1c0", "g1c1"]),
-        # lmcache.mp.sparse_state_every_n_chunks: only the named chunk ends.
+        # A keep hint: only the named chunk ends.
         ({SPARSE_STATE_KEEP_HINT: "4"}, ["g1c1"]),
         ({SPARSE_STATE_KEEP_HINT: "2,4"}, ["g1c0", "g1c1"]),
         ({SPARSE_STATE_KEEP_HINT: ""}, []),
