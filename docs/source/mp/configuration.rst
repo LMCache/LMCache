@@ -1172,6 +1172,10 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        Auto-start supports exactly one server endpoint; configuring
        multiple ``lmcache.mp.server_urls`` raises ``ValueError`` during
        connector initialization.
+       Starting a server needs the full ``lmcache`` distribution. With only
+       ``lmcache-client`` installed, worker 0 raises ``RuntimeError`` instead
+       of starting one when no server answers at the endpoint; a server that
+       is already running there is still used.
    * - ``lmcache.mp.autostart.wait_timeout``
      - ``90.0``
      - Timeout (seconds) to wait for the auto-started server to respond to
