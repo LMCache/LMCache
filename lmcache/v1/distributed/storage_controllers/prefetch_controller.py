@@ -1198,15 +1198,22 @@ class PrefetchController(StorageControllerInterface):
             used_bytes, total_bytes = l1_manager.get_memory_usage()
             if total_bytes == 0:
                 continue  # a shadow L1: views cost no local bytes
-            locked_bytes = l1_manager.get_prefetch_locked_bytes()
-            if idle and locked_bytes == 0:
-                continue  # nothing of prefetch's to wait for in this L1
-            held_bytes = (
-                l1_manager.get_staging_memory_usage() + lookup_bytes + locked_bytes
+            locked_budget = (
+                self._inflight_watermark * total_bytes
+                - l1_manager.get_staging_memory_usage()
+                - lookup_bytes
+                - request_bytes
             )
-            if held_bytes + request_bytes > self._inflight_watermark * total_bytes:
-                return False
-            if total_bytes - used_bytes - lookup_bytes < request_bytes:
+            if (
+                locked_budget < 0
+                or total_bytes - used_bytes - lookup_bytes < request_bytes
+            ):
+                if not idle:
+                    return False
+                # Even an oversized request may start on idle if no previous
+                # prefetch is holding bytes that could be released.
+                locked_budget = 0
+            if l1_manager.prefetch_locked_bytes_exceed(locked_budget):
                 return False
         return True
 

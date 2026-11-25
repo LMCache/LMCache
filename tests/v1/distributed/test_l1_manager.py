@@ -2507,3 +2507,31 @@ class TestStagingAccounting:
         assert used == one_copy * len(keys)
 
         manager.close()
+
+
+def test_expired_prefetch_charge_is_not_renewed_by_another_reader(
+    basic_memory_config, basic_layout
+):
+    manager = DramL1Manager(
+        L1ManagerConfig(memory_config=basic_memory_config, read_ttl_seconds=1)
+    )
+    keys = [make_object_key(0), make_object_key(1)]
+    try:
+        manager.reserve_write(keys, [False, False], basic_layout)
+        result = manager.finish_write_and_reserve_read(keys)
+        manager.track_prefetch_locked(keys)
+        charge = sum(obj.get_physical_size() for _, obj in result.values())
+        assert not manager.prefetch_locked_bytes_exceed(charge)
+        time.sleep(1.2)
+
+        # Both paths acquire an ordinary read lock on the old resident object.
+        manager.reserve_read(keys[:1])
+        manager.reserve_write(keys[1:], [False], basic_layout, allow_resident=True)
+        manager.finish_write_and_reserve_read(keys[1:])
+        assert manager.get_prefetch_locked_bytes() == 0
+        assert all(
+            code == L1Error.SUCCESS for code, _ in manager.unsafe_read(keys).values()
+        )
+        manager.finish_read(keys)
+    finally:
+        manager.close()
