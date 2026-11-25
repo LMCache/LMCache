@@ -10,7 +10,7 @@ Backed by the native C++ filesystem connector wrapped with
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from lmcache.v1.distributed.internal_api import (
@@ -54,42 +54,35 @@ def _validate_non_negative_int(name: str, raw: object) -> int:
     return raw
 
 
-def _check_odirect_l1_alignment(
-    config: FSNativeL2AdapterConfig,
-    native_client: Any,
-    l1_memory_desc: Optional[L1MemoryDesc],
+def _warn_odirect_l1_misalignment(
+    block_size: int, base_path: str, l1_memory_desc: L1MemoryDesc
 ) -> None:
-    """Reject an L1 arena that O_DIRECT transfers cannot rely on.
+    """Warn when O_DIRECT transfers from the L1 arena cannot all be aligned.
 
     O_DIRECT transfers whole L1 slots, which start at the arena base plus a
     multiple of the L1 alignment and span a multiple of it.  Unless the
     connector's block size divides both, some transfers fail and others
-    silently skip O_DIRECT.  Skipped when O_DIRECT is off, no L1
-    description is given, or the connector reports no block size.
-
-    Raises:
-        ValueError: If the L1 alignment or base address is not a multiple
-            of the block size.  ``native_client`` is closed first.
+    silently skip O_DIRECT.
     """
-    if not config.use_odirect or l1_memory_desc is None:
-        return
-    block_size = native_client.disk_block_size()
-    if not block_size:
-        return
     if l1_memory_desc.align_bytes % block_size:
-        native_client.close()
-        raise ValueError(
-            f"fs_native use_odirect=true requires --l1-align-bytes "
-            f"({l1_memory_desc.align_bytes}) to be a multiple of the block "
-            f"size of {config.base_path} ({block_size})."
+        logger.warning(
+            "fs_native use_odirect=true: --l1-align-bytes (%d) is not a "
+            "multiple of the block size of %s (%d), so some transfers fail "
+            "and others skip O_DIRECT. Raise --l1-align-bytes or set "
+            "use_odirect: false.",
+            l1_memory_desc.align_bytes,
+            base_path,
+            block_size,
         )
-    if l1_memory_desc.ptr % block_size:
-        native_client.close()
-        raise ValueError(
-            f"fs_native use_odirect=true requires the L1 base address "
-            f"({l1_memory_desc.ptr:#x}) to be a multiple of the block size "
-            f"of {config.base_path} ({block_size}). Only the lazy L1 "
-            f"allocator (--l1-use-lazy) aligns the base to --l1-align-bytes."
+    elif l1_memory_desc.ptr % block_size:
+        logger.warning(
+            "fs_native use_odirect=true: the L1 base address (%#x) is not a "
+            "multiple of the block size of %s (%d), so some transfers fail. "
+            "Only the lazy L1 allocator (--l1-use-lazy) aligns the base to "
+            "--l1-align-bytes; otherwise set use_odirect: false.",
+            l1_memory_desc.ptr,
+            base_path,
+            block_size,
         )
 
 
@@ -266,7 +259,10 @@ def _create_fs_native_l2_adapter(
         config.num_read_workers,
         config.read_max_bytes_in_flight,
     )
-    _check_odirect_l1_alignment(config, native_client, l1_memory_desc)
+    if config.use_odirect and l1_memory_desc is not None:
+        _warn_odirect_l1_misalignment(
+            native_client.disk_block_size(), config.base_path, l1_memory_desc
+        )
     effective_read_budget = native_client.read_budget_bytes()
     logger.info(
         "Created FS native L2 adapter: %s (workers=%d, odirect=%s, "

@@ -67,7 +67,7 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   size_t read_budget_bytes() const;
 
   // The block size O_DIRECT transfers must align to, or 0 when O_DIRECT
-  // is off or the block size could not be read.
+  // is off.
   size_t disk_block_size() const;
 
   // Dispatched directly to the read pool when one is configured, so lookups
