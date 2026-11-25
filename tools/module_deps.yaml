@@ -19,7 +19,7 @@ modules:
   lmcache.v1: common    # runs before every part under lmcache.v1
 
 # Not part of the tree: not checked, and any part may use them.
-outside: [lmcache.cli, lmcache.sdk, lmcache.inprocess]
+outside: [lmcache.cli, lmcache.sdk]
 
 # The diagram's arrows. A part may import every part its arrows lead to,
 # directly or through other parts. Imports within a part are always allowed.
