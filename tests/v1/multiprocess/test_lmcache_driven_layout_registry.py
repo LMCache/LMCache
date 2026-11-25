@@ -81,11 +81,11 @@ def stub_lmcache_native() -> Any:
         yield
 
 
-def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
+def test_lmcache_registration_uses_effective_chunk_size_until_last_instance(
     monkeypatch: pytest.MonkeyPatch,
     stub_lmcache_native: Any,
 ) -> None:
-    """Unregistering one shared GPU instance must not remove the shared layout."""
+    """Ranks share one effective size, which rejects conflicting re-registration."""
     # First Party
     from lmcache.v1.common.custom_types import EngineType
     from lmcache.v1.distributed.api import MemoryLayoutDesc
@@ -99,7 +99,7 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
         dtypes=[torch.float32],
     )
     ctx = MagicMock()
-    ctx.chunk_size = 16
+    ctx.chunk_size = 256
     ctx.hash_algorithm_name = "blake3"
     ctx.layout_desc_registry = LayoutDescRegistry()
 
@@ -155,12 +155,44 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
 
     module = lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx)
     module.register_kv_cache(
-        1, [], "shared-model", 1, EngineType.VLLM, {}, [], event_profile=None
+        1,
+        [],
+        "shared-model",
+        1,
+        EngineType.VLLM,
+        {},
+        [],
+        event_profile=None,
+        chunk_size=512,
     )
     module.register_kv_cache(
-        2, [], "shared-model", 1, EngineType.VLLM, {}, [], event_profile=None
+        2,
+        [],
+        "shared-model",
+        1,
+        EngineType.VLLM,
+        {},
+        [],
+        event_profile=None,
+        chunk_size=512,
     )
+    entry = module.get_and_touch_context_entry(1)
+    assert entry is not None and entry.chunk_size == 512
+    assert ctx.layout_desc_registry.get_chunk_size("shared-model", 1) == 512
     assert ctx.layout_desc_registry.find("shared-model", 1) is layout_desc
+
+    with pytest.raises(ValueError, match="already registered"):
+        module.register_kv_cache(
+            1,
+            [],
+            "shared-model",
+            1,
+            EngineType.VLLM,
+            {},
+            [],
+            event_profile=None,
+            chunk_size=768,
+        )
 
     module.unregister_kv_cache(1)
 

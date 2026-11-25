@@ -201,7 +201,7 @@ def test_gpu_noop_register_refreshes_without_latching(monkeypatch) -> None:
 def test_gpu_touch_latches_get_does_not() -> None:
     """touch_instance marks ping-proven; get_and_touch_context_entry only refreshes."""
     module = _bare_gpu_module()
-    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, last_seen=0.0)
+    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, 256, last_seen=0.0)
 
     module.get_and_touch_context_entry(1)
     assert module._cache_contexts[1].last_seen > 0.0
@@ -217,10 +217,10 @@ def test_gpu_reap_two_tier_windows() -> None:
     until the larger registration grace."""
     module = _bare_gpu_module()
     old = time.monotonic() - 1000.0
-    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, old, True)
-    module._cache_contexts[2] = ContextEntry(MagicMock(), "m", 1, old, False)
+    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, 256, old, True)
+    module._cache_contexts[2] = ContextEntry(MagicMock(), "m", 1, 256, old, False)
     module._cache_contexts[3] = ContextEntry(
-        MagicMock(), "m", 1, time.monotonic(), True
+        MagicMock(), "m", 1, 256, time.monotonic(), True
     )
 
     reaped = module.reap_stale_instances(120.0, 3600.0)
@@ -235,7 +235,7 @@ def test_gpu_reap_two_tier_windows() -> None:
 def test_gpu_unregister_cleans_up() -> None:
     """unregister_kv_cache pops and releases; missing id is a no-op."""
     module = _bare_gpu_module()
-    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, time.monotonic())
+    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, 256, time.monotonic())
 
     module.unregister_kv_cache(1)
     assert module.tracked_instance_count() == 0
@@ -252,11 +252,11 @@ def test_non_gpu_reap_pops_strategy_as_pair() -> None:
     module = _bare_non_gpu_module()
     old = time.monotonic() - 1000.0
     module._engine_driven_contexts[1] = non_gpu_mod.EngineDrivenContextEntry(
-        MagicMock(), "m", 1, old, True
+        MagicMock(), "m", 1, 256, old, True
     )
     module._strategies[1] = MagicMock()
     module._engine_driven_contexts[2] = non_gpu_mod.EngineDrivenContextEntry(
-        MagicMock(), "m", 1, old, False
+        MagicMock(), "m", 1, 256, old, False
     )
     module._strategies[2] = MagicMock()
 
@@ -272,7 +272,7 @@ def test_non_gpu_resolve_for_transfer_refreshes_and_raises() -> None:
     last_seen; an unknown id raises ValueError."""
     module = _bare_non_gpu_module()
     module._engine_driven_contexts[1] = non_gpu_mod.EngineDrivenContextEntry(
-        MagicMock(), "m", 1, 0.0, False
+        MagicMock(), "m", 1, 256, 0.0, False
     )
     strategy = MagicMock()
     module._strategies[1] = strategy
