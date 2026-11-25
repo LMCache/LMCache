@@ -123,9 +123,6 @@ CPU verification and pin reporting without rebuilding unrelated accelerators.
 CPU serving tests must set `lmcache.mp.use_vmm_api=false` in connector extra
 config: current vLLM checks the declared cache access before initializing the
 device and rejects the automatic CUDA VMM export mode on CPU.
-Streaming-session tests that bypass vLLM's `Scheduler.__init__` must supply
-`max_model_len` and `num_sampled_tokens_per_step`; current vLLM reads both
-while applying a `StreamingUpdate`.
 
 Use Python 3.12 with PyTorch and the common native extensions installed.
 A fresh worktree does not include ignored native build artifacts; build them
@@ -139,27 +136,10 @@ order. For these focused checks, use
 `python -m pytest --confcutdir=tests/v1 tests/v1/gpu_connector/` so the root
 `tests/conftest.py` GPU allocator fixtures are not loaded. This validates CPU
 imports and shared layout/GDS behavior, not accelerator kernel roundtrips.
-When upgrading `vllm-cpu-nightly` in a reused validation environment, remove
-stale synthetic `vllm-<version>+cpu.dist-info` directories and regenerate the
-alias with `.github/scripts/install_vllm_cpu.sh`. Do not uninstall the synthetic
-`vllm` distribution with pip: its copied `RECORD` names the real package files.
-CPU serving tests must set `lmcache.mp.use_vmm_api=false` in connector extra
-config: current vLLM checks the declared cache access before initializing the
-device and rejects the automatic CUDA VMM export mode on CPU.
 When combining these tests with `tests/inprocess/`, use `--noconftest` for
 self-contained CPU checks spanning both trees; normal accelerator CI must
 retain the root fixtures. Mirrored test directories with identical module
 names need package `__init__.py` files to avoid pytest import mismatches.
-
-### Inference runtime pins in CI
-
-When requiring a new upstream engine hook, check the independently pinned
-CPU wheel, CUDA wheel and ROCm serving image. The AMD benchmark's released
-image can lag behind the ROCm 10 probe image; verify the source revision and
-the required capability before selecting an immutable image digest.
-For isolated CPU nightly verification, `nightly-aggregate-vllm-verify.sh`
-reads `DRY_RUN=1` and forwards it as `PIN_VLLM_DRY_RUN` to the pin writer.
-Setting only `PIN_VLLM_DRY_RUN` on the aggregator does not prevent pin writes.
 
 ### Test-First Workflow
 
