@@ -14,6 +14,7 @@ import torch
 from lmcache import torch_dev
 from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey, KVEventProfile
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.sparse_state import kept_chunk_ends
 from lmcache.v1.common.token_codec import unpack_token_ids
@@ -26,7 +27,6 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.gpu_connector.gds_context import GDSBufferRegistration
-from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext

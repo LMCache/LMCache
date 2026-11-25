@@ -17,6 +17,7 @@ from lmcache.lmcache_native import EngineKVFormat
 from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.group_view import engine_group_layer_indices
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache
+from lmcache.v1.common.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.utils import (
     LayoutHints,
@@ -24,7 +25,6 @@ from lmcache.v1.common.utils import (
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,
 )
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.ipc_wrapper import KVCache
 

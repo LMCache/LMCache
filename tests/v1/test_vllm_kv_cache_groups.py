@@ -118,8 +118,8 @@ def test_conversion_defaults_to_single_group_without_config():
 def test_connector_and_server_agree_on_mixed_stride_groups() -> None:
     # First Party
     from lmcache.v1.common.custom_types import EngineType
+    from lmcache.v1.common.kv_layer_groups import KVLayerGroupsManager
     from lmcache.v1.common.utils import normalize_and_discover_per_layer_formats
-    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 
     caches = {
         f"layer.{idx}": torch.empty_strided(
@@ -389,7 +389,7 @@ def test_group_layers_by_identity_uses_per_layer_format():
     layer kv_size=1, splitting them into separate identities -- the per-group
     distinction the single global format cannot express."""
     # First Party
-    from lmcache.v1.kv_layer_groups import group_layers_by_identity
+    from lmcache.v1.common.kv_layer_groups import group_layers_by_identity
 
     kv_caches = [
         torch.randn(2, 32, 16, 8, 64, dtype=torch.bfloat16),  # K+V (rank-5)
@@ -419,7 +419,7 @@ def test_group_layers_by_identity_uses_per_layer_format():
 def test_group_layers_by_identity_rejects_group_idx_length_mismatch():
     """per_layer_engine_group_idx must hold one entry per layer."""
     # First Party
-    from lmcache.v1.kv_layer_groups import group_layers_by_identity
+    from lmcache.v1.common.kv_layer_groups import group_layers_by_identity
 
     kv_caches = [torch.randn(2, 32, 16, 8, 64, dtype=torch.bfloat16)]
     # One layer (one format) but two engine-group ids.
