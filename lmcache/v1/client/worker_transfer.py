@@ -25,7 +25,6 @@ from lmcache.v1.client.transfer_context.base import (
     scatter_cpu_to_paged_kv,
 )
 from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
-from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.common.api import MemoryLayoutDesc
 from lmcache.v1.common.custom_types import (
     EngineType,
@@ -52,6 +51,7 @@ from lmcache.v1.platform.base.event_ipc import (
 )
 from lmcache.v1.platform.kv_wrap import kv_wrapper_fds_delivered, wrap_kv_caches
 from lmcache.v1.platform.transfer_mode import MPTransferMode
+from lmcache.v1.transport.errors import REQUEST_FAILURES
 from lmcache.v1.transport.futures import MessagingFuture
 from lmcache.v1.transport.request_client import RequestClient
 import lmcache.lmcache_native as lmcache_native
