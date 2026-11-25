@@ -12,10 +12,10 @@
   ],
   "workload_skip_annotation_prefix": "weekly-skip-",
   "expected_unsupported": [
-    "sglang / deadlock / zmq",
-    "sglang / long_doc_qa_l2 / zmq",
-    "sglang / lm_eval_preemption / lmcache_driven / zmq",
-    "sglang / lm_eval_preemption / engine_driven / zmq"
+    "sglang / deadlock / grpc",
+    "sglang / long_doc_qa_l2 / grpc",
+    "sglang / lm_eval_preemption / lmcache_driven / grpc",
+    "sglang / lm_eval_preemption / engine_driven / grpc"
   ],
   "pipelines": [
     {
@@ -56,7 +56,8 @@
       ],
       "not_run_allowed": [
         "^:test_tube: Verify ",
-        "^:pushpin: Pin verified "
+        "^:pushpin: Pin verified ",
+        "^:fast_forward: Skip expensive multiprocess CI\\Z"
       ]
     },
     {

@@ -8,6 +8,7 @@ medium; the server declares one compartment per medium.
 
 # Standard
 from dataclasses import replace
+from pathlib import Path
 from typing import cast
 import threading
 
@@ -24,14 +25,21 @@ from lmcache.v1.distributed.api import (
     Tier,
 )
 from lmcache.v1.distributed.config import (
+    EvictionConfig,
     GdsL1Config,
     L1ManagerConfig,
     L1MemoryManagerConfig,
+    StorageManagerConfig,
     get_configured_capacity_bytes,
     l1_medium_name,
 )
 from lmcache.v1.distributed.error import L1ReconfigureError
 from lmcache.v1.distributed.l1_manager.base import BaseL1Manager
+from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
+from lmcache.v1.distributed.l2_adapters.dax_l2_adapter import (
+    DaxDeviceConfig,
+    DaxL2AdapterConfig,
+)
 from lmcache.v1.distributed.memory_manager.l1_manager_protocol import (
     L1MemoryManagerProtocol,
 )
@@ -41,6 +49,8 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxArenaStatus,
 )
 from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventBus
+from tests.v1.distributed.test_dax_l2_adapter import block_first_unmap
 
 GIB = 1 << 30
 
@@ -481,6 +491,55 @@ class TestCapacityChangePublishing:
         assert len(stub._event_bus.events) == 1
         snapshot = stub._event_bus.events[0].metadata["snapshot"]
         assert [(m.tier, m.backend) for m in snapshot.modules] == [(Tier.L1, "dram")]
+
+    def test_l2_cleanup_failure_publishes_reduced_capacity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cleanup errors must not leave the coordinator advertising old capacity."""
+        published: list[Event] = []
+        publish = EventBus.publish
+
+        def record(bus: EventBus, event: Event) -> None:
+            if event.event_type is EventType.SM_CAPACITY_CHANGED:
+                published.append(event)
+            publish(bus, event)
+
+        monkeypatch.setattr(EventBus, "publish", record)
+        path = tmp_path / "dax"
+        path.write_bytes(bytes(4096))
+        manager = StorageManager(
+            StorageManagerConfig(
+                l1_manager_config=L1ManagerConfig(
+                    memory_config=L1MemoryManagerConfig(
+                        size_in_bytes=4096, use_lazy=False, shm_name=""
+                    )
+                ),
+                eviction_config=EvictionConfig(eviction_policy="noop"),
+                l2_adapter_config=L2AdaptersConfig(
+                    [
+                        DaxL2AdapterConfig(
+                            devices=[DaxDeviceConfig(str(path), 4096 / GIB)],
+                            slot_bytes=4096,
+                            hotplug_enabled=True,
+                        )
+                    ]
+                ),
+            )
+        )
+        views = block_first_unmap(monkeypatch)
+        try:
+            published.clear()
+            with pytest.raises(BufferError):
+                manager.reconfigure_l2_adapter(
+                    0, "remove", {"device_path": str(path), "mode": "evict"}
+                )
+            assert len(published) == 1
+            modules = published[0].metadata["snapshot"].modules
+            assert [m.capacity_bytes for m in modules if m.tier is Tier.L2] == [0]
+        finally:
+            for view in views:
+                view.release()
+            manager.close()
 
 
 class TestCapacityPublishDoesNotTakeLifecycleLock:

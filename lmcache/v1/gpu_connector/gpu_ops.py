@@ -7,9 +7,9 @@ import torch
 
 # First Party
 from lmcache import device_ops
+from lmcache.v1.common.ops_types import StagingCopy
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.platform.ops_types import StagingCopy
 import lmcache.lmcache_native as lmcache_native
 
 

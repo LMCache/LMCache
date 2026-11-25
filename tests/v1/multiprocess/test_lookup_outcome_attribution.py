@@ -97,7 +97,8 @@ def _end_metadata(
 
     Args:
         chunk_hashes: Chunk hashes the token hasher reports; empty triggers the
-            ``empty_chunk_hashes`` early exit.
+            ``empty_chunk_hashes`` early exit (the key's ``end`` is 0, so it
+            asks for no unfull chunk).
         windows: Per-object-group window sizes (``-1`` is full attention);
             defaults to one full-attention group.
         world_size: kv_rank shards per chunk.
