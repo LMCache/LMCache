@@ -33,7 +33,4 @@ allowed:
 
 # Imports that break the tree today, as "<part or package> -> <part or package>".
 # Delete a line once nothing matches it; the check fails on a stale line.
-exceptions:
-  - transport -> client
-  - lmcache.v1.distributed -> client
-  - lmcache.v1.multiprocess -> client
+exceptions: []

@@ -42,9 +42,9 @@ belong, is in `tools/module_deps.yaml`.
 
 ## Exceptions
 
-`exceptions` in the rules file lists the places that break the tree today, by
-part or package, for example `transport -> client`. Delete a line once its
-imports are fixed; the check fails on a line that matches nothing. Do not add a
+`exceptions` in the rules file lists the places that break the tree, by part or
+package, for example `transport -> client`. It is empty today. Delete a line once
+its imports are fixed; the check fails on a line that matches nothing. Do not add a
 line to get a new import past the check. Move the shared code into a part both
 sides may import instead, usually common.
 
