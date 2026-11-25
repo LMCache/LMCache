@@ -19,7 +19,8 @@ _spec.loader.exec_module(_deps)
 _SOURCES = {
     "lmcache/__init__.py": "from lmcache.v1.platform import torch_dev\n",
     "lmcache/v1/__init__.py": "",
-    "lmcache/v1/kv_layer_groups.py": "",
+    "lmcache/v1/gpu_connector/__init__.py": "",
+    "lmcache/v1/gpu_connector/gds_context.py": "",
     "lmcache/v1/common/__init__.py": "",
     "lmcache/v1/common/a.py": (
         "from typing import TYPE_CHECKING\n"
@@ -34,7 +35,8 @@ _SOURCES = {
     "lmcache/v1/common/b.py": "",
     "lmcache/v1/platform/__init__.py": "torch_dev = None\n",
     "lmcache/v1/platform/p.py": (
-        "from lmcache.v1.common import a\nfrom lmcache.v1 import kv_layer_groups\n"
+        "from lmcache.v1.common import a\n"
+        "from lmcache.v1.gpu_connector import gds_context\n"
     ),
     "lmcache/v1/transport/__init__.py": "",
     "lmcache/v1/transport/t.py": "from ..platform import p\n",
@@ -71,7 +73,8 @@ def test_check_reports_imports_outside_the_tree(tmp_path: Path) -> None:
         "common -> platform (lmcache.v1.common.a -> lmcache)",
         "common -> client (lmcache.v1.common.a -> lmcache.v1.client.c)",
         "common -> transport (lmcache.v1.common.a -> lmcache.v1.transport.t)",
-        "platform -> server (lmcache.v1.platform.p -> lmcache.v1.kv_layer_groups)",
+        "platform -> server "
+        "(lmcache.v1.platform.p -> lmcache.v1.gpu_connector.gds_context)",
         "server -> client (lmcache.newmod -> lmcache.v1.client)",
         "server -> client (lmcache.newmod -> lmcache.v1.client.c)",
     }

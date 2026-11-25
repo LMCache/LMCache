@@ -36,9 +36,6 @@ exceptions:
   - integration -> common
   - integration -> platform
   - integration -> transport
-  - integration -> lmcache.v1.kv_layer_groups
-  - platform -> lmcache.v1.kv_layer_groups
-  - client -> lmcache.v1.kv_layer_groups
   - transport -> client
   - lmcache.v1.distributed -> client
   - lmcache.v1.multiprocess -> client
