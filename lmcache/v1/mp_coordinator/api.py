@@ -180,6 +180,26 @@ class CacheEventEntry:
 
 
 @dataclass(frozen=True)
+class RequestLookup:
+    """A request's lookup that reached a cached chunk.
+
+    A request served from cache stores nothing, so it reaches the
+    coordinator only through this report. See
+    ``docs/design/v1/mp_coordinator/views/request_index.md``.
+
+    Attributes:
+        request_id: The request id on the emitting instance.
+        key: A key of the last chunk the request hit, in the request's own
+            namespace.
+        token_offset: Position of that chunk's first token.
+    """
+
+    request_id: str
+    key: EncodedObjectKey
+    token_offset: int
+
+
+@dataclass(frozen=True)
 class CacheEventBatch:
     """A batch of same-typed cache events from one MP server.
 
@@ -217,6 +237,11 @@ class CacheEventBatch:
             failed HTTP post. Cumulative, so a loss is reported by the
             next batch that does get through. ``0`` from emitters that do
             not report it.
+        lookups: Requests' lookup hits, carried on an ``access`` batch with
+            no entries so no consumer counts them as accesses. A batch-level
+            field, not an event type, because a coordinator rejects a whole
+            ``POST /events`` naming a type it does not know but ignores a
+            field it does not know.
     """
 
     instance_id: str
@@ -231,6 +256,7 @@ class CacheEventBatch:
     capacity_bytes: int = 0
     capacity_revision: int = 0
     dropped_events: int = 0
+    lookups: list[RequestLookup] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Enforce intrinsic invariants.

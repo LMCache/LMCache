@@ -43,7 +43,35 @@ keys in that namespace. The index likewise lists only the request's own
 namespace's keys, so one tenant's request never shows another tenant's
 placements.
 
-Adding these fields bumps `CACHE_EVENT_SCHEMA_VERSION` to 2. Both
+### Requests served from cache
+
+A request whose whole prompt is cached stores nothing, so it emits no
+`MP_TOKENS`. Its lookup reports it instead. When the lookup module hands a
+finished lookup to the session (the status poll), it publishes
+`MP_LOOKUP_HIT_TAIL` with the key of the last full chunk hit and its
+offset. The hit counts engine-covered chunks too, which LMCache never
+checked; a tail the index does not hold answers 404. Early exits and
+lookups the load policy declined report nothing. The extra work (one
+`ObjectKey` per lookup) runs only when something subscribes.
+
+The subscriber keeps each request's latest hit and sends them on the next
+flush as `lookups` on an `access` batch with no entries:
+
+```json
+{"event_type": "access", "tier": "l1", "backend": "", "entries": [],
+ "lookups": [{"request_id": "cmpl-7-0",
+              "key": {"chunk_hash_hex": "cd34...", "...": "..."},
+              "token_offset": 256}]}
+```
+
+It is a batch-level field rather than a new event type on purpose. A
+coordinator rejects a whole `POST /events` (422) that names an event type
+it does not know, which would lose the `STORE`s in the same flush, but it
+ignores a field it does not know. With no entries, the key directory and
+the usage view count no access; the storage layer already reports hits
+as `ACCESS` entries.
+
+Adding these fields bumps `CACHE_EVENT_SCHEMA_VERSION` to 2. All of them
 default to empty, and the coordinator ignores fields it does not know,
 so MP servers and the coordinator can upgrade in either order. The `events` trace replayer requires an exact schema match, so it
 refuses trace files recorded at version 1.
@@ -58,8 +86,9 @@ chunk_hash -> (token_ids, token_offset, parent_hash, keys)  # bounded LRU
 (instance_id, request_id) -> (tail chunk_hash, namespace)  # bounded LRU
 ```
 
-The tail is the request's stored chunk with the highest `token_offset`.
-That is not necessarily the last one to arrive, because one chunk yields several
+The tail is the request's chunk with the highest `token_offset`, stored
+or hit. That is
+not necessarily the last one to arrive, because one chunk yields several
 `STORE`s (L1, async L2, every rank and object group) in no fixed order.
 Recovery walks `parent_hash` back from the tail until it reaches offset 0
 or a chunk the index no longer holds:
@@ -95,9 +124,11 @@ ids.
 }
 ```
 
-- `complete` is `true` when the chunks reach back to offset 0. When an
-  ancestor chunk has aged out of the index, `start_offset` is the first
-  recovered token's position and `token_ids` starts there.
+- `complete` is `true` when the chunks reach back to offset 0. It means
+  the chain is unbroken, not that the whole prompt came back: a request
+  that hit part of its prompt and stored nothing returns only the hit
+  prefix. When an ancestor chunk has aged out of the index, `start_offset`
+  is the first recovered token's position and `token_ids` starts there.
 - A key with empty `placements` has been evicted. Its tokens are still
   returned. Reload it through the existing prefetch or retrieve path.
 - An unknown request answers 404.
@@ -120,25 +151,29 @@ a few hundred bytes. The two tables have separate LRU bounds, set through
 | `request_index_max_chunks` | 65536 | about 64 MiB of token content |
 | `request_index_max_requests` | 1048576 | about 17 minutes of requests at 1000/s |
 
-Requests get the larger bound because a request costs far less than a
-chunk.
+Requests get the larger bound because every request with a hit takes a
+slot, while chunks are shared.
 
 ```bash
 lmcache coordinator --extra-config '{"request_index_max_chunks": 262144, "request_index_max_requests": 4194304}'
 ```
 
-Retention is by recency of store, not by placement: evicting a chunk's
-KV does not remove its tokens. Storing a chunk also refreshes its
-retained ancestors, root first. A popular system prompt is
+Retention is by recency of store or hit, not by placement: evicting a
+chunk's KV does not remove its tokens. Storing or hitting a chunk also
+refreshes its retained ancestors, root first. A popular system prompt is
 a cache hit for later requests and is never stored again, so without this
 refresh it would be the first chunk to age out, and every request built
 on it would come back incomplete.
 
 ## Limitations
 
+- **Lookup reports are best effort.** A flush that fails drops its
+  lookups along with its batches. They are not counted in
+  `dropped_events`, which counts entries.
 - **Only the LMCache-driven store path reports.** Engine-driven transfer,
   blend pre-computed documents and the qstore plugin module emit no
-  `MP_TOKENS`, so their stores record nothing.
+  `MP_TOKENS`, so their stores record nothing, and a hit on chunks only
+  they stored answers 404.
 - **The trailing partial chunk is lost** unless `save_unfull_chunk` stores
   it, because only complete chunks carry token bindings.
 - **Not checkpointed.** The index rebuilds from the event stream. A

@@ -385,3 +385,29 @@ def test_a_stored_request_is_recoverable_by_id(tmp_path: pathlib.Path) -> None:
             expected_b = (longer, [both_tiers] * 3)
             assert settle(lambda: recovered("req-a"), expected_a) == expected_a
             assert settle(lambda: recovered("req-b"), expected_b) == expected_b
+
+
+def test_a_full_hit_request_is_recoverable(tmp_path: pathlib.Path) -> None:
+    """MP-9: a request served entirely from cache stores nothing, yet comes
+    back by id with the storing request's keys."""
+    with running_coordinator() as url:
+        with running_server(url, tmp_path, "mp-1", [local_l2()]) as server:
+            endpoint = urlsplit(server.rpc_url)
+            with kv_client(f"{endpoint.hostname}:{endpoint.port}", MODEL) as client:
+                client.store(TOKENS, request_id="writer")
+                settle(
+                    lambda: httpx.get(f"{url}/requests/mp-1/writer").status_code, 200
+                )
+                assert client.lookup(TOKENS, request_id="reader") == len(TOKENS)
+
+            def keys_of_request(request_id: str) -> list[dict]:
+                resp = httpx.get(f"{url}/requests/mp-1/{request_id}")
+                if resp.status_code != 200:
+                    return []
+                return [k["key"] for c in resp.json()["chunks"] for k in c["keys"]]
+
+            writer_keys = keys_of_request("writer")
+            assert len(writer_keys) == 2
+            assert settle(lambda: keys_of_request("reader"), writer_keys) == (
+                writer_keys
+            )

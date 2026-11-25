@@ -30,6 +30,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
+    RequestLookup,
 )
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.cache_events import (
@@ -431,6 +432,59 @@ def test_a_chunks_request_ids_are_capped_to_the_most_recent(monkeypatch):
 
     [batches] = sink.published
     assert batches[-1].entries[0].request_ids == ["req-1", "req-2"]
+
+
+def test_lookup_hits_ride_an_entry_less_access_batch():
+    """A request served from cache stores nothing; its hit tail reaches the
+    coordinator on an ACCESS batch with no entries, so no consumer counts
+    it as an access, and an older coordinator ignores the field."""
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.MP_LOOKUP_HIT_TAIL,
+            session_id="req-1",
+            metadata={"tail_key": _key(2), "token_offset": 256},
+        ),
+    )
+    subscriber.flush()
+
+    [[batch]] = sink.published
+    assert batch.event_type == CacheEventType.ACCESS
+    assert batch.entries == []
+    assert batch.lookups == [
+        RequestLookup(
+            request_id="req-1",
+            key=_key(2).to_encoded_object_key(),
+            token_offset=256,
+        )
+    ]
+
+
+def test_repeated_lookups_of_a_request_send_its_latest_hit():
+    """vLLM may poll one request's lookup more than once per flush."""
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        *(
+            Event(
+                event_type=EventType.MP_LOOKUP_HIT_TAIL,
+                session_id="req-1",
+                metadata={"tail_key": _key(i), "token_offset": i * 256},
+            )
+            for i in (1, 2)
+        ),
+    )
+    subscriber.flush()
+
+    [[batch]] = sink.published
+    assert [(lk.key.chunk_hash_hex, lk.token_offset) for lk in batch.lookups] == [
+        (_key(2).chunk_hash.hex(), 512)
+    ]
 
 
 def test_token_binding_cache_evicts_oldest_down_to_half(monkeypatch):

@@ -377,12 +377,14 @@ class CacheEventsRequest(BaseModel):
             The unchanged batches once every constraint holds.
 
         Raises:
-            ValueError: If an entry's key cannot convert into an
-                ``ObjectKey`` (surfaced as 422).
+            ValueError: If an entry's or a lookup's key cannot convert into
+                an ``ObjectKey`` (surfaced as 422).
         """
         for batch in value:
             for entry in batch.entries:
                 entry.key.to_object_key()
+            for lookup in batch.lookups:
+                lookup.key.to_object_key()
         return value
 
 
@@ -570,7 +572,7 @@ class RequestTraceResponse(BaseModel):
             ``False`` when an ancestor chunk aged out of the index. It says
             the chain is unbroken, not that the whole prompt came back.
         token_ids: The request's tokens from ``start_offset`` through its
-            highest-offset stored chunk.
+            highest-offset chunk, stored or hit.
         chunks: The chunks those tokens came from, in sequence order.
     """
 

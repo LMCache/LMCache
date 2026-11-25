@@ -331,3 +331,89 @@ def test_store_without_request_ids_records_no_request():
         )
 
         assert _get_request(client, "req-1").status_code == 404
+
+
+# -- Requests served entirely by cache hits ------------------------------------
+
+
+def _lookup_batch(seq: int, lookups: list[tuple[str, bytes, int]]) -> dict:
+    """An entry-less ACCESS batch carrying ``(request_id, tail hash, offset)``
+    lookup reports, the way the subscriber sends them."""
+    return {
+        "instance_id": "mp-0",
+        "incarnation": 1,
+        "seq": seq,
+        "event_type": "access",
+        "tier": "l1",
+        "backend": "",
+        "entries": [],
+        "lookups": [
+            {"request_id": rid, "key": _key(chunk_hash), "token_offset": offset}
+            for rid, chunk_hash, offset in lookups
+        ],
+    }
+
+
+def test_a_full_hit_request_is_recovered():
+    """``req-2`` hit A and B and stored nothing."""
+    with _client() as client:
+        _store_two_chunk_request(client)
+        _post_events(client, [_lookup_batch(2, [("req-2", HASH_B, 4)])])
+
+        body = _get_request(client, "req-2").json()
+
+        assert body["complete"] is True
+        assert body["token_ids"] == TOKENS_A + TOKENS_B
+        # The stored keys, so their placements come back with them.
+        keys = [k["key"] for c in body["chunks"] for k in c["keys"]]
+        assert [(k["chunk_hash_hex"], k["kv_rank"]) for k in keys] == [
+            (HASH_A.hex(), 0),
+            (HASH_B.hex(), 0),
+        ]
+        assert all(k["placements"] for c in body["chunks"] for k in c["keys"])
+
+
+def test_a_lookup_report_is_not_counted_as_an_access():
+    """The storage layer reports hits as ACCESS entries already."""
+    with _client() as client:
+        _store_two_chunk_request(client)
+        _post_events(client, [_lookup_batch(2, [("req-2", HASH_B, 4)])])
+
+        resp = client.post("/directory/lookup", json={"keys": [_key(HASH_B)]})
+
+        assert resp.json()["results"][0]["access_count"] == 0
+
+
+def test_a_hit_on_a_chunk_the_index_lacks_is_404():
+    """Engine-covered chunks are reported without LMCache holding them."""
+    with _client() as client:
+        _post_events(client, [_lookup_batch(1, [("req-2", HASH_B, 4)])])
+
+        assert _get_request(client, "req-2").status_code == 404
+
+
+def test_a_hit_keeps_its_chain_from_aging_out():
+    """A prompt served only by hits is never stored again."""
+    with _client({"request_index_max_chunks": 2}) as client:
+        _post_events(
+            client,
+            [
+                _batch(1, "store", [_store_entry(HASH_A, TOKENS_A, 0, None, ["r0"])]),
+                _batch(2, "store", [_store_entry(HASH_C, TOKENS_C, 0, None, ["r1"])]),
+                _lookup_batch(3, [("hit", HASH_A, 0)]),
+                _batch(4, "store", [_store_entry(HASH_B, TOKENS_B, 0, None, ["r2"])]),
+            ],
+        )
+
+        assert _get_request(client, "hit").json()["token_ids"] == TOKENS_A
+        assert _get_request(client, "r1").status_code == 404
+
+
+def test_a_malformed_lookup_key_is_rejected():
+    with _client() as client:
+        batch = _lookup_batch(1, [("req-1", HASH_A, 0)])
+        batch["lookups"][0]["key"]["chunk_hash_hex"] = "not-hex"
+
+        resp = client.post("/events", json={"batches": [batch]})
+
+        assert resp.status_code == 422

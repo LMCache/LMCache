@@ -1175,8 +1175,9 @@ Request recovery
 
 The coordinator remembers which request each chunk belongs to, so you can get
 a request's tokens back by its id, and see where its KV lives now, even after
-the KV was evicted. A request is recorded when it stores chunks. Only the
-LMCache-driven store path reports; the design is in
+the KV was evicted. A request is recorded when it stores chunks or when its
+lookup hits cached ones, so a request served entirely from cache is recorded
+too. Only the LMCache-driven store path reports; the design is in
 ``docs/design/v1/mp_coordinator/views/request_index.md``.
 
 The index keeps tokens past KV eviction and ages out the least recent entries
@@ -1230,7 +1231,9 @@ the request; vLLM request ids are unique only per engine.
 
 A key with empty ``placements`` has been evicted; its tokens are still
 returned. ``complete`` is ``true`` when the chunks reach back to position 0.
-When an earlier chunk aged out, ``start_offset`` is the first recovered token's
+It means the chain is unbroken, not that the whole prompt came back: a request
+that hit part of its prompt and stored nothing returns only that prefix. When
+an earlier chunk aged out, ``start_offset`` is the first recovered token's
 position. Only the request's own tenant's keys are listed, even when another
 ``cache_salt`` stored the same tokens.
 

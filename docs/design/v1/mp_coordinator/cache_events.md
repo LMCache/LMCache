@@ -164,7 +164,10 @@ listener plumbing or a dedicated flush task:
   [key_directory.md](views/key_directory.md) — Token index). The
   request id and parent hash feed the request index (see
   [request_index.md](views/request_index.md)); `request_ids` keeps every
-  request that submitted the chunk while its binding is cached.
+  request that submitted the chunk while its binding is cached. A lookup's
+hit tail (`mp.lookup.hit_tail`) is held per request and sent at the next
+flush as `lookups` on an entry-less `ACCESS` batch, so a request served
+from cache is recorded too.
   `ACCESS` batches carry an **empty backend**: the directory only
   refreshes key-level recency and access count on access, so there is
   no placement identity to name. The vocabulary requires a non-empty

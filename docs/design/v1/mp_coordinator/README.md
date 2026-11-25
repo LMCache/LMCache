@@ -38,7 +38,7 @@ shape.
 | `POST /events` | mp → coordinator | fleet cache-event ingest (gate → key directory + eviction fan-out) |
 | `GET /directory/keys` | operator/tools | paginated key listing with tier/instance/backend filters |
 | `POST /directory/blend-lookup` | mp → coordinator | fragment lookup: cached chunks contained in a request's tokens |
-| `GET /requests/{instance_id}/{request_id}` | operator/tools | recover a request's tokens and each chunk's current placements, also after eviction ([request_index.md](views/request_index.md)) |
+| `GET /requests/{instance_id}/{request_id}` | operator/tools | recover a request's tokens and each chunk's current placements, also after eviction or for a full cache hit ([request_index.md](views/request_index.md)) |
 | `POST /cache/prefetches` | operator/scheduler | submit warm prefetch to a named server |
 | `GET /cache/prefetches/{instance_id}/{request_id}` | operator/scheduler | poll a warm prefetch |
 | `POST/DELETE /cache/pins` | operator | pin / unpin keys against fleet-wide eviction |

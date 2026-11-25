@@ -107,7 +107,8 @@ def test_a_parent_cycle_ends_the_walk():
 
 
 def test_requests_have_their_own_bound():
-    """Requests are not held to the chunk bound."""
+    """Every request with a hit takes a request slot, so requests are not
+    held to the chunk bound."""
     index = RequestIndex(max_chunks=1, max_requests=3)
     index.consume(_store(1, b"\x01", 0, None, ["req-1", "req-2", "req-3"]))
 

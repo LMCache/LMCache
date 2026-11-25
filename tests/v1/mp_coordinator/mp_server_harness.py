@@ -614,6 +614,47 @@ class KVClient:
         if not stored:
             raise RuntimeError(f"the server refused to store {chunks} chunks")
 
+    def lookup(
+        self, token_ids: Sequence[int], request_id: str, cache_salt: str = ""
+    ) -> int:
+        """Look a sequence up the way vLLM's scheduler does, then release.
+
+        Polls the prefetch status (which is when the server reports the
+        lookup's hit), frees the read locks the lookup took, and ends the
+        session so a later delete is not skipped.
+
+        Args:
+            token_ids: The sequence; a partial last chunk is not looked up.
+            request_id: The request id to look up under.
+            cache_salt: The tenant.
+
+        Returns:
+            The hit, in tokens.
+        """
+        end = len(token_ids) // CHUNK_SIZE * CHUNK_SIZE
+        key = IPCCacheServerKey(
+            model_name=self.model_name,
+            world_size=1,
+            worker_id=None,
+            token_bytes=pack_token_ids(token_ids),
+            start=0,
+            end=end,
+            request_id=request_id,
+            cache_salt=cache_salt,
+        )
+        self._client.lookup(key, 1).result(timeout=_RPC_TIMEOUT_S)
+        deadline = time.monotonic() + _RPC_TIMEOUT_S
+        hit = None
+        while hit is None and time.monotonic() < deadline:
+            hit = self._client.query_prefetch_status(request_id).result(
+                timeout=_RPC_TIMEOUT_S
+            )
+        if hit is None:
+            raise RuntimeError(f"lookup {request_id} did not finish")
+        self._client.free_lookup_locks(key, 1).result(timeout=_RPC_TIMEOUT_S)
+        self._client.end_session(request_id).result(timeout=_RPC_TIMEOUT_S)
+        return hit
+
     def close(self) -> None:
         """Unregister the cache and disconnect."""
         # ``None`` would mean the cache was never registered; the

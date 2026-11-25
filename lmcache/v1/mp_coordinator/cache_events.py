@@ -35,6 +35,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
+    RequestLookup,
 )
 from lmcache.v1.mp_coordinator.schemas import CacheEventsRequest
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -550,6 +551,9 @@ class CacheEventSubscriber(EventSubscriber):
         # ahead of the write-finished events), used to stamp STORE
         # entries. LRU-bounded; a miss stamps nothing.
         self._token_bindings: OrderedDict[bytes, _ChunkTokens] = OrderedDict()
+        # request_id -> its latest lookup hit since the last flush: a request
+        # may be polled more than once, and only its furthest hit matters.
+        self._pending_lookups: dict[str, RequestLookup] = {}
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         """Return the bus events this subscriber consumes."""
@@ -562,6 +566,7 @@ class CacheEventSubscriber(EventSubscriber):
             EventType.L2_KEYS_DELETED: self._on_l2_delete,
             EventType.L2_KEYS_ACCESSED: self._on_l2_access,
             EventType.MP_TOKENS: self._on_tokens,
+            EventType.MP_LOOKUP_HIT_TAIL: self._on_lookup_hit_tail,
             EventType.SM_CAPACITY_CHANGED: self._on_capacity_changed,
             # TODO: decouple the flush tick from the eviction loop (e.g. a
             # bus-owned periodic hook) so cache-event freshness does not
@@ -574,10 +579,16 @@ class CacheEventSubscriber(EventSubscriber):
 
         Publish failures are logged and the drained list is dropped.
         """
-        if not self._pending_batches and self._pending_capacity is None:
+        if (
+            not self._pending_batches
+            and self._pending_capacity is None
+            and not self._pending_lookups
+        ):
             return
         pending_batches = self._pending_batches
         self._pending_batches = []
+        lookups = list(self._pending_lookups.values())
+        self._pending_lookups = {}
         capacity = self._pending_capacity
         self._pending_capacity = None
         ts = time.time()
@@ -600,6 +611,21 @@ class CacheEventSubscriber(EventSubscriber):
             )
             for offset, pending in enumerate(pending_batches)
         ]
+        if lookups:
+            # Entry-less ACCESS: consumers that count accesses see nothing.
+            batches.append(
+                CacheEventBatch(
+                    instance_id=self._instance_id,
+                    incarnation=self._incarnation,
+                    seq=self._seq + len(batches) + 1,
+                    event_type=CacheEventType.ACCESS,
+                    tier=Tier.L1,
+                    backend="",
+                    ts=ts,
+                    dropped_events=dropped_events,
+                    lookups=lookups,
+                )
+            )
         self._seq += len(batches)
         try:
             self._sink.publish(batches)
@@ -749,6 +775,16 @@ class CacheEventSubscriber(EventSubscriber):
             _TOKEN_BINDING_CACHE_SIZE,
             evicted,
         )
+
+    def _on_lookup_hit_tail(self, event: Event) -> None:
+        """Hold a request's last hit chunk for the next flush."""
+        tail_key: ObjectKey = event.metadata["tail_key"]
+        self._pending_lookups[event.session_id] = RequestLookup(
+            request_id=event.session_id,
+            key=tail_key.to_encoded_object_key(),
+            token_offset=event.metadata["token_offset"],
+        )
+        self._flush_if_due()
 
     def _on_l2_delete(self, event: Event) -> None:
         self._record_l2_keys(CacheEventType.DELETE, event)

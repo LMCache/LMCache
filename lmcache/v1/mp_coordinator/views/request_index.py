@@ -41,8 +41,8 @@ MAX_CHUNKS_CONFIG_KEY = "request_index_max_chunks"
 
 DEFAULT_MAX_REQUESTS = 1048576
 """Default bound on tracked requests. A request costs a few hundred bytes,
-far less than a chunk, so this bound is larger: about 17 minutes of
-requests at 1000 per second."""
+far less than a chunk, and every request with a hit takes a slot, so this
+bound is larger: about 17 minutes of requests at 1000 per second."""
 
 MAX_REQUESTS_CONFIG_KEY = "request_index_max_requests"
 """``extra_config`` key overriding :data:`DEFAULT_MAX_REQUESTS`."""
@@ -73,9 +73,11 @@ class RequestTrace:
 
     Attributes:
         chunks: The chunks in sequence order, ending at the request's
-            highest-offset stored chunk.
-        complete: ``True`` when ``chunks`` reaches back to position 0;
-            ``False`` when an ancestor chunk is not held.
+            highest-offset chunk, stored or hit.
+        complete: ``True`` when ``chunks`` reaches back to position 0. It
+            says the chain is unbroken, not that the whole prompt came
+            back: a request that hit part of its prompt and stored nothing
+            returns only the hit prefix.
     """
 
     chunks: tuple[RequestChunk, ...]
@@ -104,7 +106,7 @@ class _ChunkRecord:
 
 @dataclass(frozen=True)
 class _Tail:
-    """A request's highest-offset stored chunk, and the namespace whose
+    """A request's highest-offset chunk, stored or hit, and the namespace whose
     keys belong to the request: chunk hashes depend on tokens alone, so
     one chunk can hold several tenants' keys."""
 
@@ -117,11 +119,13 @@ class RequestIndex(View):
     """Thread-safe, bounded index from ``(instance_id, request_id)`` to
     the request's chunks.
 
-    A request is recorded when it stores a chunk. The chunk table is
-    LRU-bounded to ``max_chunks`` entries and the request table to
-    ``max_requests``, by recency of store. Storing a chunk also refreshes
-    its ancestors, so a prefix many requests extend outlives unrelated
-    chunks. Evicting a chunk's KV does not remove it; only the
+    A request is recorded when it stores a chunk or when its lookup hits
+    one, so a request served entirely from cache is recorded too. The
+    chunk table is LRU-bounded to ``max_chunks`` entries and the request
+    table to ``max_requests``, by recency of store or hit. Storing or
+    hitting a chunk also refreshes its ancestors, so a prefix many requests
+    reach outlives
+    unrelated chunks. Evicting a chunk's KV does not remove it; only the
     bound does.
     """
 
@@ -179,7 +183,8 @@ class RequestIndex(View):
         )
 
     def consume(self, batch: CacheEventBatch) -> None:
-        """Record the chunks and requests a ``STORE`` batch reports.
+        """Record the chunks and requests a ``STORE`` batch reports, and
+        the requests any batch's ``lookups`` report.
 
         Store entries without token ids carry no content to retain and are
         skipped.
@@ -187,13 +192,14 @@ class RequestIndex(View):
         Args:
             batch: The admitted batch.
         """
-        if batch.event_type != CacheEventType.STORE:
+        is_store = batch.event_type == CacheEventType.STORE
+        if not is_store and not batch.lookups:
             return
         with self._lock:
             # One chunk arrives once per rank and object group; refresh its
             # chain once per batch.
             refreshed: set[bytes] = set()
-            for entry in batch.entries:
+            for entry in batch.entries if is_store else ():
                 if not entry.token_ids:
                     continue
                 key = entry.key.to_object_key()
@@ -217,6 +223,22 @@ class RequestIndex(View):
                             (batch.instance_id, request_id),
                             _Tail(key.chunk_hash, entry.token_offset, namespace),
                         )
+            for lookup in batch.lookups:
+                key = lookup.key.to_object_key()
+                # A hit on a chunk the index lacks (engine-covered, or aged
+                # out) still records the request; it resolves once the
+                # chunk is stored and answers 404 until then.
+                record = self._chunks.get(key.chunk_hash)
+                if record is not None and key.chunk_hash not in refreshed:
+                    self._refresh_chain(key.chunk_hash, record, refreshed)
+                self._record_tail(
+                    (batch.instance_id, lookup.request_id),
+                    _Tail(
+                        key.chunk_hash,
+                        lookup.token_offset,
+                        BlendNamespace.from_object_key(key),
+                    ),
+                )
             self._enforce_bounds()
 
     def fence_instance(self, instance_id: str) -> None:
