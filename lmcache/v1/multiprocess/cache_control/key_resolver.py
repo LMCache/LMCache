@@ -165,7 +165,7 @@ def resolve_chunk_object_keys(
     if not unique_chunk_hashes:
         return [], 0
     if world_size == 0:
-        every_setup = ObjectKeyIdentity(
+        all_world_sizes_identity = ObjectKeyIdentity(
             chunk_hash=b"",
             kv_rank=0,
             model_name=model_name,
@@ -173,7 +173,7 @@ def resolve_chunk_object_keys(
             tags=tags or {},
         )
         return [
-            ObjectKey(identity=replace(every_setup, chunk_hash=chunk_hash))
+            ObjectKey(identity=replace(all_world_sizes_identity, chunk_hash=chunk_hash))
             for chunk_hash in unique_chunk_hashes
         ], len(unique_chunk_hashes)
     # The coordinator holds no KV registration, so this resolves the

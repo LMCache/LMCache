@@ -504,7 +504,7 @@ class FleetEvictionController(Controller):
         or one taken without a world size, which covers every world size."""
         return (
             _pinned_chunk_key(key) in self._pin_counts
-            or _every_setup_chunk_key(key) in self._pin_counts
+            or _all_world_sizes_pin_key(key) in self._pin_counts
         )
 
 
@@ -522,7 +522,7 @@ def _decode_pin(entry: Mapping[str, object]) -> tuple[ObjectKey, int]:
     return encoded.to_object_key(), cast(int, entry["count"])
 
 
-def _every_setup_chunk_key(key: ObjectKey) -> ObjectKey:
+def _all_world_sizes_pin_key(key: ObjectKey) -> ObjectKey:
     """Return the key a pin without a world size stores for ``key``'s chunk:
     object group 0, and a ``kv_rank`` of 0, which packs no world size."""
     return replace(key, identity=replace(key.identity, object_group_id=0, kv_rank=0))

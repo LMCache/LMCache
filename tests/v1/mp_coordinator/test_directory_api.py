@@ -478,7 +478,7 @@ def test_lookup_by_chunk_hash_reports_every_rank_and_group_of_that_chunk():
         assert all(len(r["placements"]) == 1 for r in body["results"])
 
 
-def test_lookup_by_chunk_hash_without_a_world_size_reports_every_setup():
+def test_lookup_by_chunk_hash_without_a_world_size_reports_every_world_size():
     """Without a world size a hash resolves to every stored copy of its
     chunk, whatever the world size; a chunk stored nowhere has no results."""
     with _client() as client:

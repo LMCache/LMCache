@@ -1197,7 +1197,9 @@ def test_a_chunk_hash_pin_without_a_world_size_covers_every_world_size(world_siz
 
 
 @pytest.mark.parametrize("world_size", _EVERY_WORLD_SIZE)
-def test_a_delete_by_chunk_hash_without_a_world_size_reaches_every_setup(world_size):
+def test_a_delete_by_chunk_hash_without_a_world_size_reaches_every_world_size(
+    world_size,
+):
     deletes: list = []
     with _registered_delete_client(deletes) as client:
         ctx = client.app.state.ctx
