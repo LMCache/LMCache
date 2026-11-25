@@ -12,8 +12,8 @@ import os
 import uuid
 
 # First Party
-from lmcache.security.api_key import add_api_key_args
 from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.security.api_key import add_api_key_args
 from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleSpec,
     parse_server_module_specs,
@@ -40,8 +40,8 @@ class _DeprecatedStoreTrue(argparse.Action):
 class MPServerConfig:
     """Configuration for the multiprocess cache server."""
 
-    transport: Literal["zmq", "grpc"] = "zmq"
-    """Request transport exposed by the cache server."""
+    transport: Literal["zmq", "grpc"] = "grpc"
+    """Request transport exposed by the cache server. ZMQ is deprecated."""
 
     host: str = "localhost"
     """Request server host."""
@@ -114,12 +114,6 @@ class MPServerConfig:
     """Transfer mode: 'lmcache_driven' for server-driven transfer
     (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
     engine-driven transfer (PREPARE/COMMIT), or 'auto' to enable both."""
-
-    rocm_host_event_wait: bool = False
-    """ROCm workaround: LMCache-driven STORE / RETRIEVE enqueue their copies
-    only once the engine's producer event has completed on the host, instead of
-    a stream wait on it; see lmcache.v1.multiprocess.rocm_host_event_wait.
-    LMCACHE_ROCM_HOST_EVENT_WAIT=1 enables it too. Ignored off ROCm."""
 
     isolated_ipc: bool = False
     """Whether IPC mechanisms must work across isolated containers (no shared
@@ -438,8 +432,9 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--transport",
         choices=("zmq", "grpc"),
-        default="zmq",
-        help="Request transport exposed by the cache server. Default is zmq.",
+        default="grpc",
+        help="Request transport exposed by the cache server. Default is grpc. "
+        "zmq is deprecated and will be removed in a future release.",
     )
     mp_group.add_argument(
         "--host",
@@ -534,16 +529,6 @@ def add_mp_server_args(
         "'engine_driven' for engine-driven transfer (PREPARE/COMMIT), "
         "or 'auto' to enable both transfer paths. "
         "Default is 'lmcache_driven'.",
-    )
-    mp_group.add_argument(
-        "--rocm-host-event-wait",
-        action="store_true",
-        help="ROCm workaround: a stream wait on the serving engine's pending "
-        "event can slow the engine's kernels on the same hardware pipe. With "
-        "this flag STORE / RETRIEVE enqueue their copies only once that event "
-        "has completed (polled on the host). Enable it when this server runs "
-        "next to the engine on ROCm; ignored elsewhere. "
-        "LMCACHE_ROCM_HOST_EVENT_WAIT=1 enables it too. (Default is off)",
     )
     mp_group.add_argument(
         "--isolated-ipc",
@@ -735,7 +720,6 @@ def parse_args_to_mp_server_config(
         enable_dedup_content_kv=args.enable_dedup_content_kv,
         enable_blend_reorder=args.enable_blend_reorder,
         supported_transfer_mode=args.supported_transfer_mode,
-        rocm_host_event_wait=args.rocm_host_event_wait,
         isolated_ipc=args.isolated_ipc,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),

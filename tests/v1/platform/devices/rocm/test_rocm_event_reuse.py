@@ -272,33 +272,6 @@ def test_peer_view_delegates_everything_else(
     assert peer.create_event("d0") is event  # the pool is the shared backend's
 
 
-def test_query_imports_use_the_backend_opener_and_their_own_entries(
-    backend: ReusingEventIPCBackend, runtime: _Runtime
-) -> None:
-    polled: list[bytes] = []
-
-    def import_event_for_query(handle: bytes, device: object) -> object:
-        polled.append(handle)
-        return ("polled", handle)
-
-    backend.import_event_for_query = import_event_for_query  # type: ignore[attr-defined]
-    peer = backend.for_peer()
-    event = peer.import_event_for_query(b"a", "d0")
-    assert event == ("polled", b"a")
-    assert peer.import_event_for_query(b"a", "d0") is event
-    assert peer.import_event(b"a", "d0") is not event  # a stream-wait import
-    assert polled == [b"a"] and runtime.opened == [b"a"]
-
-
-def test_query_imports_fall_back_to_the_plain_import(
-    backend: ReusingEventIPCBackend, runtime: _Runtime
-) -> None:
-    peer = backend.for_peer()
-    event = peer.import_event_for_query(b"a", "d0")
-    assert peer.import_event(b"a", "d0") is event
-    assert runtime.opened == [b"a"]
-
-
 # -------------------------------------------------------------------- wiring
 
 

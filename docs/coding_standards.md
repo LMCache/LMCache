@@ -108,6 +108,12 @@ A full docstring must include:
 ### 4.4 Class Design
 
 - **Minimize the public interface.** Follow the principle of minimal surface area -- only add a new public method or property when there is a concrete need.
+- When a project-owned class intentionally implements a project-owned base
+  interface or `Protocol`, prefer explicit inheritance (e.g.,
+  `class LocalStore(StorageInterface):`) to make that relationship clear. Do not
+  omit inheritance merely because a `Protocol` supports structural typing.
+  Omitting it requires a concrete, explainable benefit, such as adapting an
+  external type that cannot be modified.
 - **Class fields with internal state** must have:
   - A clear, documented meaning
   - A clear invariant (at any point in time, a developer should know what the value should be without running the code)

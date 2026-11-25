@@ -7,7 +7,7 @@ from typing import List, Optional, Union
 import torch
 
 # First Party
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.v1.common.utils import _lmcache_nvtx_annotate
 from lmcache.v1.memory_management import (
     BytesBufferMemoryObj,
     MemoryAllocatorInterface,

@@ -7,6 +7,7 @@ its registration.
 """
 
 # Standard
+from collections.abc import Iterator
 from contextlib import nullcontext
 from typing import Any
 from unittest.mock import MagicMock
@@ -16,10 +17,12 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.api import MemoryLayoutDesc
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
 from lmcache.v1.transport.futures import MessagingFuture
 from tests.v1.multiprocess.test_event_ipc_handle_path import _FakeEventBackend
-from tests.v1.multiprocess.test_rocm_host_event_wait import _build
 
 
 class _PeerView:
@@ -54,26 +57,47 @@ def _imports(backend: _SharedBackend) -> list[bytes]:
     return [call[1] for call in backend.calls if call[0] == "import"]
 
 
-def test_server_registration_owns_its_peer_backend(
+@pytest.fixture
+def server(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    t = _build(monkeypatch, enabled=False, hip=None, registry=True)
-    module = t.module
-    monkeypatch.setattr(lmcache_driven_transfer.torch_dev, "empty_cache", lambda: None)
-    monkeypatch.setattr(
-        lmcache_driven_transfer.torch_dev, "ipc_collect", lambda: None, raising=False
-    )
-    shared = _SharedBackend()
-    monkeypatch.setattr(
-        module,
-        "_create_cache_context",
-        lambda *args, **kwargs: t.make_entry(shared).cache_context,
-    )
-    monkeypatch.setattr(
-        lmcache_driven_transfer, "get_event_ipc_backend", lambda device: shared
-    )
+) -> Iterator[Any]:
+    """The real module and registry over a stubbed device, with ``shared`` as
+    the device's event backend."""
+    context = MagicMock()
+    context.chunk_size = 256
+    context.hash_algorithm_name = "blake3"
+    context.layout_desc_registry = LayoutDescRegistry()
 
-    module.register_kv_cache(7, [], "model", 1, None, None, [])
+    def create_context(*args: Any, **kwargs: Any) -> MagicMock:
+        cache = MagicMock(num_layers=1)
+        cache.kv_layer_groups_manager.num_object_groups = 1
+        cache.kv_layer_groups_manager.get_attn_desc.return_value = AttnWindowDesc([-1])
+        return cache
+
+    shared = _SharedBackend()
+    transfer = lmcache_driven_transfer
+    monkeypatch.setattr(transfer, "DeviceHostFuncDispatcher", MagicMock())
+    monkeypatch.setattr(transfer, "create_cache_context", create_context)
+    monkeypatch.setattr(transfer, "get_event_ipc_backend", lambda device: shared)
+    monkeypatch.setattr(
+        transfer, "get_layout_desc", lambda *a, **kw: MemoryLayoutDesc([], [])
+    )
+    monkeypatch.setattr(transfer, "torch_dev", MagicMock())
+    module: Any = transfer.LMCacheDrivenTransferModule(context)
+    module.shared = shared
+    try:
+        yield module
+    finally:
+        module.close()
+
+
+def _register(module: Any, instance_id: int) -> None:
+    module.register_kv_cache(instance_id, [], "model", 1, None, None, [], None)
+
+
+def test_server_registration_owns_its_peer_backend(server: Any) -> None:
+    module, shared = server, server.shared
+    _register(module, 7)
     first = module._cache_contexts[7].event_backend
     assert first is shared.views[0]
     first.import_event(b"h", "d")
@@ -83,14 +107,14 @@ def test_server_registration_owns_its_peer_backend(
     # The engine goes away and a new one registers under the same instance
     # ID and issues the same handle bytes.
     module.unregister_kv_cache(7)
-    module.register_kv_cache(7, [], "model", 1, None, None, [])
+    _register(module, 7)
     second = module._cache_contexts[7].event_backend
     assert second is shared.views[1] and second is not first
     second.import_event(b"h", "d")
     assert _imports(shared) == [b"h", b"h"]  # not served from the old one
 
     # Another instance on the same device never shares imports with it.
-    module.register_kv_cache(8, [], "model", 1, None, None, [])
+    _register(module, 8)
     assert module._cache_contexts[8].event_backend is shared.views[2]
 
 

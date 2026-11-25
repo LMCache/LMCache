@@ -35,11 +35,11 @@ class RocmDeviceSpec(CudaDeviceSpec):
             import torch
 
             # First Party
-            from lmcache.v1.platform.devices.rocm.event_ipc import (
-                RocmEventIPCBackend,
+            from lmcache.v1.platform.devices.rocm.event_reuse import (
+                ReusingEventIPCBackend,
             )
 
-            backend = RocmEventIPCBackend(
+            backend = ReusingEventIPCBackend(
                 event_module=torch.cuda, device_type=self.device_type
             )
             self._event_backend_cache = backend

@@ -110,7 +110,6 @@ lmcache/v1/platform/base/event_ipc.py     # protocol, lookup, default backend
 lmcache/v1/platform/base/device_spec.py  # optional DeviceSpec capability
 lmcache/v1/platform/devices/cpu/__init__.py      # CPU stub backend registration
 lmcache/v1/platform/devices/cuda/__init__.py     # CUDA backend registration
-lmcache/v1/platform/devices/rocm/event_ipc.py    # ROCm backend: GIL-free import of polled events
 lmcache/v1/platform/devices/musa/event_ipc.py    # MUSA capability gate and adapter
 lmcache/v1/platform/devices/musa/ipc_wrapper.py  # MUSA availability and torch.musa loader
 lmcache/v1/platform/devices/rocm/event_reuse.py  # ROCm event pool and per-peer imports
@@ -136,25 +135,6 @@ it to `torch.cuda`. Other accelerators must explicitly register a compatible
 backend before the multiprocess handle path can use them. This prevents an
 unsupported or misspelled device type from silently selecting the active
 accelerator's event implementation.
-
-### ROCm backend
-
-`RocmEventIPCBackend` (`lmcache/v1/platform/devices/rocm/event_ipc.py`) is the
-default backend over `torch.cuda` plus one extra import:
-
-```python
-event = backend.import_event_for_query(handle, device)  # host queries only
-backend.query_event(event)
-```
-
-`torch.cuda.Event.from_ipc_handle` holds the GIL during `hipIpcOpenEventHandle`,
-which can block for seconds. `import_event_for_query` opens the handle through
-`rocm.bindings.hip`, which releases the GIL, and `query_event` queries such an
-event the same way. The server's `--rocm-host-event-wait` poller is the only
-caller. The returned event must not be passed to `wait_event`: callers that
-stream-wait keep using `import_event`, which returns a torch event, so each
-handle is opened once. If `rocm.bindings.hip` is missing or the open fails,
-`import_event_for_query` falls back to `import_event`.
 
 ### MUSA backend
 

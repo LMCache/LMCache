@@ -305,7 +305,7 @@ class CompositeCommand(BaseCommand):
         """
         # Deferred import to avoid circular dependency
         # First Party
-        from lmcache.v1.utils.subclass_discovery import discover_subclasses
+        from lmcache.v1.common.subclass_discovery import discover_subclasses
 
         package = self.__class__.__module__
 

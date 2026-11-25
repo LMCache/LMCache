@@ -119,7 +119,7 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 		Expect(cfg.KVConnectorModulePath).To(Equal("lmcache.integration.vllm.lmcache_mp_connector"))
 		Expect(cfg.KVRole).To(Equal("kv_both"))
 		Expect(cfg.KVConnectorExtraConfig.Host).To(Equal(
-			fmt.Sprintf("tcp://smoke-minimal.%s.svc.cluster.local", nsName)))
+			fmt.Sprintf("grpc://smoke-minimal.%s.svc.cluster.local", nsName)))
 		Expect(cfg.KVConnectorExtraConfig.Port).To(Equal("5555"))
 
 		By("diffing the raw kv-transfer-config.json against the golden snapshot")

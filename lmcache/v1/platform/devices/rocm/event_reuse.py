@@ -24,7 +24,7 @@ from __future__ import annotations
 
 # Standard
 from collections import OrderedDict, deque
-from typing import Any, Callable
+from typing import Any
 import threading
 import weakref
 
@@ -116,39 +116,20 @@ class PeerEventIPCBackend:
     def __init__(self, backend: Any) -> None:
         self._backend = backend
         self._lock = threading.Lock()
-        self._imports: OrderedDict[tuple[str, bytes, str], object] = OrderedDict()
+        self._imports: OrderedDict[tuple[bytes, str], object] = OrderedDict()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._backend, name)
 
     def import_event(self, handle: bytes, device: object) -> object:
         """Return the event behind ``handle``, importing it on first use."""
-        return self._import("wait", self._backend.import_event, handle, device)
-
-    def import_event_for_query(self, handle: bytes, device: object) -> object:
-        """Like :meth:`import_event`, for an event that is only queried.
-
-        Uses the backend's ``import_event_for_query`` when it has one.
-        """
-        opener = getattr(self._backend, "import_event_for_query", None)
-        if opener is None:
-            return self.import_event(handle, device)
-        return self._import("query", opener, handle, device)
-
-    def _import(
-        self,
-        kind: str,
-        opener: Callable[[bytes, object], object],
-        handle: bytes,
-        device: object,
-    ) -> object:
-        key = (kind, bytes(handle), str(device))
+        key = (bytes(handle), str(device))
         with self._lock:
             event = self._imports.get(key)
             if event is not None:
                 self._imports.move_to_end(key)
                 return event
-        event = opener(handle, device)
+        event = self._backend.import_event(handle, device)
         with self._lock:
             self._imports[key] = event
             while len(self._imports) > IMPORTED_EVENT_CACHE_SIZE:
