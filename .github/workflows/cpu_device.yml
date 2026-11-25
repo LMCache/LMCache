@@ -60,10 +60,9 @@ jobs:
       os: ${{ steps.os.outputs.os }}
       extra_legs: ${{ steps.os.outputs.extra_legs }}
     steps:
-      # One representative leg for ZMQ and for each explicit gRPC server mode
-      # covers the CPU request path without duplicating every OS/model
-      # combination. They run on Ubuntu, so they are added only when Ubuntu
-      # is selected.
+      # One representative leg for each explicit gRPC server mode covers the
+      # CPU request path without duplicating every OS/model combination. They
+      # run on Ubuntu, so they are added only when Ubuntu is selected.
       - name: Select runner OSes
         id: os
         env:
@@ -76,7 +75,7 @@ jobs:
             "trust_remote_code": "0", "mla_disable": "0", "run_engine_driven_e2e": true}'
           extra_legs=$(jq -nc --argjson os "$os" --argjson model "$opt_125m" '
             if ($os | index("ubuntu-22.04")) then
-              ["zmq", "grpc-aio", "grpc-native"]
+              ["grpc-aio", "grpc-native"]
               | map({os: "ubuntu-22.04", request_transport: ., model: $model})
             else [] end')
           {
@@ -162,8 +161,8 @@ jobs:
             trust_remote_code: "1"
             mla_disable: "0"
             run_engine_driven_e2e: true
-        # One representative leg each for the ZMQ transport and the explicit
-        # gRPC server modes, built in the changes job from the selected OSes.
+        # One representative leg for each explicit gRPC server mode, built in
+        # the changes job from the selected OSes.
         include: ${{ fromJSON(needs.changes.outputs.extra_legs) }}
 
     env:

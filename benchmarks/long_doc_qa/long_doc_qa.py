@@ -748,7 +748,7 @@ def create_argument_parser():
         default=0.0,
         help=(
             "Exclude the smallest and largest fraction of successful samples "
-            "before averaging. Example: 0.1 drops bottom 10% and top 10%."
+            "before averaging. Example: 0.1 drops bottom 10%% and top 10%%."
         ),
     )
 
