@@ -10,22 +10,27 @@ Covers:
 """
 
 # Standard
+from unittest.mock import MagicMock
 import json
 
 # Third Party
 import pytest
 
 # First Party
+from lmcache.v1.common.group_view import CacheCategory, PartContentDesc
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.config import (
     add_l2_adapters_args,
     parse_args_to_l2_adapters_config,
 )
 from lmcache.v1.distributed.serde import (
     AsyncSerdeProcessor,
+    PartContentResolver,
     SerdeConfig,
     SerdeProcessor,
     create_serde_processor,
     get_registered_serde_types,
+    register_content_aware_serde_factory,
     register_serde_factory,
 )
 
@@ -125,6 +130,47 @@ def test_register_serde_factory_duplicate_raises() -> None:
 
     with pytest.raises(ValueError, match="already registered"):
         register_serde_factory("fp8", _factory)
+
+
+def test_content_aware_serde_factory_receives_the_resolver() -> None:
+    """A content-aware factory gets the resolver passed to
+    create_serde_processor, or one that knows nothing without it."""
+    seen: list[PartContentResolver] = []
+
+    def _factory(
+        kwargs: dict[str, object], resolver: PartContentResolver
+    ) -> SerdeProcessor:
+        seen.append(resolver)
+        return MagicMock(spec=SerdeProcessor)
+
+    content = PartContentDesc(CacheCategory.RECURRENT)
+
+    def _resolver(key: ObjectKey, part: int) -> PartContentDesc | None:
+        return content
+
+    # Use a unique name to avoid collisions if the test runs twice.
+    register_content_aware_serde_factory("test-content-aware-serde-xyz", _factory)
+    assert "test-content-aware-serde-xyz" in get_registered_serde_types()
+    config = SerdeConfig(type="test-content-aware-serde-xyz")
+    key = ObjectKey(b"chunk", "model", 0)
+
+    create_serde_processor(config, _resolver)
+    create_serde_processor(config)
+
+    assert seen[0](key, 0) == content
+    assert seen[1](key, 0) is None
+
+
+def test_serde_factory_names_are_shared_across_kinds() -> None:
+    """A content-aware serde cannot take a plain serde's name."""
+
+    def _factory(
+        kwargs: dict[str, object], resolver: PartContentResolver
+    ) -> SerdeProcessor:  # pragma: no cover - not called
+        raise NotImplementedError
+
+    with pytest.raises(ValueError, match="already registered"):
+        register_content_aware_serde_factory("fp8", _factory)
 
 
 # =============================================================================

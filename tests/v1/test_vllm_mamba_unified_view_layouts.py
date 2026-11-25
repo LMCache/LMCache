@@ -3,7 +3,9 @@
 
 # Standard
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import cast
+import math
 
 # Third Party
 import pytest
@@ -12,6 +14,7 @@ import torch
 pytest.importorskip("vllm", reason="kv_cache_group_edits imports vLLM at module top")
 
 # Third Party
+from vllm.model_executor.layers.mamba.abstract import MambaBase  # noqa: E402
 from vllm.v1 import kv_cache_interface  # noqa: E402
 from vllm.v1.kv_cache_interface import (  # noqa: E402
     KVCacheConfig,
@@ -22,7 +25,18 @@ from vllm.v1.kv_cache_interface import (  # noqa: E402
 from lmcache.integration.vllm.kv_cache_group_edits import (  # noqa: E402
     apply_kv_cache_group_edits,
 )
-from lmcache.v1.common.utils import LayoutHints  # noqa: E402
+from lmcache.integration.vllm.kv_cache_groups import (  # noqa: E402
+    create_engine_group_infos_from_vllm,
+)
+from lmcache.v1.client.transfer_context.base import (  # noqa: E402
+    gather_paged_kv_to_cpu,
+)
+from lmcache.v1.common.custom_types import EngineType  # noqa: E402
+from lmcache.v1.common.kv_layer_groups import KVLayerGroupsManager  # noqa: E402
+from lmcache.v1.common.utils import (  # noqa: E402
+    LayoutHints,
+    normalize_and_discover_per_layer_formats,
+)
 
 NUM_BLOCKS = 3
 BLOCK_SIZE = 16
@@ -34,7 +48,9 @@ BLOCK_STEP = 8064
 HEAD_SIZE = 504
 
 
-def _mamba_config(spec: MambaSpec) -> KVCacheConfig:
+def _mamba_config(
+    spec: MambaSpec, layer_names: tuple[str, ...] = ("layer.0",)
+) -> KVCacheConfig:
     """Build an align-mode Mamba group using either vLLM cache-group API."""
     if hasattr(kv_cache_interface, "KVCacheGroup"):
         # Third Party
@@ -47,13 +63,13 @@ def _mamba_config(spec: MambaSpec) -> KVCacheConfig:
         else:
             params = MambaManager.Params(enable_prefix_caching=True)
         group = kv_cache_interface.KVCacheGroup(
-            kv_cache_specs={"layer.0": spec},
+            kv_cache_specs=dict.fromkeys(layer_names, spec),
             manager_config=kv_cache_interface.ManagerConfig(MambaManager, params),
             block_size=spec.block_size,
         )
     else:
         group = kv_cache_interface.KVCacheGroupSpec(
-            ["layer.0"], replace(spec, mamba_cache_mode="align")
+            list(layer_names), replace(spec, mamba_cache_mode="align")
         )
     return KVCacheConfig(
         num_blocks=NUM_BLOCKS, kv_cache_tensors=[], kv_cache_groups=[group]
@@ -170,3 +186,81 @@ def test_mamba_unified_view_rejects_row_without_aligned_tiling() -> None:
     layout_hints = cast(LayoutHints, {"kv_layout": "NHD"})
     with pytest.raises(ValueError, match="cannot tile"):
         apply_kv_cache_group_edits(config, kv_caches, layout_hints)
+
+
+@pytest.mark.parametrize("state_alignment", [1, 16])
+def test_published_state_components_address_each_layer_in_the_chunk(
+    state_alignment: int,
+) -> None:
+    """Slicing a gathered chunk with the published content yields exactly the
+    states vLLM bound to each layer's page in each block, including when an
+    unaligned first state pushes the next one to an aligned offset."""
+    # A 600-byte bf16 conv state is not 16-byte aligned; the ssm state follows.
+    shapes = ((3, 100), (4, 16, 16))
+    dtypes = (torch.bfloat16, torch.float32)
+    row = sum(
+        -(-math.prod(shape) * dtype.itemsize // state_alignment) * state_alignment
+        for shape, dtype in zip(shapes, dtypes, strict=False)
+    )
+    page = -(-(row + 512) // 64) * 64
+    spec = MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=shapes,
+        dtypes=dtypes,
+        state_alignment=state_alignment,
+        page_size_padded=page,
+    )
+    names = ("layer.0", "layer.1")
+    # vLLM registers each layer as an int8 [num_blocks, 1, 1, row] page view.
+    storage = torch.zeros(len(names) * NUM_BLOCKS * page, dtype=torch.int8)
+    kv_caches = {
+        name: storage.as_strided(
+            (NUM_BLOCKS, 1, 1, row),
+            (page, row, row, 1),
+            storage_offset=i * NUM_BLOCKS * page,
+        )
+        for i, name in enumerate(names)
+    }
+    states = {}
+    for name in names:
+        layer = SimpleNamespace(
+            get_state_shape=lambda: shapes,
+            get_state_dtype=lambda: dtypes,
+            state_alignment=state_alignment,
+        )
+        MambaBase.bind_kv_cache(layer, kv_caches[name])
+        for state in layer.kv_cache:
+            state.copy_(torch.randn(state.shape).to(state.dtype))
+        states[name] = layer.kv_cache
+    config = _mamba_config(spec, names)
+    layout_hints = cast(LayoutHints, {"kv_layout": "NHD"})
+    edited = apply_kv_cache_group_edits(config, kv_caches, layout_hints)
+
+    infos = create_engine_group_infos_from_vllm(config, edited, layout_hints)
+    normalized, formats = normalize_and_discover_per_layer_formats(
+        list(edited.values()),
+        [info.layer_indices for info in infos],
+        EngineType.VLLM,
+        layout_hints,
+    )
+    (kernel_group,) = KVLayerGroupsManager(
+        normalized, formats, infos, lmcache_tokens_per_chunk=2 * BLOCK_SIZE
+    ).kernel_groups
+    content = kernel_group.content_desc()
+    # Two blocks in one chunk, as a window wider than one block stores them.
+    blocks = [2, 0]
+    (chunk,) = gather_paged_kv_to_cpu(edited, blocks, 2, layout_hints=layout_hints)
+
+    assert len(content.state_components) == len(shapes)
+    for layer_idx, name in enumerate(names):
+        layer_bytes = chunk[layer_idx].reshape(-1)
+        for slot, block in enumerate(blocks):
+            page_start = slot * content.page_bytes
+            for component, state in zip(
+                content.state_components, states[name], strict=True
+            ):
+                start = page_start + component.byte_offset
+                data = layer_bytes[start : start + component.byte_length]
+                dtype = getattr(torch, component.dtype_str)
+                got = data.view(dtype).view(component.shape)
+                assert torch.equal(got, state[block])

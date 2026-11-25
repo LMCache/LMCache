@@ -7,13 +7,18 @@ from __future__ import annotations
 # Standard
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
+import math
 
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.common.utils import LayoutHints
 
 # First Party
-from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.group_view import (
+    CacheCategory,
+    EngineGroupInfo,
+    StateComponentDesc,
+)
 from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
@@ -470,6 +475,110 @@ def _resolve_per_layer_tp_replicated(
     return per_layer_tp_replicated
 
 
+# A layer's ``(cache_category, state_components)``.
+_LayerContent = tuple[CacheCategory, tuple[StateComponentDesc, ...]]
+
+
+def _cache_spec_category(spec: Any) -> CacheCategory:
+    """Classify a layer's KV cache spec.
+
+    Mamba specs (including GDN and linear attention) are ``RECURRENT``. Specs
+    recognized as neither Mamba nor attention are ``UNKNOWN`` so that no
+    consumer treats their pages as attention K/V.
+    """
+    if _is_mamba_spec(spec):
+        return CacheCategory.RECURRENT
+    if _is_attention_spec(spec):
+        return CacheCategory.ATTENTION
+    return CacheCategory.UNKNOWN
+
+
+def _state_components(spec: Any, kv_cache: Any) -> tuple[StateComponentDesc, ...]:
+    """Return the real layout of a Mamba layer's page, or ``()`` if unknown.
+
+    vLLM packs a layer's states back to back, each padded to
+    ``spec.state_alignment`` bytes (``MambaBase.bind_kv_cache``). Offsets are
+    relative to the start of the layer's page, which is only meaningful for
+    the unified-state view (the rank-4 view built by ``_MambaUnifiedViewEdit``):
+    it keeps each layer's page contiguous in a chunk. The other Mamba views
+    split a page into planes and get ``()``, as do specs that declare no
+    states.
+
+    Args:
+        spec: The layer's vLLM ``MambaSpec``.
+        kv_cache: The layer's KV cache after ``apply_kv_cache_group_edits``.
+
+    Returns:
+        One ``StateComponentDesc`` per state, in vLLM's order, or ``()``.
+    """
+    shapes = getattr(spec, "shapes", None)
+    dtypes = getattr(spec, "dtypes", None)
+    if not shapes or dtypes is None:
+        return ()
+    if getattr(kv_cache, "ndim", None) != 4:
+        return ()
+    alignment = getattr(spec, "state_alignment", 1)
+    components: list[StateComponentDesc] = []
+    offset = 0
+    for shape, dtype in zip(shapes, dtypes, strict=True):
+        nbytes = math.prod(shape) * dtype.itemsize
+        components.append(
+            StateComponentDesc(
+                byte_offset=offset,
+                byte_length=nbytes,
+                dtype_str=str(dtype).removeprefix("torch."),
+                shape=tuple(shape),
+            )
+        )
+        offset += -(-nbytes // alignment) * alignment
+    page_bytes = math.prod(kv_cache.shape[1:]) * kv_cache.element_size()
+    last = components[-1]
+    if last.byte_offset + last.byte_length > page_bytes:
+        return ()
+    return tuple(components)
+
+
+def _resolve_per_layer_content(
+    vllm_groups: Sequence[Any],
+    layer_to_idx: Mapping[str, int],
+    kv_caches: Sequence[Any],
+) -> list[_LayerContent]:
+    """Resolve each registered KV tensor's ``(cache_category, state_components)``.
+
+    Args:
+        vllm_groups: vLLM KV cache groups.
+        layer_to_idx: Layer name to registered tensor index mapping.
+        kv_caches: Registered KV caches after ``apply_kv_cache_group_edits``,
+            in registration order.
+
+    Returns:
+        One entry per registered tensor; ``(UNKNOWN, ())`` for layers no group
+        references.
+    """
+    content: list[_LayerContent] = [(CacheCategory.UNKNOWN, ())] * len(kv_caches)
+    for group in vllm_groups:
+        for name, layer_spec in group_layer_specs(group).items():
+            idx = layer_to_idx[name]
+            category = _cache_spec_category(layer_spec)
+            components = (
+                _state_components(layer_spec, kv_caches[idx])
+                if category is CacheCategory.RECURRENT
+                else ()
+            )
+            content[idx] = (category, components)
+    return content
+
+
+def _merge_layer_content(
+    per_layer_content: list[_LayerContent],
+    indices: list[int],
+) -> _LayerContent:
+    """Return the content shared by one LMCache group's layers, or
+    ``(UNKNOWN, ())`` if they disagree."""
+    merged = {per_layer_content[idx] for idx in indices}
+    return merged.pop() if len(merged) == 1 else (CacheCategory.UNKNOWN, ())
+
+
 def _merge_layer_recurrent(per_layer_recurrent: list[bool], indices: list[int]) -> bool:
     """Merge the per-layer recurrent-state flags of one LMCache group.
 
@@ -617,6 +726,7 @@ def create_engine_group_infos_from_vllm(
     per_layer_sw_size = [-1] * num_layers
     per_layer_recurrent = [False] * num_layers
     per_layer_tp_replicated = [False] * num_layers
+    per_layer_content: list[_LayerContent] = [(CacheCategory.UNKNOWN, ())] * num_layers
     if vllm_groups:
         per_layer_group_idx = [EXCLUDED_ENGINE_GROUP] * num_layers
         for engine_group_id, group in enumerate(vllm_groups):
@@ -639,6 +749,9 @@ def create_engine_group_infos_from_vllm(
         )
         per_layer_tp_replicated = _resolve_per_layer_tp_replicated(
             vllm_groups, layer_to_idx, num_layers
+        )
+        per_layer_content = _resolve_per_layer_content(
+            vllm_groups, layer_to_idx, per_layer_discoverable_kv_caches
         )
 
     # Aux pools form synthetic engine groups after the vLLM groups (an
@@ -680,6 +793,9 @@ def create_engine_group_infos_from_vllm(
         # A group's object is stored once per TP group only if every layer in
         # it is replicated: one sharded layer makes the object differ per rank.
         replicated = all(per_layer_tp_replicated[idx] for idx in indices)
+        cache_category, state_components = _merge_layer_content(
+            per_layer_content, indices
+        )
         infos.append(
             EngineGroupInfo(
                 engine_group_id=identity.engine_group_idx,
@@ -692,6 +808,8 @@ def create_engine_group_infos_from_vllm(
                 # --separate-object-groups, after the regular groups.
                 extra_object_group_tag=aux_group_tags.get(identity.engine_group_idx, 0),
                 recurrent_state=_merge_layer_recurrent(per_layer_recurrent, indices),
+                cache_category=cache_category,
+                state_components=state_components,
                 tp_replicas=kv_tp_size if replicated else 1,
                 # DCP splits a replicated group's tokens across its replicas.
                 dcp_shards=dcp_size if replicated else 1,

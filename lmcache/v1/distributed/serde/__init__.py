@@ -7,6 +7,7 @@ from lmcache.v1.distributed.serde.aesgcm import (
 from lmcache.v1.distributed.serde.async_processor import AsyncSerdeProcessor
 from lmcache.v1.distributed.serde.base import (
     Deserializer,
+    PartContentResolver,
     SerdeConfig,
     SerdeProcessor,
     SerdeTaskId,
@@ -15,6 +16,7 @@ from lmcache.v1.distributed.serde.base import (
 from lmcache.v1.distributed.serde.factory import (
     create_serde_processor,
     get_registered_serde_types,
+    register_content_aware_serde_factory,
     register_serde_factory,
 )
 from lmcache.v1.distributed.serde.fp8 import (
@@ -57,6 +59,7 @@ __all__ = [
     "MemoryObjGroup",
     "MultiDeserializer",
     "MultiSerializer",
+    "PartContentResolver",
     "SerdeConfig",
     "SerdeProcessor",
     "SerdeTaskId",
@@ -64,6 +67,7 @@ __all__ = [
     "create_serde_processor",
     "get_registered_serde_types",
     "make_temp_key",
+    "register_content_aware_serde_factory",
     "register_serde_factory",
     "serialized_layout_desc",
     "TurboQuantDeserializer",

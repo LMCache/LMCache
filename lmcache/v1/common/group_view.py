@@ -18,9 +18,66 @@ corresponding ``lmcache.integration.<engine>`` package, not here.
 # Standard
 from collections.abc import Mapping, Sequence
 from typing import cast
+import enum
 
 # Third Party
 import msgspec
+
+
+class CacheCategory(str, enum.Enum):
+    """Engine spec type of a KV cache group.
+
+    ``UNKNOWN`` is the empty string, the proto3 zero value, so a peer that
+    predates the field decodes to it over both msgspec and gRPC. Consumers
+    must not treat ``UNKNOWN`` as attention.
+    """
+
+    UNKNOWN = ""
+    ATTENTION = "attention"
+    RECURRENT = "recurrent"
+
+
+class StateComponentDesc(msgspec.Struct, frozen=True):
+    """Where one recurrent state (e.g. Mamba ``conv`` or ``ssm``) sits in a page.
+
+    A recurrent-state group is transferred through a synthetic attention-shaped view
+    whose dtype and dims are addressing metadata only. This records the real
+    dtype and shape of one state so a consumer can read its bytes directly.
+    """
+
+    byte_offset: int
+    """Offset from the start of the page of one layer in one block, in bytes;
+    the same for every layer and block. In a chunk tensor each layer holds its
+    blocks' pages back to back, ``PartContentDesc.page_bytes`` apart."""
+
+    byte_length: int
+    """Bytes of real data, excluding alignment padding."""
+
+    dtype_str: str
+    """Torch dtype name without the ``torch.`` prefix (e.g. ``"float32"``),
+    matching ``GroupLayout.dtype_str``."""
+
+    shape: tuple[int, ...]
+    """Per-block shape of the state."""
+
+
+class PartContentDesc(msgspec.Struct, frozen=True):
+    """What one kernel group's tensor in a chunk holds.
+
+    Sent with ``GroupLayout`` at registration so the server knows a group's
+    content even when its transfer view looks like attention K/V.
+    """
+
+    cache_category: CacheCategory = CacheCategory.UNKNOWN
+    """Engine spec type of the group."""
+
+    state_components: tuple[StateComponentDesc, ...] = ()
+    """The page's states in order, for a recurrent group whose layout is known;
+    empty otherwise."""
+
+    page_bytes: int = 0
+    """Bytes of one layer's page for one block in the chunk tensor, set when
+    ``state_components`` is non-empty."""
 
 
 class EngineGroupInfo(msgspec.Struct, frozen=True):
@@ -77,6 +134,16 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     """Token shards the ``tp_replicas`` consecutive kv ranks are split into
     (decode context parallelism): rank ``w`` holds shard ``w % dcp_shards``,
     shared by ``tp_replicas // dcp_shards`` ranks. ``1`` without DCP.
+    Defaulted field: wire-compatible."""
+
+    cache_category: CacheCategory = CacheCategory.UNKNOWN
+    """Engine spec type of this group. Unlike ``recurrent_state``, which drives
+    restore semantics and is set only for Mamba groups in a cacheable mode,
+    this reports the spec type alone. Defaulted field: wire-compatible."""
+
+    state_components: tuple[StateComponentDesc, ...] = ()
+    """Real layout of a recurrent group's page, in state order; empty when
+    the layout is not known (see ``PartContentDesc.state_components``).
     Defaulted field: wire-compatible."""
 
 

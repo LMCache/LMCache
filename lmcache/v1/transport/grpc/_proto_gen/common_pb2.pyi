@@ -6,7 +6,7 @@ from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
 from collections.abc import Iterable as _Iterable, Mapping as _Mapping
-from typing import ClassVar as _ClassVar, Optional as _Optional
+from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -86,7 +86,7 @@ class DeviceIpcWrapper(_message.Message):
     def __init__(self, descriptor_payload: _Optional[bytes] = ...) -> None: ...
 
 class EngineGroupInfo(_message.Message):
-    __slots__ = ("engine_group_id", "layer_indices", "tokens_per_block", "sw_size_tokens", "extra_object_group_tag", "recurrent_state", "tp_replicas", "dcp_shards")
+    __slots__ = ("engine_group_id", "layer_indices", "tokens_per_block", "sw_size_tokens", "extra_object_group_tag", "recurrent_state", "tp_replicas", "dcp_shards", "cache_category", "state_components")
     ENGINE_GROUP_ID_FIELD_NUMBER: _ClassVar[int]
     LAYER_INDICES_FIELD_NUMBER: _ClassVar[int]
     TOKENS_PER_BLOCK_FIELD_NUMBER: _ClassVar[int]
@@ -95,6 +95,8 @@ class EngineGroupInfo(_message.Message):
     RECURRENT_STATE_FIELD_NUMBER: _ClassVar[int]
     TP_REPLICAS_FIELD_NUMBER: _ClassVar[int]
     DCP_SHARDS_FIELD_NUMBER: _ClassVar[int]
+    CACHE_CATEGORY_FIELD_NUMBER: _ClassVar[int]
+    STATE_COMPONENTS_FIELD_NUMBER: _ClassVar[int]
     engine_group_id: int
     layer_indices: _containers.RepeatedScalarFieldContainer[int]
     tokens_per_block: int
@@ -103,4 +105,28 @@ class EngineGroupInfo(_message.Message):
     recurrent_state: bool
     tp_replicas: int
     dcp_shards: int
-    def __init__(self, engine_group_id: _Optional[int] = ..., layer_indices: _Optional[_Iterable[int]] = ..., tokens_per_block: _Optional[int] = ..., sw_size_tokens: _Optional[int] = ..., extra_object_group_tag: _Optional[int] = ..., recurrent_state: bool = ..., tp_replicas: _Optional[int] = ..., dcp_shards: _Optional[int] = ...) -> None: ...
+    cache_category: str
+    state_components: _containers.RepeatedCompositeFieldContainer[StateComponentDesc]
+    def __init__(self, engine_group_id: _Optional[int] = ..., layer_indices: _Optional[_Iterable[int]] = ..., tokens_per_block: _Optional[int] = ..., sw_size_tokens: _Optional[int] = ..., extra_object_group_tag: _Optional[int] = ..., recurrent_state: bool = ..., tp_replicas: _Optional[int] = ..., dcp_shards: _Optional[int] = ..., cache_category: _Optional[str] = ..., state_components: _Optional[_Iterable[_Union[StateComponentDesc, _Mapping]]] = ...) -> None: ...
+
+class StateComponentDesc(_message.Message):
+    __slots__ = ("byte_offset", "byte_length", "dtype_str", "shape")
+    BYTE_OFFSET_FIELD_NUMBER: _ClassVar[int]
+    BYTE_LENGTH_FIELD_NUMBER: _ClassVar[int]
+    DTYPE_STR_FIELD_NUMBER: _ClassVar[int]
+    SHAPE_FIELD_NUMBER: _ClassVar[int]
+    byte_offset: int
+    byte_length: int
+    dtype_str: str
+    shape: _containers.RepeatedScalarFieldContainer[int]
+    def __init__(self, byte_offset: _Optional[int] = ..., byte_length: _Optional[int] = ..., dtype_str: _Optional[str] = ..., shape: _Optional[_Iterable[int]] = ...) -> None: ...
+
+class PartContentDesc(_message.Message):
+    __slots__ = ("cache_category", "state_components", "page_bytes")
+    CACHE_CATEGORY_FIELD_NUMBER: _ClassVar[int]
+    STATE_COMPONENTS_FIELD_NUMBER: _ClassVar[int]
+    PAGE_BYTES_FIELD_NUMBER: _ClassVar[int]
+    cache_category: str
+    state_components: _containers.RepeatedCompositeFieldContainer[StateComponentDesc]
+    page_bytes: int
+    def __init__(self, cache_category: _Optional[str] = ..., state_components: _Optional[_Iterable[_Union[StateComponentDesc, _Mapping]]] = ..., page_bytes: _Optional[int] = ...) -> None: ...

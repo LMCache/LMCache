@@ -7,7 +7,11 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.group_view import (
+    CacheCategory,
+    EngineGroupInfo,
+    StateComponentDesc,
+)
 from lmcache.v1.common.kv_layer_groups import (
     KernelGroupIdentity,
     KernelGroupInfo,
@@ -165,6 +169,49 @@ class TestKVLayerGroupsManager:
         }
         assert groups_by_engine_group_idx[0].layer_indices == [0, 2]
         assert groups_by_engine_group_idx[1].layer_indices == [1, 3]
+
+    def test_content_desc_carries_category_and_state_components(self) -> None:
+        """Each kernel group reports its engine spec type and, for a Mamba
+        group, the real layout of its states."""
+        components = (
+            StateComponentDesc(0, 16, "float16", (2, 4)),
+            StateComponentDesc(16, 32, "float32", (2, 4)),
+        )
+        tensors = [
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(2)
+        ]
+        manager = _build_manager(
+            tensors,
+            engine_group_infos=[
+                EngineGroupInfo(
+                    0,
+                    (0,),
+                    tokens_per_block=256,
+                    cache_category=CacheCategory.ATTENTION,
+                ),
+                EngineGroupInfo(
+                    1,
+                    (1,),
+                    tokens_per_block=256,
+                    cache_category=CacheCategory.RECURRENT,
+                    state_components=components,
+                ),
+            ],
+        )
+
+        attention, mamba = (g.content_desc() for g in manager.kernel_groups)
+        assert attention.cache_category is CacheCategory.ATTENTION
+        assert (attention.state_components, attention.page_bytes) == ((), 0)
+        assert mamba.cache_category is CacheCategory.RECURRENT
+        assert mamba.state_components == components
+        # One layer's page per block: block_size * num_heads * head_size * fp16.
+        assert mamba.page_bytes == 256 * 8 * 64 * 2
+
+    def test_content_desc_is_unknown_without_engine_group_infos(self) -> None:
+        manager = _build_manager([torch.randn(2, 32, 256, 8, 64, dtype=torch.float16)])
+
+        content = manager.kernel_groups[0].content_desc()
+        assert content.cache_category is CacheCategory.UNKNOWN
 
     def test_build_rejects_bad_engine_group_infos(self):
         tensors = [

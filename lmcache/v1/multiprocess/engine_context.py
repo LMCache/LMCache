@@ -2,14 +2,15 @@
 """Shared context and layout descriptor registry for engine modules."""
 
 # Standard
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 from typing import TypedDict
 import threading
 
 # First Party
 from lmcache.v1.common.attn_window import DEFAULT_ATTN_WINDOW_DESC, AttnWindowDesc
 from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.group_view import PartContentDesc
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
@@ -54,6 +55,11 @@ class _LayoutDescEntry:
     shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC
     """How each object group is spread over the kv ranks; the default stores
     every group per rank."""
+    group_content_descs: dict[int, tuple[PartContentDesc | None, ...]] = field(
+        default_factory=dict
+    )
+    """What each part of each object group holds, by object_group_id; a group
+    whose registrations disagreed maps to ``()``."""
 
 
 def check_chunk_hash_key(ctx: "MPCacheServerContext", key: IPCCacheServerKey) -> None:
@@ -121,6 +127,31 @@ def finish_lookup_read(
         )
 
 
+def _merge_group_content_descs(
+    registered: Mapping[int, tuple[PartContentDesc | None, ...]],
+    incoming: Mapping[int, tuple[PartContentDesc | None, ...]],
+) -> dict[int, tuple[PartContentDesc | None, ...]]:
+    """Merge a re-registration's group contents into the registered ones.
+
+    Registrations sharing an entry describe the same objects, so a group they
+    disagree on is unreliable: it becomes ``()`` (every part unknown) instead
+    of taking either side, and stays so while the entry lives.
+
+    Args:
+        registered: Group contents already in the entry.
+        incoming: Group contents of the new registration.
+
+    Returns:
+        The merged group contents.
+    """
+    return {
+        gid: registered.get(gid, ())
+        if registered.get(gid, ()) == incoming.get(gid, ())
+        else ()
+        for gid in registered.keys() | incoming.keys()
+    }
+
+
 class LayoutDescRegistry:
     """Registry of layouts and hashing metadata keyed by model and world size.
 
@@ -147,11 +178,14 @@ class LayoutDescRegistry:
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
         group_unfull_chunk_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
         shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
+        group_content_descs: Mapping[int, tuple[PartContentDesc | None, ...]]
+        | None = None,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
         Re-registering the same pair increments the active registration
-        count. The latest descriptor is retained for lookups.
+        count. The latest descriptor is retained for lookups, except group
+        contents: a group on which registrations disagree becomes unknown.
 
         Args:
             model_name: The model name.
@@ -171,6 +205,9 @@ class LayoutDescRegistry:
             shard_replication_desc: How each object group is spread over the kv ranks.
                 Empty (the default) stores every group per rank; otherwise it
                 describes every object group of ``attn_desc``.
+            group_content_descs: Maps object_group_id to what each of that
+                group's parts holds, in part order; an entry is ``None`` when
+                the worker did not report it. ``None`` reports nothing.
 
         Raises:
             ValueError: If the chunk size or hash algorithm conflicts with an
@@ -192,6 +229,8 @@ class LayoutDescRegistry:
             group_layout_descs = {
                 gid: layout_desc for gid in range(attn_desc.num_object_groups)
             }
+        if group_content_descs is None:
+            group_content_descs = {}
         with self._lock:
             entry = self._registry.get(key)
             if entry is None:
@@ -206,6 +245,7 @@ class LayoutDescRegistry:
                     group_layout_descs=group_layout_descs,
                     group_unfull_chunk_layout_descs=group_unfull_chunk_layout_descs,
                     shard_replication_desc=shard_replication_desc,
+                    group_content_descs=dict(group_content_descs),
                 )
                 return
 
@@ -226,6 +266,9 @@ class LayoutDescRegistry:
             entry.group_layout_descs = group_layout_descs
             entry.group_unfull_chunk_layout_descs = group_unfull_chunk_layout_descs
             entry.shard_replication_desc = shard_replication_desc
+            entry.group_content_descs = _merge_group_content_descs(
+                entry.group_content_descs, group_content_descs
+            )
             entry.ref_count += 1
 
     def unregister(self, model_name: str, world_size: int) -> None:
@@ -265,6 +308,33 @@ class LayoutDescRegistry:
             if entry is None:
                 return None
             return entry.layout_desc
+
+    def find_part_content(
+        self, model_name: str, object_group_id: int, part: int
+    ) -> PartContentDesc | None:
+        """Look up what one part of an object group's objects holds.
+
+        Object keys carry no world size, so every registration of
+        ``model_name`` is consulted; they must agree, since registrations with
+        different world sizes may shard state differently.
+
+        Args:
+            model_name: Registered model name.
+            object_group_id: Object group of the objects.
+            part: Index of the part (tensor) within each object.
+
+        Returns:
+            The part's content descriptor, or ``None`` when the model is not
+            registered, the part is unknown, or registrations disagree.
+        """
+        found: set[PartContentDesc | None] = set()
+        with self._lock:
+            for (name, _), entry in self._registry.items():
+                if name != model_name:
+                    continue
+                parts = entry.group_content_descs.get(object_group_id, ())
+                found.add(parts[part] if part < len(parts) else None)
+        return found.pop() if len(found) == 1 else None
 
     def get_chunk_size(self, model_name: str, world_size: int) -> int:
         """Return the effective chunk size registered for a model and world size.
@@ -441,7 +511,11 @@ class MPCacheServerContext:
         self.shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info(
             storage_manager_config
         )
-        self._storage_manager = StorageManager(storage_manager_config)
+        self._layout_desc_registry = LayoutDescRegistry()
+        self._storage_manager = StorageManager(
+            storage_manager_config,
+            part_content_resolver=self._resolve_part_content,
+        )
         self._token_hasher = TokenHasher(
             chunk_size=chunk_size, hash_algorithm=hash_algorithm
         )
@@ -449,7 +523,6 @@ class MPCacheServerContext:
             self._token_hasher, ttl=session_ttl_seconds
         )
         self._event_bus = get_event_bus()
-        self._layout_desc_registry = LayoutDescRegistry()
 
     def close(self) -> None:
         """
@@ -762,6 +835,15 @@ class MPCacheServerContext:
             self._token_hasher, ttl=self._session_ttl_seconds
         )
         self._session_manager.destroy_listeners.extend(destroy_listeners)
+
+    def _resolve_part_content(
+        self, key: ObjectKey, part: int
+    ) -> PartContentDesc | None:
+        """Return what part ``part`` of the objects under ``key`` holds, per
+        the KV cache registrations, or ``None`` when unknown."""
+        return self._layout_desc_registry.find_part_content(
+            key.model_name, key.object_group_id, part
+        )
 
 
 def _round_up_to_multiple(value: int, multiple: int) -> int:

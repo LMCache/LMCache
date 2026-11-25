@@ -507,6 +507,10 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 self._ctx.hash_algorithm_name,
                 attn_desc=attn_desc,
                 group_layout_descs=dict(enumerate(group_layouts)),
+                # Each group is its own object group with a single part.
+                group_content_descs={
+                    gid: (gl.content,) for gid, gl in enumerate(payload.group_layouts)
+                },
             )
         else:
             self._ctx.layout_desc_registry.register(

@@ -37,7 +37,13 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import MockL2AdapterConfig
-from lmcache.v1.distributed.serde import SerdeConfig
+from lmcache.v1.distributed.serde import (
+    PartContentResolver,
+    SerdeConfig,
+    SerdeProcessor,
+    create_serde_processor,
+    register_content_aware_serde_factory,
+)
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.platform import current_device_spec
 
@@ -226,6 +232,32 @@ def clear_and_wait_drained(sm: StorageManager, timeout: float = 10.0) -> None:
 # =============================================================================
 # Tests: Full round-trip through serde
 # =============================================================================
+
+
+def test_storage_manager_hands_its_resolver_to_content_aware_serdes() -> None:
+    """An L2 adapter built by the storage manager gets the manager's part
+    content resolver in its content-aware serde."""
+    seen: list[PartContentResolver] = []
+
+    def _factory(
+        kwargs: dict[str, object], resolver: PartContentResolver
+    ) -> SerdeProcessor:
+        seen.append(resolver)
+        return create_serde_processor(SerdeConfig(type="fp8", kwargs=kwargs))
+
+    def _resolver(key: ObjectKey, part: int) -> None:
+        return None
+
+    # Use a unique name to avoid collisions if the test runs twice.
+    register_content_aware_serde_factory("test-e2e-content-aware-xyz", _factory)
+    cfg = make_storage_manager_config(
+        [make_mock_adapter_config(serde_type="test-e2e-content-aware-xyz")]
+    )
+    sm = StorageManager(cfg, part_content_resolver=_resolver)
+    try:
+        assert seen == [_resolver]
+    finally:
+        sm.close()
 
 
 class TestSerdeRoundTrip:

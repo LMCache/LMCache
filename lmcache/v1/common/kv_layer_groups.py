@@ -13,7 +13,12 @@ import torch
 
 # First Party
 from lmcache.v1.common.attn_window import AttnWindowDesc, GroupKind
-from lmcache.v1.common.group_view import EXCLUDED_ENGINE_GROUP
+from lmcache.v1.common.group_view import (
+    EXCLUDED_ENGINE_GROUP,
+    CacheCategory,
+    PartContentDesc,
+    StateComponentDesc,
+)
 from lmcache.v1.common.logging import init_logger, lmcache_deprecate
 from lmcache.v1.common.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
@@ -218,6 +223,28 @@ class KernelGroupInfo:
     """Whether this group's pages hold recurrent state snapshots (Mamba/GDN)
     rather than per-token attention KV. The window reflects restore
     semantics, so ``full_sw_kv`` forcing must not widen it."""
+    cache_category: CacheCategory = CacheCategory.UNKNOWN
+    """Engine spec type, from ``EngineGroupInfo.cache_category``."""
+    state_components: tuple[StateComponentDesc, ...] = ()
+    """Real Mamba page layout, from ``EngineGroupInfo.state_components``."""
+
+    def content_desc(self) -> PartContentDesc:
+        """Describe what this group's tensor in a chunk holds.
+
+        Returns:
+            The group's spec type and, for a Mamba group, its state layout and
+            the size of one layer's page per block.
+        """
+        page_bytes = (
+            self.slots_per_block * self.hidden_dim_size * self.shape_desc.element_size
+            if self.state_components
+            else 0
+        )
+        return PartContentDesc(
+            cache_category=self.cache_category,
+            state_components=self.state_components,
+            page_bytes=page_bytes,
+        )
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -460,6 +487,14 @@ class KVLayerGroupsManager:
                     ),
                     recurrent_state=(
                         info.recurrent_state if info is not None else False
+                    ),
+                    cache_category=(
+                        info.cache_category
+                        if info is not None
+                        else CacheCategory.UNKNOWN
+                    ),
+                    state_components=(
+                        info.state_components if info is not None else ()
                     ),
                 )
             )

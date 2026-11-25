@@ -13,14 +13,21 @@ interface automatically.
 """
 
 # Standard
+from collections.abc import Callable
 from dataclasses import dataclass, field
 import abc
 
 # First Party
+from lmcache.v1.common.group_view import PartContentDesc
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.memory_management import MemoryObj
 
 SerdeTaskId = int
+
+PartContentResolver = Callable[[ObjectKey, int], PartContentDesc | None]
+"""Returns what part ``i`` (the ``i``-th tensor) of the object under a key
+holds, as published at KV cache registration, or ``None`` when unknown. Given
+to content-aware serdes; see ``register_content_aware_serde_factory``."""
 
 
 @dataclass

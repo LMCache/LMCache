@@ -17,6 +17,7 @@ from lmcache.integration.vllm.kv_cache_groups import (
 )
 from lmcache.v1.common.group_view import (
     EXCLUDED_ENGINE_GROUP,
+    CacheCategory,
     expand_engine_block_ids,
     get_engine_group_indices,
     num_engine_groups,
@@ -959,3 +960,107 @@ def test_windowed_group_matches_vllm_offloading_sliding_window_groups(
     """Prefix-cacheable sliding-window, chunked-local and Mamba groups are
     windowed, in both vLLM group forms; full attention and scratch are not."""
     assert is_windowed_group(group) is expected
+
+
+@dataclass
+class _MambaStateSpec(MambaSpec):
+    """A Mamba spec that declares its states, as vLLM's ``MambaSpec`` does."""
+
+    shapes: tuple = ((3, 20), (4, 8, 8))
+    dtypes: tuple = (torch.float16, torch.float32)
+    state_alignment: int = 1
+
+
+def _unified_mamba_cache(head_size: int = 72) -> torch.Tensor:
+    """A Mamba layer as ``_MambaUnifiedViewEdit`` re-views it: rank 4, int8,
+    one ``16 * head_size``-byte page per block."""
+    return torch.zeros(32, 1, 16, head_size, dtype=torch.int8)
+
+
+@pytest.mark.parametrize("state_alignment", [1, 16])
+def test_conversion_reports_cache_category_and_state_components(
+    state_alignment: int,
+) -> None:
+    """A Mamba group's states are laid out as vLLM binds them: back to back,
+    each padded to ``state_alignment`` bytes."""
+    caches = _same_shape_caches(["layer.0"])
+    caches["layer.1"] = _unified_mamba_cache()
+    infos = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+                MockKVCacheGroup(
+                    ["layer.1"],
+                    _MambaStateSpec(block_size=16, state_alignment=state_alignment),
+                ),
+            ]
+        ),
+        caches,
+    )
+
+    assert [info.cache_category for info in infos] == [
+        CacheCategory.ATTENTION,
+        CacheCategory.RECURRENT,
+    ]
+    assert infos[0].state_components == ()
+    conv, ssm = infos[1].state_components
+    assert (conv.byte_offset, conv.byte_length) == (0, 3 * 20 * 2)
+    # 120 conv bytes pad to 128 under 16-byte alignment.
+    assert ssm.byte_offset == (120 if state_alignment == 1 else 128)
+    assert ssm.byte_length == 4 * 8 * 8 * 4
+    assert (conv.dtype_str, ssm.dtype_str) == ("float16", "float32")
+    assert (conv.shape, ssm.shape) == ((3, 20), (4, 8, 8))
+
+
+@pytest.mark.parametrize("num_states", [1, 3])
+def test_conversion_reports_any_number_of_states(num_states: int) -> None:
+    """Linear attention has one state and ReplaySSM more than two; neither may
+    fail registration."""
+    spec = _MambaStateSpec(
+        block_size=16,
+        shapes=((4, 8),) * num_states,
+        dtypes=(torch.float32,) * num_states,
+    )
+    (info,) = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(kv_cache_groups=[MockKVCacheGroup(["layer.0"], spec)]),
+        {"layer.0": _unified_mamba_cache()},
+    )
+
+    assert [c.byte_offset for c in info.state_components] == [
+        128 * i for i in range(num_states)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("spec", "cache"),
+    [
+        # Page-view and slice-plane views split a page into planes.
+        (_MambaStateSpec(block_size=16), torch.zeros(32, 2, 16, 1, 36)),
+        # States that overrun the page do not describe this view.
+        (_MambaStateSpec(block_size=16), _unified_mamba_cache(head_size=64)),
+        # A spec that declares no states.
+        (MambaSpec(block_size=16), _unified_mamba_cache()),
+    ],
+)
+def test_conversion_mamba_without_known_layout_has_no_state_components(
+    spec: MambaSpec, cache: torch.Tensor
+) -> None:
+    (info,) = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(kv_cache_groups=[MockKVCacheGroup(["layer.0"], spec)]),
+        {"layer.0": cache},
+    )
+
+    assert info.cache_category is CacheCategory.RECURRENT
+    assert info.state_components == ()
+
+
+def test_conversion_unrecognized_spec_is_unknown() -> None:
+    """A spec that is neither attention nor Mamba must not pass for K/V."""
+    (info,) = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[MockKVCacheGroup(["layer.0"], MockKVCacheSpec(16))]
+        ),
+        _same_shape_caches(["layer.0"]),
+    )
+
+    assert info.cache_category is CacheCategory.UNKNOWN
