@@ -387,9 +387,9 @@ tiers selected at startup (all satisfy ``L1MemoryManagerProtocol``):
   (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The DMA
   backend is selected by platform via ``gpu_connector/_gds_backends.py`` --
   cuFile (``libcufile.so``) on NVIDIA, hipFile (``libhipfile.so``) on AMD
-  ROCm, and muFile (``libmufile.so``) on MUSA; see the *GDS L1 Tier* section
-  of :doc:`configuration` for the vendor-specific requirements. The CPU tier
-  is disabled in this mode.
+  ROCm, muFile (``libmufile.so``) on MUSA, and NDS (``libnds.so``) on Ascend;
+  see the *GDS L1 Tier* section of :doc:`configuration` for the
+  vendor-specific requirements. The CPU tier is disabled in this mode.
 
 L2 Adapters
 ~~~~~~~~~~~
