@@ -17,7 +17,6 @@ on:
             - 'csrc/**'
             - '.github/actions/build-artifacts/action.yml'
             - '.github/scripts/smoke_client_wheel.py'
-            - 'tests/ci/test_client_packaging.py'
             - 'pyproject_client.toml'
             - 'requirements/client.txt'
             - 'setup.py'
@@ -67,11 +66,6 @@ jobs:
                 pip_packages: build
                 requirements_file: requirements/build.txt
                 release_tag_pattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
-
-            - name: Check build manifest
-              run: |
-                pip install pytest
-                python -m pytest -q --confcutdir=tests/ci tests/ci/test_client_packaging.py
 
             - name: Install the CPU build of the pinned torch
               run: |

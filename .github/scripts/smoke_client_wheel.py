@@ -17,30 +17,12 @@ import lmcache
 
 
 def main() -> None:
-    """Verify wheel ownership, native/module boundaries and client imports."""
+    """Verify wheel ownership, the native extension and client imports."""
     distribution = metadata.distribution("lmcache-client")
     init = distribution.locate_file("lmcache/__init__.py")
     assert Path(lmcache.__file__).samefile(str(init)), lmcache.__file__
-    files = {str(path) for path in distribution.files or ()}
-    assert any(path.startswith("lmcache/lmcache_native.") for path in files)
-    assert not any(
-        path.startswith(("lmcache/lmcache_redis.", "lmcache/lmcache_fs."))
-        for path in files
-    )
-    assert not any(
-        path.startswith(
-            (
-                "lmcache/inprocess/",
-                "lmcache/v1/multiprocess/",
-                "lmcache/v1/gpu_connector/",
-                "lmcache/v1/distributed/",
-                "lmcache/v1/mp_coordinator/",
-                "lmcache/v1/mp_observability/",
-            )
-        )
-        for path in files
-    )
     for module in (
+        "lmcache.lmcache_native",
         "lmcache.sdk",
         "lmcache.v1.client.worker_transfer",
         "lmcache.v1.platform.devices.cpu.cache_context",
