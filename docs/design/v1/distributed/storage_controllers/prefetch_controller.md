@@ -95,7 +95,8 @@ queue when, for every L1 manager that receives loads from a non-draining L2
 adapter, both conditions hold:
 
 ```
-(1) staging_bytes + lookup_bytes < inflight_watermark * total_bytes
+(1) staging_bytes + lookup_bytes + prefetch_locked_bytes + request_bytes
+        <= inflight_watermark * total_bytes
 (2) total_bytes - used_bytes - lookup_bytes >= request_bytes
 ```
 
@@ -108,12 +109,27 @@ adapter, both conditions hold:
 - `request_bytes` is the same worst case for the head request.
 - `used_bytes, total_bytes` come from `get_memory_usage()`, the same numbers
   eviction uses (the total is the grown heap on the lazy tier).
-- With no request in flight the head request is admitted regardless, so a
-  request that can never fit does not block the queue; its reservations then
-  fail per cell as before (`l1_oom`).
+- `prefetch_locked_bytes` is `get_prefetch_locked_bytes()`: objects this
+  controller read-locked for a request that has not consumed them yet, both L1
+  hits and loads from L2 (`track_prefetch_locked`). An object leaves the count
+  when its last reader finishes or it leaves L1; a read lock that expires (read
+  TTL) is dropped at the next check. Read locks the store path takes while
+  writing to L2 are not counted: they are short-lived and belong to no waiting
+  request.
+- With no request in flight and no prefetch-locked bytes, the head request is
+  admitted regardless, so a request that can never fit does not block the
+  queue; its reservations then fail per cell as before (`l1_oom`).
 
-Condition (1) bounds how much of L1 prefetch may occupy; condition (2) keeps a
-request from starting when L1, full of resident data, could not hold its loads.
+Condition (1) bounds everything prefetch holds for requests that have not run
+yet. Prefetch-locked bytes must count: an engine looks up its whole waiting
+queue at once, so without them a burst fills L1 with locked data for requests
+minutes from running, and later prefetches fail. Condition (2) keeps a request from
+starting when L1, full of resident data, could not hold its loads.
+
+**Priority.** `PrefetchPriority.HIGH` (the CacheBlend sparse leg after its
+prefix leg) waits in its own queue, and no `NORMAL` request starts while one
+waits. It passes the same checks; its prefix leg was charged at the worst case
+of the whole prompt, so it fits once in-flight lookups settle.
 
 The check runs at the end of every loop iteration, so a completed load (which
 wakes the loop) admits the next requests immediately. Staging held only by
@@ -131,16 +147,16 @@ Before entering `WAIT_LOAD`, the request releases all partial reservations.
 It keeps its original L1 read-lock snapshot and the planned L2 locks, but no
 adapter I/O has been submitted. The first failed attempt starts an absolute
 per-request deadline; retries never extend it. The loop checks capacity every
-10 ms, or when adapter events wake it. At expiry it
-uses the ordinary partial-reservation fallback. New pending requests remain
-FIFO and do not start ahead of a waiting load.
+10 ms, or when adapter events wake it. At expiry, the controller tries to
+read-lock the entire outstanding plan in its allowed L1 managers. If it
+can acquire every key, it drops the L2 locks and returns the L1 hits without
+staging a copy. Otherwise it releases the newly acquired locks before using
+the ordinary partial-reservation fallback. Pending requests preserve their
+priority and FIFO order while a load waits.
 
-A key that becomes resident during the wait is included only when the retry
-successfully reserves it in a readable L1 and admission takes its read lock.
-Its write reservation is contended, so the existing replan/fallback applies;
-the controller never claims an L1 hit without a read reservation. Draining an
-adapter drops its planned locks; stopping releases waiting locks and buffers
-through the existing cleanup path.
+A retry with staging capacity still uses the normal resident-key admission
+path. Draining an adapter drops its planned locks. Stopping releases
+waiting locks and buffers through the existing cleanup path.
 
 This budget covers capacity retries only. It neither cancels nor times out
 submitted I/O, and does not replace an overall request deadline. Deployments
@@ -149,9 +165,9 @@ separate whole-request deadline and borrowed-buffer lifecycle work is still
 required before combining those changes.
 
 Example: a 16 GiB L1 with the default 0.5 watermark (an 8 GiB budget) and
-requests of 288 MiB (2048 tokens of Qwen3-8B KV). 28 requests stage 7.9 GiB,
-still under the budget, so a 29th starts: 29 requests run at once, where the
-old fixed limit was 8.
+requests of 288 MiB (2048 tokens of Qwen3-8B KV). 28 requests hold 7.9 GiB, so
+a 29th waits: 28 are loading or loaded-but-unconsumed at once, where the old
+fixed limit was 8.
 
 ## Flow
 

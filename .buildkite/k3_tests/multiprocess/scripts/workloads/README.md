@@ -27,6 +27,13 @@ example, each engine has its own `dsv4-flash-tp.sh` and `kimi-linear-tp.sh`
 lifecycle while sourcing shared prompt construction and L1 round-trip checks
 from `verification/`. `mp-autostart-tp2.sh` verifies vLLM-specific connector
 auto-start behavior and therefore remains under `vllm/` rather than `common/`.
+`sleep-mode.sh` is under `vllm/` for the same reason: it drives vLLM's
+`/sleep` and `/wake_up` development endpoints. Its checks live in
+`sleep_mode.py`, which is not a workload: two sleep/wake-up cycles, during
+which the LMCache server must drop and re-create its KV cache registration,
+GPU memory must be released and come back, and the prompt must hit LMCache
+with the output from before sleep. `LMCACHE_MP_TRANSFER_MODE` selects which
+registration of the server's `/status` the checks read.
 
 The two P2P workloads under `vllm/` launch their own coordinator and LMCache
 servers on localhost:

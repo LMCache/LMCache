@@ -17,6 +17,7 @@ releasing a request at any point is a walk over its maps.
 
 # Standard
 from collections import Counter, defaultdict, deque
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import enum
@@ -28,8 +29,8 @@ import time
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.logging import init_logger
-from lmcache.utils import get_size_bytes
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.utils import get_size_bytes
 from lmcache.v1.distributed.api import (
     FetchingPolicy,
     GroupedObjectKeys,
@@ -37,6 +38,7 @@ from lmcache.v1.distributed.api import (
     MemoryTags,
     ObjectKey,
     PrefetchLockMode,
+    PrefetchPriority,
     PrefetchResult,
     PrefetchTaskSpec,
 )
@@ -548,9 +550,11 @@ class PrefetchController(StorageControllerInterface):
         l2_adapters: List of L2 adapter instances.
         adapter_descriptors: Descriptors for each L2 adapter (same order).
         policy: The prefetch policy for load plan and retention decisions.
-        inflight_watermark: Fraction of an L1 manager's capacity that
-            in-flight prefetch requests may stage before new requests wait,
-            in ``(0, 1]``.
+        inflight_watermark: Fraction of an L1 manager's capacity, in
+            ``(0, 1]``, that prefetch may hold before new requests wait:
+            buffers being staged, lookups not yet planned, and loaded
+            objects still read-locked for a request that has not consumed
+            them.
         load_admission_wait_seconds: Maximum wait after a staging reservation
             fails under temporary write pressure. Zero disables retries.
     """
@@ -615,6 +619,10 @@ class PrefetchController(StorageControllerInterface):
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
         self._pending_queue: deque[tuple[PrefetchRequestId, PrefetchTaskSpec]] = deque()
+        # HIGH-priority requests: none of the NORMAL ones starts while one waits.
+        self._high_priority_queue: deque[tuple[PrefetchRequestId, PrefetchTaskSpec]] = (
+            deque()
+        )
 
         # Thread-safe submission queue (external -> background)
         self._submission_lock = threading.Lock()
@@ -791,6 +799,7 @@ class PrefetchController(StorageControllerInterface):
             "inflight_watermark": self._inflight_watermark,
             "submission_queue_size": submission_queue_size,
             "pending_queue_size": len(self._pending_queue),
+            "high_priority_queue_size": len(self._high_priority_queue),
             "in_flight_request_count": len(in_flight),
             "lookup_phase_count": lookup_phase_count,
             "load_phase_count": len(in_flight) - lookup_phase_count - waiting_count,
@@ -1035,8 +1044,9 @@ class PrefetchController(StorageControllerInterface):
         the phase transition when done."""
         phase_adapters = signaled_adapters[request.phase]
         if request.phase == PrefetchPhase.WAIT_LOAD:
+            expired = time.monotonic() >= request.load_wait_deadline
             if (
-                time.monotonic() < request.load_wait_deadline
+                not expired
                 and not any(
                     not self._is_l2_eligible(request, idx)
                     for idx, _ in request.key_states.l2_locked_keys.items()
@@ -1044,7 +1054,8 @@ class PrefetchController(StorageControllerInterface):
                 and not self._waiting_load_has_capacity(request)
             ):
                 return
-            self._transition_to_load_phase(request)
+            if not expired or not self._reuse_resident_waiting_plan(request):
+                self._transition_to_load_phase(request)
         elif not phase_adapters:
             return
         elif request.phase == PrefetchPhase.LOOKUP:
@@ -1139,20 +1150,28 @@ class PrefetchController(StorageControllerInterface):
     # =========================================================================
 
     def _drain_submission_queue(self) -> None:
-        """Move items from the thread-safe submission queue to the
-        pending queue."""
+        """Move items from the thread-safe submission queue to the pending
+        and high-priority queues."""
         with self._submission_lock:
             items = self._submission_queue
             self._submission_queue = []
-        self._pending_queue.extend(items)
+        for item in items:
+            if item[1].priority == PrefetchPriority.HIGH:
+                self._high_priority_queue.append(item)
+            else:
+                self._pending_queue.append(item)
 
     def _start_pending_requests(self) -> None:
-        """Start pending requests in arrival order while L1 can admit the
-        head of the queue (see ``_can_admit_new_prefetch``)."""
-        while self._pending_queue and self._can_admit_new_prefetch(
-            self._pending_queue[0][1]
-        ):
-            request_id, spec = self._pending_queue.popleft()
+        """Start queued requests while L1 can admit them (see
+        ``_can_admit_new_prefetch``): ``HIGH`` priority first, in arrival
+        order, then ``NORMAL`` ones, none of which starts while a ``HIGH`` one
+        waits.
+        """
+        while self._high_priority_queue or self._pending_queue:
+            queue = self._high_priority_queue or self._pending_queue
+            if not self._can_admit_new_prefetch(queue[0][1]):
+                return
+            request_id, spec = queue.popleft()
             try:
                 self._start_lookup_phase(request_id, spec)
             except Exception:
@@ -1167,11 +1186,13 @@ class PrefetchController(StorageControllerInterface):
         The request can be admitted when both of the following conditions
         are met:
 
-        1. staging bytes + lookup bytes < ``inflight_watermark`` * capacity.
+        1. staging bytes + lookup bytes + prefetch-locked bytes + request bytes
+           <= ``inflight_watermark`` * capacity.
         2. free bytes - lookup bytes >= request bytes.
 
-        With no request in flight, ``spec`` is admitted regardless, so a
-        request that can never fit does not block the queue.
+        With no request in flight and no prefetch-locked bytes, ``spec`` is admitted
+        regardless, so a request that can never fit does not block the
+        queue.
 
         Args:
             spec: The request at the head of the pending queue.
@@ -1179,8 +1200,6 @@ class PrefetchController(StorageControllerInterface):
         Returns:
             True if ``spec`` may start.
         """
-        if not self._in_flight_requests:
-            return True
         if any(
             request.waiting_for_memory for request in self._in_flight_requests.values()
         ):
@@ -1196,13 +1215,19 @@ class PrefetchController(StorageControllerInterface):
             for adapter_idx in self._l2_adapters
             if adapter_idx not in self._draining
         }
+        idle = not self._in_flight_requests
         for l1_idx in target_l1_indices:
             l1_manager = self._l1_managers[l1_idx]
             used_bytes, total_bytes = l1_manager.get_memory_usage()
             if total_bytes == 0:
                 continue  # a shadow L1: views cost no local bytes
-            staged_bytes = l1_manager.get_staging_memory_usage() + lookup_bytes
-            if staged_bytes >= self._inflight_watermark * total_bytes:
+            locked_bytes = l1_manager.get_prefetch_locked_bytes()
+            if idle and locked_bytes == 0:
+                continue  # nothing of prefetch's to wait for in this L1
+            held_bytes = (
+                l1_manager.get_staging_memory_usage() + lookup_bytes + locked_bytes
+            )
+            if held_bytes + request_bytes > self._inflight_watermark * total_bytes:
                 return False
             if total_bytes - used_bytes - lookup_bytes < request_bytes:
                 return False
@@ -1298,11 +1323,17 @@ class PrefetchController(StorageControllerInterface):
                     ).items()
                 }
                 res_bitmap = Bitmap(len(flattened_keys))
+                locked_keys: list[ObjectKey] = []
                 for i, key in enumerate(flattened_keys):
                     error, _obj = result[key]
                     if error != L1Error.SUCCESS:
                         continue
                     res_bitmap.set(i)
+                    locked_keys.append(key)
+                # Hits stay pinned for the request until it is consumed, like
+                # loads from L2, so they count against the watermark too.
+                if locked_keys:
+                    l1_manager.track_prefetch_locked(locked_keys)
                 l1_found_bitmap = _scatter_bitmaps_full_global(
                     res_bitmap, num_rows, num_cols
                 )
@@ -1576,6 +1607,43 @@ class PrefetchController(StorageControllerInterface):
                 return False
         return True
 
+    def _reuse_resident_waiting_plan(self, request: InFlightPrefetchRequest) -> bool:
+        """Use a fully resident load plan at the deadline without staging it."""
+        cells_by_l1, _ = self._build_l1_allocation_plans(request)
+        if not cells_by_l1:
+            return False
+        acquired = MapState()
+        with ExitStack() as rollback:
+            for l1_idx, cells in cells_by_l1.items():
+                manager = self._l1_managers[l1_idx]
+                if not _tags_allowed(
+                    manager.get_memory_tags(), request.allowed_l1_memory_tags
+                ):
+                    return False
+                for row, keys in _gather_keys_by_row(request.key_groups, cells):
+                    reserved = manager.reserve_read(keys, row.num_kv_readers)
+                    locked = [
+                        key
+                        for key, (error, _) in reserved.items()
+                        if error == L1Error.SUCCESS
+                    ]
+                    rollback.callback(manager.finish_read, locked, row.num_kv_readers)
+                    if len(locked) != len(keys):
+                        return False
+                acquired[l1_idx] = cells
+            for l1_idx, cells in acquired.items():
+                self._l1_managers[l1_idx].track_prefetch_locked(
+                    _gather_keys(request.key_groups, cells)
+                )
+            request.key_states.l1_locked_keys += acquired
+            rollback.pop_all()
+
+        request.waiting_for_memory = False
+        # All planned cells are now available from L1. The standard planner
+        # returns their L2 locks and applies the request's fetching policy.
+        self._plan_load(request, {})
+        return True
+
     def _submit_load_tasks(
         self,
         request: InFlightPrefetchRequest,
@@ -1755,6 +1823,9 @@ class PrefetchController(StorageControllerInterface):
                     l1_manager.finish_write_and_reserve_read(
                         keys, read_locks=row.num_kv_readers, tag=tag
                     )
+            # Loads count against the watermark until their reader is done.
+            if loaded_keys:
+                l1_manager.track_prefetch_locked(loaded_keys)
             if failed_keys:
                 l1_manager.finish_write_and_delete(failed_keys, tag=tag)
 

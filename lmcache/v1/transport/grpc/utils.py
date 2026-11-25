@@ -8,7 +8,7 @@ from typing import cast
 import grpc
 
 # First Party
-from lmcache.v1.client.transport.errors import (
+from lmcache.v1.transport.errors import (
     MPRequestError,
     MPServerUnavailableError,
 )

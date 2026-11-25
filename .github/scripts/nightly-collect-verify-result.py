@@ -24,6 +24,9 @@ import importlib.metadata as md
 import json
 import os
 
+# Third Party
+from cpu_nightly import read_build
+
 # The installed distribution is `vllm-cpu-nightly`; install_vllm_cpu.sh
 # additionally aliases it to `vllm` with a `+cpu` local label. Prefer the
 # real distribution so the recorded version matches `vllm.__version__`
@@ -61,9 +64,20 @@ LEG = MATRIX_OS + " / " + MATRIX_MODEL + " / " + MATRIX_REQUEST_TRANSPORT
 
 is_ok = JOB_STATUS == "success"
 version = resolve_vllm_version()
+source_sha = ""
+built_at = ""
+try:
+    build = read_build(md.distribution("vllm-cpu-nightly"))
+    source_sha = build.source_sha
+    built_at = build.built_at.isoformat()
+except (md.PackageNotFoundError, ValueError, KeyError):
+    # Installation or the freshness step already reports invalid provenance.
+    pass
 
 if is_ok:
     reason = ""
+elif os.environ.get("FRESHNESS_OUTCOME") == "failure":
+    reason = "CPU nightly build is stale or has invalid provenance on " + LEG
 elif INSTALL_VLLM != "success":
     reason = "vLLM CPU nightly install failed on " + LEG
 elif INSTALL_LMC != "success":
@@ -79,6 +93,8 @@ result = {
     # Keep the version even for a failed leg: the aggregator reports it in
     # the tracking issue so a human can tell which build broke.
     "vllm_version": version,
+    "source_sha": source_sha,
+    "built_at": built_at,
     "reason": reason,
     "run_id": os.environ["GITHUB_RUN_ID"],
     "run_url": "{}/{}/actions/runs/{}".format(
