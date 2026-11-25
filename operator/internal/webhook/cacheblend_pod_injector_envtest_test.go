@@ -85,7 +85,7 @@ var _ = Describe("CacheBlendPodInjector webhook (envtest)", Ordered, func() {
 		Expect(c.Args).To(ContainElement("--no-enable-chunked-prefill"))
 		kv := argsFlagValue(c.Args, "--kv-transfer-config")
 		Expect(kv).To(ContainSubstring("CBKVConnector"))
-		Expect(kv).To(ContainSubstring("tcp://" + testEngineName + "." + testNamespace + ".svc"))
+		Expect(kv).To(ContainSubstring("grpc://" + testEngineName + "." + testNamespace + ".svc"))
 
 		By("M7: the private payload pull secret is appended to the pod")
 		Expect(pullSecretNames(got)).To(ContainElement("cb-payload-pull"))
@@ -153,7 +153,7 @@ var _ = Describe("CacheBlendPodInjector webhook (envtest)", Ordered, func() {
 		c := findContainer(got, "vllm")
 		Expect(c).NotTo(BeNil())
 		kv := argsFlagValue(c.Args, "--kv-transfer-config")
-		Expect(kv).To(ContainSubstring("tcp://" + testEngineName + "." + testNamespace + ".svc"))
+		Expect(kv).To(ContainSubstring("grpc://" + testEngineName + "." + testNamespace + ".svc"))
 	})
 })
 

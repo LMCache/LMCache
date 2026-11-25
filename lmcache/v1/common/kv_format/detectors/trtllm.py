@@ -9,7 +9,7 @@ from typing import Optional
 import torch
 
 # First Party
-from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.kv_format.detectors.base import (
     EngineDetector,
     measure_list_depth_until_tensor,

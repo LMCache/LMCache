@@ -2,8 +2,8 @@
 """Shared descriptor types for the unified ``DeviceOps`` surface.
 
 ``PageBufferShapeDesc`` and ``KernelGroupSpec`` are defined in
-``lmcache.lmcache_native`` and re-exported here for callers that want the
-platform-owned import path. ``StagingCopy`` / ``LaunchVar`` / ``BatchStep``
+``lmcache.lmcache_native`` and re-exported here so client and server code
+share one import path. ``StagingCopy`` / ``LaunchVar`` / ``BatchStep``
 still only exist natively in the compiled ``cuda_ops`` extension, so this
 module keeps placeholder stubs for those names.
 """

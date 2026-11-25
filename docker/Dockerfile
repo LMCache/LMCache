@@ -6,9 +6,9 @@
 # docs/source/getting_started/installation.rst
 # docs/source/production/docker_deployment.rst
 
-ARG CUDA_VERSION=13.0
+ARG CUDA_VERSION=13.2
 ARG UBUNTU_VERSION=24.04
-ARG NGC_VERSION=25.09
+ARG NGC_VERSION=26.05
 ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:${NGC_VERSION}-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 
 #################### BASE BUILD IMAGE ####################
@@ -135,6 +135,10 @@ RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_nativ
         vllm[runai,tensorizer,flashinfer] \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
+    # A torch-family pin that has no wheel for CUDA_TAG is installed from PyPI,
+    # built for another CUDA version, and vLLM then exits at startup.
+    # torchaudio checks this on import, so fail the build here instead.
+    python3 -c 'import torchaudio' && \
     # The nixl extra adds the NIXL connector (lmcache-nixl) at lmcache's version.
     uv pip install "lmcache[nixl]${VER:+==${VER}}" \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \

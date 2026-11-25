@@ -238,8 +238,6 @@ def _scheduler(every_n: int) -> Any:
     conn._gpu_block_pool = pool
     conn._store_pins = {}
     conn._store_pin_seq = 0
-    conn._store_pin_reports = {}
-    conn._store_pin_workers = 1
     conn._warned_unpinned_stores = False
     return conn
 

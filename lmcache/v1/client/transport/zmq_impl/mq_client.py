@@ -266,7 +266,7 @@ class MessageQueueClient:
                     b_operation = encode_operation(rpc_spec.operation)
                     payload_classes = rpc_spec.payload_types
                     if len(payload_classes) != len(wrapped_request.request_payloads):
-                        expected_classes = [cls.__name__ for cls in payload_classes]
+                        expected_classes = [str(cls) for cls in payload_classes]
                         actual_classes = [
                             type(payload).__name__
                             for payload in wrapped_request.request_payloads
@@ -498,8 +498,7 @@ class MessageQueueClient:
                 host, port = self._peer
                 self._wrong_transport = (
                     f"The server at {self._server_url} speaks gRPC, not ZMQ. Use "
-                    f"grpc://{host}:{port}, or start the server with "
-                    "--transport zmq."
+                    f"grpc://{host}:{port}; the zmq transport is deprecated."
                 )
                 logger.error("%s", self._wrong_transport)
             self.cancel_streams(release)

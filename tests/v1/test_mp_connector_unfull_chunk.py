@@ -211,6 +211,158 @@ def test_retrieve_of_a_tail_vllm_partly_holds_skips_vllms_tokens():
     )
 
 
+@pytest.mark.parametrize(
+    "group_tokens_per_block",
+    [
+        [GRID],
+        # A 32-token group, a scratch group (no tokens) and a 16-token group.
+        [2 * GRID, 0, GRID],
+    ],
+)
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # The tail is the prompt's last token alone (P = 1 mod chunk).
+        2 * CHUNK + 1,
+        # The last token starts a 16-token block inside the tail.
+        2 * CHUNK + GRID + 1,
+        # The last token starts a block in every group.
+        2 * CHUNK + 2 * GRID + 1,
+        # The last token shares a block with the one before.
+        2 * CHUNK + 20,
+        # The prompt is whole chunks.
+        2 * CHUNK,
+    ],
+)
+def test_full_prompt_hit_loads_every_token_into_the_blocks_vllm_allocates(
+    prompt: int, group_tokens_per_block: list[int]
+):
+    """A full-prompt hit reports every prompt token, as vLLM's Offloading and
+    Nixl connectors do, so vLLM allocates the whole hit in every group and
+    recomputes the last token itself. Holding that token back left its block
+    unallocated while the retrieve covered it (#6751)."""
+    connector, _ = _connector(lookup_hit=prompt)
+    connector._group_tokens_per_block = group_tokens_per_block
+
+    assert connector.get_num_new_matched_tokens(
+        _request(prompt_tokens=prompt, max_tokens=1), 0
+    ) == (prompt, True)
+
+    tracker = connector.request_trackers["req-0"]
+    assert tracker.num_lmcache_hit_tokens == prompt
+    assert tracker.num_stored_tokens == 2 * CHUNK
+    # LMCache holds the tail, so it is not stored again.
+    assert tracker.unfull_chunk_boundaries == ({prompt} if prompt % CHUNK else set())
+
+    # vLLM allocates each group's blocks for the tokens it was told to load.
+    blocks = [
+        list(range(-(-prompt // span))) if span else []
+        for span in group_tokens_per_block
+    ]
+    tracker.append_block_ids(tuple(blocks))
+    tracker.state = LMCacheMPRequestState.WAITING_FOR_LOAD
+    meta = LMCacheMPRequestMetadata.GetRetrieveMetadata(
+        tracker, CHUNK, group_tokens_per_block
+    )
+
+    assert meta is not None
+    assert (meta.op.start, meta.op.end) == (0, prompt)
+    assert meta.op.block_ids == blocks
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # vLLM holds the whole first two chunks.
+        2 * CHUNK + 1,
+        # vLLM holds the first block of the tail's chunk too.
+        2 * CHUNK + GRID + 1,
+    ],
+)
+def test_full_prompt_hit_past_a_vllm_hit_of_all_but_the_last_token(prompt: int):
+    """vLLM's prefix hit stops at P - 1 and it recomputes the last token, so
+    nothing is loaded (as on dev) and every lookup lock, the tail's
+    included, is freed once vLLM allocates."""
+    connector, scheduler_adapter = _connector(lookup_hit=prompt)
+    request = _request(prompt_tokens=prompt, max_tokens=1)
+
+    assert connector.get_num_new_matched_tokens(request, prompt - 1) == (0, False)
+
+    blocks = list(range(-(-prompt // GRID)))
+    connector.update_state_after_alloc(
+        request, MagicMock(get_block_ids=lambda: (blocks,)), 0
+    )
+    tracker = connector.request_trackers["req-0"]
+    assert tracker.state == LMCacheMPRequestState.READY
+    kwargs = scheduler_adapter.free_lookup_locks.call_args.kwargs
+    # An end at the hit boundary also frees the unfull chunk ending there.
+    assert (kwargs["start"], kwargs["end"]) == (0, prompt)
+
+
+WINDOW = 64
+NULL_BLOCK = 0
+
+
+def _sliding_window_blocks(num_tokens: int) -> list[int]:
+    """vLLM's ``SlidingWindowManager`` allocation for a hit of ``num_tokens``:
+    ``cdiv(num_tokens, GRID)`` blocks, the null block for each block wholly
+    below ``get_num_skipped_tokens(num_tokens) = num_tokens - WINDOW + 1``."""
+    num_skipped = max(0, num_tokens - WINDOW + 1) // GRID
+    return [
+        NULL_BLOCK if idx < num_skipped else idx + 1
+        for idx in range(-(-num_tokens // GRID))
+    ]
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # P = WINDOW - 1 (mod GRID): with P reported, the block holding
+        # token P - WINDOW, which recomputing token P - 1 reads, is null.
+        207,
+        223,
+        # Token P - 1 starts a block, so P - 1 leaves it unallocated.
+        2 * CHUNK + 1,
+        2 * CHUNK + GRID + 1,
+        # Neither.
+        2 * CHUNK + 20,
+        2 * CHUNK,
+    ],
+)
+def test_full_prompt_hit_keeps_the_sliding_window_vllm_recomputes_with(prompt: int):
+    """With a sliding-window group the hit is P - 1, as in vLLM's Offloading
+    connector, so the window of the first token vLLM computes is allocated;
+    when token P - 1 starts a block only the full chunks load."""
+    connector, scheduler_adapter = _connector(lookup_hit=prompt)
+    connector._full_hit_holds_back_last_token = True
+    connector._group_tokens_per_block = [GRID]
+    request = _request(prompt_tokens=prompt, max_tokens=1)
+
+    need, async_load = connector.get_num_new_matched_tokens(request, 0)
+    assert need is not None
+
+    blocks = _sliding_window_blocks(need)
+    # vLLM computes from token min(need, P - 1); its window starts WINDOW - 1
+    # tokens earlier.
+    window_start = min(need, prompt - 1) - WINDOW + 1
+    assert blocks[window_start // GRID] != NULL_BLOCK
+    full_chunks = prompt // CHUNK * CHUNK
+    trimmed = prompt % CHUNK != 0 and (prompt - 1) % GRID == 0
+    assert (need, async_load) == (full_chunks if trimmed else prompt - 1, True)
+    connector.update_state_after_alloc(
+        request, MagicMock(get_block_ids=lambda: (blocks,)), need
+    )
+    if trimmed:
+        kwargs = scheduler_adapter.free_lookup_locks.call_args.kwargs
+        assert kwargs["extra_ranges"] == ((full_chunks, prompt),)
+    meta = LMCacheMPRequestMetadata.GetRetrieveMetadata(
+        connector.request_trackers["req-0"], CHUNK, [GRID]
+    )
+    assert meta is not None
+    assert (meta.op.start, meta.op.end) == (0, full_chunks if trimmed else prompt)
+    assert meta.op.block_ids == [blocks[: -(-meta.op.end // GRID)]]
+
+
 def test_boundary_state_block_is_pinned_until_the_request_is_sent():
     connector, _ = _connector(lookup_hit=0)
     pool = MagicMock()
@@ -259,8 +411,6 @@ def test_unfull_chunk_store_pins_its_recurrent_blocks():
     connector._windowed_group_tokens = {1: CHUNK}
     connector._store_pins = {}
     connector._store_pin_seq = 0
-    connector._store_pin_reports = {}
-    connector._store_pin_workers = 1
     tracker = _tracker()
     tracker.increase_num_scheduled_tokens(PROMPT)
     scheduler_output = SimpleNamespace(
@@ -281,7 +431,7 @@ def test_unfull_chunk_store_pins_its_recurrent_blocks():
         SimpleNamespace(
             kv_cache_events=None,
             kv_connector_worker_meta=LMCacheMPWorkerMetadata(
-                completed_store_requests={}, released_store_pins={pin_key: 1}
+                completed_store_requests={pin_key: 1}
             ),
             finished_sending=None,
         )
@@ -349,6 +499,8 @@ def _connector(lookup_hit: int) -> tuple[LMCacheMPConnector, MagicMock]:
     connector._connector_stats = MagicMock()
     connector.lazy_offload = False
     connector._windowed_group_tokens = {}
+    connector._prefix_replay_tokens = 0
+    connector._full_hit_holds_back_last_token = False
     return connector, scheduler_adapter
 
 

@@ -540,10 +540,15 @@ device = RawBlockDevice(
     sys.argv[1], writable=False, io_engine="io_uring", use_odirect=False
 )
 try:
-    batch = device.batched_read([int(sys.argv[2])], [bytearray(8)], [8])
-    success, errors = device.wait_iouring(batch)
-    assert success == [False], success
-    assert len(errors) == 1, errors
+    for wait, error_type in (
+        (device.wait_iouring, str), (device.wait_iouring_exceptions, Exception)
+    ):
+        batch = device.batched_read([int(sys.argv[2])], [bytearray(8)], [8])
+        success, errors = wait(batch)
+        assert success == [False], success
+        assert len(errors) == 1, errors
+        idx, error = errors[0]
+        assert idx == 0 and isinstance(error, error_type), errors
 finally:
     device.close()
 """,

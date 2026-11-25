@@ -137,8 +137,15 @@ slot capacity because the DAX arena is exhausted by slot count. The eviction
 controller calls `delete(keys)`, which skips externally locked keys and
 reclaims slots after active read borrows drain.
 
-Runtime capacity is the sum of active, draining, migrating, resizing, and
-removing device capacities. Closed, removed, and failed devices are excluded.
+Runtime capacity is the sum of active, draining, migrating, and resizing device
+capacities. Removing, closed, removed, and failed devices are excluded.
+
+An unmap failure leaves a device `removing`: it cannot serve reads/writes or
+return to `draining`, but still owns its range and supports another removal
+attempt. The storage manager republishes capacity even when cleanup raises.
+Adapter shutdown attempts every device and closes its event notifiers before
+re-raising the first cleanup error. It stays closing until cleanup succeeds,
+so a later `close()` can retry retained mappings.
 
 ## Current Limits
 

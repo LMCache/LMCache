@@ -41,7 +41,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPRequestMetadata,
     LoadStoreOp,
 )
-from lmcache.utils import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.sparse_state import merge_sparse_state_keep
 
 if TYPE_CHECKING:

@@ -7,7 +7,9 @@ from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
+import functools
 import itertools
+import threading
 
 # Third Party
 import pytest
@@ -38,12 +40,14 @@ from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPConnectorMetadata,
     LMCacheMPRequestMetadata,
-    LMCacheMPWorkerMetadata,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import (  # noqa: E402
+    LMCacheMPSchedulerAdapter,
+    LMCacheMPWorkerAdapter,
     LoadStoreOp,
 )
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES  # noqa: E402
+from lmcache.v1.common.group_view import EngineGroupInfo  # noqa: E402
 from lmcache.v1.transport.futures import DeviceMessagingFuture  # noqa: E402
 
 pytestmark = pytest.mark.no_shared_allocator
@@ -61,16 +65,23 @@ def _scheduler(workers: int = 1) -> tuple[LMCacheMPConnector, MagicMock]:
     pool = MagicMock()
     pool.blocks = {i: f"block-{i}" for i in range(100)}
     connector._gpu_block_pool = pool
-    connector.scheduler_adapter = MagicMock(lmcache_tokens_per_chunk=8)
+    # The adapter's own receipt counter, as lazy offload uses it.
+    counter = SimpleNamespace(
+        _store_request_pending_counts={}, _expected_worker_count=workers
+    )
+    connector.scheduler_adapter = MagicMock(
+        lmcache_tokens_per_chunk=8,
+        update_pending_store_count=functools.partial(
+            LMCacheMPSchedulerAdapter.update_pending_store_count, cast(Any, counter)
+        ),
+    )
     # Group 0: full attention, 8 tokens/block. Group 1: sliding window of 3
     # tokens over 2-token blocks (2 window blocks). Group 2: Mamba, 2-token
     # blocks, one state block per chunk.
     connector._group_tokens_per_block = [8, 2, 2]
     connector._windowed_group_tokens = {1: 3, 2: 2}
     connector._store_pins = {}
-    connector._store_pin_reports = {}
     connector._store_pin_seq = 0
-    connector._store_pin_workers = workers
     connector._warned_unpinned_stores = False
     return connector, pool
 
@@ -169,25 +180,13 @@ def test_pins_are_released_once_every_worker_has_reported() -> None:
     connector._release_reported_store_pins({key: 1})
     pool.free_blocks.assert_called_once_with([f"block-{i}" for i in [7, 12, 13]])
     assert connector._store_pins == {}
-    assert connector._store_pin_reports == {}
+    adapter: Any = connector.scheduler_adapter
+    counts = adapter.update_pending_store_count.args[0]._store_request_pending_counts
+    assert counts == {}
 
     # A late duplicate report is ignored.
     connector._release_reported_store_pins({key: 1})
     pool.free_blocks.assert_called_once()
-
-
-def test_worker_metadata_aggregate_sums_released_store_pins() -> None:
-    first = LMCacheMPWorkerMetadata(
-        completed_store_requests={}, released_store_pins={"a#0": 1, "b#1": 1}
-    )
-    second = LMCacheMPWorkerMetadata(
-        completed_store_requests={}, released_store_pins={"a#0": 1}
-    )
-
-    merged = first.aggregate(second)
-
-    assert isinstance(merged, LMCacheMPWorkerMetadata)
-    assert merged.released_store_pins == {"a#0": 2, "b#1": 1}
 
 
 # ------------------------------------------------------------------ #
@@ -195,24 +194,13 @@ def test_worker_metadata_aggregate_sums_released_store_pins() -> None:
 # ------------------------------------------------------------------ #
 
 
-def _worker(pin_key: str | None = "req-0#0") -> tuple[LMCacheMPConnector, MagicMock]:
-    """A worker bound to one STORE whose submit creates ``future``."""
-    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
-    connector.dispatcher = None
-    connector.lazy_offload = False
-    connector._pinned_store_futures = {}
-    connector._finished_store_pins = []
-    connector._unsubmitted_store_pins = set()
-    connector._answered_store_pins = set()
+def _pending_future() -> MagicMock:
     future = MagicMock()
     future.query.return_value = False
-    adapter = MagicMock(store_futures={}, is_healthy=True)
-    adapter.submit_store_request.side_effect = (
-        lambda request_id, *args, **kwargs: adapter.store_futures.update(
-            {request_id: future}
-        )
-    )
-    connector.worker_adapter = adapter
+    return future
+
+
+def _store_metadata(pin_key: str | None) -> LMCacheMPConnectorMetadata:
     metadata = LMCacheMPConnectorMetadata()
     metadata.add_request_metadata(
         cast(
@@ -228,13 +216,52 @@ def _worker(pin_key: str | None = "req-0#0") -> tuple[LMCacheMPConnector, MagicM
             ),
         )
     )
-    connector._connector_metadata = metadata
+    return metadata
+
+
+def _worker(
+    pin_key: str | None = "req-0#0", *, healthy: bool = True, is_kv_writer: bool = True
+) -> tuple[LMCacheMPConnector, MagicMock]:
+    """A worker bound to one STORE; a real adapter whose submit creates
+    ``future`` (and then the next futures ``submit_store`` is given)."""
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector.dispatcher = None
+    connector.lazy_offload = False
+    connector._unsubmitted_store_pins = set()
+    connector._saved_metadata = None
+    future = _pending_future()
+    adapter: Any = LMCacheMPWorkerAdapter.__new__(LMCacheMPWorkerAdapter)
+    adapter.lazy_offload = False
+    adapter.dispatcher = None
+    adapter._health_event = threading.Event()
+    if healthy:
+        adapter._health_event.set()
+    # A non-None sentinel makes _ensure_heartbeat_started a no-op.
+    adapter._heartbeat = object()
+    # Rank 1 of two replicas holding only a replicated group is not a writer.
+    adapter.engine_group_infos = [EngineGroupInfo(0, (0,), tp_replicas=2)]
+    adapter.parallel_strategy = SimpleNamespace(kv_worker_id=0 if is_kv_writer else 1)
+    adapter.store_futures = {}
+    adapter.store_events = {}
+    adapter._completed_store_requests = {}
+    adapter._failed_store_requests = set()
+    adapter._pinned_store_futures = {}
+    adapter.kv_caches = MagicMock()
+    adapter.blocks_in_chunk = 1
+    adapter._create_key = MagicMock()
+    adapter._block_ids_per_group = MagicMock()
+    adapter.create_recorded_event = MagicMock(return_value=None)
+    adapter.transfer_ctx = MagicMock()
+    adapter.transfer_ctx.submit_store.return_value = future
+    adapter._require_transfer_ctx = MagicMock(return_value=adapter.transfer_ctx)
+    connector.worker_adapter = adapter
+    connector._connector_metadata = _store_metadata(pin_key)
     return connector, future
 
 
 def _reported(connector: LMCacheMPConnector) -> dict[str, int]:
     meta = connector.build_connector_worker_meta()
-    return {} if meta is None else meta.released_store_pins
+    return {} if meta is None else meta.completed_store_requests
 
 
 def test_worker_reports_a_pinned_store_once_its_future_ends() -> None:
@@ -243,7 +270,9 @@ def test_worker_reports_a_pinned_store_once_its_future_ends() -> None:
     connector.wait_for_save()
     # The worker never blocks on the store.
     future.wait.assert_not_called()
+    future.result.assert_not_called()
     transfer_ctx: Any = connector.worker_adapter.transfer_ctx
+    transfer_ctx.submit_store.assert_called_once()
     transfer_ctx.flush_inflight_stores.assert_not_called()
     assert _reported(connector) == {}
     assert _reported(connector) == {}
@@ -253,29 +282,25 @@ def test_worker_reports_a_pinned_store_once_its_future_ends() -> None:
     assert _reported(connector) == {}
 
 
-def test_answered_device_store_is_reported_when_its_event_query_lags() -> None:
-    # query() on the imported completion event can stay False after the
-    # server answered; result() synchronizes on the event.
+def test_answered_store_is_not_waited_for_while_its_copy_runs() -> None:
+    # The server answers before its copy is done. The worker keeps polling
+    # and never synchronizes on the copy event inside the engine step.
     connector, _ = _worker()
     future = MagicMock(spec=DeviceMessagingFuture)
     future.raw_future_ = MagicMock()
     future.query.return_value = False
-    future.raw_future_.query.return_value = False
-    connector.worker_adapter.submit_store_request.side_effect = (
-        lambda request_id, *args, **kwargs: (
-            connector.worker_adapter.store_futures.update({request_id: future})
-        )
-    )
+    future.raw_future_.query.return_value = True
+    adapter: Any = connector.worker_adapter
+    adapter.transfer_ctx.submit_store.return_value = future
 
     connector.wait_for_save()
-    assert _reported(connector) == {}
-
-    # Answered: the copy gets one more step before the worker waits for it.
-    future.raw_future_.query.return_value = True
-    assert _reported(connector) == {}
+    for _ in range(5):
+        assert _reported(connector) == {}
     future.result.assert_not_called()
+    future.wait.assert_not_called()
+
+    future.query.return_value = True
     assert _reported(connector) == {"req-0#0": 1}
-    future.result.assert_called_once()
     assert _reported(connector) == {}
 
 
@@ -295,17 +320,27 @@ def test_worker_does_not_report_an_unpinned_store() -> None:
     connector.wait_for_save()
     future.query.return_value = True
 
-    connector.worker_adapter.submit_store_request.assert_called_once()
+    adapter: Any = connector.worker_adapter
+    adapter.transfer_ctx.submit_store.assert_called_once()
     assert connector.build_connector_worker_meta() is None
+    assert adapter._pinned_store_futures == {}
 
 
-def test_worker_reports_a_pinned_store_it_did_not_submit() -> None:
+@pytest.mark.parametrize(
+    ("healthy", "is_kv_writer"),
+    [(True, False), (False, True)],
+    ids=["non-writer", "lost"],
+)
+def test_worker_reports_a_pinned_store_it_did_not_submit(
+    healthy: bool, is_kv_writer: bool
+) -> None:
     # A non-writer rank or an unhealthy server creates no store future.
-    connector, _ = _worker()
-    connector.worker_adapter.submit_store_request.side_effect = None
+    connector, _ = _worker(healthy=healthy, is_kv_writer=is_kv_writer)
 
     connector.wait_for_save()
 
+    adapter: Any = connector.worker_adapter
+    adapter.transfer_ctx.submit_store.assert_not_called()
     assert _reported(connector) == {"req-0#0": 1}
     assert _reported(connector) == {}
 
@@ -314,10 +349,30 @@ def test_worker_reports_pinned_stores_of_a_lost_server() -> None:
     connector, future = _worker()
     connector.wait_for_save()
     adapter: Any = connector.worker_adapter
-    adapter.is_healthy = False
+    adapter._health_event.clear()
 
     assert _reported(connector) == {"req-0#0": 1}
     future.query.assert_not_called()
+    assert _reported(connector) == {}
+
+
+def test_worker_reports_each_pinned_store_of_one_request() -> None:
+    # A request has several STOREs in flight without lazy offload, so a
+    # receipt per request id could not tell them apart.
+    connector, first = _worker()
+    second = _pending_future()
+    adapter: Any = connector.worker_adapter
+    adapter.transfer_ctx.submit_store.side_effect = [first, second]
+
+    connector.wait_for_save()
+    connector._connector_metadata = _store_metadata("req-0#1")
+    connector.wait_for_save()
+    assert _reported(connector) == {}
+
+    second.query.return_value = True
+    assert _reported(connector) == {"req-0#1": 1}
+    first.query.return_value = True
+    assert _reported(connector) == {"req-0#0": 1}
     assert _reported(connector) == {}
 
 
@@ -343,7 +398,23 @@ def test_worker_reports_a_pinned_store_whose_step_skipped_wait_for_save() -> Non
     connector._connector_metadata = LMCacheMPConnectorMetadata()
     assert _reported(connector) == {"req-0#0": 1}
     assert _reported(connector) == {}
-    connector.worker_adapter.submit_store_request.assert_not_called()
+    adapter: Any = connector.worker_adapter
+    adapter.transfer_ctx.submit_store.assert_not_called()
+
+
+def test_skipped_store_is_reported_when_the_next_step_saves_first() -> None:
+    # Same, on a vLLM that calls wait_for_save before it builds the worker
+    # metadata: the next step's own STORE is submitted, the skipped one is not.
+    connector, future = _worker()
+
+    assert _reported(connector) == {}
+    connector._connector_metadata = _store_metadata("req-0#1")
+    connector.wait_for_save()
+    assert _reported(connector) == {"req-0#0": 1}
+    assert _reported(connector) == {}
+
+    future.query.return_value = True
+    assert _reported(connector) == {"req-0#1": 1}
 
 
 # ------------------------------------------------------------------ #
