@@ -30,7 +30,7 @@ from lmcache.v1.distributed.api import (
 # re-RoPE reused KV from the wrong source position.
 UNKNOWN_TOKEN_OFFSET = -1
 
-CACHE_EVENT_SCHEMA_VERSION = 1
+CACHE_EVENT_SCHEMA_VERSION = 2
 """Version of the cache-event wire shape: :class:`CacheEventBatch` as carried
 by ``POST /events``. Bumped when a field is added, removed or changes meaning,
 so an ``events``-level trace file names the shape its records hold and a
@@ -147,12 +147,21 @@ class CacheEventEntry:
         token_offset: Token position of the chunk's first token in the
             sequence it was stored under; prefix-chained chunk hashes do
             not reveal it. :data:`UNKNOWN_TOKEN_OFFSET` when unreported.
+        parent_hash_hex: Hex ``chunk_hash`` of the chunk before this one in
+            the sequence it was stored under, stamped on ``store`` entries.
+            Empty for a sequence's first chunk or when unreported.
+        request_ids: The emitting instance's requests whose store
+            submitted this chunk, stamped on ``store`` entries. A list
+            because concurrent requests can submit the same chunk. Empty
+            when unreported.
     """
 
     key: EncodedObjectKey
     size_bytes: int = 0
     token_ids: list[int] = field(default_factory=list)
     token_offset: int = UNKNOWN_TOKEN_OFFSET
+    parent_hash_hex: str = ""
+    request_ids: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Enforce intrinsic invariants.
@@ -168,6 +177,26 @@ class CacheEventEntry:
                 f"token_offset must be >= 0 or UNKNOWN_TOKEN_OFFSET "
                 f"({UNKNOWN_TOKEN_OFFSET}), got {self.token_offset}"
             )
+
+
+@dataclass(frozen=True)
+class RequestLookup:
+    """A request's lookup that reached a cached chunk.
+
+    A request served from cache stores nothing, so it reaches the
+    coordinator only through this report. See
+    ``docs/design/v1/mp_coordinator/views/request_index.md``.
+
+    Attributes:
+        request_id: The request id on the emitting instance.
+        key: A key of the last chunk the request hit, in the request's own
+            namespace.
+        token_offset: Position of that chunk's first token.
+    """
+
+    request_id: str
+    key: EncodedObjectKey
+    token_offset: int
 
 
 @dataclass(frozen=True)
@@ -208,6 +237,11 @@ class CacheEventBatch:
             failed HTTP post. Cumulative, so a loss is reported by the
             next batch that does get through. ``0`` from emitters that do
             not report it.
+        lookups: Requests' lookup hits, carried on an ``access`` batch with
+            no entries so no consumer counts them as accesses. A batch-level
+            field, not an event type, because a coordinator rejects a whole
+            ``POST /events`` naming a type it does not know but ignores a
+            field it does not know.
     """
 
     instance_id: str
@@ -222,6 +256,7 @@ class CacheEventBatch:
     capacity_bytes: int = 0
     capacity_revision: int = 0
     dropped_events: int = 0
+    lookups: list[RequestLookup] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Enforce intrinsic invariants.

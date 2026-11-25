@@ -377,12 +377,14 @@ class CacheEventsRequest(BaseModel):
             The unchanged batches once every constraint holds.
 
         Raises:
-            ValueError: If an entry's key cannot convert into an
-                ``ObjectKey`` (surfaced as 422).
+            ValueError: If an entry's or a lookup's key cannot convert into
+                an ``ObjectKey`` (surfaced as 422).
         """
         for batch in value:
             for entry in batch.entries:
                 entry.key.to_object_key()
+            for lookup in batch.lookups:
+                lookup.key.to_object_key()
         return value
 
 
@@ -527,6 +529,89 @@ class DirectoryListResponse(BaseModel):
 
     total: int = 0
     keys: list[DirectoryKeyInfo] = Field(default_factory=list)
+
+
+class RequestKeyPlacements(BaseModel):
+    """One stored key of a request's chunk and where its KV lives now.
+
+    Attributes:
+        key: A key the chunk was stored under (one per rank and object
+            group).
+        placements: The key's current placements; empty once its KV has
+            been evicted everywhere.
+    """
+
+    key: EncodedObjectKey
+    placements: list[Placement] = Field(default_factory=list)
+
+
+class RequestChunkInfo(BaseModel):
+    """One chunk of a recovered request, in sequence order.
+
+    Attributes:
+        chunk_hash_hex: Hex ``ObjectKey.chunk_hash`` of the chunk.
+        token_offset: Position of the chunk's first token in the request.
+        num_tokens: Token ids the chunk holds.
+        keys: Every key the chunk was stored under, with its placements.
+    """
+
+    chunk_hash_hex: str
+    token_offset: int
+    num_tokens: int
+    keys: list[RequestKeyPlacements] = Field(default_factory=list)
+
+
+class RequestTraceResponse(BaseModel):
+    """Reply to ``GET /requests/{instance_id}/{request_id}``.
+
+    Attributes:
+        instance_id: The MP server that reported the request.
+        request_id: The request id on that server.
+        start_offset: Position of the first recovered token.
+        complete: ``True`` when the chunks reach back to position 0;
+            ``False`` when an ancestor chunk aged out of the index. It says
+            the chain is unbroken, not that the whole prompt came back.
+        token_ids: The request's tokens from ``start_offset`` through its
+            highest-offset chunk, stored or hit.
+        chunks: The chunks those tokens came from, in sequence order.
+    """
+
+    instance_id: str
+    request_id: str
+    start_offset: int
+    complete: bool
+    token_ids: list[int] = Field(default_factory=list)
+    chunks: list[RequestChunkInfo] = Field(default_factory=list)
+
+
+class ChunkRequestInfo(BaseModel):
+    """One request whose sequence contains a chunk.
+
+    Attributes:
+        instance_id: The MP server that reported the request.
+        request_id: The request id on that server.
+        model_name: The model the request ran under.
+        cache_salt: The request's tenant salt; empty when unset.
+    """
+
+    instance_id: str
+    request_id: str
+    model_name: str
+    cache_salt: str = ""
+
+
+class ChunkRequestsResponse(BaseModel):
+    """Reply to ``GET /chunks/{chunk_hash_hex}/requests``.
+
+    Attributes:
+        chunk_hash_hex: The chunk, echoed back.
+        total: Tracked requests whose sequence contains the chunk.
+        requests: The requested page of them.
+    """
+
+    chunk_hash_hex: str
+    total: int = 0
+    requests: list[ChunkRequestInfo] = Field(default_factory=list)
 
 
 class BlendLookupRequest(BaseModel):
