@@ -43,9 +43,12 @@ lmcache_args=(
     --eviction-policy LRU
     --max-workers "$MAX_WORKERS"
     --port "$LMCACHE_PORT"
-    --supported-transfer-mode "${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
 )
 
+# Without a mode the server keeps its own default, which follows its device.
+if [[ -n "${LMCACHE_MP_TRANSFER_MODE:-}" ]]; then
+    lmcache_args+=(--supported-transfer-mode "$LMCACHE_MP_TRANSFER_MODE")
+fi
 if [[ -n "${LMCACHE_HOST:-}" ]]; then
     lmcache_args+=(--host "$LMCACHE_HOST")
 fi
@@ -70,7 +73,10 @@ if [[ "${SEPARATE_OBJECT_GROUPS:-0}" == "1" || "${SEPARATE_OBJECT_GROUPS:-0}" ==
 fi
 
 server_environment=()
-if [[ "${ENGINE_USE_ALL_DEVICES:-false}" != "true" ]]; then
+if [[ "${LMCACHE_SERVER_CPU_ONLY:-false}" == "true" ]]; then
+    echo "Hiding all devices from the LMCache server (${DEVICE_AFFINITY_VAR}=)"
+    server_environment+=("${DEVICE_AFFINITY_VAR}=")
+elif [[ "${ENGINE_USE_ALL_DEVICES:-false}" != "true" ]]; then
     server_environment+=("${DEVICE_AFFINITY_VAR}=${GPU_FOR_ENGINE}")
 fi
 engine_add_lmcache_server_environment server_environment

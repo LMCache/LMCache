@@ -22,6 +22,19 @@ from lmcache.v1.multiprocess.ext_server_module import (
 logger = init_logger(__name__)
 
 
+def _default_supported_transfer_mode() -> Literal["lmcache_driven", "auto"]:
+    """Return the ``--supported-transfer-mode`` default for this server's device.
+
+    A server without an accelerator cannot open a GPU worker's IPC handles,
+    so it also loads the engine-driven path, which such a worker picks under
+    ``mp_transfer_mode=auto``.
+    """
+    # First Party
+    from lmcache import torch_device_type
+
+    return "auto" if torch_device_type == "cpu" else "lmcache_driven"
+
+
 class _DeprecatedStoreTrue(argparse.Action):
     """``store_true`` for a renamed flag: sets the new destination and warns."""
 
@@ -523,13 +536,14 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--supported-transfer-mode",
         type=str,
-        default="lmcache_driven",
+        default=_default_supported_transfer_mode(),
         choices=["lmcache_driven", "engine_driven", "auto"],
         help="Supported transfer mode: 'lmcache_driven' for server-driven "
         "transfer (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), "
         "'engine_driven' for engine-driven transfer (PREPARE/COMMIT), "
         "or 'auto' to enable both transfer paths. "
-        "Default is 'lmcache_driven'.",
+        "Default is 'lmcache_driven', or 'auto' on a server without an "
+        "accelerator, which cannot open a GPU worker's IPC handles.",
     )
     mp_group.add_argument(
         "--rocm-host-event-wait",

@@ -135,14 +135,15 @@ Source: ``lmcache/v1/multiprocess/config.py``
        ``--supported-transfer-mode`` to be ``lmcache_driven`` or ``auto``.
        Choices: ``default``, ``blend``.
    * - ``--supported-transfer-mode``
-     - ``lmcache_driven``
+     - ``lmcache_driven`` (``auto`` without an accelerator)
      - Which worker → server transfer paths the server loads.
-       ``lmcache_driven`` (default) enables only the server-driven
+       ``lmcache_driven`` enables only the server-driven
        transfer path (STORE/RETRIEVE, supports both CUDA IPC and CPU
        SHM); ``engine_driven`` enables only the non-GPU
        (PREPARE/COMMIT) transfer path; ``auto`` loads both
        so workers of either device type can connect without manual
-       configuration.
+       configuration. A server without an accelerator defaults to
+       ``auto`` because it cannot open a GPU worker's IPC handles.
        Choices: ``lmcache_driven``, ``engine_driven``, ``auto``.
    * - ``--isolated-ipc`` / ``--no-isolated-ipc``
      - ``false``

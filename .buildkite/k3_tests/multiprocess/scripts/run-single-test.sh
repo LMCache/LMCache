@@ -121,6 +121,12 @@ elif [ "$TEST_NAME" = "deadlock" ]; then
     export CHUNK_SIZE=256
     export CPU_BUFFER_SIZE=50
     export MAX_WORKERS=2
+elif [ "$TEST_NAME" = "cpu_server_auto" ]; then
+    # Both sides on their defaults: the LMCache server sees no GPU and gets no
+    # --supported-transfer-mode, and vLLM inherits no transfer mode.
+    export LMCACHE_SERVER_CPU_ONLY=true
+    unset LMCACHE_MP_TRANSFER_MODE
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
 elif [ "$TEST_NAME" = "lazy_offload" ]; then
     # The shared GPU launcher includes these values in the real vLLM
     # kv-transfer configuration only for this integration test.

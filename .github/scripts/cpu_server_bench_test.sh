@@ -76,7 +76,7 @@ echo "==> Starting lmcache server (log: ${LOG_FILE})"
 rm -f "${LOG_FILE}"
 
 # The server only loads the transfer paths named by
-# --supported-transfer-mode (default: lmcache_driven), so pass the
+# --supported-transfer-mode (default: auto on a CPU-only host), so pass the
 # bench's mode explicitly. The engine-driven leg also names a SHM
 # segment: the default --shm-name "" would silently downgrade it to
 # typed inline transport. Keep the name short — macOS caps POSIX SHM names

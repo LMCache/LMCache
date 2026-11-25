@@ -553,7 +553,7 @@ LMCACHE_ARGS=(
 #     sub-mode: SHM (--shm-name __default__) or inline (--shm-name "")
 #   lmcache_driven -> LMCacheDrivenTransferContext (server-side IPC handle)
 # The server only loads the paths named by --supported-transfer-mode
-# (default: lmcache_driven), so every leg passes it explicitly. Likewise
+# (default: auto on a CPU-only host), so every leg passes it explicitly. Likewise
 # the default --shm-name "" disables the SHM pool, so the shm legs name a
 # segment explicitly. Keep segment names short: macOS caps POSIX SHM
 # names at 31 chars including the server's lmcache_l1_pool_ prefix.

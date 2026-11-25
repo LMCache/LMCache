@@ -481,6 +481,20 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
+      # Both sides on their defaults: an LMCache server that sees no GPU and
+      # vLLM on GPU 0 with no transfer mode set. The worker's auto must pick
+      # engine_driven, and a repeated request must be served from LMCache.
+      - label: ":compression: {{matrix.inference_engine}} / cpu_server_auto / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh cpu_server_auto
+        matrix: *vllm-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
       - label: ":compression: {{matrix.inference_engine}} / http_api / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh http_api
         matrix: *common-matrix

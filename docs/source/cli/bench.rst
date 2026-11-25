@@ -1221,10 +1221,9 @@ to the much slower typed inline tensor transport. In ``lmcache_driven`` mode,
 the CPU wrapper migrates the tensors to POSIX SHM during registration.
 
 By default ``--mode cpu`` uses the engine-driven gather/scatter path
-(``auto`` → ``cpu→engine_driven``); that path requires the server to
-be started with ``--supported-transfer-mode engine_driven`` or
-``auto``, since the server's default ``lmcache_driven`` does not load
-it. To use the zero-copy SHM handle path instead, pass
+(``auto`` → ``cpu→engine_driven``), which a CPU-only server loads
+because its ``--supported-transfer-mode`` defaults to ``auto``. To use
+the zero-copy SHM handle path instead, pass
 ``--transfer-mode lmcache_driven``:
 
 .. code-block:: bash

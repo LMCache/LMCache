@@ -343,15 +343,18 @@ used for STORE/RETRIEVE) and an **engine-driven** path
 (PREPARE/COMMIT, used by CPU-only or non-CUDA accelerator workers).
 The server picks which paths to load via ``--supported-transfer-mode``:
 
-- ``lmcache_driven`` *(default)* -- load only the server-driven
-  transfer path.  Supports CUDA devices (IPC) and CPU devices (SHM),
-  and skips allocating the engine-driven prepare/commit resources
-  (inline tensor codec).
+- ``lmcache_driven`` *(default with an accelerator)* -- load only the
+  server-driven transfer path.  Supports CUDA devices (IPC) and CPU
+  devices (SHM), and skips allocating the engine-driven prepare/commit
+  resources (inline tensor codec).
 - ``engine_driven`` -- load only the engine-driven path.  Use when
   serving CPU-only or non-CUDA accelerator workers.
-- ``auto`` -- load both paths.  Workers of either device
-  type can connect without manual configuration; the server has no
-  upfront knowledge of the connecting worker's device.
+- ``auto`` *(default without an accelerator)* -- load both paths.
+  Workers of either device type can connect without manual
+  configuration; the server has no upfront knowledge of the connecting
+  worker's device.  A CPU-only server cannot open a GPU worker's IPC
+  handles, so a GPU worker left on ``mp_transfer_mode=auto`` uses the
+  engine-driven path there.
 
 When the engine-driven path is loaded (``auto`` or ``engine_driven``), the
 server offers workers one of two engine-driven transports:

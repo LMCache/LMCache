@@ -27,6 +27,7 @@ from lmcache.v1.multiprocess.config import (
     parse_args_to_coordinator_config,
     parse_args_to_mp_server_config,
 )
+import lmcache
 
 _COORD_ENV = (
     "LMCACHE_COORDINATOR_URL",
@@ -250,6 +251,22 @@ def test_isolated_ipc_defaults_to_false():
 def test_isolated_ipc_flag_enables():
     assert _parse_mp(["--isolated-ipc"]).isolated_ipc is True
     assert _parse_mp(["--no-isolated-ipc"]).isolated_ipc is False
+
+
+@pytest.mark.parametrize(
+    ("device_type", "expected"),
+    [
+        # A CPU-only server cannot open a GPU worker's IPC handles (#4186).
+        ("cpu", "auto"),
+        ("cuda", "lmcache_driven"),
+    ],
+)
+def test_supported_transfer_mode_default_follows_server_device(
+    monkeypatch, device_type, expected
+):
+    monkeypatch.setattr(lmcache, "torch_device_type", device_type)
+
+    assert _parse_mp([]).supported_transfer_mode == expected
 
 
 # -- Engine type --------------------------------------------------------------
