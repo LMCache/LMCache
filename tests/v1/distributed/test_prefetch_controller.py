@@ -1481,6 +1481,8 @@ class AdmissionRacingL1Manager:
 
 _NOT_RACED_L1_CALLS = frozenset(
     {
+        "register_listener",
+        "unregister_listener",
         "get_memory_tags",
         "get_memory_usage",
         "get_staging_memory_usage",
@@ -1513,7 +1515,7 @@ class EvictionRacingL1Manager:
 
     def __getattr__(self, name: str):
         attr = getattr(self._inner, name)
-        # Memory tags are static metadata read when the controller is built,
+        # Listeners and memory tags are controller lifecycle operations,
         # and the usage reads are admission bookkeeping made before the
         # request locks anything: neither is a request-path call for the
         # evictor to race with.
@@ -2460,10 +2462,26 @@ def watermark_for(l1_manager: DramL1Manager, num_objects: float) -> float:
 
 
 class TestPrefetchLockedBudget:
-    def test_unconsumed_loads_hold_back_new_requests(self):
+    @pytest.mark.parametrize(
+        "priority, queue",
+        [
+            (PrefetchPriority.NORMAL, "pending_queue_size"),
+            (PrefetchPriority.HIGH, "high_priority_queue_size"),
+        ],
+    )
+    def test_unconsumed_loads_hold_back_new_requests(
+        self, monkeypatch, priority, queue
+    ):
         """Loaded-but-unconsumed objects count against the watermark:
         once they fill it, a new request waits with nothing in flight, and it
         starts as soon as the earlier reader releases its objects."""
+        # The release itself must wake the queue, independently of the
+        # periodic retry used for silent read-TTL expiry.
+        monkeypatch.setattr(
+            "lmcache.v1.distributed.storage_controllers.prefetch_controller."
+            "PREFETCH_LOOP_POLL_TIMEOUT_MS",
+            60_000,
+        )
         l1_manager = make_budget_l1()
         adapter = make_adapter()
         layout = make_layout()
@@ -2485,10 +2503,12 @@ class TestPrefetchLockedBudget:
             assert row_bits(first) == [0, 1] and row_bits(second) == [0, 1]
             assert l1_manager.get_prefetch_locked_bytes() == 4 * OBJECT_BYTES
 
-            third_id = ctrl.submit_prefetch_request(single_row_spec(keys[4:6]))
-            assert wait_for_condition(
-                lambda: ctrl.report_status()["pending_queue_size"] == 1
-            ), ctrl.report_status()
+            third_id = ctrl.submit_prefetch_request(
+                single_row_spec(keys[4:6], priority=priority)
+            )
+            assert wait_for_condition(lambda: ctrl.report_status()[queue] == 1), (
+                ctrl.report_status()
+            )
             assert ctrl.report_status()["in_flight_request_count"] == 0
             assert ctrl.query_prefetch_result(third_id) is None
 

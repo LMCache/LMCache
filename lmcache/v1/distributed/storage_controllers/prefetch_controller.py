@@ -16,7 +16,9 @@ releasing a request at any point is a walk over its maps.
 """
 
 # Standard
+from collections.abc import Callable
 from collections import Counter, defaultdict, deque
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import enum
@@ -41,7 +43,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1ManagerInterface
+from lmcache.v1.distributed.internal_api import L1ManagerInterface, L1ManagerListener
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
@@ -532,6 +534,37 @@ class InFlightPrefetchRequest:
         return not self.inflight_load_tasks
 
 
+class _AdmissionWakeListener(L1ManagerListener):
+    """Wake blocked prefetches after L1 readers, writers or eviction free capacity."""
+
+    def __init__(self, wake: Callable[[], None]) -> None:
+        self._wake = wake
+
+    def on_l1_keys_read_finished(self, keys: list[ObjectKey]) -> None:
+        if keys:
+            self._wake()
+
+    def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]) -> None:
+        if keys:
+            self._wake()
+
+    def on_l1_keys_write_finished(self, keys: list[ObjectKey]) -> None:
+        if keys:
+            self._wake()
+
+    def on_l1_keys_reserved_read(self, keys: list[ObjectKey]) -> None:
+        pass
+
+    def on_l1_keys_reserved_write(self, keys: list[ObjectKey]) -> None:
+        pass
+
+    def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]) -> None:
+        pass
+
+    def on_l1_keys_accessed(self, keys: list[ObjectKey]) -> None:
+        pass
+
+
 class PrefetchController(StorageControllerInterface):
     """
     Asynchronously prefetches data from L2 adapters into L1 memory.
@@ -873,6 +906,12 @@ class PrefetchController(StorageControllerInterface):
     # Lifecycle
     # =========================================================================
 
+    def _wake_pending_admission(self) -> None:
+        # A blocked head stays in the queue until admitted. New requests wake
+        # the loop themselves, so a release with empty queues needs no syscall.
+        if self._high_priority_queue or self._pending_queue:
+            self._submission_efd.notify()
+
     def start(self) -> None:
         """Start the background prefetch loop thread."""
         logger.info("Starting PrefetchController...")
@@ -953,6 +992,14 @@ class PrefetchController(StorageControllerInterface):
     # =========================================================================
 
     def _prefetch_loop(self) -> None:
+        listener = _AdmissionWakeListener(self._wake_pending_admission)
+        with ExitStack() as cleanup:
+            for manager in self._l1_managers.values():
+                manager.register_listener(listener)
+                cleanup.callback(manager.unregister_listener, listener)
+            self._poll_prefetch_events()
+
+    def _poll_prefetch_events(self) -> None:
         """
         Main event-driven loop running in a background thread.
 
