@@ -49,6 +49,22 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1gpu-dshm } }]
         artifact_paths: ["*.log"]
 
+      # vLLM on the lmcache-client wheel from its own venv, against a server
+      # from the full lmcache. engine_driven is soft until it has passed on GPU:
+      # the CPU client wheel has no lmcache.cuda_ops, so the worker falls back
+      # to the torch kernels. client-wheel.sh exits 42 when only it fails.
+      - label: ":zap: vllm / client_wheel / grpc"
+        command: .buildkite/k3_tests/multiprocess/run.sh client_wheel
+        env:
+          INFERENCE_ENGINE: "vllm"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
+        timeout_in_minutes: 45
+        soft_fail:
+          - exit_status: 42
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu-dshm } }]
+        artifact_paths: ["*.log", "ci_results_*/client_wheel/*.txt"]
+
       - label: ":zap: vllm / restart_recovery / grpc"
         command: .buildkite/k3_tests/multiprocess/run.sh restart_recovery
         env:

@@ -185,7 +185,7 @@ echo "Results dir: $RESULTS_DIR"
 echo ""
 
 # Tests that still handle their own server lifecycle.
-SELF_CONTAINED_TESTS=" mp_autostart_tp2 p2p p2p_write kimi_linear_tp dsv4_flash_tp "
+SELF_CONTAINED_TESTS=" mp_autostart_tp2 client_wheel p2p p2p_write kimi_linear_tp dsv4_flash_tp "
 
 # Tests that compare against a baseline engine (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
