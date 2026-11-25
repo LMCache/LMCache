@@ -1,8 +1,10 @@
 # Module Dependencies
 
-LMCache code is split into six parts. Each part may import only the parts its
-arrows point to. The rules live in one file, `tools/module_deps.yaml`, and
-`tools/check_module_deps.py` enforces them in pre-commit and CI.
+LMCache code is split into six parts. Each part may import the parts its arrows
+lead to, directly or through other parts: integration may import common, since
+integration depends on client and client on common. The rules live in one file,
+`tools/module_deps.yaml`, and `tools/check_module_deps.py` enforces them in
+pre-commit and CI.
 
 ```mermaid
 flowchart BT
@@ -41,7 +43,7 @@ belong, is in `tools/module_deps.yaml`.
 ## Exceptions
 
 `exceptions` in the rules file lists the places that break the tree today, by
-part or package, for example `integration -> common`. Delete a line once its
+part or package, for example `transport -> client`. Delete a line once its
 imports are fixed; the check fails on a line that matches nothing. Do not add a
 line to get a new import past the check. Move the shared code into a part both
 sides may import instead, usually common.
@@ -51,7 +53,5 @@ sides may import instead, usually common.
 - A new import inside an excepted part or package passes.
 - Dynamic imports whose target is computed at run time, `importlib.util`,
   `runpy`, `exec`, `sys.modules` and entry points are not checked.
-- The check only sees import direction. A part can still pass along what it
-  imported, for example integration reaching a common name through client.
 - Draft pull requests skip pre-commit, so the check runs once a PR is ready for
   review.

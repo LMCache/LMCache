@@ -2,9 +2,10 @@
 """Check that lmcache imports follow the rules in tools/module_deps.yaml.
 
 The rules file is the only source of the dependency tree; this script reads it
-and reports every import between parts that ``allowed`` does not permit and no
-``exceptions`` line covers. It also fails on an exception that matches nothing,
-and when docs/design/MODULE_DEPENDENCIES.md disagrees with ``allowed``.
+and reports every import between parts that no chain of ``allowed`` arrows
+permits and no ``exceptions`` line covers. It also fails on an exception that
+matches nothing, and when docs/design/MODULE_DEPENDENCIES.md disagrees with
+``allowed``.
 
 Import statements count wherever they are, including ``TYPE_CHECKING`` blocks
 and function bodies, as do attribute chains such as ``lmcache.v1.client.x``.
@@ -38,7 +39,8 @@ class Rules:
         packages: ``(package, part)`` pairs, longest package first.
         modules: Single modules placed in a part without their submodules.
         outside: Packages that are not part of the tree.
-        allowed: Parts each part may import.
+        allowed: The diagram's arrows, as the parts each part depends on
+            directly.
         exceptions: ``(importer, target)`` pairs; each side is a part name or a
             package.
     """
@@ -276,8 +278,26 @@ def _matches(side: str, module: str, part: str, rules: Rules) -> bool:
     return side == part if side in rules.allowed else _within(module, side)
 
 
+def _reachable(allowed: dict[str, list[str]]) -> dict[str, set[str]]:
+    """Return the parts each part reaches by following ``allowed`` arrows."""
+    reach: dict[str, set[str]] = {}
+    for part in allowed:
+        seen: set[str] = set()
+        todo = list(allowed[part])
+        while todo:
+            target = todo.pop()
+            if target not in seen:
+                seen.add(target)
+                todo.extend(allowed[target])
+        reach[part] = seen
+    return reach
+
+
 def check(root: Path, rules: Rules) -> tuple[list[str], list[str]]:
     """Find imports that break the tree, and exceptions that match nothing.
+
+    A part may import every part its arrows lead to, directly or through
+    other parts.
 
     Args:
         root: Repository root that contains the ``lmcache`` package.
@@ -291,6 +311,7 @@ def check(root: Path, rules: Rules) -> tuple[list[str], list[str]]:
         SyntaxError: If a module under ``root/lmcache`` cannot be parsed.
     """
     modules = _collect_modules(root)
+    reachable = _reachable(rules.allowed)
     violations: list[str] = []
     used: set[tuple[str, str]] = set()
     for module, path in modules.items():
@@ -301,7 +322,7 @@ def check(root: Path, rules: Rules) -> tuple[list[str], list[str]]:
             target_part = part_of(target, rules)
             if target_part is None or target_part == source:
                 continue
-            if target_part in rules.allowed[source]:
+            if target_part in reachable[source]:
                 continue
             covering = [
                 exc

@@ -52,7 +52,9 @@ _SOURCES = {
     "lmcache/sdk/__init__.py": "from lmcache.v1.client import c\n",
     "lmcache/integration/__init__.py": "",
     "lmcache/integration/i.py": (
-        "from lmcache.v1.client import c\nfrom lmcache.v1.common import a\n"
+        "from lmcache.v1.client import c\n"
+        "from lmcache.v1.common import a\n"
+        "from lmcache.v1.gpu_connector import gds_context\n"
     ),
     "docs/design/MODULE_DEPENDENCIES.md": (_REPO / _deps.DOC).read_text(),
 }
@@ -64,7 +66,10 @@ def test_check_reports_imports_outside_the_tree(tmp_path: Path) -> None:
         (tmp_path / name).write_text(source, encoding="utf-8")
     rules = replace(
         _deps.load_rules(_REPO / _deps.RULES),
-        exceptions=[("integration", "common"), ("lmcache.sdk", "client")],
+        exceptions=[
+            ("integration", "lmcache.v1.gpu_connector"),
+            ("lmcache.sdk", "client"),
+        ],
     )
 
     violations, unused = _deps.check(tmp_path, rules)

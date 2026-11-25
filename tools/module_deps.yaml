@@ -21,7 +21,8 @@ modules:
 # Not part of the tree: not checked, and any part may use them.
 outside: [lmcache.cli, lmcache.sdk, lmcache.inprocess]
 
-# The parts each part may import. Imports within a part are always allowed.
+# The diagram's arrows. A part may import every part its arrows lead to,
+# directly or through other parts. Imports within a part are always allowed.
 allowed:
   common: []
   platform: [common]
@@ -33,9 +34,6 @@ allowed:
 # Imports that break the tree today, as "<part or package> -> <part or package>".
 # Delete a line once nothing matches it; the check fails on a stale line.
 exceptions:
-  - integration -> common
-  - integration -> platform
-  - integration -> transport
   - transport -> client
   - lmcache.v1.distributed -> client
   - lmcache.v1.multiprocess -> client
