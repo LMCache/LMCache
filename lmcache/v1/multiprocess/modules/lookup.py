@@ -26,7 +26,6 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
-from lmcache.v1.multiprocess.affinity_pool import DeferredResponse
 from lmcache.v1.multiprocess.engine_context import (
     MPCacheServerContext,
     check_chunk_hash_key,
@@ -43,7 +42,11 @@ from lmcache.v1.multiprocess.kv_load_policy import (
     KVLoadPolicy,
     create_kv_load_policy,
 )
-from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.request_handler import (
+    DeferredResponse,
+    HandlerType,
+    request_handler,
+)
 from lmcache.v1.multiprocess.session import Session
 
 logger = init_logger(__name__)
@@ -143,8 +146,9 @@ class _PrefetchJob:
     # prefetch was submitted.
     row_windows: tuple[int, ...]
     request_id: str
-    # Chunk-aligned tokens LMCache was asked to look up, past the engine-covered
-    # prefix (hit-rate denominator); 0 on early exits.
+    # Tokens LMCache was asked to look up, past the engine-covered prefix
+    # (hit-rate denominator): the full chunks, plus the sub-chunk tail when the
+    # lookup probes the unfull chunk; 0 on early exits.
     requested_tokens: int
     chunk_size: int
     num_object_groups: int = 1
@@ -357,7 +361,11 @@ class LookupModule(DiscoverableModule):
             model_name, world_size
         )
         chunk_hashes = _key_chunk_hashes(token_hasher, key, end=key.end)
-        if not chunk_hashes:
+        # A prompt shorter than one chunk has no full-chunk hash. A connector
+        # that loads unfull chunks still sends its unaligned length, so carry
+        # on: the empty job below probes the tail stored inside chunk 0. An
+        # aligned end (0 here) asks for no tail, so it returns now.
+        if not chunk_hashes and key.end % chunk_size == 0:
             self._register_empty_prefetch_job(
                 key,
                 chunk_size=chunk_size,
@@ -365,12 +373,15 @@ class LookupModule(DiscoverableModule):
             )
             return
 
-        # Total chunk-aligned tokens submitted for lookup; surfaces as the
-        # denominator of the L1+L2 token-level hit-rate via the
-        # ``requested_tokens`` field on ``MP_LOOKUP_PREFETCH_END``.  Sub-chunk
-        # trailing tokens are intentionally excluded — they cannot hit at
-        # chunk granularity.
+        # Chunk-aligned tokens submitted for lookup; the full-chunk prefetch
+        # and the load policy work on these.
         requested_tokens = len(chunk_hashes) * chunk_size
+        # Sub-chunk trailing tokens past the last full chunk. A lookup that
+        # probes the unfull chunk can hit them (a tail saved by
+        # ``save_unfull_chunk``), so they join its hit-rate denominator; a
+        # connector that does not load unfull chunks sends an aligned end,
+        # which leaves none.
+        unfull_tail_tokens = max(0, min(key.end, key.num_tokens) - requested_tokens)
 
         # Guard with has_subscribers() to avoid allocating the metadata dict
         # (including dtype/shape list comprehensions) when no subscriber is
@@ -410,6 +421,9 @@ class LookupModule(DiscoverableModule):
         # The engine-covered prefix is never looked up, so it is excluded from
         # the hit-rate denominator and reported separately.
         looked_up_tokens = requested_tokens - start_chunk * chunk_size
+        # The paths below that probe the unfull chunk also count its tokens,
+        # so a tail hit can never push the hit rate above 1.
+        probed_tokens = looked_up_tokens + unfull_tail_tokens
         session.begin_lookup(key)
 
         group_layout_descs = self._ctx.layout_desc_registry.find_group_layout_descs(
@@ -472,11 +486,12 @@ class LookupModule(DiscoverableModule):
         # Prefetch only [start, end); status offsets hits back to absolute.
         suffix_hashes = chunk_hashes[start_chunk:]
         if not suffix_hashes:
-            # Everything is engine-covered: nothing to lock or prefetch. The
-            # empty job still reports the covered prefix as the hit.
+            # Every full chunk is engine-covered, or there is none: nothing to
+            # lock or prefetch. The empty job still reports the covered prefix
+            # as the hit and probes the unfull chunk after it.
             self._register_empty_prefetch_job(
                 key,
-                requested_tokens=looked_up_tokens,
+                requested_tokens=probed_tokens,
                 chunk_size=chunk_size,
                 num_object_groups=attn_desc.num_object_groups,
                 attn_desc=attn_desc,
@@ -505,7 +520,7 @@ class LookupModule(DiscoverableModule):
                 handle=handle,
                 row_windows=tuple(row.sliding_window_size for row in spec.key_groups),
                 request_id=key.request_id,
-                requested_tokens=looked_up_tokens,
+                requested_tokens=probed_tokens,
                 chunk_size=chunk_size,
                 num_object_groups=attn_desc.num_object_groups,
                 attn_desc=attn_desc,
@@ -851,7 +866,8 @@ class LookupModule(DiscoverableModule):
                 submitting a prefetch; empty when the lookup simply had
                 nothing to fetch.
             probe_unfull_chunk: Probe the unfull chunk after the hit prefix;
-                set when every full chunk is engine-covered.
+                set when every full chunk is engine-covered or the prompt has
+                no full chunk.
         """
         self._register_prefetch_job(
             _PrefetchJob(
@@ -944,7 +960,17 @@ class LookupModule(DiscoverableModule):
 
         chunk_size = job.chunk_size
         covered_tokens = job.engine_covered_chunks * chunk_size
-        hit_tokens = (l1_chunks + l2_chunks) * chunk_size
+        # A locked unfull chunk extends the full-chunk hit up to its boundary.
+        # Only its tokens past the hit prefix are added: the returned count
+        # also holds the engine-covered prefix, which the hit counters exclude.
+        # Unfull chunks are probed in L1 only, so the tail is an L1 hit.
+        unfull_hit_tokens = (
+            unfull_chunk_boundary - found_count * chunk_size
+            if unfull_chunk_boundary
+            else 0
+        )
+        l1_hit_tokens = l1_chunks * chunk_size + unfull_hit_tokens
+        hit_tokens = (l1_chunks + l2_chunks) * chunk_size + unfull_hit_tokens
         # Prefix served by either cache: both ranges start at 0 and overlap in
         # the sub-chunk gap below the lookup start, so take the longer, not the sum.
         request_hit_tokens = max(job.engine_hit_tokens, covered_tokens + hit_tokens)
@@ -959,7 +985,7 @@ class LookupModule(DiscoverableModule):
                     # engine-covered prefix gets its own field.
                     "apc_covered_tokens": covered_tokens,
                     "hit_tokens": hit_tokens,
-                    "l1_hit_tokens": l1_chunks * chunk_size,
+                    "l1_hit_tokens": l1_hit_tokens,
                     "l2_hit_tokens": l2_chunks * chunk_size,
                     # Request-level view: the whole prompt as denominator and
                     # what the engine plus LMCache served as numerator.

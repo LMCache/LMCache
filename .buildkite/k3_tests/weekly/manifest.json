@@ -12,10 +12,10 @@
   ],
   "workload_skip_annotation_prefix": "weekly-skip-",
   "expected_unsupported": [
-    "sglang / deadlock / zmq",
-    "sglang / long_doc_qa_l2 / zmq",
-    "sglang / lm_eval_preemption / lmcache_driven / zmq",
-    "sglang / lm_eval_preemption / engine_driven / zmq"
+    "sglang / deadlock / grpc",
+    "sglang / long_doc_qa_l2 / grpc",
+    "sglang / lm_eval_preemption / lmcache_driven / grpc",
+    "sglang / lm_eval_preemption / engine_driven / grpc"
   ],
   "pipelines": [
     {
@@ -49,6 +49,7 @@
         " / cache_stats / ",
         " / p2p_write / ",
         " / lazy_offload / ",
+        " / eviction_aware_lazy_offload / ",
         " / sleep_mode / ",
         " / http_api / ",
         " / gds_smoke / ",

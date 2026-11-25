@@ -8,15 +8,10 @@ worker thread.  Within each worker, tasks execute sequentially in FIFO order.
 This is used for GPU-bound request handlers (STORE / RETRIEVE) so that all
 operations for a given vLLM instance land on one thread, eliminating the need
 for per-instance locks on the shared temporary GPU buffer.
-
-A task may return a :class:`DeferredResponse`: its worker is then free for the
-next task, and the submitter's future completes when the response does.
 """
 
 # Standard
 from concurrent.futures import Future
-from typing import Callable, Generic, TypeVar
-import functools
 import queue
 import threading
 
@@ -27,53 +22,6 @@ logger = init_logger(__name__)
 
 # Sentinel object to signal worker shutdown
 _SHUTDOWN = object()
-
-
-ResponseT = TypeVar("ResponseT")
-
-
-class DeferredResponse(Future, Generic[ResponseT]):
-    """A task result that is completed after the task has returned.
-
-    The reply is ``resume()`` once the future is done, which by default is the
-    future's result. A NON_BLOCKING handler passes its own ``resume``, which
-    the transport runs on a normal worker; this pool runs it on the thread
-    that completes the future.
-    """
-
-    def __init__(self, resume: Callable[[], ResponseT] | None = None) -> None:
-        super().__init__()
-        self._resume = resume
-
-    def resume(self) -> ResponseT:
-        """Return the reply. Call only once the future is done."""
-        if self._resume is None:
-            return self.result()
-        return self._resume()
-
-
-def _complete_from(target: Future, source: DeferredResponse) -> None:
-    exc = source.exception()
-    if exc is not None:
-        target.set_exception(exc)
-    else:
-        target.set_result(source.resume())
-
-
-_worker_local = threading.local()
-
-
-def current_worker_poster() -> Callable[[Callable[[], None]], None] | None:
-    """Return a function that queues a call on the calling worker thread, or
-    None outside a worker. The call must handle its own exceptions."""
-    q = getattr(_worker_local, "queue", None)
-    if q is None:
-        return None
-
-    def post(fn: Callable[[], None]) -> None:
-        q.put((Future(), fn, (), {}))
-
-    return post
 
 
 class AffinityThreadPool:
@@ -125,7 +73,6 @@ class AffinityThreadPool:
 
     @staticmethod
     def _worker(q: queue.Queue) -> None:
-        _worker_local.queue = q
         while True:
             item = q.get()
             if item is _SHUTDOWN:
@@ -134,11 +81,6 @@ class AffinityThreadPool:
             if future.set_running_or_notify_cancel():
                 try:
                     result = fn(*args, **kwargs)
-                    if isinstance(result, DeferredResponse):
-                        result.add_done_callback(
-                            functools.partial(_complete_from, future)
-                        )
-                        continue
                     future.set_result(result)
                 except BaseException as exc:
                     future.set_exception(exc)

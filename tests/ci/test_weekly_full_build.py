@@ -22,7 +22,9 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / ".github/scripts/weekly_full_build.py"
 MANIFEST = REPO / ".buildkite/k3_tests/weekly/manifest.json"
+XPU_MANIFEST = REPO / ".buildkite/k3_tests/weekly/manifest-xpu.json"
 MP_PIPELINE = REPO / ".buildkite/k3_tests/multiprocess/pipeline.yml"
+XPU_MP_PIPELINE = REPO / ".buildkite/k3_tests/xpu/multiprocess/pipeline.yml"
 UPLOAD = REPO / ".buildkite/k3_tests/common_scripts/upload-pipeline.sh"
 
 
@@ -39,6 +41,11 @@ def gate() -> ModuleType:
 @pytest.fixture(scope="module")
 def manifest() -> dict[str, Any]:
     return json.loads(MANIFEST.read_text())
+
+
+@pytest.fixture(scope="module")
+def xpu_manifest() -> dict[str, Any]:
+    return json.loads(XPU_MANIFEST.read_text())
 
 
 def _job(name: str, state: str = "passed", **fields: Any) -> dict[str, Any]:
@@ -144,6 +151,32 @@ def test_unsupported_workload_skip_fails_unless_expected(
 
     expected = dict(manifest, expected_unsupported=["sglang / sleep_mode /"])
     assert gate.evaluate(expected, builds, annotations)["passed"]
+
+
+def test_manifest_allows_expected_sglang_unsupported_skips(
+    gate: ModuleType, manifest: dict
+) -> None:
+    builds = _passing_builds(manifest)
+    annotations = {
+        "k3-multiprocess-test": [
+            {
+                "context": f"weekly-skip-{i}",
+                "body_html": (
+                    "<p>Skipped as unsupported: "
+                    f"<code>:compression: sglang / {workload} / grpc</code></p>"
+                ),
+            }
+            for i, workload in enumerate(
+                [
+                    "deadlock",
+                    "long_doc_qa_l2",
+                    "lm_eval_preemption / lmcache_driven",
+                    "lm_eval_preemption / engine_driven",
+                ]
+            )
+        ]
+    }
+    assert gate.evaluate(manifest, builds, annotations)["passed"]
 
 
 @pytest.mark.parametrize(
@@ -268,6 +301,49 @@ def test_every_multiprocess_workload_is_required(manifest: dict) -> None:
     # lm_eval runs as lm_eval_<mode>; the pin canaries reuse vllm_bench/lm_eval.
     unlisted = {w for w in workloads if w not in required and f"{w}_" not in required}
     assert not unlisted, f"add these workloads to {MANIFEST.name}: {sorted(unlisted)}"
+
+
+def test_complete_xpu_passing_run_passes(
+    gate: ModuleType, xpu_manifest: dict[str, Any]
+) -> None:
+    report = gate.evaluate(xpu_manifest, _passing_builds(xpu_manifest), {})
+    assert report["passed"], report
+
+
+def test_every_xpu_multiprocess_workload_is_required(
+    xpu_manifest: dict[str, Any],
+) -> None:
+    """Every expanded job in xpu/multiprocess/pipeline.yml must match manifest-xpu."""
+    # Third Party
+    import yaml
+
+    pipeline = yaml.safe_load(XPU_MP_PIPELINE.read_text(encoding="utf-8"))
+    labels: list[str] = []
+    for group in pipeline["steps"]:
+        for step in group.get("steps", []):
+            raw = step["label"]
+            transports = step.get("matrix", {}).get("setup", {}).get("transport") or [
+                None
+            ]
+            for t in transports:
+                labels.append(
+                    raw.replace("{{matrix.transport}}", t) if t is not None else raw
+                )
+
+    spec = next(p for p in xpu_manifest["pipelines"] if p["slug"] == "xpu-mp-test")
+    patterns = [re.compile(p) for p in spec["required"]]
+    unmatched_labels = [
+        lbl for lbl in labels if not any(p.search(lbl) for p in patterns)
+    ]
+    unused_patterns = [
+        p.pattern for p in patterns if not any(p.search(lbl) for lbl in labels)
+    ]
+    assert not unmatched_labels, (
+        f"add these XPU jobs to {XPU_MANIFEST.name}: {unmatched_labels}"
+    )
+    assert not unused_patterns, (
+        f"unused patterns in {XPU_MANIFEST.name}: {unused_patterns}"
+    )
 
 
 def test_fetch_annotations_paginates(

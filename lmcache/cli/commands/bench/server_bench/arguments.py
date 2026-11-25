@@ -135,7 +135,7 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
             "'(1,1024,16,1,128):float16:4;"
             "(2,1024,16,8,128):float16:28'. "
             "All groups must share the same NB and BS. "
-            "See lmcache.v1.kv_layer_groups.parse_kvcache_shape_spec "
+            "See lmcache.v1.common.kv_layer_groups.parse_kvcache_shape_spec "
             "for the authoritative parser. Default: '%s'" % _DEFAULT_SHAPE_SPEC
         ),
     )

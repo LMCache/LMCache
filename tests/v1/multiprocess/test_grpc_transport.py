@@ -25,10 +25,6 @@ from lmcache.v1.client.kv_event_subscriber import (
     KVEventStreamClosed,
     MPKVEventSubscriber,
 )
-from lmcache.v1.client.transport.errors import (
-    MPRequestError,
-    MPServerUnavailableError,
-)
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
@@ -47,7 +43,6 @@ from lmcache.v1.common.custom_types import (
 )
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.p2p import P2PClient
-from lmcache.v1.multiprocess.affinity_pool import DeferredResponse
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.ext_server_module import ExtServerModuleRouter
 from lmcache.v1.multiprocess.modules.blend import BlendModule
@@ -62,6 +57,7 @@ from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.plugin_modules.qstore import QStoreModule
 from lmcache.v1.multiprocess.request_handler import (
+    DeferredResponse,
     HandlerType,
     iter_request_handlers,
     request_handler,
@@ -79,6 +75,10 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     validate_method_handler,
 )
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
+from lmcache.v1.transport.errors import (
+    MPRequestError,
+    MPServerUnavailableError,
+)
 from lmcache.v1.transport.futures import MessagingStream
 from lmcache.v1.transport.grpc import proto_codec
 from lmcache.v1.transport.grpc.codecs import (
@@ -228,6 +228,7 @@ def grpc_client(
             self, payload: RegisterEngineDrivenContextPayload
         ) -> RegisterEngineDrivenContextResponse:
             assert payload.num_physical_slots == 32
+            assert payload.chunk_size == 32
             return RegisterEngineDrivenContextResponse("shared-memory", 4096)
 
         @request_handler(HandlerType.BLOCKING)
@@ -356,6 +357,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
             "hidden_dim_size": 128,
             "dtype_str": "float16",
             "use_mla": False,
+            "chunk_size": 32,
             "num_physical_slots": 32,
         },
     )
@@ -369,6 +371,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
             hidden_dim_size=128,
             dtype_str="float16",
             use_mla=False,
+            chunk_size=32,
             num_physical_slots=32,
         ),
     )
@@ -469,7 +472,7 @@ import sys
 
 banned = (
     "cachetools",
-    "lmcache.utils",
+    "lmcache.v1.distributed.utils",
     "lmcache.v1.transport.futures",
     "lmcache.v1.transport.request_client",
 )
@@ -752,6 +755,7 @@ def test_generated_grpc_services_communicate_end_to_end(
             hidden_dim_size=128,
             dtype_str="float16",
             use_mla=False,
+            chunk_size=32,
             num_physical_slots=32,
         )
     ).result(5)

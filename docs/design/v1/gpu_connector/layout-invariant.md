@@ -253,7 +253,7 @@ consumer code must never do any of the following — it queries via the
 
 ## Consumers
 
-- **`lmcache/v1/kv_layer_groups.py::KVLayerGroupsManager.__init__`** —
+- **`lmcache/v1/common/kv_layer_groups.py::KVLayerGroupsManager.__init__`** —
   partitions layers by the full `KernelGroupIdentity` field list
   `(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype,
   engine_kv_format, block_stride_elems)`. Including `block_size` in the

@@ -2,18 +2,31 @@
 """Transport-neutral request handler metadata and discovery."""
 
 # Standard
+from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Callable, TypeVar, cast, get_type_hints
+from typing import Any, Callable, Generic, TypeVar, cast, get_type_hints
 import inspect
 
 # First Party
-from lmcache.v1.multiprocess.affinity_pool import DeferredResponse
 from lmcache.v1.transport.rpc import RpcOperation, RpcSpec, get_rpc_spec
 
 F = TypeVar("F", bound=Callable[..., Any])
+ResponseT = TypeVar("ResponseT")
 
 _HANDLER_OPTIONS_ATTR = "__lmcache_request_handler_options__"
+
+
+class DeferredResponse(Future, Generic[ResponseT]):
+    """A reply that is built by ``resume()`` once the future is done."""
+
+    def __init__(self, resume: Callable[[], ResponseT]) -> None:
+        super().__init__()
+        self._resume = resume
+
+    def resume(self) -> ResponseT:
+        """Return the reply. Call only once the future is done."""
+        return self._resume()
 
 
 class HandlerType(Enum):

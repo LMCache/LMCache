@@ -15,8 +15,12 @@ import zmq
 # First Party
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.security.api_key import APIKeyVerifier
-from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool, DeferredResponse
-from lmcache.v1.multiprocess.request_handler import HandlerType, handler_return_type
+from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
+from lmcache.v1.multiprocess.request_handler import (
+    DeferredResponse,
+    HandlerType,
+    handler_return_type,
+)
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.platform import create_event_notifier
 from lmcache.v1.transport.errors import InvalidRequestError

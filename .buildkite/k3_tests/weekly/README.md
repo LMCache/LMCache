@@ -10,8 +10,8 @@ commits.
 | Workflow | [`.github/workflows/weekly_full_build.yml`](../../../.github/workflows/weekly_full_build.yml) |
 | Schedule | Manual runs first (**Actions → Weekly full build → Run workflow**, from `dev`); `schedule` (`Sunday 08:00 UTC`) is commented out until initial runs are validated |
 | Gate | [`.github/scripts/weekly_full_build.py`](../../../.github/scripts/weekly_full_build.py) |
-| What must run | [`manifest.json`](manifest.json) |
-| Results | The workflow run: its summary links every Buildkite build; artifact `weekly-full-build-<n>` keeps `report.json`, `summary.md` and failed-job logs for 90 days |
+| What must run | [`manifest.json`](manifest.json) (CUDA) and [`manifest-xpu.json`](manifest-xpu.json) (Intel XPU) |
+| Results | The workflow run: its summary links every Buildkite build; artifacts `weekly-full-build-<n>` and `weekly-full-build-xpu-<n>` keep `report.json`, `summary.md` and failed-job logs for 90 days |
 
 Sunday 08:00 UTC starts the quietest six hours of the `k8s` GPU queue in the
 30-day PR CI baseline (2026-10-17 to 2026-11-15): 0.6 of 16 GPUs busy on
@@ -24,6 +24,8 @@ average, against 5 to 10 on weekdays.
 | `k3-unit-tests` | All unit tests. Without `--maxfail=1`, so one failure does not hide the next; JUnit report in `junit-unit.xml`. |
 | `k3-multiprocess-test` | Every workload of `pipeline.yml`, plus `dsv4_flash_tp`: the full-size DeepSeek-V4-Flash L1 correctness test at TP=4 on vLLM and SGLang. It left per-PR CI in #6143; only the weekly build runs it (`CI_WEEKLY_FULL=1`). |
 | `k3-blend-test` | CacheBlend plugin compatibility and coordinator global match. |
+| `unit-tests-xpu` | Intel XPU unit tests (`-rfEs`, JUnit report in `junit-xpu-unit.xml`). |
+| `xpu-mp-test` | Full Intel XPU multiprocess matrix across `inline` and `shm` transports. |
 
 `dsv4_flash_tp` runs with `DSV4_FALLBACK_VLLM_VERSION=""`: it tests the pinned
 vLLM as is instead of falling back to an older vLLM when the current one
@@ -68,14 +70,14 @@ summary lists it under "Passed after a retry" so flakiness stays visible.
    capability), add a pattern for its label to `expected_unsupported` in the
    same PR that explains why.
 
-When a workload is added to `multiprocess/pipeline.yml`, add it to
-`required` in `manifest.json`; `tests/ci/test_weekly_full_build.py` fails
-otherwise.
+When a workload is added to `multiprocess/pipeline.yml` or
+`xpu/multiprocess/pipeline.yml`, add it to `required` in `manifest.json` or
+`manifest-xpu.json`; `tests/ci/test_weekly_full_build.py` fails otherwise.
 
 ## One-time setup (admins)
 
-- **Branch filter.** On `k3-unit-tests`, `k3-multiprocess-test` and
-  `k3-blend-test`, add `!ci-weekly-full` to the branch filter, so the push of
+- **Branch filter.** On `k3-unit-tests`, `k3-multiprocess-test`, `k3-blend-test`,
+  `unit-tests-xpu` and `xpu-mp-test`, add `!ci-weekly-full` to the branch filter, so the push of
   the CI-owned branch starts no duplicate builds. The weekly builds pass
   `ignore_pipeline_branch_filters`. Without the filter, `upload-pipeline.sh`
   still ends those push builds green before any test runs.

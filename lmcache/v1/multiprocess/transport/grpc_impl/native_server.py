@@ -23,8 +23,7 @@ from lmcache.v1.mp_observability.otel_init import (
     grpc_metrics_enabled,
     register_metrics_source,
 )
-from lmcache.v1.multiprocess.affinity_pool import DeferredResponse
-from lmcache.v1.multiprocess.request_handler import HandlerType
+from lmcache.v1.multiprocess.request_handler import DeferredResponse, HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.auth import AUTHENTICATION_ERROR
 from lmcache.v1.multiprocess.transport.grpc_impl.native_metrics import (
     native_metrics_source,

@@ -9,7 +9,7 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool, DeferredResponse
+from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 
 
 def test_submit_returns_correct_result():
@@ -246,19 +246,3 @@ def test_shutdown_no_wait():
     pool.submit(lambda: time.sleep(0.5), affinity_key=0)
     # Should return immediately without waiting
     pool.shutdown(wait=False)
-
-
-def test_deferred_response_replies_with_resume():
-    """The submitter gets resume()'s value, which defaults to the result."""
-    pool = AffinityThreadPool(max_workers=1)
-    resumed: DeferredResponse[int] = DeferredResponse(lambda: 7)
-    plain: DeferredResponse[int] = DeferredResponse()
-
-    replied = pool.submit(lambda: resumed, affinity_key=0)
-    default = pool.submit(lambda: plain, affinity_key=0)
-    resumed.set_result(1)
-    plain.set_result(1)
-
-    assert replied.result(timeout=5) == 7
-    assert default.result(timeout=5) == 1
-    pool.shutdown()
