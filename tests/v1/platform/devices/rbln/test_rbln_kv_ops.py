@@ -210,7 +210,6 @@ def test_trailing_partial_chunk_is_handled() -> None:
         EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,  # NHD
         EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,  # HND, K/V packed in content
         EngineKVFormat.NB_NL_TWO_NH_BS_HS,  # cross-layer HND
-        EngineKVFormat.NL_X_NBBS_ONE_HS,  # MLA, blocks fused with tokens
         EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS,  # MLA plane tuples
     ],
     ids=lambda fmt: fmt.name,

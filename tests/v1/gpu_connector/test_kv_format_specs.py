@@ -46,13 +46,6 @@ def _build(name: str):
             _t(NB, 2, NH, 1, BS, HS) for _ in range(NL)
         ],
         "NL_X_NB_BS_HS": lambda: [_t(NB, BS, HS) for _ in range(NL)],
-        "TWO_X_NL_X_NBBS_NH_HS": lambda: [
-            [_t(PBS, NH, HS) for _ in range(NL)] for _ in range(2)
-        ],
-        "TWO_X_NL_X_NB_BS_NH_HS": lambda: [
-            [_t(NB, BS, NH, HS) for _ in range(NL)] for _ in range(2)
-        ],
-        "NL_X_NBBS_ONE_HS": lambda: [_t(PBS, 1, HS) for _ in range(NL)],
         "NL_X_NB_NH_BS_TWO_HS": lambda: [_t(NB, NH, BS, 2, HS) for _ in range(NL)],
         "NL_X_NB_BS_NH_TWO_HS": lambda: [_t(NB, BS, NH, 2, HS) for _ in range(NL)],
         "NL_X_NB_NH_BS_CS": lambda: [_t(NB, NH, BS, 2 * HS) for _ in range(NL)],
@@ -63,8 +56,7 @@ def _build(name: str):
 
 
 # Independently-computed expected geometry per format. ``num_blocks`` /
-# ``block_size`` are ``None`` for NBBS-fused formats, which must raise.
-_RAISE = object()
+# ``block_size`` are pinned independently for each format.
 GOLDEN = {
     "NB_NL_TWO_BS_NH_HS": dict(
         shape_desc="[NB, NL, 2, BS, NH, HS]",
@@ -183,45 +175,6 @@ GOLDEN = {
         elements_per_layer=NB * BS * HS,
         concrete="5 x [7, 3, 4]",
     ),
-    "TWO_X_NL_X_NBBS_NH_HS": dict(
-        shape_desc="2 x NL x [PBS, NH, HS]",
-        num_layers=NL,
-        num_blocks=_RAISE,
-        block_size=_RAISE,
-        page_buffer_size=PBS,
-        num_heads=NH,
-        hidden_dim=NH * HS,
-        head_size=HS,
-        tokens_per_layer=PBS,
-        elements_per_layer=PBS * NH * HS * 2,
-        concrete="2 x 5 x [21, 2, 4]",
-    ),
-    "TWO_X_NL_X_NB_BS_NH_HS": dict(
-        shape_desc="2 x NL x [NB, BS, NH, HS]",
-        num_layers=NL,
-        num_blocks=NB,
-        block_size=BS,
-        page_buffer_size=PBS,
-        num_heads=NH,
-        hidden_dim=NH * HS,
-        head_size=HS,
-        tokens_per_layer=PBS,
-        elements_per_layer=NB * BS * NH * HS * 2,
-        concrete="2 x 5 x [7, 3, 2, 4]",
-    ),
-    "NL_X_NBBS_ONE_HS": dict(
-        shape_desc="NL x [PBS, 1, HS]",
-        num_layers=NL,
-        num_blocks=_RAISE,
-        block_size=_RAISE,
-        page_buffer_size=PBS,
-        num_heads=1,
-        hidden_dim=HS,
-        head_size=HS,
-        tokens_per_layer=PBS,
-        elements_per_layer=PBS * HS,
-        concrete="5 x [21, 1, 4]",
-    ),
     "NL_X_NB_NH_BS_TWO_HS": dict(
         shape_desc="NL x [NB, NH, BS, 2, HS]",
         num_layers=NL,
@@ -336,14 +289,8 @@ def test_scalar_geometry(case):
 def test_num_blocks_and_block_size(case):
     name, fmt, gold = case
     spec = get_spec(_build(name), fmt)
-    if gold["num_blocks"] is _RAISE:
-        with pytest.raises(ValueError):
-            spec.num_blocks()
-        with pytest.raises(ValueError):
-            spec.block_size()
-    else:
-        assert spec.num_blocks() == gold["num_blocks"], name
-        assert spec.block_size() == gold["block_size"], name
+    assert spec.num_blocks() == gold["num_blocks"], name
+    assert spec.block_size() == gold["block_size"], name
 
 
 def test_data_ptrs_shape(case):

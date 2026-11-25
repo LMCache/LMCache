@@ -266,9 +266,8 @@ page_buffer_offset(const int k_or_v, const int token_idx,
            static_cast<int64_t>(block_offset) * scalars_per_token +
            scalar_offset;
   }
-  // MLA formats: vLLM (NL_X_NB_BS_HS) and SGLang (NL_X_NBBS_ONE_HS)
-  else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS ||
-                     format == EngineKVFormat::NL_X_NBBS_ONE_HS) {
+  // MLA format
+  else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS) {
     return static_cast<int64_t>(token_idx) * scalars_per_token + scalar_offset;
   }
   // vllm flash attention (HND) — physical: [2, NB, NH, BS, HS]
@@ -586,9 +585,6 @@ void multi_layer_kv_transfer_templated(
       case EngineKVFormat::NL_X_NB_BS_HS:
         LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NL_X_NB_BS_HS);
         break;
-      case EngineKVFormat::NL_X_NBBS_ONE_HS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NL_X_NBBS_ONE_HS);
-        break;
       case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:
         LAUNCH_KERNEL_WITH_FORMAT(T, false,
                                   EngineKVFormat::NL_X_TWO_NB_NH_BS_HS);
@@ -632,9 +628,6 @@ void multi_layer_kv_transfer_templated(
         break;
       case EngineKVFormat::NL_X_NB_BS_HS:
         LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NB_BS_HS);
-        break;
-      case EngineKVFormat::NL_X_NBBS_ONE_HS:
-        LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NBBS_ONE_HS);
         break;
       case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:
         LAUNCH_KERNEL_WITH_FORMAT(T, true,
@@ -747,9 +740,6 @@ void multi_layer_kv_transfer_fused_templated(
         break;                                                                \
       case EngineKVFormat::NL_X_NB_BS_HS:                                     \
         LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NL_X_NB_BS_HS)      \
-        break;                                                                \
-      case EngineKVFormat::NL_X_NBBS_ONE_HS:                                  \
-        LAUNCH_FUSED_WITH_FORMAT(T_, DIR, EngineKVFormat::NL_X_NBBS_ONE_HS)   \
         break;                                                                \
       case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:                              \
         LAUNCH_FUSED_WITH_FORMAT(T_, DIR,                                     \

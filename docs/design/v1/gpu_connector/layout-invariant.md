@@ -87,7 +87,8 @@ kv_format/
   No separate string id, no engine attribute. The C++ `EngineKVFormat`
   enum is the one authority for which formats exist. Its **member name is
   the layout legend** — a `_`-joined token sequence where `X` marks a
-  list-nesting boundary (`TWO_X_NL_X_NBBS_NH_HS` → `2 x NL x [PBS, NH, HS]`).
+  list-nesting boundary (`NL_X_TWO_X_NB_BS_NH_HS` →
+  `NL x 2 x [NB, BS, NH, HS]`).
   The symbolic `shape_desc(fmt)` and numeric `concrete_shape(fmt, size)` are
   both *rendered* from that name (`specs/base.py`), so they cannot drift from
   the enum or from each other.
@@ -159,9 +160,6 @@ an `EngineKVFormat`. Nothing else may index raw shapes.
 | `NL_X_NB_TWO_NH_BS_HS` | vLLM flash-infer | HND | `NL × [NB, 2, NH, BS, HS]` |
 | `NL_X_NB_BS_HS` | vLLM MLA / SGLang unified MLA | — | `NL × [NB, BS, HS]` |
 | `NL_X_NB_BS_NH_HS` | SGLang unified components | NHD | `NL × [NB, BS, NH, HS]` |
-| `TWO_X_NL_X_NBBS_NH_HS` | Legacy SGLang MHA | NHD | `[K_list, V_list]`, each `NL × [PBS, NH, HS]` |
-| `TWO_X_NL_X_NB_BS_NH_HS` | Legacy SGLang MP MHA | NHD | `[K_list, V_list]`, each `NL × [NB, BS, NH, HS]` |
-| `NL_X_NBBS_ONE_HS` | Legacy SGLang MLA | — | `NL × [PBS, 1, HS]` |
 | `NL_X_NB_NH_BS_TWO_HS` | vLLM blocks-first fused (CPU) | HND | DEPRECATED (use `NL_X_NB_NH_BS_CS`): `NL × [NB, NH, BS, 2, HS]`, split from raw `[NB, NH, BS, 2·HS]` |
 | `NL_X_NB_BS_NH_TWO_HS` | vLLM blocks-first fused | NHD | DEPRECATED (use `NL_X_NB_BS_NH_CS`): `NL × [NB, BS, NH, 2, HS]`, split from raw `[NB, BS, NH, 2·HS]` |
 | `NL_X_NB_NH_BS_CS` | vLLM blocks-first fused (unified KV cache) | HND | `NL × [NB, NH, BS, CS]`, raw registration; CS = content size = 2·HS (K/V packed) |
@@ -211,7 +209,7 @@ helper.
 
 | Helper | Returns | Notes |
 |---|---|---|
-| `get_group_data_ptrs(kv, fmt, layer_indices)` | `list[int]` | Pointer array in **kernel-expected order**: `[base]` for cross-layer (`layer_indices` ignored), `[K_0…K_N, V_0…V_N]` for SGLang MHA, per-layer flat elsewhere. Matches the dispatch in `csrc/cuda/mp_mem_kernels.cu:161-169`. The pointer-array shape is a property of the format — callers never ask "does this format have per-layer pointers?". |
+| `get_group_data_ptrs(kv, fmt, layer_indices)` | `list[int]` | Pointer array in **kernel-expected order**: `[base]` for cross-layer (`layer_indices` ignored), `[K_0…K_N, V_0…V_N]` for K/V-list formats, per-layer flat elsewhere. The pointer-array shape is a property of the format — callers never ask "does this format have per-layer pointers?". |
 | `make_page_buffer_shape_desc(kv, fmt, layer_idx, num_layers_in_group, num_blocks, block_size, block_stride_elems)` | `PageBufferShapeDesc` | The kernel-facing shape struct. During grouping, `resolve_block_stride` records the per-block dim-0 element stride in `KernelGroupIdentity`; the manager stamps the descriptor from `identity.block_stride_elems`. This lets groups with different physical block sizes (e.g. a compressed DeepSeek V4 indexer group alongside dense layers) share a single GPU pool. |
 
 ### Contiguity

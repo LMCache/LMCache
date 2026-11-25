@@ -47,15 +47,6 @@ def test_concrete_shape_vllm_mla():
     assert out == "61 x [1024, 64, 512]"
 
 
-def test_concrete_shape_uses_pbs_for_folded_formats():
-    # NL_X_NBBS_ONE_HS folds num_blocks * block_size into one PBS dim.
-    sd = _make_shape_desc(kv_size=1, nl=2, nb=32, bs=16, nh=1, hs=128)
-    out = get_concrete_engine_kv_shape_from_shape_desc(
-        sd, lmcache_native.EngineKVFormat.NL_X_NBBS_ONE_HS
-    )
-    assert out == "2 x [512, 1, 128]"  # 512 == 32 * 16
-
-
 def test_concrete_shape_is_group_accurate():
     # Two groups with different layer counts produce different shapes for
     # the same format — the whole-context helper could not do this.

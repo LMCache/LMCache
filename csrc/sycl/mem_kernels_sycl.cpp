@@ -86,9 +86,8 @@ inline int64_t page_buffer_offset(const int k_or_v, const int token_idx,
            k_or_v * block_size * scalars_per_token +
            block_offset * scalars_per_token + scalar_offset;
   }
-  // MLA formats: vLLM (NL_X_NB_BS_HS) and SGLang (NL_X_NBBS_ONE_HS)
-  else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS ||
-                     format == EngineKVFormat::NL_X_NBBS_ONE_HS) {
+  // MLA format
+  else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS) {
     return token_idx * scalars_per_token + scalar_offset;
   }
 }
@@ -114,8 +113,7 @@ inline int64_t page_buffer_base_offset(const int k_or_v, const int token_idx,
     return block_idx * 2 * block_size * scalars_per_token +
            k_or_v * block_size * scalars_per_token +
            block_offset * scalars_per_token;
-  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS ||
-                       format == EngineKVFormat::NL_X_NBBS_ONE_HS) {
+  } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS) {
     return token_idx * scalars_per_token;
   }
 }
@@ -387,9 +385,6 @@ void multi_layer_kv_transfer_templated(
         case EngineKVFormat::NL_X_NB_BS_HS:
           LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NL_X_NB_BS_HS);
           break;
-        case EngineKVFormat::NL_X_NBBS_ONE_HS:
-          LAUNCH_KERNEL_WITH_FORMAT(T, false, EngineKVFormat::NL_X_NBBS_ONE_HS);
-          break;
         default:
           throw std::runtime_error("Unsupported MLA EngineKVFormat");
       }
@@ -397,9 +392,6 @@ void multi_layer_kv_transfer_templated(
       switch (engine_kv_format) {
         case EngineKVFormat::NL_X_NB_BS_HS:
           LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NB_BS_HS);
-          break;
-        case EngineKVFormat::NL_X_NBBS_ONE_HS:
-          LAUNCH_KERNEL_WITH_FORMAT(T, true, EngineKVFormat::NL_X_NBBS_ONE_HS);
           break;
         default:
           throw std::runtime_error("Unsupported MLA EngineKVFormat");
