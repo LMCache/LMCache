@@ -53,6 +53,12 @@ Server Configuration
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
+   * - ``--http-log-level``
+     - ``info``
+     - Log level of the HTTP server (uvicorn), including its access log.
+   * - ``--http-access-log`` / ``--no-http-access-log``
+     - on
+     - Log one line per HTTP request, e.g. every ``/metrics`` scrape.
    * - ``--api-key-file``
      - unset
      - Read a bearer API key from a file. Repeat the option to accept multiple

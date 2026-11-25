@@ -73,6 +73,9 @@ class TestCoordinatorCommandArguments:
                 '{"my_view.window": 8}',
                 "--timeout-keep-alive",
                 "15",
+                "--http-log-level",
+                "warning",
+                "--no-http-access-log",
                 "--disable-metrics",
                 "--otlp-endpoint",
                 "http://collector:4317",
@@ -96,6 +99,8 @@ class TestCoordinatorCommandArguments:
         assert args.metadata_path == "/tmp/metadata.json"
         assert args.extra_config == '{"my_view.window": 8}'
         assert args.timeout_keep_alive == 15
+        assert args.http_log_level == "warning"
+        assert args.http_access_log is False
         assert args.disable_metrics is True
         assert args.otlp_endpoint == "http://collector:4317"
         assert args.event_transport == "kafka"
@@ -107,6 +112,10 @@ class TestCoordinatorCommandArguments:
         """The blend-lookup switch parses as True when passed."""
         args = parser.parse_args(["coordinator", "--enable-blend-lookup"])
         assert args.enable_blend_lookup is True
+
+    def test_http_log_level_rejects_unknown_level(self, parser):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["coordinator", "--http-log-level", "loud"])
 
     def test_flags_default_to_none(self, parser):
         """Unset flags default to None so the config defaults win."""
@@ -120,6 +129,8 @@ class TestCoordinatorCommandArguments:
         assert args.metadata_path is None
         assert args.extra_config is None
         assert args.timeout_keep_alive is None
+        assert args.http_log_level is None
+        assert args.http_access_log is None
         assert args.disable_metrics is None
         assert args.otlp_endpoint is None
         assert args.event_transport is None
@@ -154,6 +165,8 @@ class TestCoordinatorCommandExecute:
             metadata_path="/var/lib/lmcache/metadata.json",
             extra_config='{"my_view.window": 8, "controller_packages": ["acme.c"]}',
             timeout_keep_alive=None,
+            http_log_level=None,
+            http_access_log=None,
             disable_metrics=True,
             otlp_endpoint="http://collector:4317",
             event_transport="kafka",
@@ -238,6 +251,8 @@ class TestCoordinatorCommandExecute:
             metadata_path=None,
             extra_config=None,
             timeout_keep_alive=None,
+            http_log_level=None,
+            http_access_log=None,
             disable_metrics=None,
             otlp_endpoint=None,
             event_transport=None,
@@ -301,6 +316,8 @@ class TestCoordinatorCommandExecute:
             metadata_path=None,
             extra_config=None,
             timeout_keep_alive=None,
+            http_log_level=None,
+            http_access_log=None,
             disable_metrics=None,
             otlp_endpoint=None,
             event_transport=None,

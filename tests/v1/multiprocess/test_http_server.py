@@ -11,8 +11,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 import torch
+import uvicorn.config
 
 # First Party
+from lmcache.v1.common.logging import HTTP_LOG_LEVELS
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -632,3 +634,53 @@ class TestHealthAndMiscEndpoints:
         resp = client_with_engine.get("/status")
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
+
+
+@pytest.mark.parametrize(
+    ("http_config", "log_level", "access_log"),
+    [
+        pytest.param(HTTPFrontendConfig(), "info", True, id="defaults"),
+        pytest.param(
+            HTTPFrontendConfig(http_log_level="warning", http_access_log=False),
+            "warning",
+            False,
+            id="quiet",
+        ),
+    ],
+)
+def test_http_logging_settings_reach_uvicorn(
+    monkeypatch: pytest.MonkeyPatch,
+    http_config: HTTPFrontendConfig,
+    log_level: str,
+    access_log: bool,
+) -> None:
+    """The HTTP server starts uvicorn with the configured log level and
+    access-log switch."""
+    size = 1 << 20
+    server_cls = MagicMock()
+    monkeypatch.setattr(http_server_module, "_configs", {})
+    monkeypatch.setattr(http_server_module.uvicorn, "Server", server_cls)
+    http_server_module.run_http_server(
+        http_config,
+        MPServerConfig(),
+        StorageManagerConfig(
+            l1_manager_config=L1ManagerConfig(
+                memory_config=L1MemoryManagerConfig(
+                    size_in_bytes=size, use_lazy=False, init_size_in_bytes=size
+                ),
+            ),
+            eviction_config=EvictionConfig(eviction_policy="LRU"),
+        ),
+        ObservabilityConfig(),
+        CoordinatorConfig(),
+    )
+
+    (uvicorn_config,) = server_cls.call_args.args
+    assert uvicorn_config.log_level == log_level
+    assert uvicorn_config.access_log is access_log
+
+
+def test_http_log_levels_match_uvicorn() -> None:
+    """``--http-log-level`` offers exactly the levels uvicorn accepts, so a
+    uvicorn release that adds or drops a level fails here."""
+    assert set(HTTP_LOG_LEVELS) == set(uvicorn.config.LOG_LEVELS)

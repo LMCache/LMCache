@@ -12,7 +12,7 @@ import os
 import uuid
 
 # First Party
-from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.logging import HTTP_LOG_LEVELS, init_logger
 from lmcache.v1.common.security.api_key import add_api_key_args
 from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleSpec,
@@ -312,6 +312,12 @@ class HTTPFrontendConfig:
 
     http_port: int = 8080
     """HTTP server port."""
+
+    http_log_level: str = "info"
+    """uvicorn log level, one of ``HTTP_LOG_LEVELS``."""
+
+    http_access_log: bool = True
+    """Whether uvicorn logs one line per HTTP request."""
 
 
 DEFAULT_HTTP_FRONTEND_CONFIG = HTTPFrontendConfig()
@@ -868,6 +874,24 @@ def add_http_frontend_args(
         default=8080,
         help="Port to bind the HTTP server. Default is 8080.",
     )
+    http_group.add_argument(
+        "--http-log-level",
+        choices=HTTP_LOG_LEVELS,
+        default="info",
+        help=(
+            "Log level of the HTTP server (uvicorn), including its access "
+            "log. LMCACHE_LOG_LEVEL does not affect it. Default is info."
+        ),
+    )
+    http_group.add_argument(
+        "--http-access-log",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Log one line per HTTP request, including polled endpoints such "
+            "as /metrics and health probes. Default is on."
+        ),
+    )
     return parser
 
 
@@ -886,6 +910,8 @@ def parse_args_to_http_frontend_config(
     return HTTPFrontendConfig(
         http_host=args.http_host,
         http_port=args.http_port,
+        http_log_level=args.http_log_level,
+        http_access_log=args.http_access_log,
     )
 
 

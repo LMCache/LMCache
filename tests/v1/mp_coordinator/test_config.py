@@ -27,6 +27,11 @@ def test_non_positive_intervals_rejected():
         MPCoordinatorConfig(health_check_interval=-1.0)
 
 
+def test_unknown_http_log_level_rejected() -> None:
+    with pytest.raises(ValueError, match="http_log_level"):
+        MPCoordinatorConfig(http_log_level="loud")
+
+
 def test_no_env_loading() -> None:
     """Config is CLI-only: the env loader is gone, not merely unused."""
     assert not hasattr(MPCoordinatorConfig, "from_env")

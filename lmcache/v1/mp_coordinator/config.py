@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 # First Party
+from lmcache.v1.common.logging import HTTP_LOG_LEVELS
 from lmcache.v1.multiprocess.config import DEFAULT_KAFKA_CACHE_EVENT_TOPIC
 
 
@@ -95,6 +96,11 @@ class MPCoordinatorConfig:
         timeout_keep_alive: Seconds the HTTP server keeps idle connections
             open before closing them. Must be greater than the heartbeat
             interval of MP servers to avoid race-condition disconnects.
+        http_log_level: Log level of the HTTP server (uvicorn), including
+            its access log; one of ``HTTP_LOG_LEVELS``. ``LMCACHE_LOG_LEVEL``
+            does not affect it.
+        http_access_log: Whether the HTTP server logs one line per request,
+            including heartbeats and polled endpoints.
         public_endpoints: Exact HTTP paths the coordinator serves without
             credentials when API-key authentication is on. ``None`` keeps the
             default, which is ``/healthz`` alone: the liveness probe must not
@@ -144,6 +150,8 @@ class MPCoordinatorConfig:
     public_endpoints: tuple[str, ...] | None = None
     extra_config: Mapping[str, object] = field(default_factory=dict)
     timeout_keep_alive: int = 10
+    http_log_level: str = "info"
+    http_access_log: bool = True
     metrics_enabled: bool = True
     otlp_endpoint: str | None = None
     event_source_config: HttpCacheEventSourceConfig | KafkaCacheEventSourceConfig = (
@@ -154,8 +162,9 @@ class MPCoordinatorConfig:
         """Validate timing parameters.
 
         Raises:
-            ValueError: If a timing parameter is non-positive/negative, or a
-                public endpoint is not an absolute path.
+            ValueError: If a timing parameter is non-positive/negative, the
+                HTTP log level is unknown, or a public endpoint is not an
+                absolute path.
         """
         if self.instance_timeout <= 0:
             raise ValueError("instance_timeout must be positive")
@@ -179,6 +188,10 @@ class MPCoordinatorConfig:
             raise ValueError("checkpoint_interval must be non-negative")
         if self.timeout_keep_alive <= 0:
             raise ValueError("timeout_keep_alive must be positive")
+        if self.http_log_level not in HTTP_LOG_LEVELS:
+            raise ValueError(
+                f"http_log_level must be one of {', '.join(HTTP_LOG_LEVELS)}"
+            )
         for endpoint in self.public_endpoints or ():
             if not endpoint.startswith("/"):
                 raise ValueError(
