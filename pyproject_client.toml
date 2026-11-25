@@ -41,7 +41,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 requires-python = ">=3.10,<3.15"
-dynamic = ["dependencies", "optional-dependencies", "version"]
+dynamic = ["dependencies", "version"]
 
 [project.urls]
 homepage = "https://docs.lmcache.ai"
@@ -54,7 +54,6 @@ version_file = "lmcache/_version.py"
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements/client.txt"] }
-optional-dependencies.cuda = { file = ["requirements/cuda13_core.txt"] }
 
 [tool.setuptools]
 # Single modules, for packages that also hold modules the wheel leaves out.
@@ -63,131 +62,9 @@ py-modules = [
     # Roots of the packages found below.
     "lmcache.__init__",
     "lmcache._version",
-    "lmcache.cli.__init__",
     "lmcache.v1.__init__",
-
-    # ---- Temporary allowlist ----
-    # Everything below leaves the wheel as migrations land; the goal is an
-    # empty list. Delete an entry once nothing imports it from that path.
-
-    # Shared modules that client code imports from outside the client packages.
-    # Remove after: each moves into lmcache/v1/common or the client package
-    # that owns it.
-    "lmcache.banner",
-    "lmcache.logging",
-    "lmcache.utils",
-    "lmcache.security.__init__",
-    "lmcache.security.api_key",
-    "lmcache.security.bearer",
-    "lmcache.v1.kv_layer_groups",
-    "lmcache.v1.memory_management",
-    "lmcache.v1.periodic_thread",
-    "lmcache.v1.system_detection",
-    "lmcache.v1.utils.__init__",
-    "lmcache.v1.utils.subclass_discovery",
-
-    # Server modules that client code, vLLM or ATOM still import from their
-    # old path, grouped by what needs them.
-
-    # object_group_transfer: lazy imports in client/transfer_context/base.py and
-    # platform/base/cache_context.py. Remove after #6310 moves what they use.
-    "lmcache.v1.gpu_connector.gpu_ops",
-    "lmcache.v1.memory_allocators.__init__",
-    "lmcache.v1.memory_allocators.lazy_memory_allocator",
-    "lmcache.v1.memory_allocators.tensor_memory_allocator",
-    "lmcache.v1.multiprocess.object_group_transfer.__init__",
-    "lmcache.v1.multiprocess.object_group_transfer.direct_copy",
-    "lmcache.v1.multiprocess.object_group_transfer.dispatch",
-    "lmcache.v1.multiprocess.object_group_transfer.engines",
-    "lmcache.v1.multiprocess.object_group_transfer.gpu_dma",
-    "lmcache.v1.multiprocess.object_group_transfer.nic_dma",
-    "lmcache.v1.multiprocess.object_group_transfer.nvme_dma",
-    "lmcache.v1.multiprocess.object_group_transfer.planning",
-    "lmcache.v1.multiprocess.object_group_transfer.staged",
-    "lmcache.v1.multiprocess.object_group_transfer.unfull_chunk",
-
-    # gds_context: platform/devices/{cuda,musa}/cache_context.py and
-    # object_group_transfer/nvme_dma.py. Remove after #6310: neither imports it.
-    "lmcache.v1.gpu_connector.__init__",
-    "lmcache.v1.gpu_connector._gds_backends",
-    "lmcache.v1.gpu_connector.gds_backends.__init__",
-    "lmcache.v1.gpu_connector.gds_backends._driver",
-    "lmcache.v1.gpu_connector.gds_backends.base",
-    "lmcache.v1.gpu_connector.gds_context",
-
-    # GdsL1Config, which gds_context.py imports from distributed/config.py, and
-    # what config.py imports. Remove after #6307 moves it, or gds_context goes.
-    "lmcache.v1.distributed.bitmap_ops.__init__",
-    "lmcache.v1.distributed.bitmap_ops.fold",
-    "lmcache.v1.distributed.config",
-    "lmcache.v1.distributed.error",
-    "lmcache.v1.distributed.eviction",
-    "lmcache.v1.distributed.eviction_policy.__init__",
-    "lmcache.v1.distributed.eviction_policy.arc",
-    "lmcache.v1.distributed.eviction_policy.factory",
-    "lmcache.v1.distributed.eviction_policy.isolated_lru",
-    "lmcache.v1.distributed.eviction_policy.lru",
-    "lmcache.v1.distributed.eviction_policy.noop",
-    "lmcache.v1.distributed.internal_api",
-    "lmcache.v1.distributed.key_codec",
-    "lmcache.v1.distributed.l2_adapters.__init__",
-    "lmcache.v1.distributed.l2_adapters.base",
-    "lmcache.v1.distributed.l2_adapters.config",
-    "lmcache.v1.distributed.l2_adapters.factory",
-    "lmcache.v1.distributed.serde.__init__",
-    "lmcache.v1.distributed.serde.aesgcm",
-    "lmcache.v1.distributed.serde.async_processor",
-    "lmcache.v1.distributed.serde.base",
-    "lmcache.v1.distributed.serde.factory",
-    "lmcache.v1.distributed.serde.fp8",
-    "lmcache.v1.distributed.serde.key_provider",
-    "lmcache.v1.distributed.serde.multi",
-    "lmcache.v1.distributed.serde.turboquant.__init__",
-    "lmcache.v1.distributed.serde.turboquant.decode_kernel",
-    "lmcache.v1.distributed.serde.turboquant.store_kernel",
-    "lmcache.v1.distributed.serde.turboquant.turboquant",
-    "lmcache.v1.distributed.serde.utils",
-    "lmcache.v1.distributed.storage_controller",
-    "lmcache.v1.distributed.storage_controllers.__init__",
-    "lmcache.v1.distributed.storage_controllers.adapter_lifecycle",
-    "lmcache.v1.distributed.storage_controllers.eviction_controller",
-    "lmcache.v1.distributed.storage_controllers.prefetch_controller",
-    "lmcache.v1.distributed.storage_controllers.prefetch_policy",
-    "lmcache.v1.distributed.storage_controllers.store_controller",
-    "lmcache.v1.distributed.storage_controllers.store_policy",
-    "lmcache.v1.distributed.storage_controllers.utils",
-    "lmcache.v1.mp_coordinator.__init__",
-    "lmcache.v1.mp_coordinator.persistence.__init__",
-    "lmcache.v1.mp_coordinator.persistence.durable_component",
-    "lmcache.v1.mp_coordinator.utils.__init__",
-    "lmcache.v1.mp_coordinator.utils.encoding",
-
-    # The event bus, which object_group_transfer/staged.py and the distributed
-    # storage controllers above import. Remove with those two groups.
-    "lmcache.v1.mp_observability.errors",
-    "lmcache.v1.mp_observability.event",
-    "lmcache.v1.mp_observability.event_bus",
-    "lmcache.v1.mp_observability.otel_init",
-
-    # MemoryLayoutDesc: client/transfer_context/base.py, worker_transfer.py.
-    # Remove after #6307 moves it, and the groups above are gone.
-    "lmcache.v1.distributed.api",
-
-    # FrozenDict, which distributed/api.py and key_codec.py import. Remove with
-    # the GdsL1Config and MemoryLayoutDesc groups.
-    "lmcache.v1.utils.frozen_dict",
-
-    # vLLM's lmcache_mp_connector.py imports BlockAllocationRecord from here.
-    # Remove once vLLM imports it from lmcache.v1.common.custom_types.
-    "lmcache.v1.multiprocess.custom_types",
-
-    # ATOM's kv_transfer/offload/mp/ imports EngineGroupInfo from here. Remove
-    # once ATOM imports it from lmcache.v1.common.group_view.
-    "lmcache.v1.multiprocess.group_view",
-
-    # The package of the lmcache/v1/multiprocess/ modules above. Remove with
-    # the last of them.
-    "lmcache.v1.multiprocess.__init__",
+    # Not tensorrt_adapter.py: it re-exports the in-process connector.
+    "lmcache.integration.tensorrt_llm.tensorrt_mp_adapter",
 ]
 
 [tool.setuptools.packages.find]
@@ -195,15 +72,14 @@ py-modules = [
 # vertical, the SDK and the engine integrations.
 where = [""]
 include = [
-    "lmcache.cli.metrics*",
     "lmcache.integration*",
     "lmcache.sdk*",
     "lmcache.v1.client*",
     "lmcache.v1.common*",
-    "lmcache.v1.exceptions*",
     "lmcache.v1.platform*",
     "lmcache.v1.transport*",
 ]
+exclude = ["lmcache.integration.tensorrt_llm"]
 
 [tool.setuptools.package-data]
 "*" = ["*.pyi", "*.proto"]

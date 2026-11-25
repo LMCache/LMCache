@@ -111,7 +111,13 @@ jobs:
             echo "upstream=$upstream"
           } >> "$GITHUB_OUTPUT"
 
-          if [[ "$upstream" == "$current" ]]; then
+          mapfile -t client_matches < <(extract_torch_version pyproject_client.toml)
+          if [[ "${#client_matches[@]}" -ne 1 ]]; then
+            echo "Expected exactly one torch pin in pyproject_client.toml"
+            exit 1
+          fi
+
+          if [[ "$upstream" == "$current" && "$upstream" == "${client_matches[0]}" ]]; then
             echo "Torch version already up to date."
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -135,8 +141,7 @@ jobs:
           ' "$TARGET_FILE" > "$tmp_output"
 
           mv "$tmp_output" "$TARGET_FILE"
-          # pyproject_client.toml (lmcache-client) carries the same pin.
-          sed -i -E "s/torch==${current}\"/torch==${upstream}\"/" pyproject_client.toml
+          sed -i -E "s/torch==[0-9]+(\.[0-9]+){1,2}/torch==${upstream}/" pyproject_client.toml
           grep -q "\"torch==${upstream}\"" pyproject_client.toml
 
           if git diff --quiet -- "$TARGET_FILE" pyproject_client.toml; then
@@ -164,7 +169,8 @@ jobs:
           title: "[Build] sync torch version with vLLM ${{
             steps.vllm.outputs.tag }} (${{ steps.sync.outputs.upstream }})"
           body: |
-            Auto-sync the pinned torch version in `pyproject.toml` with the
+            Auto-sync the pinned torch version in `pyproject.toml` and
+            `pyproject_client.toml` with the
             latest **stable** vLLM release, `${{ steps.vllm.outputs.tag }}`.
 
             - Current: `${{ steps.sync.outputs.current }}`

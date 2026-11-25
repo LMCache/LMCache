@@ -1,17 +1,19 @@
 name: Build Client Artifacts
 
 # Build the lmcache-client wheel from pyproject_client.toml (#6315), the way
-# build_cli_artifacts.yml builds lmcache-cli, and create request clients from
-# the installed wheel. pr_full_build.yml calls this on `full` PRs.
+# build_cli_artifacts.yml builds lmcache-cli, and smoke-test the installed
+# wheel. pr_full_build.yml calls this on `full` PRs.
 
 on:
     workflow_call:
+    workflow_dispatch:
     pull_request:
         types: [opened, synchronize, reopened, ready_for_review]
         branches:
             - dev
             - "release-**"
         paths:
+            - 'lmcache/**'
             - 'pyproject_client.toml'
             - 'requirements/client.txt'
             - 'setup.py'
@@ -20,6 +22,7 @@ on:
             - 'pyproject.toml'
             - 'requirements/build.txt'
             - '.github/scripts/build_client_wheel.sh'
+            - '.github/scripts/smoke_client_wheel.py'
             - '.github/workflows/build_client_artifacts.yml'
 
 env:
@@ -95,17 +98,8 @@ jobs:
                   "$(grep -oE 'torch==[0-9][0-9.]*' pyproject_client.toml | head -1)"
                 "$RUNNER_TEMP/venv-client/bin/pip" install dist/lmcache_client-*.whl
 
-            - name: Create and close a ZMQ and a gRPC request client
+            - name: Smoke-test the installed client wheel
               # Outside the checkout and isolated, so lmcache is the installed wheel.
               run: |
                 cd "$RUNNER_TEMP"
-                venv-client/bin/python -I -c '
-                import importlib.metadata as md, pathlib, lmcache
-                init = md.distribution("lmcache-client").locate_file("lmcache/__init__.py")
-                assert pathlib.Path(lmcache.__file__).samefile(init), lmcache.__file__
-                print("lmcache from", lmcache.__file__)
-                from lmcache.v1.client.transport.factory import RequestClientFactory
-                for url in ("tcp://127.0.0.1:1", "grpc://127.0.0.1:1"):
-                    RequestClientFactory.create(url).close()
-                    print("created and closed", url)
-                '
+                venv-client/bin/python -I "$GITHUB_WORKSPACE/.github/scripts/smoke_client_wheel.py"
