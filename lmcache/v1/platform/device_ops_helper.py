@@ -154,7 +154,6 @@ def _launch_block_transfer_batches(
             shape_desc,
             lmcache_chunk_size,
             engine_kv_format,
-            # A skip longer than one launch carries into the next launches.
             max(0, min(skip_prefix_n_blocks - start, len(launch_block_ids))),
         )
 

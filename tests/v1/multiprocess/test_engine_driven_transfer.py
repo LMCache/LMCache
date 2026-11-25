@@ -1128,7 +1128,6 @@ def test_scatter_unpinned_chunks_survive_back_to_back_groups() -> None:
 
     if not (torch_dev.is_available() and torch_device_type == "cuda"):
         _pytest.skip("needs CUDA and compiled block-transfer ops")
-    # With the extension installed, CUDA always takes the address kernel.
     _pytest.importorskip("lmcache.cuda_ops")
 
     torch.manual_seed(0)
