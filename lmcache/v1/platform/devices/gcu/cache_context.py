@@ -24,6 +24,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev
+from lmcache.v1.common.buffer_registration import BufferRegistration
 from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.group_view import engine_group_layer_indices
 from lmcache.v1.common.logging import init_logger
@@ -33,10 +34,6 @@ from lmcache.v1.common.utils import (
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,
 )
-from lmcache.v1.gpu_connector.gds_context import (
-    deregister_gds_gpu_buffer,
-    register_gds_gpu_buffer,
-)
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.ipc_wrapper import KVCache
@@ -45,6 +42,7 @@ from lmcache.v1.platform.devices.cpu.stub_cpu_device import StubStream
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.common.group_view import EngineGroupInfo
+    from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 
 logger = init_logger(__name__)
 
@@ -130,7 +128,7 @@ class _TempGcuBuffer:
 
     @property
     def buffer(self) -> torch.Tensor:
-        """The flat staging tensor (for GDS registration)."""
+        """The flat staging tensor."""
         return self._temp_buffer
 
     def get_temp_kernel_group_buffer(
@@ -283,6 +281,8 @@ class GcuCacheContext(BaseCacheContext):
         engine_type: EngineType = EngineType.VLLM,
         separate_object_groups: bool = True,
         full_sw_kv: bool = False,
+        *,
+        object_group_transfer: ObjectGroupTransfer | None = None,
     ) -> None:
         """Build a GCU cache context from IPC-wrapped KV tensors.
 
@@ -294,6 +294,7 @@ class GcuCacheContext(BaseCacheContext):
             engine_type: Serving engine that produced the KV cache.
             separate_object_groups: Whether to split object groups by window.
             full_sw_kv: Whether sliding-window groups transfer their full KV.
+            object_group_transfer: Default object-group copy callback.
 
         Raises:
             ValueError: If reconstructed tensors are not GCU tensors.
@@ -301,6 +302,7 @@ class GcuCacheContext(BaseCacheContext):
         # Kept for close(): raw-IPC wrappers hold driver-level mappings that
         # pin the exporter's device memory until explicitly closed.
         self._kv_wrappers: KVCache = list(kv_caches)
+        self._buffer_registration: BufferRegistration | None = None
         try:
             self._initialize(
                 kv_caches,
@@ -310,6 +312,7 @@ class GcuCacheContext(BaseCacheContext):
                 engine_type,
                 separate_object_groups,
                 full_sw_kv,
+                object_group_transfer,
             )
         except BaseException:
             # Partial construction may have imported some mappings already;
@@ -327,6 +330,7 @@ class GcuCacheContext(BaseCacheContext):
         engine_type: EngineType,
         separate_object_groups: bool,
         full_sw_kv: bool,
+        object_group_transfer: ObjectGroupTransfer | None,
     ) -> None:
         """Initialize reconstructed tensors and GCU transfer resources."""
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
@@ -368,6 +372,7 @@ class GcuCacheContext(BaseCacheContext):
             kv_layer_groups_manager=kv_layer_groups_manager,
             block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+            object_group_transfer=object_group_transfer,
         )
 
         self.group_kv_pointers_: list[torch.Tensor] = []
@@ -393,18 +398,20 @@ class GcuCacheContext(BaseCacheContext):
         # GPU streams
         self.cuda_stream_ = torch_dev.Stream(device=self.device_)
 
-        # Register the staging buffer with the GDS context on the GCU stream.
-        with torch_dev.stream(self.cuda_stream_):
-            register_gds_gpu_buffer(self._temp_buffer.buffer)
-
         # Observability stream: a cupy-free stub whose ptr is the real
         # gcuStream_t, so recorded events carry the correct handle.
         stub = StubStream(device=self.device_)
         stub.ptr = self.cuda_stream_.gcu_stream
         self.cupy_stream_ = stub
 
+    def register_staging_buffer(self, registration: BufferRegistration) -> None:
+        """Register the staging allocation on the transfer stream."""
+        with torch_dev.stream(self.cuda_stream_):
+            registration.register(self._temp_buffer.buffer)
+        self._buffer_registration = registration
+
     def close(self) -> None:
-        """Drain the context stream, deregister the GDS staging buffer and
+        """Drain the context stream, release any staging registration and
         release the imported KV mappings (reverse of __init__).
 
         The stream is synchronized first so no in-flight kernel still touches
@@ -413,8 +420,10 @@ class GcuCacheContext(BaseCacheContext):
         process's GPUs for the process lifetime.
         """
         self.cuda_stream_.synchronize()
-        with torch_dev.stream(self.cuda_stream_):
-            deregister_gds_gpu_buffer(self._temp_buffer.buffer)
+        if self._buffer_registration is not None:
+            with torch_dev.stream(self.cuda_stream_):
+                self._buffer_registration.deregister(self._temp_buffer.buffer)
+            self._buffer_registration = None
         self._close_kv_wrappers()
 
     def _close_kv_wrappers(self) -> None:
