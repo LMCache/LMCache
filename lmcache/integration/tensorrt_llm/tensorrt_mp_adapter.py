@@ -33,9 +33,8 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
-from lmcache.utils import EngineType
 from lmcache.v1.client.transport.factory import RequestClientFactory
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey
 from lmcache.v1.common.kv_format.types import LayoutHints
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform.base.event_ipc import (
@@ -366,6 +365,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             layout_hints,
             [],
             None,
+            self._chunk_size,
         )
 
         try:

@@ -12,7 +12,7 @@ from lmcache.lmcache_native import (
     EngineKVFormat,
     TransferDirection,
 )
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.torch_ops._kv_format import (
     _blocked_scale_views,
     _format_spec,

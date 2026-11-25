@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform import get_device_spec
 
@@ -38,10 +38,10 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.v1.common.buffer_registration import BufferRegistration
     from lmcache.v1.common.group_view import EngineGroupInfo
-    from lmcache.v1.common.object_group_transfer import ObjectGroupTransfer
     from lmcache.v1.common.utils import LayoutHints
     from lmcache.v1.platform.base.cache_context import BaseCacheContext
     from lmcache.v1.platform.base.ipc_wrapper import KVCache
+    from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 
 
 logger = init_logger(__name__)

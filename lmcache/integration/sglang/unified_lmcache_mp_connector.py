@@ -505,8 +505,8 @@ class UnifiedLMCacheMPConnector:
     def _register_transfer_context(self) -> bool:
         """Build, register, and publish a replacement transfer context."""
         # First Party
-        from lmcache.utils import EngineType
         from lmcache.v1.client.worker_transfer import create_transfer_context
+        from lmcache.v1.common.custom_types import EngineType
         from lmcache.v1.common.group_view import EngineGroupInfo, is_kv_writer
 
         transfer_ctx = create_transfer_context(

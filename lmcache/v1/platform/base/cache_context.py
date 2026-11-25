@@ -34,10 +34,10 @@ if TYPE_CHECKING:
 
     # First Party
     from lmcache.v1.common.buffer_registration import BufferRegistration
+    from lmcache.v1.common.kv_layer_groups import KVLayerGroupsManager
     from lmcache.v1.common.memory_management import MemoryObj
-    from lmcache.v1.common.object_group_transfer import ObjectGroupTransfer
-    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-    from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+    from lmcache.v1.common.ops_types import PageBufferShapeDesc
+    from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 
 
 class BaseCacheContext(ABC):
@@ -411,7 +411,7 @@ class BaseCacheContext(ABC):
 
         A subclass that changes the staging layout can override this method.
         The default calls the ``object_group_transfer`` constructor callback;
-        see :class:`~lmcache.v1.common.object_group_transfer.ObjectGroupTransfer`
+        see :class:`~lmcache.v1.platform.base.object_group_transfer.ObjectGroupTransfer`
         for argument semantics, completion ownership and copy errors.
 
         Raises:

@@ -7,9 +7,9 @@ and passed between processes during multiprocessing tests.
 """
 
 # First Party
-from lmcache.utils import EngineType
 from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
+    EngineType,
     IPCCacheServerKey,
     KVEventProfile,
 )
@@ -46,6 +46,7 @@ def register_kv_cache_handler(
     layout_hints: LayoutHints,
     engine_group_infos: list[EngineGroupInfo],
     event_profile: KVEventProfile | None,
+    chunk_size: int | None = None,
 ) -> KVEventProfile | None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
@@ -60,6 +61,7 @@ def register_kv_cache_handler(
         engine_group_infos: Engine-neutral KV cache group metadata,
             msgspec-decoded from the request payload.
         event_profile: Optional identity contract echoed by this test handler.
+        chunk_size: Effective logical tokens per LMCache chunk.
 
     Returns:
         The supplied profile, or None when absent.

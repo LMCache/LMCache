@@ -18,8 +18,8 @@ from lmcache.integration.atom.multi_process_adapter import (
     AtomMPTransferSpec,
     AtomMPWorkerAdapter,
 )
-from lmcache.utils import EngineType
 from lmcache.v1.client.chunk_hashes import lmcache_chunk_hashes
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.kv_format import detect_format
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache
