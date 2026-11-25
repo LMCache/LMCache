@@ -562,3 +562,23 @@ def test_p2p_store_policy_keeps_objects_local_until_the_usage_threshold() -> Non
                 main_sm.delete_l2_adapter(adapter_id)
             main_sm.close()
             delete_transfer_channel_context()
+
+
+def test_a_real_peer_answers_the_probe_without_locking() -> None:
+    """The probe (a lookup of no keys and its query) completes on a real
+    peer and takes no read lock, while a lookup of the same resident key
+    does."""
+    keys = [_key(0)]
+    with _peer_side() as peer:
+        reserved = peer.sm.reserve_write(keys, _LAYOUT)
+        peer.sm.finish_write(list(reserved), l1_owners_of(reserved))
+        client = P2PClient(peer.mq_url)
+        try:
+            assert client.probe().result(5) is None
+            assert peer.l1.report_status()["read_locked_count"] == 0
+
+            task_id = client.p2p_lookup_and_lock(keys, {0: _LAYOUT}).result(5)
+            assert _poll(lambda: client.p2p_query_lookup_results(task_id).result(5))
+            assert peer.l1.report_status()["read_locked_count"] == 1
+        finally:
+            client.close()

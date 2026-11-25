@@ -105,40 +105,35 @@ wakeup instead of the next periodic pulse (one pulse is up to
 shared with those callbacks and guarded by a lock. Failures stay bounded:
 
 - an ack that does not arrive within ~3 s, or a failed ack, is a miss;
-- an unanswered result query is not sent again: the lookup and query calls
-  fail fast when the peer is not connected, and the lookup deadline
-  (`lookup_timeout_s`) bounds a query that is never answered. The query has
-  no gRPC deadline of its own: the peer returns a result only once, so a
-  reply that arrived after a deadline would be lost with its read locks;
+- an unanswered result query is not sent again: a gRPC call fails once the
+  connection is seen to drop, and a copy of one stuck behind an unready
+  channel or a silent peer would wait the same way;
 - a failed query is retried once, and a second failure is a miss;
 - the lookup deadline (`lookup_timeout_s`) still bounds the whole lookup;
 - a lookup acknowledgement that fails because the peer is down
-  (`UNAVAILABLE` or `CANCELLED` at once) or past the ~3 s lookup deadline (a
-  frozen peer), or a single query RPC unanswered for ~3 s, marks the
-  peer unresponsive; other ack errors are only a miss. A stalled query's
-  late answer is still used by its lookup. While marked, lookups to the peer
-  are a miss at once, without an RPC. Recovery is checked one step at a
-  time. First the adapter sends a probe, an unlock of no keys, that no
-  request waits on; it waits for a connection, up to the same deadline, so a
-  peer that is down is probed at most once per deadline. An answered probe
-  only shows that the peer's RPC server is up, so the next lookup then goes
-  out as a canary while the others still miss. The mark is cleared only when
-  the canary completes; if its ack or query fails or stalls, the next lookup
-  probes again; a check that has not ended within `lookup_timeout_s` (for
-  example a canary whose request was dropped) is given up and the next
-  lookup probes again. Only a query sent after the mark was last cleared
-  can set it again. A peer whose RPC server answers but whose lookups stall thus
-  costs one waiting request per check instead of every request. The
-  trade-off: a peer that stalls past the deadline and recovers misses hits
-  until a probe and a canary complete.
+  (`UNAVAILABLE` or `CANCELLED`) or past the ~3 s lookup RPC deadline (a
+  frozen peer) marks the peer unhealthy (`_PeerHealth`); other ack errors
+  are only a miss. While marked, lookups to the peer are a miss at once,
+  without an RPC, and the first of them sends a probe that no request waits
+  on: a lookup of no keys and its query. The peer completes such a lookup at
+  once and locks nothing, so both calls wait for a connection with the ~3 s
+  deadline, and a peer that is down is probed at most once per deadline. An
+  answered probe clears the mark. Trade-off: a peer that acks lookups but
+  never answers their queries is not marked, and each lookup to it waits
+  `lookup_timeout_s`.
 
-The lookup deadline also stops lookups from piling up behind a peer that is
-down: without it, lookups waiting for a connection were all sent, and
-read-locked their keys until the peer's read TTL, when the peer came back.
-It does not stop a peer from running a lookup that it received in time but
-handled after the deadline (for example while its handler threads were
-busy): the requester has dropped it by then, so its read locks last until the
-TTL.
+The lookup RPC fails fast instead of waiting for a connection and has the
+~3 s deadline, so lookups no longer pile up behind a peer that is down:
+waiting for a connection, they were all sent, and read-locked their keys
+until the peer's read TTL, when the peer came back. The query still waits
+for a connection and has no deadline: it is only sent after the peer acked,
+so a short connection drop delays it instead of losing the result, and the
+peer hands a result out once, so a reply after a deadline would be lost
+with its read locks.
+The deadline does not stop a peer from running a lookup that it received in
+time but handled after the deadline (for example while its handler threads
+were busy): the requester has dropped it by then, so its read locks last
+until the TTL.
 
 The transfer-channel read exposes no completion fd: the RDMA read completes
 inside the transfer engine. So the adapter also registers its lookup and load

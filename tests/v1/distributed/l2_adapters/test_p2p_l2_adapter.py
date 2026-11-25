@@ -4,6 +4,7 @@
 # Standard
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
+import logging
 import queue
 import select
 import threading
@@ -1190,22 +1191,20 @@ def test_replies_from_another_thread_resolve_each_lookup_once():
     ],
     ids=["down", "frozen"],
 )
-def test_unacknowledged_peer_is_skipped_until_a_canary_completes(ack_error):
+def test_unacknowledged_peer_is_skipped_until_a_probe_is_answered(ack_error):
     """After a lookup is not acknowledged, every lookup to the peer is a
-    signalled miss at once with no RPC; the first of them sends a probe that
-    no request waits on, one at a time. Once a probe is answered, exactly one
-    lookup goes out as a canary while the others still miss; a canary that
-    fails keeps the peer skipped, one that completes ends it."""
+    signalled miss at once with no RPC, and the adapter reports itself
+    unhealthy. The first of them sends a probe that no request waits on, one
+    at a time; a failed probe keeps the peer skipped and the next lookup
+    probes again; an answered probe ends it."""
     addresses = [TransferChannelAddress(offset=100, size=10)]
-    first_ack, straggler_ack, canary_1, canary_2 = (_PendingFuture() for _ in range(4))
-    probes = [_PendingFuture() for _ in range(4)]
+    first_ack, straggler_ack = _PendingFuture(), _PendingFuture()
+    probes = [_PendingFuture() for _ in range(2)]
     with _adapter(lookup_timeout_s=30.0) as (adapter, req_client, *_):
         req_client.p2p_lookup_and_lock.side_effect = [
             first_ack,
             straggler_ack,
-            canary_1,
-            canary_2,
-            _PendingFuture(),
+            _FakeFuture(value=7),
         ]
         req_client.p2p_query_lookup_results.return_value = _FakeFuture(value=addresses)
         req_client.probe.side_effect = probes
@@ -1214,98 +1213,34 @@ def test_unacknowledged_peer_is_skipped_until_a_canary_completes(ack_error):
         def submit() -> int:
             return adapter.submit_lookup_and_lock_task([_key(9)], {0: _LAYOUT})
 
-        def assert_skipped(lookups_sent: int) -> None:
+        def assert_skipped() -> None:
             task_id = submit()
             assert _fd_ready(lookup_fd)
             assert adapter.query_lookup_and_lock_result(task_id).popcount() == 0
-            assert req_client.p2p_lookup_and_lock.call_count == lookups_sent
+            assert req_client.p2p_lookup_and_lock.call_count == 2
+            assert adapter.report_status()["is_healthy"] is False
 
         first = submit()
         submit()
+        assert adapter.report_status()["is_healthy"] is True
         first_ack.resolve(exc=ack_error)
         assert adapter.query_lookup_and_lock_result(first).popcount() == 0
 
         # The first lookup after the failure probes at once, even with
         # another lookup from before the failure still unacknowledged.
-        assert_skipped(2)
+        assert_skipped()
         assert req_client.probe.call_count == 1
         straggler_ack.resolve(exc=ack_error)
-        assert_skipped(2)  # the probe is still pending: no second one
+        assert_skipped()  # the probe is still pending: no second one
         assert req_client.probe.call_count == 1
         probes[0].resolve(exc=ack_error)  # the peer is still out
-        assert_skipped(2)
+        assert_skipped()
         assert req_client.probe.call_count == 2
 
-        probes[1].resolve()  # the RPC server answers: one canary goes out
-        canary = submit()
+        probes[1].resolve()  # answered: the peer is back
+        assert adapter.report_status()["is_healthy"] is True
+        assert adapter.query_lookup_and_lock_result(submit()).popcount() == 1
         assert req_client.p2p_lookup_and_lock.call_count == 3
-        assert_skipped(3)  # while the canary is pending
-        canary_1.resolve(exc=ack_error)  # the lookup path is still out
-        assert adapter.query_lookup_and_lock_result(canary).popcount() == 0
-        assert_skipped(3)
-        assert req_client.probe.call_count == 3
-
-        probes[2].resolve()
-        canary = submit()
-        canary_2.resolve(value=7)  # acked and answered: the peer is back
-        assert adapter.query_lookup_and_lock_result(canary).popcount() == 1
-        submit()
-        assert req_client.p2p_lookup_and_lock.call_count == 5
-        assert req_client.probe.call_count == 3
-
-
-def test_a_stalled_query_skips_the_peer_and_its_late_answer_is_used():
-    """A query outstanding past the RPC timeout makes later lookups to the
-    peer a miss at once, while the waiting lookup still takes the answer
-    when it lands (the peer hands a result out once)."""
-    addresses = [TransferChannelAddress(offset=100, size=10)]
-    query = _PendingFuture()
-    with (
-        patch.object(p2p_mod, "LOOKUP_RPC_TIMEOUT_S", 0.05),
-        _adapter(lookup_timeout_s=30.0) as (adapter, req_client, *_),
-    ):
-        req_client.p2p_lookup_and_lock.return_value = _FakeFuture(value=7)
-        req_client.p2p_query_lookup_results.return_value = query
-        waiting = adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
-        assert adapter.query_lookup_and_lock_result(waiting) is None
-        time.sleep(0.1)
-        assert adapter.query_lookup_and_lock_result(waiting) is None
-
-        later = adapter.submit_lookup_and_lock_task([_key(1)], {0: _LAYOUT})
-        assert adapter.query_lookup_and_lock_result(later).popcount() == 0
-        assert req_client.p2p_lookup_and_lock.call_count == 1
-        req_client.probe.assert_called_once()
-
-        query.resolve(value=addresses)
-        assert adapter.query_lookup_and_lock_result(waiting).popcount() == 1
-
-
-def test_a_canary_whose_query_stalls_keeps_the_peer_skipped():
-    """A canary that is acknowledged but whose query stays unanswered past
-    the RPC timeout fails the check: the peer stays skipped and the next
-    lookup probes again."""
-    with (
-        patch.object(p2p_mod, "LOOKUP_RPC_TIMEOUT_S", 0.05),
-        _adapter(lookup_timeout_s=30.0) as (adapter, req_client, *_),
-    ):
-        req_client.p2p_lookup_and_lock.side_effect = [
-            _FakeFuture(exc=MPServerUnavailableError("UNAVAILABLE", "down")),
-            _FakeFuture(value=7),
-        ]
-        req_client.p2p_query_lookup_results.return_value = _PendingFuture()
-        req_client.probe.return_value = _FakeFuture()  # answered at once
-
-        def submit() -> int:
-            return adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
-
-        assert adapter.query_lookup_and_lock_result(submit()).popcount() == 0
-        assert adapter.query_lookup_and_lock_result(submit()).popcount() == 0
-        canary = submit()
-        assert req_client.p2p_lookup_and_lock.call_count == 2
-        time.sleep(0.1)
-        assert adapter.query_lookup_and_lock_result(canary) is None
-        adapter.submit_lookup_and_lock_task([_key(1)], {0: _LAYOUT})
-        assert req_client.p2p_lookup_and_lock.call_count == 2
         assert req_client.probe.call_count == 2
 
 
@@ -1324,132 +1259,6 @@ def test_a_peer_error_on_an_ack_does_not_skip_the_peer():
         req_client.probe.assert_not_called()
 
 
-def test_a_canary_that_is_never_polled_is_given_up_after_the_lookup_timeout():
-    """A canary whose request was dropped (never polled again) does not keep
-    the peer skipped: after lookup_timeout_s the next lookup probes again."""
-    with _adapter(lookup_timeout_s=0.1) as (adapter, req_client, *_):
-        req_client.p2p_lookup_and_lock.side_effect = [
-            _FakeFuture(exc=MPServerUnavailableError("UNAVAILABLE", "down")),
-            _PendingFuture(),  # the canary, orphaned by its request
-            _PendingFuture(),  # the next canary
-        ]
-        req_client.probe.return_value = _FakeFuture()  # answered at once
-
-        def submit() -> int:
-            return adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
-
-        assert adapter.query_lookup_and_lock_result(submit()).popcount() == 0
-        submit()  # a miss that sends the probe, which is answered
-        submit()  # the canary; never polled
-        assert req_client.p2p_lookup_and_lock.call_count == 2
-        submit()
-        assert req_client.probe.call_count == 1
-        time.sleep(0.2)
-        submit()
-        assert req_client.probe.call_count == 2
-        submit()  # the new probe was answered: this one is the next canary
-        assert req_client.p2p_lookup_and_lock.call_count == 3
-
-
-def test_the_query_stall_is_timed_per_query_rpc():
-    """A slow peer that answers each query with "not ready" within the RPC
-    timeout is not marked, however long the lookup takes in total."""
-    addresses = [TransferChannelAddress(offset=100, size=10)]
-    queries = [_PendingFuture() for _ in range(4)]  # the last for the next lookup
-    with (
-        patch.object(p2p_mod, "LOOKUP_RPC_TIMEOUT_S", 0.2),
-        _adapter(lookup_timeout_s=30.0) as (adapter, req_client, *_),
-    ):
-        req_client.p2p_lookup_and_lock.return_value = _FakeFuture(value=7)
-        req_client.p2p_query_lookup_results.side_effect = queries
-        task_id = adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
-        for query in queries[:2]:
-            time.sleep(0.12)  # under the timeout for this query
-            assert adapter.query_lookup_and_lock_result(task_id) is None
-            query.resolve(value=None)  # not ready yet
-            assert adapter.query_lookup_and_lock_result(task_id) is None
-        queries[2].resolve(value=addresses)
-        assert adapter.query_lookup_and_lock_result(task_id).popcount() == 1
-        adapter.submit_lookup_and_lock_task([_key(1)], {0: _LAYOUT})
-        assert req_client.p2p_lookup_and_lock.call_count == 2
-        req_client.probe.assert_not_called()
-
-
-def test_a_query_stuck_from_before_a_recovery_does_not_mark_the_peer_again():
-    """Once a canary has cleared the mark, a lookup whose query was sent
-    before that and is still unanswered does not skip the peer again."""
-    addresses = [TransferChannelAddress(offset=100, size=10)]
-    stuck, canary_query = _PendingFuture(), _PendingFuture()
-    with (
-        patch.object(p2p_mod, "LOOKUP_RPC_TIMEOUT_S", 0.05),
-        _adapter(lookup_timeout_s=30.0) as (adapter, req_client, *_),
-    ):
-        req_client.p2p_lookup_and_lock.return_value = _FakeFuture(value=7)
-        req_client.p2p_query_lookup_results.side_effect = [
-            stuck,
-            canary_query,
-            _PendingFuture(),
-        ]
-        req_client.probe.return_value = _FakeFuture()  # answered at once
-        old = adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
-        time.sleep(0.1)
-        assert adapter.query_lookup_and_lock_result(old) is None  # marks
-        adapter.submit_lookup_and_lock_task([_key(1)], {0: _LAYOUT})  # probe
-        canary = adapter.submit_lookup_and_lock_task([_key(2)], {0: _LAYOUT})
-        canary_query.resolve(value=addresses)
-        assert adapter.query_lookup_and_lock_result(canary).popcount() == 1
-
-        assert adapter.query_lookup_and_lock_result(old) is None
-        adapter.submit_lookup_and_lock_task([_key(3)], {0: _LAYOUT})
-        assert req_client.p2p_lookup_and_lock.call_count == 3
-
-
-def test_a_canary_whose_rpc_raises_leaves_the_next_lookup_as_the_canary():
-    """If sending the canary raises, the request fails but the check is not
-    stuck: the next lookup goes out as the canary."""
-    with _adapter() as (adapter, req_client, *_):
-        req_client.p2p_lookup_and_lock.side_effect = [
-            _FakeFuture(exc=MPServerUnavailableError("UNAVAILABLE", "down")),
-            RuntimeError("channel closed"),
-            _PendingFuture(),
-        ]
-        req_client.probe.return_value = _FakeFuture()
-
-        def submit() -> int:
-            return adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
-
-        assert adapter.query_lookup_and_lock_result(submit()).popcount() == 0
-        submit()  # sends the probe, answered at once
-        with pytest.raises(RuntimeError):
-            submit()
-        submit()
-        assert req_client.p2p_lookup_and_lock.call_count == 3
-        assert req_client.probe.call_count == 1
-
-
-def test_a_canary_rejected_by_the_peer_is_logged():
-    """A canary whose ack fails with a peer error (not unreachability) is
-    logged, although the peer is already marked."""
-    with (
-        _adapter() as (adapter, req_client, *_),
-        patch.object(p2p_mod.logger, "exception") as log_exception,
-    ):
-        req_client.p2p_lookup_and_lock.side_effect = [
-            _FakeFuture(exc=MPServerUnavailableError("UNAVAILABLE", "down")),
-            _FakeFuture(exc=MPRequestError("INTERNAL", "boom")),
-        ]
-        req_client.probe.return_value = _FakeFuture()
-
-        def submit() -> int:
-            return adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
-
-        assert adapter.query_lookup_and_lock_result(submit()).popcount() == 0
-        assert log_exception.call_count == 1
-        submit()  # probe
-        assert adapter.query_lookup_and_lock_result(submit()).popcount() == 0
-        assert log_exception.call_count == 2
-
-
 @pytest.mark.parametrize(
     "ack_error",
     [
@@ -1460,20 +1269,25 @@ def test_a_canary_rejected_by_the_peer_is_logged():
 )
 def test_one_traceback_per_outage(ack_error, caplog, monkeypatch):
     """A run of failed acks to an unreachable peer logs one traceback for the
-    outage, a canary that fails the same way adds none, and the next outage
-    after the peer recovers logs one again."""
+    outage, a probe that fails adds none, and the next outage after the peer
+    recovers logs one again."""
     acks: list[_PendingFuture] = []
+    probes: list[_PendingFuture] = []
 
     def send_lookup(*_args) -> _PendingFuture:
         acks.append(_PendingFuture())
         return acks[-1]
+
+    def send_probe() -> _PendingFuture:
+        probes.append(_PendingFuture())
+        return probes[-1]
 
     with _adapter() as (adapter, req_client, *_):
         req_client.p2p_lookup_and_lock.side_effect = send_lookup
         req_client.p2p_query_lookup_results.return_value = _FakeFuture(
             value=[TransferChannelAddress(offset=100, size=10)]
         )
-        req_client.probe.return_value = _FakeFuture()  # answered at once
+        req_client.probe.side_effect = send_probe
         # The lmcache logger does not propagate, so caplog would see nothing.
         monkeypatch.setattr(p2p_mod.logger, "handlers", [caplog.handler])
 
@@ -1492,14 +1306,53 @@ def test_one_traceback_per_outage(ack_error, caplog, monkeypatch):
             )
             assert tracebacks() == outage
 
-            submit()  # skipped; sends a probe, answered at once
-            canary = submit()
-            acks[-1].resolve(exc=ack_error)  # the canary fails the same way
-            assert adapter.query_lookup_and_lock_result(canary).popcount() == 0
+            submit()  # skipped; sends a probe
+            probes[-1].resolve(exc=ack_error)  # the peer is still out
             assert tracebacks() == outage
 
             submit()  # probe again
-            canary = submit()
-            acks[-1].resolve(value=7)  # the peer is back
-            assert adapter.query_lookup_and_lock_result(canary).popcount() == 1
-        assert req_client.p2p_lookup_and_lock.call_count == 14
+            probes[-1].resolve()  # the peer is back
+            task_id = submit()
+            acks[-1].resolve(value=7)
+            assert adapter.query_lookup_and_lock_result(task_id).popcount() == 1
+            assert tracebacks() == outage
+        assert req_client.p2p_lookup_and_lock.call_count == 12
+        assert req_client.probe.call_count == 4
+
+
+def test_closing_with_a_lookup_in_flight_logs_no_error(caplog, monkeypatch):
+    """Closing the adapter cancels its calls; the cancelled ack of a lookup
+    in flight neither logs an error nor marks the peer."""
+    ack = _PendingFuture()
+    with _adapter() as (adapter, req_client, *_):
+        req_client.p2p_lookup_and_lock.return_value = ack
+        monkeypatch.setattr(p2p_mod.logger, "handlers", [caplog.handler])
+        adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+        adapter.close()
+        ack.resolve(exc=MPServerUnavailableError("CANCELLED", "channel closed"))
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert adapter.report_status()["is_healthy"] is True
+
+
+def test_peer_recovers_when_lookups_are_further_apart_than_the_lookup_timeout():
+    """An answered probe brings the peer back even when lookups arrive less
+    often than lookup_timeout_s."""
+    addresses = [TransferChannelAddress(offset=100, size=10)]
+    with _adapter(lookup_timeout_s=0.1) as (adapter, req_client, *_):
+        req_client.p2p_lookup_and_lock.side_effect = [
+            _FakeFuture(exc=MPServerUnavailableError("UNAVAILABLE", "down")),
+        ] + [_FakeFuture(value=7)] * 8
+        req_client.p2p_query_lookup_results.return_value = _FakeFuture(value=addresses)
+        req_client.probe.return_value = _FakeFuture()  # every probe answered
+
+        def lookup() -> int:
+            task_id = adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+            return adapter.query_lookup_and_lock_result(task_id).popcount()
+
+        assert lookup() == 0
+        hits = []
+        for _ in range(8):
+            time.sleep(0.15)
+            hits.append(lookup())
+        assert sum(hits) >= 7
+        assert req_client.probe.call_count == 1
