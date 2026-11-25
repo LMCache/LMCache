@@ -25,6 +25,12 @@ repos:
     language: system
     types: [python]
     files: ^tests/
+  - id: check-module-deps
+    name: Check module dependency directions
+    entry: python3 tools/check_module_deps.py
+    language: system
+    pass_filenames: false
+    files: ^(lmcache/.*\.py|tools/check_module_deps\.py|tools/module_deps_baseline\.txt|docs/design/MODULE_DEPENDENCIES\.md)$
   - id: ban-cuda-host-register
     name: Ban cudaHostRegister/Unregister outside platform
     entry: >-

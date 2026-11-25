@@ -101,3 +101,8 @@
 # Packaging
 pyproject.toml                         @sammshen @ApostaC @deng451e @hickeyma
 setup.py                               @sammshen @ApostaC @deng451e @hickeyma
+
+# Module dependency tree
+/docs/design/MODULE_DEPENDENCIES.md    @maobaolong
+/tools/check_module_deps.py            @maobaolong
+/tools/module_deps_baseline.txt        @maobaolong
