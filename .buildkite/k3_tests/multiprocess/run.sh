@@ -7,11 +7,12 @@
 #              | fault_tolerance | deadlock | mp_autostart_tp2
 #              | restart_recovery | gds_smoke | p2p | p2p_write
 #              | kimi_linear_tp | dsv4_flash_tp | lazy_offload | sleep_mode
+#              | eviction_aware_lazy_offload
 # Thin wrapper: sets up environment, then delegates to scripts/.
 # No Docker -- all processes run natively in the pod.
 set -euo pipefail
 
-TEST_NAME="${1:?Usage: $0 <test_name>  (lm_eval|lm_eval_preemption|preemption_correctness|hma_lm_eval_gemma4|vllm_bench|long_doc_qa|high_concurrency|long_doc_qa_l2|fault_tolerance|deadlock|mp_autostart_tp2|restart_recovery|cache_stats|lazy_offload|sleep_mode|http_api|gds_smoke|p2p|p2p_write|kimi_linear_tp|dsv4_flash_tp)}"
+TEST_NAME="${1:?Usage: $0 <test_name>  (lm_eval|lm_eval_preemption|preemption_correctness|hma_lm_eval_gemma4|vllm_bench|long_doc_qa|high_concurrency|long_doc_qa_l2|fault_tolerance|deadlock|mp_autostart_tp2|restart_recovery|cache_stats|lazy_offload|eviction_aware_lazy_offload|sleep_mode|http_api|gds_smoke|p2p|p2p_write|kimi_linear_tp|dsv4_flash_tp)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 INFERENCE_ENGINE="${INFERENCE_ENGINE:-vllm}"
@@ -25,7 +26,7 @@ export DEVICE_AFFINITY_VAR="${DEVICE_AFFINITY_VAR:-CUDA_VISIBLE_DEVICES}"
 export LM_EVAL_NUM_CONCURRENT_DEFAULT="${LM_EVAL_NUM_CONCURRENT_DEFAULT:-50}"
 export LM_EVAL_VERIFY_MODE_DEFAULT="${LM_EVAL_VERIFY_MODE_DEFAULT:-samples}"
 export LM_EVAL_SCORE_MIN_DEFAULT="${LM_EVAL_SCORE_MIN_DEFAULT:-0.80}"
-export LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
+export LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-grpc}"
 export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
 
 # ── Environment setup ────────────────────────────────────────
@@ -45,6 +46,13 @@ if resolve_engine_workload "$TEST_NAME" "${SCRIPT_DIR}/scripts" \
 else
     status=$?
     if [[ "$status" -eq "$WORKLOAD_UNSUPPORTED_STATUS" ]]; then
+        # The job still passes, so record the skip where the weekly full
+        # build's gate reads it; an unexpected skip must fail the weekly run.
+        if [[ "${CI_WEEKLY_FULL:-0}" == "1" ]] && command -v buildkite-agent >/dev/null 2>&1; then
+            buildkite-agent annotate --style warning \
+                --context "weekly-skip-${BUILDKITE_JOB_ID:-unknown}" \
+                "Skipped as unsupported: \`${BUILDKITE_LABEL:-$TEST_NAME}\`" || true
+        fi
         exit 0
     fi
     exit "$status"

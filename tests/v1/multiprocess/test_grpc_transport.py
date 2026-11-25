@@ -24,10 +24,6 @@ from lmcache.v1.client.kv_event_subscriber import (
     KVEventStreamClosed,
     MPKVEventSubscriber,
 )
-from lmcache.v1.client.transport.errors import (
-    MPRequestError,
-    MPServerUnavailableError,
-)
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
@@ -77,6 +73,10 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     validate_method_handler,
 )
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
+from lmcache.v1.transport.errors import (
+    MPRequestError,
+    MPServerUnavailableError,
+)
 from lmcache.v1.transport.futures import MessagingStream
 from lmcache.v1.transport.grpc import proto_codec
 from lmcache.v1.transport.grpc.codecs import (
@@ -197,21 +197,36 @@ def grpc_client(
             requires_client_affinity=True,
         )
         def prepare_retrieve(
-            self, key: IPCCacheServerKey, instance_id: int
+            self,
+            key: IPCCacheServerKey,
+            instance_id: int,
+            chunk_start: int = 0,
+            chunk_count: int = 0,
         ) -> PrepareRetrieveResponse:
             assert key.request_configs == {"blend": True}
             assert instance_id == 7
+            assert (chunk_start, chunk_count) == (2, 3)
             return PrepareRetrieveResponse(
                 success=True,
                 data=b"retrieved",
                 context={"slot": 3},
             )
 
+        @request_handler(
+            HandlerType.BLOCKING,
+            requires_client_affinity=True,
+        )
+        def commit_retrieve(
+            self, key: IPCCacheServerKey, instance_id: int, failed: bool = False
+        ) -> bool:
+            return failed
+
         @request_handler()
         def register_kv_cache_engine_driven_context(
             self, payload: RegisterEngineDrivenContextPayload
         ) -> RegisterEngineDrivenContextResponse:
             assert payload.num_physical_slots == 32
+            assert payload.chunk_size == 32
             return RegisterEngineDrivenContextResponse("shared-memory", 4096)
 
         @request_handler(HandlerType.BLOCKING)
@@ -340,6 +355,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
             "hidden_dim_size": 128,
             "dtype_str": "float16",
             "use_mla": False,
+            "chunk_size": 32,
             "num_physical_slots": 32,
         },
     )
@@ -353,6 +369,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
             hidden_dim_size=128,
             dtype_str="float16",
             use_mla=False,
+            chunk_size=32,
             num_physical_slots=32,
         ),
     )
@@ -453,7 +470,7 @@ import sys
 
 banned = (
     "cachetools",
-    "lmcache.utils",
+    "lmcache.v1.distributed.utils",
     "lmcache.v1.transport.futures",
     "lmcache.v1.transport.request_client",
 )
@@ -719,11 +736,13 @@ def test_generated_grpc_services_communicate_end_to_end(
             "skipped": [[0, 1], [], [3]],
         }
     )
-    assert client.prepare_retrieve(key, 7).result(5) == PrepareRetrieveResponse(
+    assert client.prepare_retrieve(key, 7, 2, 3).result(5) == PrepareRetrieveResponse(
         success=True,
         data=b"retrieved",
         context={"slot": 3},
     )
+    assert client.commit_retrieve(key, 7, True).result(5) is True
+    assert client.commit_retrieve(key, 7).result(5) is False
     registration = client.register_kv_cache_engine_driven_context(
         RegisterEngineDrivenContextPayload(
             instance_id=7,
@@ -734,6 +753,7 @@ def test_generated_grpc_services_communicate_end_to_end(
             hidden_dim_size=128,
             dtype_str="float16",
             use_mla=False,
+            chunk_size=32,
             num_physical_slots=32,
         )
     ).result(5)

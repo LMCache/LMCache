@@ -9,8 +9,8 @@ from typing import Any
 import threading
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.security.api_key import APIKeyVerifier
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.security.api_key import APIKeyVerifier
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.ext_server_module import register_grpc_services
 from lmcache.v1.multiprocess.transport.base import RequestServer

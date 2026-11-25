@@ -5,6 +5,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include "ttl_lock.h"
+#include "cache_flush.h"
 #include "bitmap.h"
 #include "fold.h"
 #include "periodic_event_notifier.h"
@@ -48,7 +49,7 @@ PYBIND11_MODULE(lmcache_native, m) {
   // Device-independent KV-format and transfer enums. These live in the
   // common (non-CUDA) native module so they are available regardless of the
   // GPU backend, and so they are the single source of truth shared with the
-  // pure-Python fallback in ``lmcache.v1.platform.ops_types``.
+  // pure-Python fallback in ``lmcache.v1.common.ops_types``.
   py::enum_<EngineKVFormat>(m, "EngineKVFormat")
       .value("NB_NL_TWO_BS_NH_HS", EngineKVFormat::NB_NL_TWO_BS_NH_HS)
       .value("NL_X_TWO_NB_BS_NH_HS", EngineKVFormat::NL_X_TWO_NB_BS_NH_HS)
@@ -163,6 +164,14 @@ PYBIND11_MODULE(lmcache_native, m) {
         py::arg("hit_length"), py::arg("num_chunks"), py::arg("windows"),
         "Expand a model-wide hit length into one retain bitmap of size "
         "num_chunks per window, parallel to windows.");
+
+  m.def("cache_flush_supported",
+        &lmcache::lmcache_native::cache_flush_supported,
+        "Return whether cache_flush_range() works on this CPU.");
+  m.def("cache_flush_range", &lmcache::lmcache_native::cache_flush_range,
+        py::arg("ptr"), py::arg("size"),
+        py::call_guard<py::gil_scoped_release>(),
+        "Write back and invalidate the CPU cache lines of [ptr, ptr + size).");
 
   py::class_<TTLLock>(m, "TTLLock")
       .def(py::init<uint32_t>(), py::arg("ttl_second") = 300,

@@ -151,13 +151,13 @@ def _parse_mp(argv: list[str]) -> MPServerConfig:
     return parse_args_to_mp_server_config(parser.parse_args(argv))
 
 
-def test_transport_defaults_to_zmq():
-    assert _parse_mp([]).transport == "zmq"
-    assert MPServerConfig().transport == "zmq"
+def test_transport_defaults_to_grpc():
+    assert _parse_mp([]).transport == "grpc"
+    assert MPServerConfig().transport == "grpc"
 
 
-def test_transport_flag_is_parsed_without_starting_grpc():
-    assert _parse_mp(["--transport", "grpc"]).transport == "grpc"
+def test_transport_flag_still_selects_zmq():
+    assert _parse_mp(["--transport", "zmq"]).transport == "zmq"
 
 
 def test_null_block_id_defaults_to_zero():
