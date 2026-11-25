@@ -703,10 +703,11 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
 
     Attributes:
         completed_store_requests: Newly completed stores of this worker, as
-            ``{request_id: 1}``. ``aggregate()`` sums the counts across the
-            workers of one step; the scheduler-side manager accumulates
-            across steps and settles a store only once its count reaches
-            ``world_size``.
+            ``{receipt id: 1}``. The receipt id is the request id with lazy
+            offload and the STORE's pin key (``lmcache.hint.store_pin``)
+            otherwise. ``aggregate()`` sums the counts across the workers of
+            one step; the scheduler accumulates across steps and settles a
+            store only once its count reaches ``world_size``.
         failed_store_requests: Requests whose store did not succeed on this
             worker, either with a failed result or dropped while unhealthy.
             Their completion receipts are still counted -- the pinned blocks
@@ -728,8 +729,8 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             other: The report of another rank, for the same scheduler step.
 
         Returns:
-            A new metadata whose completion counts are summed per request,
-            and whose failed-request sets are unioned.
+            A new metadata whose completion counts are summed per key, and
+            whose failed-request sets are unioned.
         """
         assert isinstance(other, LMCacheMPWorkerMetadata)
         merged = dict(self.completed_store_requests)

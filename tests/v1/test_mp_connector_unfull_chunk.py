@@ -16,12 +16,14 @@ from vllm.v1.utils import ConstantList  # noqa: E402
 
 # First Party
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
+    STORE_PIN_HINT,
     LMCacheMPConnector,
 )
 from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
     LMCacheMPRequestMetadata,
     LMCacheMPRequestState,
     LMCacheMPRequestTracker,
+    LMCacheMPWorkerMetadata,
 )
 
 CHUNK = 128
@@ -396,6 +398,48 @@ def test_boundary_state_block_is_pinned_until_the_request_is_sent():
     pool.free_blocks.assert_called_once_with(["boundary-state-block"])
 
 
+def test_unfull_chunk_store_pins_its_recurrent_blocks():
+    """A tail STORE's state block is pinned until the workers report the
+    STORE, like a full chunk's."""
+    connector, _ = _connector(lookup_hit=0)
+    pool = MagicMock()
+    pool.blocks = {BOUNDARY_STATE_BLOCK: "boundary-state-block"}
+    connector._gpu_block_pool = pool
+    connector._boundary_state_groups = [1]
+    connector._pinned_boundary_state_blocks = {}
+    connector._group_tokens_per_block = GROUP_TOKENS_PER_BLOCK
+    connector._windowed_group_tokens = {1: CHUNK}
+    connector._store_pins = {}
+    connector._store_pin_seq = 0
+    tracker = _tracker()
+    tracker.increase_num_scheduled_tokens(PROMPT)
+    scheduler_output = SimpleNamespace(
+        kv_connector_block_state=SimpleNamespace(
+            boundary_state_offloads={
+                "req-0": [(1, BOUNDARY_STATE_BLOCK, TAIL_BOUNDARY)]
+            }
+        )
+    )
+    metadata = MagicMock()
+
+    connector._add_unfull_chunk_stores(scheduler_output, tracker, metadata)
+
+    (r_meta,), _ = metadata.add_request_metadata.call_args
+    pin_key = r_meta.request_configs[STORE_PIN_HINT]
+    assert connector._store_pins == {pin_key: [BOUNDARY_STATE_BLOCK]}
+    connector.update_connector_output(
+        SimpleNamespace(
+            kv_cache_events=None,
+            kv_connector_worker_meta=LMCacheMPWorkerMetadata(
+                completed_store_requests={pin_key: 1}
+            ),
+            finished_sending=None,
+        )
+    )
+    pool.free_blocks.assert_called_once_with(["boundary-state-block"])
+    assert connector._store_pins == {}
+
+
 def test_pinned_boundary_state_block_is_released_after_a_preemption():
     """A request stores its tail, is preempted, then hits the whole tail and
     stores nothing more. It still delays its free, so the block it pinned
@@ -454,6 +498,7 @@ def _connector(lookup_hit: int) -> tuple[LMCacheMPConnector, MagicMock]:
     connector._unfull_chunk_grid = GRID
     connector._connector_stats = MagicMock()
     connector.lazy_offload = False
+    connector._windowed_group_tokens = {}
     connector._prefix_replay_tokens = 0
     connector._full_hit_holds_back_last_token = False
     return connector, scheduler_adapter
