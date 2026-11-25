@@ -63,7 +63,6 @@ py-modules = [
     # Roots of the packages found below.
     "lmcache.__init__",
     "lmcache._version",
-    "lmcache.cli.__init__",
     "lmcache.v1.__init__",
 
     "lmcache.v1.kv_layer_groups",
@@ -74,7 +73,6 @@ py-modules = [
 # vertical, the SDK and the engine integrations.
 where = [""]
 include = [
-    "lmcache.cli.metrics*",
     "lmcache.integration*",
     "lmcache.sdk*",
     "lmcache.v1.client*",
