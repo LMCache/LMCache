@@ -14,7 +14,7 @@ import mmap
 import os
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import L1BackendType, MemorySegment
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -764,8 +764,9 @@ class StorageManagerConfig:
     """ The L1 write-placement policy name. """
 
     prefetch_inflight_watermark: float = 0.5
-    """ Fraction of each L1's capacity that in-flight L2 prefetches may stage
-    before new prefetch requests wait, in (0, 1]. """
+    """ Fraction of each L1's capacity, in (0, 1], that L2 prefetches may hold
+    (in flight, or loaded but not yet consumed) before new prefetch requests
+    wait. """
 
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
@@ -1126,8 +1127,9 @@ def add_storage_manager_args(
         "--l2-prefetch-inflight-watermark",
         type=float,
         default=0.5,
-        help="Fraction of L1 capacity, in (0, 1], that in-flight L2 prefetch "
-        "requests may stage before new prefetch requests wait. Default is 0.5.",
+        help="Fraction of L1 capacity, in (0, 1], that L2 prefetches may hold "
+        "(in flight, or loaded but not yet consumed) before new prefetch "
+        "requests wait. Default is 0.5.",
     )
     # Deprecated: released deployers (operator) still render this flag into
     # server args, and rejecting it crashes the pod on startup.

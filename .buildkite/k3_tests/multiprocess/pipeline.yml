@@ -31,14 +31,14 @@ x-common-inference-engines: &common-inference-engines
   - "sglang"
 
 # Most scenarios exercise transport-independent behavior, so keep their PR
-# coverage on the default ZMQ transport.
+# coverage on gRPC.
 x-common-matrix: &common-matrix
   setup:
     inference_engine: *common-inference-engines
     request_transport:
-      - "zmq"
+      - "grpc"
 
-# Retain gRPC only for the representative GPU E2E and restart-recovery smokes.
+# Retain ZMQ only for the representative GPU E2E and restart-recovery smokes.
 x-common-smoke-matrix: &common-smoke-matrix
   setup:
     inference_engine: *common-inference-engines
@@ -52,7 +52,7 @@ x-vllm-matrix: &vllm-matrix
     inference_engine:
       - "vllm"
     request_transport:
-      - "zmq"
+      - "grpc"
 
 x-vllm-smoke-matrix: &vllm-smoke-matrix
   setup:
@@ -89,16 +89,62 @@ x-pod-1gpu: &pod-1gpu
     - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
 
 steps:
+  # Weekly full build only (CI_WEEKLY_FULL=1, see .github/workflows/
+  # weekly_full_build.yml). L1 KV correctness for the full-size
+  # DeepSeek-V4-Flash (sparse-MLA + fp8, TP=4) on real weights: each engine
+  # serves one greedy request, clears only its local prefix cache, and must
+  # return byte-identical output from LMCache's L1 pool. The 6-layer
+  # hma_dsv4_correctness steps below keep per-PR coverage of the KV layouts;
+  # this group keeps the real model's kernels and TP sharding covered once a
+  # week. Listed first so the 4-GPU pods get scheduled before smaller ones.
+  - group: ":compression: DSV4 full-size (4-GPU, weekly)"
+    if: build.env("CI_WEEKLY_FULL") == "1"
+    steps:
+      - label: ":compression: {{matrix.inference_engine}} / dsv4_flash_tp / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh dsv4_flash_tp
+        matrix: *common-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
+          # Test the pinned vLLM as is. The script's fallback to an older vLLM
+          # would turn a real DSV4 regression into a pass.
+          DSV4_FALLBACK_VLLM_VERSION: ""
+        # The 160GB fp8 TP-shard load, plus the weight download on a cold
+        # hf-cache node, needs the long timeout.
+        timeout_in_minutes: 120
+        retry:
+          automatic:
+            - exit_status: -1
+              limit: 2
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "4" } }
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  # TP=4 NCCL + inference-engine shared memory; the 1Gi used
+                  # by the smaller pods is too tight for four ranks.
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 8Gi } }
+        artifact_paths: ["*.log", "ci_results_*/dsv4_flash_tp/**/*"]
+
   - group: ":compression: DSV4 (1-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("VERIFY_AND_PIN_SGLANG") !~ /true/
     steps:
       # Retain uncompressed, 4x, and 128x KV paths without loading the full model.
-      - label: ":compression: vllm / hma_dsv4_correctness / zmq"
+      - label: ":compression: vllm / hma_dsv4_correctness / grpc"
         command: .buildkite/k3_tests/multiprocess/run.sh hma_dsv4_correctness
         env:
           MODEL: "deepseek-ai/DeepSeek-V4-Flash"
           INFERENCE_ENGINE: "vllm"
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
           LMCACHE_MP_TRANSFER_MODE: "lmcache_driven"
           TENSOR_PARALLEL_SIZE: "1"
           VLLM_LOAD_FORMAT: "dummy"
@@ -141,12 +187,12 @@ steps:
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
         artifact_paths: ["*.log", "ci_results_*/hma_dsv4_correctness/**/*"]
-      - label: ":compression: sglang / hma_dsv4_correctness / zmq"
+      - label: ":compression: sglang / hma_dsv4_correctness / grpc"
         command: .buildkite/k3_tests/multiprocess/run.sh hma_dsv4_correctness
         env:
           MODEL: "deepseek-ai/DeepSeek-V4-Flash"
           INFERENCE_ENGINE: "sglang"
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
           LMCACHE_MP_TRANSFER_MODE: "lmcache_driven"
           TENSOR_PARALLEL_SIZE: "1"
           SGLANG_JSON_MODEL_OVERRIDE_ARGS: '{"num_hidden_layers":6,"num_nextn_predict_layers":0,"compress_ratios":[0,0,4,128,4,128]}'
@@ -274,7 +320,7 @@ steps:
               - "default"
               - "explicit"
             request_transport:
-              - "zmq"
+              - "grpc"
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           P2P_RPC_PORT_MODE: "{{matrix.p2p_rpc_port_mode}}"
@@ -326,7 +372,7 @@ steps:
               - "lmcache_driven"
               - "engine_driven"
             request_transport:
-              - "zmq"
+              - "grpc"
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -371,7 +417,7 @@ steps:
               - "lmcache_driven"
               - "engine_driven"
             request_transport:
-              - "zmq"
+              - "grpc"
         timeout_in_minutes: 30
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
@@ -401,7 +447,7 @@ steps:
         # Two rungs (~15 min of client time) plus two model loads.
         timeout_in_minutes: 45
         env:
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
           ASYNC_SCHEDULING: "{{matrix.async_scheduling}}"
           NUM_GPU_BLOCKS_OVERRIDE: "1024"
           MAX_MODEL_LEN: "8192"
@@ -472,6 +518,21 @@ steps:
       # two remain pending and the third drains the first request.
       - label: ":compression: {{matrix.inference_engine}} / lazy_offload / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh lazy_offload
+        matrix: *vllm-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      # Real GPU MP integration: vLLM is launched with EVICTION_AWARE lazy
+      # offload over a pinned 32768-token KV pool (512 blocks of 64 tokens).
+      # An idle engine must hold every store; a workload twice the pool must
+      # drain them.
+      - label: ":compression: {{matrix.inference_engine}} / eviction_aware_lazy_offload / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh eviction_aware_lazy_offload
         matrix: *vllm-matrix
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
@@ -555,7 +616,7 @@ steps:
               - "inline"
               - "server_copy"
             request_transport:
-              - "zmq"
+              - "grpc"
         env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }

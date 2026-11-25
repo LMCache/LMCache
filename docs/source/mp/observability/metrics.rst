@@ -279,15 +279,18 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
    * - ``lmcache_mp.lookup_requested``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Total tokens submitted for lookup (denominator of the L1+L2
-       token-level hit rate). Only chunk-aligned tokens are counted.
+       token-level hit rate). Counts the full chunks, plus the sub-chunk
+       tail when the lookup probes an unfull chunk.
    * - ``lmcache_mp.lookup_hit``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Total tokens found in L1 or L2 during lookup (numerator of the
-       L1+L2 token-level hit rate). Counts the contiguous prefix hit only.
+       L1+L2 token-level hit rate). Counts the contiguous prefix hit only,
+       including an unfull-chunk (tail) hit.
    * - ``lmcache_mp.lookup_hit_l1``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Of ``lookup_hit``: tokens L1 could serve on its own under each
-       object group's attention-window rule.
+       object group's attention-window rule. An unfull-chunk hit is
+       always counted here, since unfull chunks are served from L1 only.
    * - ``lmcache_mp.lookup_hit_l2``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Of ``lookup_hit``: tokens L2 added beyond the L1-servable prefix.
@@ -808,9 +811,9 @@ each metric see ``docs/design/v1/mp_observability/METRICS.md`` and
 gRPC Runtime Metrics
 ~~~~~~~~~~~~~~~~~~~~
 
-When metrics are enabled and the MP request transport is gRPC, LMCache also
-registers gRPC Python's OpenTelemetry observability plugin against the same
-OTel ``MeterProvider``. ZMQ mode does not register this plugin, so the
+When metrics are enabled and the MP request transport is gRPC (the default),
+LMCache also registers gRPC Python's OpenTelemetry observability plugin
+against the same OTel ``MeterProvider``. ZMQ mode does not register this plugin, so the
 existing LMCache EventBus metrics remain unchanged. The plugin is provided by
 ``grpcio-observability`` and is installed only on Linux, which is the platform
 currently supported by that upstream package. On non-Linux developer hosts the

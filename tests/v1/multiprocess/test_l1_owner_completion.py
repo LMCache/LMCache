@@ -13,6 +13,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -24,7 +25,6 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager.base import BaseL1Manager
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
-from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess import native_completion
@@ -151,7 +151,10 @@ def test_store_owner_callback_round_trip(
         object_groups=[ObjectGroupInfo(kernel_group_indices=[i]) for i in range(2)],
     )
     entry = SimpleNamespace(
-        cache_context=cache_context, model_name="model", event_backend=backend
+        cache_context=cache_context,
+        model_name="model",
+        chunk_size=2,
+        event_backend=backend,
     )
     monkeypatch.setattr(module, "get_and_touch_context_entry", lambda _: entry)
     try:

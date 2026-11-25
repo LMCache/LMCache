@@ -302,7 +302,7 @@ denormalized token-level counts so subscribers need not know `chunk_size`:
   |---|---|---|
   | `""` | Normal path (including a genuine cold miss) | None — inspect the hit rate |
   | `no_gpu_context` | No layout registered for this model / world size | Configuration or registration bug; also logged at `error` |
-  | `empty_chunk_hashes` | Prompt shorter than one chunk | None — a workload property, not a cache failure |
+  | `empty_chunk_hashes` | Prompt shorter than one chunk, looked up without its unfull chunk (aligned `end`) | None — a workload property, not a cache failure |
   | `no_group_layout_descs` | No per-object-group layouts registered for this model / world size | Configuration or registration bug; also logged at `error` |
 
   Without it `found_count == 0` conflates a cold miss with every early

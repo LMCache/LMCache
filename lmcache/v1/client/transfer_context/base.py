@@ -30,10 +30,9 @@ import time
 import torch
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.utils import EngineType
 from lmcache.v1.common.api import MemoryLayoutDesc
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.native_block_transfer import transfer_with_address_kernel
@@ -273,8 +272,13 @@ class EngineDrivenContext(ABC):
         )
 
     @abstractmethod
-    def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
-        """Commit retrieve. Inline: no-op. Shm: release read locks."""
+    def commit_retrieve(
+        self, key: IPCCacheServerKey, instance_id: int, failed: bool = False
+    ) -> bool:
+        """Commit retrieve. Inline: no-op. Shm: release read locks.
+
+        ``failed`` tells the server the worker did not get or apply the data.
+        """
         ...
 
     @abstractmethod
