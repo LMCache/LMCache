@@ -13,9 +13,8 @@ import time
 
 # First Party
 from lmcache.lmcache_native import PeriodicEventNotifier
-from lmcache.utils import lmcache_deprecate
 from lmcache.v1.common.errors import LMCacheTimeoutError
-from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.logging import init_logger, lmcache_deprecate
 from lmcache.v1.distributed.api import (
     CapacitySnapshot,
     L1BackendType,
@@ -1106,6 +1105,9 @@ class StorageManager:
     ) -> dict:
         """Route a runtime reconfiguration request to one L2 adapter.
 
+        Publish capacity after success or a cleanup error, since failed
+        unmapping can still make a device unavailable for new allocations.
+
         Args:
             adapter_index: Zero-based reconfigurable-adapter index.
             operation: Adapter-specific operation name.
@@ -1114,15 +1116,26 @@ class StorageManager:
         Returns:
             JSON-serializable operation result.
         """
-        with self._lifecycle_lock if operation in ("add", "resize") else nullcontext():
-            adapter = self._get_reconfigurable_l2_adapter(adapter_index)
-            result = adapter.reconfigure(
-                operation,
-                payload,
-                device_owners=lambda path, offset, size: self._device_owner_names(
-                    path, offset, size, adapter
-                ),
-            )
+        try:
+            with (
+                self._lifecycle_lock
+                if operation in ("add", "resize")
+                else nullcontext()
+            ):
+                adapter = self._get_reconfigurable_l2_adapter(adapter_index)
+                result = adapter.reconfigure(
+                    operation,
+                    payload,
+                    device_owners=lambda path, offset, size: self._device_owner_names(
+                        path, offset, size, adapter
+                    ),
+                )
+        except (BufferError, OSError):
+            try:
+                self._publish_capacity_changed()
+            except Exception:
+                logger.exception("Failed to publish L2 capacity after a cleanup error")
+            raise
         result["adapter_index"] = adapter_index
         self._publish_capacity_changed()
         return result

@@ -5,8 +5,16 @@ on:
     - cron: '30 7 * * *'
   workflow_dispatch:
     inputs:
+      scope:
+        description: "Nightly scope (XPU requires the dev branch)"
+        type: choice
+        options:
+          - all
+          - cpu-verify
+          - xpu
+        default: all
       cpu_verify_only:
-        description: "Only verify newest CPU wheels and update their tested pins"
+        description: "Legacy CPU-only override; takes precedence over scope"
         type: boolean
         default: false
 
@@ -15,7 +23,7 @@ permissions:
 
 jobs:
   nightly-wheels:
-    if: ${{ !inputs.cpu_verify_only }}
+    if: ${{ !inputs.cpu_verify_only && (inputs.scope == '' || inputs.scope == 'all') }}
     name: Build nightly CUDA wheels (${{ matrix.arch }})
     strategy:
       fail-fast: false
@@ -123,7 +131,7 @@ jobs:
         run: gh release upload nightly dist/cu130/*.whl --clobber --repo ${{ github.repository }}
 
   resolve-xpu-nightly:
-    if: ${{ !inputs.cpu_verify_only }}
+    if: ${{ !inputs.cpu_verify_only && inputs.scope != 'cpu-verify' }}
     name: Resolve vLLM XPU nightly runtime
     runs-on: ubuntu-24.04
     outputs:
@@ -314,7 +322,7 @@ jobs:
   # versioned like the CUDA nightlies (0.5.4.devN+rocm7.2) so a nightly can
   # never be mistaken for a release.
   nightly-rocm-wheel:
-    if: ${{ !inputs.cpu_verify_only }}
+    if: ${{ !inputs.cpu_verify_only && (inputs.scope == '' || inputs.scope == 'all') }}
     name: Build ROCm nightly wheel
     uses: ./.github/workflows/build_rocm_artifacts.yml
     with:
@@ -361,7 +369,7 @@ jobs:
   # release workflow, but receives a unique development version and is
   # published to a rolling GitHub Release rather than PyPI.
   nightly-musa-wheel:
-    if: ${{ !inputs.cpu_verify_only }}
+    if: ${{ !inputs.cpu_verify_only && (inputs.scope == '' || inputs.scope == 'all') }}
     name: Build MUSA nightly wheel
     uses: ./.github/workflows/build_musa_artifacts.yml
     with:
@@ -407,7 +415,7 @@ jobs:
   # RBLN nightly reuses the release build and smoke check with a development
   # version, published to a rolling GitHub Release rather than PyPI.
   nightly-rbln-wheel:
-    if: ${{ !inputs.cpu_verify_only }}
+    if: ${{ !inputs.cpu_verify_only && (inputs.scope == '' || inputs.scope == 'all') }}
     name: Build RBLN nightly wheel
     uses: ./.github/workflows/build_rbln_artifacts.yml
     with:
@@ -451,7 +459,7 @@ jobs:
           asset_glob: dist/rbln/*.whl
 
   nightly-build:
-    if: ${{ !inputs.cpu_verify_only }}
+    if: ${{ !inputs.cpu_verify_only && (inputs.scope == '' || inputs.scope == 'all') }}
     name: Build image (${{ matrix.arch }})
     strategy:
       fail-fast: false
@@ -509,8 +517,8 @@ jobs:
           docker builder prune -af
           docker buildx build --load \
           --platform linux/${{ matrix.arch }} \
-          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
-          --build-arg CUDA_VERSION=13.0 \
+          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.05-cuda13.2-devel-ubuntu24.04 \
+          --build-arg CUDA_VERSION=13.2 \
           --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
           --target image-build \
           --tag lmcache/vllm-openai:nightly-${{ github.run_id }}-${{ matrix.arch }} \
@@ -553,8 +561,8 @@ jobs:
           docker builder prune -af
           docker buildx build --load \
           --platform linux/${{ matrix.arch }} \
-          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
-          --build-arg CUDA_VERSION=13.0 \
+          --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.05-cuda13.2-devel-ubuntu24.04 \
+          --build-arg CUDA_VERSION=13.2 \
           --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
           --target lmcache-final \
           --tag lmcache/standalone:nightly-${{ github.run_id }}-${{ matrix.arch }} \
@@ -620,6 +628,7 @@ jobs:
           docker buildx imagetools inspect lmcache/standalone:nightly-${{ env.NOW }}
 
   nightly-verify-cpu-vllm:
+    if: ${{ inputs.cpu_verify_only || inputs.scope != 'xpu' }}
     name: CPU device tests
     # Reuse the PR-gating CPU device suite (server bench + vLLM e2e over
     # two models) rather than keeping a second, weaker copy of the install
@@ -642,7 +651,7 @@ jobs:
   nightly-pin-or-report-vllm:
     name: Pin or report vLLM
     needs: nightly-verify-cpu-vllm
-    if: always() && !cancelled()
+    if: always() && !cancelled() && (inputs.cpu_verify_only || inputs.scope != 'xpu')
     concurrency:
       group: github-nightly-vllm-pin
       cancel-in-progress: false

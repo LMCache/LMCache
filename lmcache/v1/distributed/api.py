@@ -672,6 +672,20 @@ class PrefetchLockMode(enum.Enum):
     NO_LOCK = enum.auto()
 
 
+class PrefetchPriority(enum.Enum):
+    """The order in which waiting prefetch requests are admitted.
+
+    ``NORMAL`` -- waits in arrival order under the in-flight watermark.
+
+    ``HIGH`` -- for a later leg of an admitted lookup (e.g. the CacheBlend
+    sparse leg). No ``NORMAL`` request starts while a ``HIGH`` one waits, so
+    new lookups cannot take the budget an admitted lookup needs to finish.
+    """
+
+    NORMAL = enum.auto()
+    HIGH = enum.auto()
+
+
 @dataclass(frozen=True)
 class GroupedObjectKeys:
     """The object keys of one ``(object group, kv rank)`` row of a prefetch.
@@ -728,6 +742,7 @@ class PrefetchTaskSpec:
         allowed_l2_memory_tags: Memory tags of the L2 adapters to look up and
             load from. ``None`` allows every L2 adapter; an empty set allows
             none.
+        priority: See :class:`PrefetchPriority`.
 
     Note:
         Every key group holds the same number of keys (``group_size``). The
@@ -744,6 +759,7 @@ class PrefetchTaskSpec:
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
     allowed_l1_memory_tags: frozenset[MemoryTags] | None = None
     allowed_l2_memory_tags: frozenset[MemoryTags] | None = None
+    priority: PrefetchPriority = PrefetchPriority.NORMAL
 
     def __post_init__(self) -> None:
         if not self.key_groups:

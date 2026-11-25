@@ -138,7 +138,7 @@ def test_connector_single_server_autostart_keeps_resolved_endpoint(
         ),
     )
     module.LMCacheMPConnector(config, role)
-    expected = "tcp://localhost:6000" if explicit_url else "tcp://127.0.0.1:5555"
+    expected = "grpc://localhost:6000" if explicit_url else "grpc://127.0.0.1:5555"
     if role_name == "SCHEDULER":
         assert module.LMCacheMPSchedulerAdapter.call_args.kwargs["server_urls"] == [
             expected

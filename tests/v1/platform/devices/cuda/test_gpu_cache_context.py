@@ -28,7 +28,7 @@ import torch
 # First Party
 from lmcache import torch_device_type
 from lmcache.v1.common.group_view import EngineGroupInfo  # noqa: E402
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager  # noqa: E402
+from lmcache.v1.common.kv_layer_groups import KVLayerGroupsManager  # noqa: E402
 
 # Skip this module before importing CUDA cache context on environments
 # without CuPy support.

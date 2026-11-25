@@ -24,9 +24,8 @@ import zmq
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.utils import EngineType
 from lmcache.v1.client.transport.factory import RequestClientFactory
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey
 from lmcache.v1.common.errors import LMCacheTimeoutError
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.token_codec import pack_token_ids
@@ -224,6 +223,7 @@ def test_native_alias_sparse_checkpoint_roundtrip(native_client: RequestClient) 
         EngineType.ATOM,
         {},
         groups,
+        None,
     ).result(TIMEOUT)
     try:
         assert _transfer(
@@ -328,6 +328,7 @@ def test_state_ordinals_alias_the_page_allocation(native_client: RequestClient) 
         EngineType.ATOM,
         {},
         groups,
+        None,
     ).result(TIMEOUT)
     try:
         assert _transfer(

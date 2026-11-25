@@ -82,7 +82,7 @@ dividing the logical one, so backends advertising fixed ints sub-page
 
 Registering the raw kernel-paged tensor makes LMCache discover
 `block_size == kernel < logical`, and `_derive_compression_metadata`
-(`lmcache/v1/kv_layer_groups.py`) misclassifies the group as compressed:
+(`lmcache/v1/common/kv_layer_groups.py`) misclassifies the group as compressed:
 only `1/k` of each chunk's KV is transferred, addressed against the kernel
 page space. The edit re-views the tensor as
 `(num_kernel_pages / k, 2, logical_block_size, 1, head_size)` — a pure
@@ -182,7 +182,7 @@ with one aggregated error: `CrossAttentionSpec`, and Mamba with
 `mamba_cache_mode != "align"` (no reusable snapshots). Declared slot
 compression (`compress_ratio > 1` / `tq_slot_size > 0`, e.g. DeepSeek-V4) is
 *not* rejected — those groups are served by the compression path in
-`lmcache/v1/kv_layer_groups.py` and only skipped by the edits here. Note the
+`lmcache/v1/common/kv_layer_groups.py` and only skipped by the edits here. Note the
 compression path still derives per-group ratios from the unified vLLM block
 size; switching it to per-group block sizes is pending in a separate PR.
 
@@ -199,7 +199,7 @@ Groups whose spec *declares* slot compression — `tokens_per_state > 1`
 (DeepSeek-V4 slot packing; `compress_ratio` on older vLLM) or
 `TQFullAttentionSpec.tq_slot_size > 0` — genuinely store fewer physical
 slots than logical tokens. They must reach the compression path in
-`lmcache/v1/kv_layer_groups.py` with their slot count intact; only the MLA
+`lmcache/v1/common/kv_layer_groups.py` with their slot count intact; only the MLA
 rule (3) views them, and it preserves that count. (DeepSeek-V3.2's `fp8_ds_mla` cache
 packs *bytes per slot*, not slots per block: its specs keep
 `block_size == scheduler block size` and `compress_ratio == 1`, so it never
@@ -263,7 +263,7 @@ bijective block-id → bytes mapping. Consequences:
 |---|---|
 | Edits (this doc) | `lmcache/integration/vllm/kv_cache_group_edits.py` |
 | Caller | `lmcache/integration/vllm/lmcache_mp_connector.py` (`register_kv_caches`) |
-| Compression-ratio derivation (downstream consumer) | `lmcache/v1/kv_layer_groups.py` |
+| Compression-ratio derivation (downstream consumer) | `lmcache/v1/common/kv_layer_groups.py` |
 | vLLM block-size inflation | `vllm/platforms/interface.py` (`_align_hybrid_block_size`) |
 | vLLM kernel-page split + block-table expansion | `vllm/v1/worker/utils.py`, `vllm/v1/worker/block_table.py` |
 | Unit tests | `tests/v1/test_vllm_kv_cache_group_edits.py` |

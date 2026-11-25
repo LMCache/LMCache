@@ -14,7 +14,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
@@ -43,6 +42,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
     build_grpc_request_server,
 )
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
+from lmcache.v1.transport.errors import MPRequestError
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 

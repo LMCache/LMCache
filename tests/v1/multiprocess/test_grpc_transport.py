@@ -24,10 +24,6 @@ from lmcache.v1.client.kv_event_subscriber import (
     KVEventStreamClosed,
     MPKVEventSubscriber,
 )
-from lmcache.v1.client.transport.errors import (
-    MPRequestError,
-    MPServerUnavailableError,
-)
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
@@ -77,6 +73,10 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     validate_method_handler,
 )
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
+from lmcache.v1.transport.errors import (
+    MPRequestError,
+    MPServerUnavailableError,
+)
 from lmcache.v1.transport.futures import MessagingStream
 from lmcache.v1.transport.grpc import proto_codec
 from lmcache.v1.transport.grpc.codecs import (
@@ -226,6 +226,7 @@ def grpc_client(
             self, payload: RegisterEngineDrivenContextPayload
         ) -> RegisterEngineDrivenContextResponse:
             assert payload.num_physical_slots == 32
+            assert payload.chunk_size == 32
             return RegisterEngineDrivenContextResponse("shared-memory", 4096)
 
         @request_handler(HandlerType.BLOCKING)
@@ -354,6 +355,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
             "hidden_dim_size": 128,
             "dtype_str": "float16",
             "use_mla": False,
+            "chunk_size": 32,
             "num_physical_slots": 32,
         },
     )
@@ -367,6 +369,7 @@ def test_rpc_surface_is_derived_from_split_service_descriptors() -> None:
             hidden_dim_size=128,
             dtype_str="float16",
             use_mla=False,
+            chunk_size=32,
             num_physical_slots=32,
         ),
     )
@@ -467,7 +470,7 @@ import sys
 
 banned = (
     "cachetools",
-    "lmcache.utils",
+    "lmcache.v1.distributed.utils",
     "lmcache.v1.transport.futures",
     "lmcache.v1.transport.request_client",
 )
@@ -750,6 +753,7 @@ def test_generated_grpc_services_communicate_end_to_end(
             hidden_dim_size=128,
             dtype_str="float16",
             use_mla=False,
+            chunk_size=32,
             num_physical_slots=32,
         )
     ).result(5)

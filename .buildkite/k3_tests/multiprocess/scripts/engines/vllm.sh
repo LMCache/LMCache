@@ -91,7 +91,9 @@ PY
         echo "Disabling vLLM prefix caching via --no-enable-prefix-caching"
         VLLM_PREFIX_ARGS=(--no-enable-prefix-caching)
     elif [[ -n "${MAMBA_CACHE_MODE:-}" ]]; then
-        VLLM_MAMBA_ARGS=(--mamba-cache-mode "$MAMBA_CACHE_MODE")
+        if vllm_supports_mamba_cache_mode; then
+            VLLM_MAMBA_ARGS=(--mamba-cache-mode "$MAMBA_CACHE_MODE")
+        fi
         VLLM_PREFIX_ARGS=(--enable-prefix-caching)
     fi
 
@@ -174,8 +176,10 @@ engine_kv_transfer_config() {
     LMCACHE_MP_MQ_TIMEOUT="${LMCACHE_MP_MQ_TIMEOUT:-10}" \
     VLLM_KV_LOAD_FAILURE_POLICY="${VLLM_KV_LOAD_FAILURE_POLICY:-recompute}" \
     LMCACHE_MP_LAZY_OFFLOAD="${LMCACHE_MP_LAZY_OFFLOAD:-false}" \
+    LMCACHE_MP_LAZY_OFFLOAD_POLICY="${LMCACHE_MP_LAZY_OFFLOAD_POLICY:-FIFO}" \
     LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD="${LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD:-2}" \
     LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT="${LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT:-1}" \
+    LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS="${LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS:-2.5}" \
     NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-}" \
     KV_CACHE_MEMORY_BYTES="${KV_CACHE_MEMORY_BYTES:-}" \
         python3 - <<'PY'
@@ -197,18 +201,29 @@ if os.environ.get("VLLM_TARGET_DEVICE") == "xpu":
 if os.environ["NUM_GPU_BLOCKS_OVERRIDE"] or os.environ["KV_CACHE_MEMORY_BYTES"]:
     extra_config["lmcache.mp.use_vmm_api"] = False
 if os.environ["LMCACHE_MP_LAZY_OFFLOAD"].lower() in {"1", "true"}:
-    extra_config.update(
-        {
-            "lmcache.mp.lazy_offload": True,
-            "lmcache.mp.lazy_offload_policy": "FIFO",
-            "lmcache.mp.lazy_offload_threshold": int(
-                os.environ["LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD"]
-            ),
-            "lmcache.mp.lazy_offload_select_count": int(
-                os.environ["LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT"]
-            ),
-        }
-    )
+    # The policy is selectable so a test can exercise one other than FIFO. It
+    # stays FIFO unless a test asks otherwise.
+    policy = os.environ["LMCACHE_MP_LAZY_OFFLOAD_POLICY"]
+    extra_config["lmcache.mp.lazy_offload"] = True
+    extra_config["lmcache.mp.lazy_offload_policy"] = policy
+    if policy == "FIFO":
+        extra_config.update(
+            {
+                "lmcache.mp.lazy_offload_threshold": int(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD"]
+                ),
+                "lmcache.mp.lazy_offload_select_count": int(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT"]
+                ),
+            }
+        )
+    else:
+        # EVICTION_AWARE ignores those two and reads its own tunables. Only
+        # the horizon is set here: it is what decides how early a buffered
+        # store comes due ahead of its blocks reaching the eviction head.
+        extra_config["lmcache.mp.lazy_offload_horizon_steps"] = float(
+            os.environ["LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS"]
+        )
 
 print(
     json.dumps(
