@@ -519,6 +519,7 @@ class GPUCacheContext(BaseCacheContext):
         # Third Party
         import cupy
 
+        self.cuda_stream_: torch.cuda.Stream
         self.cupy_stream_: "cupy.cuda.Stream"
         if self._staging_alignment:
             owner = _OwnedCUDAStream.create(self.device_)
