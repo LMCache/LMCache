@@ -19,42 +19,42 @@ workloads:
     tier: pr-smoke
     trigger: pr (lmcache/** or shared CI deps)
     coverage_objective: CPU-only multiprocess E2E across shm, inline, and server_copy transfer modes.
-    acceptance_check: All 3 modes pass on ZMQ in smoke-pipeline.yml.
+    acceptance_check: All 3 modes pass on gRPC in smoke-pipeline.yml.
 
   - workload: cache_stats
     gpu_requirement: 1-GPU
     tier: pr-smoke
     trigger: pr (lmcache/** or shared CI deps)
-    coverage_objective: Verify cache hit/miss stats reporting on 1-GPU vLLM + ZMQ.
-    acceptance_check: vllm / cache_stats / zmq passes in smoke-pipeline.yml.
+    coverage_objective: Verify cache hit/miss stats reporting on 1-GPU vLLM + gRPC.
+    acceptance_check: vllm / cache_stats / grpc passes in smoke-pipeline.yml.
 
   - workload: lazy_offload
     gpu_requirement: 1-GPU
     tier: pr-smoke
     trigger: pr (lmcache/** or shared CI deps)
-    coverage_objective: Verify FIFO lazy offload queue drain behavior on 1-GPU vLLM + ZMQ.
-    acceptance_check: vllm / lazy_offload / zmq passes in smoke-pipeline.yml.
+    coverage_objective: Verify FIFO lazy offload queue drain behavior on 1-GPU vLLM + gRPC.
+    acceptance_check: vllm / lazy_offload / grpc passes in smoke-pipeline.yml.
 
   - workload: http_api
     gpu_requirement: 1-GPU
     tier: pr-smoke
     trigger: pr (lmcache/** or shared CI deps)
-    coverage_objective: Verify multiprocess HTTP API endpoints on representative vLLM + ZMQ (SGLang variant stays in heavy).
-    acceptance_check: vllm / http_api / zmq passes in smoke-pipeline.yml.
+    coverage_objective: Verify multiprocess HTTP API endpoints on representative vLLM + gRPC (SGLang variant stays in heavy).
+    acceptance_check: vllm / http_api / grpc passes in smoke-pipeline.yml.
 
   - workload: restart_recovery
     gpu_requirement: 1-GPU
     tier: pr-smoke
     trigger: pr (lmcache/** or shared CI deps)
-    coverage_objective: Verify server restart recovery on representative vLLM + ZMQ.
-    acceptance_check: vllm / restart_recovery / zmq passes in smoke-pipeline.yml.
+    coverage_objective: Verify server restart recovery on representative vLLM + gRPC.
+    acceptance_check: vllm / restart_recovery / grpc passes in smoke-pipeline.yml.
 
   - workload: lm_eval
     gpu_requirement: 1-GPU
     tier: pr-smoke
     trigger: pr (lmcache/** or shared CI deps)
-    coverage_objective: Verify representative 1-GPU accuracy smoke (vllm / lmcache_driven / zmq); full engine/mode matrix stays in heavy.
-    acceptance_check: vllm / lm_eval_lmcache_driven / zmq passes in smoke-pipeline.yml.
+    coverage_objective: Verify representative 1-GPU accuracy smoke (vllm / lmcache_driven / grpc); full engine/mode matrix stays in heavy.
+    acceptance_check: vllm / lm_eval_lmcache_driven / grpc passes in smoke-pipeline.yml.
 
   - workload: hma_dsv4_correctness
     gpu_requirement: 1-GPU (DSV4 dummy weights)
@@ -89,35 +89,35 @@ workloads:
     tier: heavy
     trigger: schedule | PR with force-ci | MP_FULL_ON_PR=true | shared CI deps | heavy-only paths (sglang, long_doc_qa)
     coverage_objective: L2 cache long-document QA correctness on vLLM (SGLang noop_skip pruned).
-    acceptance_check: vllm / long_doc_qa_l2 / zmq passes in pipeline.yml.
+    acceptance_check: vllm / long_doc_qa_l2 / grpc passes in pipeline.yml.
 
   - workload: vllm_bench
     gpu_requirement: 2-GPU
     tier: heavy
     trigger: schedule | PR with force-ci | MP_FULL_ON_PR=true | shared CI deps | heavy-only paths (sglang, long_doc_qa)
-    coverage_objective: Throughput regression benchmark across ZMQ and gRPC.
-    acceptance_check: vllm_bench passes on both transports in pipeline.yml.
+    coverage_objective: Throughput regression benchmark on gRPC.
+    acceptance_check: vllm_bench passes in pipeline.yml.
 
   - workload: deadlock
     gpu_requirement: 2-GPU
     tier: heavy
     trigger: schedule | PR with force-ci | MP_FULL_ON_PR=true | shared CI deps | heavy-only paths (sglang, long_doc_qa)
     coverage_objective: Multi-request deadlock stress on vLLM (SGLang noop_skip pruned).
-    acceptance_check: vllm / deadlock / zmq passes in pipeline.yml.
+    acceptance_check: vllm / deadlock / grpc passes in pipeline.yml.
 
   - workload: mp_autostart_tp2
     gpu_requirement: 2-GPU
     tier: heavy
     trigger: schedule | PR with force-ci | MP_FULL_ON_PR=true | shared CI deps | heavy-only paths (sglang, long_doc_qa)
     coverage_objective: TP=2 multiprocess autostart lifecycle on vLLM.
-    acceptance_check: vllm / mp_autostart_tp2 / zmq passes in pipeline.yml.
+    acceptance_check: vllm / mp_autostart_tp2 / grpc passes in pipeline.yml.
 
   - workload: p2p
     gpu_requirement: 2-GPU
     tier: heavy
     trigger: schedule | PR with force-ci | MP_FULL_ON_PR=true | shared CI deps | heavy-only paths (sglang, long_doc_qa)
     coverage_objective: Peer-to-peer KV transfer between two LMCache+vLLM instances.
-    acceptance_check: vllm / p2p / zmq passes in pipeline.yml.
+    acceptance_check: vllm / p2p / {default,explicit} / grpc pass in pipeline.yml.
 
   - workload: lm_eval_preemption
     gpu_requirement: 1-GPU
@@ -131,16 +131,16 @@ workloads:
     tier: heavy
     trigger: schedule | PR with force-ci | MP_FULL_ON_PR=true | shared CI deps | heavy-only paths (sglang, long_doc_qa)
     coverage_objective: Fault tolerance under simulated worker failures on vLLM.
-    acceptance_check: vllm / fault_tolerance / zmq passes in pipeline.yml.
+    acceptance_check: vllm / fault_tolerance / grpc passes in pipeline.yml.
 
   - workload: gds_smoke
     gpu_requirement: 1-GPU
     tier: heavy
     trigger: schedule | PR with force-ci | MP_FULL_ON_PR=true | shared CI deps | heavy-only paths (sglang, long_doc_qa)
     coverage_objective: GPUDirect Storage (cuFile) multiprocess smoke on NVMe scratch.
-    acceptance_check: vllm / gds_smoke / zmq passes in pipeline.yml.
+    acceptance_check: vllm / gds_smoke / grpc passes in pipeline.yml.
 
 noop_skip_pruned:
-  - "sglang / deadlock / zmq"
-  - "sglang / long_doc_qa_l2 / zmq"
+  - "sglang / deadlock / grpc"
+  - "sglang / long_doc_qa_l2 / grpc"
   - "sglang / lm_eval_preemption"
