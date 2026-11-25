@@ -573,7 +573,9 @@ class KVClient:
             engine_type=EngineType.VLLM,
         )
 
-    def store(self, token_ids: Sequence[int], cache_salt: str = "") -> None:
+    def store(
+        self, token_ids: Sequence[int], cache_salt: str = "", request_id: str = ""
+    ) -> None:
         """Store a sequence's whole chunks, then end its session.
 
         A session left open holds read locks that make a later L1 delete
@@ -582,6 +584,7 @@ class KVClient:
         Args:
             token_ids: The sequence; a partial last chunk is not stored.
             cache_salt: The tenant.
+            request_id: The request id to store under; empty picks a fresh one.
 
         Raises:
             ValueError: If the sequence needs more blocks than the cache has.
@@ -592,7 +595,7 @@ class KVClient:
             raise ValueError(
                 f"{chunks} chunks need more than the cache's {self._BLOCKS - 1} blocks"
             )
-        request_id = uuid.uuid4().hex
+        request_id = request_id or uuid.uuid4().hex
         key = IPCCacheServerKey(
             model_name=self.model_name,
             world_size=1,

@@ -61,6 +61,7 @@ class TestWhatIsFound:
             "CacheUsageManager",
             "InstanceRegistry",
             "KeyDirectory",
+            "RequestIndex",
             "ServerConfigRegistry",
         }
 

@@ -162,10 +162,9 @@ listener plumbing or a dedicated flush task:
   therefore repeated per rank/group/tier placement — an accepted wire
   trade for a self-contained protocol (see
   [key_directory.md](views/key_directory.md) — Token index). The
-  request id and parent hash let the coordinator rebuild a request's
-  sequence from its chunks; `request_ids` keeps every request that
-  submitted the chunk (most recent 8, in the request's own namespace)
-  while its binding is cached.
+  request id and parent hash feed the request index (see
+  [request_index.md](views/request_index.md)); `request_ids` keeps every
+  request that submitted the chunk while its binding is cached.
   `ACCESS` batches carry an **empty backend**: the directory only
   refreshes key-level recency and access count on access, so there is
   no placement identity to name. The vocabulary requires a non-empty
