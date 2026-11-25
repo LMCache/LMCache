@@ -367,9 +367,9 @@ class KeyDirectory(View):
 
         A key names its chunk: the copies are the stored keys that share its
         chunk hash, model, cache salt, tags and world size, in any object
-        group and on any kv rank. A delete by key uses this, so the one key a
-        lookup returned removes the whole chunk rather than one rank's share
-        of it. Another world size's copy is a different parallel setup's
+        group and on any kv rank. A delete by key uses this, so any one of a
+        chunk's keys removes the whole chunk rather than one rank's share of
+        it. Another world size's copy is a different parallel setup's
         object and is left alone.
 
         Args:
@@ -406,17 +406,15 @@ class KeyDirectory(View):
 
         Returns:
             Each key with the stored keys that differ from it only in
-            ``object_group_id``, in ascending group order. A key reached
-            twice -- the caller named one chunk in several groups -- is
-            returned once, at its first position.
+            ``object_group_id``, in ascending group order.
         """
         with self._lock:
-            expanded_keys: dict[ObjectKey, None] = {}
+            expanded_keys: list[ObjectKey] = []
             for key in keys:
                 key_in_each_group = [key, *self._get_stored_keys_in_other_groups(key)]
                 key_in_each_group.sort(key=lambda group_key: group_key.object_group_id)
-                expanded_keys.update(dict.fromkeys(key_in_each_group))
-            return list(expanded_keys)
+                expanded_keys.extend(key_in_each_group)
+            return expanded_keys
 
     def _get_stored_copies_of_chunk(self, key: ObjectKey) -> list[ObjectKey]:
         """Return the stored keys of ``key``'s chunk in its parallel setup:

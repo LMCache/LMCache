@@ -1022,6 +1022,15 @@ no ``request_id`` to poll:
   ``(model_name, world_size)`` — the model has not allocated KV cache on this
   node yet (start vLLM first).
 
+.. note::
+
+   **Sliding-window models:** the two forms load different chunks. The tokens
+   form keeps each object group's attention window, and a warm prefetch plans
+   nothing for a model with a sliding-window group. The keys form names chunks
+   that need not be a contiguous prefix, so it has no window to keep: it loads
+   every named chunk in every group and retains it in L1 until evicted. Serving
+   is unaffected, since a lookup still applies each group's window.
+
 **Example:**
 
 .. code-block:: bash

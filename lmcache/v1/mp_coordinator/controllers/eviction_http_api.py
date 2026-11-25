@@ -55,6 +55,7 @@ from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
+from lmcache.v1.multiprocess.cache_control.object_service import MAX_DELETE_BATCH
 
 if TYPE_CHECKING:
     # First Party
@@ -336,17 +337,18 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
     async def request_pin(body: PinRequest, request: Request) -> PinResponse:
         """Pin keys in the L2 eviction plan.
 
-        Pins the body's ``keys`` as given, or resolves its token sequence to
-        object keys locally, and records them so they are excluded from the
-        L2 eviction plan (fleet-wide, per ``cache_salt``). No MP-server
-        round-trip.
+        Pins the chunks the body's ``keys`` name, or resolves its token
+        sequence to object keys locally, and records them so they are
+        excluded from the L2 eviction plan (fleet-wide, per ``cache_salt``).
+        A pin covers its chunk in every object group and on every rank of its
+        world size. No MP-server round-trip.
 
         Args:
             body: ``keys``, or model/world_size, token_ids, cache_salt.
 
         Returns:
-            ``PinResponse`` with ``requested`` chunks (keys form: keys) and
-            ``affected`` L2 keys pinned.
+            ``PinResponse`` with ``requested`` distinct chunks and
+            ``affected`` keys pinned.
 
         Raises:
             HTTPException: 400 if the token cap is exceeded or a key field is invalid.
@@ -374,8 +376,8 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
             body: ``keys``, or model/world_size, token_ids, cache_salt.
 
         Returns:
-            ``PinResponse`` with ``requested`` chunks (keys form: keys) and
-            ``affected`` L2 keys unpinned.
+            ``PinResponse`` with ``requested`` distinct chunks and
+            ``affected`` keys unpinned.
 
         Raises:
             HTTPException: 400 if the token cap is exceeded or a key field is invalid.
@@ -399,9 +401,10 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
         offset: int = Query(default=0, ge=0),
         limit: int = Query(default=1000, ge=1, le=10000),
     ) -> PinListResponse:
-        """List the keys pinned against L2 eviction, one page at a time.
+        """List the chunks pinned against L2 eviction, one page at a time.
 
-        Reads the coordinator's pin table. Pins are fleet-wide, so there is no
+        Reads the coordinator's pin table, which holds each pinned chunk once,
+        under its rank-0 key in object group 0. Pins are fleet-wide, so there is no
         ``instance_id`` filter, and they apply to L2 only, so there is no
         ``tier`` filter.
 
@@ -445,15 +448,15 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
                 cache_salt, and tier, force.
 
         Returns:
-            ``DeleteResponse`` with ``requested`` chunks (keys form: the keys
-            given), ``affected`` keys
-            removed, and ``skipped`` keys refused (L1 locks reported by the node,
-            plus L2 pins held back here).
+            ``DeleteResponse`` with ``requested`` distinct chunks,
+            ``affected`` keys removed, and ``skipped`` keys refused (L1 locks
+            reported by the node, plus L2 pins held back here).
 
         Raises:
             HTTPException: 400 if the token cap is exceeded or a key field is
                 invalid; 404 if ``instance_id`` is not registered; 502 if the
-                target server is unreachable or rejects the delete.
+                target server is unreachable or rejects a batch (keys of
+                earlier batches stay deleted, and the detail says how many).
         """
         ctx = get_context(request)
         target = ctx.views.get(InstanceRegistry).get(body.instance_id)
@@ -487,11 +490,16 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
 
         node_deleted = 0
         node_skipped = 0
-        if delete_keys:
-            client = get_outbound_client(request)
-            url = instance_url(target, "/cache/objects")
+        client = get_outbound_client(request)
+        url = instance_url(target, "/cache/objects")
+        # The node refuses more than MAX_DELETE_BATCH keys per request, and
+        # expanding each chunk to every group and rank can exceed it.
+        for start in range(0, len(delete_keys), MAX_DELETE_BATCH):
             payload = {
-                "keys": [asdict(k.to_encoded_object_key()) for k in delete_keys],
+                "keys": [
+                    asdict(k.to_encoded_object_key())
+                    for k in delete_keys[start : start + MAX_DELETE_BATCH]
+                ],
                 "tier": body.tier.value,
                 "force": body.force,
             }
@@ -503,10 +511,13 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
             except httpx.HTTPError as exc:
                 raise HTTPException(
                     status_code=502,
-                    detail=f"delete to {body.instance_id!r} failed: {exc}",
+                    detail=(
+                        f"delete to {body.instance_id!r} failed after "
+                        f"{node_deleted} keys were deleted: {exc}"
+                    ),
                 ) from None
-            node_deleted = result.get("deleted", 0)
-            node_skipped = result.get("skipped", 0)
+            node_deleted += result.get("deleted", 0)
+            node_skipped += result.get("skipped", 0)
 
         if touches_l2 and body.force:
             before = controller.capture()

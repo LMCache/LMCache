@@ -9,7 +9,8 @@ other groups through what the directory holds and how pins match.
 :func:`resolve_grouped_object_keys` is the node's prefetch resolver, and
 expands every object group the model registered, each with its own layout and
 attention window; :func:`resolve_grouped_chunk_keys` does the same for chunks
-named by hash rather than by tokens.
+named by hash rather than by tokens, and :func:`named_chunks_of_keys` splits
+keys naming chunks into the parallel setup they share and their hashes.
 """
 
 # Future
@@ -17,7 +18,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 # First Party
@@ -44,9 +45,10 @@ if TYPE_CHECKING:
 # work proportionate.
 MAX_TOKEN_IDS = 1_000_000
 
-# Hard cap on how many keys a single key-addressed request may carry. Equal to
-# the node's delete batch, so a delete named by keys fits one node call before
-# it is expanded to the chunks' other stored copies.
+# Hard cap on how many keys a single key-addressed request may carry, bounding
+# the work one request can ask for. A delete expands each key to every stored
+# copy of its chunk and sends the result to the node in batches, so this does
+# not need to match the node's delete batch.
 MAX_KEYS_PER_REQUEST = 10_000
 
 
@@ -223,6 +225,71 @@ def resolve_grouped_chunk_keys(
     return [
         replace(row, sliding_window_size=FULL_ATTENTION_WINDOW_CHUNKS) for row in rows
     ]
+
+
+@dataclass(frozen=True)
+class NamedChunks:
+    """Chunks named by key, split into the parallel setup that stores them
+    and their chunk hashes.
+
+    Attributes:
+        model_name: Model the keys belong to.
+        world_size: World size packed in the keys' ``kv_rank``.
+        cache_salt: Per-tenant isolation salt.
+        tags: Matching tags supplied when the content was stored.
+        chunk_hashes: The distinct chunk hashes, in first-named order.
+    """
+
+    model_name: str
+    world_size: int
+    cache_salt: str
+    tags: dict[str, str]
+    chunk_hashes: list[bytes]
+
+
+def named_chunks_of_keys(keys: list[ObjectKey]) -> NamedChunks:
+    """Split keys naming chunks of one parallel setup into that setup and the
+    chunks' hashes, ignoring each key's object group and rank.
+
+    A key-addressed prefetch warms one model's layout, so its keys must share
+    one setup.
+
+    Args:
+        keys: Keys naming the chunks.
+
+    Returns:
+        The setup the keys share and their distinct chunk hashes.
+
+    Raises:
+        ValueError: The keys disagree on model, world size, cache salt or
+            tags, or their ``kv_rank`` packs no world size.
+    """
+    setups = {
+        (
+            key.identity.model_name,
+            ObjectKey.WorldSizeFromKVRank(key.identity.kv_rank),
+            key.identity.cache_salt,
+            tuple(key.identity.tags.items()),
+        )
+        for key in keys
+    }
+    if len(setups) != 1:
+        raise ValueError(
+            "keys must name the same model, world size, cache_salt and tags"
+        )
+    [(model_name, world_size, cache_salt, tags)] = setups
+    if world_size < 1:
+        raise ValueError(
+            "the keys' kv_rank packs no world size; pass keys as the "
+            "directory lists them"
+        )
+    return NamedChunks(
+        model_name=model_name,
+        world_size=world_size,
+        cache_salt=cache_salt,
+        tags=dict(tags),
+        chunk_hashes=list(dict.fromkeys(key.chunk_hash for key in keys)),
+    )
 
 
 def _lookup_ipc_key(

@@ -65,13 +65,17 @@ status calls are quick and the client drives completion on demand.
 ## Keys form on the MP server
 
 `PrefetchService.submit_keys` treats each key as naming its chunk, the way a
-pin does. It takes the model, world size (unpacked from `kv_rank`), salt and
-tags from the keys -- they must agree, or the request is a 400 -- and rebuilds
+pin does. `named_chunks_of_keys` takes the model, world size (unpacked from
+`kv_rank`), salt and tags from the keys -- they must agree, or the request is
+a 400 -- and the coordinator's `PrefetchRequest` runs the same check, so a
+caller's mismatch is a 422 there rather than a relayed 502. It then rebuilds
 one row per registered `(object group, kv rank)` from the distinct chunk
 hashes. So one key per chunk warms the whole chunk, and every row has the same
 length, which the `full` fetch needs. Every row gets no sliding window: the
 named chunks need not be a contiguous prefix, so there is no trailing window
-to keep, and `full` refuses windowed rows.
+to keep, and `full` refuses windowed rows. The tokens form keeps the windows
+and so plans nothing for a sliding-window model; making it load the
+in-window chunks is left as a follow-up.
 
 ## Wiring (`app.py`)
 

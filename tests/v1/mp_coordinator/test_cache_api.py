@@ -25,6 +25,7 @@ from lmcache.v1.mp_coordinator.api import (
 )
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.controllers import eviction_http_api
 from lmcache.v1.mp_coordinator.controllers.eviction_controller import (
     FleetEvictionController,
 )
@@ -148,6 +149,38 @@ def test_prefetch_by_keys_forwards_only_the_keys():
             "status": "submitted",
         }
         assert forwarded == [{"keys": [key]}]
+
+
+@pytest.mark.parametrize(
+    "second_key",
+    [
+        pytest.param("other-world-size", id="keys-of-two-setups"),
+        pytest.param("no-world-size", id="kv-rank-without-world-size"),
+    ],
+)
+def test_prefetch_by_keys_rejects_keys_no_single_setup_holds(second_key: str):
+    """One prefetch warms one model's layout, so its keys must share model,
+    world size, salt and tags, and their kv_rank must pack a world size.
+    That is the caller's error, a 422 here, not a 502 relayed from the node."""
+    with _pin_client() as client:
+        ctx = client.app.state.ctx
+        first = _resolve(ctx)[0]
+        if second_key == "other-world-size":
+            second = resolve_object_keys(ctx.token_hasher, "m", 2, TOKENS, "alice")[0][
+                0
+            ]
+        else:
+            second = replace(first, identity=replace(first.identity, kv_rank=0))
+
+        resp = client.post(
+            "/cache/prefetches",
+            json={
+                "instance_id": "mp-1",
+                "keys": [_wire_key(first), _wire_key(second)],
+            },
+        )
+
+        assert resp.status_code == 422, resp.text
 
 
 def test_prefetch_status_unknown_instance_returns_404():
@@ -350,7 +383,7 @@ def test_key_controls_reject_request_without_exactly_one_form(
     """Pin, delete and prefetch bodies carry exactly one of keys / token_ids;
     the tokens form needs model_name and world_size -- a defaulted world size
     would resolve another parallel setup's keys and report success -- and
-    the keys form is capped like the node's delete batch. Anything else is a
+    the keys form is capped at MAX_KEYS_PER_REQUEST. Anything else is a
     422."""
     with _pin_client() as client:
         key = _wire_key(_resolve(client.app.state.ctx)[0])
@@ -924,6 +957,89 @@ def test_a_delete_by_key_reaches_every_rank_of_the_chunk():
         assert {k["chunk_hash_hex"] for k in call["keys"]} == {
             second_chunk_rank0.chunk_hash.hex()
         }
+
+
+def test_a_pin_by_key_holds_back_every_rank_from_a_delete_by_key():
+    """At TP=2, pinning a chunk's rank-0 key covers both ranks, so a non-force
+    delete by the same key sends nothing rather than deleting rank 1 and
+    leaving a pinned, unusable chunk. Unpinning by the other rank's key
+    releases it."""
+    deletes: list = []
+    with _registered_delete_client(deletes) as client:
+        ctx = client.app.state.ctx
+        tp2, _ = resolve_object_keys(ctx.token_hasher, "m", 2, TOKENS, "alice")
+        _store(ctx, tp2)
+        rank0, rank1 = _wire_key(tp2[2]), _wire_key(tp2[3])
+        delete_body = {"instance_id": "mp-1", "keys": [rank0]}
+        assert client.post("/cache/pins", json={"keys": [rank0]}).status_code == 200
+
+        resp = client.post("/cache/delete", json=delete_body)
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "instance_id": "mp-1",
+            "requested": 1,
+            "affected": 0,
+            "skipped": 2,
+            "status": "deleted",
+        }
+        assert deletes == []
+
+        unpin = client.request("DELETE", "/cache/pins", json={"keys": [rank1]})
+        assert unpin.status_code == 200, unpin.text
+        assert client.post("/cache/delete", json=delete_body).status_code == 200
+        [call] = deletes
+        assert sorted(k["kv_rank"] for k in call["keys"]) == sorted(
+            key.kv_rank for key in tp2[2:]
+        )
+
+
+def test_an_expanded_delete_is_sent_in_node_sized_batches(monkeypatch):
+    """Expansion across groups and ranks can outgrow the node's per-request
+    limit, so the delete goes out in batches of at most MAX_DELETE_BATCH keys
+    and the reply adds the batches up."""
+    monkeypatch.setattr(eviction_http_api, "MAX_DELETE_BATCH", 4)
+    deletes: list = []
+    with _registered_delete_client(deletes) as client:
+        ctx = client.app.state.ctx
+        keys = _keys_in_groups(ctx)
+        _store(ctx, keys)
+
+        resp = client.post("/cache/delete", json=_delete_body("mp-1", tier="l2"))
+
+        assert resp.status_code == 200, resp.text
+        assert [len(call["keys"]) for call in deletes] == [4, 2]
+        assert resp.json()["affected"] == len(keys)
+
+
+def test_a_failed_batch_reports_what_earlier_batches_deleted(monkeypatch):
+    """Earlier batches cannot be undone, so a node failure on a later one is
+    a 502 that says how many keys were already removed."""
+    monkeypatch.setattr(eviction_http_api, "MAX_DELETE_BATCH", 4)
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        keys = json.loads(request.content)["keys"]
+        calls.append(len(keys))
+        if len(calls) > 1:
+            return httpx.Response(500, json={"detail": "boom"})
+        return httpx.Response(200, json={"deleted": len(keys), "skipped": 0})
+
+    with _delete_client() as client:
+        client.post(
+            "/instances",
+            json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
+        )
+        client.app.state.outbound_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+        _store(client.app.state.ctx, _keys_in_groups(client.app.state.ctx))
+
+        resp = client.post("/cache/delete", json=_delete_body("mp-1", tier="l2"))
+
+        assert resp.status_code == 502
+        assert "after 4 keys were deleted" in resp.json()["detail"]
+        assert calls == [4, 2]
 
 
 def test_a_delete_sends_only_the_groups_the_chunk_is_stored_in():

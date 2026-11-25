@@ -1217,8 +1217,9 @@ Supply exactly one of ``keys`` / ``token_ids``.
      - list[object]
      - Keys form. Each key, in the wire form ``GET /directory/keys`` returns,
        names its chunk; the server warms that chunk in every object group and
-       rank. The keys must agree on model, world size, ``cache_salt`` and
-       ``tags``; at most 10,000 keys. The fields below are then ignored.
+       rank, with no sliding window (see the note below). The keys must agree
+       on model, world size, ``cache_salt`` and ``tags``; at most 10,000 keys.
+       The fields below are then ignored.
    * - ``model_name``
      - string
      - Tokens form, required. Model whose layout sizes the target's L1
@@ -1261,11 +1262,21 @@ submitted to warm (keys form: the distinct chunks the keys name).
 
 - ``200``: submitted (or a ``noop`` as above).
 - ``404``: unknown ``instance_id`` (not registered).
-- ``502``: the target server was unreachable or rejected the submit -- including
-  keys that disagree on model, world size, ``cache_salt`` or ``tags``.
+- ``502``: the target server was unreachable or rejected the submit.
 - ``422``: request body fails field-level validation, supplies both or neither
   of ``keys`` / ``token_ids``, omits ``model_name`` or ``world_size`` in the
-  tokens form, or carries more than 10,000 keys.
+  tokens form, carries more than 10,000 keys, or has keys that disagree on
+  model, world size, ``cache_salt`` or ``tags`` (or whose ``kv_rank`` packs no
+  world size).
+
+.. note::
+
+   **Sliding-window models:** the two forms load different chunks. The tokens
+   form keeps each object group's window, and a warm prefetch loads nothing on
+   a model with a sliding-window group. The keys form names chunks that need not
+   be a contiguous prefix, so it ignores the windows and loads every named
+   chunk in every group, and those chunks stay in L1 until evicted. Serving is
+   unaffected: a lookup still applies each group's window.
 
 .. note::
 
@@ -1365,17 +1376,24 @@ supply exactly one:
   ..., "cache_salt": ..., "tags": ...}``: the coordinator resolves the token
   sequence to the keys of its complete chunks **locally**. Chunk hashes are
   prefix-chained, so this always covers every chunk from position 0.
-* **keys form** -- ``{"keys": [...]}``: pin exactly these keys, in the same
-  wire form ``GET /directory/keys`` and ``POST /directory/lookup`` return. Use
-  it to pin a chunk in the middle of a prompt without its prefix chunks.
+* **keys form** -- ``{"keys": [...]}``: pin the chunks these keys name, in the
+  same wire form ``GET /directory/keys`` and ``POST /directory/lookup`` return.
+  Use it to pin a chunk in the middle of a prompt without its prefix chunks.
 
 Local resolution requires the coordinator's ``chunk_size`` and
 ``hash_algorithm`` (see `Configuration`_) to match the MP servers' ``--chunk-size``
 / ``--hash-algorithm``; otherwise the resolved keys will not match what was
-stored and the pin protects nothing. With object-group separation (the default),
-a chunk is stored once per object group; a pin covers the chunk in every group,
-including groups it is not stored in yet, so ``GET /cache/pins`` lists one entry
-per chunk and rank rather than per group.
+stored and the pin protects nothing.
+
+A pin is on a whole chunk. A chunk is stored once per kv rank and, with
+object-group separation (the default), once per object group; a pin taken
+through any one of its keys covers every group and every rank of that key's
+world size, including copies not stored yet. Otherwise eviction or a delete
+could remove one rank's share and leave the pinned chunk unusable.
+``GET /cache/pins`` therefore lists one entry per chunk, under its rank-0 key
+in group 0. One request pins (or unpins) each chunk once, however many of its
+keys it names, so a tokens-form pin at TP=2 is released by one unpin in either
+form.
 
 ``POST /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1393,9 +1411,9 @@ Pin keys in the L2 eviction plan.
      - Description
    * - ``keys``
      - list[object]
-     - Keys form. The keys to pin, each ``{"chunk_hash_hex", "model_name",
-       "kv_rank", "object_group_id", "cache_salt", "tags"}``; at most 10,000.
-       The other fields below are ignored.
+     - Keys form. Keys naming the chunks to pin, each ``{"chunk_hash_hex",
+       "model_name", "kv_rank", "object_group_id", "cache_salt", "tags"}``; at
+       most 10,000. The other fields below are ignored.
    * - ``token_ids``
      - list[int]
      - Tokens form. Prompt tokens whose complete chunks are pinned; must match
@@ -1424,8 +1442,10 @@ Pin keys in the L2 eviction plan.
 
 ``requested`` is the number of whole chunks resolved (keys form: the distinct
 chunks the keys name, so one chunk's keys on several ranks or groups count
-once); ``affected`` is the number of L2 keys pinned (tokens form: chunks times
-the per-rank fan-out).
+once); ``affected`` is the number of keys the request resolved to (tokens form:
+chunks times the per-rank fan-out), each covering its whole chunk. Unlike
+``POST /directory/lookup``, which reports one ``chunks`` per key given, pin,
+delete and prefetch count chunks.
 
 **HTTP status codes:**
 
@@ -1502,7 +1522,8 @@ chunk pinned *N* times needs *N* unpins before it can be evicted.
 ``GET /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-List the keys currently pinned in the L2 eviction plan.
+List the chunks currently pinned in the L2 eviction plan, one entry per chunk
+under its rank-0 key in object group 0.
 
 **Query parameters** (all optional):
 
@@ -1583,9 +1604,11 @@ anyway (L1 read/write locks on the node and the coordinator's L2 pin set).
 ``requested`` is the number of whole chunks resolved (keys form: the distinct
 chunks the keys name). A key names its chunk: it is expanded to every copy the
 coordinator's directory holds of that chunk in the key's parallel setup -- every
-object group and every kv rank of the same world size -- so the one key
-``POST /directory/lookup`` returns removes the whole chunk, not one rank's
-share. ``affected`` and
+object group and every kv rank of the same world size -- so any one of the
+chunk's keys removes the whole chunk, not one rank's share. If any copy is
+pinned, a non-force delete holds back every copy. The expanded keys are sent to
+the server in batches of at most 10,000, the most it accepts per request.
+``affected`` and
 ``skipped`` are **totals across the tiers acted on**: ``affected`` counts L1 keys
 removed by the node plus L2 keys removed by the coordinator, and ``skipped``
 counts L1 keys the node refused plus L2 keys held back for an L2 pin (non-force
@@ -1600,7 +1623,8 @@ sequence returns ``status`` ``"noop"``.
 - ``422``: request body fails field-level validation, supplies both or neither
   of ``keys`` / ``token_ids``, omits ``model_name`` or ``world_size`` in the
   tokens form, or carries more than 10,000 keys.
-- ``502``: the target server was unreachable or rejected the delete.
+- ``502``: the target server was unreachable or rejected a batch. Earlier
+  batches stay deleted, and ``detail`` says how many keys were removed.
 - ``503``: a forced delete removed the keys, but dropping their pins could not
   be written to the metadata file; the pins are kept.
 

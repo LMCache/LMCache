@@ -27,6 +27,7 @@ from lmcache.v1.multiprocess.cache_control.errors import (
     Unavailable,
 )
 from lmcache.v1.multiprocess.cache_control.key_resolver import (
+    named_chunks_of_keys,
     resolve_grouped_chunk_keys,
     resolve_grouped_object_keys,
 )
@@ -126,47 +127,30 @@ class PrefetchService:
             Unavailable: no layout registered for the model (not on this node).
         """
         _check_direction(source_tier, target_tier)
-        identities = {
-            (
-                key.identity.model_name,
-                ObjectKey.WorldSizeFromKVRank(key.identity.kv_rank),
-                key.identity.cache_salt,
-                tuple(key.identity.tags.items()),
-            )
-            for key in keys
-        }
-        if len(identities) != 1:
-            raise InvalidRequest(
-                "keys of one prefetch must name the same model, world size, "
-                "cache_salt and tags"
-            )
-        [(model_name, world_size, cache_salt, tags)] = identities
-        if world_size < 1:
-            raise InvalidRequest(
-                "the keys' kv_rank packs no world size; pass keys as the "
-                "directory lists them"
-            )
-        chunk_hashes = list(dict.fromkeys(key.chunk_hash for key in keys))
+        try:
+            named = named_chunks_of_keys(keys)
+        except ValueError as exc:
+            raise InvalidRequest(str(exc)) from None
         group_layout_descs, attn_desc, shard_replication_desc = self._registered_descs(
-            model_name, world_size
+            named.model_name, named.world_size
         )
         try:
             key_groups = resolve_grouped_chunk_keys(
-                chunk_hashes,
-                model_name,
-                world_size,
-                cache_salt,
+                named.chunk_hashes,
+                named.model_name,
+                named.world_size,
+                named.cache_salt,
                 group_layout_descs,
                 attn_desc,
                 shard_replication_desc,
-                tags=dict(tags),
+                tags=named.tags,
             )
         except ValueError as exc:
             raise InvalidRequest(str(exc)) from None
         request_id = self._jobs.submit(self._engine.storage_manager, key_groups)
         return {
             "request_id": request_id,
-            "chunks": len(chunk_hashes),
+            "chunks": len(named.chunk_hashes),
             "status": "submitted",
         }
 
