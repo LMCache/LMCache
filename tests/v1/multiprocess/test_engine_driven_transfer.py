@@ -2144,6 +2144,23 @@ def test_server_pages_inline_store_and_retrieve(
         module.commit_store(key, 2, b"", 2, 5)
 
 
+def test_server_page_range_uses_registered_chunk_size(
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """Page bounds use the engine's registered size, not the server default."""
+    module, _, _, _ = server_module_factory(chunk_size=8)
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(
+            instance_id=2,
+            chunk_size=16,
+            num_physical_slots=16,
+        )
+    )
+
+    with pytest.raises(ValueError, match="outside the key's 4 chunks"):
+        module.prepare_retrieve(_default_key(tokens=64), 2, 4, 1)
+
+
 @pytest.mark.parametrize("failure", ["miss", "raise"])
 def test_server_failed_retrieve_page_releases_later_pages(
     server_module_factory: ServerModuleFactory, failure: str

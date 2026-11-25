@@ -659,7 +659,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         st = None
         result = False
         try:
-            chunk_range = self._page_range(key, chunk_start, chunk_count)
+            chunk_range = self._page_range(
+                key, chunk_start, chunk_count, entry.chunk_size
+            )
             result = strategy.commit_store(
                 key=key,
                 instance_id=instance_id,
@@ -687,14 +689,18 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         return result
 
     def _page_range(
-        self, key: IPCCacheServerKey, chunk_start: int, chunk_count: int
+        self,
+        key: IPCCacheServerKey,
+        chunk_start: int,
+        chunk_count: int,
+        chunk_size: int,
     ) -> tuple[int, int]:
         """Resolve a page to ``[start, end)`` chunk positions within ``key``.
 
         Raises:
             ValueError: If the page is outside the key's chunks.
         """
-        total = (key.end - key.start) // self._ctx.chunk_size
+        total = (key.end - key.start) // chunk_size
         end = total if chunk_count == 0 else chunk_start + chunk_count
         if chunk_start < 0 or chunk_count < 0 or end > total or chunk_start > end:
             raise ValueError(
@@ -741,8 +747,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 instance ID, or the page is outside the key's chunks.
         """
         entry, strategy = self._resolve_for_transfer(instance_id)
-        start, end = self._page_range(key, chunk_start, chunk_count)
-        total = (key.end - key.start) // self._ctx.chunk_size
+        chunk_size = entry.chunk_size
+        start, end = self._page_range(key, chunk_start, chunk_count, chunk_size)
+        total = (key.end - key.start) // chunk_size
         whole = (start, end) == (0, total)
         group_keys = self._group_keys_for(entry, key)
         group_first_chunk: list[int] = []
