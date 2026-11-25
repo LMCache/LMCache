@@ -212,7 +212,8 @@ def get_request_tags(
         An immutable mapping with the prefix removed and names sorted.
 
     Raises:
-        ValueError: A matching tag name is empty or its value is not a string.
+        ValueError: A matching tag name is empty, reserved for internal use,
+            or its value is not a string.
     """
     tags: dict[str, str] = {}
     for name, value in (request_configs or {}).items():
@@ -220,7 +221,12 @@ def get_request_tags(
             continue
         if not isinstance(value, str):
             raise ValueError("tags require non-empty string names and string values")
-        tags[name.removeprefix("lmcache.tag.")] = value
+        tag_name = name.removeprefix("lmcache.tag.")
+        if tag_name == CHUNK_SIZE_TAG:
+            raise ValueError(
+                f"lmcache.tag.{CHUNK_SIZE_TAG} is reserved for internal use"
+            )
+        tags[tag_name] = value
     validate_identity_tags(tags)
     return freeze_dict(tags, sort_keys=True)
 
@@ -232,8 +238,6 @@ def _get_object_identity_tags(
     """Return request tags plus the internal unfull-chunk namespace."""
     tags = get_request_tags(request_configs)
     if chunk_size is None:
-        return tags
-    if CHUNK_SIZE_TAG in tags:
         return tags
     return freeze_dict({**tags, CHUNK_SIZE_TAG: str(chunk_size)}, sort_keys=True)
 

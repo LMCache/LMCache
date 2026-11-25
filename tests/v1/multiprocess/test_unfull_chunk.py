@@ -137,14 +137,14 @@ def test_unfull_chunk_key_is_namespaced_by_registered_chunk_size():
     pretagged_key = replace(
         ipc_key, request_configs={"lmcache.tag.chunk_size": "configured"}
     )
-    reused = ipc_key_to_object_keys(
-        pretagged_key,
-        [chunk_hash],
-        [0],
-        DEFAULT_SHARD_REPLICATION_DESC,
-        chunk_size=16,
-    )[0][0]
-    assert reused.identity.tags[CHUNK_SIZE_TAG] == "configured"
+    with pytest.raises(ValueError, match="chunk_size.*reserved"):
+        ipc_key_to_object_keys(
+            pretagged_key,
+            [chunk_hash],
+            [0],
+            DEFAULT_SHARD_REPLICATION_DESC,
+            chunk_size=16,
+        )
 
 
 def test_server_resolves_full_chunk_keys_and_the_tail_key_of_an_unaligned_key():
@@ -476,6 +476,57 @@ def lookup_module(storage_manager):
         0: LAYOUT
     }
     return LookupModule(ctx), storage_manager, hasher
+
+
+def test_reregister_with_smaller_chunk_does_not_hit_an_old_unfull_chunk() -> None:
+    """A tail stored under one chunk size cannot become a full-chunk hit
+    after the same model is re-registered with a smaller chunk size."""
+    config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=16 * 1024 * 1024,
+                use_lazy=False,
+            ),
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+        l2_adapter_config=L2AdaptersConfig(adapters=[]),
+    )
+    ctx = MPCacheServerContext(config, chunk_size=CHUNK_SIZE)
+    try:
+        larger_chunk_size = 2 * CHUNK_SIZE
+        larger_layout = MemoryLayoutDesc(
+            shapes=[torch.Size([larger_chunk_size, 1, 8])],
+            dtypes=[torch.uint8],
+        )
+        ctx.layout_desc_registry.register(
+            MODEL,
+            1,
+            larger_layout,
+            chunk_size=larger_chunk_size,
+            hash_algorithm=ctx.hash_algorithm_name,
+        )
+
+        tokens = list(range(CHUNK_SIZE))
+        store_key = replace(_key(tokens, 0, len(tokens), "store-32"), worker_id=0)
+        tail_keys = ctx.resolve_unfull_chunk_obj_keys(store_key, [0], larger_chunk_size)
+        reserved = ctx.storage_manager.reserve_write(tail_keys, larger_layout)
+        assert set(reserved) == set(tail_keys)
+        ctx.storage_manager.finish_write(tail_keys, l1_owners_of(reserved))
+
+        ctx.layout_desc_registry.unregister(MODEL, 1)
+        ctx.layout_desc_registry.register(
+            MODEL,
+            1,
+            LAYOUT,
+            chunk_size=CHUNK_SIZE,
+            hash_algorithm=ctx.hash_algorithm_name,
+        )
+
+        assert (
+            _lookup(LookupModule(ctx), tokens, len(tokens), request_id="lookup-16") == 0
+        )
+    finally:
+        ctx.close()
 
 
 def test_lookup_hits_the_unfull_chunk_and_free_deletes_a_temporary_one(

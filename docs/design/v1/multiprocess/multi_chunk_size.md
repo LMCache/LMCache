@@ -300,6 +300,12 @@ second is an untagged full-chunk object. They therefore have different keys,
 and the lookup cannot retrieve an object whose size and layout belong to the
 previous registration.
 
+**Upgrade note:** Unfull chunks stored by an older LMCache version do not have
+the `chunk_size` identity tag and can still collide with full chunks after the
+effective chunk size changes. Before the first chunk-size change after an
+upgrade, clear the existing L2 cache. If the L2 cache cannot be cleared, keep
+the previous chunk size until its old objects have been removed.
+
 ## Coordinator and CacheBlend
 
 Coordinator and CacheBlend still depend on one global chunk size and do not yet
