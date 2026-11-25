@@ -1,0 +1,109 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Shared helpers for the cpu_hello_world demo scripts. Source this file:
+#   source "$(dirname "${BASH_SOURCE[0]}")/../common.sh"
+#
+# Provides:
+#   wait_for_endpoint_contains URL TIMEOUT EXPECTED LABEL [WATCH_PID]
+#   scrape_metric METRIC_NAME HTTP_PORT   -> integer counter total (or 0)
+#   pick_loopback_iface                   -> echoes lo (Linux) / lo0 (macOS)
+#   demo_mktemp PREFIX                    -> portable temp file path
+#   demo_mktemp_dir PREFIX                -> portable temp directory path
+#
+# These mirror the logic proven in .github/scripts/run-cpu-e2e-validation.sh
+# so the demo behaves like LMCache's own CPU CI.
+
+# Create a temp file (demo_mktemp) or directory (demo_mktemp_dir) from PREFIX.
+#
+# Why not `mktemp -t PREFIX...`: the two platforms disagree about `-t`.
+# GNU/Linux treats the argument as a template that MUST end with at least
+# three X's, so `-t foo_XXXX.log` aborts with "must end with at least three
+# consecutive 'X's". macOS treats it as a bare prefix and appends its own
+# random suffix, so the same call leaves the literal characters "XXXX.log"
+# embedded in the filename. Passing a full template path behaves identically
+# on both, and `${TMPDIR%/}` keeps macOS's trailing slash out of the result.
+demo_mktemp() {
+  local prefix="$1"
+  local base="${TMPDIR:-/tmp}"
+  mktemp "${base%/}/${prefix}_XXXXXX"
+}
+
+demo_mktemp_dir() {
+  local prefix="$1"
+  local base="${TMPDIR:-/tmp}"
+  mktemp -d "${base%/}/${prefix}_XXXXXX"
+}
+
+# Poll an HTTP endpoint until it responds and (optionally) its body contains
+# EXPECTED. Returns 0 on success, 1 on timeout. If WATCH_PID is given, give up
+# as soon as that process dies rather than waiting out the full timeout -- a
+# vLLM engine that fails during startup is otherwise indistinguishable from one
+# that is merely slow, and CPU timeouts here are measured in minutes.
+wait_for_endpoint_contains() {
+  local url="$1"
+  local timeout="$2"
+  local expected="$3"
+  local label="$4"
+  local watch_pid="${5:-}"
+  local response
+
+  for _ in $(seq 1 "${timeout}"); do
+    if [ -n "${watch_pid}" ] && ! kill -0 "${watch_pid}" 2>/dev/null; then
+      echo "!! ${label} exited before becoming ready (${url})"
+      return 1
+    fi
+    if response="$(curl -fsS --max-time 5 "${url}" 2>/dev/null)"; then
+      if [ -z "${expected}" ] || echo "${response}" | grep -q "${expected}"; then
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+
+  echo "!! ${label} did not become ready within ${timeout}s (${url})"
+  return 1
+}
+
+# Sum a Prometheus counter from the LMCache /metrics endpoint. Prints the
+# integer total, or 0 if the endpoint/metric is unavailable. Matches every
+# time-series line that starts with METRIC_NAME (labels included).
+scrape_metric() {
+  local metric_name="$1"
+  local http_port="$2"
+  python3 - "$metric_name" "$http_port" <<'PY'
+import sys
+import urllib.request
+
+metric_name, http_port = sys.argv[1], sys.argv[2]
+url = f"http://127.0.0.1:{http_port}/metrics"
+try:
+    body = urllib.request.urlopen(url, timeout=10).read().decode()
+except Exception as exc:  # noqa: BLE001 - best-effort probe, never fatal
+    print(f"ERROR fetching {url}: {exc}", file=sys.stderr)
+    print("0")
+    sys.exit(0)
+
+total = 0.0
+for line in body.splitlines():
+    if line.startswith("#") or not line.startswith(metric_name):
+        continue
+    parts = line.rsplit(" ", 1)
+    if len(parts) != 2:
+        continue
+    try:
+        total += float(parts[1])
+    except ValueError:
+        continue
+print(int(total))
+PY
+}
+
+# Echo the loopback interface name for gloo/vLLM rendezvous. Pinning to
+# loopback avoids vLLM picking a LAN address and stalling for minutes on
+# socket retries during CPU startup.
+pick_loopback_iface() {
+  case "$(uname -s)" in
+    Darwin) echo "lo0" ;;
+    *) echo "lo" ;;
+  esac
+}
