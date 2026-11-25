@@ -94,14 +94,31 @@ class RequestTrace:
         return [token for chunk in self.chunks for token in chunk.token_ids]
 
 
+@dataclass(frozen=True)
+class RequestRef:
+    """A request whose sequence contains a given chunk.
+
+    Attributes:
+        instance_id: The MP server that reported the request.
+        request_id: The request id on that server.
+        namespace: The model, salt, world size and tags it ran under.
+    """
+
+    instance_id: str
+    request_id: str
+    namespace: BlendNamespace
+
+
 @dataclass
 class _ChunkRecord:
-    """Retained content of one chunk hash, outliving its placements."""
+    """Retained content of one chunk hash, outliving its placements, and
+    the retained chunks stored after it in some sequence."""
 
     token_ids: tuple[int, ...]
     token_offset: int
     parent_hash: bytes | None
     keys: set[ObjectKey] = field(default_factory=set)
+    children: set[bytes] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -127,6 +144,10 @@ class RequestIndex(View):
     reach outlives
     unrelated chunks. Evicting a chunk's KV does not remove it; only the
     bound does.
+
+    The reverse question, which requests contain a chunk, is answered by
+    walking child links down from the chunk to the tails below it, so it
+    costs no memory beyond the two bounded tables.
     """
 
     def __init__(
@@ -152,6 +173,9 @@ class RequestIndex(View):
         self._lock = threading.Lock()
         self._chunks: OrderedDict[bytes, _ChunkRecord] = OrderedDict()
         self._tails: OrderedDict[tuple[str, str], _Tail] = OrderedDict()
+        # tail chunk hash -> requests whose tail it is; the inverse of
+        # ``_tails``, for walking down from a chunk to its requests.
+        self._requests_by_tail: dict[bytes, set[tuple[str, str]]] = {}
 
     @classmethod
     def from_config(
@@ -213,6 +237,10 @@ class RequestIndex(View):
                         else None,
                     )
                     self._chunks[key.chunk_hash] = record
+                    if record.parent_hash is not None:
+                        parent = self._chunks.get(record.parent_hash)
+                        if parent is not None:
+                            parent.children.add(key.chunk_hash)
                 record.keys.add(key)
                 if key.chunk_hash not in refreshed:
                     self._refresh_chain(key.chunk_hash, record, refreshed)
@@ -301,6 +329,43 @@ class RequestIndex(View):
             chunks.reverse()
             return RequestTrace(chunks=tuple(chunks), complete=complete)
 
+    def get_chunk_requests(self, chunk_hash: bytes) -> list[RequestRef] | None:
+        """List the tracked requests whose sequence contains ``chunk_hash``.
+
+        A request's sequence contains every chunk on the parent chain of
+        its highest-offset chunk, whether it stored the chunk or hit it.
+
+        Args:
+            chunk_hash: The chunk's ``ObjectKey.chunk_hash``.
+
+        Returns:
+            The requests sorted by ``(instance_id, request_id)``, or
+            ``None`` when the index does not hold the chunk.
+        """
+        with self._lock:
+            if chunk_hash not in self._chunks:
+                return None
+            requests: set[tuple[str, str]] = set()
+            pending = [chunk_hash]
+            seen = {chunk_hash}
+            while pending:
+                current = pending.pop()
+                requests.update(self._requests_by_tail.get(current, ()))
+                record = self._chunks.get(current)
+                if record is None:
+                    continue
+                for child in record.children - seen:
+                    seen.add(child)
+                    pending.append(child)
+            return [
+                RequestRef(
+                    instance_id=instance_id,
+                    request_id=request_id,
+                    namespace=self._tails[(instance_id, request_id)].namespace,
+                )
+                for instance_id, request_id in sorted(requests)
+            ]
+
     def _refresh_chain(
         self, chunk_hash: bytes, record: _ChunkRecord, refreshed: set[bytes]
     ) -> None:
@@ -326,13 +391,29 @@ class RequestIndex(View):
         already is. Call under the lock."""
         current = self._tails.get(request)
         if current is None or tail.token_offset >= current.token_offset:
+            if current is not None:
+                self._forget_tail(request, current.chunk_hash)
             self._tails[request] = tail
+            self._requests_by_tail.setdefault(tail.chunk_hash, set()).add(request)
         self._tails.move_to_end(request)
 
+    def _forget_tail(self, request: tuple[str, str], chunk_hash: bytes) -> None:
+        """Drop ``request`` from ``chunk_hash``'s tail set. Call under the
+        lock."""
+        requests = self._requests_by_tail[chunk_hash]
+        requests.discard(request)
+        if not requests:
+            del self._requests_by_tail[chunk_hash]
+
     def _enforce_bounds(self) -> None:
-        """Age out the least recent chunks and requests past the bound.
-        Call under the lock."""
+        """Age out the least recent chunks and requests past the bound,
+        unlinking them from the reverse indexes. Call under the lock."""
         while len(self._chunks) > self._max_chunks:
-            self._chunks.popitem(last=False)
+            chunk_hash, record = self._chunks.popitem(last=False)
+            if record.parent_hash is not None:
+                parent = self._chunks.get(record.parent_hash)
+                if parent is not None:
+                    parent.children.discard(chunk_hash)
         while len(self._tails) > self._max_requests:
-            self._tails.popitem(last=False)
+            request, tail = self._tails.popitem(last=False)
+            self._forget_tail(request, tail.chunk_hash)

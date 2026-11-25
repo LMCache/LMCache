@@ -387,9 +387,12 @@ def test_a_stored_request_is_recoverable_by_id(tmp_path: pathlib.Path) -> None:
             assert settle(lambda: recovered("req-b"), expected_b) == expected_b
 
 
-def test_a_full_hit_request_is_recoverable(tmp_path: pathlib.Path) -> None:
+def test_a_full_hit_request_is_recoverable_and_listed_by_its_chunks(
+    tmp_path: pathlib.Path,
+) -> None:
     """MP-9: a request served entirely from cache stores nothing, yet comes
-    back by id with the storing request's keys."""
+    back by id with the storing request's keys, and each of its chunks
+    lists both requests."""
     with running_coordinator() as url:
         with running_server(url, tmp_path, "mp-1", [local_l2()]) as server:
             endpoint = urlsplit(server.rpc_url)
@@ -411,3 +414,11 @@ def test_a_full_hit_request_is_recoverable(tmp_path: pathlib.Path) -> None:
             assert settle(lambda: keys_of_request("reader"), writer_keys) == (
                 writer_keys
             )
+            for key in writer_keys:
+                body = httpx.get(
+                    f"{url}/chunks/{key['chunk_hash_hex']}/requests"
+                ).json()
+                assert [r["request_id"] for r in body["requests"]] == [
+                    "reader",
+                    "writer",
+                ]

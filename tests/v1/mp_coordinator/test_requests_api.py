@@ -409,6 +409,106 @@ def test_a_hit_keeps_its_chain_from_aging_out():
         assert _get_request(client, "r1").status_code == 404
 
 
+# -- Chunk -> requests ---------------------------------------------------------
+
+
+def _chunk_requests(client: TestClient, chunk_hash: bytes, **params):
+    return client.get(f"/chunks/{chunk_hash.hex()}/requests", params=params)
+
+
+def _store_branching_requests(client: TestClient) -> None:
+    """``req-1`` stores A, B; ``req-2`` extends B with C; ``req-3`` is a
+    full hit ending at B."""
+    _store_two_chunk_request(client)
+    _post_events(
+        client,
+        [
+            _batch(2, "store", [_store_entry(HASH_C, TOKENS_C, 8, HASH_B, ["req-2"])]),
+            _lookup_batch(3, [("req-3", HASH_B, 4)]),
+        ],
+    )
+
+
+def test_a_chunk_lists_every_request_whose_sequence_contains_it():
+    with _client() as client:
+        _store_branching_requests(client)
+
+        body = _chunk_requests(client, HASH_A).json()
+
+        assert body["chunk_hash_hex"] == HASH_A.hex()
+        assert body["total"] == 3
+        listed = [(r["instance_id"], r["request_id"]) for r in body["requests"]]
+        assert listed == [("mp-0", "req-1"), ("mp-0", "req-2"), ("mp-0", "req-3")]
+        assert all(
+            (r["model_name"], r["cache_salt"]) == ("m", "") for r in body["requests"]
+        )
+        assert [
+            r["request_id"] for r in _chunk_requests(client, HASH_C).json()["requests"]
+        ] == ["req-2"]
+
+
+def test_every_listed_request_resolves_through_the_chunk():
+    with _client() as client:
+        _store_branching_requests(client)
+
+        for chunk_hash in (HASH_A, HASH_B, HASH_C):
+            for ref in _chunk_requests(client, chunk_hash).json()["requests"]:
+                resp = _get_request(client, ref["request_id"], ref["instance_id"])
+                assert resp.status_code == 200
+                hashes = [c["chunk_hash_hex"] for c in resp.json()["chunks"]]
+                assert chunk_hash.hex() in hashes
+
+
+def test_chunk_requests_are_paged():
+    with _client() as client:
+        _store_branching_requests(client)
+
+        body = _chunk_requests(client, HASH_A, offset=1, limit=1).json()
+
+        assert body["total"] == 3
+        assert [r["request_id"] for r in body["requests"]] == ["req-2"]
+
+
+def test_a_request_extending_its_sequence_is_listed_once():
+    with _client() as client:
+        _store_two_chunk_request(client)
+        _post_events(
+            client,
+            [
+                _batch(
+                    2, "store", [_store_entry(HASH_C, TOKENS_C, 8, HASH_B, ["req-1"])]
+                )
+            ],
+        )
+
+        body = _chunk_requests(client, HASH_A).json()
+
+        assert [r["request_id"] for r in body["requests"]] == ["req-1"]
+
+
+def test_an_aged_out_chunk_is_404_and_its_descendants_still_answer():
+    with _client({"request_index_max_chunks": 2}) as client:
+        _store_two_chunk_request(client)
+        _post_events(
+            client,
+            [
+                _batch(
+                    2, "store", [_store_entry(HASH_C, TOKENS_C, 8, HASH_B, ["req-2"])]
+                )
+            ],
+        )
+
+        assert _chunk_requests(client, HASH_A).status_code == 404
+        body = _chunk_requests(client, HASH_B).json()
+        assert [r["request_id"] for r in body["requests"]] == ["req-1", "req-2"]
+
+
+def test_unknown_or_malformed_chunk_hash():
+    with _client() as client:
+        assert _chunk_requests(client, b"\x99").status_code == 404
+        assert client.get("/chunks/not-hex/requests").status_code == 400
+
+
 def test_a_malformed_lookup_key_is_rejected():
     with _client() as client:
         batch = _lookup_batch(1, [("req-1", HASH_A, 0)])

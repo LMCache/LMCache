@@ -584,6 +584,36 @@ class RequestTraceResponse(BaseModel):
     chunks: list[RequestChunkInfo] = Field(default_factory=list)
 
 
+class ChunkRequestInfo(BaseModel):
+    """One request whose sequence contains a chunk.
+
+    Attributes:
+        instance_id: The MP server that reported the request.
+        request_id: The request id on that server.
+        model_name: The model the request ran under.
+        cache_salt: The request's tenant salt; empty when unset.
+    """
+
+    instance_id: str
+    request_id: str
+    model_name: str
+    cache_salt: str = ""
+
+
+class ChunkRequestsResponse(BaseModel):
+    """Reply to ``GET /chunks/{chunk_hash_hex}/requests``.
+
+    Attributes:
+        chunk_hash_hex: The chunk, echoed back.
+        total: Tracked requests whose sequence contains the chunk.
+        requests: The requested page of them.
+    """
+
+    chunk_hash_hex: str
+    total: int = 0
+    requests: list[ChunkRequestInfo] = Field(default_factory=list)
+
+
 class BlendLookupRequest(BaseModel):
     """Body of ``POST /directory/blend-lookup``.
 

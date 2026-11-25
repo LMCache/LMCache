@@ -106,6 +106,17 @@ def test_a_parent_cycle_ends_the_walk():
     assert trace.complete is False
 
 
+def test_a_forgotten_request_leaves_its_chunks_request_list():
+    index = RequestIndex(max_requests=2)
+    index.consume(_store(1, b"\x01", 0, None, ["req-1"]))
+    index.consume(_store(2, b"\x01", 0, None, ["req-2", "req-3"]))
+
+    refs = index.get_chunk_requests(b"\x01")
+
+    assert refs is not None
+    assert [r.request_id for r in refs] == ["req-2", "req-3"]
+
+
 def test_requests_have_their_own_bound():
     """Every request with a hit takes a request slot, so requests are not
     held to the chunk bound."""

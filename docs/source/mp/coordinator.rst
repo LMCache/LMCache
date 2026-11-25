@@ -1242,6 +1242,41 @@ position. Only the request's own tenant's keys are listed, even when another
 - ``200``: request found.
 - ``404``: the index holds no chunk of the request.
 
+``GET /chunks/{chunk_hash_hex}/requests``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+List the tracked requests whose sequence contains a chunk, whether they stored
+it or hit it, sorted by ``(instance_id, request_id)``. Takes ``offset``
+(default ``0``) and ``limit`` (default ``1000``, at most ``10000``).
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "chunk_hash_hex": "aa12...",
+      "total": 3,
+      "requests": [
+        {"instance_id": "server-1", "request_id": "cmpl-42-0",
+         "model_name": "m", "cache_salt": ""}
+      ]
+    }
+
+**HTTP status codes:**
+
+- ``200``: chunk found.
+- ``400``: ``chunk_hash_hex`` is not hex.
+- ``404``: the index does not hold the chunk.
+
+**Example:**
+
+.. code-block:: bash
+
+    # Which requests used the first chunk of cmpl-42-0?
+    hash=$(curl -s http://localhost:9300/requests/server-1/cmpl-42-0 \
+      | jq -r '.chunks[0].chunk_hash_hex')
+    curl -s "http://localhost:9300/chunks/$hash/requests"
+
 Cache control
 -------------
 

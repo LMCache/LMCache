@@ -2,11 +2,14 @@
 
 Module: `lmcache/v1/mp_coordinator/views/request_index.py`
 HTTP surface: `lmcache/v1/mp_coordinator/http_apis/requests_api.py`
-(`GET /requests/{instance_id}/{request_id}`)
+(`GET /requests/{instance_id}/{request_id}`) and
+`lmcache/v1/mp_coordinator/http_apis/chunks_api.py`
+(`GET /chunks/{chunk_hash_hex}/requests`)
 
 Given a request id, the request index recovers the request's token
 sequence and tells you where each of its KV chunks lives. It keeps the
-tokens after the KV has been evicted.
+tokens after the KV has been evicted. Given a chunk, it lists the requests
+whose sequence contains it.
 
 ## Why
 
@@ -82,8 +85,9 @@ Chunk hashes are prefix-chained, so a chunk names its whole prefix. The
 index stores:
 
 ```
-chunk_hash -> (token_ids, token_offset, parent_hash, keys)  # bounded LRU
-(instance_id, request_id) -> (tail chunk_hash, namespace)  # bounded LRU
+chunk_hash -> (token_ids, token_offset, parent_hash, keys, children)  # bounded LRU
+(instance_id, request_id) -> (tail chunk_hash, namespace)            # bounded LRU
+tail chunk_hash -> {(instance_id, request_id)}                        # inverse of the above
 ```
 
 The tail is the request's chunk with the highest `token_offset`, stored
@@ -140,6 +144,40 @@ as with directory lookups.
 `instance_id` is the MP server's id. vLLM request ids are unique only per
 engine, so a request is addressed by the pair.
 
+## Chunk → requests
+
+A request contains a chunk when the chunk is on the parent chain of the
+request's tail, whether the request stored the chunk or hit it. The index
+answers by walking child links down from the chunk and collecting the
+requests whose tail it meets:
+
+```
+        A ── B ── C   req-2 (stored C)
+             │
+             └─ (B is req-1's tail, and req-3's hit tail)
+
+GET /chunks/A/requests -> req-1, req-2, req-3
+GET /chunks/C/requests -> req-2
+```
+
+Per-chunk request lists would cost requests × chain depth and would have
+to drop entries for exactly the hot chunks. Child links cost one entry per
+chunk, so the answer stays exact within the two existing bounds. The walk
+visits every chunk built on this one, so the handler runs it off the event
+loop.
+
+```json
+{"chunk_hash_hex": "ab12...", "total": 3,
+ "requests": [{"instance_id": "mp-0", "request_id": "req-1",
+               "model_name": "m", "cache_salt": ""}]}
+```
+
+Requests are sorted by `(instance_id, request_id)` and paged with
+`offset` and `limit` (default 1000, at most 10000). Chunk records span
+tenants, so each request carries its model and salt. An unknown chunk
+answers 404, a malformed hash 400. Every listed request resolves through
+`GET /requests/...` with the chunk in its chain.
+
 ## Bounds and settings
 
 Token ids cost about 1 KiB per 256-token chunk; a tracked request costs
@@ -163,10 +201,16 @@ chunk's KV does not remove its tokens. Storing or hitting a chunk also
 refreshes its retained ancestors, root first. A popular system prompt is
 a cache hit for later requests and is never stored again, so without this
 refresh it would be the first chunk to age out, and every request built
-on it would come back incomplete.
+on it would come back incomplete. Aging out a chunk unlinks it from its
+parent's children; aging out a request removes it from its tail's set.
 
 ## Limitations
 
+- **Child links can be missed.** A chunk links to its parent only if the
+  parent is held when the chunk arrives. A child stored before its parent,
+  or a parent that aged out and was stored again, leaves the child off
+  `GET /chunks/.../requests` for that parent. The request itself still
+  recovers, because recovery follows parent links.
 - **Lookup reports are best effort.** A flush that fails drops its
   lookups along with its batches. They are not counted in
   `dropped_events`, which counts entries.

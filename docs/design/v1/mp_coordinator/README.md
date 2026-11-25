@@ -39,6 +39,7 @@ shape.
 | `GET /directory/keys` | operator/tools | paginated key listing with tier/instance/backend filters |
 | `POST /directory/blend-lookup` | mp → coordinator | fragment lookup: cached chunks contained in a request's tokens |
 | `GET /requests/{instance_id}/{request_id}` | operator/tools | recover a request's tokens and each chunk's current placements, also after eviction or for a full cache hit ([request_index.md](views/request_index.md)) |
+| `GET /chunks/{chunk_hash_hex}/requests` | operator/tools | paginated list of the requests whose sequence contains a chunk |
 | `POST /cache/prefetches` | operator/scheduler | submit warm prefetch to a named server |
 | `GET /cache/prefetches/{instance_id}/{request_id}` | operator/scheduler | poll a warm prefetch |
 | `POST/DELETE /cache/pins` | operator | pin / unpin keys against fleet-wide eviction |
@@ -98,6 +99,7 @@ lmcache/v1/mp_coordinator/
     events_api.py       # /events (fleet cache-event ingest)
     directory_api.py    # /directory/lookup, /directory/blend-lookup, /directory/keys, ...
     requests_api.py     # /requests/{instance_id}/{request_id}
+    chunks_api.py       # /chunks/{chunk_hash_hex}/requests
     instances_usage_api.py  # /instances/usage, /instances/{id}/usage
 ```
 
