@@ -56,6 +56,7 @@ from lmcache.v1.multiprocess.http_auth import (
     HTTPAuthenticationConfig,
     HTTPAuthenticationMiddleware,
 )
+from lmcache.v1.multiprocess.http_reconfigure import ReconfigureInstanceMiddleware
 from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
     MPRuntimePluginLauncher,
 )
@@ -265,6 +266,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="LMCache HTTP API", version="1.0.0", lifespan=lifespan)
 app.state.http_authentication = HTTPAuthenticationConfig()
+app.add_middleware(ReconfigureInstanceMiddleware)
 app.add_middleware(HTTPAuthenticationMiddleware)
 
 # Automatically discover and register all HTTP API endpoints
