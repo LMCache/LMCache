@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Register copied recurrent states in the vLLM prefix cache."""
 
-# Future
-from __future__ import annotations
-
 # Standard
 from typing import TYPE_CHECKING
 
@@ -15,10 +12,10 @@ if TYPE_CHECKING:
 
 
 def publish_recurrent_checkpoints(
-    pool: BlockPool,
-    request: Request,
+    pool: "BlockPool",
+    request: "Request",
     block_size: int,
-    checkpoints: dict[int, dict[int, KVCacheBlock]],
+    checkpoints: "dict[int, dict[int, KVCacheBlock]]",
 ) -> None:
     """Publish device checkpoints after every required worker copy is fenced.
 

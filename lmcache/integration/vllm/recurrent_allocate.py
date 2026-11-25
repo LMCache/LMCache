@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Allocate an entire history plan without evicting already-local checkpoints."""
 
-# Future
-from __future__ import annotations
-
 # Standard
 from typing import TYPE_CHECKING
 
@@ -19,11 +16,11 @@ if TYPE_CHECKING:
 
 
 def allocate_recurrent_destinations(
-    pool: BlockPool,
-    request: Request,
+    pool: "BlockPool",
+    request: "Request",
     block_size: int,
     plan: HistoryResponse,
-    local_pins: list[KVCacheBlock],
+    local_pins: "list[KVCacheBlock]",
 ) -> RecurrentDestinations:
     """Allocate private blocks for every checkpoint in the server's plan.
 

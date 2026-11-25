@@ -13,6 +13,7 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import TransferDirection
+from lmcache.v1.common.ops_types import TransferPhase
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.subscribers.tracing import (
@@ -28,7 +29,6 @@ from lmcache.v1.mp_observability.subscribers.tracing.span_registry import SpanRe
 from lmcache.v1.mp_observability.subscribers.tracing.transfer_phase import (
     TransferPhaseTracingSubscriber,
 )
-from lmcache.v1.platform.ops_types import TransferPhase
 
 D2H = int(TransferDirection.D2H)
 H2D = int(TransferDirection.H2D)

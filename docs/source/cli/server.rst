@@ -48,7 +48,9 @@ Commonly used flags include:
    * - Flag
      - Description
    * - ``--transport {zmq,grpc}``
-     - Request transport exposed by the server (default: ``zmq``).
+     - Request transport exposed by the server (default: ``grpc``).
+       ``zmq`` is deprecated and will be removed in a future release; see
+       :ref:`mp-migrating-from-zmq`.
    * - ``--host HOST``
      - Bind address for the server.
    * - ``--port PORT``

@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Control RPCs for optional restoration of earlier recurrent checkpoints."""
 
-# Future
-from __future__ import annotations
-
 # Standard
 from typing import TYPE_CHECKING
 import time
@@ -30,9 +27,9 @@ if TYPE_CHECKING:
 
 def handle_recurrent_history(
     payload: bytes,
-    context: MPCacheServerContext,
+    context: "MPCacheServerContext",
     reservations: RecurrentReservations,
-    entries: dict[int, ContextEntry],
+    entries: "dict[int, ContextEntry]",
 ) -> bytes:
     """Process a history control request on the server's existing RPC path.
 

@@ -283,7 +283,10 @@ def test_store_skip_chunks_drops_caller_masked_chunks(
 
 @pytest.mark.parametrize("tp", [1, 2, 4])
 @pytest.mark.parametrize("cancel", [False, True])
-def test_primary_returns_before_history_is_published(monkeypatch, tp, cancel):
+@pytest.mark.parametrize("real_connector", [False, True])
+def test_primary_returns_before_history_is_published(
+    monkeypatch, tp, cancel, real_connector
+):
     """Drive retrieve and publication with delayed device events."""
     # Standard
     from dataclasses import replace
@@ -302,7 +305,6 @@ def test_primary_returns_before_history_is_published(monkeypatch, tp, cancel):
     from lmcache.v1.transport.recurrent_history import HistoryResponse
 
     module, _, _ = _make_module(monkeypatch, 3, [-1, 1], ("attention", "recurrent"))
-    module._host_event_waiter = None
     module._recurrent_history = RecurrentReservations()
     context = module._ctx
     context.chunk_size = 16
@@ -356,8 +358,10 @@ def test_primary_returns_before_history_is_published(monkeypatch, tp, cancel):
     )
 
     prepare_visible = False
+    actions = []
 
     def submit(operation):
+        actions.append(operation.action)
         payload = handle_recurrent_history(
             msgspec.msgpack.encode(operation),
             context,
@@ -379,8 +383,59 @@ def test_primary_returns_before_history_is_published(monkeypatch, tp, cancel):
         ),
     )
     scheduler = RecurrentHistoryScheduler(pool, adapter, [1])
-    scheduler.begin_background(request, tracker)
-    scheduler.poll()
+    if real_connector:
+        pytest.importorskip("vllm")
+        from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+        from lmcache.integration.vllm.lmcache_mp_metadata import (
+            LMCacheMPRequestState,
+            LMCacheMPWorkerMetadata,
+        )
+
+        connector = MagicMock()
+        connector.lazy_offload = False
+        connector._recurrent_history = scheduler
+        connector._get_request_tracker.return_value = tracker
+        tracker.state = LMCacheMPRequestState.READY
+        tracker.num_allocated_blocks = lambda: {}
+        tracker.needs_retrieve = lambda: True
+        step = MagicMock()
+
+        def tick():
+            return LMCacheMPConnector.build_connector_meta(
+                connector, step
+            ).history_tasks
+
+        def update(primary=False, ranks=()):
+            metadata = LMCacheMPWorkerMetadata(
+                {}, history_receipts={("A", lease, rank) for rank in ranks}
+            )
+            LMCacheMPConnector.update_connector_output(
+                connector,
+                SimpleNamespace(
+                    finished_recving={"A"} if primary else set(),
+                    finished_sending=set(),
+                    kv_connector_worker_meta=metadata,
+                ),
+            )
+
+        LMCacheMPConnector.update_state_after_alloc(
+            connector, request, MagicMock(get_block_ids=lambda: ()), 48
+        )
+    else:
+
+        def tick():
+            scheduler.poll()
+            return scheduler.take_background_tasks()
+
+        def update(primary=False, ranks=()):
+            if primary:
+                scheduler.settle("A")
+            for rank in ranks:
+                scheduler.worker_finished("A", lease, rank)
+
+        scheduler.begin_background(request, tracker)
+
+    tick()
     assert request.request_id in scheduler.planning and not scheduler.dispatch
     key = IPCCacheServerKey("m", tp, 0, tracker.packed_token_ids(), 0, 48, "A")
     for rank in range(tp):
@@ -389,16 +444,16 @@ def test_primary_returns_before_history_is_published(monkeypatch, tp, cancel):
         )
         assert ok
         fences[rank].record.assert_not_called()
-    scheduler.settle("A")
-    scheduler.poll()
-    scheduler.poll()
-    assert scheduler.take_background_tasks() == []
+    update(primary=True)
+    assert tick() == []
+    assert tick() == []
     assert tracker.request_configs is None and not scheduler.pending
     if not cancel:
         scheduler.finish_request("A", normal_finish=True)
     prepare_visible = True
-    scheduler.poll()
-    [(owner, tokens, end, salt, copy)] = scheduler.take_background_tasks()
+    tasks = tick()
+    assert len(tasks) == 1, "primary receipt and a ready plan must dispatch one copy"
+    [(owner, tokens, end, salt, copy)] = tasks
     assert (owner, tokens, end, salt) == ("A", key.token_bytes, 48, tracker.cache_salt)
     for rank in range(tp):
         _, ok = module.retrieve(
@@ -413,7 +468,9 @@ def test_primary_returns_before_history_is_published(monkeypatch, tp, cancel):
         replace(key, request_id="B", worker_id=0), 1, [[1, 2, 3], [0, 0, 9]], b"event"
     )
     assert ok
-    scheduler.poll()
+    for _ in range(32):
+        tick()
+    assert actions.count("status") == 0
     pool.cache_full_blocks.assert_not_called()
     manager.finish_read.assert_not_called()
     assert "A" in scheduler.pending
@@ -423,15 +480,23 @@ def test_primary_returns_before_history_is_published(monkeypatch, tp, cancel):
     lease = scheduler.pending["A"].plan.lease
     assert not module._recurrent_history.query(lease).settled
     live[-1].query.return_value = True
-    # Advance a controlled scheduler clock past the status poll interval.
+    if not cancel and tp > 1:
+        update(ranks=[0, 0])
+        scheduler.worker_finished("A", "stale-lease", 1)
+        tick()
+        assert actions.count("status") == 0
+    update(ranks=range(len(live)))
+    # Drive any pending cancellation retry after the last device fence.
     # First Party
     from lmcache.integration.vllm import recurrent_scheduler
 
     monkeypatch.setattr(
         recurrent_scheduler, "time", SimpleNamespace(monotonic=lambda: 1e12)
     )
-    for _ in range(4):
-        scheduler.poll()
+    for _ in range(6):
+        tick()
+    if not cancel:
+        assert actions.count("status") == 1
     assert pool.cache_full_blocks.call_count == (0 if cancel else 2)
     manager.finish_read.assert_called_once()
     assert not scheduler.pending and not module._recurrent_history.entries

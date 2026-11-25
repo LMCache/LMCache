@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Scatter recurrent checkpoint objects into private device destinations."""
 
-# Future
-from __future__ import annotations
-
 # Standard
 from collections.abc import Mapping, Set
 from typing import TYPE_CHECKING
@@ -19,8 +16,8 @@ if TYPE_CHECKING:
 
 
 def enqueue_recurrent_copies(
-    context: BaseCacheContext,
-    lease: RecurrentReadLease,
+    context: "BaseCacheContext",
+    lease: "RecurrentReadLease",
     rank: int,
     destinations: Mapping[int, Mapping[int, int]],
     primary_blocks: Set[int],

@@ -12,7 +12,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.common.object_group_transfer import ObjectGroupTransfer
+from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 
 
 class _FakeKVLayerGroupsManager:
@@ -87,7 +87,7 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
 ) -> None:
     """Unregistering one shared GPU instance must not remove the shared layout."""
     # First Party
-    from lmcache.utils import EngineType
+    from lmcache.v1.common.custom_types import EngineType
     from lmcache.v1.distributed.api import MemoryLayoutDesc
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
     from lmcache.v1.multiprocess.modules import (
@@ -113,6 +113,7 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
         full_sw_kv: bool = False,
         *,
         object_group_transfer: ObjectGroupTransfer | None = None,
+        buffer_registration: object = None,
     ) -> _FakeGPUContext:
         """Return a fake cache context without touching CUDA or wrappers."""
         return _FakeGPUContext()

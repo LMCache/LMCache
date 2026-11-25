@@ -6,9 +6,8 @@ import threading
 
 # First Party
 from lmcache import torch_dev
-from lmcache.utils import lmcache_deprecate
 from lmcache.v1.common.errors import LMCacheTimeoutError
-from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.logging import init_logger, lmcache_deprecate
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,

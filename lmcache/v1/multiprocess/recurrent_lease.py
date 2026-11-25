@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Server-side ownership of the source objects for one history restore."""
 
-# Future
-from __future__ import annotations
-
 # Standard
 from collections.abc import Set
 from dataclasses import dataclass
@@ -33,13 +30,13 @@ class RecurrentReadLease:
     """
 
     groups: list[int]
-    keys: dict[int, tuple[ObjectKey, ...]]
+    keys: "dict[int, tuple[ObjectKey, ...]]"
     progress: RecurrentCopyProgress
-    _objects: dict[ObjectKey, MemoryObj]
-    _manager: L1ManagerInterface
+    _objects: "dict[ObjectKey, MemoryObj]"
+    _manager: "L1ManagerInterface"
     valid_until: float = float("inf")
 
-    def sources_for(self, rank: int, position: int) -> list[MemoryObj]:
+    def sources_for(self, rank: int, position: int) -> "list[MemoryObj]":
         """Return one source per group for a worker's claimed checkpoint."""
         if time.monotonic() >= self.valid_until:
             self.progress.cancel()
@@ -65,10 +62,10 @@ class RecurrentReadLease:
 
 
 def reserve_recurrent_history(
-    context: MPCacheServerContext,
-    key: IPCCacheServerKey,
+    context: "MPCacheServerContext",
+    key: "IPCCacheServerKey",
     already_local: Set[int],
-) -> RecurrentReadLease | None:
+) -> "RecurrentReadLease | None":
     """Reserve complete recurrent checkpoints from a single L1.
 
     Args:

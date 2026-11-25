@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Read reservations for complete recurrent checkpoints in L1."""
 
-# Future
-from __future__ import annotations
-
 # Standard
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
@@ -19,9 +16,9 @@ if TYPE_CHECKING:
 
 
 def reserve_complete_recurrent_reads(
-    manager: L1ManagerInterface,
-    candidates: Mapping[int, tuple[ObjectKey, ...]],
-) -> tuple[dict[int, tuple[ObjectKey, ...]], dict[ObjectKey, MemoryObj]]:
+    manager: "L1ManagerInterface",
+    candidates: "Mapping[int, tuple[ObjectKey, ...]]",
+) -> "tuple[dict[int, tuple[ObjectKey, ...]], dict[ObjectKey, MemoryObj]]":
     """Reserve only L1-resident checkpoints with every required object.
 
     Args:

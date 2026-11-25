@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.utils import get_device_identity
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
@@ -47,6 +46,7 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigureError,
     L2ReconfigureStatus,
 )
+from lmcache.v1.distributed.utils import get_device_identity
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
 
@@ -79,7 +79,6 @@ _CAPACITY_STATES: set[DaxDeviceState] = {
     "draining",
     "migrating",
     "resizing",
-    "removing",
 }
 
 
@@ -683,7 +682,13 @@ class DaxL2Adapter(L2AdapterInterface):
         """Stop worker pools and release DAX resources.
 
         The call waits for already submitted worker tasks to finish before
-        closing mapped DAX cores and event notifiers.
+        closing mapped DAX cores and event notifiers. Cleanup attempts every
+        resource before re-raising the first error. A failed core remains owned
+        and unavailable until a later close succeeds.
+
+        Raises:
+            BufferError: An exported view prevented a core from unmapping.
+            OSError: A mapping or notifier could not be closed.
         """
         store_executor = None
         lookup_executor = None
@@ -711,17 +716,32 @@ class DaxL2Adapter(L2AdapterInterface):
         if copy_executor is not None:
             copy_executor.shutdown(wait=True)
 
+        first_error: BufferError | OSError | None = None
         with self._device_lock:
             entries = list(self._devices)
             for entry in entries:
-                entry.core.close()
-                entry.state = "closed"
+                entry.state = "removing"
+                try:
+                    entry.core.close()
+                except (BufferError, OSError) as exc:
+                    logger.exception("Failed to close DAX device %s", entry.device_path)
+                    if first_error is None:
+                        first_error = exc
+                else:
+                    entry.state = "closed"
             self._key_to_device.clear()
+            self._recalculate_capacity_locked()
 
-        self._store_efd.close()
-        self._lookup_efd.close()
-        self._load_efd.close()
+        for notifier in (self._store_efd, self._lookup_efd, self._load_efd):
+            try:
+                notifier.close()
+            except OSError as exc:
+                logger.exception("Failed to close DAX event notifier")
+                if first_error is None:
+                    first_error = exc
 
+        if first_error is not None:
+            raise first_error
         with self._lock:
             self._closed = True
 
@@ -985,6 +1005,8 @@ class DaxL2Adapter(L2AdapterInterface):
         Raises:
             L2ReconfigureError: If the request is invalid, blocked, or lacks
                 destination capacity.
+            BufferError, OSError: Unmapping failed; the range remains owned in
+                removing state and can only be retried as a removal.
         """
         self._ensure_hotplug_enabled()
         self._validate_remove_mode(mode)
@@ -994,6 +1016,10 @@ class DaxL2Adapter(L2AdapterInterface):
                 device_path, offset_bytes
             )
             if mode == "drain":
+                if source.state == "removing":
+                    raise L2ReconfigureError(
+                        409, "device removal is already in progress"
+                    )
                 source.state = "draining"
                 return {
                     "status": "ok",
@@ -1042,7 +1068,9 @@ class DaxL2Adapter(L2AdapterInterface):
                 source.state = "removed"
                 self._recalculate_capacity_locked()
             except Exception:
-                if source.state not in {"closed", "removed"}:
+                if source.state == "removing":
+                    self._recalculate_capacity_locked()
+                elif source.state not in {"closed", "removed"}:
                     source.state = old_state
                 raise
 

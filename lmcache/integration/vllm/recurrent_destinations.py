@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Private device blocks owned by a pending recurrent history restore."""
 
-# Future
-from __future__ import annotations
-
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 # First Party
@@ -23,16 +20,17 @@ if TYPE_CHECKING:
 class RecurrentDestinations:
     """Retain private destinations and local checkpoint pins through the copy."""
 
-    pool: BlockPool
-    request: Request
+    pool: "BlockPool"
+    request: "Request"
     block_size: int
     plan: HistoryResponse
-    blocks: dict[int, dict[int, KVCacheBlock]]
-    local_pins: list[KVCacheBlock]
+    blocks: "dict[int, dict[int, KVCacheBlock]]"
+    local_pins: "list[KVCacheBlock]"
     canceled: bool = False
     released: bool = False
     receive_completed: bool = False
-    copy_submitted: bool = False
+    receipt_ranks: set[int] = field(default_factory=set)
+    receipt_deadline: float = 0.0
 
     def block_ids(self) -> dict[int, dict[int, int]]:
         """Return destination block IDs suitable for the worker copy request."""

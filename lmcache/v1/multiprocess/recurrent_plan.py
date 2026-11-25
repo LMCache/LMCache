@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Build sparse recurrent checkpoint reads from the existing prefix keys."""
 
-# Future
-from __future__ import annotations
-
 # Standard
 from collections.abc import Set
 from dataclasses import replace
@@ -20,10 +17,10 @@ if TYPE_CHECKING:
 
 
 def earlier_checkpoint_keys(
-    context: MPCacheServerContext,
-    key: IPCCacheServerKey,
+    context: "MPCacheServerContext",
+    key: "IPCCacheServerKey",
     already_local: Set[int],
-) -> tuple[list[int], dict[int, tuple[ObjectKey, ...]]]:
+) -> "tuple[list[int], dict[int, tuple[ObjectKey, ...]]]":
     """Resolve all earlier single-chunk recurrent states for a prefix.
 
     Args:

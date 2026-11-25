@@ -116,7 +116,6 @@ class LMCacheMPRequestTracker:
 
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
-    history_copy: bytes | None = None
     max_offload_tokens: int | None = None
     lookup_started_at: float | None = None
 
@@ -650,7 +649,6 @@ class LMCacheMPRequestMetadata:
                 start=start_token_idx,
                 end=end_token_idx,
                 skip_first_n_tokens=skip_first_n_tokens,
-                history_copy=tracker.history_copy,
             )
 
             ret = LMCacheMPRequestMetadata(
@@ -722,6 +720,8 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
     completed_store_requests: dict[str, int]
     failed_store_requests: set[str] = field(default_factory=set)
 
+    history_receipts: set[tuple[str, str, int]] = field(default_factory=set)
+
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
     ) -> "KVConnectorWorkerMetadata":
@@ -740,6 +740,7 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             merged[k] = merged.get(k, 0) + v
         return LMCacheMPWorkerMetadata(
             completed_store_requests=merged,
+            history_receipts=self.history_receipts | other.history_receipts,
             failed_store_requests=(
                 self.failed_store_requests | other.failed_store_requests
             ),

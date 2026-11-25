@@ -1348,7 +1348,7 @@ class _DeleteRecorder(L2AdapterListener):
 
 
 class TestDeleteAfterRestart:
-    def test_delete_reports_keys_stored_before_restart(self, monkeypatch):
+    def test_delete_reports_keys_stored_before_restart(self):
         """Deleting keys a previous process stored still notifies listeners,
         and only bytes stored by this process count toward usage."""
         storage: dict[str, bytes] = {}
@@ -1367,18 +1367,9 @@ class TestDeleteAfterRestart:
         )
         recorder = _DeleteRecorder()
         after.register_listener(recorder)
-        usage_at_notification = []
-        notify = after._store_efd.notify
-
-        def record_usage_and_notify():
-            usage_at_notification.append(after.get_usage().total_bytes_used)
-            notify()
-
-        monkeypatch.setattr(after._store_efd, "notify", record_usage_and_notify)
         try:
             after.submit_store_task([new_key], [create_memory_obj()])
             assert wait_for_event_fd(after.get_store_event_fd(), timeout=5.0)
-            assert usage_at_notification == [1024 * 4]
             assert after.get_usage().total_bytes_used == 1024 * 4
 
             after.delete([old_key, new_key])

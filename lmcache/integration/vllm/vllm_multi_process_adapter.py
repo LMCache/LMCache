@@ -27,14 +27,6 @@ from lmcache.integration.vllm.mp_server_launcher import (
     wait_for_mp_server_from_url,
 )
 from lmcache.integration.vllm.utils import vllm_layout_hints
-from lmcache.utils import (
-    CacheEvent,
-    CacheRemoveEvent,
-    CacheStoreEvent,
-    EngineType,
-    _lmcache_nvtx_annotate,
-    init_logger,
-)
 from lmcache.v1.client.heartbeat import HeartbeatThread
 from lmcache.v1.client.kv_event_subscriber import (
     KVEventStreamClosed,
@@ -47,6 +39,7 @@ from lmcache.v1.common.custom_types import (
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
     BlockAllocationRecord,
+    EngineType,
     IPCCacheServerKey,
     KVEventBatch,
     KVEventRecord,
@@ -56,13 +49,21 @@ from lmcache.v1.common.group_view import (
     expand_engine_block_ids,
     is_kv_writer,
 )
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_codec import num_packed_tokens
-from lmcache.v1.common.utils import LayoutHints
+from lmcache.v1.common.utils import (
+    CacheEvent,
+    CacheRemoveEvent,
+    CacheStoreEvent,
+    LayoutHints,
+    _lmcache_nvtx_annotate,
+)
 from lmcache.v1.platform.fd_channel import fd_channel_path_for_url
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
 from lmcache.v1.transport.futures import MessagingFuture
 from lmcache.v1.transport.recurrent_history import (
     HISTORY_METHOD,
+    HistoryCopy,
     HistoryRequest,
     HistoryResponse,
 )
@@ -370,7 +371,7 @@ def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
         '    --kv-transfer-config \'{"kv_connector":'
         '"LMCacheMPConnector","kv_role":"kv_both",'
         '"kv_connector_extra_config":{"lmcache.mp.host":'
-        '"tcp://localhost","lmcache.mp.port":5555}}\'\n'
+        '"grpc://localhost","lmcache.mp.port":5555}}\'\n'
         "See https://docs.lmcache.ai/mp/quickstart.html for details."
     )
     logger.warning(hint)
@@ -507,8 +508,6 @@ class LoadStoreOp:
     skip_first_n_tokens: int = 0
     """Number of tokens to skip writing at the beginning of the retrieve
     range. Used to avoid overwriting APC-shared GPU blocks during retrieve."""
-
-    history_copy: bytes | None = None
 
     @property
     def flat_block_ids(self) -> list[int]:
@@ -1541,6 +1540,7 @@ class LMCacheMPWorkerAdapter:
         # or dropped while unhealthy). Reported alongside the completion
         # receipts so the scheduler can break their stored-prefix chains.
         self._failed_store_requests: set[str] = set()
+        self.history_receipts: set[tuple[str, str, int]] = set()
 
     @property
     def is_healthy(self) -> bool:
@@ -1967,7 +1967,7 @@ class LMCacheMPWorkerAdapter:
         if not tasks and not retained:
             return
         now = time.monotonic()
-        for payload, (future, event, retry_at) in tuple(retained.items()):
+        for receipt, (future, event, retry_at) in tuple(retained.items()):
             if now < retry_at:
                 continue
             try:
@@ -1977,10 +1977,11 @@ class LMCacheMPWorkerAdapter:
                 # and let the next foreground receive proceed normally.
                 if not retry_at:
                     logger.exception("Could not poll a background history transfer")
-                retained[payload] = (future, event, now + 1.0)
+                retained[receipt] = (future, event, now + 1.0)
                 continue
             if completed:
-                del retained[payload]
+                self.history_receipts.add(receipt)
+                del retained[receipt]
         for rid, tokens, end, salt, payload in tasks:
             # Bound producer handles even if the device never confirms a fence.
             # Unclaimed optional reservations are retired by the server reaper.
@@ -1997,7 +1998,8 @@ class LMCacheMPWorkerAdapter:
             except Exception:
                 logger.exception("History submission failed for %s", rid)
                 continue
-            retained[payload] = (future, event, 0.0)
+            lease = msgspec.msgpack.decode(payload, type=HistoryCopy).lease
+            retained[rid, lease, self.worker_id] = (future, event, 0.0)
         self._history_transfers = retained
 
     @_lmcache_nvtx_annotate
@@ -2045,8 +2047,6 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
-        if op.history_copy is not None:
-            key = replace(key, history_copy=op.history_copy)
         transfer_ctx = self._require_transfer_ctx("submitting retrieve requests")
         future = transfer_ctx.submit_retrieve(
             request_id,

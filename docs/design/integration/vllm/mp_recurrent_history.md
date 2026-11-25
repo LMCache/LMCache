@@ -68,6 +68,8 @@ Five paired Ascend TP=2 rounds with the compatibility harness exercised the
 independent-copy path at 32K, 64K and 128K input lengths and concurrency 1 and 8.
 At 32K and 128K the second request reused a published checkpoint in every round.
 At 64K the baseline already served the second request from local cache.
+The 468 ms difference at concurrency 8 had no historical checkpoint reuse;
+its cause is undetermined and it is excluded from reuse savings.
 The CPU tests additionally exercise TP=1 and TP=4 using simulated events.
 
 ## Validation

@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Coordinate optional historical state restoration from the scheduler."""
 
-# Future
-from __future__ import annotations
-
 # Standard
 from typing import TYPE_CHECKING
 import time
@@ -47,22 +44,22 @@ class RecurrentHistoryScheduler:
     """Own optional history plans until every worker finishes the receive."""
 
     def __init__(
-        self, pool: BlockPool, adapter: LMCacheMPSchedulerAdapter, groups: list[int]
+        self, pool: "BlockPool", adapter: "LMCacheMPSchedulerAdapter", groups: list[int]
     ) -> None:
         self.pool, self.adapter, self.groups = pool, adapter, groups
         self.block_size = pool.hash_block_size
         self.pending: dict[str, RecurrentDestinations] = {}
         self.enabled = True
-        self.planning: dict[str, tuple[HistoryFuture, float, int]] = {}
+        self.planning: "dict[str, tuple[HistoryFuture, float, int]]" = {}
         self.plans: dict[str, HistoryResponse] = {}
-        self.abandoned: list[tuple[HistoryFuture, float, int]] = []
-        self.controls: dict[str, tuple[str, HistoryFuture | None, float]] = {}
+        self.abandoned: "list[tuple[HistoryFuture, float, int]]" = []
+        self.controls: "dict[str, tuple[str, HistoryFuture | None, float]]" = {}
         self.retiring: dict[str, str] = {}
-        self.background: dict[str, tuple[Request, LMCacheMPRequestTracker, int]] = {}
+        self.background: "dict[str, tuple[Request, LMCacheMPRequestTracker, int]]" = {}
         self.primary_done: set[str] = set()
         self.dispatch: list[tuple[str, bytes, int, str, bytes]] = []
-        self.owners: dict[CheckpointKey, str] = {}
-        self.owned_keys: dict[str, list[CheckpointKey]] = {}
+        self.owners: "dict[CheckpointKey, str]" = {}
+        self.owned_keys: "dict[str, list[CheckpointKey]]" = {}
 
     def _checkpoint_key(self, request, tracker, pos):
         return (
@@ -146,12 +143,13 @@ class RecurrentHistoryScheduler:
             self.primary_done.discard(rid)
             if plan is None:
                 continue
-            self._prepare(request, tracker, end=end)
+            self._allocate(request, end)
             pending = self.pending.get(rid)
             if pending is None:
                 self._forget_owner(rid)
                 continue
             pending.receive_completed = True
+            pending.receipt_deadline = time.monotonic() + self.adapter._mq_timeout
             self.dispatch.append(
                 (
                     rid,
@@ -236,18 +234,6 @@ class RecurrentHistoryScheduler:
         self.planning[rid] = future, time.monotonic() + self.adapter._mq_timeout, end
         return False
 
-    def prepare(self, request: Request, tracker: LMCacheMPRequestTracker) -> None:
-        """Plan an extra history restore when this request needs a primary load."""
-        if not self.enabled or not tracker.is_ready_for_retrieving():
-            return
-        if request.request_id in self.pending:
-            return
-        try:
-            self._prepare(request, tracker)
-        except (RuntimeError, ValueError, TimeoutError):
-            self.enabled = False
-            logger.exception("Recurrent history planning disabled after failure")
-
     def settle(self, request_id: str, cancel: bool = False) -> None:
         """Settle a finished receive or cancel before request tracker removal."""
         if not cancel and request_id in self.background:
@@ -266,6 +252,16 @@ class RecurrentHistoryScheduler:
         if pending is not None:
             pending.canceled |= cancel
             pending.receive_completed |= not cancel
+
+    def worker_finished(self, rid: str, lease: str, rank: int) -> None:
+        """Accept each worker receipt once, for the currently owned lease."""
+        pending = self.pending.get(rid)
+        if (
+            pending
+            and pending.plan.lease == lease
+            and 0 <= rank < self.adapter.world_size
+        ):
+            pending.receipt_ranks.add(rank)
 
     def finish_request(self, rid, normal_finish):
         pending = self.pending.get(rid)
@@ -292,11 +288,20 @@ class RecurrentHistoryScheduler:
         for rid, pending in tuple(self.pending.items()):
             if not (pending.canceled or pending.receive_completed):
                 continue
+            if (
+                not pending.canceled
+                and len(pending.receipt_ranks) < self.adapter.world_size
+            ):
+                if time.monotonic() < pending.receipt_deadline:
+                    continue
+                pending.canceled = True
             lease = pending.plan.lease
             action = "cancel" if pending.canceled else "status"
             outcome = self._advance(lease, action)
-            if outcome is not None and outcome.lease == lease:
-                pending.copy_submitted = outcome.copy_submitted
+            if outcome is not None and outcome.lease == lease and not outcome.settled:
+                # A worker can complete with an error before submitting a device copy.
+                # Only the server can confirm that these destinations are safe to free.
+                pending.canceled = True
             if outcome is not None and pending.settle(outcome):
                 self._forget_owner(rid)
                 del self.pending[rid]
@@ -332,19 +337,14 @@ class RecurrentHistoryScheduler:
             del self.controls[lease]
             if previous == action:
                 if not outcome.settled and action != "acknowledge":
-                    self.controls[lease] = action, None, now + 0.0005
+                    self.controls[lease] = action, None, now + 0.05
                 return outcome
         except Exception:
             self.controls[lease] = action, None, now + 0.05
             logger.exception("Recurrent history control failed for %s", lease)
         return None
 
-    def _prepare(
-        self, request: Request, tracker: LMCacheMPRequestTracker, end=None
-    ) -> None:
-        background = end is not None
-        if end is None:
-            end = tracker.num_lmcache_hit_tokens
+    def _allocate(self, request: "Request", end: int) -> None:
         plan = self.plans.pop(request.request_id, None)
         if plan is None:
             return
@@ -374,8 +374,3 @@ class RecurrentHistoryScheduler:
             self._retire(plan.lease, "cancel")
             return
         self.pending[request.request_id] = pending
-        if background:
-            return
-        tracker.history_copy = msgspec.msgpack.encode(
-            HistoryCopy(lease=plan.lease, destinations=pending.block_ids())
-        )

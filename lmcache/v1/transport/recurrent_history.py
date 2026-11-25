@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Messages for the opt-in recurrent history restore extension."""
 
-# Future
-from __future__ import annotations
-
 # Third Party
 import msgspec
 

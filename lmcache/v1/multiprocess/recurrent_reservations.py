@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Lifetime management for CPU read reservations shared by worker copies."""
 
-# Future
-from __future__ import annotations
-
 # Standard
 from dataclasses import dataclass, field
 from typing import Any
@@ -52,10 +49,10 @@ class RecurrentReservations:
 
     def __init__(self) -> None:
         self.lock = threading.RLock()
-        self.entries: dict[str, HistoryReservation] = {}
+        self.entries: "dict[str, HistoryReservation]" = {}
         self._generation = uuid.uuid4().hex
 
-    def add(self, reservation: HistoryReservation) -> str:
+    def add(self, reservation: "HistoryReservation") -> str:
         """Register a read reservation and return its unguessable token."""
         with self.lock:
             token = f"{self._generation}-{uuid.uuid4().hex}"

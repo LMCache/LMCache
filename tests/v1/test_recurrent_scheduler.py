@@ -16,9 +16,10 @@ from lmcache.v1.transport.recurrent_history import HistoryResponse
 def start_history(history, adapter, request, tracker):
     adapter._mq_timeout = 5
     adapter.read_recurrent_history.side_effect = lambda future: future.value
-    if not history.plan_ready(request, tracker, tracker.num_lmcache_hit_tokens):
-        assert history.plan_ready(request, tracker, tracker.num_lmcache_hit_tokens)
-    history.prepare(request, tracker)
+    history.begin_background(request, tracker)
+    history.settle(request.request_id)
+    history.poll()
+    history.poll()
 
 
 @pytest.mark.parametrize("missing", [None, 0, 1, 2])
@@ -160,6 +161,8 @@ def test_receipt_for_another_lease_cannot_release_private_blocks() -> None:
 
     start_history(history, adapter, request, tracker)
     history.settle("request")
+    history.worker_finished("request", "mine", 0)
+    history.worker_finished("request", "mine", 1)
     history.poll()
     history.poll()
 

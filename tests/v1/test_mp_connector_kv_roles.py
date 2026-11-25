@@ -47,8 +47,8 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
 )
 from lmcache.integration.vllm.utils import mm_hash_to_token_values  # noqa: E402
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
-from lmcache.utils import CacheRemoveEvent, CacheStoreEvent  # noqa: E402
 from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.common.utils import CacheRemoveEvent, CacheStoreEvent  # noqa: E402
 
 pytestmark = pytest.mark.no_shared_allocator
 
@@ -1050,7 +1050,9 @@ def test_primary_load_survives_background_poll_failure(monkeypatch):
     producer = object()
     history = MagicMock()
     history.query.side_effect = [RuntimeError("A completion event unavailable"), True]
-    adapter._history_transfers = {b"A": (history, producer, 0.0)}
+    adapter.history_receipts = set()
+    receipt = ("A", "lease", 0)
+    adapter._history_transfers = {receipt: (history, producer, 0.0)}
     now = [10.0]
     monkeypatch.setattr(adapter_mod, "time", SimpleNamespace(monotonic=lambda: now[0]))
 
@@ -1062,7 +1064,7 @@ def test_primary_load_survives_background_poll_failure(monkeypatch):
         cache_salts=[""],
         request_configs_list=[None],
     )
-    assert adapter._history_transfers[b"A"][1] is producer
+    assert adapter._history_transfers[receipt][1] is producer
     meta.requests.clear()
     worker.start_load_kv(MagicMock())
     history.query.assert_called_once_with()
@@ -1070,3 +1072,4 @@ def test_primary_load_survives_background_poll_failure(monkeypatch):
     worker.start_load_kv(MagicMock())
     assert history.query.call_count == 2
     assert not adapter._history_transfers
+    assert adapter.history_receipts == {receipt}

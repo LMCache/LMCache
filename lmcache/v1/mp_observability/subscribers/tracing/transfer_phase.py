@@ -24,10 +24,10 @@ import time
 # First Party
 from lmcache.lmcache_native import TransferDirection
 from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.ops_types import TransferPhase
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 from lmcache.v1.mp_observability.subscribers.tracing.span_registry import SpanRegistry
-from lmcache.v1.platform.ops_types import TransferPhase
 
 logger = init_logger(__name__)
 

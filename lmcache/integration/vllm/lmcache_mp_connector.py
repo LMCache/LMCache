@@ -91,10 +91,10 @@ from lmcache.integration.vllm.recurrent_scheduler import RecurrentHistorySchedul
 from lmcache.integration.vllm.utils import (
     vllm_layout_hints,
 )
-from lmcache.utils import CacheRemoveEvent
-from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.client.worker_transfer import LMCacheDrivenTransferContext
 from lmcache.v1.common.banner import print_banner_once
+from lmcache.v1.common.logging import init_logger as lmcache_init_logger
+from lmcache.v1.common.utils import CacheRemoveEvent
 
 try:
     # First Party
@@ -575,17 +575,17 @@ def _ensure_transport_scheme(server_url: str) -> str:
     """Ensure a multiprocess server URL carries a transport scheme.
 
     Preserve explicit schemes so the request client factory can select the
-    transport. Bare endpoints retain the legacy ZMQ TCP behavior.
+    transport. Bare endpoints default to gRPC.
 
     Args:
         server_url: A server URL, with or without a ``<scheme>://`` prefix.
 
     Returns:
-        The URL with a transport scheme, defaulting to ``tcp://``.
+        The URL with a transport scheme, defaulting to ``grpc://``.
     """
     if "://" in server_url:
         return server_url
-    return f"tcp://{server_url}"
+    return f"grpc://{server_url}"
 
 
 class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
@@ -596,13 +596,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     Multi-server deployment:
     - lmcache.mp.server_urls: server URL list or comma-separated string,
-      e.g. "tcp://host1:6667,tcp://host2:6667".
+      e.g. "grpc://host1:6667,grpc://host2:6667".
 
     Single-server deployment:
     - lmcache.mp.host: the host of the LMCache server, e.g. "127.0.0.1" or
-      "tcp://127.0.0.1" (default "tcp://localhost"). The final URL is
-      "{host}:{port}". If no transport scheme is provided, "tcp://" is
-      automatically prepended.
+      "grpc://127.0.0.1" (default "grpc://localhost"). The final URL is
+      "{host}:{port}". If no transport scheme is provided, "grpc://" is
+      automatically prepended. "tcp://" selects the deprecated ZMQ transport.
     - lmcache.mp.port: the port of the LMCache server.
 
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
@@ -739,15 +739,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             # Legacy single-server fallback.
             server_host = vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.host", "tcp://localhost"
+                "lmcache.mp.host", "grpc://localhost"
             )
             server_port = vllm_config.kv_transfer_config.get_from_extra_config(
                 "lmcache.mp.port", 5555
             )
             server_urls = [f"{server_host}:{server_port}"]
 
-        # Preserve explicit transport schemes and default bare host:port
-        # endpoints to the legacy ZMQ TCP transport.
         server_urls = [_ensure_transport_scheme(u) for u in server_urls]
 
         # The server count is derived from lmcache.mp.server_urls.
@@ -1324,13 +1322,20 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             Completion counts and failed request IDs, or None when lazy
             offload is disabled or there are no new results.
         """
+        receipts = self.worker_adapter.history_receipts.copy()
+        self.worker_adapter.history_receipts.clear()
         if not self.lazy_offload:
-            return None
+            return (
+                LMCacheMPWorkerMetadata({}, history_receipts=receipts)
+                if receipts
+                else None
+            )
         completed_store_requests = self.worker_adapter.get_completed_store_requests()
         failed_store_requests = self.worker_adapter.get_failed_store_requests()
-        if completed_store_requests or failed_store_requests:
+        if receipts or completed_store_requests or failed_store_requests:
             return LMCacheMPWorkerMetadata(
                 completed_store_requests=completed_store_requests or {},
+                history_receipts=receipts,
                 failed_store_requests=failed_store_requests or set(),
             )
         return None
@@ -1791,6 +1796,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 connectors output.
         """
         if self._recurrent_history is not None:
+            worker_meta = connector_output.kv_connector_worker_meta
+            if isinstance(worker_meta, LMCacheMPWorkerMetadata):
+                for rid, lease, rank in worker_meta.history_receipts:
+                    self._recurrent_history.worker_finished(rid, lease, rank)
             for request_id in connector_output.finished_recving or ():
                 self._recurrent_history.settle(request_id)
         # A request's stores are done once its workers report it sent.
@@ -2052,7 +2061,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)
-            request_tracker.history_copy = None
             request_tracker.state = LMCacheMPRequestState.READY
 
     def _process_new_requests(

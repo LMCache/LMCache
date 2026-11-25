@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run an optional history copy after the primary retrieve has been enqueued."""
 
-# Future
-from __future__ import annotations
-
 # Standard
 from typing import TYPE_CHECKING
 
@@ -22,7 +19,7 @@ if TYPE_CHECKING:
 
 
 def receive_recurrent_history(
-    context: BaseCacheContext,
+    context: "BaseCacheContext",
     reservations: RecurrentReservations,
     key: IPCCacheServerKey,
     copy: HistoryCopy,

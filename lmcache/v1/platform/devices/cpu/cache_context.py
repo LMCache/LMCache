@@ -24,7 +24,7 @@ import os
 import torch
 
 # First Party
-from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.group_view import engine_group_layer_indices
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.utils import (
@@ -42,8 +42,8 @@ if TYPE_CHECKING:
 
     # First Party
     from lmcache.v1.common.group_view import EngineGroupInfo
-    from lmcache.v1.common.object_group_transfer import ObjectGroupTransfer
     from lmcache.v1.platform.base.ipc_wrapper import KVCache
+    from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 
 logger = init_logger(__name__)
 
@@ -95,6 +95,8 @@ class CPUCacheContext(BaseCacheContext):
 
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
         self.device_ = torch.device("cpu")
+        if engine_type == EngineType.VLLM and not (layout_hints or {}).get("kv_layout"):
+            layout_hints = {**(layout_hints or {}), "kv_layout": "HND"}
 
         # Discover layout & build KV layer groups via the same path
         # GPUCacheContext uses, so we don't need to hand-roll any

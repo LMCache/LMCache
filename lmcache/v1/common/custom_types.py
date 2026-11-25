@@ -2,6 +2,7 @@
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 # Third Party
@@ -503,3 +504,11 @@ class KVEventBatch:
     next_cursor: int
     lost: bool
     events: list[KVEventRecord]
+
+
+class EngineType(Enum):
+    VLLM = "vllm"
+    ATOM = "atom"
+    SGLANG = "sglang"
+    TRTLLM = "trtllm"
+    MOCK = "mock"
