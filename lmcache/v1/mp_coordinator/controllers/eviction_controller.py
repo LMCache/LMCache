@@ -175,7 +175,8 @@ class FleetEvictionController(Controller):
         from eviction.
 
         A pin covers the key's chunk in every object group and on every rank
-        of its world size (see :func:`_pinned_chunk_key`). Each chunk counts
+        of its world size, or of every world size for a key of world size 0
+        (see :func:`_pinned_chunk_key`). Each chunk counts
         once per call, however many of its keys the call names: a tokens-form
         pin names a chunk once per rank, and one unpin must release it.
         """
@@ -295,7 +296,7 @@ class FleetEvictionController(Controller):
 
         Used by non-force delete to skip L2-pinned keys.
         """
-        return [key for key in keys if _pinned_chunk_key(key) not in self._pin_counts]
+        return [key for key in keys if not self._is_pinned(key)]
 
     def drop_pins(self, keys: list[ObjectKey]) -> None:
         """Remove each key from the L2 pin set (used by force delete; idempotent)."""
@@ -356,9 +357,7 @@ class FleetEvictionController(Controller):
             actions = self._policy.get_eviction_actions(
                 effective_ratio,
                 cache_salt=cache_salt,
-                key_eligible_filter=lambda key: (
-                    _pinned_chunk_key(key) not in self._pin_counts
-                ),
+                key_eligible_filter=lambda key: not self._is_pinned(key),
             )
             keys_to_evict: list[ObjectKey] = []
             for action in actions:
@@ -500,6 +499,14 @@ class FleetEvictionController(Controller):
             salt_count,
         )
 
+    def _is_pinned(self, key: ObjectKey) -> bool:
+        """Whether a pin covers ``key``: one on its chunk in its world size,
+        or one taken without a world size, which covers every world size."""
+        return (
+            _pinned_chunk_key(key) in self._pin_counts
+            or _every_setup_chunk_key(key) in self._pin_counts
+        )
+
 
 def _decode_pin(entry: Mapping[str, object]) -> tuple[ObjectKey, int]:
     """Rebuild one pin from the form :meth:`capture` produced.
@@ -515,6 +522,12 @@ def _decode_pin(entry: Mapping[str, object]) -> tuple[ObjectKey, int]:
     return encoded.to_object_key(), cast(int, entry["count"])
 
 
+def _every_setup_chunk_key(key: ObjectKey) -> ObjectKey:
+    """Return the key a pin without a world size stores for ``key``'s chunk:
+    object group 0, and a ``kv_rank`` of 0, which packs no world size."""
+    return replace(key, identity=replace(key.identity, object_group_id=0, kv_rank=0))
+
+
 def _pinned_chunk_key(key: ObjectKey) -> ObjectKey:
     """Return the key the pin table stores for ``key``'s chunk: its rank-0
     key in object group 0.
@@ -524,7 +537,8 @@ def _pinned_chunk_key(key: ObjectKey) -> ObjectKey:
     them all, or eviction could take one share and leave the pinned chunk
     unusable. Keys of one world size are the same chunk, as the directory
     treats them for a delete; another world size is a different parallel
-    setup's object and keeps its own pins.
+    setup's object and keeps its own pins. A key of world size 0 maps to
+    itself in group 0: a pin taken without a world size, covering every one.
     """
     world_size = ObjectKey.WorldSizeFromKVRank(key.kv_rank)
     kv_rank = ObjectKey.ComputeKVRank(world_size, 0, world_size, 0)

@@ -478,6 +478,31 @@ def test_lookup_by_chunk_hash_reports_every_rank_and_group_of_that_chunk():
         assert all(len(r["placements"]) == 1 for r in body["results"])
 
 
+def test_lookup_by_chunk_hash_without_a_world_size_reports_every_setup():
+    """Without a world size a hash resolves to every stored copy of its
+    chunk, whatever the world size; a chunk stored nowhere has no results."""
+    with _client() as client:
+        stored = [
+            _key(h="aa", rank=rank, world_size=world_size)
+            for world_size in (1, 2)
+            for rank in range(world_size)
+        ]
+        entries = [{"key": key, "size_bytes": 1} for key in stored]
+        _post_events(client, [_batch(entries=entries)])
+
+        resp = client.post(
+            "/directory/lookup",
+            json={"chunk_hashes": ["aa", "ff"], "model_name": MODEL},
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["chunks"] == 2
+        assert sorted(r["key"]["kv_rank"] for r in body["results"]) == sorted(
+            key["kv_rank"] for key in stored
+        )
+
+
 def test_lookup_and_listing_report_access_counts():
     def _access(seq: int) -> dict:
         return _batch(
@@ -531,7 +556,6 @@ def test_lookup_requires_exactly_one_form():
     "body",
     [
         pytest.param({"chunk_hashes": ["aa"], "world_size": 1}, id="no-model"),
-        pytest.param({"chunk_hashes": ["aa"], "model_name": "m"}, id="no-world-size"),
         pytest.param(
             {"chunk_hashes": ["zz"], "model_name": "m", "world_size": 1},
             id="not-hex",
@@ -561,9 +585,8 @@ def test_lookup_requires_exactly_one_form():
     ],
 )
 def test_lookup_rejects_a_malformed_chunk_hash_form(body: dict):
-    """The chunk form names one parallel setup, so it needs model_name and
-    world_size, and it excludes the other forms; each hash must be non-empty
-    hex."""
+    """The chunk form needs model_name and excludes the other forms; each
+    hash must be non-empty hex."""
     with _client() as client:
         assert client.post("/directory/lookup", json=body).status_code == 422
 

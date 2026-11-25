@@ -370,10 +370,6 @@ def test_pin_by_keys_pins_only_the_named_mid_prompt_chunk():
             {"chunk_hashes": ["aa"], "world_size": 1}, id="chunk-hashes-without-model"
         ),
         pytest.param(
-            {"chunk_hashes": ["aa"], "model_name": "m"},
-            id="chunk-hashes-without-world-size",
-        ),
-        pytest.param(
             {"chunk_hashes": ["zz"], "model_name": "m", "world_size": 1},
             id="chunk-hash-not-hex",
         ),
@@ -398,8 +394,8 @@ def test_key_controls_reject_request_without_exactly_one_form(
     method: str, path: str, body: dict | str
 ):
     """Pin, delete and prefetch bodies carry exactly one of keys / token_ids /
-    chunk_hashes; the tokens and chunk-hash forms need model_name and
-    world_size -- a defaulted world size would resolve another parallel
+    chunk_hashes; the tokens and chunk-hash forms need model_name, and the
+    tokens form a world_size -- a defaulted one would resolve another parallel
     setup's keys and report success -- each hash is non-empty hex, and the
     keys and chunk-hash forms are capped at MAX_KEYS_PER_REQUEST. Anything
     else is a 422."""
@@ -1138,6 +1134,129 @@ def test_prefetch_by_chunk_hash_forwards_each_chunk_once_as_a_key():
             assert key["cache_salt"] == "alice"
             assert key["tags"] == {"adapter": "A"}
             assert ObjectKey.WorldSizeFromKVRank(key["kv_rank"]) == 2
+
+
+def _stored_in_two_setups(ctx) -> tuple[list[ObjectKey], list[ObjectKey]]:
+    """Store TOKENS at TP=1 and TP=2 (two object groups each); return the
+    stored keys and the copies of the second chunk among them."""
+    tp1, _ = resolve_object_keys(ctx.token_hasher, "m", 1, TOKENS, "alice")
+    tp2, _ = resolve_object_keys(ctx.token_hasher, "m", 2, TOKENS, "alice")
+    stored = [
+        replace(k, identity=replace(k.identity, object_group_id=g))
+        for g in (0, 1)
+        for k in tp1 + tp2
+    ]
+    _store(ctx, stored)
+    second = tp1[1].chunk_hash
+    return stored, [k for k in stored if k.chunk_hash == second]
+
+
+_EVERY_WORLD_SIZE = [
+    pytest.param({}, id="omitted"),
+    pytest.param({"world_size": None}, id="null"),
+    pytest.param({"world_size": 0}, id="zero"),
+]
+
+
+@pytest.mark.parametrize("world_size", _EVERY_WORLD_SIZE)
+def test_a_chunk_hash_pin_without_a_world_size_covers_every_world_size(world_size):
+    """Without a world size the pin is one entry that covers the chunk in
+    every parallel setup, stored or not: eviction and a non-force delete
+    leave every copy, and an unpin the same way releases them."""
+    deletes: list = []
+    with _registered_delete_client(deletes) as client:
+        ctx = client.app.state.ctx
+        eviction = ctx.controllers.get(FleetEvictionController)
+        client.put("/quota/config", json={"default_limit_gb": 0})
+        named = {
+            "chunk_hashes": [_resolve(ctx)[1].chunk_hash.hex()],
+            "model_name": "m",
+            "cache_salt": "alice",
+            **world_size,
+        }
+
+        pinned = client.post("/cache/pins", json=named)
+        stored, second_chunk = _stored_in_two_setups(ctx)
+
+        assert pinned.status_code == 200, pinned.text
+        assert pinned.json() == {"requested": 1, "affected": 1, "status": "pinned"}
+        assert set(eviction.compute_eviction_plan()["alice"]) == set(stored) - set(
+            second_chunk
+        )
+        held = client.post(
+            "/cache/delete", json={**named, "instance_id": "mp-1", "tier": "l2"}
+        )
+        assert held.json()["skipped"] == len(second_chunk)
+        assert deletes == []
+
+        unpinned = client.request("DELETE", "/cache/pins", json=named)
+
+        assert unpinned.json() == {"requested": 1, "affected": 1, "status": "unpinned"}
+        assert set(eviction.compute_eviction_plan()["alice"]) == set(stored)
+
+
+@pytest.mark.parametrize("world_size", _EVERY_WORLD_SIZE)
+def test_a_delete_by_chunk_hash_without_a_world_size_reaches_every_setup(world_size):
+    deletes: list = []
+    with _registered_delete_client(deletes) as client:
+        ctx = client.app.state.ctx
+        _, second_chunk = _stored_in_two_setups(ctx)
+        body = {
+            "instance_id": "mp-1",
+            "chunk_hashes": [second_chunk[0].chunk_hash.hex()],
+            "model_name": "m",
+            "cache_salt": "alice",
+            "tier": "l2",
+            **world_size,
+        }
+
+        resp = client.post("/cache/delete", json=body)
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["requested"] == 1
+        [call] = deletes
+        assert sorted(
+            (k["kv_rank"], k["object_group_id"]) for k in call["keys"]
+        ) == sorted((k.kv_rank, k.object_group_id) for k in second_chunk)
+
+
+def test_a_forced_delete_without_a_world_size_drops_the_pin_it_named():
+    """The every-world-size pin matches no stored copy, so a forced delete by
+    the same hashes must drop it along with the copies it removes."""
+    deletes: list = []
+    with _registered_delete_client(deletes) as client:
+        ctx = client.app.state.ctx
+        _, second_chunk = _stored_in_two_setups(ctx)
+        named = {
+            "chunk_hashes": [second_chunk[0].chunk_hash.hex()],
+            "model_name": "m",
+            "cache_salt": "alice",
+        }
+        client.post("/cache/pins", json=named)
+
+        resp = client.post(
+            "/cache/delete",
+            json={**named, "instance_id": "mp-1", "tier": "l2", "force": True},
+        )
+
+        assert resp.status_code == 200, resp.text
+        [call] = deletes
+        assert len(call["keys"]) == len(second_chunk)
+        assert client.get("/cache/pins").json() == {"total": 0, "pins": []}
+
+
+@pytest.mark.parametrize("world_size", _EVERY_WORLD_SIZE)
+def test_a_prefetch_by_chunk_hash_needs_a_world_size(world_size):
+    """A prefetch warms one layout on its target, so it cannot span world
+    sizes."""
+    with _pin_client() as client:
+        body = {
+            "instance_id": "mp-1",
+            "chunk_hashes": ["aa"],
+            "model_name": "m",
+            **world_size,
+        }
+        assert client.post("/cache/prefetches", json=body).status_code == 422
 
 
 @pytest.mark.parametrize(

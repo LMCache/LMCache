@@ -139,16 +139,23 @@ def resolve_chunk_object_keys(
     without its prefix. Each distinct hash expands into one key per rank in
     object group ``0``, in first-named order.
 
+    A ``world_size`` of ``0`` names each chunk in every parallel setup: it
+    resolves to one key per chunk whose ``kv_rank`` is ``0``, which packs no
+    world size and so is no stored key; the coordinator's pin table and key
+    directory read it as every world size.
+
     Args:
         chunk_hashes: The chunks' hashes; a repeated hash counts once.
         model_name: Model whose rank fan-out to use.
-        world_size: Tensor-parallel world size selecting the per-rank fan-out.
+        world_size: Tensor-parallel world size selecting the per-rank fan-out,
+            or ``0`` for every world size.
         cache_salt: Per-tenant isolation salt.
         tags: Matching tags supplied when the content was stored.
 
     Returns:
-        ``(obj_keys, chunk_count)``: one key per (distinct chunk, rank), and
-        the number of distinct chunks.
+        ``(obj_keys, chunk_count)``: one key per (distinct chunk, rank), or
+        per distinct chunk for world size ``0``, and the number of distinct
+        chunks.
 
     Raises:
         ValueError: A key field (e.g. ``cache_salt``) is invalid.
@@ -157,6 +164,18 @@ def resolve_chunk_object_keys(
     ipc_key = _lookup_ipc_key(model_name, world_size, [], cache_salt, tags=tags)
     if not distinct:
         return [], 0
+    if world_size == 0:
+        every_setup = ObjectKeyIdentity(
+            chunk_hash=b"",
+            kv_rank=0,
+            model_name=model_name,
+            cache_salt=cache_salt,
+            tags=tags or {},
+        )
+        return [
+            ObjectKey(identity=replace(every_setup, chunk_hash=chunk_hash))
+            for chunk_hash in distinct
+        ], len(distinct)
     # The coordinator holds no KV registration, so this resolves the
     # per-rank layout of object group 0 only.
     obj_keys = ipc_key_to_object_keys(

@@ -470,8 +470,8 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
                 status_code=404,
                 detail=f"no MP server registered with instance_id={body.instance_id!r}",
             )
-        resolved, chunks = _resolve_request_keys(body, ctx.token_hasher)
-        resolved = ctx.views.get(KeyDirectory).get_stored_keys_of_chunks(resolved)
+        named, chunks = _resolve_request_keys(body, ctx.token_hasher)
+        resolved = ctx.views.get(KeyDirectory).get_stored_keys_of_chunks(named)
 
         if not chunks:
             return DeleteResponse(
@@ -526,7 +526,9 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
 
         if touches_l2 and body.force:
             before = controller.capture()
-            controller.drop_pins(resolved)
+            # ``named`` carries a hash-form request's every-world-size pin key,
+            # which matches no stored copy.
+            controller.drop_pins(named + resolved)
             try:
                 ctx.metadata_persister.save()
             except MetadataWriteError as exc:

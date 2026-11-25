@@ -52,7 +52,9 @@ async def lookup_placements(
     request's full sequence from position 0; trailing incomplete chunks
     are ignored. The chunk-hash form expands each named chunk the same
     way, so a chunk in the middle of a prompt is reached without its
-    prefix. Both then reach every object group the directory holds.
+    prefix. Both then reach every object group the directory holds; chunk
+    hashes without a world size reach every stored copy, whatever the world
+    size.
 
     Args:
         body: The keys to resolve, or the token sequence or chunk hashes
@@ -88,14 +90,19 @@ async def lookup_placements(
                 obj_keys, chunks = resolve_object_keys(
                     token_hasher=ctx.token_hasher,
                     model_name=body.model_name,
-                    world_size=body.world_size,
+                    # The tokens form defaults to a single-GPU setup.
+                    world_size=body.world_size or 1,
                     token_ids=body.token_ids,
                     cache_salt=body.cache_salt,
                     tags=body.tags,
                 )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        obj_keys = directory.get_keys_across_object_groups(obj_keys)
+        if body.chunk_hashes and not body.world_size:
+            # Hashes without a world size name every stored copy of the chunk.
+            obj_keys = directory.get_stored_keys_of_chunks(obj_keys)
+        else:
+            obj_keys = directory.get_keys_across_object_groups(obj_keys)
         encoded_keys = [key.to_encoded_object_key() for key in obj_keys]
     placements = directory.lookup(obj_keys)
     keys_with_placements = [

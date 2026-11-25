@@ -18,6 +18,7 @@ import ipaddress
 from pydantic import (
     AfterValidator,
     BaseModel,
+    BeforeValidator,
     Field,
     StringConstraints,
     field_validator,
@@ -64,6 +65,18 @@ def _validate_chunk_hash_hex(value: str) -> str:
 
 
 ChunkHashHex = Annotated[str, AfterValidator(_validate_chunk_hash_hex)]
+
+
+def _null_as_every_world_size(value: object) -> object:
+    """Read an explicit ``null`` world size as ``0``, every world size."""
+    return 0 if value is None else value
+
+
+# A content request's world size: ``0`` -- also when omitted or ``null`` --
+# names every world size, which only the chunk-hash form accepts.
+ContentWorldSize = Annotated[
+    int, BeforeValidator(_null_as_every_world_size), Field(ge=0)
+]
 
 _URL_HOST_DELIMITERS = frozenset("/\\:?#@[]")
 
@@ -437,11 +450,12 @@ class DirectoryLookupRequest(BaseModel):
       prefix-chained, so this must be the request's **full** token
       sequence from position 0; a mid-request slice resolves to
       different keys. Trailing incomplete chunks are ignored.
-    * ``chunk_hashes`` (with ``model_name`` and ``world_size``) — resolve
-      chunks named by hash exactly as the tokens form resolves the chunks
-      it hashes, so a chunk in the middle of a prompt is reached without
-      its prefix. At most ``MAX_KEYS_PER_REQUEST`` hashes; a repeated hash
-      counts once.
+    * ``chunk_hashes`` (with ``model_name``) — resolve chunks named by hash
+      exactly as the tokens form resolves the chunks it hashes, so a chunk
+      in the middle of a prompt is reached without its prefix. Without a
+      ``world_size`` (omitted, ``null`` or ``0``) a hash resolves to every
+      stored copy of its chunk, whatever the world size. At most
+      ``MAX_KEYS_PER_REQUEST`` hashes; a repeated hash counts once.
 
     Attributes:
         keys: The keys to resolve (keys form).
@@ -450,7 +464,8 @@ class DirectoryLookupRequest(BaseModel):
         model_name: Model whose rank fan-out to use (tokens and chunk-hash
             forms).
         world_size: World size selecting the per-rank fan-out (tokens and
-            chunk-hash forms; required with ``chunk_hashes``).
+            chunk-hash forms). Omitted, ``null`` or ``0``: ``1`` in the
+            tokens form, every world size in the chunk-hash form.
         cache_salt: Per-tenant isolation salt applied to produced keys
             (tokens and chunk-hash forms).
         tags: Matching tags supplied when the content was stored (tokens and
@@ -463,7 +478,7 @@ class DirectoryLookupRequest(BaseModel):
         default_factory=list, max_length=MAX_KEYS_PER_REQUEST
     )
     model_name: str = ""
-    world_size: int = Field(default=1, ge=1)
+    world_size: ContentWorldSize = 0
     cache_salt: str = ""
     tags: MatchingTags = Field(default_factory=dict)
 
@@ -494,20 +509,13 @@ class DirectoryLookupRequest(BaseModel):
 
         Raises:
             ValueError: If not exactly one of ``keys`` / ``token_ids`` /
-                ``chunk_hashes`` is supplied, the tokens form omits
-                ``model_name``, or the chunk-hash form omits ``model_name``
-                or ``world_size``.
+                ``chunk_hashes`` is supplied, or the tokens or chunk-hash
+                form omits ``model_name``.
         """
-        if [bool(self.keys), bool(self.token_ids), bool(self.chunk_hashes)].count(
-            True
-        ) != 1:
-            raise ValueError(
-                "supply exactly one of 'keys', 'token_ids' or 'chunk_hashes'"
-            )
-        if self.token_ids and not self.model_name:
-            raise ValueError("'model_name' is required with 'token_ids'")
-        if self.chunk_hashes:
-            _require_setup(self.model_name, self.model_fields_set, "chunk_hashes")
+        _require_one_form(self.keys, self.token_ids, self.chunk_hashes)
+        if (self.token_ids or self.chunk_hashes) and not self.model_name:
+            form = "token_ids" if self.token_ids else "chunk_hashes"
+            raise ValueError(f"'model_name' is required with '{form}'")
         return self
 
 
@@ -538,12 +546,15 @@ class CacheContentRequest(BaseModel):
       another parallel setup's keys, and the request would report success
       having touched nothing.
 
-    * ``chunk_hashes`` (with ``model_name`` and ``world_size``) — name chunks
-      by hash, in the hex form the directory and pin listings return, with
-      the setup that stores them stated once rather than per key. Like the
-      keys form it reaches a chunk in the middle of a prompt, and each hash
-      names its whole chunk exactly as a key does. At most
-      ``MAX_KEYS_PER_REQUEST`` hashes; a repeated hash counts once.
+    * ``chunk_hashes`` (with ``model_name``) — name chunks by hash, in the
+      hex form the directory and pin listings return, with the setup that
+      stores them stated once rather than per key. Like the keys form it
+      reaches a chunk in the middle of a prompt, and each hash names its
+      whole chunk exactly as a key does. Without a ``world_size`` (omitted,
+      ``null`` or ``0``) a hash names its chunk in every world size: one pin
+      covers every parallel setup's copies, stored or not, and a delete
+      reaches every stored copy. At most ``MAX_KEYS_PER_REQUEST`` hashes; a
+      repeated hash counts once.
 
     Attributes:
         keys: Keys naming the chunks (keys form).
@@ -551,8 +562,9 @@ class CacheContentRequest(BaseModel):
         chunk_hashes: Hex-encoded chunk hashes (chunk-hash form).
         model_name: Model whose rank fan-out to use (tokens and chunk-hash
             forms).
-        world_size: World size selecting the per-rank fan-out (tokens and
-            chunk-hash forms).
+        world_size: World size selecting the per-rank fan-out: required in
+            the tokens form; in the chunk-hash form, omitted, ``null`` or
+            ``0`` names every world size.
         cache_salt: Per-tenant isolation salt applied to produced keys
             (tokens and chunk-hash forms).
         tags: Matching tags supplied when the content was stored (tokens and
@@ -565,7 +577,7 @@ class CacheContentRequest(BaseModel):
         default_factory=list, max_length=MAX_KEYS_PER_REQUEST
     )
     model_name: str = ""
-    world_size: int = Field(default=1, ge=1)
+    world_size: ContentWorldSize = 0
     cache_salt: str = ""
     tags: MatchingTags = Field(default_factory=dict)
 
@@ -602,19 +614,18 @@ class CacheContentRequest(BaseModel):
 
         Raises:
             ValueError: If not exactly one of ``keys`` / ``token_ids`` /
-                ``chunk_hashes`` is supplied, or the tokens or chunk-hash
-                form omits ``model_name`` or ``world_size``.
+                ``chunk_hashes`` is supplied, the tokens or chunk-hash form
+                omits ``model_name``, or the tokens form omits
+                ``world_size``.
         """
-        if [bool(self.keys), bool(self.token_ids), bool(self.chunk_hashes)].count(
-            True
-        ) != 1:
-            raise ValueError(
-                "supply exactly one of 'keys', 'token_ids' or 'chunk_hashes'"
-            )
-        if self.token_ids:
-            _require_setup(self.model_name, self.model_fields_set, "token_ids")
-        if self.chunk_hashes:
-            _require_setup(self.model_name, self.model_fields_set, "chunk_hashes")
+        _require_one_form(self.keys, self.token_ids, self.chunk_hashes)
+        if (self.token_ids or self.chunk_hashes) and not self.model_name:
+            form = "token_ids" if self.token_ids else "chunk_hashes"
+            raise ValueError(f"'model_name' is required with '{form}'")
+        # A defaulted world size would resolve another parallel setup's keys,
+        # and the request would report success having touched nothing.
+        if self.token_ids and not self.world_size:
+            raise ValueError("'world_size' is required with 'token_ids'")
         return self
 
 
@@ -791,7 +802,7 @@ class PrefetchRequest(CacheContentRequest):
 
     @model_validator(mode="after")
     def _validate_one_setup(self) -> "PrefetchRequest":
-        """Reject keys that no single parallel setup holds (surfaced as 422).
+        """Reject content no single parallel setup holds (surfaced as 422).
 
         One prefetch warms one model's layout on the target, which would
         reject such keys itself; checking here reports the caller's error
@@ -802,10 +813,15 @@ class PrefetchRequest(CacheContentRequest):
 
         Raises:
             ValueError: The keys disagree on model, world size, cache salt or
-                tags, or their ``kv_rank`` packs no world size.
+                tags, or their ``kv_rank`` packs no world size; or the
+                chunk-hash form names no world size.
         """
         if self.keys:
             named_chunks_of_keys([encoded.to_object_key() for encoded in self.keys])
+        if self.chunk_hashes and not self.world_size:
+            raise ValueError(
+                "'world_size' is required with 'chunk_hashes' for a prefetch"
+            )
         return self
 
 
@@ -927,23 +943,18 @@ class DeleteResponse(BaseModel):
     status: str
 
 
-def _require_setup(model_name: str, fields_set: set[str], form: str) -> None:
-    """Require the parallel setup a token or chunk-hash form resolves in.
-
-    ``world_size`` must be stated rather than defaulted: a defaulted one
-    resolves another parallel setup's keys, and the request would report
-    success having touched nothing.
+def _require_one_form(
+    keys: list[EncodedObjectKey], token_ids: list[int], chunk_hashes: list[str]
+) -> None:
+    """Require exactly one way of naming cache content.
 
     Args:
-        model_name: The request's ``model_name``.
-        fields_set: The fields the caller supplied.
-        form: The form being checked, named in the error.
+        keys: The request's ``keys``.
+        token_ids: The request's ``token_ids``.
+        chunk_hashes: The request's ``chunk_hashes``.
 
     Raises:
-        ValueError: If ``model_name`` is empty or ``world_size`` was not
-            supplied.
+        ValueError: If not exactly one of them is non-empty.
     """
-    if not model_name:
-        raise ValueError(f"'model_name' is required with '{form}'")
-    if "world_size" not in fields_set:
-        raise ValueError(f"'world_size' is required with '{form}'")
+    if [bool(keys), bool(token_ids), bool(chunk_hashes)].count(True) != 1:
+        raise ValueError("supply exactly one of 'keys', 'token_ids' or 'chunk_hashes'")

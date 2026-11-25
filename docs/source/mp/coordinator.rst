@@ -1080,8 +1080,10 @@ forms -- supply exactly one:
   "world_size": ..., "cache_salt": ..., "tags": ...}``: resolve chunks named by
   hash (the ``chunk_hash_hex`` of a key) exactly as the tokens form resolves
   the chunks it hashes, so a chunk in the middle of a prompt is reached without
-  its prefix. ``model_name`` and ``world_size`` are required; at most 10,000
-  hashes, and a repeated hash counts once.
+  its prefix. ``model_name`` is required. Without a ``world_size`` (omitted,
+  ``null`` or ``0``) each hash resolves to every stored copy of its chunk,
+  whatever the world size; a chunk stored nowhere then has no results. At most
+  10,000 hashes, and a repeated hash counts once.
 
 .. important::
 
@@ -1162,8 +1164,7 @@ namespace. Tag names must be nonempty strings and values must be strings.
 - ``400``: the token sequence exceeds the per-request cap, or a resolution
   parameter is invalid (e.g. ``model_name`` contains ``@``).
 - ``422``: not exactly one form supplied, ``model_name`` missing with
-  ``token_ids``, ``model_name`` or ``world_size`` missing with
-  ``chunk_hashes``, more than 10,000 hashes, or a key or hash is malformed
+  ``token_ids`` or ``chunk_hashes``, more than 10,000 hashes, or a key or hash is malformed
   (e.g. not hex, or an empty hash).
 
 **Examples:**
@@ -1421,7 +1422,11 @@ supply exactly one:
   "world_size": ..., "cache_salt": ..., "tags": ...}``: pin the chunks these
   hashes name (a key's ``chunk_hash_hex``), with the setup that stores them
   stated once rather than per key. Each hash acts exactly as a key of that
-  setup would.
+  setup would. Without a ``world_size`` (omitted, ``null`` or ``0``) a hash
+  names its chunk in **every** world size: the pin is one entry, listed with
+  ``kv_rank`` ``0``, that covers every parallel setup's copies, stored or not,
+  and is released by an unpin that also omits ``world_size``. It is separate
+  from a pin taken with a world size; each needs its own unpin.
 
 Local resolution requires the coordinator's ``chunk_size`` and
 ``hash_algorithm`` (see `Configuration`_) to match the MP servers' ``--chunk-size``
@@ -1471,8 +1476,9 @@ Pin keys in the L2 eviction plan.
        when resolving keys.
    * - ``world_size``
      - int
-     - Tokens and chunk-hash forms, required. World size (``>= 1``) selecting
-       the per-rank fan-out.
+     - Tokens form, required (``>= 1``). World size selecting the per-rank
+       fan-out. Chunk-hash form, optional: omitted, ``null`` or ``0`` covers
+       every world size.
    * - ``cache_salt``
      - string
      - Tokens and chunk-hash forms. Optional (default ``""``). Per-tenant
@@ -1502,8 +1508,8 @@ delete and prefetch count chunks.
 - ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt`` violates
   its invariants.
 - ``422``: request body fails field-level validation, supplies not exactly one
-  of ``keys`` / ``token_ids`` / ``chunk_hashes``, omits ``model_name`` or
-  ``world_size`` in the tokens or chunk-hash form, carries more than 10,000
+  of ``keys`` / ``token_ids`` / ``chunk_hashes``, omits ``model_name`` in
+  the tokens or chunk-hash form or ``world_size`` in the tokens form, carries more than 10,000
   keys or hashes, or has an undecodable key or hash.
 - ``503``: the metadata file (``--metadata-path``) could not be written; the
   change was undone, so retry once the storage is fixed.
@@ -1668,7 +1674,9 @@ anyway (L1 read/write locks on the node and the coordinator's L2 pin set).
 forms: the distinct chunks named). A key or hash names its chunk: it is expanded to every copy the
 coordinator's directory holds of that chunk in the key's parallel setup -- every
 object group and every kv rank of the same world size -- so any one of the
-chunk's keys removes the whole chunk, not one rank's share. If any copy is
+chunk's keys removes the whole chunk, not one rank's share. Chunk hashes
+without a ``world_size`` expand to the copies of every world size, and a forced
+delete also drops a pin taken the same way. If any copy is
 pinned, a non-force delete holds back every copy. The expanded keys are sent to
 the server in batches of at most 10,000, the most it accepts per request.
 ``affected`` and
@@ -1684,8 +1692,8 @@ sequence returns ``status`` ``"noop"``.
 - ``200``: deleted (or a ``noop``).
 - ``404``: no server is registered under ``instance_id``.
 - ``422``: request body fails field-level validation, supplies not exactly one
-  of ``keys`` / ``token_ids`` / ``chunk_hashes``, omits ``model_name`` or
-  ``world_size`` in the tokens or chunk-hash form, or carries more than 10,000
+  of ``keys`` / ``token_ids`` / ``chunk_hashes``, omits ``model_name`` in
+  the tokens or chunk-hash form or ``world_size`` in the tokens form, or carries more than 10,000
   keys or hashes.
 - ``502``: the target server was unreachable or rejected a batch. Earlier
   batches stay deleted, and ``detail`` says how many keys were removed.
