@@ -17,6 +17,11 @@ LMCache_inprocess/lmcache/inprocess/integration/tensorrt_llm/
 └── tensorrt_adapter.py    # In-process — engine in TRT-LLM process
 ```
 
+The core package initializer exports only the MP scheduler and worker.
+InProcess package-level exports belong to
+`lmcache.inprocess.integration.tensorrt_llm` in `LMCache_inprocess`; importing
+the core TensorRT package does not load the InProcess engine.
+
 Both adapters subclass TRT-LLM's `KvCacheConnectorScheduler` and
 `KvCacheConnectorWorker`. The TRT-LLM imports are *guarded at module
 level only via the package's `__init__`*; nothing in core LMCache
