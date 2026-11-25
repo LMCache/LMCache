@@ -35,8 +35,8 @@ from lmcache.v1.distributed.api import (
     MemoryResidency,
     MemoryTags,
     ObjectKey,
-    PrefetchPriority,
     PrefetchLockMode,
+    PrefetchPriority,
     PrefetchResult,
     PrefetchTaskSpec,
 )

@@ -176,7 +176,9 @@ def test_resident_key_needs_allow_resident_to_stage(l1: L1ManagerInterface) -> N
 def test_prefetch_locked_bytes_follow_the_read_lock(l1: L1ManagerInterface) -> None:
     keys = [key(1), key(2), key(3)]
     staged = l1.reserve_write(keys, [False] * 3, LAYOUT, tag="pf")
-    size = staged[key(1)][1].get_size()
+    _error, staged_obj = staged[key(1)]
+    assert staged_obj is not None
+    size = staged_obj.get_size()
     l1.finish_write_and_reserve_read(keys[:2], tag="pf")
     l1.finish_write(keys[2:], tag="pf")  # resident but not read-locked
     l1.track_prefetch_locked(keys + [key(4)])  # key(4) is not resident
