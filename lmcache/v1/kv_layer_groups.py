@@ -597,7 +597,11 @@ class KVLayerGroupsManager:
             return self._lmcache_tokens_per_chunk
         if sw_size_tokens == -1 or sw_size_tokens >= self._lmcache_tokens_per_chunk:
             return self._lmcache_tokens_per_chunk
-        return sw_size_tokens
+        # Whole blocks; chunk ends are block-aligned.
+        tokens_per_block = self._kernel_groups[kernel_group_idx].tokens_per_block
+        if tokens_per_block > 0:
+            sw_size_tokens = -(-sw_size_tokens // tokens_per_block) * tokens_per_block
+        return min(sw_size_tokens, self._lmcache_tokens_per_chunk)
 
     def get_kernel_group_window_chunks(self, kernel_group_idx: int) -> int:
         """Trailing LMCache chunks one kernel group needs for a cache hit.
@@ -739,13 +743,14 @@ class KVLayerGroupsManager:
         """Validate the chunk size configuration against the slot and
         tokens block detected from the serving engine.
 
+        Sub-chunk sliding windows are rounded up to whole blocks by
+        :meth:`get_subchunk_sw_size_tokens`.
+
         Raises:
             ValueError: If one of the following conditions is met:
                 - ``tokens_per_block`` is not a whole multiple of
                   ``slots_per_block``
                 - ``lmcache_tokens_per_chunk`` is not a whole multiple of
-                  ``tokens_per_block``
-                - a sub-chunk sliding window is not a whole multiple of
                   ``tokens_per_block``
         """
         if tokens_per_block % slots_per_block != 0:
@@ -758,15 +763,6 @@ class KVLayerGroupsManager:
                 f"group {group_idx}: lmcache_tokens_per_chunk "
                 f"{lmcache_tokens_per_chunk} must be a multiple of "
                 f"tokens_per_block {tokens_per_block}"
-            )
-        if (
-            0 < sw_size_tokens < lmcache_tokens_per_chunk
-            and sw_size_tokens % tokens_per_block != 0
-        ):
-            raise ValueError(
-                f"group {group_idx}: sub-chunk sliding window size "
-                f"{sw_size_tokens} must be a multiple of tokens_per_block "
-                f"{tokens_per_block}"
             )
         if slots_per_block != tokens_per_block:
             logger.info(
