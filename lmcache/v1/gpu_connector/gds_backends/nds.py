@@ -14,7 +14,7 @@ import os
 import torch
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
 from lmcache.v1.gpu_connector.gds_backends._file import FDGDSHandle, FileGDSBackend
 from lmcache.v1.gpu_connector.gds_backends._nds_fiemap import FileExtentMap
