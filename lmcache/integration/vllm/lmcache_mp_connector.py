@@ -94,12 +94,11 @@ from lmcache.integration.vllm.mp_server_launcher import (
 from lmcache.integration.vllm.utils import (
     vllm_layout_hints,
 )
-from lmcache.v1.client.transport.errors import REQUEST_FAILURES
+from lmcache.integration.vllm.vllm_multi_process_adapter import STORE_PIN_HINT
 from lmcache.v1.client.worker_transfer import LMCacheDrivenTransferContext
 from lmcache.v1.common.banner import print_banner_once
 from lmcache.v1.common.logging import init_logger as lmcache_init_logger
 from lmcache.v1.common.utils import CacheRemoveEvent
-from lmcache.v1.transport.futures import DeviceMessagingFuture
 
 try:
     # First Party
@@ -155,8 +154,6 @@ _DCP_LAYOUT_NAMESPACE = "##lmcache-dcp-layout-v1-"
 # Request-config key whose value becomes ``ObjectKeyIdentity.tags["revision"]``.
 # See ``get_request_tags`` in ``lmcache.v1.distributed.api``.
 _REVISION_TAG_KEY = "lmcache.tag.revision"
-#: Request-config hint carrying a pinned STORE's key.
-STORE_PIN_HINT = "lmcache.hint.store_pin"
 _MAX_LCM_EXPANSION_FACTOR = 4
 _USE_VMM_API_KEY = "lmcache.mp.use_vmm_api"
 
@@ -872,12 +869,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # Boundary-state blocks pinned for each request's unfull-chunk
             # stores, released once the request's stores finish.
             self._pinned_boundary_state_blocks: dict[str, list[int]] = {}
-            # Sliding-window / recurrent blocks pinned per STORE, and the
-            # worker reports collected for each (one per worker releases it).
+            # Sliding-window / recurrent blocks pinned per STORE, released
+            # by the workers' store receipts like a lazy-offload batch.
             self._store_pins: dict[str, list[int]] = {}
-            self._store_pin_reports: dict[str, int] = {}
             self._store_pin_seq = 0
-            self._store_pin_workers = parallel_strategy.vllm_world_size
             self._warned_unpinned_stores = False
         elif self.role == KVConnectorRole.WORKER:
             # Node routing: a worker connects only to its local LMCache server.
@@ -899,14 +894,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             # Requests whose blocks vLLM keeps until they are in finished_sending.
             self._delay_free_req_ids = set()
-            # Pinned STOREs by pin key: in flight, finished but not yet
-            # reported, and seen in a step's metadata but not yet submitted.
-            self._pinned_store_futures: dict[str, Any] = {}
-            self._finished_store_pins: list[str] = []
+            # Pinned STOREs seen in a step's metadata but not submitted, and
+            # the metadata whose STOREs wait_for_save submitted last.
             self._unsubmitted_store_pins: set[str] = set()
-            # Pinned STOREs the server answered whose event query was still
-            # False at the previous step.
-            self._answered_store_pins: set[str] = set()
+            self._saved_metadata: object | None = None
             if self.transfer_intermediate_tensors:
                 # First Party
                 from lmcache.integration.vllm.experimental import (
@@ -1215,33 +1206,36 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
-        stores = [meta for meta in metadata.requests if meta.direction == "STORE"]
-        if not stores:
+        request_ids = []
+        ops = []
+        cache_salts = []
+        request_configs_list = []
+        for meta in metadata.requests:
+            if meta.direction != "STORE":
+                continue
+            request_ids.append(meta.request_id)
+            ops.append(meta.op)
+            cache_salts.append(meta.cache_salt)
+            request_configs_list.append(meta.request_configs)
+            self._unsubmitted_store_pins.discard(
+                (meta.request_configs or {}).get(STORE_PIN_HINT)
+            )
+        self._saved_metadata = metadata
+
+        if len(request_ids) == 0:
             if self.dispatcher is not None:
                 dispatch(self.dispatcher, "wait_for_save", event=None)
             return
 
         event = self.worker_adapter.create_recorded_event()
 
-        for meta in stores:
-            pin_key = (meta.request_configs or {}).get(STORE_PIN_HINT)
-            before = self.worker_adapter.store_futures.get(meta.request_id)
-            self.worker_adapter.submit_store_request(
-                meta.request_id,
-                meta.op,
-                event,
-                cache_salt=meta.cache_salt,
-                request_configs=meta.request_configs,
-            )
-            if pin_key is None:
-                continue
-            self._unsubmitted_store_pins.discard(pin_key)
-            future = self.worker_adapter.store_futures.get(meta.request_id)
-            if future is None or future is before:
-                # Nothing was submitted (non-writer rank, unhealthy server).
-                self._finished_store_pins.append(pin_key)
-            else:
-                self._pinned_store_futures[pin_key] = future
+        self.worker_adapter.batched_submit_store_requests(
+            request_ids,
+            ops,
+            event,
+            cache_salts=cache_salts,
+            request_configs_list=request_configs_list,
+        )
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "wait_for_save", event=event)
 
@@ -1330,84 +1324,57 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """Build this step's store results for the scheduler.
 
         Returns:
-            The pinned STOREs this worker no longer reads and, with lazy
-            offload, completion counts and failed request IDs; None when
+            Completion receipts (lazy-offload batches, or pinned STOREs
+            otherwise) and, with lazy offload, failed request IDs; None when
             there is nothing to report.
         """
-        released_store_pins = self._take_released_store_pins()
-        completed_store_requests = None
+        adapter = self.worker_adapter
+        completed_store_requests = adapter.get_completed_store_requests()
         failed_store_requests = None
         if self.lazy_offload:
-            adapter = self.worker_adapter
-            completed_store_requests = adapter.get_completed_store_requests()
             failed_store_requests = adapter.get_failed_store_requests()
-        if completed_store_requests or failed_store_requests or released_store_pins:
+        else:
+            unsubmitted = self._take_unsubmitted_store_pins()
+            if unsubmitted:
+                completed_store_requests = {
+                    **(completed_store_requests or {}),
+                    **unsubmitted,
+                }
+        if completed_store_requests or failed_store_requests:
             return LMCacheMPWorkerMetadata(
                 completed_store_requests=completed_store_requests or {},
                 failed_store_requests=failed_store_requests or set(),
-                released_store_pins=released_store_pins,
             )
         return None
 
-    def _take_released_store_pins(self) -> dict[str, int]:
-        """Collect the pinned STOREs this worker is done with.
+    def _take_unsubmitted_store_pins(self) -> dict[str, int]:
+        """Collect receipts for pinned STOREs this worker will never submit.
 
-        A pinned STORE is done once its future has ended, or when this worker
-        submitted nothing for it. vLLM builds the worker metadata on every
-        step, before ``wait_for_save`` when the finalize is deferred. A
-        pinned STORE that is still unsubmitted one step after its metadata
-        was bound will never be submitted (a vLLM that skips
-        ``wait_for_save`` on a step without a forward), so it is reported
-        too.
+        vLLM builds the worker metadata on every step, before
+        ``wait_for_save`` when the finalize is deferred. A pinned STORE that
+        is still unsubmitted one step after its metadata was bound will never
+        be submitted (a vLLM that skips ``wait_for_save`` on a step without a
+        forward), and the adapter, which reports every STORE it was given,
+        never saw it.
 
         Returns:
-            ``{pin key: 1}`` for each STORE to release, reported once.
+            ``{pin key: 1}`` for each such STORE, reported once.
         """
-        released = dict.fromkeys(self._finished_store_pins, 1)
-        self._finished_store_pins = []
-        if not self.worker_adapter.is_healthy:
-            # The adapter drops its store futures of a lost server the same
-            # way; they may never end.
-            released.update(dict.fromkeys(self._pinned_store_futures, 1))
-            self._pinned_store_futures = {}
-        answered: set[str] = set()
-        for pin_key, future in list(self._pinned_store_futures.items()):
-            # Same rule as the adapter's poll: a failed request has ended,
-            # any other error is fatal because the server may still read.
-            try:
-                if not future.query():
-                    if not (
-                        isinstance(future, DeviceMessagingFuture)
-                        and future.raw_future_.query()
-                    ):
-                        continue
-                    # The server answered, so only its copy-done event is
-                    # left. query() can stay False on an imported event, so
-                    # after one more step result() synchronizes on it.
-                    if pin_key not in self._answered_store_pins:
-                        answered.add(pin_key)
-                        continue
-                future.result(timeout=60)
-            except REQUEST_FAILURES as exc:
-                logger.warning("Pinned store %s failed: %s", pin_key, exc)
-            del self._pinned_store_futures[pin_key]
-            released[pin_key] = 1
-        self._answered_store_pins = answered
-        for pin_key in self._unsubmitted_store_pins:
-            released[pin_key] = 1
+        released = dict.fromkeys(self._unsubmitted_store_pins, 1)
+        self._unsubmitted_store_pins = set()
         metadata = self._connector_metadata
-        self._unsubmitted_store_pins = {
-            hint
-            for meta in (
-                metadata.requests
-                if isinstance(metadata, LMCacheMPConnectorMetadata)
-                else ()
-            )
-            if meta.direction == "STORE"
-            and (hint := (meta.request_configs or {}).get(STORE_PIN_HINT)) is not None
-            and hint not in released
-            and hint not in self._pinned_store_futures
-        }
+        if (
+            isinstance(metadata, LMCacheMPConnectorMetadata)
+            and metadata is not self._saved_metadata
+        ):
+            self._unsubmitted_store_pins = {
+                hint
+                for meta in metadata.requests
+                if meta.direction == "STORE"
+                and (hint := (meta.request_configs or {}).get(STORE_PIN_HINT))
+                is not None
+                and hint not in released
+            }
         return released
 
     def get_block_ids_with_load_errors(self) -> set[int]:
@@ -1858,8 +1825,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, LMCacheMPWorkerMetadata):
             return
-        self._release_reported_store_pins(meta.released_store_pins)
         if not self.lazy_offload:
+            self._release_reported_store_pins(meta.completed_store_requests)
             return
         actions = self._lazy_offload_manager.on_store_results(
             meta.failed_store_requests,
@@ -2474,25 +2441,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             STORE_PIN_HINT: key,
         }
 
-    def _release_reported_store_pins(self, reports: dict[str, int]) -> None:
+    def _release_reported_store_pins(self, receipts: dict[str, int]) -> None:
         """Unpin the STOREs every worker has reported done.
 
-        Each worker reports a pinned STORE once, when its store future has
-        ended or when it submitted nothing for it. vLLM sums the reports of
-        one step; the counts are accumulated across steps here.
+        Each worker sends one receipt per pinned STORE, when its store future
+        has ended or when it submitted nothing for it. vLLM sums the receipts
+        of one step; the adapter accumulates them across steps, as it does
+        for lazy-offload batches.
 
         Args:
-            reports: ``{pin key: workers newly done}`` from this step's
+            receipts: ``{pin key: workers newly done}`` from this step's
                 aggregated worker metadata.
         """
-        for key, count in reports.items():
+        for key, count in receipts.items():
             if key not in self._store_pins:
                 continue
-            total = self._store_pin_reports.get(key, 0) + count
-            if total < self._store_pin_workers:
-                self._store_pin_reports[key] = total
+            if not self.scheduler_adapter.update_pending_store_count(key, count):
                 continue
-            self._store_pin_reports.pop(key, None)
             block_ids = self._store_pins.pop(key)
             pool = self._gpu_block_pool
             if pool is not None:

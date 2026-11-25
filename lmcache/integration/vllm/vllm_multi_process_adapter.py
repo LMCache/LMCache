@@ -155,6 +155,9 @@ DEFAULT_MQ_TIMEOUT: float = ExtraConfigDefault.mq_timeout.default
 DEFAULT_HEARTBEAT_INTERVAL: float = ExtraConfigDefault.heartbeat_interval.default
 
 _EXTRA_CONFIG_KEY_PREFIX = "lmcache.mp."
+#: Request-config hint carrying a pinned STORE's key. A STORE that has it gets
+#: one completion receipt per rank under that key, also without lazy offload.
+STORE_PIN_HINT = "lmcache.hint.store_pin"
 
 # Floor (seconds) of the MP server's worker reap timeout. It only covers the
 # default 10 s heartbeat interval (3 x 10 s); the adapter warns at startup
@@ -1513,6 +1516,9 @@ class LMCacheMPWorkerAdapter:
         # or dropped while unhealthy). Reported alongside the completion
         # receipts so the scheduler can break their stored-prefix chains.
         self._failed_store_requests: set[str] = set()
+        # Futures of pinned stores outside lazy offload, by pin key. Lazy
+        # offload has one store batch per request and polls store_futures.
+        self._pinned_store_futures: dict[str, MessagingFuture[StoreResult]] = {}
 
     @property
     def is_healthy(self) -> bool:
@@ -1872,11 +1878,14 @@ class LMCacheMPWorkerAdapter:
         """
         Submit a KV cache store request to LMCache
 
-        In lazy offload mode every call produces exactly one completion
-        receipt from this rank: a call that creates no store future (a
-        non-writer rank, or a drop while the server is unhealthy) reports
-        completion immediately, because the scheduler unpins the request's
-        blocks only after collecting one receipt per worker rank.
+        In lazy offload mode, and for a STORE that carries a pin key
+        (``lmcache.hint.store_pin``), every call produces exactly one
+        completion receipt from this rank: a call that creates no store
+        future (a non-writer rank, or a drop while the server is unhealthy)
+        reports completion immediately, because the scheduler unpins the
+        blocks only after collecting one receipt per worker rank. The
+        receipt is keyed by the request id with lazy offload and by the pin
+        key otherwise.
 
         Args:
             request_id: The ID of the request
@@ -1892,23 +1901,29 @@ class LMCacheMPWorkerAdapter:
                 are unregistered or before they are registered.
         """
         self._ensure_heartbeat_started()
+        receipt_id = (
+            request_id
+            if self.lazy_offload
+            else (request_configs or {}).get(STORE_PIN_HINT)
+        )
 
         if not self.is_kv_writer:
             # Every group this rank holds is written by another of its
             # server's TP ranks; the server would reserve nothing for this STORE.
-            if self.lazy_offload:
-                self._completed_store_requests[request_id] = 1
+            if receipt_id is not None:
+                self._completed_store_requests[receipt_id] = 1
             return
 
         if not self.is_healthy:
-            if self.lazy_offload:
+            if receipt_id is not None:
                 logger.warning(
                     "Dropping store for request %s while the server is "
                     "unhealthy; reporting it as completed so its blocks "
                     "are unpinned",
                     request_id,
                 )
-                self._completed_store_requests[request_id] = 1
+                self._completed_store_requests[receipt_id] = 1
+            if self.lazy_offload:
                 self._failed_store_requests.add(request_id)
             return
 
@@ -1930,6 +1945,9 @@ class LMCacheMPWorkerAdapter:
             self.blocks_in_chunk,
         )
         self.store_futures[request_id] = future
+        if receipt_id is not None and not self.lazy_offload:
+            # store_futures keeps only a request's latest STORE.
+            self._pinned_store_futures[receipt_id] = future
         if event is not None:
             self.store_events[request_id] = event
 
@@ -2364,8 +2382,30 @@ class LMCacheMPWorkerAdapter:
             self._completed_store_requests[req_id] = 1
         return None, finished_retrieves
 
+    def _poll_pinned_stores(self) -> None:
+        """Turn the pinned stores that have ended into completion receipts.
+
+        Same rule as the lazy-offload poll: a store has ended once its
+        future is done (a failed request counts as ended), and every store
+        of a lost server is ended because its future may never complete.
+        """
+        if not self._pinned_store_futures:
+            return
+        if self.is_healthy:
+            ended = [
+                pin_key
+                for pin_key, future in self._pinned_store_futures.items()
+                if _poll_transfer(pin_key, future)[0]
+            ]
+        else:
+            ended = list(self._pinned_store_futures)
+        for pin_key in ended:
+            del self._pinned_store_futures[pin_key]
+            self._completed_store_requests[pin_key] = 1
+
     def get_completed_store_requests(self) -> dict[str, int] | None:
         """Return completed store requests since the last call."""
+        self._poll_pinned_stores()
         if not self._completed_store_requests:
             return None
         completed_store_requests = self._completed_store_requests

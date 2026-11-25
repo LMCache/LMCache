@@ -411,8 +411,6 @@ def test_unfull_chunk_store_pins_its_recurrent_blocks():
     connector._windowed_group_tokens = {1: CHUNK}
     connector._store_pins = {}
     connector._store_pin_seq = 0
-    connector._store_pin_reports = {}
-    connector._store_pin_workers = 1
     tracker = _tracker()
     tracker.increase_num_scheduled_tokens(PROMPT)
     scheduler_output = SimpleNamespace(
@@ -433,7 +431,7 @@ def test_unfull_chunk_store_pins_its_recurrent_blocks():
         SimpleNamespace(
             kv_cache_events=None,
             kv_connector_worker_meta=LMCacheMPWorkerMetadata(
-                completed_store_requests={}, released_store_pins={pin_key: 1}
+                completed_store_requests={pin_key: 1}
             ),
             finished_sending=None,
         )
