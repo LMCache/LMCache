@@ -1170,6 +1170,75 @@ namespace. Tag names must be nonempty strings and values must be strings.
       -H 'Content-Type: application/json' \
       -d '{"keys": [{"chunk_hash_hex": "aa12...", "model_name": "m", "kv_rank": 0}]}'
 
+Request recovery
+----------------
+
+The coordinator remembers which request each chunk belongs to, so you can get
+a request's tokens back by its id, and see where its KV lives now, even after
+the KV was evicted. A request is recorded when it stores chunks. Only the
+LMCache-driven store path reports; the design is in
+``docs/design/v1/mp_coordinator/views/request_index.md``.
+
+The index keeps tokens past KV eviction and ages out the least recent entries
+past two bounds, set with ``--extra-config``:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 14 52
+
+   * - Key
+     - Default
+     - Bounds
+   * - ``request_index_max_chunks``
+     - ``65536``
+     - Retained chunks (about 64 MiB of token ids at 256 tokens per chunk).
+   * - ``request_index_max_requests``
+     - ``1048576``
+     - Tracked requests.
+
+``GET /requests/{instance_id}/{request_id}``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Return a request's tokens and, per chunk, every key it was stored under with
+the key's current placements. ``instance_id`` is the MP server that reported
+the request; vLLM request ids are unique only per engine.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "instance_id": "server-1",
+      "request_id": "cmpl-42-0",
+      "start_offset": 0,
+      "complete": true,
+      "token_ids": [15496, 11, 995],
+      "chunks": [
+        {
+          "chunk_hash_hex": "aa12...",
+          "token_offset": 0,
+          "num_tokens": 256,
+          "keys": [
+            {
+              "key": {"chunk_hash_hex": "aa12...", "model_name": "m", "kv_rank": 0},
+              "placements": [{"instance_id": "server-1", "tier": "l1", "backend": "dram"}]
+            }
+          ]
+        }
+      ]
+    }
+
+A key with empty ``placements`` has been evicted; its tokens are still
+returned. ``complete`` is ``true`` when the chunks reach back to position 0.
+When an earlier chunk aged out, ``start_offset`` is the first recovered token's
+position. Only the request's own tenant's keys are listed, even when another
+``cache_salt`` stored the same tokens.
+
+**HTTP status codes:**
+
+- ``200``: request found.
+- ``404``: the index holds no chunk of the request.
+
 Cache control
 -------------
 

@@ -137,7 +137,8 @@ listener plumbing or a dedicated flush task:
   `key_directory.md` — Shared pools).
   The LMCache-driven store path additionally publishes
   `mp.tokens` (parallel `chunk_hashes` + `token_chunks` +
-  `token_offsets`) at
+  `token_offsets` + `parent_hashes`, with the storing request id as the
+  event's `session_id`) at
   store submission — ordered ahead of the store's write-finished
   events, built only when the event has a subscriber, so the cost is
   zero with event reporting off (and no hashing anywhere: the directory
@@ -156,13 +157,16 @@ listener plumbing or a dedicated flush task:
   remembers their chunk-hash → (token ids, offset) pairs (LRU cache
   bounded at
   65536; passing the bound evicts the oldest half in one batch, so
-  eviction — and its warning — stays rare) and stamps `token_ids` and
-  `token_offset` onto
+  eviction — and its warning — stays rare) and stamps `token_ids`,
+  `token_offset`, `parent_hash_hex` and `request_ids` onto
   every L1/L2 `STORE` entry,
   so token bindings ride the store events themselves. Tokens are
   therefore repeated per rank/group/tier placement — an accepted wire
   trade for a self-contained protocol (see
-  [key_directory.md](views/key_directory.md) — Token index).
+  [key_directory.md](views/key_directory.md) — Token index). The
+  request id and parent hash feed the request index (see
+  [request_index.md](views/request_index.md)); `request_ids` keeps every
+  request that submitted the chunk while its binding is cached.
   `ACCESS` batches carry an **empty backend**: the directory only
   refreshes key-level recency and access count on access, so there is
   no placement identity to name. The vocabulary requires a non-empty
