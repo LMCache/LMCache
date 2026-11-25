@@ -14,10 +14,10 @@ import torch
 
 # First Party
 from lmcache.integration.vllm.utils import vllm_layout_hints
-from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.logging import init_logger as lmcache_init_logger
 from lmcache.v1.common.utils import get_device
+from lmcache.v1.transport.errors import REQUEST_FAILURES
 
 if TYPE_CHECKING:
     # Third Party

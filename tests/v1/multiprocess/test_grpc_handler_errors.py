@@ -10,11 +10,11 @@ import socket
 import pytest
 
 # First Party
-from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
+from lmcache.v1.transport.errors import MPRequestError
 
 
 class FailingModule:

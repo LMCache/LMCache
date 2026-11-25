@@ -22,11 +22,11 @@ from lmcache.v1.client.transfer_context.base import (
     EngineDrivenContext,
     EngineDrivenContextMetadata,
 )
-from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
 )
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.transport.errors import MPRequestError
 
 
 class _FakeContext(EngineDrivenContext):

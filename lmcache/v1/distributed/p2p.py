@@ -11,9 +11,6 @@ from typing import Any, Callable, TypeVar
 import grpc
 
 # First Party
-from lmcache.v1.client.transport.grpc_impl.auth import (
-    GrpcClientAuthenticationInterceptor,
-)
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.transport.auth import (
@@ -23,6 +20,9 @@ from lmcache.v1.transport.futures import MessagingFuture
 from lmcache.v1.transport.grpc._proto_gen import p2p_service_pb2 as pb
 from lmcache.v1.transport.grpc._proto_gen.p2p_service_pb2_grpc import (
     P2PServiceStub,
+)
+from lmcache.v1.transport.grpc.auth import (
+    GrpcClientAuthenticationInterceptor,
 )
 from lmcache.v1.transport.grpc.endpoint import parse_grpc_target
 from lmcache.v1.transport.grpc.proto_codec import (
