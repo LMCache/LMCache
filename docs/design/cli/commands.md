@@ -222,7 +222,7 @@ Resolved KV shape spec: (2,1024,16,8,128):float16:32
 
 With ``--end`` unset, the loop runs forever; stop with ``Ctrl-C``. The KV
 tensor layout is controlled by ``--kvcache-shape-spec`` (see
-``lmcache/v1/kv_layer_groups.py``); see :doc:`bench_server` in the user guide
+``lmcache/v1/common/kv_layer_groups.py``); see :doc:`bench_server` in the user guide
 for the full flag list.
 
 **`bench l2`** -- store / lookup / load throughput benchmark against an

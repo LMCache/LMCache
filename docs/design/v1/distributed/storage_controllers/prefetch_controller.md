@@ -94,7 +94,8 @@ queue when, for every L1 manager that receives loads from a non-draining L2
 adapter, both conditions hold:
 
 ```
-(1) staging_bytes + lookup_bytes < inflight_watermark * total_bytes
+(1) staging_bytes + lookup_bytes + prefetch_locked_bytes + request_bytes
+        <= inflight_watermark * total_bytes
 (2) total_bytes - used_bytes - lookup_bytes >= request_bytes
 ```
 
@@ -107,21 +108,36 @@ adapter, both conditions hold:
 - `request_bytes` is the same worst case for the head request.
 - `used_bytes, total_bytes` come from `get_memory_usage()`, the same numbers
   eviction uses (the total is the grown heap on the lazy tier).
-- With no request in flight the head request is admitted regardless, so a
-  request that can never fit does not block the queue; its reservations then
-  fail per cell as before (`l1_oom`).
+- `prefetch_locked_bytes` is `get_prefetch_locked_bytes()`: objects this
+  controller read-locked for a request that has not consumed them yet, both L1
+  hits and loads from L2 (`track_prefetch_locked`). An object leaves the count
+  when its last reader finishes or it leaves L1; a read lock that expires (read
+  TTL) is dropped at the next check. Read locks the store path takes while
+  writing to L2 are not counted: they are short-lived and belong to no waiting
+  request.
+- With no request in flight and no prefetch-locked bytes, the head request is
+  admitted regardless, so a request that can never fit does not block the
+  queue; its reservations then fail per cell as before (`l1_oom`).
 
-Condition (1) bounds how much of L1 prefetch may occupy; condition (2) keeps a
-request from starting when L1, full of resident data, could not hold its loads.
+Condition (1) bounds everything prefetch holds for requests that have not run
+yet. Prefetch-locked bytes must count: an engine looks up its whole waiting
+queue at once, so without them a burst fills L1 with locked data for requests
+minutes from running, and later prefetches fail. Condition (2) keeps a request from
+starting when L1, full of resident data, could not hold its loads.
+
+**Priority.** `PrefetchPriority.HIGH` (the CacheBlend sparse leg after its
+prefix leg) waits in its own queue, and no `NORMAL` request starts while one
+waits. It passes the same checks; its prefix leg was charged at the worst case
+of the whole prompt, so it fits once in-flight lookups settle.
 
 The check runs at the end of every loop iteration, so a completed load (which
 wakes the loop) admits the next requests immediately. Staging held only by
 stores is re-checked at the poll timeout (500 ms) at the latest.
 
 Example: a 16 GiB L1 with the default 0.5 watermark (an 8 GiB budget) and
-requests of 288 MiB (2048 tokens of Qwen3-8B KV). 28 requests stage 7.9 GiB,
-still under the budget, so a 29th starts: 29 requests run at once, where the
-old fixed limit was 8.
+requests of 288 MiB (2048 tokens of Qwen3-8B KV). 28 requests hold 7.9 GiB, so
+a 29th waits: 28 are loading or loaded-but-unconsumed at once, where the old
+fixed limit was 8.
 
 ## Flow
 

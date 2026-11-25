@@ -16,10 +16,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.utils import init_logger
-from lmcache.v1.common.utils import round_down
-from lmcache.v1.distributed.utils import cdiv
-from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
+from lmcache.v1.common.group_view import slice_block_ids_per_group
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.utils import round_down, round_up
 
 if TYPE_CHECKING:
     # First Party
@@ -107,7 +106,7 @@ class LMCacheMPQRequestMetadata:
         # LMCache chunk size), so aligning to the max aligns to all.
         tokens_per_block = max(group_tokens_per_block)
         block_start = round_down(start_token_idx, tokens_per_block)
-        block_end = cdiv(end_token_idx, tokens_per_block) * tokens_per_block
+        block_end = round_up(end_token_idx, tokens_per_block)
 
         allocated_lengths = tracker.num_allocated_blocks()
         allocated_tokens = min(

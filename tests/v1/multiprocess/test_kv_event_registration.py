@@ -12,7 +12,6 @@ import pytest
 import zmq
 
 # First Party
-from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.transport.zmq_impl.mq_client import MessageQueueClient
 from lmcache.v1.common.api import MemoryLayoutDesc
@@ -24,7 +23,7 @@ from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as transfer
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
-from lmcache.v1.transport.errors import InvalidRequestError
+from lmcache.v1.transport.errors import InvalidRequestError, MPRequestError
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 from lmcache.v1.transport.grpc.method_registry import (
     get_method_codec_registry,
@@ -53,9 +52,21 @@ class RejectingModule:
 
 
 def _payload(
-    instance: int = 1, profile: KVEventProfile | None = PROFILE
+    instance: int = 1,
+    profile: KVEventProfile | None = PROFILE,
+    chunk_size: int | None = None,
 ) -> tuple[Any, ...]:
-    return (instance, [], "model", 2, EngineType.VLLM, {}, [GROUP], profile)
+    return (
+        instance,
+        [],
+        "model",
+        2,
+        EngineType.VLLM,
+        {},
+        [GROUP],
+        profile,
+        chunk_size,
+    )
 
 
 @pytest.fixture
@@ -253,7 +264,7 @@ def test_registration_errors_reach_client_and_leave_server_usable(
                     [
                         msgspec.msgpack.encode(7),
                         encode_operation("register_kv_cache"),
-                        *[msgspec_encode(v, type(v)) for v in _payload()[:-1]],
+                        *[msgspec_encode(v, type(v)) for v in _payload()[:7]],
                     ]
                 )
                 _, operation, payload = socket.recv_multipart()
@@ -292,7 +303,17 @@ def test_none_profile_preserves_protobuf_request_and_success_bytes() -> None:
         world_size=2,
         engine_type="vllm",
     )
-    payload: tuple[Any, ...] = (1, [], "model", 2, EngineType.VLLM, {}, [], None)
+    payload: tuple[Any, ...] = (
+        1,
+        [],
+        "model",
+        2,
+        EngineType.VLLM,
+        {},
+        [],
+        None,
+        None,
+    )
     request = codec.request_encoder(payload, {})
     assert request.SerializeToString() == old.SerializeToString()
     assert codec.request_decoder(request) == payload
@@ -305,17 +326,21 @@ def test_none_profile_preserves_protobuf_request_and_success_bytes() -> None:
     qstore = get_method_codec_registry().by_full_name[
         "lmcache.mp.QStoreService.RegisterQCache"
     ]
+    qstore_payload = (*payload[:7], None)
     assert (
-        qstore.request_encoder(payload[:-1], {}).SerializeToString()
+        qstore.request_encoder(qstore_payload, {}).SerializeToString()
         == old.SerializeToString()
     )
     assert (
-        qstore.request_decoder(qstore.request_encoder(payload[:-1], {})) == payload[:-1]
+        qstore.request_decoder(qstore.request_encoder(qstore_payload, {}))
+        == qstore_payload
     )
     assert qstore.response_encoder(None).SerializeToString() == b""
     assert qstore.response_decoder(qstore.response_encoder(None)) is None
     native = codec.request_encoder(_payload(), {})
-    assert codec.request_decoder(native)[-1] == PROFILE
+    decoded = codec.request_decoder(native)
+    assert decoded[-2] == PROFILE
+    assert decoded[-1] is None
 
 
 def test_zmq_missing_profile_reports_arity_not_union_attribute_error() -> None:
@@ -324,7 +349,7 @@ def test_zmq_missing_profile_reports_arity_not_union_attribute_error() -> None:
     )
     try:
         future: MessagingFuture[Any] | MessagingStream[Any] = client.submit_request(
-            "register_kv_cache", list(_payload()[:-1])
+            "register_kv_cache", list(_payload()[:7])
         )
         assert isinstance(future, MessagingFuture)
         with pytest.raises(ValueError, match="Payload count mismatch"):

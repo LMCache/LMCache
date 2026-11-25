@@ -130,7 +130,7 @@ vLLM integration:
 | `LMCacheMPSchedulerAdapter.maybe_submit_lookup_request` | New argument `include_unfull_chunk`: send the unaligned lookup length instead of flooring it. The only adapter change. |
 | `LMCacheMPRequestTracker` | New fields `unfull_chunk_boundaries` (tails already stored or hit) and `ends_at_prompt` (`max_tokens == 1`). |
 | `LMCacheMPRequestMetadata` | New `GetUnfullChunkStoreMetadata(...)`: builds the tail store ops. |
-| `kv_cache_groups` | New `is_per_request_state_spec`, `is_align_mode_mamba_spec`. |
+| `kv_cache_groups` | New `is_per_request_state_spec`, `is_align_mode_mamba_spec`, `is_windowed_group` (a prefix-cacheable sliding-window, chunked-local or Mamba group; see [Full-prompt hit](#full-prompt-hit)). |
 
 ## How it works
 
@@ -278,6 +278,30 @@ lock release.
   kernel's `skip_prefix_n_blocks`, and a lead block below `n` is not copied.
   `n` is aligned to every group's block, so the skip is whole blocks. The
   Mamba block (state at `B > n`) is always written.
+
+### Full-prompt hit
+
+A hit `e = P` covers the whole prompt. vLLM recomputes the last prompt token
+to sample the next one, and what the connector reports decides which blocks
+vLLM allocates:
+
+| Case | Reported | Retrieve |
+|---|---|---|
+| Full attention only (default) | `P`, as vLLM's Offloading and Nixl connectors do. The load is async; vLLM allocates blocks for `P` tokens and rolls back to `P - 1` itself. | `[start, P)` |
+| vLLM already holds `P - 1` tokens | `0` (load nothing, as before #6751) | none; FREE_LOOKUP_LOCKS with `end = P` frees every lock, the tail's included |
+| A windowed group: sliding window, chunked local or Mamba (`is_windowed_group`) | `P - 1`, the same condition under which vLLM's Offloading connector subtracts one | `[start, P)`; if token `P - 1` starts a block in some group (`(P - 1) % T == 0`), only the full chunks `[start, kC)` and the tail's lock is released |
+| SWA bounded replay (DeepSeek-V4.1) | the last chunk boundary below `P` | `[start, kC)`, `[kC, P)` released |
+
+Why windowed groups keep `P - 1`: with `P` reported, vLLM's
+`SlidingWindowManager` null-pads every block below token `P - W + 1`, then
+recomputes token `P - 1`, whose window starts at `P - W`. When
+`P = W - 1 (mod T)` that token's block is the null block (`T = 16`,
+`W = 64`: `P = 207, 223, ...`). With `P - 1` reported, only the blocks
+wholly below token `P - W` are null-padded. Holding a token back leaves the
+block of token `P - 1` unallocated when that token starts a block (#6751), so
+that case loads only the full chunks and vLLM recomputes the tail. Since the
+chunk size is a multiple of every group's block, every case above retrieves
+only into blocks vLLM allocated.
 
 ### Object layout
 

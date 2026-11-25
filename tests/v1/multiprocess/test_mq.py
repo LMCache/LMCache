@@ -18,7 +18,6 @@ import zmq
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.client.transport.zmq_impl.mq_client import (
     CONNECT_TIMEOUT_MS,
     RECONNECT_IVL_MAX_MS,
@@ -42,6 +41,7 @@ from lmcache.v1.multiprocess.transport.zmq_impl.server import (
     add_handler_helper,
     build_zmq_request_server,
 )
+from lmcache.v1.transport.errors import MPRequestError
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 
 # Test helpers
@@ -422,6 +422,7 @@ def test_mq_register_kv_cache():
             {"vllm_block_size": 16},
             [],
             None,
+            256,
         ],
         expected_response=None,
         num_requests=1,
