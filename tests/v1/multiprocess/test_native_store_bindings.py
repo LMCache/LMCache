@@ -250,3 +250,35 @@ def test_popped_callback_is_still_inside_the_loss_boundary(
     assert module.bind_store(key, [obj], registration, 4, "fresh")
     _publish_kv(bus, EventType.MP_STORE_BINDINGS_RELEASED, transfer_key="fresh")
     assert module.get_store_binding(obj) is None
+
+
+def test_repeated_drop_notification_does_not_discard_a_new_release(
+    registration: StoreBindingRegistration,
+) -> None:
+    bus = EventBus(EventBusConfig(max_queue_size=2))
+    obj = _event_key(1)
+    key = replace(
+        IPCCacheServerKey.from_token_ids("model", 1, 0, range(4), 0, 4, "retry"),
+        event_bindings=(EventBinding(PROFILE, (10, 11), None),),
+    )
+
+    def submit_after_drain() -> None:
+        # The subscribed write acknowledged the loss before this empty boundary.
+        assert module.bind_store(key, [obj], registration, 4, "new")
+        bus.publish(
+            Event(
+                EventType.MP_STORE_BINDINGS_RELEASED, metadata={"transfer_key": "new"}
+            )
+        )
+
+    bus.subscribe_drops(submit_after_drain)
+    module, _ = _event_module(bus=bus)
+    bus.publish(
+        Event(EventType.L1_WRITE_FINISHED, metadata={"keys": [obj], "l1_tag": "l1"})
+    )
+    for _ in range(2):
+        bus.publish(Event(EventType.MP_STORE_START))
+    bus.stop()
+    assert module.get_store_binding(obj) is not None
+    bus.stop()
+    assert module.get_store_binding(obj) is None

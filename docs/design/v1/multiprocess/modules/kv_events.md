@@ -119,4 +119,5 @@ pending and retained bindings together with the residency projection.
 During loss recovery a valid STORE proceeds without acquiring a binding or
 queuing a release. The bus records an empty boundary after dispatching the
 last popped event, including events with no KV subscriber. Native admission
-resumes after that boundary and any subsequent overflow is handled separately.
+resumes after that boundary. Only a new overflow starts another discard window.
+A delayed notification for an acknowledged drop leaves fresh releases queued.

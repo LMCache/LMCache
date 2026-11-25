@@ -534,17 +534,18 @@ class KVEventModule(DiscoverableModule, InstanceLivenessTarget):
     def _record_kv_event_loss(self) -> None:
         """Wake subscribers even when the final eviction was dropped."""
         with self._kv_event_lock:
-            dropped = self._ctx.event_bus.dropped_events_count()
-            if dropped > self._kv_event_dropped:
-                self._kv_event_dropped = dropped
-                self._kv_event_lost_markers += 1
-                self._residency.clear()
-                self._bound.clear()
-                self._pending_stores.clear()
-                self._announced.clear()
-                self._append_kv_event(_KIND_LOST, "", [])
-            # Read the drop count before the queue: later overflow stays detectable.
             bus = self._ctx.event_bus
+            dropped = bus.dropped_events_count()
+            if dropped <= self._kv_event_dropped:
+                # New bindings can arrive before a repeated drop notification.
+                return
+            self._kv_event_dropped = dropped
+            self._kv_event_lost_markers += 1
+            self._residency.clear()
+            self._bound.clear()
+            self._pending_stores.clear()
+            self._announced.clear()
+            self._append_kv_event(_KIND_LOST, "", [])
             self._discard_until_drain = (
                 bus.completed_drains() + 1 if bus.queue_depth() else 0
             )
