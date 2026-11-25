@@ -486,8 +486,6 @@ def gather_paged_kv_to_cpu(
             f"gathered chunks ({len(iter_indices)})"
         )
 
-    # The address-taking kernel reads host chunks through raw addresses;
-    # it stages unpinned buffers itself, so chunks allocated here are plain.
     if out is None:
         # One object plane per K/V entry: MLA and fused-K/V formats
         # (kv_size == 1) store a single plane, split formats store K and V.
@@ -686,5 +684,3 @@ def scatter_cpu_to_paged_kv(
         engine_kv_format,
         skip_prefix_window,
     )
-    # The device copy may still be in flight: the caller must synchronize the
-    # KV tensor device before reusing these chunks.
