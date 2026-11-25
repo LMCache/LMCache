@@ -79,6 +79,12 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     shared by ``tp_replicas // dcp_shards`` ranks. ``1`` without DCP.
     Defaulted field: wire-compatible."""
 
+    rope_num_layers: int | None = None
+    """Number of leading entries in ``layer_indices`` carrying rotary keys.
+    ``None`` leaves rotation coverage unspecified (legacy inference); ``0``
+    declares no rotary keys. For a single-plane group ordered as K then V,
+    this is the number of K tensors, not the total number of components."""
+
 
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of engine groups (block-id lists per transfer request).
