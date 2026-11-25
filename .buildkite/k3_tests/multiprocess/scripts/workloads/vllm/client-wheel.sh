@@ -115,8 +115,17 @@ run_mode() (
         lmcache "${server_args[@]}" > "$LMCACHE_LOG" 2>&1 &
     server_pid=$!
     echo "$server_pid" >> "$PID_FILE"
-    # The next mode reuses the GPU, so wait until both processes exit.
-    trap 'kill $vllm_pid "$server_pid" 2>/dev/null; wait $vllm_pid "$server_pid" 2>/dev/null; sleep 5' EXIT
+    # The next mode reuses the GPU, so wait until both processes exit. They end
+    # by SIGTERM or have exited already, so keep the test's own status.
+    stop_processes() {
+        local status=$?
+        set +e
+        kill $vllm_pid "$server_pid" 2>/dev/null
+        wait $vllm_pid "$server_pid" 2>/dev/null
+        sleep 5
+        exit "$status"
+    }
+    trap stop_processes EXIT
     local _
     for _ in $(seq 120); do
         curl --noproxy '*' -sf "http://localhost:${http_port}/healthcheck" > /dev/null && break
