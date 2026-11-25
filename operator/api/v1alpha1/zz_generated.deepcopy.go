@@ -275,6 +275,16 @@ func (in *CacheBlendEngineSpec) DeepCopyInto(out *CacheBlendEngineSpec) {
 		*out = new(bool)
 		**out = **in
 	}
+	if in.SecurityContext != nil {
+		in, out := &in.SecurityContext, &out.SecurityContext
+		*out = new(v1.SecurityContext)
+		(*in).DeepCopyInto(*out)
+	}
+	if in.PodSecurityContext != nil {
+		in, out := &in.PodSecurityContext, &out.PodSecurityContext
+		*out = new(v1.PodSecurityContext)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.ExtraArgs != nil {
 		in, out := &in.ExtraArgs, &out.ExtraArgs
 		*out = make([]string, len(*in))
@@ -992,6 +1002,16 @@ func (in *LMCacheEngineSpec) DeepCopyInto(out *LMCacheEngineSpec) {
 		in, out := &in.Privileged, &out.Privileged
 		*out = new(bool)
 		**out = **in
+	}
+	if in.SecurityContext != nil {
+		in, out := &in.SecurityContext, &out.SecurityContext
+		*out = new(v1.SecurityContext)
+		(*in).DeepCopyInto(*out)
+	}
+	if in.PodSecurityContext != nil {
+		in, out := &in.PodSecurityContext, &out.PodSecurityContext
+		*out = new(v1.PodSecurityContext)
+		(*in).DeepCopyInto(*out)
 	}
 	if in.ExtraArgs != nil {
 		in, out := &in.ExtraArgs, &out.ExtraArgs

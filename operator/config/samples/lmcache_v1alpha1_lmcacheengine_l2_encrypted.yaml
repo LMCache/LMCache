@@ -17,6 +17,11 @@
 # read-only at /etc/lmcache/keys/master; only the "master" data key is
 # projected. A missing Secret or missing key surfaces as a pod mount
 # event and self-heals once the Secret is fixed.
+#
+# The mount is 0400 root-owned, and the official images run as the
+# non-root `lmcache` user (uid 1000): the fsGroup below (matching that
+# uid's group) lets the non-root engine read the key. Alternatively set
+# securityContext.runAsUser: 0 to run the engine as root.
 apiVersion: lmcache.lmcache.ai/v1alpha1
 kind: LMCacheEngine
 metadata:
@@ -25,6 +30,9 @@ metadata:
 spec:
   nodeSelector:
     nvidia.com/gpu.present: "true"
+
+  podSecurityContext:
+    fsGroup: 1000
 
   l1:
     sizeGB: 100

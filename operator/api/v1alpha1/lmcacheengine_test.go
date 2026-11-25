@@ -483,3 +483,31 @@ func TestIsolatedIPCEnabled(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateSpec_SecurityContextPrivilegedRejected(t *testing.T) {
+	// The builder forces the privileged bit from spec.privileged, so a
+	// privileged key inside securityContext would silently do nothing —
+	// validation must reject it with a pointer at the dedicated field.
+	privileged := true
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1:              L1BackendSpec{SizeGB: 10},
+		SecurityContext: &corev1.SecurityContext{Privileged: &privileged},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 || errs[0].Field != "spec.securityContext.privileged" {
+		t.Fatalf("expected a rejection at spec.securityContext.privileged, got %v", errs)
+	}
+}
+
+func TestValidateSpec_SecurityContextPasses(t *testing.T) {
+	uid := int64(0)
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1:                 L1BackendSpec{SizeGB: 10},
+		SecurityContext:    &corev1.SecurityContext{RunAsUser: &uid},
+		PodSecurityContext: &corev1.PodSecurityContext{},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 0 {
+		t.Fatalf("plain securityContext/podSecurityContext must validate, got %v", errs)
+	}
+}

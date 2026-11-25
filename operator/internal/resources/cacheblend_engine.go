@@ -94,6 +94,8 @@ func cbSpecToEngineSpec(spec *lmcachev1alpha1.CacheBlendEngineSpec) *lmcachev1al
 		PriorityClassName:  spec.PriorityClassName,
 		HostIPC:            spec.HostIPC,
 		Privileged:         spec.Privileged,
+		SecurityContext:    spec.SecurityContext,
+		PodSecurityContext: spec.PodSecurityContext,
 		ExtraArgs:          spec.ExtraArgs,
 	}
 }

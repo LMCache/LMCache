@@ -86,6 +86,22 @@ func startupProbeFailureThreshold(l1SizeGB float64) int32 {
 	return startupProbeDefaultFailureThreshold
 }
 
+// engineSecurityContext composes the engine container's security context:
+// spec.securityContext when set, with the privileged bit always forced from
+// spec.privileged — the dedicated field stays the single source of truth for
+// that key (validation rejects a privileged inside securityContext), so a
+// stray value there can never silently grant root capabilities. An unset
+// securityContext keeps the pre-field output: only the privileged bit.
+func engineSecurityContext(spec *lmcachev1alpha1.LMCacheEngineSpec) *corev1.SecurityContext {
+	sc := &corev1.SecurityContext{}
+	if spec.SecurityContext != nil {
+		sc = spec.SecurityContext.DeepCopy()
+	}
+	privileged := derefBool(spec.Privileged, false)
+	sc.Privileged = &privileged
+	return sc
+}
+
 // BuildDaemonSet constructs a DaemonSet for the given LMCacheEngine.
 // Selector labels take precedence over additional pod labels.
 func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
@@ -97,7 +113,8 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 // GPU/security pod-template scaffolding (host /dev/shm sharing for CUDA IPC —
 // a hostPath mount by default, or the host IPC namespace when spec.HostIPC is
 // true — runtimeClassName, optional privileged (default false, via
-// spec.Privileged), NVIDIA_VISIBLE_DEVICES, resources without a device-plugin
+// spec.Privileged), securityContext/podSecurityContext passthrough,
+// NVIDIA_VISIBLE_DEVICES, resources without a device-plugin
 // GPU claim) so those settings cannot drift between the two engines.
 // Selector labels take precedence over spec.PodLabels so the pod template
 // remains selectable by the DaemonSet and its Services.
@@ -140,7 +157,6 @@ func buildDaemonSetCore(
 			runtimeClassName = &rc
 		}
 	}
-	privileged := derefBool(spec.Privileged, false)
 	// Isolated IPC needs neither the host IPC namespace nor the shared
 	// /dev/shm, and takes priority over spec.hostIPC (see the isolatedIPC
 	// field documentation).
@@ -363,6 +379,7 @@ func buildDaemonSetCore(
 				Spec: corev1.PodSpec{
 					HostIPC:            hostIPC,
 					HostNetwork:        derefBool(spec.HostNetwork, false),
+					SecurityContext:    spec.PodSecurityContext,
 					RuntimeClassName:   runtimeClassName,
 					ServiceAccountName: spec.ServiceAccountName,
 					PriorityClassName:  spec.PriorityClassName,
@@ -381,13 +398,11 @@ func buildDaemonSetCore(
 							Ports:           containerPorts,
 							Env:             envVars,
 							Resources:       ComputeResources(spec),
-							SecurityContext: &corev1.SecurityContext{
-								Privileged: &privileged,
-							},
-							VolumeMounts:   volumeMounts,
-							StartupProbe:   startupProbe,
-							LivenessProbe:  livenessProbe,
-							ReadinessProbe: readinessProbe,
+							SecurityContext: engineSecurityContext(spec),
+							VolumeMounts:    volumeMounts,
+							StartupProbe:    startupProbe,
+							LivenessProbe:   livenessProbe,
+							ReadinessProbe:  readinessProbe,
 						},
 					},
 					Volumes: volumes,

@@ -549,3 +549,27 @@ func TestBuildCBEngine_ChunkSizeConsistency(t *testing.T) {
 		t.Fatalf("CacheBlendChunkSize constant must be 256, got %d", lmcachev1alpha1.CacheBlendChunkSize)
 	}
 }
+
+func TestBuildCBEngineDaemonSet_SecurityContextPassthrough(t *testing.T) {
+	// CacheBlendEngine pods run the same non-root image and share the same
+	// DaemonSet builder, so the projection must carry the securityContext
+	// fields through like every other pod-template passthrough.
+	uid := int64(0)
+	fsGroup := int64(1000)
+	engine := minimalCBEngine()
+	engine.Spec.SecurityContext = &corev1.SecurityContext{RunAsUser: &uid}
+	engine.Spec.PodSecurityContext = &corev1.PodSecurityContext{FSGroup: &fsGroup}
+
+	ds := BuildCBEngineDaemonSet(engine)
+	sc := ds.Spec.Template.Spec.Containers[0].SecurityContext
+	if sc == nil || sc.RunAsUser == nil || *sc.RunAsUser != 0 {
+		t.Fatalf("securityContext.runAsUser must project to the blend engine container, got %+v", sc)
+	}
+	if sc.Privileged == nil || *sc.Privileged {
+		t.Fatalf("privileged must default to false on the blend engine, got %+v", sc)
+	}
+	podSC := ds.Spec.Template.Spec.SecurityContext
+	if podSC == nil || podSC.FSGroup == nil || *podSC.FSGroup != 1000 {
+		t.Fatalf("podSecurityContext.fsGroup must project to the pod, got %+v", podSC)
+	}
+}

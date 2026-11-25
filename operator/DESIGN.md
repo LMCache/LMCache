@@ -202,6 +202,26 @@ spec:
                               # privileged mode. Needed only on clusters where
                               # the engine cannot see the node GPUs otherwise
                               # (see "Auto-managed Pod Settings" below).
+                              # This field is the single source of truth for
+                              # the privileged bit: it always wins over
+                              # securityContext (whose privileged key is
+                              # rejected at validation).
+  securityContext: {}         # container-level SecurityContext for the engine
+                              # container (runAsUser, runAsGroup, capabilities,
+                              # seccompProfile, ...). The official images run as
+                              # the non-root `lmcache` user (uid 1000); set
+                              # runAsUser: 0 to run as root — e.g. to reuse a
+                              # cache or mount previously populated under
+                              # /root, or to read the 0400 root-owned L2
+                              # master-key mount.
+  podSecurityContext: {}     # pod-level PodSecurityContext (fsGroup,
+                              # runAsUser/runAsGroup defaults,
+                              # supplementalGroups, ...) inherited by the
+                              # engine container and the init containers.
+                              # fsGroup is the Kubernetes fix for
+                              # volume-ownership problems: a non-root engine
+                              # needs fsGroup (or securityContext.runAsUser: 0)
+                              # to read the 0400 root-owned L2 master key.
 
   # -- Extra CLI flags --
   extraArgs: []string         # appended last, can override any auto-generated flag
@@ -223,6 +243,7 @@ The operator always injects these into the pod spec:
 - **IPC wiring (mode-dependent)** — under the default **isolated IPC** (`spec.isolatedIPC`, auto-on for nvidia) the server runs with `--isolated-ipc`, KV caches and completion events travel over driver-level CUDA IPC that rendezvouses in the kernel driver, and the engine pod gets **no** IPC wiring at all: no `hostIPC`, no `/dev/shm` volume (the injection webhook gives opted-in vLLM pods a pod-private memory-backed `/dev/shm` for their own workers). With `spec.isolatedIPC: false`, the legacy wiring applies: a **host `/dev/shm` mount (hostPath, volume `lmcache-dev-shm`)** — required for torch-storage CUDA IPC between LMCache and vLLM. Those CUDA IPC handles are opened via files the driver and PyTorch create in `/dev/shm`, so both pods must see the same `/dev/shm` tmpfs; without it, `cudaIpcOpenMemHandle` fails with `cudaErrorMapBufferObjectFailed`. A shared IPC namespace is **not** required — only the shared `/dev/shm` tmpfs is. The injection webhook mirrors the mount onto opted-in vLLM pods. `spec.hostIPC: true` restores the host-IPC-namespace mode — for clusters that block hostPath volumes, or for `gpuVendor: amd` (unverified without it). A user-supplied `/dev/shm` mount suppresses the injection in every mode.
 - **`runtimeClassName: nvidia`** — uses the NVIDIA container runtime, which injects the host's NVIDIA driver libraries and device files into the container. This is required for CUDA to function inside the pod.
 - **`NVIDIA_VISIBLE_DEVICES=all`** — gives the engine access to all GPUs on the node for CUDA IPC and custom data transfer kernels without claiming any via `nvidia.com/gpu` resource requests (which would make those GPUs unavailable to the serving engine). The combination of `runtimeClassName: nvidia` + `NVIDIA_VISIBLE_DEVICES=all` lets the container see all GPUs without consuming device-plugin resources, so the serving engine (e.g., vLLM) can still request all GPUs on the node. On most clusters this is sufficient; on some, the engine cannot see the GPUs unless the pod is also privileged — set `spec.privileged: true` to run the engine container privileged (default `false`).
+- **Security context (passthrough)** — the official LMCache images run as the non-root `lmcache` user (uid 1000). `spec.securityContext` sets the engine container's security context (e.g. `runAsUser: 0` to run as root — to reuse a cache or mount previously populated under `/root`, or to read the `0400` root-owned L2 master-key mount), and `spec.podSecurityContext` sets the pod-level context (e.g. `fsGroup`, the Kubernetes fix for root-owned volume contents) inherited by the engine and init containers. The privileged bit stays governed by `spec.privileged`: the builder forces it from that field and validation rejects a `privileged` key inside `securityContext`, so the setting can never silently do nothing.
 - **`NVIDIA_VISIBLE_DEVICES=all`** and **`NVIDIA_DRIVER_CAPABILITIES=all`** — env vars that instruct the NVIDIA container runtime to expose all GPUs and all driver capabilities to the container.
 - **`--host 0.0.0.0`** — always passed as a container arg. The server defaults to `--host localhost` which only binds to loopback; the server must bind to all interfaces so the node-local Service can route traffic to it.
 - **No `hostNetwork`** — the operator does **not** use `hostNetwork`. Instead, it creates a ClusterIP Service with `internalTrafficPolicy=Local`. kube-proxy ensures that traffic to the service is routed only to the LMCache pod on the same node. This avoids occupying host ports and reduces the privileged surface area.
