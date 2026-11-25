@@ -7,6 +7,7 @@ from typing import NamedTuple
 import re
 
 # Third Party
+import numpy as np
 import pytest
 import torch
 
@@ -124,6 +125,20 @@ def sentinel(
     return torch.full(shape, -1, dtype=BIT_VIEW[dtype], device=device).view(dtype)
 
 
+def page_pointers(pages: list[torch.Tensor], device: torch.device) -> torch.Tensor:
+    """Device vector of page addresses, as the engine connectors build it.
+
+    Level Zero USM addresses can set the top bit, so an XPU vector is ``uint64``
+    and is filled through NumPy, as the downstream XPU connector does. CUDA and
+    the fallback keep ``int64``.
+    """
+    addresses = np.array([page.data_ptr() for page in pages], dtype=np.uint64)
+    pointers = torch.from_numpy(addresses)
+    if device.type != "xpu":
+        pointers = pointers.to(torch.int64)
+    return pointers.to(device)
+
+
 def same_bits(actual: torch.Tensor, expected: torch.Tensor) -> bool:
     """Compare raw bit patterns, so NaN payloads cannot hide a difference."""
     return torch.equal(
@@ -192,7 +207,7 @@ def test_multi_layer_transfer_addresses_each_layout(
     expected = reference_pages(layout, chunk)
     pages = [sentinel(tuple(page.shape), layout.dtype, device) for page in expected]
     args = (
-        torch.tensor([page.data_ptr() for page in pages], device=device),
+        page_pointers(pages, device),
         torch.tensor(SLOTS, device=device),
         device,
         BLOCKS * BLOCK_SIZE,
