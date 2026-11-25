@@ -116,9 +116,6 @@ class CudaDeviceOps(DeviceOps):
 
     def __init__(self) -> None:
         super().__init__()
-        # The compiled address-taking block kernel. It stays None only before
-        # ensure_native() runs or when the extension is not installed, and the
-        # torch baseline then serves block transfers.
         self._block_transfer_kernel: Callable[..., None] | None = None
         self._paged_table_cache: dict[
             tuple[tuple[int, ...], torch.device], torch.Tensor
@@ -151,10 +148,6 @@ class CudaDeviceOps(DeviceOps):
                 "CudaDeviceOps stays on the torch baseline for all ops."
             )
             return
-        # Every supported build exports the block kernel, so a module without
-        # it is a broken install: let the AttributeError propagate rather than
-        # serving the torch baseline. ``_native_bound`` stays False, so the
-        # next call fails the same way.
         self._block_transfer_kernel = native.multi_layer_block_kv_transfer
         self.bind_native(native, skip={"multi_layer_block_kv_transfer"})
         self._native_bound = True

@@ -77,9 +77,6 @@ class NpuDeviceOps(DeviceOps):
 
     def __init__(self) -> None:
         super().__init__()
-        # The compiled address-taking block kernel, set by ensure_native().
-        # A missing plugin makes ensure_native() raise rather than fall back,
-        # so it is None only on an instance that has not been initialized.
         self._block_transfer_kernel: Callable[..., None] | None = None
         self._paged_table_cache: dict[
             tuple[tuple[int, ...], torch.device], torch.Tensor
@@ -96,10 +93,6 @@ class NpuDeviceOps(DeviceOps):
                 "NPU requires the LMCache-Ascend native ops (lmcache_ascend.ops): "
                 "Install LMCache-Ascend and retry."
             ) from exc
-        # Every supported build exports the block kernel, so a module without
-        # it is a broken install: let the AttributeError propagate rather than
-        # serving the torch baseline. ``_native_bound`` stays False, so the
-        # next call fails the same way.
         self._block_transfer_kernel = native.multi_layer_block_kv_transfer
         self.bind_native(native, skip={"multi_layer_block_kv_transfer"})
         self._native_bound = True
