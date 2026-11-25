@@ -11,14 +11,14 @@ import torch
 # First Party
 from lmcache.v1.client.transfer_context import inline
 from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
-from lmcache.v1.client.transfer_context.tensor_wire import (
+from lmcache.v1.common.custom_types import PrepareRetrieveResponse
+from lmcache.v1.transport.futures import MessagingFuture
+from lmcache.v1.transport.tensor_wire import (
     decode_grouped_tensors,
     decode_tensors,
     encode_grouped_tensors,
     encode_tensors,
 )
-from lmcache.v1.common.custom_types import PrepareRetrieveResponse
-from lmcache.v1.transport.futures import MessagingFuture
 
 SHAPE = (4, 8)
 CHUNK = [torch.full(SHAPE, float(i)) for i in range(5)]

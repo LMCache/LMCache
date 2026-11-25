@@ -18,7 +18,6 @@ from lmcache import torch_dev
 from lmcache.v1.client.transfer_context.base import (
     ContextClosedError,
     EngineDrivenContext,
-    EngineDrivenContextMetadata,
     compute_kv_layout,
     create_engine_driven_context,
     gather_paged_kv_to_cpu,
@@ -35,6 +34,7 @@ from lmcache.v1.common.custom_types import (
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.transfer_context import EngineDrivenContextMetadata
 from lmcache.v1.common.utils import (
     LayoutHints,
     get_device,

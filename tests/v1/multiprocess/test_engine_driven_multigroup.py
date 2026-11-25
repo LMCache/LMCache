@@ -19,15 +19,9 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.client import worker_transfer
 from lmcache.v1.client.transfer_context.base import (
-    EngineDrivenContextMetadata,
     compute_kv_layout,
 )
 from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
-from lmcache.v1.client.transfer_context.tensor_wire import (
-    decode_grouped_tensors,
-    encode_grouped_tensors,
-    encode_tensors,
-)
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
@@ -40,6 +34,7 @@ from lmcache.v1.common.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.transfer_context import EngineDrivenContextMetadata
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -58,6 +53,11 @@ from lmcache.v1.multiprocess.modules.server_transfer import (
     ShmTransferStrategy,
 )
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
+from lmcache.v1.transport.tensor_wire import (
+    decode_grouped_tensors,
+    encode_grouped_tensors,
+    encode_tensors,
+)
 
 
 def _detected_block_size(kv_caches: dict[str, torch.Tensor]) -> int:
