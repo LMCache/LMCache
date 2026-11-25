@@ -16,7 +16,7 @@ import logging
 import pytest
 
 # First Party
-from lmcache.v1.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import GDSMemoryObject
 from lmcache.v1.multiprocess.object_group_transfer import (
     direct_copy,

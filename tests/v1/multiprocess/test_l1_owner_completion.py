@@ -13,6 +13,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -24,7 +25,6 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager.base import BaseL1Manager
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
-from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess import native_completion

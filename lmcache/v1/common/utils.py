@@ -270,7 +270,7 @@ def normalize_and_discover_per_layer_formats(
     Returns:
         ``(normalized_kv_caches, engine_kv_formats)``: the canonical KV cache
         structure and one format per layer (length equals the layer count),
-        ready for :func:`lmcache.v1.kv_layer_groups.group_layers_by_identity`.
+        ready for :func:`lmcache.v1.common.kv_layer_groups.group_layers_by_identity`.
     """
 
     # Detect the whole structure once. A format that isn't a per-layer list (a
