@@ -60,6 +60,16 @@ Requirements
   L1 buffer for RDMA, so P2P is incompatible with the GDS L1 tier
   (``--gds-l1-path``) and the Device-DAX L1 tier (``--l1-devdax-path``); the
   server refuses to start in those configurations.
+* **The same model name on every vLLM instance.** The model name is part of
+  every cache key, so vLLM instances share KV only when they report the same
+  model name.
+
+  To check, compare the ``model_name`` label on each server's ``/metrics``
+  endpoint:
+
+  .. code-block:: bash
+
+     curl -s http://<server>:<http-port>/metrics | grep -o 'model_name="[^"]*"' | sort -u
 
 Configuration
 -------------
