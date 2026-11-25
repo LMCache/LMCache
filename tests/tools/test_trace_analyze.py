@@ -217,6 +217,30 @@ class TestBlendReplay:
         assert res.eviction_count == 6
         assert res.per_request_non_prefix_hit_tokens == [0, 0, 0]
 
+    @pytest.mark.parametrize("capacity_chunks", [1, 2])
+    @pytest.mark.parametrize(
+        ("query_tokens", "expected_hit_tokens"),
+        [([99, 9, 10, 11, 12], 4), ([99, 1, 2, 3, 4], 0)],
+        ids=["resident-suffix", "evicted-prefix"],
+    )
+    def test_oversize_replay_matches_only_resident_chunks(
+        self,
+        capacity_chunks: int,
+        query_tokens: list[int],
+        expected_hit_tokens: int,
+    ) -> None:
+        """Replaying more chunks than fit retains only the suffix in both indexes."""
+        repeat = _record(2, self.STORED.input_ids)
+        shifted = _record(3, query_tokens)
+        (res,) = analyze([self.STORED, repeat, shifted], [4], [capacity_chunks * 4])
+
+        assert res.per_request_prefix_hit_tokens == [0, 0, 0]
+        assert res.per_request_non_prefix_hit_tokens == [
+            0,
+            capacity_chunks * 4,
+            expected_hit_tokens,
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Report and helpers
