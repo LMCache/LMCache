@@ -168,7 +168,9 @@ def _init_connector(
             world_size=1, rank=0, tensor_parallel_size=1, pipeline_parallel_size=1
         ),
         cache_config=SimpleNamespace(block_size=GRID, enable_prefix_caching=True),
-        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        scheduler_config=SimpleNamespace(
+            disable_hybrid_kv_cache_manager=False, max_num_batched_tokens=1 << 20
+        ),
         speculative_config=(
             SimpleNamespace(num_speculative_tokens=draft_tokens)
             if draft_tokens
