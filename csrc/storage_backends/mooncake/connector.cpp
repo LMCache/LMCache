@@ -2,6 +2,7 @@
 
 // Standard
 #include <algorithm>
+#include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
@@ -19,6 +20,28 @@ namespace connector {
 
 namespace {
 
+mooncake::ReplicateConfig parse_replicate_config(const ConfigDict& config) {
+  const auto parse_count = [&config](const char* key, size_t& count) {
+    const auto it = config.find(key);
+    if (it == config.end()) {
+      return;
+    }
+
+    const auto& value = it->second;
+    const auto result =
+        std::from_chars(value.data(), value.data() + value.size(), count);
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size()) {
+      throw std::invalid_argument(std::string(key) +
+                                  " must be a non-negative integer");
+    }
+  };
+
+  mooncake::ReplicateConfig replicate_config;
+  parse_count("replica_num", replicate_config.replica_num);
+  parse_count("nof_replica_num", replicate_config.nof_replica_num);
+  return replicate_config;
+}
+
 template <typename T>
 void ensure_batch_result_size(const std::vector<T>& results, size_t expected,
                               const char* op_name) {
@@ -33,9 +56,11 @@ void ensure_batch_result_size(const std::vector<T>& results, size_t expected,
 
 MooncakeConnector::MooncakeConnector(ConfigDict config, int num_workers,
                                      L1RegistrationConfig l1_registration,
-                                     WorkerPoolConfig worker_pool_config)
+                                     WorkerPoolConfig worker_pool_config,
+                                     ConfigDict replicate_config)
     : ConnectorBase(num_workers, std::move(worker_pool_config)),
       config_(std::move(config)),
+      replicate_config_(parse_replicate_config(replicate_config)),
       l1_registration_(l1_registration) {
   // Create a RealClient via the static factory.
   client_ = mooncake::RealClient::create();
@@ -87,7 +112,8 @@ void MooncakeConnector::do_single_set(WorkerMooncakeConn& conn,
                                       size_t len, size_t chunk_size) {
   (void)chunk_size;
   ensure_registered(buf, len);
-  int rc = conn.client->put_from(key, const_cast<void*>(buf), len);
+  int rc = conn.client->put_from(key, const_cast<void*>(buf), len,
+                                 replicate_config_);
   if (rc != 0) {
     throw std::runtime_error("Mooncake put_from failed for key: " + key);
   }
@@ -169,8 +195,8 @@ void MooncakeConnector::do_batch_set(WorkerMooncakeConn& conn,
     ensure_registered(req.buf_ptrs[i], req.buf_lens[i]);
   }
 
-  auto results =
-      conn.client->batch_put_from(req.keys, req.buf_ptrs, req.buf_lens);
+  auto results = conn.client->batch_put_from(req.keys, req.buf_ptrs,
+                                             req.buf_lens, replicate_config_);
   ensure_batch_result_size(results, req.keys.size(), "batch_put_from");
 
   for (size_t i = 0; i < results.size(); ++i) {
