@@ -18,7 +18,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.mp_coordinator.controllers.base import Controller
 from lmcache.v1.mp_coordinator.discovery import Registry, discover
 

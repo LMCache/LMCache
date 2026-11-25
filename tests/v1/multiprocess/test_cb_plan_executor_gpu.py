@@ -122,7 +122,9 @@ def _run_plan(
     slots,
 ):
     """Drive the production flat-table entry point with the planner's
-    double-buffer wave layout."""
+    double-buffer wave layout. A chunk repeating the previous one in the
+    same wave is a D2D row from the slot that staged it, as the planner
+    emits for repeated chunks."""
     chunk_bytes = case.kv_size * _NL * _SPC * case.hidden * _DTYPE.itemsize
     spec = cuda_ops.CBGroupSpec(
         paged_kv_ptrs=paged_ptrs.data_ptr(),
@@ -151,9 +153,15 @@ def _run_plan(
         base = (step_idx % 2) * wave
         for j in range(min(wave, n_chunks - w0)):
             ci, slot = w0 + j, base + j
-            staging.append(
-                (slots[slot].data_ptr(), host_chunks[ci].data_ptr(), chunk_bytes, 0)
-            )
+            if j == 0 or host_chunks[ci] is not host_chunks[ci - 1]:
+                head = slot
+                staging.append(
+                    (slots[slot].data_ptr(), host_chunks[ci].data_ptr(), chunk_bytes, 0)
+                )
+            else:
+                staging.append(
+                    (slots[slot].data_ptr(), slots[head].data_ptr(), chunk_bytes, -1)
+                )
             ropes.append((0, slot, old_sts[ci], cur_sts[ci]))
             scatters.append((0, slot, ci * _SPC, _SPC))
         step_offsets.append((len(staging), len(ropes), len(scatters)))
@@ -171,12 +179,15 @@ def _run_plan(
 
 @pytest.mark.parametrize("fmt_key", sorted(_CASES))
 @pytest.mark.parametrize("n_chunks,max_batch", [(12, 4), (96, 16), (44, 16)])
-def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch, fmt_key):
+@pytest.mark.parametrize("repeat", [1, 3])
+def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch, fmt_key, repeat):
     """Many steps of slot-half reuse, each wave carrying different data into
     the same slots: an ordering violation (staging overwriting a slot still
     being read, or kernels reading a half-staged slot) breaks bit-exactness.
     Covers full packs, partial tail packs, and deep reuse, on both the
-    fused-packed and un-fused split-K/V paged layouts."""
+    fused-packed and un-fused split-K/V paged layouts. With ``repeat`` > 1
+    each stored chunk fills ``repeat`` positions (D2D rows within a wave),
+    each re-RoPEd by its own shift."""
     case = _CASES[fmt_key]
     dev = torch.device(torch_device_type)
     torch.manual_seed(n_chunks)
@@ -191,10 +202,11 @@ def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch, fmt_key):
     ptrs_new = torch.tensor(
         [t.data_ptr() for t in paged_new], dtype=torch.long, device=dev
     )
-    host_chunks = [
+    stored = [
         torch.randn(case.kv_size, _NL, _SPC, case.hidden, dtype=_DTYPE).pin_memory()
         for _ in range(n_chunks)
     ]
+    host_chunks = [stored[i // repeat] for i in range(n_chunks)]
     slots = [
         torch.zeros(case.kv_size, _NL, _SPC, case.hidden, dtype=_DTYPE, device=dev)
         for _ in range(max_batch)
@@ -203,7 +215,7 @@ def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch, fmt_key):
     pos = torch.arange(0, n_chunks * _SPC, device=dev, dtype=torch.long)
     block_ids = torch.arange(_NB, device=dev, dtype=torch.long).flip(0)
     slot_mapping = block_ids[pos // _BS] * _BS + pos % _BS
-    old_sts = [i * _SPC + 512 for i in range(n_chunks)]
+    old_sts = [(i // repeat) * _SPC + 512 for i in range(n_chunks)]
     cur_sts = [i * _SPC for i in range(n_chunks)]
 
     _reference_scatter(
