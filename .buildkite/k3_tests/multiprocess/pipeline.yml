@@ -30,20 +30,11 @@ x-common-inference-engines: &common-inference-engines
   - "vllm"
   - "sglang"
 
-# Most scenarios exercise transport-independent behavior, so keep their PR
-# coverage on gRPC.
+# Every workload runs on gRPC; ZMQ is deprecated and no longer tested here.
 x-common-matrix: &common-matrix
   setup:
     inference_engine: *common-inference-engines
     request_transport:
-      - "grpc"
-
-# Retain ZMQ only for the representative GPU E2E and restart-recovery smokes.
-x-common-smoke-matrix: &common-smoke-matrix
-  setup:
-    inference_engine: *common-inference-engines
-    request_transport:
-      - "zmq"
       - "grpc"
 
 # vLLM-only workloads stay isolated from the common engine list.
@@ -54,20 +45,11 @@ x-vllm-matrix: &vllm-matrix
     request_transport:
       - "grpc"
 
-x-vllm-smoke-matrix: &vllm-smoke-matrix
-  setup:
-    inference_engine:
-      - "vllm"
-    request_transport:
-      - "zmq"
-      - "grpc"
-
-x-sglang-smoke-matrix: &sglang-smoke-matrix
+x-sglang-matrix: &sglang-matrix
   setup:
     inference_engine:
       - "sglang"
     request_transport:
-      - "zmq"
       - "grpc"
 
 # Keep the regular 1-GPU pod anchor available after the two lm_eval steps are
@@ -235,7 +217,7 @@ steps:
     steps:
       - label: ":compression: {{matrix.inference_engine}} / vllm_bench / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
-        matrix: *vllm-smoke-matrix
+        matrix: *vllm-matrix
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -477,7 +459,7 @@ steps:
 
       - label: ":compression: {{matrix.inference_engine}} / restart_recovery / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh restart_recovery
-        matrix: *common-smoke-matrix
+        matrix: *common-matrix
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -504,7 +486,7 @@ steps:
       # must be served from LMCache on replay.
       - label: ":compression: {{matrix.inference_engine}} / p2p_write / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh p2p_write
-        matrix: *vllm-smoke-matrix
+        matrix: *vllm-matrix
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -643,16 +625,14 @@ steps:
 
   # Canary path for VERIFY_AND_PIN_VLLM=true: skips every real test group
   # above (each group's `if` evaluates to false) and instead runs vllm_bench
-  # across both request transports. The pin is published only after both
-  # matrix jobs pass, preventing one successful transport from pinning a
-  # nightly that failed the other transport.
+  # on gRPC. The pin is published only after it passes.
   - label: ":test_tube: Verify {{matrix.inference_engine}} nightly / {{matrix.request_transport}}"
     if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
     command: |
       .buildkite/k3_tests/multiprocess/run.sh vllm_bench
       python3 -c 'import vllm; print(vllm.__version__)' \
         > "verified_vllm_{{matrix.request_transport}}.txt"
-    matrix: *vllm-smoke-matrix
+    matrix: *vllm-matrix
     env:
       INFERENCE_ENGINE: "{{matrix.inference_engine}}"
       LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -676,8 +656,8 @@ steps:
     artifact_paths: ["*.log", "verified_vllm_*.txt"]
 
   # The SGLang canary discovers the newest official nightly, installs its
-  # exact source revision, and verifies LMCache retrieval through both request
-  # transports. The pin job below runs only after both matrix jobs pass.
+  # exact source revision, and verifies LMCache retrieval over gRPC. The pin
+  # job below runs only after it passes.
   - label: ":test_tube: Verify SGLang nightly / {{matrix.request_transport}}"
     if: build.env("VERIFY_AND_PIN_SGLANG") =~ /true/
     command: |
@@ -693,7 +673,7 @@ steps:
         printf 'index_url=%s\n' "$${PINNED_SGLANG_INDEX_URL}"
       } > "verified_sglang_{{matrix.request_transport}}.txt"
       BASH
-    matrix: *sglang-smoke-matrix
+    matrix: *sglang-matrix
     env:
       INFERENCE_ENGINE: "{{matrix.inference_engine}}"
       LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -711,7 +691,6 @@ steps:
     if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
     command: |
       buildkite-agent artifact download "verified_vllm_*.txt" .
-      diff -u verified_vllm_zmq.txt verified_vllm_grpc.txt
       VLLM_VERSION="$(cat verified_vllm_grpc.txt)" \
         bash .github/scripts/pin-tested-vllm.sh
     timeout_in_minutes: 10
@@ -734,7 +713,6 @@ steps:
     if: build.env("VERIFY_AND_PIN_SGLANG") =~ /true/
     command: |
       buildkite-agent artifact download "verified_sglang_*.txt" .
-      diff -u verified_sglang_zmq.txt verified_sglang_grpc.txt
       SGLANG_VERSION="$(sed -n '1p' verified_sglang_grpc.txt)" \
       SGLANG_SHORT_SHA="$(sed -n 's/^short_sha=//p' verified_sglang_grpc.txt)" \
       SGLANG_INDEX_URL="$(sed -n 's/^index_url=//p' verified_sglang_grpc.txt)" \
