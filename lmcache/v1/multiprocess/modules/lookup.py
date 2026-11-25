@@ -168,6 +168,11 @@ class _PrefetchJob:
     # The lookup key, for the unfull-chunk stage that runs once the hit is
     # known; None on early exits, which never probe an unfull chunk.
     unfull_chunk_lookup_key: IPCCacheServerKey | None = None
+    # Every full chunk's hash and one key of the request's namespace, set
+    # only when something consumes ``MP_LOOKUP_HIT_TAIL``: the hit tail's
+    # key is built from them once the hit is known.
+    chunk_hashes: tuple[bytes, ...] = ()
+    namespace_key: ObjectKey | None = None
 
 
 class LookupModule(DiscoverableModule):
@@ -413,6 +418,16 @@ class LookupModule(DiscoverableModule):
 
         # Prefetch only [start, end); status offsets hits back to absolute.
         suffix_hashes = chunk_hashes[start_chunk:]
+        # Group 0 of rank 0 carries the namespace the store path reports.
+        namespace_key = (
+            ipc_key_to_object_keys(key, chunk_hashes[:1], [0], shard_replication_desc)[
+                0
+            ][0]
+            if chunk_hashes
+            and self._ctx.event_bus.has_subscribers(EventType.MP_LOOKUP_HIT_TAIL)
+            else None
+        )
+        hit_tail_hashes = tuple(chunk_hashes) if namespace_key is not None else ()
         if not suffix_hashes:
             # Every full chunk is engine-covered, or there is none: nothing to
             # lock or prefetch. The empty job still reports the covered prefix
@@ -426,6 +441,8 @@ class LookupModule(DiscoverableModule):
                 start_chunk=start_chunk,
                 engine_covered_chunks=start_chunk,
                 probe_unfull_chunk=True,
+                chunk_hashes=hit_tail_hashes,
+                namespace_key=namespace_key,
             )
             return
 
@@ -495,6 +512,8 @@ class LookupModule(DiscoverableModule):
                 model_name=model_name,
                 cache_salt=key.cache_salt,
                 unfull_chunk_lookup_key=key,
+                chunk_hashes=hit_tail_hashes,
+                namespace_key=namespace_key,
             )
         )
 
@@ -782,6 +801,8 @@ class LookupModule(DiscoverableModule):
         engine_covered_chunks: int = 0,
         early_exit_reason: str = "",
         probe_unfull_chunk: bool = False,
+        chunk_hashes: tuple[bytes, ...] = (),
+        namespace_key: ObjectKey | None = None,
     ) -> None:
         """Register a job that resolves immediately without a prefetch.
 
@@ -801,6 +822,10 @@ class LookupModule(DiscoverableModule):
             probe_unfull_chunk: Probe the unfull chunk after the hit prefix;
                 set when every full chunk is engine-covered or the prompt has
                 no full chunk.
+            chunk_hashes: Every full chunk's hash, for reporting the hit
+                tail; empty to report none.
+            namespace_key: A key of the request's namespace, set with
+                ``chunk_hashes``.
         """
         self._register_prefetch_job(
             _PrefetchJob(
@@ -830,6 +855,8 @@ class LookupModule(DiscoverableModule):
                 cache_salt=key.cache_salt,
                 early_exit_reason=early_exit_reason,
                 unfull_chunk_lookup_key=key if probe_unfull_chunk else None,
+                chunk_hashes=chunk_hashes,
+                namespace_key=namespace_key,
             )
         )
 
@@ -907,6 +934,22 @@ class LookupModule(DiscoverableModule):
         # Prefix served by either cache: both ranges start at 0 and overlap in
         # the sub-chunk gap below the lookup start, so take the longer, not the sum.
         request_hit_tokens = max(job.engine_hit_tokens, covered_tokens + hit_tokens)
+        if job.namespace_key is not None and found_count:
+            # The request's furthest full chunk, so the coordinator can
+            # recover a request that stores nothing.
+            self._ctx.event_bus.publish(
+                Event(
+                    event_type=EventType.MP_LOOKUP_HIT_TAIL,
+                    session_id=job.request_id,
+                    metadata={
+                        "tail_key": ObjectKey(
+                            chunk_hash=job.chunk_hashes[found_count - 1],
+                            identity=job.namespace_key.identity,
+                        ),
+                        "token_offset": (found_count - 1) * chunk_size,
+                    },
+                )
+            )
         self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.MP_LOOKUP_PREFETCH_END,

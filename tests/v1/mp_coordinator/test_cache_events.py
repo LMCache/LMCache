@@ -30,6 +30,7 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
+    RequestLookup,
 )
 from lmcache.v1.mp_coordinator.app import create_app
 from lmcache.v1.mp_coordinator.cache_events import (
@@ -189,6 +190,8 @@ def test_tokens_stored_events_publish_no_batches():
                 "chunk_hashes": [_key(1).chunk_hash],
                 "token_chunks": [[1, 2]],
                 "token_offsets": [0],
+                "parent_hashes": [None] * 1,
+                "object_keys": [_key(1)],
             },
         ),
     )
@@ -213,6 +216,8 @@ def test_tokens_event_stamps_store_entries():
                 "chunk_hashes": [_key(1).chunk_hash],
                 "token_chunks": [[1, 2]],
                 "token_offsets": [0],
+                "parent_hashes": [None] * 1,
+                "object_keys": [_key(1)],
             },
         ),
         Event(
@@ -262,6 +267,8 @@ def test_tokens_event_stamps_the_chunks_offset():
                 "chunk_hashes": [key.chunk_hash for key in keys],
                 "token_chunks": [[1, 2], [3, 4]],
                 "token_offsets": [256, 512],
+                "parent_hashes": [None] * len(keys),
+                "object_keys": keys,
             },
         ),
         Event(
@@ -275,6 +282,209 @@ def test_tokens_event_stamps_the_chunks_offset():
     store = batches[-1]
     assert [e.token_ids for e in store.entries] == [[1, 2], [3, 4]]
     assert [e.token_offset for e in store.entries] == [256, 512]
+
+
+def test_tokens_event_stamps_request_and_parent():
+    """The storing request and the preceding chunk ride on every STORE of
+    the chunk, so the coordinator can rebuild the request's sequence."""
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    keys = [_key(1), _key(2)]
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.MP_TOKENS,
+            session_id="req-1",
+            metadata={
+                "chunk_hashes": [key.chunk_hash for key in keys],
+                "token_chunks": [[1, 2], [3, 4]],
+                "token_offsets": [0, 2],
+                "parent_hashes": [None, keys[0].chunk_hash],
+                "object_keys": keys,
+            },
+        ),
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED,
+            metadata={"keys": keys, "meta": [_meta(100)] * 2},
+        ),
+        Event(
+            event_type=EventType.L2_KEYS_STORED,
+            metadata={"keys": [keys[1]], "sizes": [100], "backend": "fs"},
+        ),
+    )
+    subscriber.flush()
+
+    [batches] = sink.published
+    l1_store, l2_store = batches
+    assert [e.request_ids for e in l1_store.entries] == [["req-1"], ["req-1"]]
+    assert [e.parent_hash_hex for e in l1_store.entries] == [
+        "",
+        keys[0].chunk_hash.hex(),
+    ]
+    assert l2_store.entries[0].request_ids == ["req-1"]
+    assert l2_store.entries[0].parent_hash_hex == keys[0].chunk_hash.hex()
+
+
+def test_a_chunk_submitted_by_two_requests_carries_both():
+    """Concurrent requests can submit the same chunk; the later binding
+    must not erase the earlier request."""
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    def _tokens(request_id: str) -> Event:
+        return Event(
+            event_type=EventType.MP_TOKENS,
+            session_id=request_id,
+            metadata={
+                "chunk_hashes": [_key(1).chunk_hash],
+                "token_chunks": [[1, 2]],
+                "token_offsets": [0],
+                "parent_hashes": [None],
+                "object_keys": [_key(1)],
+            },
+        )
+
+    _dispatch(
+        subscriber,
+        _tokens("req-1"),
+        _tokens("req-2"),
+        _tokens("req-1"),
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED,
+            metadata={"keys": [_key(1)], "meta": [_meta(100)]},
+        ),
+    )
+    subscriber.flush()
+
+    [batches] = sink.published
+    assert sorted(batches[-1].entries[0].request_ids) == ["req-1", "req-2"]
+
+
+def test_request_ids_are_stamped_only_on_their_own_tenants_keys():
+    """Two salts storing the same tokens share a chunk hash; a request id
+    must not ride on the other tenant's STORE."""
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+    chunk_hash = _key(1).chunk_hash
+    salted = {
+        salt: ObjectKey(
+            chunk_hash=chunk_hash, model_name="m", kv_rank=0, cache_salt=salt
+        )
+        for salt in ("a", "b")
+    }
+
+    _dispatch(
+        subscriber,
+        *(
+            Event(
+                event_type=EventType.MP_TOKENS,
+                session_id=f"req-{salt}",
+                metadata={
+                    "chunk_hashes": [chunk_hash],
+                    "token_chunks": [[1, 2]],
+                    "token_offsets": [0],
+                    "parent_hashes": [None],
+                    "object_keys": [key],
+                },
+            )
+            for salt, key in salted.items()
+        ),
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED,
+            metadata={"keys": list(salted.values()), "meta": [_meta(100)] * 2},
+        ),
+    )
+    subscriber.flush()
+
+    [batches] = sink.published
+    assert [e.request_ids for e in batches[-1].entries] == [["req-a"], ["req-b"]]
+
+
+def test_a_chunks_request_ids_are_capped_to_the_most_recent(monkeypatch):
+    """A chunk re-submitted by many requests must not grow every STORE."""
+    monkeypatch.setattr(cache_events, "_MAX_REQUEST_IDS_PER_CHUNK", 2)
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        *(
+            Event(
+                event_type=EventType.MP_TOKENS,
+                session_id=f"req-{i}",
+                metadata={
+                    "chunk_hashes": [_key(1).chunk_hash],
+                    "token_chunks": [[1, 2]],
+                    "token_offsets": [0],
+                    "parent_hashes": [None],
+                    "object_keys": [_key(1)],
+                },
+            )
+            for i in range(3)
+        ),
+        Event(
+            event_type=EventType.L1_WRITE_FINISHED,
+            metadata={"keys": [_key(1)], "meta": [_meta(100)]},
+        ),
+    )
+    subscriber.flush()
+
+    [batches] = sink.published
+    assert batches[-1].entries[0].request_ids == ["req-1", "req-2"]
+
+
+def test_lookup_hits_ride_an_entry_less_access_batch():
+    """A request served from cache stores nothing; its hit tail reaches the
+    coordinator on an ACCESS batch with no entries, so no consumer counts
+    it as an access, and an older coordinator ignores the field."""
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        Event(
+            event_type=EventType.MP_LOOKUP_HIT_TAIL,
+            session_id="req-1",
+            metadata={"tail_key": _key(2), "token_offset": 256},
+        ),
+    )
+    subscriber.flush()
+
+    [[batch]] = sink.published
+    assert batch.event_type == CacheEventType.ACCESS
+    assert batch.entries == []
+    assert batch.lookups == [
+        RequestLookup(
+            request_id="req-1",
+            key=_key(2).to_encoded_object_key(),
+            token_offset=256,
+        )
+    ]
+
+
+def test_repeated_lookups_of_a_request_send_its_latest_hit():
+    """vLLM may poll one request's lookup more than once per flush."""
+    sink = _RecordingSink()
+    subscriber = _subscriber(sink)
+
+    _dispatch(
+        subscriber,
+        *(
+            Event(
+                event_type=EventType.MP_LOOKUP_HIT_TAIL,
+                session_id="req-1",
+                metadata={"tail_key": _key(i), "token_offset": i * 256},
+            )
+            for i in (1, 2)
+        ),
+    )
+    subscriber.flush()
+
+    [[batch]] = sink.published
+    assert [(lk.key.chunk_hash_hex, lk.token_offset) for lk in batch.lookups] == [
+        (_key(2).chunk_hash.hex(), 512)
+    ]
 
 
 def test_token_binding_cache_evicts_oldest_down_to_half(monkeypatch):
@@ -298,6 +508,8 @@ def test_token_binding_cache_evicts_oldest_down_to_half(monkeypatch):
                 "chunk_hashes": [key.chunk_hash for key in keys],
                 "token_chunks": [[1, 2], [3, 4], [5, 6]],
                 "token_offsets": [0, 256, 512],
+                "parent_hashes": [None] * len(keys),
+                "object_keys": keys,
             },
         ),
         Event(
@@ -339,6 +551,8 @@ def test_token_binding_eviction_warns(monkeypatch):
                 "chunk_hashes": [_key(i).chunk_hash for i in (1, 2, 3)],
                 "token_chunks": [[1, 2], [3, 4], [5, 6]],
                 "token_offsets": [0, 256, 512],
+                "parent_hashes": [None] * 3,
+                "object_keys": [_key(i) for i in (1, 2, 3)],
             },
         ),
     )
@@ -360,6 +574,8 @@ def test_mismatched_token_chunks_raise():
                     "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
                     "token_chunks": [[1, 2]],
                     "token_offsets": [0, 256],
+                    "parent_hashes": [None] * 2,
+                    "object_keys": [_key(1), _key(2)],
                 },
             ),
         )
@@ -378,6 +594,8 @@ def test_mismatched_token_offsets_raise():
                     "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
                     "token_chunks": [[1, 2], [3, 4]],
                     "token_offsets": [0],
+                    "parent_hashes": [None] * 2,
+                    "object_keys": [_key(1), _key(2)],
                 },
             ),
         )
@@ -846,6 +1064,8 @@ def test_token_bindings_feed_the_key_directory_end_to_end():
                 "chunk_hashes": [_key(1).chunk_hash, _key(2).chunk_hash],
                 "token_chunks": [[1, 2], [3, 4]],
                 "token_offsets": [0, 256],
+                "parent_hashes": [None] * 2,
+                "object_keys": [_key(1), _key(2)],
             },
         ),
         Event(

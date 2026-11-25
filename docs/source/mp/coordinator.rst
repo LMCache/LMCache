@@ -1170,6 +1170,113 @@ namespace. Tag names must be nonempty strings and values must be strings.
       -H 'Content-Type: application/json' \
       -d '{"keys": [{"chunk_hash_hex": "aa12...", "model_name": "m", "kv_rank": 0}]}'
 
+Request recovery
+----------------
+
+The coordinator remembers which request each chunk belongs to, so you can get
+a request's tokens back by its id, and see where its KV lives now, even after
+the KV was evicted. A request is recorded when it stores chunks or when its
+lookup hits cached ones, so a request served entirely from cache is recorded
+too. Only the LMCache-driven store path reports; the design is in
+``docs/design/v1/mp_coordinator/views/request_index.md``.
+
+The index keeps tokens past KV eviction and ages out the least recent entries
+past two bounds, set with ``--extra-config``:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 14 52
+
+   * - Key
+     - Default
+     - Bounds
+   * - ``request_index_max_chunks``
+     - ``65536``
+     - Retained chunks (about 64 MiB of token ids at 256 tokens per chunk).
+   * - ``request_index_max_requests``
+     - ``1048576``
+     - Tracked requests.
+
+``GET /requests/{instance_id}/{request_id}``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Return a request's tokens and, per chunk, every key it was stored under with
+the key's current placements. ``instance_id`` is the MP server that reported
+the request; vLLM request ids are unique only per engine.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "instance_id": "server-1",
+      "request_id": "cmpl-42-0",
+      "start_offset": 0,
+      "complete": true,
+      "token_ids": [15496, 11, 995],
+      "chunks": [
+        {
+          "chunk_hash_hex": "aa12...",
+          "token_offset": 0,
+          "num_tokens": 256,
+          "keys": [
+            {
+              "key": {"chunk_hash_hex": "aa12...", "model_name": "m", "kv_rank": 0},
+              "placements": [{"instance_id": "server-1", "tier": "l1", "backend": "dram"}]
+            }
+          ]
+        }
+      ]
+    }
+
+A key with empty ``placements`` has been evicted; its tokens are still
+returned. ``complete`` is ``true`` when the chunks reach back to position 0.
+It means the chain is unbroken, not that the whole prompt came back: a request
+that hit part of its prompt and stored nothing returns only that prefix. When
+an earlier chunk aged out, ``start_offset`` is the first recovered token's
+position. Only the request's own tenant's keys are listed, even when another
+``cache_salt`` stored the same tokens.
+
+**HTTP status codes:**
+
+- ``200``: request found.
+- ``404``: the index holds no chunk of the request.
+
+``GET /chunks/{chunk_hash_hex}/requests``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+List the tracked requests whose sequence contains a chunk, whether they stored
+it or hit it, sorted by ``(instance_id, request_id)``. Takes ``offset``
+(default ``0``) and ``limit`` (default ``1000``, at most ``10000``).
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "chunk_hash_hex": "aa12...",
+      "total": 3,
+      "requests": [
+        {"instance_id": "server-1", "request_id": "cmpl-42-0",
+         "model_name": "m", "cache_salt": ""}
+      ]
+    }
+
+**HTTP status codes:**
+
+- ``200``: chunk found.
+- ``400``: ``chunk_hash_hex`` is not hex.
+- ``404``: the index does not hold the chunk.
+
+**Example:**
+
+.. code-block:: bash
+
+    # Which requests used the first chunk of cmpl-42-0?
+    hash=$(curl -s http://localhost:9300/requests/server-1/cmpl-42-0 \
+      | jq -r '.chunks[0].chunk_hash_hex')
+    curl -s "http://localhost:9300/chunks/$hash/requests"
+
 Cache control
 -------------
 

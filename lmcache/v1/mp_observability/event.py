@@ -93,6 +93,8 @@ class EventType(Enum):
     # parent_hashes (list[bytes | None]: the preceding chunk's hash, None
     # for a sequence's first chunk).
     MP_TOKENS = "mp.tokens"
+    # A lookup's last hit chunk, for the coordinator's request index.
+    MP_LOOKUP_HIT_TAIL = "mp.lookup.hit_tail"
 
     # MP Server lifecycle sentinels (CPU-synchronous)
     MP_REQUEST_START = "mp.request.start"

@@ -31,9 +31,11 @@ from lmcache.v1.distributed.api import CapacitySnapshot, L1BackendType, ObjectKe
 from lmcache.v1.distributed.internal_api import L1ObjectMeta
 from lmcache.v1.mp_coordinator.api import (
     UNKNOWN_TOKEN_OFFSET,
+    BlendNamespace,
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
+    RequestLookup,
 )
 from lmcache.v1.mp_coordinator.schemas import CacheEventsRequest
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -63,6 +65,10 @@ _KAFKA_MAX_BUFFER_KBYTES = 64 * 1024
 # Token-binding cache bound: covers the window between a chunk's
 # token-binding event and its last (async L2) store event.
 _TOKEN_BINDING_CACHE_SIZE = 65536
+
+# Requests remembered per chunk binding, most recent kept: a chunk that
+# many requests re-submit would otherwise grow every STORE entry.
+_MAX_REQUEST_IDS_PER_CHUNK = 8
 
 
 class CacheEventPublishError(Exception):
@@ -464,10 +470,18 @@ class _ChunkTokens:
     Attributes:
         token_ids: The chunk's token ids.
         token_offset: Position of its first token in the stored sequence.
+        parent_hash_hex: Hex hash of the preceding chunk; empty for a
+            sequence's first chunk.
+        requests: ``(request_id, namespace)`` of the requests whose store
+            submitted the chunk, oldest first. The namespace is kept
+            because chunk hashes depend on tokens alone: two tenants
+            storing the same tokens share one binding.
     """
 
     token_ids: tuple[int, ...]
     token_offset: int
+    parent_hash_hex: str = ""
+    requests: tuple[tuple[str, BlendNamespace], ...] = ()
 
 
 # Stands in for a chunk the binding cache does not know, so a STORE entry
@@ -537,6 +551,9 @@ class CacheEventSubscriber(EventSubscriber):
         # ahead of the write-finished events), used to stamp STORE
         # entries. LRU-bounded; a miss stamps nothing.
         self._token_bindings: OrderedDict[bytes, _ChunkTokens] = OrderedDict()
+        # request_id -> its latest lookup hit since the last flush: a request
+        # may be polled more than once, and only its furthest hit matters.
+        self._pending_lookups: dict[str, RequestLookup] = {}
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         """Return the bus events this subscriber consumes."""
@@ -549,6 +566,7 @@ class CacheEventSubscriber(EventSubscriber):
             EventType.L2_KEYS_DELETED: self._on_l2_delete,
             EventType.L2_KEYS_ACCESSED: self._on_l2_access,
             EventType.MP_TOKENS: self._on_tokens,
+            EventType.MP_LOOKUP_HIT_TAIL: self._on_lookup_hit_tail,
             EventType.SM_CAPACITY_CHANGED: self._on_capacity_changed,
             # TODO: decouple the flush tick from the eviction loop (e.g. a
             # bus-owned periodic hook) so cache-event freshness does not
@@ -561,10 +579,16 @@ class CacheEventSubscriber(EventSubscriber):
 
         Publish failures are logged and the drained list is dropped.
         """
-        if not self._pending_batches and self._pending_capacity is None:
+        if (
+            not self._pending_batches
+            and self._pending_capacity is None
+            and not self._pending_lookups
+        ):
             return
         pending_batches = self._pending_batches
         self._pending_batches = []
+        lookups = list(self._pending_lookups.values())
+        self._pending_lookups = {}
         capacity = self._pending_capacity
         self._pending_capacity = None
         ts = time.time()
@@ -587,6 +611,21 @@ class CacheEventSubscriber(EventSubscriber):
             )
             for offset, pending in enumerate(pending_batches)
         ]
+        if lookups:
+            # Entry-less ACCESS: consumers that count accesses see nothing.
+            batches.append(
+                CacheEventBatch(
+                    instance_id=self._instance_id,
+                    incarnation=self._incarnation,
+                    seq=self._seq + len(batches) + 1,
+                    event_type=CacheEventType.ACCESS,
+                    tier=Tier.L1,
+                    backend="",
+                    ts=ts,
+                    dropped_events=dropped_events,
+                    lookups=lookups,
+                )
+            )
         self._seq += len(batches)
         try:
             self._sink.publish(batches)
@@ -694,11 +733,30 @@ class CacheEventSubscriber(EventSubscriber):
         chunk_hashes: list[bytes] = event.metadata["chunk_hashes"]
         token_chunks: list[list[int]] = event.metadata["token_chunks"]
         token_offsets: list[int] = event.metadata["token_offsets"]
-        for chunk_hash, chunk, offset in zip(
-            chunk_hashes, token_chunks, token_offsets, strict=True
+        parent_hashes: list[bytes | None] = event.metadata["parent_hashes"]
+        object_keys: list[ObjectKey] = event.metadata["object_keys"]
+        for chunk_hash, chunk, offset, parent_hash, object_key in zip(
+            chunk_hashes,
+            token_chunks,
+            token_offsets,
+            parent_hashes,
+            object_keys,
+            strict=True,
         ):
+            # Concurrent requests can submit the same chunk; keep each one,
+            # or the earlier request loses its tail chunk.
+            request = (event.session_id, BlendNamespace.from_object_key(object_key))
+            requests = tuple(
+                r
+                for r in self._token_bindings.get(chunk_hash, _NO_BINDING).requests
+                if r != request
+            )
+            requests = (*requests, request)[-_MAX_REQUEST_IDS_PER_CHUNK:]
             self._token_bindings[chunk_hash] = _ChunkTokens(
-                token_ids=tuple(chunk), token_offset=offset
+                token_ids=tuple(chunk),
+                token_offset=offset,
+                parent_hash_hex=parent_hash.hex() if parent_hash is not None else "",
+                requests=requests,
             )
             self._token_bindings.move_to_end(chunk_hash)
         if len(self._token_bindings) <= _TOKEN_BINDING_CACHE_SIZE:
@@ -717,6 +775,16 @@ class CacheEventSubscriber(EventSubscriber):
             _TOKEN_BINDING_CACHE_SIZE,
             evicted,
         )
+
+    def _on_lookup_hit_tail(self, event: Event) -> None:
+        """Hold a request's last hit chunk for the next flush."""
+        tail_key: ObjectKey = event.metadata["tail_key"]
+        self._pending_lookups[event.session_id] = RequestLookup(
+            request_id=event.session_id,
+            key=tail_key.to_encoded_object_key(),
+            token_offset=event.metadata["token_offset"],
+        )
+        self._flush_if_due()
 
     def _on_l2_delete(self, event: Event) -> None:
         self._record_l2_keys(CacheEventType.DELETE, event)
@@ -755,13 +823,20 @@ class CacheEventSubscriber(EventSubscriber):
 
     def _store_entry(self, key: ObjectKey, size_bytes: int) -> CacheEventEntry:
         """Build a STORE entry, stamping the chunk's token content when the
-        token-binding cache knows the chunk."""
+        token-binding cache knows the chunk. Only requests of ``key``'s own
+        namespace are stamped."""
         binding = self._token_bindings.get(key.chunk_hash, _NO_BINDING)
+        request_ids: list[str] = []
+        if binding.requests:
+            namespace = BlendNamespace.from_object_key(key)
+            request_ids = [rid for rid, ns in binding.requests if ns == namespace]
         return CacheEventEntry(
             key=key.to_encoded_object_key(),
             size_bytes=size_bytes,
             token_ids=list(binding.token_ids),
             token_offset=binding.token_offset,
+            parent_hash_hex=binding.parent_hash_hex,
+            request_ids=request_ids,
         )
 
     def _record(
