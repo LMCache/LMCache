@@ -13,8 +13,8 @@ if TYPE_CHECKING:
     from lmcache.v1.common.utils import LayoutHints
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 
@@ -201,12 +201,62 @@ def _is_mamba_spec(spec: Any) -> bool:
     return any(cls.__name__ == "MambaSpec" for cls in type(spec).__mro__)
 
 
+def _is_chunked_local_attention_spec(spec: Any) -> bool:
+    return any(
+        cls.__name__ == "ChunkedLocalAttentionSpec" for cls in type(spec).__mro__
+    )
+
+
 def group_mamba_cache_mode(group: Any, spec: Any) -> str:
-    """Return the Mamba cache mode set for one layer, ``"none"`` if unset."""
+    """Return the Mamba cache mode set for one layer, ``"none"`` if unset.
+
+    vLLM after vllm-project/vllm#63830 has no ``mamba_cache_mode``; its
+    manager params carry ``enable_prefix_caching``, which implies align mode.
+
+    Args:
+        group: A vLLM ``KVCacheGroup``.
+        spec: The layer's KV cache spec, read when the group has no manager
+            config.
+
+    Returns:
+        The Mamba cache mode, e.g. ``"align"``, ``"all"`` or ``"none"``.
+    """
     config = _manager_config(group)
-    if config is not None:
-        return getattr(config.params, "mamba_cache_mode", "none")
-    return getattr(spec, "mamba_cache_mode", "none")
+    if config is None:
+        return getattr(spec, "mamba_cache_mode", "none")
+    params = config.params
+    if hasattr(params, "mamba_cache_mode"):
+        return params.mamba_cache_mode
+    return "align" if getattr(params, "enable_prefix_caching", False) else "none"
+
+
+def vllm_mamba_cache_mode(vllm_config: Any, kv_cache_config: Any) -> str:
+    """Return vLLM's engine-wide Mamba cache mode.
+
+    vLLM before vllm-project/vllm#63830 stores it as
+    ``cache_config.mamba_cache_mode``. Later vLLM removed the field: align mode
+    is on exactly when prefix caching is enabled and the model has Mamba layers.
+
+    Args:
+        vllm_config: The vLLM ``VllmConfig``.
+        kv_cache_config: vLLM's resolved ``KVCacheConfig``, or ``None`` when
+            vLLM did not pass one.
+
+    Returns:
+        ``cache_config.mamba_cache_mode`` when vLLM has it. Otherwise
+        ``"align"`` when prefix caching is on and a KV cache group holds a
+        Mamba layer, else ``"none"``.
+    """
+    cache_config = vllm_config.cache_config
+    if hasattr(cache_config, "mamba_cache_mode"):
+        return cache_config.mamba_cache_mode
+    if kv_cache_config is None or not any(
+        _is_mamba_spec(spec)
+        for group in kv_cache_config.kv_cache_groups
+        for spec in group_specs(group)
+    ):
+        return "none"
+    return "align" if cache_config.enable_prefix_caching else "none"
 
 
 def _is_cachable_mamba(group: Any, spec: Any) -> bool:
@@ -245,6 +295,29 @@ def is_align_mode_mamba_group(group: Any) -> bool:
         return is_align_mode_mamba_spec(group.kv_cache_spec)
     return any(
         _is_mamba_spec(spec) and group_mamba_cache_mode(group, spec) == "align"
+        for spec in group_specs(group)
+    )
+
+
+def is_windowed_group(group: Any) -> bool:
+    """Return whether a prefix-cacheable group keeps only a window of tokens
+    (sliding window, chunked local or Mamba): the groups for which vLLM's
+    Offloading connector reports a full-prompt hit as ``P - 1``."""
+    if is_scratch_group(group):
+        return False
+    if _manager_config(group) is not None:
+        return any(
+            _manager_is(group, name)
+            for name in (
+                "SlidingWindowManager",
+                "ChunkedLocalAttentionManager",
+                "MambaManager",
+            )
+        )
+    return any(
+        _is_sliding_window_spec(spec)
+        or _is_chunked_local_attention_spec(spec)
+        or _is_mamba_spec(spec)
         for spec in group_specs(group)
     )
 
@@ -461,7 +534,7 @@ def create_engine_group_infos_from_vllm(
     the groups' ``layer_names`` from the v1 KV cache interface), maps each
     engine KV cache group's layer names to registered tensor indices, then
     splits the layers by physical transfer identity using the real tensors (via
-    the shared :func:`lmcache.v1.kv_layer_groups.group_layers_by_identity`).
+    the shared :func:`lmcache.v1.common.kv_layer_groups.group_layers_by_identity`).
     vLLM-specific field access is intentionally confined to this function.
 
     Args:
@@ -492,12 +565,12 @@ def create_engine_group_infos_from_vllm(
         order used by store/retrieve block IDs.
     """
     # First Party
-    from lmcache.utils import EngineType
+    from lmcache.v1.common.custom_types import EngineType
     from lmcache.v1.common.group_view import EXCLUDED_ENGINE_GROUP
+    from lmcache.v1.common.kv_layer_groups import group_layers_by_identity
     from lmcache.v1.common.utils import (
         normalize_and_discover_per_layer_formats,
     )
-    from lmcache.v1.kv_layer_groups import group_layers_by_identity
 
     # vLLM-specific field access (confined to this function): map each
     # registered KV tensor to its vLLM engine KV cache group index. vLLM places

@@ -42,3 +42,4 @@ steps:
       - "durations/test.html"
       - "coverage-test.xml"
       - "coverage-test/**/*"
+      - "junit-unit.xml"

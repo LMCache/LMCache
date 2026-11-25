@@ -127,7 +127,12 @@ device and rejects the automatic CUDA VMM export mode on CPU.
 Use Python 3.12 with PyTorch and the common native extensions installed.
 A fresh worktree does not include ignored native build artifacts; build them
 with `NO_GPU_EXT=1 python setup.py build_ext --inplace` before running layout
-and connector import tests. For these focused checks, use
+and connector import tests. `build_ext` does not generate the ignored gRPC
+bindings. Before running multiprocess tests in a fresh checkout, install
+`requirements/proto.txt` and run
+`python lmcache/v1/transport/grpc/_proto_gen/_generate.py` from the repo root;
+this generates both transport and memory-orchestrator bindings in dependency
+order. For these focused checks, use
 `python -m pytest --confcutdir=tests/v1 tests/v1/gpu_connector/` so the root
 `tests/conftest.py` GPU allocator fixtures are not loaded. This validates CPU
 imports and shared layout/GDS behavior, not accelerator kernel roundtrips.

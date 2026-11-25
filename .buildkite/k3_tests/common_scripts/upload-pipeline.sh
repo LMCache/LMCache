@@ -24,8 +24,17 @@ source "${SCRIPT_DIR}/helpers.sh"
 # shellcheck source=.buildkite/k3_tests/common_scripts/path-filter.sh
 source "${SCRIPT_DIR}/path-filter.sh"
 
+# weekly_full_build.yml pushes the tested commit to this CI-owned branch and
+# then creates the real weekly builds through the API with CI_WEEKLY_FULL=1.
+# The push itself can also start ordinary branch builds; end those green here
+# instead of spending GPUs on a duplicate, unchecked run.
+if [[ "${BUILDKITE_BRANCH:-}" == "ci-weekly-full" && "${CI_WEEKLY_FULL:-0}" != "1" ]]; then
+    echo "+++ :fast_forward: Push build on ci-weekly-full; the weekly full build runs separately"
+    exit 0
+fi
+
 case "${PIPELINE_FILE}" in
-    *k3_tests/multiprocess/pipeline.yml)
+    *k3_tests/multiprocess/pipeline.yml|*k3_tests/multiprocess/smoke-pipeline.yml)
         expensive_pipeline_name="multiprocess"
         ;;
     *)
@@ -55,6 +64,18 @@ if [[ "${XPU_CANDIDATE_VALIDATION:-0}" != "1" ]] && should_skip_ci "${PIPELINE_F
             --style success \
             --context "path-filter-skip" \
             "Skipped: no relevant files changed for ${PIPELINE_FILE}. Add a \`force-ci\` label to the PR to force a full run." \
+            || true
+    fi
+    exit 0
+fi
+
+if should_skip_multiprocess_heavy "${PIPELINE_FILE}"; then
+    echo "+++ :fast_forward: Bypassing heavy multiprocess tier on PR (covered by PR-smoke)"
+    if command -v buildkite-agent >/dev/null 2>&1; then
+        buildkite-agent annotate \
+            --style success \
+            --context "mp-heavy-skip" \
+            "Bypassed heavy multiprocess tier on PR; PR-smoke runs independently in parallel. Add \`force-ci\` label (or set \`MP_FULL_ON_PR=true\`) to run heavy." \
             || true
     fi
     exit 0

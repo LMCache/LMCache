@@ -33,11 +33,10 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
-from lmcache.logging import init_logger
-from lmcache.utils import EngineType
 from lmcache.v1.client.transport.factory import RequestClientFactory
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey
 from lmcache.v1.common.kv_format.types import LayoutHints
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
@@ -48,7 +47,7 @@ from lmcache.v1.transport.request_client import RequestClient
 
 logger = init_logger(__name__)
 
-DEFAULT_SERVER_URL = "ipc:///tmp/lmcache.sock"
+DEFAULT_SERVER_URL = "grpc://localhost:5555"
 DEFAULT_MQ_TIMEOUT: float = 300.0
 
 
@@ -365,6 +364,8 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             EngineType.TRTLLM,
             layout_hints,
             [],
+            None,
+            self._chunk_size,
         )
 
         try:
