@@ -160,9 +160,9 @@ def resolve_chunk_object_keys(
     Raises:
         ValueError: A key field (e.g. ``cache_salt``) is invalid.
     """
-    distinct = list(dict.fromkeys(chunk_hashes))
+    unique_chunk_hashes = list(dict.fromkeys(chunk_hashes))
     ipc_key = _lookup_ipc_key(model_name, world_size, [], cache_salt, tags=tags)
-    if not distinct:
+    if not unique_chunk_hashes:
         return [], 0
     if world_size == 0:
         every_setup = ObjectKeyIdentity(
@@ -174,14 +174,14 @@ def resolve_chunk_object_keys(
         )
         return [
             ObjectKey(identity=replace(every_setup, chunk_hash=chunk_hash))
-            for chunk_hash in distinct
-        ], len(distinct)
+            for chunk_hash in unique_chunk_hashes
+        ], len(unique_chunk_hashes)
     # The coordinator holds no KV registration, so this resolves the
     # per-rank layout of object group 0 only.
     obj_keys = ipc_key_to_object_keys(
-        ipc_key, distinct, [0], DEFAULT_SHARD_REPLICATION_DESC
+        ipc_key, unique_chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
     )[0]
-    return obj_keys, len(distinct)
+    return obj_keys, len(unique_chunk_hashes)
 
 
 def resolve_grouped_object_keys(

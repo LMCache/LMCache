@@ -1168,14 +1168,14 @@ def test_a_chunk_hash_pin_without_a_world_size_covers_every_world_size(world_siz
         ctx = client.app.state.ctx
         eviction = ctx.controllers.get(FleetEvictionController)
         client.put("/quota/config", json={"default_limit_gb": 0})
-        named = {
+        chunk_hash_body = {
             "chunk_hashes": [_resolve(ctx)[1].chunk_hash.hex()],
             "model_name": "m",
             "cache_salt": "alice",
             **world_size,
         }
 
-        pinned = client.post("/cache/pins", json=named)
+        pinned = client.post("/cache/pins", json=chunk_hash_body)
         stored, second_chunk = _stored_in_two_setups(ctx)
 
         assert pinned.status_code == 200, pinned.text
@@ -1184,12 +1184,13 @@ def test_a_chunk_hash_pin_without_a_world_size_covers_every_world_size(world_siz
             second_chunk
         )
         held = client.post(
-            "/cache/delete", json={**named, "instance_id": "mp-1", "tier": "l2"}
+            "/cache/delete",
+            json={**chunk_hash_body, "instance_id": "mp-1", "tier": "l2"},
         )
         assert held.json()["skipped"] == len(second_chunk)
         assert deletes == []
 
-        unpinned = client.request("DELETE", "/cache/pins", json=named)
+        unpinned = client.request("DELETE", "/cache/pins", json=chunk_hash_body)
 
         assert unpinned.json() == {"requested": 1, "affected": 1, "status": "unpinned"}
         assert set(eviction.compute_eviction_plan()["alice"]) == set(stored)
@@ -1227,16 +1228,21 @@ def test_a_forced_delete_without_a_world_size_drops_the_pin_it_named():
     with _registered_delete_client(deletes) as client:
         ctx = client.app.state.ctx
         _, second_chunk = _stored_in_two_setups(ctx)
-        named = {
+        chunk_hash_body = {
             "chunk_hashes": [second_chunk[0].chunk_hash.hex()],
             "model_name": "m",
             "cache_salt": "alice",
         }
-        client.post("/cache/pins", json=named)
+        client.post("/cache/pins", json=chunk_hash_body)
 
         resp = client.post(
             "/cache/delete",
-            json={**named, "instance_id": "mp-1", "tier": "l2", "force": True},
+            json={
+                **chunk_hash_body,
+                "instance_id": "mp-1",
+                "tier": "l2",
+                "force": True,
+            },
         )
 
         assert resp.status_code == 200, resp.text
