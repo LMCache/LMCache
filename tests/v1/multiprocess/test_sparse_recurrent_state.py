@@ -20,6 +20,7 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.common.sparse_state import (
     SPARSE_STATE_KEEP_HINT,
     encode_kept_chunk_ends,
@@ -29,7 +30,6 @@ from lmcache.v1.common.sparse_state import (
 )
 from lmcache.v1.distributed.api import FULL_ATTENTION_WINDOW_CHUNKS
 from lmcache.v1.distributed.bitmap_ops import fold_unfold_grouped
-from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     sparse_recurrent_chunk_masks,
 )
