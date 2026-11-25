@@ -201,6 +201,12 @@ def _is_mamba_spec(spec: Any) -> bool:
     return any(cls.__name__ == "MambaSpec" for cls in type(spec).__mro__)
 
 
+def _is_chunked_local_attention_spec(spec: Any) -> bool:
+    return any(
+        cls.__name__ == "ChunkedLocalAttentionSpec" for cls in type(spec).__mro__
+    )
+
+
 def group_mamba_cache_mode(group: Any, spec: Any) -> str:
     """Return the Mamba cache mode set for one layer, ``"none"`` if unset.
 
@@ -289,6 +295,29 @@ def is_align_mode_mamba_group(group: Any) -> bool:
         return is_align_mode_mamba_spec(group.kv_cache_spec)
     return any(
         _is_mamba_spec(spec) and group_mamba_cache_mode(group, spec) == "align"
+        for spec in group_specs(group)
+    )
+
+
+def is_windowed_group(group: Any) -> bool:
+    """Return whether a prefix-cacheable group keeps only a window of tokens
+    (sliding window, chunked local or Mamba): the groups for which vLLM's
+    Offloading connector reports a full-prompt hit as ``P - 1``."""
+    if is_scratch_group(group):
+        return False
+    if _manager_config(group) is not None:
+        return any(
+            _manager_is(group, name)
+            for name in (
+                "SlidingWindowManager",
+                "ChunkedLocalAttentionManager",
+                "MambaManager",
+            )
+        )
+    return any(
+        _is_sliding_window_spec(spec)
+        or _is_chunked_local_attention_spec(spec)
+        or _is_mamba_spec(spec)
         for spec in group_specs(group)
     )
 
