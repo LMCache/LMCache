@@ -26,10 +26,6 @@ import psutil
 import pytest
 
 # First Party
-from lmcache.v1.client.transport.errors import (
-    MPRequestError,
-    MPServerUnavailableError,
-)
 from lmcache.v1.client.transport.grpc_impl.client import GrpcMultiprocessClient
 from lmcache.v1.common.custom_types import KVEventBatch
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -42,6 +38,10 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
     build_grpc_request_server,
+)
+from lmcache.v1.transport.errors import (
+    MPRequestError,
+    MPServerUnavailableError,
 )
 from lmcache.v1.transport.futures import MessagingStream
 from lmcache.v1.transport.server_module import (
