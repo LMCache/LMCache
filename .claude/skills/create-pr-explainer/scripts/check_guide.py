@@ -75,8 +75,7 @@ def _check_figures(
                         and panel.get_attribute("data-view") == state
                     )
                     _check(panel.is_visible() == visible, f"wrong panel for {state}")
-                if panels:
-                    _check(any(p.is_visible() for p in panels), f"no panel for {state}")
+                _check(any(p.is_visible() for p in panels), f"no panel for {state}")
                 _check_layout(page)
                 if preview:
                     page.evaluate("document.activeElement.blur()")

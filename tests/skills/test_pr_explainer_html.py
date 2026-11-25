@@ -14,19 +14,23 @@ from tests.import_utils import repo_path
 
 
 @pytest.mark.parametrize(
-    ("addition", "diagnostic"),
+    ("edit", "diagnostic"),
     [
-        ("", None),
-        ('<img src="neighbor.svg" alt="">', "external asset"),
+        (None, None),
+        (("</body>", '<img src="neighbor.svg" alt=""></body>'), "external asset"),
         (
-            "<noscript><style>[data-view] { display: none }</style></noscript>",
+            (
+                "</body>",
+                "<noscript><style>[data-view]{display:none}</style></noscript></body>",
+            ),
             "static outcome is hidden",
         ),
+        ((" data-view=", " data-unused="), "no panel for full"),
     ],
-    ids=["standalone", "local-dependency", "hidden-fallback"],
+    ids=["standalone", "local-dependency", "hidden-fallback", "disconnected-controls"],
 )
 def test_copied_reviewer_guide(
-    tmp_path: Path, addition: str, diagnostic: str | None
+    tmp_path: Path, edit: tuple[str, str] | None, diagnostic: str | None
 ) -> None:
     """The author can copy the shared starter and catch broken offline behavior."""
     skill = repo_path(".agents", "skills", "create-pr-explainer")
@@ -36,10 +40,10 @@ def test_copied_reviewer_guide(
     )
     pytest.importorskip("playwright.sync_api")
     guide = tmp_path / "review guide.html"
-    guide.write_text(
-        starter.read_text(encoding="utf-8").replace("</body>", addition + "</body>"),
-        encoding="utf-8",
-    )
+    source = starter.read_text(encoding="utf-8")
+    if edit is not None:
+        source = source.replace(*edit)
+    guide.write_text(source, encoding="utf-8")
     (tmp_path / "neighbor.svg").write_text(
         '<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf-8"
     )
