@@ -128,29 +128,29 @@ class PrefetchService:
         """
         _check_direction(source_tier, target_tier)
         try:
-            named = named_chunks_of_keys(keys)
+            chunks_to_warm = named_chunks_of_keys(keys)
         except ValueError as exc:
             raise InvalidRequest(str(exc)) from None
         group_layout_descs, attn_desc, shard_replication_desc = self._registered_descs(
-            named.model_name, named.world_size
+            chunks_to_warm.model_name, chunks_to_warm.world_size
         )
         try:
             key_groups = resolve_grouped_chunk_keys(
-                named.chunk_hashes,
-                named.model_name,
-                named.world_size,
-                named.cache_salt,
+                chunks_to_warm.chunk_hashes,
+                chunks_to_warm.model_name,
+                chunks_to_warm.world_size,
+                chunks_to_warm.cache_salt,
                 group_layout_descs,
                 attn_desc,
                 shard_replication_desc,
-                tags=named.tags,
+                tags=chunks_to_warm.tags,
             )
         except ValueError as exc:
             raise InvalidRequest(str(exc)) from None
         request_id = self._jobs.submit(self._engine.storage_manager, key_groups)
         return {
             "request_id": request_id,
-            "chunks": len(named.chunk_hashes),
+            "chunks": len(chunks_to_warm.chunk_hashes),
             "status": "submitted",
         }
 

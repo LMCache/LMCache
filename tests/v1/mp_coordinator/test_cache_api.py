@@ -916,11 +916,14 @@ def test_a_delete_by_key_removes_only_that_chunk_in_every_group():
         ctx = client.app.state.ctx
         _store(ctx, _keys_in_groups(ctx))
         second_chunk = _resolve(ctx)[1]
-        named = [replace(second_chunk, object_group_id=g) for g in (0, 1)]
+        keys_in_two_groups = [replace(second_chunk, object_group_id=g) for g in (0, 1)]
 
         resp = client.post(
             "/cache/delete",
-            json={"instance_id": "mp-1", "keys": [_wire_key(k) for k in named]},
+            json={
+                "instance_id": "mp-1",
+                "keys": [_wire_key(k) for k in keys_in_two_groups],
+            },
         )
 
         assert resp.status_code == 200, resp.text
