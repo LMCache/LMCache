@@ -95,13 +95,11 @@ class _EggInfoWithNixlConnector(_egg_info):
 if __name__ == "__main__":
     policy = BuildPolicy()
     profile = policy.resolve_profile()
-    ext_modules, cmdclass, req_file = policy.collect_extensions(profile)
     if os.environ.get("LMCACHE_CLIENT_BUILD") == "1":
-        # lmcache-client (pyproject_client.toml) is a CPU build; the storage
-        # extensions are server-only.
-        ext_modules = [
-            ext for ext in ext_modules if ext.name == "lmcache.lmcache_native"
-        ]
+        ext_modules, cmdclass = policy.collect_client_extensions(profile)
+        req_file = None
+    else:
+        ext_modules, cmdclass, req_file = policy.collect_extensions(profile)
     cmdclass["build_py"] = _BuildPyWithGrpcStubs
     cmdclass["egg_info"] = _EggInfoWithNixlConnector
 

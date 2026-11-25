@@ -63,8 +63,6 @@ py-modules = [
     "lmcache.__init__",
     "lmcache._version",
     "lmcache.v1.__init__",
-    # Not tensorrt_adapter.py: it re-exports the in-process connector.
-    "lmcache.integration.tensorrt_llm.tensorrt_mp_adapter",
 ]
 
 [tool.setuptools.packages.find]
@@ -79,7 +77,6 @@ include = [
     "lmcache.v1.platform*",
     "lmcache.v1.transport*",
 ]
-exclude = ["lmcache.integration.tensorrt_llm"]
 
 [tool.setuptools.package-data]
 "*" = ["*.pyi", "*.proto"]
