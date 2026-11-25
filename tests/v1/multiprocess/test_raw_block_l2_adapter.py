@@ -18,7 +18,6 @@ from tests.v1.distributed.raw_block.test_utils import (
     RAW_BLOCK_CI_CAPACITY_BYTES,
     RAW_BLOCK_CI_HEADER_BYTES,
     RAW_BLOCK_CI_META_TOTAL_BYTES,
-    RAW_BLOCK_CI_SLOT_BYTES,
     install_lmcache_native_fallback,
     make_empty_memory_obj,
     make_memory_obj,
@@ -54,7 +53,6 @@ def _make_adapter(tmp_path: Path) -> RawBlockL2Adapter:
         capacity_bytes=RAW_BLOCK_CI_CAPACITY_BYTES,
         block_align=RAW_BLOCK_CI_BLOCK_ALIGN,
         header_bytes=RAW_BLOCK_CI_HEADER_BYTES,
-        slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
         meta_total_bytes=RAW_BLOCK_CI_META_TOTAL_BYTES,
         use_odirect=False,
         enable_zero_copy=False,
@@ -80,7 +78,10 @@ def test_raw_block_l2_adapter_store_lookup_load_roundtrip(tmp_path):
         assert wait_for_event_fd(adapter.get_store_event_fd())
         store_result = adapter.pop_completed_store_tasks()[store_task_id]
         assert store_result.is_successful()
-        assert store_result.bytes_transferred() == RAW_BLOCK_CI_SLOT_BYTES
+        # Charged at its device footprint: header plus one padded block.
+        assert store_result.bytes_transferred() == (
+            RAW_BLOCK_CI_HEADER_BYTES + RAW_BLOCK_CI_BLOCK_ALIGN
+        )
 
         lookup_task_id = adapter.submit_lookup_and_lock_task(
             [key, missing_key], {0: _EMPTY_LAYOUT}
@@ -116,7 +117,10 @@ def test_raw_block_l2_adapter_delete_makes_key_miss(tmp_path):
         assert wait_for_event_fd(adapter.get_store_event_fd())
         store_result = adapter.pop_completed_store_tasks()[store_task_id]
         assert store_result.is_successful()
-        assert store_result.bytes_transferred() == RAW_BLOCK_CI_SLOT_BYTES
+        # Charged at its device footprint: header plus one padded block.
+        assert store_result.bytes_transferred() == (
+            RAW_BLOCK_CI_HEADER_BYTES + RAW_BLOCK_CI_BLOCK_ALIGN
+        )
 
         adapter.delete([key])
 
@@ -132,7 +136,6 @@ def test_raw_block_l2_adapter_delete_makes_key_miss(tmp_path):
 class _FakeFdpCore:
     def __init__(self, status: list[tuple[int, int]] | None = None) -> None:
         self.status = status if status is not None else [(0, 10), (7, 17)]
-        self.slot_bytes = RAW_BLOCK_CI_SLOT_BYTES
         self.meta_checkpoint_placement_id: int | None = None
         self.put_many_calls: list[list[int | None] | None] = []
         self.worker_failure: str | None = None
@@ -148,7 +151,7 @@ class _FakeFdpCore:
         return {
             "is_healthy": self.worker_failure is None,
             "worker_error": self.worker_failure,
-            "usable_capacity_bytes": RAW_BLOCK_CI_SLOT_BYTES * 8,
+            "usable_capacity_bytes": RAW_BLOCK_CI_CAPACITY_BYTES,
             "fixed_buffers_registered": self.registered_bytes > 0,
             "fixed_buffer_registered_bytes": self.registered_bytes,
         }
@@ -170,9 +173,10 @@ class _FakeFdpCore:
         return RawBlockPutManyResult(
             results=[True] * len(specs),
             stored_keys=[spec.encoded for spec in specs],
+            stored_bytes=[RAW_BLOCK_CI_HEADER_BYTES] * len(specs),
         )
 
-    def snapshot_indexed_keys(self) -> list[str]:
+    def snapshot_indexed_allocations(self) -> list[tuple[str, int]]:
         return []
 
     def register_io_buffer_range(self, ptr: int, size: int) -> None:
@@ -197,7 +201,6 @@ def _make_fdp_config(
         capacity_bytes=RAW_BLOCK_CI_CAPACITY_BYTES,
         block_align=RAW_BLOCK_CI_BLOCK_ALIGN,
         header_bytes=RAW_BLOCK_CI_HEADER_BYTES,
-        slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
         meta_total_bytes=RAW_BLOCK_CI_META_TOTAL_BYTES,
         use_odirect=False,
         enable_zero_copy=False,
@@ -239,7 +242,6 @@ def _make_fixed_buffer_config(
         capacity_bytes=RAW_BLOCK_CI_CAPACITY_BYTES,
         block_align=RAW_BLOCK_CI_BLOCK_ALIGN,
         header_bytes=RAW_BLOCK_CI_HEADER_BYTES,
-        slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
         meta_total_bytes=RAW_BLOCK_CI_META_TOTAL_BYTES,
         use_odirect=False,
         enable_zero_copy=enable_zero_copy,
@@ -384,7 +386,6 @@ def test_raw_block_meta_checkpoint_placement_id_reaches_core_config() -> None:
     config = RawBlockL2AdapterConfig.from_dict(
         {
             "device_path": "/dev/ng0n1",
-            "slot_bytes": RAW_BLOCK_CI_SLOT_BYTES,
             "io_engine": "io_uring",
             "use_uring_cmd": True,
             "meta_checkpoint_placement_id": 7,
@@ -507,7 +508,6 @@ def test_raw_block_meta_checkpoint_placement_id_requires_uring_cmd() -> None:
         RawBlockL2AdapterConfig.from_dict(
             {
                 "device_path": "/tmp/raw-block",
-                "slot_bytes": RAW_BLOCK_CI_SLOT_BYTES,
                 "io_engine": "posix",
                 "meta_checkpoint_placement_id": 7,
             }
@@ -531,7 +531,6 @@ def test_raw_block_fdp_requires_uring_cmd_config():
     with pytest.raises(ValueError, match="fdp_enabled requires"):
         RawBlockL2AdapterConfig(
             device_path="/dev/ng0n1",
-            slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
             io_engine="posix",
             use_uring_cmd=False,
             fdp_enabled=True,
@@ -541,7 +540,6 @@ def test_raw_block_fdp_requires_uring_cmd_config():
 def test_raw_block_fdp_disabled_ignores_placement_ids() -> None:
     config = RawBlockL2AdapterConfig(
         device_path="/tmp/raw-block",
-        slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
         fdp_enabled=False,
         fdp_placement_ids=[0, 1],
     )
@@ -557,7 +555,6 @@ def test_raw_block_fdp_data_placement_policy_requires_fdp_enabled() -> None:
     with pytest.raises(ValueError, match="requires fdp_enabled=true"):
         RawBlockL2AdapterConfig(
             device_path="/tmp/raw-block",
-            slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
             fdp_enabled=False,
             fdp_data_placement_policy="cache_salt_prefix",
         )
@@ -586,7 +583,6 @@ def test_raw_block_fdp_slot_reuse_policy_requires_fdp_enabled() -> None:
     with pytest.raises(ValueError, match="requires fdp_enabled=true"):
         RawBlockL2AdapterConfig(
             device_path="/tmp/raw-block",
-            slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
             fdp_enabled=False,
             fdp_slot_reuse_policy="pid_affinity",
         )
@@ -601,7 +597,6 @@ def test_raw_block_fdp_slot_reuse_policy_from_dict_reaches_core() -> None:
     config = RawBlockL2AdapterConfig.from_dict(
         {
             "device_path": "/dev/ng0n1",
-            "slot_bytes": RAW_BLOCK_CI_SLOT_BYTES,
             "io_engine": "io_uring",
             "use_uring_cmd": True,
             "fdp_enabled": True,
@@ -618,7 +613,6 @@ def test_raw_block_fdp_from_dict_validates_enabled_id_elements() -> None:
         RawBlockL2AdapterConfig.from_dict(
             {
                 "device_path": "/dev/ng0n1",
-                "slot_bytes": RAW_BLOCK_CI_SLOT_BYTES,
                 "io_engine": "io_uring",
                 "use_uring_cmd": True,
                 "fdp_enabled": True,

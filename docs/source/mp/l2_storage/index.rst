@@ -306,8 +306,8 @@ because every ``L2AdapterEvictionState`` owns its own policy instance.
      - Full support. Useful for testing eviction behaviour without
        real storage hardware.
    * - ``raw_block``
-     - Full shared/global eviction support. ``delete`` recycles raw-block
-       slots; locked entries are skipped and retried on the next cycle.
+     - Full shared/global eviction support. ``delete`` frees the object's
+       space; locked entries are skipped and retried on the next cycle.
    * - ``s3``
      - ``delete`` removes objects from the bucket and frees aggregate
        byte accounting. ``get_usage`` reports ``usage_fraction == -1.0``

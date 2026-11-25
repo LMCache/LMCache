@@ -97,7 +97,6 @@ class TestFactoryRegistry:
     def test_raw_block_factory_is_registered(self):
         config = RawBlockL2AdapterConfig(
             device_path="/tmp/raw-block-dev",
-            slot_bytes=64 * 1024,
             use_odirect=False,
             meta_enable_periodic=False,
         )
@@ -137,7 +136,6 @@ class TestFactoryRegistry:
 
             config = RawBlockL2AdapterConfig(
                 device_path=dev_path,
-                slot_bytes=64 * 1024,
                 use_odirect=False,
                 meta_total_bytes=1 * 1024 * 1024,
                 meta_enable_periodic=False,

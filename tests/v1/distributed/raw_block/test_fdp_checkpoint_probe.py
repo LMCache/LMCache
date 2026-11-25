@@ -91,7 +91,6 @@ def _make_checkpoint_probe_core(
             capacity_bytes=RAW_BLOCK_CI_META_TOTAL_BYTES + RAW_BLOCK_CI_SLOT_BYTES * 16,
             block_align=RAW_BLOCK_CI_BLOCK_ALIGN,
             header_bytes=RAW_BLOCK_CI_HEADER_BYTES,
-            slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
             use_odirect=False,
             enable_zero_copy=False,
             meta_total_bytes=RAW_BLOCK_CI_META_TOTAL_BYTES,

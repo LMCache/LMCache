@@ -9,8 +9,11 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any, Optional
+import bisect
 import ctypes
 import json
+import os
+import random
 import struct
 import threading
 import time
@@ -22,6 +25,9 @@ import torch
 
 # First Party
 from lmcache.v1.common.logging import init_logger
+from lmcache.v1.distributed.l2_adapters.raw_block.extent_allocator import (
+    ExtentAllocator,
+)
 from lmcache.v1.distributed.l2_adapters.raw_block.io_engine import (
     DEFAULT_IOURING_QUEUE_DEPTH,
     IoUringBlockIOConfig,
@@ -52,11 +58,48 @@ _DEFAULT_META_VERSION = 1
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
 _MAX_PUT_MANY_IO_URING_BATCH_KEYS = 64
 _MAX_FIXED_BUFFER_REGION_BYTES = 1 << 30
+# Checkpoint payload format. Version 1 is the fixed-slot layout; it is still
+# accepted on load and converted.
+_CHECKPOINT_FORMAT_VERSION = 2
+# The first data block holds this marker. A fixed-slot binary that does not
+# understand format 2 starts empty and writes its first object at that block,
+# so a missing marker means such a run reused the space (see
+# _prepare_data_region).
+_MARKER_MAGIC = b"LMCVAR01"
+# Write generations only need to differ across writes and runs, not resist
+# guessing; an own instance (seeded from os.urandom) is several times cheaper
+# than secrets and unaffected by random.seed() elsewhere in the process.
+# Reseeded in a forked child, or every child of one parent would repeat them.
+_GENERATION_RNG = random.Random()
+os.register_at_fork(after_in_child=_GENERATION_RNG.seed)
+# A header block that was read but holds no valid header (e.g. invalidated),
+# as opposed to None: the read itself failed.
+_NO_HEADER = (0, 0, 0)
 
 # Slot-header validation issues many small pread calls during POSIX restart
 # recovery. Use a conservative reader count to expose device parallelism without
 # relying on high thread counts; io_uring recovery should use batched reads.
 DEFAULT_RECOVERY_READ_THREADS = 8
+
+
+def _without_overlaps(
+    entries: list[tuple[str, "_Entry"]],
+) -> list[tuple[str, "_Entry"]]:
+    """Drop every entry whose range overlaps another entry's.
+
+    A consistent checkpoint never has overlapping entries, so an overlap means
+    corruption and neither entry can be trusted.
+    """
+    order = sorted(range(len(entries)), key=lambda i: entries[i][1].offset)
+    bad: set[int] = set()
+    reach_end, reach_idx = -1, -1
+    for i in order:
+        entry = entries[i][1]
+        if entry.offset < reach_end:
+            bad.update((i, reach_idx))
+        if entry.offset + entry.length > reach_end:
+            reach_end, reach_idx = entry.offset + entry.length, i
+    return [item for i, item in enumerate(entries) if i not in bad]
 
 
 def round_up(x: int, align: int) -> int:
@@ -96,7 +139,6 @@ class RawBlockCoreConfig:
     capacity_bytes: int
     block_align: int
     header_bytes: int
-    slot_bytes: int
     use_odirect: bool
     enable_zero_copy: bool
     meta_total_bytes: int
@@ -115,29 +157,44 @@ class RawBlockCoreConfig:
     fdp_slot_affinity_enabled: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class _Entry:
+    """A committed object: header at ``offset``, then its payload."""
+
     offset: int
+    length: int
+    """Allocated bytes: header plus block-aligned payload."""
     size: int
     meta: DiskCacheMetadata
+    # Runtime-only FDP placement identifier of the write, for reuse affinity.
+    placement_id: PlacementId = None
+    # Random and odd per write, also in the object header: recovery trusts an
+    # entry only if the header on the device came from that very write. An
+    # entry imported from fixed slots takes the header's bytes there (-1 until
+    # the import reads them).
+    generation: int = 0
 
 
 class _CheckpointEntry(msgspec.Struct, gc=False):
-    """A version-1 JSON record with only acyclic metadata fields."""
+    """A format-2 JSON record with only acyclic metadata fields."""
 
     offset: int
     size: int
+    gen: int
     shape: torch.Size | None
     dtype: str | None
     fmt: str | None
     cached_positions: list[Any] | None
 
 
-@dataclass
+@dataclass(slots=True)
 class _Inflight:
     offset: int
+    length: int
     meta: DiskCacheMetadata
+    placement_id: PlacementId = None
     canceled: bool = False
+    generation: int = 0
 
 
 @dataclass(frozen=True)
@@ -146,14 +203,18 @@ class RawBlockPutManyResult:
 
     results: list[bool]
     stored_keys: list[str]
+    stored_bytes: list[int]
+    """Device bytes allocated to each of ``stored_keys``."""
 
 
 class RawBlockCore:
     """
     Raw-block storage engine for the distributed L2 path.
 
-    This class owns the raw-device I/O path, slot allocation, checkpoint/recovery,
-    and lock refcounts that protect slots from deletion while in use.
+    This class owns the raw-device I/O path, space allocation, checkpoint and
+    recovery, and lock refcounts that protect objects from deletion while in
+    use. Each object gets ``header_bytes`` plus its block-aligned payload, so
+    no object size is configured.
     """
 
     def __init__(self, config: RawBlockCoreConfig):
@@ -164,8 +225,9 @@ class RawBlockCore:
 
         Raises:
             ValueError: If the supplied configuration is invalid.
-            RuntimeError: If the raw device cannot be opened or the computed
-                layout cannot fit metadata and at least one data slot.
+            RuntimeError: If the raw device cannot be opened, the computed
+                layout cannot fit metadata and a data region, or a startup
+                checkpoint or marker write fails.
 
         Notes:
             If initialization opens the device and a later recovery step fails,
@@ -176,7 +238,6 @@ class RawBlockCore:
         self.capacity_bytes = int(config.capacity_bytes)
         self.block_align = int(config.block_align)
         self.header_bytes = int(config.header_bytes)
-        self.slot_bytes = int(config.slot_bytes)
         self.use_odirect = bool(config.use_odirect)
         self.enable_zero_copy = bool(config.enable_zero_copy)
 
@@ -204,20 +265,20 @@ class RawBlockCore:
                 "io_engine='io_uring' and use_uring_cmd=true"
             )
         self._recovery_read_threads = DEFAULT_RECOVERY_READ_THREADS
+        # The posix engine writes one request after another; deletes spread
+        # their header writes over these threads.
+        self._invalidate_pool: Optional[ThreadPoolExecutor] = None
         if not self.device_path:
             raise ValueError("RawBlockCore requires a non-empty device_path")
         if self.block_align <= 0 or (self.block_align & (self.block_align - 1)) != 0:
             raise ValueError(
                 f"block_align must be a power of 2, got {self.block_align}"
             )
-        if self.header_bytes < 24:
-            raise ValueError("header_bytes must be >= 24")
+        if self.header_bytes < 32:
+            # Magic, key identity, payload length and write generation.
+            raise ValueError("header_bytes must be >= 32")
         if self.header_bytes % self.block_align != 0:
             raise ValueError("header_bytes must be a multiple of block_align")
-        if self.slot_bytes < self.header_bytes + 1:
-            raise ValueError("slot_bytes must be >= header_bytes + 1")
-        if self.slot_bytes % self.block_align != 0:
-            raise ValueError("slot_bytes must be a multiple of block_align")
         if self.meta_total_bytes <= self.block_align:
             raise ValueError("meta_total_bytes must provide room for metadata header")
         if self.meta_total_bytes % self.block_align != 0:
@@ -242,21 +303,34 @@ class RawBlockCore:
             )
 
         self._lock = threading.Lock()
+        # Header invalidations in flight; close() waits for them to finish.
+        self._invalidations_inflight = 0
+        self._invalidations_done = threading.Condition(self._lock)
         self._index: dict[str, _Entry] = {}
         self._lock_refcnt: dict[str, int] = {}
         self._inflight: dict[str, _Inflight] = {}
 
-        self._next_slot: int = 0
-        self._quarantined_slots: set[int] = set()
+        self._allocator: Optional[ExtentAllocator] = None
+        # Retired (quarantined) ranges, sorted and disjoint, and their total.
+        self._retired: list[tuple[int, int]] = []
+        self._retired_bytes: int = 0
         self._last_payload_uecc: str | None = None
-        self._free_slots: dict[int, None] = {}
-        self._free_slots_by_placement_id: dict[int, dict[int, None]] = {}
-        self._slot_placement_ids: dict[int, int] = {}
+        # End of the highest range ever allocated: below it space was written
+        # before, so FDP affinity counters only count reuse below it.
+        self._high_water: int = 0
         self._fdp_slot_affinity_hit_count: int = 0
         self._fdp_slot_affinity_fallback_count: int = 0
-        self._max_slots: int = 0
+        self._alloc_failure_count: int = 0
+        self._invalidation_failures: int = 0
+        self._header_invalidations: int = 0
+        # Metadata containers of a rejected checkpoint's layout, voided with
+        # this layout's at startup (see _note_foreign_layout).
+        self._foreign_container_offsets: list[int] = []
+        self._no_space_logged_at: float = float("-inf")
+        self._no_space_since_log: int = 0
         self._effective_capacity_bytes: int = 0
         self._data_base_offset: int = 0
+        self._data_bytes: int = 0
 
         self._io_engine: Optional[RawBlockIO] = None
         self._closed = False
@@ -279,13 +353,24 @@ class RawBlockCore:
         )
         self.use_odirect = self._io_engine.use_odirect
         self.max_data_transfer_size = self._io_engine.max_data_transfer_size
+        if self.io_engine == "posix" and self._recovery_read_threads > 1:
+            self._invalidate_pool = ThreadPoolExecutor(
+                max_workers=self._recovery_read_threads,
+                thread_name_prefix="rawblk-invalidate",
+            )
 
         try:
             self._ensure_capacity_and_layout()
+            # New checkpoints must supersede every copy on the device, also
+            # one this run does not load (skipped or rejected); otherwise the
+            # next restart would load that older copy instead.
+            self._meta_seq = self._max_checkpoint_seq()
+            loaded_format = None
             if self.load_checkpoint_on_init:
-                self._load_checkpoint_from_device()
+                loaded_format = self._load_checkpoint_from_device()
             else:
                 logger.info("RawBlockCore: skipping on-device metadata checkpoint load")
+            self._prepare_data_region(loaded_format)
 
             if self.meta_enable_periodic:
                 self._meta_thread = threading.Thread(
@@ -547,13 +632,14 @@ class RawBlockCore:
             return list(self._index.keys())
 
     def entry_offset(self, encoded_key: str) -> int | None:
-        """Return the raw-device slot offset for an indexed key.
+        """Return the raw-device offset of an indexed key's object.
 
         Args:
             encoded_key: Encoded raw-block key string.
 
         Returns:
-            Slot offset in bytes, or None when the key is not indexed.
+            Offset of the object's header in bytes, or None when the key is
+            not indexed.
         """
         with self._lock:
             entry = self._index.get(encoded_key)
@@ -564,7 +650,7 @@ class RawBlockCore:
         return self._meta_container_offsets()
 
     def data_base_offset(self) -> int:
-        """Return the byte offset where raw-block data slots begin."""
+        """Return the byte offset where the raw-block data region begins."""
         return int(self._data_base_offset)
 
     def put_many(
@@ -573,7 +659,7 @@ class RawBlockCore:
         objs: Sequence[MemoryObj],
         placement_ids: Sequence[PlacementId] | None = None,
     ) -> RawBlockPutManyResult:
-        """Persist a batch of memory objects into raw-block slots.
+        """Persist a batch of memory objects into raw-block space.
 
         With ``io_engine='io_uring'`` and more than one key, writes are
         submitted in batches and failure is no longer independent per key: a
@@ -594,10 +680,10 @@ class RawBlockCore:
                 0 is rejected because default writes already use that mapping.
 
         Returns:
-            Per-key success results and newly stored encoded keys. A key is
-            reported as failed when no free raw-block slot is available or when
-            its payload does not fit a slot. Slot reclamation is owned by the
-            adapter/controller calling ``delete_many``.
+            Per-key success results, newly stored encoded keys and their
+            allocated bytes. A key is reported as failed when no free range is
+            long enough for it. Space reclamation is owned by the
+            adapter/controller calling ``delete_many_with_sizes``.
 
         Raises:
             ValueError: If either sequence is empty, sequence lengths do not
@@ -620,11 +706,13 @@ class RawBlockCore:
 
         results = [False] * len(keys)
         stored_keys: list[str] = []
+        stored_bytes: list[int] = []
 
         for i, (key, obj) in enumerate(zip(keys, objs, strict=False)):
             placement_id = per_key_placement_ids[i]
             if self._closed:
                 break
+            payload_len = len(obj.byte_array)
 
             with self._lock:
                 if key.encoded in self._index:
@@ -632,54 +720,29 @@ class RawBlockCore:
                     continue
                 if key.encoded in self._inflight:
                     continue
-
-                try:
-                    offset = self._allocate_slot_locked(placement_id)
-                except RuntimeError:
-                    logger.warning(
-                        "RawBlockCore: no free slot available for key %s",
-                        key.encoded,
-                    )
+                inflight = self._reserve_locked(key, payload_len, obj, placement_id)
+                if inflight is None:
                     continue
 
-                meta = DiskCacheMetadata(
-                    path=f"{self.device_path}@{offset}",
-                    size=len(obj.byte_array),
-                    shape=obj.metadata.shape,
-                    dtype=obj.metadata.dtype,
-                    cached_positions=obj.metadata.cached_positions,
-                    fmt=obj.metadata.fmt,
-                    pin_count=0,
-                )
-                self._inflight[key.encoded] = _Inflight(offset=offset, meta=meta)
-
-            success = self._write_one(key, obj, offset, placement_id=placement_id)
+            success = self._write_one(
+                key,
+                obj,
+                inflight.offset,
+                inflight.generation,
+                placement_id=placement_id,
+            )
 
             with self._lock:
-                inflight = self._inflight.pop(key.encoded, None)
-                if inflight is None:
-                    results[i] = False
-                    continue
-                if inflight.canceled or not success:
-                    self._append_free_slot_locked(
-                        self._offset_to_slot(int(inflight.offset))
-                    )
-                    self._meta_dirty_total += 1
-                    results[i] = False
-                    continue
-
-                self._index[key.encoded] = _Entry(
-                    offset=inflight.offset,
-                    size=inflight.meta.size,
-                    meta=inflight.meta,
-                )
-                self._meta_dirty_total += 1
-                results[i] = True
-                stored_keys.append(key.encoded)
+                entry = self._finish_write_locked(key.encoded, success)
+                if entry is not None:
+                    results[i] = True
+                    stored_keys.append(key.encoded)
+                    stored_bytes.append(entry.length)
 
         return RawBlockPutManyResult(
             results=results,
             stored_keys=stored_keys,
+            stored_bytes=stored_bytes,
         )
 
     def exists_many(
@@ -719,7 +782,7 @@ class RawBlockCore:
         encoded_keys: Sequence[str],
         objs: Sequence[MemoryObj],
         *,
-        on_quarantine: Callable[[list[str]], None] | None = None,
+        on_quarantine: Callable[[list[tuple[str, int]]], None] | None = None,
     ) -> list[bool]:
         """Load raw-block payloads into caller-provided memory objects.
 
@@ -732,13 +795,14 @@ class RawBlockCore:
             objs: Destination memory objects. Buffers must remain valid until
                 this method returns. A destination shorter than its stored
                 payload is reported as an unsuccessful load.
-            on_quarantine: Called after retiring payload slots, with the encoded
-                keys removed from the index, outside the core lock.
+            on_quarantine: Called after retiring a failed object's space, with
+                the encoded keys removed from the index and their allocated
+                bytes, outside the core lock.
 
         Returns:
             A list of per-key load success booleans aligned with
-            ``encoded_keys``. A confirmed passthrough payload UECC removes its
-            slot for this open handle. Other successfully loaded keys remain
+            ``encoded_keys``. A confirmed passthrough payload UECC retires its
+            object's space for this open handle. Other successfully loaded keys remain
             hits. A terminal worker failure reports all misses.
 
         Raises:
@@ -834,9 +898,7 @@ class RawBlockCore:
                         for read_idx, error in unrecovered_reads.items():
                             key, entry = items[read_indices[read_idx]]
                             assert entry is not None
-                            removed.extend(
-                                self._quarantine_slot_locked(key, entry, error)
-                            )
+                            removed.extend(self._quarantine_locked(key, entry, error))
                     if on_quarantine is not None:
                         on_quarantine(removed)
 
@@ -880,7 +942,9 @@ class RawBlockCore:
         *,
         force: bool = False,
     ) -> list[bool]:
-        """Delete indexed keys and recycle their slots when allowed.
+        """Delete indexed keys and free their space when allowed.
+
+        Same as ``delete_many_with_sizes`` without the byte counts.
 
         Args:
             encoded_keys: Ordered encoded raw-block keys to delete.
@@ -890,12 +954,43 @@ class RawBlockCore:
         Returns:
             A list of per-key deletion booleans aligned with ``encoded_keys``.
         """
-        deleted: list[bool] = []
+        return [
+            size is not None
+            for size in self.delete_many_with_sizes(encoded_keys, force=force)
+        ]
+
+    def delete_many_with_sizes(
+        self,
+        encoded_keys: Sequence[str],
+        *,
+        force: bool = False,
+    ) -> list[int | None]:
+        """Delete indexed keys and free their space when allowed.
+
+        A deleted object's space is freed only after its header has been
+        overwritten: the newest on-device checkpoint may still list the
+        object, and recovery verifies headers only, so the object must fail
+        that check before another object can reuse any of its bytes. A range
+        whose header write fails is retired instead, like a quarantined one.
+        In-flight writes of the keys are cancelled.
+
+        Args:
+            encoded_keys: Ordered encoded raw-block keys to delete.
+            force: If true, delete locked keys as well. Normal MP eviction uses
+                false so locked entries are preserved.
+
+        Returns:
+            Per key, aligned with ``encoded_keys``: the allocated bytes the
+            key's committed object held, 0 when only an in-flight write was
+            cancelled, or None when nothing was deleted.
+        """
+        sizes: list[int | None] = []
+        invalidate: list[tuple[int, int, PlacementId]] = []
         with self._lock:
             for encoded_key in encoded_keys:
                 locked = self._lock_refcnt.get(encoded_key, 0) > 0
                 if locked and not force:
-                    deleted.append(False)
+                    sizes.append(None)
                     continue
 
                 removed_entry = self._index.pop(encoded_key, None)
@@ -904,15 +999,23 @@ class RawBlockCore:
                     inflight.canceled = True
                 self._lock_refcnt.pop(encoded_key, None)
                 if removed_entry is not None:
-                    self._append_free_slot_locked(
-                        self._offset_to_slot(int(removed_entry.offset))
+                    invalidate.append(
+                        (
+                            removed_entry.offset,
+                            removed_entry.length,
+                            removed_entry.placement_id,
+                        )
                     )
                     self._meta_dirty_total += 1
-                deleted.append(removed_entry is not None or inflight is not None)
-        return deleted
+                    sizes.append(removed_entry.length)
+                else:
+                    sizes.append(0 if inflight is not None else None)
+        if invalidate:
+            self._invalidate_and_free(invalidate)
+        return sizes
 
     def usage(self) -> tuple[float, float]:
-        """Return current raw-block slot usage fractions.
+        """Return current raw-block space usage fractions.
 
         Returns:
             ``(current_usage, projected_usage)``. Raw-block has no separate
@@ -920,14 +1023,21 @@ class RawBlockCore:
             indicates that usable capacity is unknown.
         """
         with self._lock:
-            usable_capacity = (
-                self._max_slots - len(self._quarantined_slots)
-            ) * self.slot_bytes
+            usable_capacity = self._usable_capacity_bytes_locked()
             if usable_capacity <= 0:
                 return (-1.0, -1.0)
-            used_slots = len(self._index) + len(self._inflight)
-            usage = (used_slots * self.slot_bytes) / usable_capacity
+            usage = self._allocated_bytes_locked() / usable_capacity
             return (usage, usage)
+
+    def usable_capacity_bytes(self) -> int:
+        """Return allocatable data bytes, less space retired after I/O errors."""
+        with self._lock:
+            return self._usable_capacity_bytes_locked()
+
+    def snapshot_indexed_allocations(self) -> list[tuple[str, int]]:
+        """Return every indexed key with the device bytes it holds."""
+        with self._lock:
+            return [(k, entry.length) for k, entry in self._index.items()]
 
     def checkpoint_now(self) -> None:
         """Synchronously write a metadata checkpoint."""
@@ -967,6 +1077,7 @@ class RawBlockCore:
         """
         with self._lock:
             assert self._io_engine is not None
+            assert self._allocator is not None
             worker_error = self._worker_error()
             fixed_buffers_registered, fixed_buffer_registered_bytes = (
                 self._io_engine.fixed_buffer_status()
@@ -978,22 +1089,23 @@ class RawBlockCore:
                 "device_path": self.device_path,
                 "block_align": self.block_align,
                 "header_bytes": self.header_bytes,
-                "slot_bytes": self.slot_bytes,
                 "meta_total_bytes": self.meta_total_bytes,
-                "usable_capacity_bytes": (
-                    self._max_slots - len(self._quarantined_slots)
-                )
-                * self.slot_bytes,
-                "quarantined_slot_count": len(self._quarantined_slots),
+                "usable_capacity_bytes": self._usable_capacity_bytes_locked(),
+                "allocated_bytes": self._allocated_bytes_locked(),
+                "free_bytes": self._allocator.free_bytes,
+                "free_extent_count": self._allocator.free_extent_count,
+                "largest_free_extent_bytes": self._allocator.largest_free_extent,
+                "alloc_failure_count": self._alloc_failure_count,
+                "quarantined_bytes": self._retired_bytes,
+                "quarantined_range_count": len(self._retired),
+                "header_invalidation_count": self._header_invalidations,
+                "header_invalidation_failure_count": self._invalidation_failures,
                 "last_payload_uecc": self._last_payload_uecc,
                 "indexed_key_count": len(self._index),
                 "inflight_key_count": len(self._inflight),
                 "locked_key_count": sum(
                     1 for refcnt in self._lock_refcnt.values() if refcnt > 0
                 ),
-                "free_slot_count": len(self._free_slots),
-                "next_slot": self._next_slot,
-                "max_slots": self._max_slots,
                 "metadata_seq": self._meta_seq,
                 "metadata_dirty_total": self._meta_dirty_total,
                 "metadata_persisted": self._meta_persisted,
@@ -1018,6 +1130,16 @@ class RawBlockCore:
             if self._closed:
                 return
             self._closed = True
+            # Deletes started before close finish their header writes first;
+            # later ones skip them (see _invalidate_and_free).
+            if not self._invalidations_done.wait_for(
+                lambda: self._invalidations_inflight == 0, timeout=30
+            ):
+                logger.warning(
+                    "RawBlockCore: closing %s with header writes of deletes "
+                    "still pending",
+                    self.device_path,
+                )
 
         self._meta_stop_evt.set()
         if self._meta_thread is not None:
@@ -1029,6 +1151,8 @@ class RawBlockCore:
         except Exception as e:
             logger.warning("RawBlockCore final checkpoint failed: %s", e)
 
+        if self._invalidate_pool is not None:
+            self._invalidate_pool.shutdown(wait=True)
         assert self._io_engine is not None
         self._io_engine.close()
 
@@ -1066,6 +1190,8 @@ class RawBlockCore:
         if self._meta_thread is not None:
             self._meta_thread.join(timeout=5)
             self._meta_thread = None
+        if self._invalidate_pool is not None:
+            self._invalidate_pool.shutdown(wait=True)
         assert self._io_engine is not None
         self._io_engine.close()
         self._closed = True
@@ -1142,15 +1268,6 @@ class RawBlockCore:
         except Exception:
             return None
 
-    def _payload_fits_slot(self, payload_len: int) -> bool:
-        """Return whether a logical payload can fit in one raw-block slot."""
-        payload_capacity = self.slot_bytes - self.header_bytes
-        if payload_len > payload_capacity:
-            return False
-        if self._requires_transfer_alignment:
-            return round_up(payload_len, self.block_align) <= payload_capacity
-        return True
-
     def _prepare_write_payload(self, memory_obj: MemoryObj) -> tuple[Any, int, int]:
         """Prepare the payload buffer and lengths for a raw-block write.
 
@@ -1159,29 +1276,16 @@ class RawBlockCore:
 
         Returns:
             A tuple of ``(buffer, payload_len, total_len)`` where ``total_len``
-            includes any O_DIRECT padding.
-
-        Raises:
-            RuntimeError: If the aligned payload would exceed slot capacity.
+            includes any O_DIRECT padding. The object's allocation always
+            holds ``total_len`` bytes after the header.
         """
         buf = memory_obj.byte_array
         if hasattr(buf, "cast"):
             buf = buf.cast("B")
         payload_len = len(memory_obj.byte_array)
-        payload_capacity = self.slot_bytes - self.header_bytes
-        if payload_len > payload_capacity:
-            raise RuntimeError(
-                f"RawBlockCore payload {payload_len} exceeds slot capacity "
-                f"{payload_capacity}"
-            )
         total_len = payload_len
         if self._requires_transfer_alignment:
             total_len = round_up(payload_len, self.block_align)
-            if total_len > payload_capacity:
-                raise RuntimeError(
-                    f"Aligned payload {total_len} exceeds slot capacity "
-                    f"{payload_capacity}"
-                )
             # byte_array exposes only payload_len bytes. Without a direct view
             # covering total_len, the I/O engine bounces the payload and zeroes
             # [payload_len, total_len) in its own buffer.
@@ -1255,15 +1359,17 @@ class RawBlockCore:
         key: RawBlockKeySpec,
         memory_obj: MemoryObj,
         offset: int,
+        generation: int,
         *,
         placement_id: PlacementId = None,
     ) -> bool:
-        """Write one object header and payload into a raw-block slot.
+        """Write one object header and payload at its allocated offset.
 
         Args:
             key: Raw-block key spec with the slot-header identity.
             memory_obj: Source object to write.
-            offset: Slot byte offset on the raw device.
+            offset: Byte offset of the object's allocation on the raw device.
+            generation: The write's generation, stored in the header.
             placement_id: FDP placement identifier for this raw-block write.
                 ``None`` omits the directive; explicit identifier 0 is rejected.
 
@@ -1274,7 +1380,10 @@ class RawBlockCore:
         try:
             with self._io_engine.lease_buffer(self.header_bytes) as header_buf:
                 self._encode_header_into_buffer(
-                    header_buf, key.slot_identity, len(memory_obj.byte_array)
+                    header_buf,
+                    key.slot_identity,
+                    len(memory_obj.byte_array),
+                    generation,
                 )
                 buf, payload_len, total_len = self._prepare_write_payload(memory_obj)
                 hdr_total = (
@@ -1313,7 +1422,7 @@ class RawBlockCore:
         """Persist objects using bounded io_uring batch submissions.
 
         Large ``put_many`` calls are split into chunks so one caller cannot
-        monopolize the RawBlockCore lock while planning slots, and so the
+        monopolize the RawBlockCore lock while planning space, and so the
         transient memory a single batch holds stays bounded.
 
         Each key contributes at least two write entries (header + payload).
@@ -1329,8 +1438,8 @@ class RawBlockCore:
                 entry per key. ``None`` entries omit the directive.
 
         Returns:
-            Per-key success results aligned with ``keys`` and the list of
-            encoded keys that were newly committed to the index.
+            Per-key success results aligned with ``keys``, the encoded keys
+            newly committed to the index and their allocated bytes.
 
         Raises:
             ValueError: If ``keys``, ``objs``, and ``placement_ids`` do not all
@@ -1341,6 +1450,7 @@ class RawBlockCore:
 
         results = [False] * len(keys)
         stored_keys: list[str] = []
+        stored_bytes: list[int] = []
         first_occurrences: dict[str, int] = {}
         unique_plan: list[tuple[int, RawBlockKeySpec, MemoryObj, PlacementId]] = []
         duplicate_indices: list[tuple[int, int]] = []
@@ -1368,11 +1478,14 @@ class RawBlockCore:
             for local_i, (global_i, _key, _obj, _placement_id) in enumerate(chunk):
                 results[global_i] = chunk_result.results[local_i]
             stored_keys.extend(chunk_result.stored_keys)
+            stored_bytes.extend(chunk_result.stored_bytes)
 
         for duplicate_i, first_i in duplicate_indices:
             results[duplicate_i] = results[first_i]
 
-        return RawBlockPutManyResult(results=results, stored_keys=stored_keys)
+        return RawBlockPutManyResult(
+            results=results, stored_keys=stored_keys, stored_bytes=stored_bytes
+        )
 
     def _put_many_batch_io_chunk(
         self,
@@ -1388,8 +1501,7 @@ class RawBlockCore:
         Failures before submission are reported per key: already indexed keys
         report success without rewriting, duplicates of keys already reserved
         in this chunk share that key's final result, and keys with no free
-        slot, payloads that cannot fit one slot, or buffer preparation errors
-        fail individually.
+        range long enough or buffer preparation errors fail individually.
         Once a combined device write is submitted, any write failure rolls back
         every submitted new key and commits none of them.
 
@@ -1403,8 +1515,8 @@ class RawBlockCore:
                 inherit that key's identifier; ``None`` omits the directive.
 
         Returns:
-            Per-key success results aligned with ``keys`` and the list of
-            encoded keys that were newly committed to the index.
+            Per-key success results aligned with ``keys``, the encoded keys
+            newly committed to the index and their allocated bytes.
 
         Raises:
             ValueError: If ``keys``, ``objs``, and ``placement_ids`` do not all
@@ -1412,11 +1524,15 @@ class RawBlockCore:
         """
         results = [False] * len(keys)
         stored_keys: list[str] = []
-        write_plan: list[tuple[int, RawBlockKeySpec, MemoryObj, int, PlacementId]] = []
+        stored_bytes: list[int] = []
+        write_plan: list[
+            tuple[int, RawBlockKeySpec, MemoryObj, _Inflight, PlacementId]
+        ] = []
         planned_keys: set[str] = set()
         batch_duplicates: list[tuple[int, str]] = []
+        payload_lens_in = [len(obj.byte_array) for obj in objs]
 
-        # Reserve slots for eligible first-occurrence keys under the lock.
+        # Reserve space for eligible first-occurrence keys under the lock.
         with self._lock:
             for i, (key, obj, placement_id) in enumerate(
                 zip(keys, objs, placement_ids, strict=True)
@@ -1432,36 +1548,18 @@ class RawBlockCore:
                     continue
                 if encoded_key in self._inflight:
                     continue
-                payload_len = len(obj.byte_array)
-                if not self._payload_fits_slot(payload_len):
-                    logger.warning(
-                        "RawBlockCore: payload for key %s does not fit slot",
-                        encoded_key,
-                    )
-                    continue
-                try:
-                    offset = self._allocate_slot_locked(placement_id)
-                except RuntimeError:
-                    logger.warning(
-                        "RawBlockCore: no free slot available for key %s",
-                        key.encoded,
-                    )
-                    continue
-                meta = DiskCacheMetadata(
-                    path=f"{self.device_path}@{offset}",
-                    size=payload_len,
-                    shape=obj.metadata.shape,
-                    dtype=obj.metadata.dtype,
-                    cached_positions=obj.metadata.cached_positions,
-                    fmt=obj.metadata.fmt,
-                    pin_count=0,
+                inflight = self._reserve_locked(
+                    key, payload_lens_in[i], obj, placement_id
                 )
-                self._inflight[encoded_key] = _Inflight(offset=offset, meta=meta)
+                if inflight is None:
+                    continue
                 planned_keys.add(encoded_key)
-                write_plan.append((i, key, obj, offset, placement_id))
+                write_plan.append((i, key, obj, inflight, placement_id))
 
         if not write_plan:
-            return RawBlockPutManyResult(results=results, stored_keys=stored_keys)
+            return RawBlockPutManyResult(
+                results=results, stored_keys=stored_keys, stored_bytes=stored_bytes
+            )
 
         # Build header/payload write entries outside the lock. Preparation
         # failures happen before device submission and are isolated per key.
@@ -1471,16 +1569,20 @@ class RawBlockCore:
         payload_lens: list[int] = []
         total_lens: list[int] = []
         write_placement_ids: list[PlacementId] = []
-        prepared_plan: list[tuple[int, RawBlockKeySpec, MemoryObj, int]] = []
+        prepared_plan: list[tuple[int, RawBlockKeySpec]] = []
         write_succeeded = True
         with ExitStack() as released_buffers:
-            for i, key, obj, offset, placement_id in write_plan:
+            for i, key, obj, inflight, placement_id in write_plan:
+                offset = inflight.offset
                 try:
                     header_buf = released_buffers.enter_context(
                         self._io_engine.lease_buffer(self.header_bytes)
                     )
                     self._encode_header_into_buffer(
-                        header_buf, key.slot_identity, len(obj.byte_array)
+                        header_buf,
+                        key.slot_identity,
+                        len(obj.byte_array),
+                        inflight.generation,
                     )
                     hdr_total = (
                         round_up(self.header_bytes, self.block_align)
@@ -1495,23 +1597,18 @@ class RawBlockCore:
                         e,
                     )
                     with self._lock:
-                        inflight = self._inflight.pop(key.encoded, None)
-                        if inflight is not None:
-                            self._append_free_slot_locked(
-                                self._offset_to_slot(int(inflight.offset))
-                            )
-                            self._meta_dirty_total += 1
+                        self._finish_write_locked(key.encoded, False)
                     continue
 
                 # Queue the key only once every fallible step has succeeded, so a
-                # failed key never leaves a header behind for a slot that the
-                # rollback above just returned to the free list.
+                # failed key never leaves a header behind for space that the
+                # rollback above just freed.
                 offsets.extend((offset, offset + self.header_bytes))
                 buffers.extend((header_buf, buf))
                 payload_lens.extend((hdr_total, payload_len))
                 total_lens.extend((hdr_total, total_len))
                 write_placement_ids.extend((placement_id, placement_id))
-                prepared_plan.append((i, key, obj, offset))
+                prepared_plan.append((i, key))
 
             if prepared_plan:
                 with self._lock:
@@ -1537,38 +1634,29 @@ class RawBlockCore:
         # Commit successful writes, or roll back submitted keys if the device
         # write failed.
         with self._lock:
-            for i, key, _obj, _offset in prepared_plan:
-                inflight = self._inflight.pop(key.encoded, None)
-                if inflight is None:
-                    continue
-                if not write_succeeded or inflight.canceled:
-                    self._append_free_slot_locked(
-                        self._offset_to_slot(int(inflight.offset))
-                    )
-                    self._meta_dirty_total += 1
-                    continue
-                self._index[key.encoded] = _Entry(
-                    offset=inflight.offset,
-                    size=inflight.meta.size,
-                    meta=inflight.meta,
-                )
-                self._meta_dirty_total += 1
-                results[i] = True
-                stored_keys.append(key.encoded)
+            for i, key in prepared_plan:
+                entry = self._finish_write_locked(key.encoded, write_succeeded)
+                if entry is not None:
+                    results[i] = True
+                    stored_keys.append(key.encoded)
+                    stored_bytes.append(entry.length)
             for i, encoded_key in batch_duplicates:
                 results[i] = encoded_key in self._index
 
-        return RawBlockPutManyResult(results=results, stored_keys=stored_keys)
+        return RawBlockPutManyResult(
+            results=results, stored_keys=stored_keys, stored_bytes=stored_bytes
+        )
 
     def _encode_header_into_buffer(
-        self, buf: Any, slot_identity: int, payload_len: int
+        self, buf: Any, slot_identity: int, payload_len: int, generation: int
     ) -> None:
-        """Encode a fixed-size raw-block slot header into ``buf`` in place.
+        """Encode a raw-block object header into ``buf`` in place.
 
         Args:
             buf: Writable buffer of at least ``header_bytes`` bytes.
-            slot_identity: Encoded slot identity to store.
+            slot_identity: Encoded key identity to store.
             payload_len: Logical payload length to store.
+            generation: The write's generation (see ``_Entry.generation``).
         """
         buf[0:8] = b"LMCBLK01"
         buf[8:16] = int(slot_identity & ((1 << 64) - 1)).to_bytes(
@@ -1577,16 +1665,19 @@ class RawBlockCore:
             signed=False,
         )
         buf[16:24] = int(payload_len).to_bytes(8, "little", signed=False)
+        buf[24:32] = int(generation).to_bytes(8, "little", signed=False)
 
-    def _decode_slot_header(self, hdr: bytes) -> Optional[tuple[int, int]]:
-        """Decode a raw-block slot header into identity and payload length."""
-        if len(hdr) < 24 or hdr[0:8] != b"LMCBLK01":
+    def _decode_slot_header(self, hdr: bytes) -> Optional[tuple[int, int, int]]:
+        """Decode a raw-block object header into identity, payload length and
+        generation; fixed-slot writers left the generation bytes unset."""
+        if len(hdr) < 32 or hdr[0:8] != b"LMCBLK01":
             return None
         slot_identity = int.from_bytes(hdr[8:16], "little", signed=False)
         payload_len = int.from_bytes(hdr[16:24], "little", signed=False)
-        return slot_identity, payload_len
+        generation = int.from_bytes(hdr[24:32], "little", signed=False)
+        return slot_identity, payload_len, generation
 
-    def _read_slot_header(self, offset: int) -> Optional[tuple[int, int]]:
+    def _read_slot_header(self, offset: int) -> Optional[tuple[int, int, int]]:
         """Read and decode the slot header at a raw-device offset."""
         assert self._io_engine is not None
         with self._io_engine.lease_buffer(self.header_bytes) as buf:
@@ -1602,7 +1693,7 @@ class RawBlockCore:
                     )
                 ):
                     return None
-                return self._decode_slot_header(bytes(buf))
+                return self._decode_slot_header(bytes(buf)) or _NO_HEADER
             except Exception:
                 return None
             finally:
@@ -1611,8 +1702,12 @@ class RawBlockCore:
                     self._last_io_ts = time.monotonic()
 
     def _ensure_capacity_and_layout(self) -> None:
-        """Compute metadata/data layout from the configured raw device."""
-        if self._effective_capacity_bytes > 0 and self._max_slots > 0:
+        """Compute the metadata/data layout and start with all data space free.
+
+        The first data block holds the format marker; objects are allocated
+        after it.
+        """
+        if self._allocator is not None:
             return
 
         assert self._io_engine is not None
@@ -1626,117 +1721,535 @@ class RawBlockCore:
 
         self._data_base_offset = self.meta_total_bytes
         data_bytes = self._effective_capacity_bytes - self._data_base_offset
-        self._max_slots = data_bytes // self.slot_bytes
-        if self._max_slots <= 0:
-            raise RuntimeError(
-                "raw block capacity too small for slot size after metadata"
-            )
+        self._data_bytes = data_bytes // self.block_align * self.block_align
+        if self._data_bytes < self.block_align + self.header_bytes + self.block_align:
+            raise RuntimeError("raw block capacity too small for data after metadata")
+        self._allocator = self._new_allocator()
 
-    def _slot_to_offset(self, slot: int) -> int:
-        """Convert a data-slot index to its byte offset."""
-        return self._data_base_offset + slot * self.slot_bytes
+    def _new_allocator(self, used: Sequence[tuple[int, int]] = ()) -> ExtentAllocator:
+        """Return an allocator over the data region after the marker block."""
+        return ExtentAllocator(
+            self._data_base_offset + self.block_align,
+            self._data_bytes - self.block_align,
+            self.block_align,
+            used,
+        )
 
-    def _offset_to_slot(self, offset: int) -> int:
-        """Convert a data-slot byte offset to its slot index."""
-        return (offset - self._data_base_offset) // self.slot_bytes
+    def _alloc_len(self, payload_len: int) -> int:
+        """Return the bytes an object with a ``payload_len`` payload occupies."""
+        return self.header_bytes + round_up(payload_len, self.block_align)
 
-    def _quarantine_slot_locked(
+    def _usable_capacity_bytes_locked(self) -> int:
+        """Return allocatable data-region bytes not retired by quarantine."""
+        assert self._allocator is not None
+        return self._allocator.size - self._retired_bytes
+
+    def _allocated_bytes_locked(self) -> int:
+        """Return usable bytes that are not free: objects, writes in flight and
+        deleted objects whose header is still being invalidated."""
+        assert self._allocator is not None
+        return self._usable_capacity_bytes_locked() - self._allocator.free_bytes
+
+    def _reserve_locked(
+        self,
+        key: RawBlockKeySpec,
+        payload_len: int,
+        obj: MemoryObj,
+        placement_id: PlacementId,
+    ) -> _Inflight | None:
+        """Allocate space for one object and record it as in flight.
+
+        Args:
+            key: Key being stored.
+            payload_len: ``len(obj.byte_array)``, computed outside the lock.
+            obj: Object being stored, for its metadata.
+            placement_id: FDP placement identifier of the write.
+
+        Returns:
+            The reservation, or None when no free range is long enough.
+        """
+        length = self._alloc_len(payload_len)
+        offset = self._allocate_locked(length, placement_id)
+        if offset is None:
+            self._warn_no_space_locked(length)
+            return None
+        meta = DiskCacheMetadata(
+            path=f"{self.device_path}@{offset}",
+            size=payload_len,
+            shape=obj.metadata.shape,
+            dtype=obj.metadata.dtype,
+            cached_positions=obj.metadata.cached_positions,
+            fmt=obj.metadata.fmt,
+            pin_count=0,
+        )
+        inflight = _Inflight(
+            offset=offset,
+            length=length,
+            meta=meta,
+            placement_id=placement_id,
+            generation=_GENERATION_RNG.getrandbits(64) | 1,
+        )
+        self._inflight[key.encoded] = inflight
+        return inflight
+
+    def _finish_write_locked(self, encoded_key: str, success: bool) -> _Entry | None:
+        """Commit a finished write, or free its space if it failed or was cancelled.
+
+        Returns:
+            The committed entry, or None when nothing was committed.
+        """
+        inflight = self._inflight.pop(encoded_key, None)
+        if inflight is None:
+            return None
+        if inflight.canceled or not success:
+            # A header it left carries a generation no checkpoint lists.
+            self._free_locked(inflight.offset, inflight.length, inflight.placement_id)
+            return None
+        self._meta_dirty_total += 1
+        entry = _Entry(
+            offset=inflight.offset,
+            length=inflight.length,
+            size=inflight.meta.size,
+            meta=inflight.meta,
+            placement_id=inflight.placement_id,
+            generation=inflight.generation,
+        )
+        self._index[encoded_key] = entry
+        return entry
+
+    def _allocate_locked(self, nbytes: int, placement_id: PlacementId) -> int | None:
+        """Allocate ``nbytes`` of device space while ``self._lock`` is held.
+
+        With FDP slot affinity, a free range of exactly ``nbytes`` last written
+        with the same placement identifier is preferred. Affinity counters
+        count only allocations of space written before.
+
+        Returns:
+            The offset, or None when no free range is long enough.
+        """
+        assert self._allocator is not None
+        tag = placement_id if self.fdp_slot_affinity_enabled else None
+        hit = tag is not None and self._allocator.has_tagged_extent(nbytes, tag)
+        offset = self._allocator.allocate(nbytes, tag=tag)
+        if offset is None:
+            self._alloc_failure_count += 1
+            return None
+        if tag is not None and offset < self._high_water:
+            if hit:
+                self._fdp_slot_affinity_hit_count += 1
+            else:
+                self._fdp_slot_affinity_fallback_count += 1
+        self._high_water = max(self._high_water, offset + nbytes)
+        return offset
+
+    def _largest_unretired_span_locked(self) -> int:
+        """Return the length of the longest data range with no retired byte."""
+        assert self._allocator is not None
+        cursor, longest = self._allocator.base, 0
+        for start, length in self._retired:
+            longest = max(longest, start - cursor)
+            cursor = max(cursor, start + length)
+        return max(longest, self._allocator.base + self._allocator.size - cursor)
+
+    def _drop_retired_locked(self) -> None:
+        """Forget retired ranges along with a dropped index: they were retired
+        for its entries, and the rebuilt allocator holds them as free. The
+        checkpoints are voided on that path, so nothing lists them."""
+        self._retired.clear()
+        self._retired_bytes = 0
+
+    def _warn_no_space_locked(self, nbytes: int) -> None:
+        """Log a failed allocation, at most once a minute (they come in runs)."""
+        assert self._allocator is not None
+        now = time.monotonic()
+        self._no_space_since_log += 1
+        if now - self._no_space_logged_at < 60:
+            return
+        never = nbytes > self._largest_unretired_span_locked()
+        logger.warning(
+            "RawBlockCore: %d stores found no free range long enough on %s "
+            "since the last warning (latest needed %d bytes%s; %d bytes free, "
+            "largest free range %d bytes)",
+            self._no_space_since_log,
+            self.device_path,
+            nbytes,
+            ", more than any range can ever hold" if never else "",
+            self._allocator.free_bytes,
+            self._allocator.largest_free_extent,
+        )
+        self._no_space_logged_at = now
+        self._no_space_since_log = 0
+
+    def _free_locked(self, offset: int, length: int, placement_id: PlacementId) -> None:
+        """Return a range to free space, minus any retired parts of it."""
+        assert self._allocator is not None
+        tag = placement_id if self.fdp_slot_affinity_enabled else None
+        self._free_unretired_locked(offset, length, tag)
+
+    def _free_unretired_locked(self, offset: int, length: int, tag: int | None) -> None:
+        """Free a range, minus any retired parts of it."""
+        assert self._allocator is not None
+        if not self._retired:
+            self._allocator.free(offset, length, tag=tag)
+            return
+        end = offset + length
+        i = bisect.bisect_left(self._retired, (offset,))
+        if i and sum(self._retired[i - 1]) > offset:
+            i -= 1
+        cursor = offset
+        while i < len(self._retired) and self._retired[i][0] < end:
+            r_start, r_len = self._retired[i]
+            if r_start > cursor:
+                self._allocator.free(cursor, r_start - cursor, tag=tag)
+            cursor = max(cursor, r_start + r_len)
+            i += 1
+        if cursor < end:
+            self._allocator.free(cursor, end - cursor, tag=tag)
+
+    def _retire_locked(self, offset: int, length: int, *, allocated: bool) -> None:
+        """Exclude a range from allocation until the device is reopened.
+
+        Free bytes in the range are withdrawn now; allocated bytes in it are
+        dropped when their owner frees them (see ``_free_locked``).
+
+        Args:
+            offset: Start of the range.
+            length: Its length.
+            allocated: Whether the whole range is known to be allocated, so
+                there are no free bytes to withdraw.
+        """
+        assert self._allocator is not None
+        end = offset + length
+        i = bisect.bisect_left(self._retired, (offset,))
+        if i and sum(self._retired[i - 1]) >= offset:
+            i -= 1
+        j = i
+        new_start, new_end, covered = offset, end, 0
+        while j < len(self._retired) and self._retired[j][0] <= new_end:
+            r_start, r_len = self._retired[j]
+            covered += max(0, min(r_start + r_len, end) - max(r_start, offset))
+            new_start = min(new_start, r_start)
+            new_end = max(new_end, r_start + r_len)
+            j += 1
+        self._retired[i:j] = [(new_start, new_end - new_start)]
+        self._retired_bytes += length - covered
+        if allocated:
+            return
+        # shortcut: linear in free extents; fine while retiring free space
+        # stays rare (a late read error), index free extents by start if not.
+        self._allocator.remove_free_range(offset, length)
+
+    def _quarantine_locked(
         self, key: str, observed: _Entry, error: str
-    ) -> list[str]:
-        """Retire the failed physical slot and invalidate its current owner."""
-        slot = self._offset_to_slot(observed.offset)
-        if slot in self._quarantined_slots:
-            return []
-        self._quarantined_slots.add(slot)
+    ) -> list[tuple[str, int]]:
+        """Retire the space of an object whose payload read failed for good.
+
+        The observed object's range is retired with every current owner of
+        any byte of it: a force-delete or an unlocked reader can race reuse,
+        so a new object may now hold part of the range. Owners are retired
+        whole rather than freed, since their headers were not invalidated.
+        In-flight writes into the range are cancelled.
+
+        Returns:
+            The removed keys with the bytes each held.
+        """
+        start, end = observed.offset, observed.offset + observed.length
         self._last_payload_uecc = error
-        self._free_slots.pop(slot, None)
-        self._remove_slot_from_affinity_pool_locked(slot)
         if self._index.get(key) is observed:
-            removed = [key]
+            owners = [key]
         else:
-            # A force-delete or unlocked reader can race slot reuse. Invalidate
-            # the owner at the failed offset, preserving a new copy elsewhere.
-            removed = [
-                k for k, entry in self._index.items() if entry.offset == observed.offset
+            # shortcut: scans the index under the lock; fine while payload
+            # UECCs stay rare, index entries by offset if they are not.
+            owners = [
+                k
+                for k, entry in self._index.items()
+                if entry.offset < end and start < entry.offset + entry.length
             ]
             for pending in self._inflight.values():
-                if pending.offset == observed.offset:
+                if pending.offset < end and start < pending.offset + pending.length:
                     pending.canceled = True
-        for encoded_key in removed:
-            del self._index[encoded_key]
+        # The observed object may be gone, its space partly free or reused.
+        self._retire_locked(start, observed.length, allocated=False)
+        removed: list[tuple[str, int]] = []
+        for owner in owners:
+            entry = self._index.pop(owner)
+            self._retire_locked(entry.offset, entry.length, allocated=True)
+            removed.append((owner, entry.length))
         self._meta_dirty_total += len(removed)
         logger.error(
-            "RawBlockCore quarantined slot %d on %s: %s", slot, self.device_path, error
+            "RawBlockCore quarantined bytes [%d, %d) on %s: %s",
+            start,
+            end,
+            self.device_path,
+            error,
         )
         return removed
 
-    def _allocate_slot_locked(self, placement_id: PlacementId = None) -> int:
-        """Allocate a slot offset while ``self._lock`` is held."""
-        self._ensure_capacity_and_layout()
-
-        if self.fdp_slot_affinity_enabled and placement_id is not None:
-            affinity_slots = self._free_slots_by_placement_id.get(placement_id)
-            if affinity_slots:
-                slot, _ = affinity_slots.popitem()
-                if not affinity_slots:
-                    self._free_slots_by_placement_id.pop(placement_id, None)
-                self._free_slots.pop(slot, None)
-                self._fdp_slot_affinity_hit_count += 1
-                self._set_slot_placement_id_locked(slot, placement_id)
-                return self._slot_to_offset(slot)
-
-        if self._free_slots:
-            slot, _ = self._free_slots.popitem()
-            self._remove_slot_from_affinity_pool_locked(slot)
-            if self.fdp_slot_affinity_enabled and placement_id is not None:
-                self._fdp_slot_affinity_fallback_count += 1
-            self._set_slot_placement_id_locked(slot, placement_id)
-            return self._slot_to_offset(slot)
-
-        while self._next_slot in self._quarantined_slots:
-            self._next_slot += 1
-        if self._next_slot < self._max_slots:
-            slot = self._next_slot
-            self._next_slot += 1
-            self._set_slot_placement_id_locked(slot, placement_id)
-            return self._slot_to_offset(slot)
-        raise RuntimeError("No free slots available")
-
-    def _append_free_slot_locked(self, slot: int) -> None:
-        """Add a slot to the free list while ``self._lock`` is held."""
-        if slot < 0 or slot >= self._max_slots:
-            return
-        if slot in self._free_slots or slot in self._quarantined_slots:
-            return
-        self._free_slots[slot] = None
-        if not self.fdp_slot_affinity_enabled:
-            return
-        placement_id = self._slot_placement_ids.get(slot)
-        if placement_id is not None:
-            self._free_slots_by_placement_id.setdefault(placement_id, {})[slot] = None
-
-    def _remove_slot_from_affinity_pool_locked(self, slot: int) -> None:
-        """Remove an allocated slot from its PID-specific free-slot pool."""
-        placement_id = self._slot_placement_ids.get(slot)
-        if placement_id is None:
-            return
-        affinity_slots = self._free_slots_by_placement_id.get(placement_id)
-        if affinity_slots is None:
-            return
-        affinity_slots.pop(slot, None)
-        if not affinity_slots:
-            self._free_slots_by_placement_id.pop(placement_id, None)
-
-    def _set_slot_placement_id_locked(
-        self,
-        slot: int,
-        placement_id: PlacementId,
+    def _invalidate_and_free(
+        self, ranges: Sequence[tuple[int, int, PlacementId]]
     ) -> None:
-        """Record the latest runtime-only placement identifier for a slot."""
-        if not self.fdp_slot_affinity_enabled or placement_id is None:
-            self._slot_placement_ids.pop(slot, None)
+        """Overwrite the header at the start of each range, then free it.
+
+        Called outside the lock for deleted objects. Nothing is flushed, so
+        this ordering holds for process crashes, not for power loss on drives
+        with volatile write caches (issue #6568). A range whose header write
+        fails is retired instead: its old header may still be valid, so
+        reusing the rest of it could let recovery return another object's
+        bytes for that key. The write happens with meta_verify_on_load off as
+        well: this run's recovery reads no headers, but a later run with
+        verification on may load the same checkpoint. After close() the space
+        is left allocated; this run reuses nothing any more. Ranges are freed
+        as their header writes end (each with posix, each io_uring batch
+        otherwise), so stores can reuse them while the rest of a large delete
+        is still being written.
+
+        Args:
+            ranges: ``(offset, length, placement_id)`` per range; the header
+                write uses the range's placement identifier.
+        """
+        with self._lock:
+            if self._closed:
+                return
+            self._invalidations_inflight += 1
+        try:
+            self._write_headers(ranges)
+        finally:
+            with self._lock:
+                self._invalidations_inflight -= 1
+                self._invalidations_done.notify_all()
+
+    def _write_headers(self, ranges: Sequence[tuple[int, int, PlacementId]]) -> None:
+        """Zero the header block at the start of each range, then settle it.
+
+        The posix engine writes one request per call, so the ranges are
+        spread over the invalidation threads, each write settling its own
+        range. io_uring writes batches of ``max_batch_size``; a batch with a
+        failed request is retried one request at a time.
+        """
+        assert self._io_engine is not None
+        with self._io_engine.lease_buffers(1, self.header_bytes) as buffers:
+            zeros = buffers[0]
+            zeros[: self.header_bytes] = bytes(self.header_bytes)
+
+            def one_by_one(part: Sequence[tuple[int, int, PlacementId]]) -> None:
+                for r in part:
+                    self._settle_invalidated([r], self._write_headers_once(zeros, [r]))
+
+            if self.io_engine == "posix":
+                if self._invalidate_pool is None or len(ranges) == 1:
+                    one_by_one(ranges)
+                    return
+                parts = [
+                    ranges[start:end]
+                    for start, end in self._build_recovery_item_ranges(
+                        len(ranges), self._recovery_read_threads
+                    )
+                ]
+                # list() waits for every part and re-raises a worker's error.
+                list(self._invalidate_pool.map(one_by_one, parts))
+                return
+            step = self._io_engine.max_batch_size
+            for start in range(0, len(ranges), step):
+                batch = ranges[start : start + step]
+                if self._write_headers_once(zeros, batch):
+                    self._settle_invalidated(batch, True)
+                else:
+                    one_by_one(batch)
+
+    def _settle_invalidated(
+        self, ranges: Sequence[tuple[int, int, PlacementId]], written: bool
+    ) -> None:
+        """Free ranges whose header was zeroed; retire them if it was not."""
+        with self._lock:
+            for offset, length, placement_id in ranges:
+                if written:
+                    self._header_invalidations += 1
+                    self._free_locked(offset, length, placement_id)
+                else:
+                    self._invalidation_failures += 1
+                    self._retire_locked(offset, length, allocated=True)
+
+    def _write_headers_once(
+        self, block: Any, ranges: Sequence[tuple[int, int, PlacementId]]
+    ) -> bool:
+        """Write ``block`` at the start of each range in one engine call."""
+        n = len(ranges)
+        with self._lock:
+            self._inflight_io_count += 1
+        try:
+            self._write_buffers(
+                [offset for offset, _, _ in ranges],
+                [block] * n,
+                [self.header_bytes] * n,
+                [self.header_bytes] * n,
+                [placement_id for _, _, placement_id in ranges],
+            )
+            return True
+        except Exception:
+            logger.exception("RawBlockCore could not invalidate %d object headers", n)
+            return False
+        finally:
+            with self._lock:
+                self._inflight_io_count -= 1
+                self._last_io_ts = time.monotonic()
+
+    def _read_marker(self) -> bool | None:
+        """Return whether the data region's first block holds the format marker.
+
+        Returns:
+            True or False, or None when the block cannot be read, also on a
+            retry: an unreadable marker says nothing about a downgrade.
+        """
+        assert self._io_engine is not None
+        for _ in range(2):
+            with self._io_engine.lease_buffers(1, self.block_align) as buffers:
+                try:
+                    ok = all(
+                        self._read_buffers(
+                            [self._data_base_offset],
+                            buffers,
+                            [self.block_align],
+                            [self.block_align],
+                        )
+                    )
+                except Exception:
+                    logger.exception("RawBlockCore could not read the format marker")
+                    continue
+                if ok:
+                    return bytes(buffers[0][: len(_MARKER_MAGIC)]) == _MARKER_MAGIC
+        return None
+
+    def _write_marker(self) -> None:
+        """Write the format marker into the data region's first block.
+
+        Raises:
+            Exception: Propagates raw-device write errors.
+        """
+        assert self._io_engine is not None
+        with self._io_engine.lease_buffer(self.block_align) as buf:
+            buf[: self.block_align] = bytes(self.block_align)
+            buf[: len(_MARKER_MAGIC)] = _MARKER_MAGIC
+            self._write_buffers(
+                [self._data_base_offset],
+                [buf],
+                [self.block_align],
+                [self.block_align],
+            )
+
+    def _note_foreign_layout(self, data: Any) -> None:
+        """Remember the containers of a rejected checkpoint's own layout.
+
+        A checkpoint written with another ``meta_total_bytes`` has its other
+        copy at an offset this layout does not read; a later run with that
+        layout again would load it over space this run reused.
+        """
+        try:
+            meta_total = int(data["meta_total_bytes"])
+            align = int(data["block_align"])
+        except (KeyError, TypeError, ValueError):
             return
-        self._slot_placement_ids[slot] = placement_id
+        if meta_total <= 0 or align <= 0 or meta_total == self.meta_total_bytes:
+            return
+        container = (meta_total // self._meta_copy_count) // align * align
+        self._foreign_container_offsets = [
+            offset // self.block_align * self.block_align
+            for offset in range(0, container * self._meta_copy_count, container)
+            if offset + self.block_align <= self._effective_capacity_bytes
+        ]
+
+    def _void_checkpoints(self) -> None:
+        """Zero the header block of every metadata container, also those of a
+        rejected checkpoint's layout.
+
+        Raises:
+            Exception: Propagates raw-device write errors.
+        """
+        assert self._io_engine is not None
+        offsets = sorted(
+            set(self._meta_container_offsets()) | set(self._foreign_container_offsets)
+        )
+        with self._io_engine.lease_buffer(self.block_align) as buf:
+            buf[: self.block_align] = bytes(self.block_align)
+            self._write_buffers(
+                offsets,
+                [buf] * len(offsets),
+                [self.block_align] * len(offsets),
+                [self.block_align] * len(offsets),
+            )
+
+    def _prepare_data_region(self, loaded_format: int | None) -> None:
+        """Make the device safe for this run's stores, before the first one.
+
+        - A format-2 checkpoint with the data-region marker gone means a
+          fixed-slot run started empty on this device and overwrote space the
+          checkpoint lists, so the checkpoint is dropped.
+        - A checkpoint that is not loaded (skipped, rejected, dropped, or
+          written with another meta_magic or meta_version, which this run
+          cannot see) may list space this run's stores will overwrite without
+          touching those objects' headers, so every metadata container is
+          voided first.
+        - An imported fixed-slot checkpoint is rewritten in format 2, so a
+          fixed-slot binary started later rejects it and starts empty. If the
+          rewrite does not fit a container, the run starts empty instead.
+        - The marker overwrites what was slot 0, before an imported
+          checkpoint is rewritten, so a crash in between re-imports it.
+
+        Args:
+            loaded_format: Format of the checkpoint loaded at startup, or None.
+
+        Raises:
+            RuntimeError: If the marker cannot be read while a format-2
+                checkpoint was loaded.
+            Exception: Propagates raw-device write errors.
+        """
+        read = self._read_marker()
+        if read is None and loaded_format == _CHECKPOINT_FORMAT_VERSION:
+            raise RuntimeError(
+                "RawBlockCore could not read the data-region format marker"
+            )
+        marked = bool(read)
+        if loaded_format == _CHECKPOINT_FORMAT_VERSION and not marked:
+            logger.warning(
+                "RawBlockCore: the data-region marker is missing, so a "
+                "fixed-slot run used %s after its last checkpoint; starting "
+                "with an empty index",
+                self.device_path,
+            )
+            with self._lock:
+                self._index.clear()
+                self._lock_refcnt.clear()
+                self._drop_retired_locked()
+                self._allocator = self._new_allocator()
+            loaded_format = None
+        if loaded_format == 1:
+            if not marked:
+                self._write_marker()
+                marked = True
+            with self._lock:
+                self._meta_dirty_total += 1
+            if not self._checkpoint_once(force=True):
+                # Format 2 entries are longer, so the rewrite can outgrow a
+                # container that held the fixed-slot checkpoint.
+                logger.warning(
+                    "RawBlockCore: the imported checkpoint does not fit a "
+                    "metadata container in the new format; starting %s with "
+                    "an empty index",
+                    self.device_path,
+                )
+                with self._lock:
+                    self._index.clear()
+                    self._lock_refcnt.clear()
+                    self._drop_retired_locked()
+                    self._allocator = self._new_allocator()
+                loaded_format = None
+        if loaded_format is None:
+            self._void_checkpoints()
+            # A foreign container may sit where the marker goes.
+            marked = marked and self._data_base_offset not in set(
+                self._foreign_container_offsets
+            )
+        if not marked:
+            self._write_marker()
 
     def _checkpoint_loop(self) -> None:
         """Periodically checkpoint dirty metadata until shutdown."""
@@ -1758,21 +2271,20 @@ class RawBlockCore:
         ]
 
     def _read_meta_header(self, container_offset: int) -> Optional[dict[str, int]]:
-        """Read and validate a metadata checkpoint header."""
+        """Read and validate a metadata checkpoint header.
+
+        Returns:
+            The header, or None when the block holds no valid header.
+
+        Raises:
+            RuntimeError: If the block cannot be read. Startup would otherwise
+                take an unreadable checkpoint for a missing one and void it.
+        """
         assert self._io_engine is not None
         with self._io_engine.lease_buffer(self.block_align) as buf:
-            try:
-                if not all(
-                    self._read_buffers(
-                        [container_offset],
-                        [buf],
-                        [self.block_align],
-                        [self.block_align],
-                    )
-                ):
-                    return None
-            except Exception:
-                return None
+            self._read_meta_block(
+                container_offset, buf, self.block_align, self.block_align
+            )
 
             hdr = bytes(buf[: _META_HEADER_STRUCT.size])
             magic, version, seq, payload_len, crc = _META_HEADER_STRUCT.unpack(hdr)
@@ -1789,6 +2301,25 @@ class RawBlockCore:
                 "container_offset": int(container_offset),
             }
 
+    def _read_meta_block(
+        self, offset: int, buf: Any, payload_len: int, total_len: int
+    ) -> None:
+        """Read part of the metadata region into ``buf``.
+
+        Raises:
+            RuntimeError: If the read fails.
+        """
+        try:
+            ok = all(self._read_buffers([offset], [buf], [payload_len], [total_len]))
+        except Exception as e:
+            raise RuntimeError(
+                f"RawBlockCore could not read the metadata region at {offset}"
+            ) from e
+        if not ok:
+            raise RuntimeError(
+                f"RawBlockCore could not read the metadata region at {offset}"
+            )
+
     def _load_meta_payload(self, header: dict[str, int]) -> Optional[bytes]:
         """Load and CRC-validate a checkpoint payload for a metadata header."""
         payload_len = int(header["payload_len"])
@@ -1796,24 +2327,21 @@ class RawBlockCore:
         total_len = round_up(payload_len, self.block_align)
         assert self._io_engine is not None
         with self._io_engine.lease_buffer(total_len) as buf:
-            try:
-                if not all(
-                    self._read_buffers(
-                        [payload_off],
-                        [buf],
-                        [payload_len],
-                        [total_len],
-                    )
-                ):
-                    return None
-            except Exception:
-                return None
-
+            self._read_meta_block(payload_off, buf, payload_len, total_len)
             payload = bytes(buf[:payload_len])
             crc = zlib.crc32(payload) & 0xFFFFFFFF
             if crc != int(header["crc"]):
                 return None
             return payload
+
+    def _max_checkpoint_seq(self) -> int:
+        """Return the highest sequence of a valid checkpoint header, or 0."""
+        seqs = [
+            header["seq"]
+            for offset in self._meta_container_offsets()
+            if (header := self._read_meta_header(offset)) is not None
+        ]
+        return max(seqs, default=0)
 
     def _select_latest_checkpoint(
         self,
@@ -1834,25 +2362,28 @@ class RawBlockCore:
         return best_header, best_payload
 
     def _snapshot_state(self) -> tuple[dict[str, Any], int]:
-        """Build a JSON-serializable checkpoint state snapshot."""
+        """Build a JSON-serializable checkpoint state snapshot.
+
+        Returns:
+            The snapshot and the dirty counter it covers.
+        """
         with self._lock:
             dirty_total = self._meta_dirty_total
             snapshot = {
-                "version": 1,
+                "version": _CHECKPOINT_FORMAT_VERSION,
                 "device_path": self.device_path,
                 "capacity_bytes": self.capacity_bytes,
                 "block_align": self.block_align,
                 "header_bytes": self.header_bytes,
-                "slot_bytes": self.slot_bytes,
                 "meta_total_bytes": self.meta_total_bytes,
                 "meta_magic": self.meta_magic_text,
                 "meta_version": self.meta_version,
                 "data_base_offset": self._data_base_offset,
-                "next_slot": self._next_slot,
                 "entries": {
                     encoded_key: _CheckpointEntry(
                         offset=entry.offset,
                         size=entry.meta.size,
+                        gen=entry.generation,
                         shape=entry.meta.shape,
                         dtype=self._checkpoint_dtype_name(entry.meta.dtype),
                         fmt=(
@@ -1981,23 +2512,19 @@ class RawBlockCore:
                 self._meta_dirty_since = snapshot_ts
         return written
 
-    def _is_valid_checkpoint_entry(self, offset: int, size: int) -> bool:
-        """Return whether a checkpoint entry references a valid data slot."""
-        if offset < self._data_base_offset:
-            return False
-        rel = offset - self._data_base_offset
-        if rel % self.slot_bytes != 0:
-            return False
-        slot = rel // self.slot_bytes
-        if slot >= self._max_slots:
-            return False
-        return 0 < size <= (self.slot_bytes - self.header_bytes)
-
     def _apply_loaded_state(self, data: dict[str, Any]) -> bool:
-        """Apply decoded checkpoint state after validating layout fields."""
+        """Apply decoded checkpoint state after validating layout fields.
+
+        Format 2 lists each object's offset; format 1 (fixed slots) is
+        imported by giving each object only the space it needs, so the rest of
+        its old slot becomes free. Entries outside the data region, off the
+        block (or, in format 1, slot) grid, or overlapping another entry are
+        dropped.
+        """
         if not isinstance(data, dict):
             return False
-        if int(data.get("version", 0)) != 1:
+        version = data.get("version")
+        if version not in (1, _CHECKPOINT_FORMAT_VERSION):
             return False
         checkpoint_device_path = data.get("device_path")
         if checkpoint_device_path and checkpoint_device_path != self.device_path:
@@ -2008,9 +2535,6 @@ class RawBlockCore:
             return False
         if int(data.get("header_bytes", self.header_bytes)) != self.header_bytes:
             logger.warning("Device metadata header_bytes mismatch; ignoring metadata")
-            return False
-        if int(data.get("slot_bytes", self.slot_bytes)) != self.slot_bytes:
-            logger.warning("Device metadata slot_bytes mismatch; ignoring metadata")
             return False
         if (
             int(data.get("meta_total_bytes", self.meta_total_bytes))
@@ -2026,91 +2550,113 @@ class RawBlockCore:
         if int(data.get("meta_version", self.meta_version)) != self.meta_version:
             logger.warning("Device metadata meta_version mismatch; ignoring metadata")
             return False
+        slot_bytes = 0
+        if version == 1:
+            raw_slot_bytes = data.get("slot_bytes")
+            if (
+                not isinstance(raw_slot_bytes, int)
+                or raw_slot_bytes <= self.header_bytes
+            ):
+                logger.warning("Device metadata slot_bytes is invalid; ignoring it")
+                return False
+            slot_bytes = raw_slot_bytes
 
-        try:
-            next_slot = int(data.get("next_slot", 0))
-        except Exception:
-            logger.warning("Device metadata next_slot is invalid; ignoring metadata")
-            return False
-        if next_slot < 0 or next_slot > self._max_slots:
+        assert self._allocator is not None
+        region_start = self._allocator.base
+        region_end = self._allocator.base + self._allocator.size
+        loaded: list[tuple[str, _Entry]] = []
+        entries = data.get("entries", {})
+        if isinstance(entries, dict):
+            for encoded_key, entry in entries.items():
+                if not isinstance(entry, dict):
+                    continue
+
+                offset = int(entry.get("offset", 0))
+                size = int(entry.get("size", 0))
+                length = self._alloc_len(size)
+                if (
+                    size <= 0
+                    or offset % self.block_align
+                    or offset < region_start
+                    or offset + length > region_end
+                ):
+                    continue
+                if version == 1 and (
+                    (offset - self._data_base_offset) % slot_bytes
+                    or length > slot_bytes
+                ):
+                    continue
+                shape_list = entry.get("shape")
+                fmt_name = entry.get("fmt")
+                cached_positions_list = entry.get("cached_positions")
+                dtype_name = entry.get("dtype")
+
+                shape = torch.Size(list(shape_list)) if shape_list is not None else None
+                fmt = (
+                    MemoryFormat[fmt_name]
+                    if isinstance(fmt_name, str)
+                    and fmt_name in MemoryFormat.__members__
+                    else MemoryFormat.UNDEFINED
+                )
+                cached_positions = (
+                    torch.tensor(cached_positions_list, dtype=torch.long)
+                    if cached_positions_list is not None
+                    else None
+                )
+                dtype = self._recover_checkpoint_dtype(dtype_name)
+
+                meta = DiskCacheMetadata(
+                    path=f"{self.device_path}@{offset}",
+                    size=size,
+                    shape=shape,
+                    dtype=dtype,
+                    cached_positions=cached_positions,
+                    fmt=fmt,
+                    pin_count=0,
+                )
+                # Fixed-slot headers have no generation: -1 adopts the one
+                # the header has (see _validate_loaded_entries).
+                generation = int(entry.get("gen", 0)) if version != 1 else -1
+                if version != 1 and generation < 0:
+                    continue
+                loaded.append(
+                    (
+                        encoded_key,
+                        _Entry(
+                            offset=offset,
+                            length=length,
+                            size=size,
+                            meta=meta,
+                            generation=generation,
+                        ),
+                    )
+                )
+        kept = _without_overlaps(loaded)
+        if len(kept) < len(loaded):
             logger.warning(
-                "Device metadata next_slot out of range (%d); ignoring metadata",
-                next_slot,
+                "RawBlockCore dropped %d checkpoint entries with overlapping space",
+                len(loaded) - len(kept),
             )
-            return False
 
         with self._lock:
-            self._next_slot = next_slot
-            self._free_slots = {}
-            self._free_slots_by_placement_id.clear()
-            self._slot_placement_ids.clear()
-            self._index.clear()
+            self._index = dict(kept)
             self._lock_refcnt.clear()
-
-            entries = data.get("entries", {})
-            if isinstance(entries, dict):
-                for encoded_key, entry in entries.items():
-                    if not isinstance(entry, dict):
-                        continue
-
-                    offset = int(entry.get("offset", 0))
-                    size = int(entry.get("size", 0))
-                    shape_list = entry.get("shape")
-                    fmt_name = entry.get("fmt")
-                    cached_positions_list = entry.get("cached_positions")
-                    dtype_name = entry.get("dtype")
-
-                    if self._offset_to_slot(offset) in self._quarantined_slots:
-                        continue
-                    if not self._is_valid_checkpoint_entry(offset, size):
-                        continue
-
-                    shape = (
-                        torch.Size(list(shape_list)) if shape_list is not None else None
-                    )
-                    fmt = (
-                        MemoryFormat[fmt_name]
-                        if isinstance(fmt_name, str)
-                        and fmt_name in MemoryFormat.__members__
-                        else MemoryFormat.UNDEFINED
-                    )
-                    cached_positions = (
-                        torch.tensor(cached_positions_list, dtype=torch.long)
-                        if cached_positions_list is not None
-                        else None
-                    )
-                    dtype = self._recover_checkpoint_dtype(dtype_name)
-
-                    meta = DiskCacheMetadata(
-                        path=f"{self.device_path}@{offset}",
-                        size=size,
-                        shape=shape,
-                        dtype=dtype,
-                        cached_positions=cached_positions,
-                        fmt=fmt,
-                        pin_count=0,
-                    )
-                    self._index[encoded_key] = _Entry(
-                        offset=offset, size=size, meta=meta
-                    )
-
-            used_slots = {
-                self._offset_to_slot(int(entry.offset))
-                for entry in self._index.values()
-            }
-            used_slots.update(self._quarantined_slots)
-            # Rebuild from committed entries instead of trusting checkpoint
-            # free_slots. A crash-time checkpoint can otherwise preserve a slot
-            # reserved by an uncommitted in-flight write as neither used nor free.
-            self._free_slots = {
-                slot: None for slot in range(self._next_slot) if slot not in used_slots
-            }
-
+            self._allocator = self._new_allocator(
+                [(entry.offset, entry.length) for _, entry in kept]
+            )
+            self._high_water = max(
+                (entry.offset + entry.length for _, entry in kept), default=0
+            )
             self._meta_dirty_total = 0
             self._meta_persisted = 0
 
-        if self.meta_verify_on_load:
+        # A fixed-slot import always reads its headers once: their generation
+        # bytes are adopted, or a later verified run would drop the entries.
+        if self.meta_verify_on_load or version == 1:
             self._validate_loaded_entries()
+        with self._lock:
+            for entry in self._index.values():
+                entry.generation = max(entry.generation, 0)
         return True
 
     def _recover_checkpoint_dtype(
@@ -2143,7 +2689,7 @@ class RawBlockCore:
         return None
 
     def _validate_loaded_entries(self) -> None:
-        """Drop recovered entries whose slot headers do not match metadata."""
+        """Drop recovered entries whose object headers do not match metadata."""
         with self._lock:
             items = list(self._index.items())
 
@@ -2153,22 +2699,36 @@ class RawBlockCore:
         offsets = [int(entry.offset) for _, entry in items]
         headers = self._read_slot_headers(offsets)
         to_drop = [
-            encoded_key
+            (encoded_key, slot_hdr is None)
             for (encoded_key, entry), slot_hdr in zip(items, headers, strict=True)
             if self._is_stale_header(encoded_key, entry, slot_hdr)
         ]
+        with self._lock:
+            # An entry imported from fixed slots takes the generation bytes its
+            # header has, so a later rewrite of the key there is told apart.
+            for (encoded_key, entry), slot_hdr in zip(items, headers, strict=True):
+                if entry.generation < 0 and slot_hdr is not None:
+                    entry.generation = slot_hdr[2]
 
         if not to_drop:
             return
 
         with self._lock:
-            for encoded_key in to_drop:
+            for encoded_key, unreadable in to_drop:
                 removed_entry = self._index.pop(encoded_key, None)
                 self._lock_refcnt.pop(encoded_key, None)
-                if removed_entry is not None:
-                    self._append_free_slot_locked(
-                        self._offset_to_slot(int(removed_entry.offset))
+                if removed_entry is None:
+                    continue
+                if unreadable:
+                    # The header may still be valid on the device, so the
+                    # space cannot be reused without rewriting it first.
+                    self._retire_locked(
+                        removed_entry.offset, removed_entry.length, allocated=True
                     )
+                else:
+                    # Its header already fails the check, so no checkpoint can
+                    # bring it back: the space is free at once.
+                    self._free_locked(removed_entry.offset, removed_entry.length, None)
             self._meta_dirty_total += 1
 
         logger.warning(
@@ -2180,7 +2740,7 @@ class RawBlockCore:
     def _read_slot_headers(
         self,
         offsets: list[int],
-    ) -> list[Optional[tuple[int, int]]]:
+    ) -> list[Optional[tuple[int, int, int]]]:
         """Dispatch slot-header reads to the appropriate engine path."""
         n = len(offsets)
         if self.io_engine == "posix" and self._recovery_read_threads > 1 and n > 1:
@@ -2192,7 +2752,7 @@ class RawBlockCore:
     def _read_slot_headers_posix_parallel(
         self,
         offsets: list[int],
-    ) -> list[Optional[tuple[int, int]]]:
+    ) -> list[Optional[tuple[int, int, int]]]:
         """Return slot headers using a bounded POSIX reader thread pool."""
         n = len(offsets)
         max_workers = min(self._recovery_read_threads, n)
@@ -2212,7 +2772,7 @@ class RawBlockCore:
     def _read_slot_header_range(
         self,
         work_item: tuple[list[int], int, int],
-    ) -> list[Optional[tuple[int, int]]]:
+    ) -> list[Optional[tuple[int, int, int]]]:
         """Read one recovery range, preserving offset order and failed reads."""
         offsets, start, end = work_item
         return [self._read_slot_header(offsets[i]) for i in range(start, end)]
@@ -2220,7 +2780,7 @@ class RawBlockCore:
     def _read_slot_headers_batched(
         self,
         offsets: list[int],
-    ) -> list[Optional[tuple[int, int]]]:
+    ) -> list[Optional[tuple[int, int, int]]]:
         """Return slot headers using the batched io_uring read path.
 
         Splits the reads into ``max_batch_size``-sized batches so a large
@@ -2232,13 +2792,13 @@ class RawBlockCore:
             offsets: Device byte offsets for each slot header to read.
 
         Returns:
-            Decoded (slot_identity, payload_len) per slot, or None on error,
-            in the same order as ``offsets``.
+            Decoded (slot_identity, payload_len, generation) per header, or
+            None on error, in the same order as ``offsets``.
         """
         n = len(offsets)
         assert self._io_engine is not None
         batch_size = self._io_engine.max_batch_size
-        headers: list[Optional[tuple[int, int]]] = []
+        headers: list[Optional[tuple[int, int, int]]] = []
         for start in range(0, n, batch_size):
             headers.extend(
                 self._read_slot_header_batch(offsets[start : start + batch_size])
@@ -2248,7 +2808,7 @@ class RawBlockCore:
     def _read_slot_header_batch(
         self,
         offsets: list[int],
-    ) -> list[Optional[tuple[int, int]]]:
+    ) -> list[Optional[tuple[int, int, int]]]:
         """Read one bounded batch of slot headers through the engine read path.
 
         Submission, splitting, and completion are delegated to the engine's
@@ -2262,7 +2822,8 @@ class RawBlockCore:
             offsets: Device byte offsets for this batch (non-empty).
 
         Returns:
-            Decoded (slot_identity, payload_len) per slot, or None on error.
+            Decoded (slot_identity, payload_len, generation) per header, or
+            None on error.
             Decode successful completions directly and reread only failed
             slots. Submission errors or a completion-count mismatch require
             rereading every slot because individual results are unavailable.
@@ -2289,7 +2850,7 @@ class RawBlockCore:
                     self._inflight_io_count -= 1
                     self._last_io_ts = time.monotonic()
             return [
-                self._decode_slot_header(bytes(buf))
+                (self._decode_slot_header(bytes(buf)) or _NO_HEADER)
                 if success
                 else self._read_slot_header(offset)
                 for offset, buf, success in zip(offsets, bufs, results, strict=True)
@@ -2299,18 +2860,21 @@ class RawBlockCore:
         self,
         encoded_key: str,
         entry: _Entry,
-        slot_hdr: Optional[tuple[int, int]],
+        slot_hdr: Optional[tuple[int, int, int]],
     ) -> bool:
-        """Return True when the recovered slot header does not match metadata."""
+        """Return True when the recovered object header does not match the
+        entry: another key or size, or another write of the same key."""
         if slot_hdr is None:
             return True
         try:
             expected_identity = object_key_slot_identity(encoded_key)
         except Exception:
             return True
-        slot_identity, payload_len = slot_hdr
-        return int(slot_identity) != int(expected_identity) or int(payload_len) != int(
-            entry.size
+        slot_identity, payload_len, generation = slot_hdr
+        return (
+            int(slot_identity) != int(expected_identity)
+            or int(payload_len) != int(entry.size)
+            or (entry.generation >= 0 and generation != entry.generation)
         )
 
     def _build_recovery_item_ranges(
@@ -2325,28 +2889,37 @@ class RawBlockCore:
             for start in range(0, item_count, range_size)
         ]
 
-    def _load_checkpoint_from_device(self) -> None:
-        """Load the newest valid checkpoint from the raw device if present."""
+    def _load_checkpoint_from_device(self) -> int | None:
+        """Load the newest valid checkpoint from the raw device if present.
+
+        Returns:
+            The loaded checkpoint's format version, or None when none was
+            loaded.
+        """
         header, payload = self._select_latest_checkpoint()
         if header is None:
             logger.info("RawBlockCore: no valid on-device metadata checkpoint found")
-            return
+            return None
         if payload is None:
             logger.warning("RawBlockCore: checkpoint header had no payload")
-            return
+            return None
         try:
             data = json.loads(payload.decode("utf-8"))
         except Exception:
             logger.warning("RawBlockCore: failed to decode metadata payload")
-            return
+            return None
         if not self.apply_loaded_state(data):
             logger.warning("RawBlockCore: metadata payload rejected by checks")
-            return
+            self._note_foreign_layout(data)
+            return None
+        # Continue after the copy loaded, not after a newer torn one: the next
+        # write then replaces the torn copy and keeps this one.
         self._meta_seq = int(header["seq"])
         logger.info(
-            "RawBlockCore loaded checkpoint (entries=%d next_slot=%d seq=%d device=%s)",
+            "RawBlockCore loaded format-%d checkpoint (entries=%d seq=%d device=%s)",
+            data["version"],
             len(self._index),
-            self._next_slot,
             self._meta_seq,
             self.device_path,
         )
+        return int(data["version"])

@@ -172,7 +172,7 @@ def _normalize_fdp_slot_reuse_policy(
     *,
     fdp_enabled: bool,
 ) -> str:
-    """Normalize the FDP free-slot reuse policy."""
+    """Normalize the FDP free-space reuse policy."""
     if policy is None or policy == "":
         if fdp_enabled:
             return _FDP_SLOT_REUSE_POLICY_PID_AFFINITY
@@ -225,7 +225,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         self,
         *,
         device_path: str,
-        slot_bytes: int,
+        slot_bytes: int | None = None,
         capacity_bytes: int = 0,
         use_odirect: bool = True,
         block_align: int = 4096,
@@ -256,11 +256,12 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
 
         Args:
             device_path: Raw device path or pre-sized file path used for L2.
-            slot_bytes: Fixed data-slot size in bytes.
+            slot_bytes: Deprecated and ignored; each object gets the space it
+                needs. Accepted so existing configurations keep working.
             capacity_bytes: Optional cap on usable bytes; zero uses device size.
             use_odirect: Whether to open the raw path with O_DIRECT.
             block_align: Required power-of-two block alignment in bytes.
-            header_bytes: Per-slot header reservation in bytes.
+            header_bytes: Per-object header reservation in bytes.
             meta_total_bytes: Reserved metadata checkpoint region size.
             meta_magic: Eight-byte ASCII metadata checkpoint magic.
             meta_version: Metadata checkpoint version.
@@ -269,7 +270,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
                 checkpoint that has waited a full interval does not wait for it.
             meta_enable_periodic: Whether to run the checkpoint thread.
             load_checkpoint_on_init: Whether to load existing checkpoint metadata.
-            meta_verify_on_load: Whether recovery verifies slot headers.
+            meta_verify_on_load: Whether recovery verifies object headers.
             enable_zero_copy: Whether to use aligned direct-buffer I/O.
             io_engine: Raw-block I/O engine: ``"posix"`` or ``"io_uring"``.
             iouring_queue_depth: Queue depth for the Rust io_uring engine.
@@ -285,9 +286,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             fdp_data_placement_policy: KV data FDP placement policy. ``None``
                 defaults to ``"cache_salt_prefix"`` when FDP is enabled and
                 ``"none"`` otherwise.
-            fdp_slot_reuse_policy: Evicted-slot reuse policy. ``"pid_affinity"``
-                prefers a slot last assigned to the same placement identifier
-                before falling back to the global free-slot pool. ``None``
+            fdp_slot_reuse_policy: Free-space reuse policy. ``"pid_affinity"``
+                prefers a free extent of exactly the needed length last written
+                with the same placement identifier, otherwise best fit. ``None``
                 defaults to ``"pid_affinity"`` when FDP is enabled and ``"none"``
                 otherwise.
             meta_checkpoint_placement_id: Optional non-zero placement identifier
@@ -297,8 +298,12 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             num_load_workers: Number of load worker threads.
         """
         super().__init__()
+        if slot_bytes is not None:
+            logger.warning(
+                "raw_block: slot_bytes is deprecated and ignored; space is "
+                "allocated to each object's actual size"
+            )
         self.device_path = device_path
-        self.slot_bytes = int(slot_bytes)
         self.capacity_bytes = int(capacity_bytes)
         self.use_odirect = bool(use_odirect)
         self.block_align = int(block_align)
@@ -369,10 +374,6 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         if not bool(d.get("persist_enabled", True)):
             raise ValueError("raw_block requires persist_enabled=true")
 
-        slot_bytes = d.get("slot_bytes")
-        if not isinstance(slot_bytes, int) or slot_bytes <= 0:
-            raise ValueError("slot_bytes must be a positive integer")
-
         block_align = int(d.get("block_align", 4096))
         header_bytes = int(d.get("header_bytes", 4096))
         meta_total_bytes = int(d.get("meta_total_bytes", 256 * 1024 * 1024))
@@ -400,16 +401,12 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
 
         if block_align <= 0 or (block_align & (block_align - 1)) != 0:
             raise ValueError(f"block_align must be a power of 2, got {block_align}")
-        if slot_bytes % block_align != 0:
-            raise ValueError("slot_bytes must be a multiple of block_align")
         if header_bytes % block_align != 0:
             raise ValueError("header_bytes must be a multiple of block_align")
         if meta_total_bytes % block_align != 0:
             raise ValueError("meta_total_bytes must be a multiple of block_align")
-        if slot_bytes < header_bytes + 1:
-            raise ValueError("slot_bytes must be >= header_bytes + 1")
         if capacity_bytes > 0 and capacity_bytes <= meta_total_bytes:
-            raise ValueError("capacity_bytes must leave space for at least one slot")
+            raise ValueError("capacity_bytes must leave space after meta_total_bytes")
         if iouring_queue_depth <= 0:
             raise ValueError("iouring_queue_depth must be > 0")
         if use_uring_cmd and io_engine != "io_uring":
@@ -440,7 +437,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
 
         return cls(
             device_path=device_path,
-            slot_bytes=slot_bytes,
+            slot_bytes=d.get("slot_bytes"),
             capacity_bytes=capacity_bytes,
             use_odirect=bool(d.get("use_odirect", True)),
             block_align=block_align,
@@ -474,14 +471,14 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         return (
             "raw_block L2 adapter config fields:\n"
             "- device_path (str): raw device or file path (required)\n"
-            "- slot_bytes (int): slot size in bytes, aligned to block_align "
-            "(required)\n"
+            "- slot_bytes (int): deprecated and ignored; space is allocated "
+            "per object\n"
             "- capacity_bytes (int): optional usable capacity cap "
             "(default 0 = device size)\n"
             "- use_odirect (bool): enable O_DIRECT raw I/O (default true)\n"
             "- block_align (int): required power-of-two block alignment in "
             "bytes (default 4096)\n"
-            "- header_bytes (int): per-slot header reservation (default 4096)\n"
+            "- header_bytes (int): per-object header reservation (default 4096)\n"
             "- meta_total_bytes (int): reserved metadata checkpoint region "
             "(default 256MiB)\n"
             "- meta_magic (str): 8-byte metadata magic (default LMCIDX01)\n"
@@ -489,11 +486,12 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "- meta_checkpoint_interval_sec (int): periodic checkpoint interval "
             "(default 60)\n"
             "- meta_idle_quiet_ms (int): quiet period before checkpoint (default 100)\n"
-            "- meta_enable_periodic (bool): enable periodic checkpointing "
+            "- meta_enable_periodic (bool): enable periodic checkpointing; "
+            "when false, only a clean shutdown leaves a full checkpoint "
             "(default true)\n"
             "- load_checkpoint_on_init (bool): load existing metadata checkpoint "
             "on startup (default true)\n"
-            "- meta_verify_on_load (bool): validate slot headers on recovery "
+            "- meta_verify_on_load (bool): validate object headers on recovery "
             "(default true)\n"
             "- enable_zero_copy (bool): use aligned direct buffers when possible "
             "(default true)\n"
@@ -531,7 +529,6 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             capacity_bytes=self.capacity_bytes,
             block_align=self.block_align,
             header_bytes=self.header_bytes,
-            slot_bytes=self.slot_bytes,
             use_odirect=self.use_odirect,
             enable_zero_copy=self.enable_zero_copy,
             meta_total_bytes=self.meta_total_bytes,
@@ -554,7 +551,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
 
 
 class RawBlockL2Adapter(L2AdapterInterface):
-    """MP L2 adapter that persists KV objects into raw-block slots."""
+    """MP L2 adapter that persists KV objects into raw-block extents."""
 
     def __init__(
         self,
@@ -833,17 +830,24 @@ class RawBlockL2Adapter(L2AdapterInterface):
             return self._completed_load_tasks.pop(task_id, None)
 
     def delete(self, keys: list[ObjectKey]) -> None:
-        """Delete keys from raw-block L2 and notify listeners for removals."""
+        """Delete keys from raw-block L2 and notify listeners for removals.
+
+        Before returning, the call zeroes each deleted object's header on the
+        device (one ``header_bytes`` write per object), so its cost grows with
+        the number of keys.
+        """
         encoded_keys = [encode_object_key(key).encoded for key in keys]
-        metas = self._core.get_metadata_many(encoded_keys)
-        deleted_bitmap = self._core.delete_many(encoded_keys, force=False)
+        sizes = self._core.delete_many_with_sizes(encoded_keys, force=False)
         deleted_keys: list[ObjectKey] = []
         deleted_sizes: list[int] = []
-        for key, meta, deleted in zip(keys, metas, deleted_bitmap, strict=False):
-            if not deleted:
+        for key, size in zip(keys, sizes, strict=True):
+            if size is None:
                 continue
             deleted_keys.append(key)
-            deleted_sizes.append(0 if meta is None else int(self._core.slot_bytes))
+            deleted_sizes.append(size)
+        # Space whose header could not be invalidated is retired.
+        with self._usage_lock:
+            self._max_capacity_bytes = self._core.usable_capacity_bytes()
         if deleted_keys:
             try:
                 self._notify_keys_deleted(deleted_keys, deleted_sizes)
@@ -853,12 +857,11 @@ class RawBlockL2Adapter(L2AdapterInterface):
     def register_listener(self, listener: "L2AdapterListener") -> None:
         """Register a listener and seed it with currently indexed keys."""
         super().register_listener(listener)
-        keys = self._snapshot_indexed_object_keys()
+        keys, sizes = self._snapshot_indexed_allocations()
         if not keys:
             return
         try:
-            slot_bytes = int(self._core.slot_bytes)
-            listener.on_l2_keys_stored(keys, [slot_bytes] * len(keys))
+            listener.on_l2_keys_stored(keys, sizes)
         except Exception as e:
             logger.warning(
                 "RawBlockL2Adapter listener recovery bootstrap failed: %s", e
@@ -1226,15 +1229,14 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
     def _seed_usage_from_core_snapshot(self) -> None:
         """Seed byte counters for entries recovered by RawBlockCore startup."""
-        recovered_keys = self._snapshot_indexed_object_keys()
+        recovered_keys, sizes = self._snapshot_indexed_allocations()
         if not recovered_keys:
             return
 
-        slot_bytes = int(self._core.slot_bytes)
-        total_delta = len(recovered_keys) * slot_bytes
+        total_delta = sum(sizes)
         by_salt: dict[str, int] = {}
-        for key in recovered_keys:
-            by_salt[key.cache_salt] = by_salt.get(key.cache_salt, 0) + slot_bytes
+        for key, size in zip(recovered_keys, sizes, strict=True):
+            by_salt[key.cache_salt] = by_salt.get(key.cache_salt, 0) + size
 
         with self._usage_lock:
             self._total_bytes_used += total_delta
@@ -1243,10 +1245,11 @@ class RawBlockL2Adapter(L2AdapterInterface):
                     self._bytes_by_cache_salt.get(salt, 0) + delta
                 )
 
-    def _snapshot_indexed_object_keys(self) -> list[ObjectKey]:
-        """Return decoded ObjectKeys for all indexed raw-block entries."""
+    def _snapshot_indexed_allocations(self) -> tuple[list[ObjectKey], list[int]]:
+        """Return decoded ObjectKeys and allocated bytes for indexed entries."""
         keys: list[ObjectKey] = []
-        for encoded_key in self._core.snapshot_indexed_keys():
+        sizes: list[int] = []
+        for encoded_key, size in self._core.snapshot_indexed_allocations():
             try:
                 keys.append(decode_object_key(encoded_key))
             except Exception as e:
@@ -1255,7 +1258,9 @@ class RawBlockL2Adapter(L2AdapterInterface):
                     encoded_key,
                     e,
                 )
-        return keys
+                continue
+            sizes.append(size)
+        return keys, sizes
 
     def _run_store_task(
         self,
@@ -1273,20 +1278,23 @@ class RawBlockL2Adapter(L2AdapterInterface):
 
             - task success for the whole batch
             - newly stored object keys
-            - raw-block slot byte charges aligned with the newly stored keys
+            - device bytes allocated to each newly stored key
         """
         specs = [encode_object_key(key) for key in keys]
         placement_ids = self._assign_fdp_placement_ids(keys)
         put_result = self._core.put_many(specs, objects, placement_ids=placement_ids)
-        stored_encoded = set(put_result.stored_keys)
-        slot_bytes = int(self._core.slot_bytes)
+        stored_bytes = dict(
+            zip(put_result.stored_keys, put_result.stored_bytes, strict=True)
+        )
         stored_keys: list[ObjectKey] = []
         stored_sizes: list[int] = []
         for key, spec in zip(keys, specs, strict=False):
-            if spec.encoded not in stored_encoded:
+            # pop: a key repeated in the batch is stored and charged once.
+            size = stored_bytes.pop(spec.encoded, None)
+            if size is None:
                 continue
             stored_keys.append(key)
-            stored_sizes.append(slot_bytes)
+            stored_sizes.append(size)
         return all(put_result.results), stored_keys, stored_sizes
 
     def _finish_store_task(
@@ -1356,16 +1364,14 @@ class RawBlockL2Adapter(L2AdapterInterface):
                 accessed_keys.append(keys[i])
         return bitmap, accessed_keys
 
-    def _on_quarantine(self, encoded_keys: list[str]) -> None:
-        """Refresh capacity and notify eviction listeners about removed slot owners."""
+    def _on_quarantine(self, removed: list[tuple[str, int]]) -> None:
+        """Refresh capacity and notify eviction listeners about removed owners."""
         with self._usage_lock:
-            self._max_capacity_bytes = self._core.report_status()[
-                "usable_capacity_bytes"
-            ]
-        if encoded_keys:
-            keys = [decode_object_key(key) for key in encoded_keys]
+            self._max_capacity_bytes = self._core.usable_capacity_bytes()
+        if removed:
+            keys = [decode_object_key(key) for key, _ in removed]
             try:
-                self._notify_keys_deleted(keys, [self._core.slot_bytes] * len(keys))
+                self._notify_keys_deleted(keys, [size for _, size in removed])
             except Exception as e:
                 logger.warning(
                     "RawBlockL2Adapter quarantine notification failed: %s", e

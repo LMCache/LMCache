@@ -40,7 +40,6 @@ from tests.v1.distributed.raw_block.test_utils import (
     RAW_BLOCK_CI_CAPACITY_BYTES,
     RAW_BLOCK_CI_HEADER_BYTES,
     RAW_BLOCK_CI_META_TOTAL_BYTES,
-    RAW_BLOCK_CI_SLOT_BYTES,
     _RecordingRawDevice,
     is_skip_safe_io_error,
     make_aligned_memory_obj,
@@ -58,6 +57,12 @@ requires_rust_raw_block_io = pytest.mark.skipif(
     importlib.util.find_spec("lmcache_rust_raw_block_io") is None,
     reason="lmcache_rust_raw_block_io is not installed",
 )
+
+
+def _allocated(core: RawBlockCore, encoded_keys) -> list[int]:
+    """Device bytes each key holds, 0 when it is not indexed."""
+    held = dict(core.snapshot_indexed_allocations())
+    return [held.get(k, 0) for k in encoded_keys]
 
 
 def test_normalize_raw_block_placement_ids_rejects_out_of_range() -> None:
@@ -422,18 +427,15 @@ def test_raw_block_core_rejects_checkpoint_layout_mismatch(
 
     try:
         state = {
-            "version": 1,
+            "version": 2,
             "device_path": str(path),
             "capacity_bytes": core.capacity_bytes,
             "block_align": core.block_align,
             "header_bytes": core.header_bytes,
-            "slot_bytes": core.slot_bytes,
             "meta_total_bytes": core.meta_total_bytes,
             "meta_magic": core.meta_magic_text,
             "meta_version": core.meta_version,
             "data_base_offset": core.data_base_offset(),
-            "next_slot": 0,
-            "free_slots": [],
             "entries": {},
         }
         state[field_name] = mismatched_value
@@ -512,12 +514,20 @@ def _make_core_with_fake(
 
     with patch.object(raw_block_core, "make_raw_block_io", _make_engine):
         core = RawBlockCore(config)
+    # Count only the test's own I/O, not startup's header reads and marker.
+    fake.reset_counts()
     return core
 
 
-def _available_slots(status: Mapping[str, int]) -> int:
-    """Return slots still allocatable from the free list plus the high-water tail."""
-    return status["free_slot_count"] + (status["max_slots"] - status["next_slot"])
+# Device bytes of an object with at most one block of payload.
+_OBJECT_BYTES = RAW_BLOCK_CI_HEADER_BYTES + RAW_BLOCK_CI_BLOCK_ALIGN
+# First object offset: the data region starts with one format-marker block.
+_DATA_START = RAW_BLOCK_CI_META_TOTAL_BYTES + RAW_BLOCK_CI_BLOCK_ALIGN
+
+
+def _free_bytes(status: Mapping[str, int]) -> int:
+    """Return bytes still allocatable."""
+    return status["free_bytes"]
 
 
 @pytest.mark.no_shared_allocator
@@ -555,7 +565,7 @@ def test_raw_block_core_rejects_work_after_terminal_worker_failure(
 
         status = core.report_status()
         assert len(fake.batched_write_calls) == writes_before
-        assert _available_slots(status) == _available_slots(before)
+        assert _free_bytes(status) == _free_bytes(before)
         assert status["locked_key_count"] == 0
         assert status["inflight_key_count"] == 0
         assert status["inflight_io_count"] == 0
@@ -570,7 +580,9 @@ def test_raw_block_core_uecc_quarantines_only_the_failed_payload_slot(
     tmp_path: Path,
 ) -> None:
     fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
-    capacity = RAW_BLOCK_CI_META_TOTAL_BYTES + 3 * RAW_BLOCK_CI_SLOT_BYTES
+    # Room for a (20 KiB), b (8 KiB) and a second copy of a, nothing more.
+    a_bytes, b_bytes = 20 * 1024, 8 * 1024
+    capacity = _DATA_START + 2 * a_bytes + b_bytes
     with patch.object(IoUringBlockIO, "validate_uring_cmd_device"):
         core = _make_core_with_fake(
             tmp_path / "raw-block",
@@ -602,8 +614,9 @@ def test_raw_block_core_uecc_quarantines_only_the_failed_payload_slot(
         assert core.load_many_into([b.encoded], targets[1:]) == [True]
         status = core.report_status()
         assert status["is_healthy"] and status["worker_error"] is None
-        assert status["quarantined_slot_count"] == 1
-        assert status["usable_capacity_bytes"] == 2 * core.slot_bytes
+        assert status["quarantined_range_count"] == 1
+        assert status["quarantined_bytes"] == a_bytes
+        assert status["usable_capacity_bytes"] == a_bytes + b_bytes
         assert (
             f"offset={old_offset + core.header_bytes + 8192} len=4096 status=0x0281"
             in status["last_payload_uecc"]
@@ -658,7 +671,7 @@ def test_uecc_text_alone_does_not_quarantine(
                 m.setattr(fake, "wait_iouring", fail_read)
             assert core.load_many_into([key.encoded], [target]) == [False]
         assert not fake.batch_results
-        assert core.report_status()["quarantined_slot_count"] == 0
+        assert core.report_status()["quarantined_range_count"] == 0
         assert core.load_many_into([key.encoded], [target]) == [True]
     finally:
         core.close()
@@ -678,7 +691,11 @@ def test_uecc_after_slot_reuse_removes_current_owner(tmp_path: Path) -> None:
         )
     old_key, new_key = [encode_object_key(make_object_key(i)) for i in (713, 714)]
     obj = make_memory_obj(b"x" * 4096)
+    # The new owner is larger than the failed object, so it also holds space
+    # past the failed range.
+    larger = make_memory_obj(b"y" * 8192)
     wait = fake.wait_iouring_exceptions
+    new_bytes: list[int] = []
 
     def finish_after_reuse(
         batch_id: int,
@@ -686,8 +703,12 @@ def test_uecc_after_slot_reuse_removes_current_owner(tmp_path: Path) -> None:
         result = wait(batch_id)
         if result[1]:
             assert core.delete_many([old_key.encoded]) == [True]
-            assert core.put_many([new_key, old_key], [obj, obj]).results == [True, True]
+            assert core.put_many([new_key, old_key], [larger, obj]).results == [
+                True,
+                True,
+            ]
             assert core.entry_offset(new_key.encoded) == failed_offset
+            new_bytes.extend(_allocated(core, [new_key.encoded]))
         return result
 
     try:
@@ -701,7 +722,14 @@ def test_uecc_after_slot_reuse_removes_current_owner(tmp_path: Path) -> None:
                 [old_key.encoded], [make_empty_memory_obj(4096)]
             ) == [False]
         assert core.exists_many([old_key.encoded, new_key.encoded]) == [True, False]
-        assert core.report_status()["quarantined_slot_count"] == 1
+        status = core.report_status()
+        assert status["quarantined_range_count"] == 1
+        # The whole new owner is retired: its header was never invalidated, so
+        # none of its space may be reused.
+        assert status["quarantined_bytes"] == new_bytes[0]
+        assert status["allocated_bytes"] == sum(
+            _allocated(core, core.snapshot_indexed_keys())
+        )
         assert core.load_many_into(
             [old_key.encoded], [make_empty_memory_obj(4096)]
         ) == [True]
@@ -718,7 +746,7 @@ def test_uecc_after_slot_reuse_removes_current_owner(tmp_path: Path) -> None:
             load_checkpoint_on_init=True,
         )
     try:
-        assert reopened.report_status()["quarantined_slot_count"] == 0
+        assert reopened.report_status()["quarantined_range_count"] == 0
         assert reopened.exists_many([old_key.encoded, new_key.encoded]) == [True, False]
         assert reopened.put_many([new_key], [obj]).results == [True]
         assert reopened.entry_offset(new_key.encoded) == failed_offset
@@ -730,10 +758,9 @@ def test_uecc_after_slot_reuse_removes_current_owner(tmp_path: Path) -> None:
 def test_raw_block_core_request_error_does_not_mark_worker_failed(
     tmp_path: Path,
 ) -> None:
-    fake = _RecordingRawDevice(
-        size=RAW_BLOCK_CI_CAPACITY_BYTES, fail_completion_entries={0}
-    )
+    fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
     core = _make_core_with_fake(tmp_path / "raw-block", fake, "io_uring")
+    fake.fail_completion_entries.add(0)
     try:
         key = encode_object_key(make_object_key(701))
         assert core.put_many([key], [make_memory_obj(b"failed-io")]).results == [False]
@@ -1076,7 +1103,7 @@ def test_raw_block_core_io_uring_put_many_all_or_nothing_rollback(
     core = _make_core_with_fake(path, fake, io_engine="io_uring")
 
     try:
-        before = _available_slots(core.report_status())
+        before = _free_bytes(core.report_status())
 
         specs = [encode_object_key(make_object_key(i)) for i in range(5)]
         objects = [make_memory_obj(bytes([i + 1]) * 1024) for i in range(5)]
@@ -1090,7 +1117,7 @@ def test_raw_block_core_io_uring_put_many_all_or_nothing_rollback(
         status = core.report_status()
         assert status["inflight_key_count"] == 0
         assert status["indexed_key_count"] == 0
-        assert _available_slots(status) == before
+        assert _free_bytes(status) == before
     finally:
         core.close()
 
@@ -1100,22 +1127,22 @@ def test_raw_block_core_io_uring_put_many_partial_slot_exhaustion(
 ) -> None:
     path = make_raw_block_file(tmp_path)
     fake = _RecordingRawDevice(size=128 * 1024 * 1024)
-    # Capacity leaves room for exactly 3 data slots after the metadata region,
-    # so the last keys of a 5-key batch find no free slot.
-    capacity = RAW_BLOCK_CI_META_TOTAL_BYTES + 3 * RAW_BLOCK_CI_SLOT_BYTES
+    # Capacity leaves room for exactly 3 objects after the metadata region,
+    # so the last keys of a 5-key batch find no free space.
+    capacity = _DATA_START + 3 * _OBJECT_BYTES
     core = _make_core_with_fake(
         path, fake, io_engine="io_uring", capacity_bytes=capacity
     )
 
     try:
-        assert core.report_status()["max_slots"] == 3
+        assert core.report_status()["usable_capacity_bytes"] == 3 * _OBJECT_BYTES
 
         specs = [encode_object_key(make_object_key(i)) for i in range(5)]
         objects = [make_memory_obj(bytes([i + 1]) * 1024) for i in range(5)]
 
         result = core.put_many(specs, objects)
 
-        # First three keys allocate a slot and commit; the slot-starved tail
+        # First three keys allocate space and commit; the space-starved tail
         # fails individually while the batch for the rest still succeeds.
         assert result.results == [True, True, True, False, False]
         assert result.stored_keys == [spec.encoded for spec in specs[:3]]
@@ -1127,7 +1154,7 @@ def test_raw_block_core_io_uring_put_many_partial_slot_exhaustion(
         status = core.report_status()
         assert status["indexed_key_count"] == 3
         assert status["inflight_key_count"] == 0
-        assert _available_slots(status) == 0
+        assert _free_bytes(status) == 0
 
         loaded = [make_empty_memory_obj(1024) for _ in range(3)]
         load_result = core.load_many_into([spec.encoded for spec in specs[:3]], loaded)
@@ -1165,20 +1192,24 @@ def test_raw_block_core_io_uring_put_many_duplicate_keys_in_batch(
         core.close()
 
 
-def test_raw_block_core_io_uring_put_many_oversize_key_isolated(
+def test_raw_block_core_io_uring_put_many_key_larger_than_free_space_isolated(
     tmp_path: Path,
 ) -> None:
     path = make_raw_block_file(tmp_path)
     fake = _RecordingRawDevice(size=128 * 1024 * 1024)
-    core = _make_core_with_fake(path, fake, io_engine="io_uring")
+    # The four small objects fit; the third key needs more than all the space.
+    capacity = _DATA_START + 8 * _OBJECT_BYTES
+    core = _make_core_with_fake(
+        path, fake, io_engine="io_uring", capacity_bytes=capacity
+    )
 
     try:
-        before = _available_slots(core.report_status())
+        before = _free_bytes(core.report_status())
         specs = [encode_object_key(make_object_key(i)) for i in range(60, 65)]
         payloads = [
             b"a" * 1024,
             b"b" * 2048,
-            b"c" * RAW_BLOCK_CI_SLOT_BYTES,
+            b"c" * (8 * _OBJECT_BYTES),
             b"d" * 3072,
             b"e" * 4096,
         ]
@@ -1195,7 +1226,7 @@ def test_raw_block_core_io_uring_put_many_oversize_key_isolated(
         status = core.report_status()
         assert status["inflight_key_count"] == 0
         assert status["indexed_key_count"] == 4
-        assert _available_slots(status) == before - 4
+        assert _free_bytes(status) == before - 4 * _OBJECT_BYTES
 
         loaded_payloads = [payload for i, payload in enumerate(payloads) if i != 2]
         loaded = [make_empty_memory_obj(len(payload)) for payload in loaded_payloads]
@@ -1210,9 +1241,8 @@ def test_raw_block_core_io_uring_put_many_prep_failure_leaves_no_orphan(
 ) -> None:
     """A buffer-preparation failure must queue nothing for the failed key.
 
-    The failed key's slot is returned to the free list, so leaving its header
-    in the shared submission would write into a slot the allocator considers
-    free.
+    The failed key's space is freed, so leaving its header in the shared
+    submission would write into space the allocator considers free.
     """
     path = make_raw_block_file(tmp_path)
     fake = _RecordingRawDevice(size=128 * 1024 * 1024)
@@ -1232,7 +1262,7 @@ def test_raw_block_core_io_uring_put_many_prep_failure_leaves_no_orphan(
     monkeypatch.setattr(RawBlockCore, "_prepare_write_payload", failing_prepare)
 
     try:
-        before = _available_slots(core.report_status())
+        before = _free_bytes(core.report_status())
         specs = [encode_object_key(make_object_key(i)) for i in range(80, 83)]
         objects = [make_memory_obj(bytes([i + 1]) * 1024) for i in range(3)]
 
@@ -1247,9 +1277,9 @@ def test_raw_block_core_io_uring_put_many_prep_failure_leaves_no_orphan(
         submitted = fake.batched_write_calls[0].offsets
         assert len(submitted) == 4
 
-        # Nothing may be written into the failed key's reclaimed slot.
-        failed_slot_offset = RAW_BLOCK_CI_META_TOTAL_BYTES + RAW_BLOCK_CI_SLOT_BYTES
-        failed_slot_end = failed_slot_offset + RAW_BLOCK_CI_SLOT_BYTES
+        # Nothing may be written into the failed key's reclaimed space.
+        failed_slot_offset = _DATA_START + _OBJECT_BYTES
+        failed_slot_end = failed_slot_offset + _OBJECT_BYTES
         assert not [
             offset
             for offset in submitted
@@ -1259,9 +1289,9 @@ def test_raw_block_core_io_uring_put_many_prep_failure_leaves_no_orphan(
         status = core.report_status()
         assert status["inflight_key_count"] == 0
         assert status["indexed_key_count"] == 2
-        assert _available_slots(status) == before - 2
+        assert _free_bytes(status) == before - 2 * _OBJECT_BYTES
 
-        # The reclaimed slot stays usable for a later key.
+        # The reclaimed space stays usable for a later key.
         reuse_spec = encode_object_key(make_object_key(90))
         assert core.put_many([reuse_spec], [make_memory_obj(b"z" * 1024)]).results == [
             True
@@ -1279,7 +1309,7 @@ def test_raw_block_core_io_uring_put_many_partial_submission_rolls_back(
     core = _make_core_with_fake(path, fake, io_engine="io_uring")
 
     try:
-        before = _available_slots(core.report_status())
+        before = _free_bytes(core.report_status())
         specs = [encode_object_key(make_object_key(i)) for i in range(70, 74)]
         objects = [make_memory_obj(bytes([i]) * 1024) for i in range(4)]
 
@@ -1288,12 +1318,13 @@ def test_raw_block_core_io_uring_put_many_partial_submission_rolls_back(
         assert result.results == [False] * 4
         assert result.stored_keys == []
         assert len(fake.batched_write_calls) == 1
-        assert len(fake.store) == 3
+        # and the format marker and the two voided checkpoint headers
+        assert len(fake.store) == 3 + 3
 
         status = core.report_status()
         assert status["inflight_key_count"] == 0
         assert status["indexed_key_count"] == 0
-        assert _available_slots(status) == before
+        assert _free_bytes(status) == before
         assert core.exists_many([spec.encoded for spec in specs]) == [False] * 4
     finally:
         core.close()
@@ -1313,7 +1344,7 @@ def test_raw_block_core_io_uring_put_many_completion_failure_rolls_back(
     core = _make_core_with_fake(path, fake, io_engine="io_uring")
 
     try:
-        before = _available_slots(core.report_status())
+        before = _free_bytes(core.report_status())
         specs = [encode_object_key(make_object_key(i)) for i in range(74, 78)]
         objects = [make_memory_obj(bytes([i]) * 1024) for i in range(4)]
 
@@ -1325,12 +1356,13 @@ def test_raw_block_core_io_uring_put_many_completion_failure_rolls_back(
         assert len(fake.batched_write_calls) == 1
         assert len(fake.batched_write_calls[0].offsets) == 8
         assert fake.wait_iouring_count == 1
-        assert len(fake.store) == 8
+        # and the format marker and the two voided checkpoint headers
+        assert len(fake.store) == 8 + 3
 
         status = core.report_status()
         assert status["inflight_key_count"] == 0
         assert status["indexed_key_count"] == 0
-        assert _available_slots(status) == before
+        assert _free_bytes(status) == before
         assert core.exists_many([spec.encoded for spec in specs]) == [False] * 4
     finally:
         core.close()
@@ -1393,6 +1425,41 @@ def test_raw_block_core_recovers_checkpoint_from_temp_file(tmp_path):
         loaded = make_empty_memory_obj(len(payload))
         assert recovered.load_many_into([spec.encoded], [loaded]) == [True]
         assert memory_obj_bytes(loaded) == payload
+    finally:
+        recovered.close()
+
+
+@requires_rust_raw_block_io
+def test_raw_block_core_checkpoint_after_skipped_load_supersedes_older_runs(
+    tmp_path,
+):
+    """A run that does not load the on-device checkpoint must still write
+    checkpoints that a later restart prefers over the older run's copies."""
+    path = make_raw_block_file(tmp_path)
+    config = make_raw_block_core_config(path)
+    old_specs = [encode_object_key(make_object_key(i)) for i in range(3)]
+    new_spec = encode_object_key(make_object_key(100))
+    payload = b"raw-block-payload"
+
+    core = RawBlockCore(config)
+    try:
+        # Several checkpoints, so the older run's sequence numbers are high.
+        for spec in old_specs:
+            assert core.put_many([spec], [make_memory_obj(payload)]).results == [True]
+            core.checkpoint_now()
+    finally:
+        core.close()
+
+    core = RawBlockCore(replace(config, load_checkpoint_on_init=False))
+    try:
+        assert core.put_many([new_spec], [make_memory_obj(payload)]).results == [True]
+        core.checkpoint_now()
+    finally:
+        core.close()
+
+    recovered = RawBlockCore(config)
+    try:
+        assert recovered.snapshot_indexed_keys() == [new_spec.encoded]
     finally:
         recovered.close()
 
@@ -1497,7 +1564,9 @@ def test_raw_block_core_uses_bounded_posix_recovery_read_tasks(monkeypatch):
     core = object.__new__(RawBlockCore)
     core._lock = threading.Lock()
     core._index = {
-        spec.encoded: type("Entry", (), {"offset": 4096 * (i + 1), "size": 7})()
+        spec.encoded: type(
+            "Entry", (), {"offset": 4096 * (i + 1), "size": 7, "generation": 0}
+        )()
         for i, spec in enumerate(specs)
     }
     core._lock_refcnt = {}
@@ -1507,6 +1576,7 @@ def test_raw_block_core_uses_bounded_posix_recovery_read_tasks(monkeypatch):
     core._read_slot_header = lambda offset: (
         specs[(offset // 4096) - 1].slot_identity,
         7,
+        0,
     )
 
     max_worker_calls: list[int] = []
@@ -1547,7 +1617,9 @@ def test_raw_block_core_iouring_recovery_does_not_use_posix_threads(monkeypatch)
     core = object.__new__(RawBlockCore)
     core._lock = threading.Lock()
     core._index = {
-        spec.encoded: type("Entry", (), {"offset": 4096 * (i + 1), "size": 7})()
+        spec.encoded: type(
+            "Entry", (), {"offset": 4096 * (i + 1), "size": 7, "generation": 0}
+        )()
         for i, spec in enumerate(specs)
     }
     core._lock_refcnt = {}
@@ -1558,6 +1630,7 @@ def test_raw_block_core_iouring_recovery_does_not_use_posix_threads(monkeypatch)
     core._read_slot_header = lambda offset: (
         specs[(offset // 4096) - 1].slot_identity,
         7,
+        0,
     )
     # io_uring dispatch reads headers via the batched path; stub it to the
     # single-read helper so this test exercises dispatch without real io_uring.
@@ -1579,66 +1652,57 @@ def test_raw_block_core_iouring_recovery_does_not_use_posix_threads(monkeypatch)
 
 
 @requires_rust_raw_block_io
-def test_raw_block_core_rebuilds_missing_free_slots_from_checkpoint(tmp_path):
+def test_raw_block_core_rebuilds_free_space_from_checkpoint_entries(tmp_path):
     path = make_raw_block_file(tmp_path)
-    config = make_raw_block_core_config(path)
-    existing = encode_object_key(make_object_key(41))
-    recovered = encode_object_key(make_object_key(42))
-    existing_payload = b"already-committed"
-    recovered_payload = b"recovered-hole"
+    # The entries are never written, so skip header verification.
+    config = replace(make_raw_block_core_config(path), meta_verify_on_load=False)
+    low, high, recovered = [encode_object_key(make_object_key(i)) for i in (41, 43, 42)]
+    payload = b"already-committed"
 
     core = RawBlockCore(config)
     try:
-        put_result = core.put_many([existing], [make_memory_obj(existing_payload)])
-        assert put_result.results == [True]
+        # Objects start after the format marker block.
+        base = core.data_base_offset() + RAW_BLOCK_CI_BLOCK_ALIGN
 
-        committed_offset = core.entry_offset(existing.encoded)
-        assert committed_offset == core.data_base_offset()
+        def entry(offset: int) -> dict[str, Any]:
+            return {
+                "offset": offset,
+                "size": len(payload),
+                "shape": [len(payload)],
+                "dtype": "uint8",
+                "fmt": "BINARY",
+                "cached_positions": None,
+            }
 
+        # A checkpoint taken while the object between these two was still in
+        # flight: its space is listed nowhere, so it must come back as free.
         applied = core.apply_loaded_state(
             {
-                "version": 1,
+                "version": 2,
                 "device_path": str(path),
                 "capacity_bytes": core.capacity_bytes,
                 "block_align": core.block_align,
                 "header_bytes": core.header_bytes,
-                "slot_bytes": core.slot_bytes,
                 "meta_total_bytes": core.meta_total_bytes,
                 "meta_magic": core.meta_magic_text,
                 "meta_version": core.meta_version,
-                "data_base_offset": core.data_base_offset(),
-                # Simulates a checkpoint taken after slot 1 was reserved but
-                # before its key was committed into the metadata index.
-                "next_slot": 2,
-                # Older checkpoints include free_slots; keep this empty to
-                # verify recovery ignores stale/missing free-list data and
-                # reconstructs reusable slots from entries plus next_slot.
-                "free_slots": [],
+                "data_base_offset": base,
                 "entries": {
-                    existing.encoded: {
-                        "offset": committed_offset,
-                        "size": len(existing_payload),
-                        "shape": [len(existing_payload)],
-                        "dtype": "uint8",
-                        "fmt": "BINARY",
-                        "cached_positions": None,
-                    }
+                    low.encoded: entry(base),
+                    high.encoded: entry(base + 2 * _OBJECT_BYTES),
                 },
             }
         )
 
         assert applied is True
         status = core.report_status()
-        assert status["next_slot"] == 2
-        assert status["free_slot_count"] == 1
-
-        put_recovered = core.put_many([recovered], [make_memory_obj(recovered_payload)])
-
-        assert put_recovered.results == [True]
-        assert core.entry_offset(recovered.encoded) == (
-            core.data_base_offset() + core.slot_bytes
+        assert status["indexed_key_count"] == 2
+        assert (
+            status["free_bytes"] == status["usable_capacity_bytes"] - 2 * _OBJECT_BYTES
         )
-        assert core.report_status()["next_slot"] == 2
+
+        assert core.put_many([recovered], [make_memory_obj(b"hole")]).results == [True]
+        assert core.entry_offset(recovered.encoded) == base + _OBJECT_BYTES
     finally:
         core.close()
 
@@ -1663,6 +1727,13 @@ class _FakeRawDevice:
         del offset, total_len
         out[:payload_len] = b"\x00" * payload_len
 
+    def batched_read(self, offsets, buffers, total_lens) -> int:
+        """Read zeros, as a never-written device does."""
+        for buffer, total in zip(buffers, total_lens, strict=True):
+            memoryview(buffer).cast("B")[:total] = b"\x00" * total
+        self._batch_results[124] = [True] * len(offsets)
+        return 124
+
     def pwrite_from_buffer(self, offset, data, payload_len=None, total_len=None):
         del offset, data, payload_len, total_len
 
@@ -1681,7 +1752,7 @@ class _FakeRawDevice:
         return 123
 
     def wait_iouring(self, batch_id: int) -> tuple[list[bool], list[tuple[int, str]]]:
-        assert batch_id == 123
+        assert batch_id in (123, 124)  # a write or a read batch
         return self._batch_results.pop(batch_id), []
 
     def register_fixed_buffers(
@@ -1757,7 +1828,6 @@ def _make_fake_io_uring_core(
             capacity_bytes=RAW_BLOCK_CI_CAPACITY_BYTES,
             block_align=RAW_BLOCK_CI_BLOCK_ALIGN,
             header_bytes=RAW_BLOCK_CI_HEADER_BYTES,
-            slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
             use_odirect=False,
             enable_zero_copy=enable_zero_copy,
             meta_total_bytes=RAW_BLOCK_CI_META_TOTAL_BYTES,
@@ -1776,7 +1846,12 @@ def _make_fake_io_uring_core(
             fdp_slot_affinity_enabled=fdp_slot_affinity_enabled,
         )
     )
-    return core, raw_devices[0]
+    raw_device = raw_devices[0]
+    # Count only the test's own writes, not startup's format marker.
+    raw_device.batched_write_calls.clear()
+    raw_device.batched_write_buffers.clear()
+    raw_device.write_uring_calls.clear()
+    return core, raw_device
 
 
 def test_raw_block_core_register_io_range_splits_at_one_gib(
@@ -2108,6 +2183,27 @@ def test_raw_block_core_uring_cmd_aligned_write_keeps_source(
         core.close()
 
 
+def _put_separated(
+    core: RawBlockCore, keys: list[Any], placement_ids: list[int | None]
+) -> list[int]:
+    """Store one-block objects with a live separator after each, so freeing
+    them leaves separate equal-length holes instead of one coalesced extent."""
+    offsets = []
+    for n, (key, placement_id) in enumerate(zip(keys, placement_ids, strict=True)):
+        separator = encode_object_key(
+            make_object_key(9000 + key.slot_identity % 997 + n)
+        )
+        assert core.put_many(
+            [key, separator],
+            [make_memory_obj(b"a"), make_memory_obj(b"s")],
+            placement_ids=[placement_id, None],
+        ).results == [True, True]
+        offset = core.entry_offset(key.encoded)
+        assert offset is not None
+        offsets.append(offset)
+    return offsets
+
+
 def test_raw_block_core_reuses_free_slot_with_matching_placement_id(
     tmp_path, monkeypatch
 ):
@@ -2121,25 +2217,16 @@ def test_raw_block_core_reuses_free_slot_with_matching_placement_id(
     ]
 
     try:
-        assert core.put_many(
-            [first, second],
-            [make_memory_obj(b"a"), make_memory_obj(b"b")],
-            placement_ids=[1, 7],
-        ).results == [True, True]
-        first_offset = core.entry_offset(first.encoded)
-        second_offset = core.entry_offset(second.encoded)
-        assert first_offset is not None
-        assert second_offset is not None
-        assert first_offset != second_offset
-
+        _, second_offset = _put_separated(core, [first, second], [1, 7])
         assert core.delete_many([first.encoded, second.encoded]) == [True, True]
+        # Both holes fit; the one last written with placement 7 wins.
         assert core.put_many(
             [replacement],
             [make_memory_obj(b"c")],
-            placement_ids=[1],
+            placement_ids=[7],
         ).results == [True]
 
-        assert core.entry_offset(replacement.encoded) == first_offset
+        assert core.entry_offset(replacement.encoded) == second_offset
         status = core.report_status()
         assert status["fdp_slot_affinity_hit_count"] == 1
         assert status["fdp_slot_affinity_fallback_count"] == 0
@@ -2158,29 +2245,23 @@ def test_raw_block_core_falls_back_and_rebinds_slot_placement_id(tmp_path, monke
     ]
 
     try:
-        assert core.put_many(
-            [first, second],
-            [make_memory_obj(b"a"), make_memory_obj(b"b")],
-            placement_ids=[1, 7],
-        ).results == [True, True]
-        second_offset = core.entry_offset(second.encoded)
-        assert second_offset is not None
-
+        _put_separated(core, [first, second], [1, 7])
         assert core.delete_many([first.encoded, second.encoded]) == [True, True]
         assert core.put_many(
             [fallback],
             [make_memory_obj(b"c")],
             placement_ids=[9],
         ).results == [True]
-        assert core.entry_offset(fallback.encoded) == second_offset
+        fallback_offset = core.entry_offset(fallback.encoded)
 
+        # The reused hole now carries placement 9.
         assert core.delete_many([fallback.encoded]) == [True]
         assert core.put_many(
             [replacement],
             [make_memory_obj(b"d")],
             placement_ids=[9],
         ).results == [True]
-        assert core.entry_offset(replacement.encoded) == second_offset
+        assert core.entry_offset(replacement.encoded) == fallback_offset
 
         status = core.report_status()
         assert status["fdp_slot_affinity_hit_count"] == 1
@@ -2189,28 +2270,22 @@ def test_raw_block_core_falls_back_and_rebinds_slot_placement_id(tmp_path, monke
         core.close()
 
 
-def test_raw_block_core_slot_affinity_none_preserves_global_lifo(tmp_path, monkeypatch):
+def test_raw_block_core_slot_affinity_off_ignores_placement_ids(tmp_path, monkeypatch):
     core, _ = _make_fake_io_uring_core(tmp_path, monkeypatch)
     first, second, replacement = [
         encode_object_key(make_object_key(620 + i)) for i in range(3)
     ]
 
     try:
-        assert core.put_many(
-            [first, second],
-            [make_memory_obj(b"a"), make_memory_obj(b"b")],
-            placement_ids=[1, 7],
-        ).results == [True, True]
-        second_offset = core.entry_offset(second.encoded)
-        assert second_offset is not None
-
+        _, second_offset = _put_separated(core, [first, second], [7, 1])
         assert core.delete_many([first.encoded, second.encoded]) == [True, True]
         assert core.put_many(
             [replacement],
             [make_memory_obj(b"c")],
-            placement_ids=[1],
+            placement_ids=[7],
         ).results == [True]
 
+        # Equal holes: the last freed is taken, whatever its placement.
         assert core.entry_offset(replacement.encoded) == second_offset
         status = core.report_status()
         assert status["fdp_slot_affinity_enabled"] is False
@@ -2228,22 +2303,15 @@ def test_raw_block_core_omitted_placement_clears_previous_affinity(
         monkeypatch,
         fdp_slot_affinity_enabled=True,
     )
-    first, second, unplaced, replacement = [
-        encode_object_key(make_object_key(630 + i)) for i in range(4)
+    first, unplaced, replacement = [
+        encode_object_key(make_object_key(630 + i)) for i in range(3)
     ]
 
     try:
-        assert core.put_many(
-            [first, second],
-            [make_memory_obj(b"a"), make_memory_obj(b"b")],
-            placement_ids=[7, 1],
-        ).results == [True, True]
-        second_offset = core.entry_offset(second.encoded)
-        assert second_offset is not None
-
-        assert core.delete_many([first.encoded, second.encoded]) == [True, True]
+        (first_offset,) = _put_separated(core, [first], [1])
+        assert core.delete_many([first.encoded]) == [True]
         assert core.put_many([unplaced], [make_memory_obj(b"c")]).results == [True]
-        assert core.entry_offset(unplaced.encoded) == second_offset
+        assert core.entry_offset(unplaced.encoded) == first_offset
         assert core.delete_many([unplaced.encoded]) == [True]
 
         assert core.put_many(
@@ -2251,7 +2319,7 @@ def test_raw_block_core_omitted_placement_clears_previous_affinity(
             [make_memory_obj(b"d")],
             placement_ids=[1],
         ).results == [True]
-        assert core.entry_offset(replacement.encoded) == second_offset
+        assert core.entry_offset(replacement.encoded) == first_offset
 
         status = core.report_status()
         assert status["fdp_slot_affinity_hit_count"] == 0
@@ -2310,7 +2378,9 @@ def _make_recovery_core(
     core = object.__new__(RawBlockCore)
     core._lock = threading.Lock()
     core._index = {
-        spec.encoded: type("Entry", (), {"offset": 4096 * (i + 1), "size": 64})()
+        spec.encoded: type(
+            "Entry", (), {"offset": 4096 * (i + 1), "size": 64, "generation": 0}
+        )()
         for i, spec in enumerate(specs)
     }
     core._lock_refcnt = {}
@@ -2340,11 +2410,14 @@ def _make_iouring_header_core(queue_depth: int = 256) -> RawBlockCore:
     return core
 
 
-def _slot_header(core: RawBlockCore, identity: int, payload_len: int) -> bytes:
+def _slot_header(
+    core: RawBlockCore, identity: int, payload_len: int, generation: int = 0
+) -> bytes:
     header = bytearray(core.header_bytes)
     header[0:8] = b"LMCBLK01"
     header[8:16] = int(identity).to_bytes(8, "little")
     header[16:24] = int(payload_len).to_bytes(8, "little")
+    header[24:32] = int(generation).to_bytes(8, "little")
     return bytes(header)
 
 
@@ -2353,7 +2426,7 @@ def test_read_slot_headers_batched_reads_and_decodes_one_batch() -> None:
     # no public projection, so this asserts the io_uring read path directly.
     core = _make_iouring_header_core()
     offsets = [4096, 8192]
-    expected = [(0xCAFE, 128), (0xBEEF, 256)]
+    expected = [(0xCAFE, 128, 0), (0xBEEF, 256, 0)]
     raw_dev = Mock()
 
     def batched_read(
@@ -2365,7 +2438,7 @@ def test_read_slot_headers_batched_reads_and_decodes_one_batch() -> None:
         assert total_lens == [core.header_bytes, core.header_bytes]
         for buffer, header in zip(
             buffers,
-            [_slot_header(core, identity, size) for identity, size in expected],
+            [_slot_header(core, identity, size) for identity, size, _ in expected],
             strict=True,
         ):
             buffer[:] = header
@@ -2408,11 +2481,11 @@ def test_read_slot_headers_batched_splits_by_iouring_queue_depth() -> None:
     core._io_engine._raw = raw_dev  # type: ignore[union-attr]
 
     assert core._read_slot_headers_batched(offsets) == [
-        (4096, 64),
-        (8192, 64),
-        (12288, 64),
-        (16384, 64),
-        (20480, 64),
+        (4096, 64, 0),
+        (8192, 64, 0),
+        (12288, 64, 0),
+        (16384, 64, 0),
+        (20480, 64, 0),
     ]
     assert seen_batches == [[4096, 8192], [12288, 16384], [20480]]
     assert raw_dev.wait_iouring.call_count == 3
@@ -2433,13 +2506,13 @@ def test_read_slot_headers_batched_falls_back_per_slot_on_batch_error(
     else:
         raw_dev.wait_iouring.return_value = ([True], [])
     core._io_engine._raw = raw_dev  # type: ignore[union-attr]
-    read_mock = Mock(side_effect=[(1, 64), None, (3, 64)])
+    read_mock = Mock(side_effect=[(1, 64, 0), None, (3, 64, 0)])
     monkeypatch.setattr(core, "_read_slot_header", read_mock)
 
     assert core._read_slot_headers_batched([4096, 8192, 12288]) == [
-        (1, 64),
+        (1, 64, 0),
         None,
-        (3, 64),
+        (3, 64, 0),
     ]
     assert read_mock.call_args_list == [
         call(4096),
@@ -2448,10 +2521,10 @@ def test_read_slot_headers_batched_falls_back_per_slot_on_batch_error(
     ]
 
 
-@pytest.mark.parametrize("retry_header", [(2, 64), None])
+@pytest.mark.parametrize("retry_header", [(2, 64, 0), None])
 def test_read_slot_headers_batched_retries_only_failed_completion(
     monkeypatch: pytest.MonkeyPatch,
-    retry_header: tuple[int, int] | None,
+    retry_header: tuple[int, int, int] | None,
 ) -> None:
     """Retry a failed slot without rereading a successfully completed header."""
     core = _make_iouring_header_core()
@@ -2476,7 +2549,10 @@ def test_read_slot_headers_batched_retries_only_failed_completion(
     read_mock = Mock(return_value=retry_header)
     monkeypatch.setattr(core, "_read_slot_header", read_mock)
 
-    assert core._read_slot_headers_batched([4096, 8192]) == [(1, 64), retry_header]
+    assert core._read_slot_headers_batched([4096, 8192]) == [
+        (1, 64, 0),
+        retry_header,
+    ]
     read_mock.assert_called_once_with(8192)
     raw_dev.wait_iouring.assert_called_once_with(77)
 
@@ -2487,7 +2563,7 @@ def test_validate_loaded_entries_iouring_multi_entry_uses_batched_reader(
     specs = [encode_object_key(make_object_key(i)) for i in range(3)]
     core = _make_recovery_core(specs)
     expected_offsets = [4096, 8192, 12288]
-    batched_mock = Mock(return_value=[(spec.slot_identity, 64) for spec in specs])
+    batched_mock = Mock(return_value=[(spec.slot_identity, 64, 0) for spec in specs])
     monkeypatch.setattr(core, "_read_slot_headers_batched", batched_mock)
     read_mock = Mock()
     monkeypatch.setattr(core, "_read_slot_header", read_mock)
@@ -2505,7 +2581,7 @@ def test_validate_loaded_entries_uring_cmd_uses_batched_reader(
     specs = [encode_object_key(make_object_key(i)) for i in range(3)]
     core = _make_recovery_core(specs, use_uring_cmd=True)
     expected_offsets = [4096, 8192, 12288]
-    batched_mock = Mock(return_value=[(spec.slot_identity, 64) for spec in specs])
+    batched_mock = Mock(return_value=[(spec.slot_identity, 64, 0) for spec in specs])
     monkeypatch.setattr(core, "_read_slot_headers_batched", batched_mock)
     read_mock = Mock()
     monkeypatch.setattr(core, "_read_slot_header", read_mock)
@@ -2515,3 +2591,173 @@ def test_validate_loaded_entries_uring_cmd_uses_batched_reader(
     batched_mock.assert_called_once_with(expected_offsets)
     read_mock.assert_not_called()
     assert list(core._index) == [spec.encoded for spec in specs]
+
+
+def _fragmented_uring_cmd_core(tmp_path: Path, fake: _RecordingRawDevice):
+    """io_uring_cmd core whose free space is four separate 8 KiB holes."""
+    hole = RAW_BLOCK_CI_HEADER_BYTES + 4096
+    with patch.object(IoUringBlockIO, "validate_uring_cmd_device"):
+        core = _make_core_with_fake(
+            tmp_path / "raw-block",
+            fake,
+            "io_uring",
+            capacity_bytes=_DATA_START + 8 * hole,
+            use_uring_cmd=True,
+            max_data_transfer_size=4096,
+        )
+    fillers = [encode_object_key(make_object_key(800 + i)) for i in range(8)]
+    assert (
+        core.put_many(
+            fillers, [make_memory_obj(bytes([i]) * 4096) for i in range(8)]
+        ).results
+        == [True] * 8
+    )
+    assert core.delete_many([k.encoded for k in fillers[::2]]) == [True] * 4
+    return core, fillers[1::2]
+
+
+@pytest.mark.no_shared_allocator
+@requires_rust_raw_block_io
+def test_uecc_after_delete_retires_the_freed_space(tmp_path: Path) -> None:
+    """A late UECC on space already freed by an unlocked delete still retires
+    it, so later stores do not land on the unreadable range."""
+    fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
+    with patch.object(IoUringBlockIO, "validate_uring_cmd_device"):
+        core = _make_core_with_fake(
+            tmp_path / "raw-block",
+            fake,
+            "io_uring",
+            use_uring_cmd=True,
+            max_data_transfer_size=4096,
+        )
+    old_key, new_key = [encode_object_key(make_object_key(i)) for i in (850, 851)]
+    obj = make_memory_obj(b"x" * 4096)
+    wait = fake.wait_iouring_exceptions
+
+    def delete_before_completion(
+        batch_id: int,
+    ) -> tuple[list[bool], list[tuple[int, BaseException]]]:
+        result = wait(batch_id)
+        if result[1]:
+            assert core.delete_many([old_key.encoded]) == [True]
+        return result
+
+    try:
+        assert core.put_many([old_key], [obj]).results == [True]
+        failed_offset = core.entry_offset(old_key.encoded)
+        assert failed_offset is not None
+        failed = [(failed_offset, _allocated(core, [old_key.encoded])[0])]
+        fake.uecc_on_next_wait_batch = True
+        with patch.object(
+            fake, "wait_iouring_exceptions", side_effect=delete_before_completion
+        ):
+            assert core.load_many_into(
+                [old_key.encoded], [make_empty_memory_obj(4096)]
+            ) == [False]
+        assert core.report_status()["quarantined_bytes"] == sum(n for _, n in failed)
+        assert core.put_many([new_key], [obj]).results == [True]
+        offset = core.entry_offset(new_key.encoded)
+        assert offset is not None
+        assert all(not (o <= offset < o + n) for o, n in failed)
+    finally:
+        core.close()
+
+
+def _uring_cmd_core(tmp_path: Path, fake: _RecordingRawDevice, **overrides: Any):
+    with patch.object(IoUringBlockIO, "validate_uring_cmd_device"):
+        return _make_core_with_fake(
+            tmp_path / "raw-block",
+            fake,
+            "io_uring",
+            use_uring_cmd=True,
+            max_data_transfer_size=4096,
+            **overrides,
+        )
+
+
+@pytest.mark.no_shared_allocator
+@requires_rust_raw_block_io
+def test_uecc_cancels_a_write_in_flight_over_the_failed_space(tmp_path: Path) -> None:
+    """A store that reused the failed space and is still being written must not
+    commit once that space is retired."""
+    fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
+    core = _uring_cmd_core(tmp_path, fake)
+    old_key, new_key = [encode_object_key(make_object_key(i)) for i in (880, 881)]
+    obj = make_memory_obj(b"x" * 4096)
+    wait = fake.wait_iouring_exceptions
+    real_write = fake.batched_write
+    write_started, release_write = threading.Event(), threading.Event()
+    results: list[list[bool]] = []
+
+    def blocking_write(*args: Any, **kwargs: Any) -> int:
+        # The new key's header and payload over the failed space (the delete's
+        # one-entry header invalidation goes through).
+        if failed_offset in args[0] and len(args[0]) > 1:
+            write_started.set()
+            assert release_write.wait(10)
+        return real_write(*args, **kwargs)
+
+    def finish_while_reused(
+        batch_id: int,
+    ) -> tuple[list[bool], list[tuple[int, BaseException]]]:
+        result = wait(batch_id)
+        if result[1]:
+            assert core.delete_many([old_key.encoded]) == [True]
+            store = threading.Thread(
+                target=lambda: results.append(core.put_many([new_key], [obj]).results)
+            )
+            store.start()
+            threads.append(store)
+            assert write_started.wait(10)
+        return result
+
+    threads: list[threading.Thread] = []
+    try:
+        assert core.put_many([old_key], [obj]).results == [True]
+        failed_offset = core.entry_offset(old_key.encoded)
+        fake.uecc_on_next_wait_batch = True
+        with (
+            patch.object(fake, "batched_write", side_effect=blocking_write),
+            patch.object(
+                fake, "wait_iouring_exceptions", side_effect=finish_while_reused
+            ),
+        ):
+            assert core.load_many_into(
+                [old_key.encoded], [make_empty_memory_obj(4096)]
+            ) == [False]
+            release_write.set()
+            threads[0].join(10)
+        assert results == [[False]]
+        assert core.exists_many([new_key.encoded]) == [False]
+        status = core.report_status()
+        assert status["quarantined_bytes"] > 0
+        # The cancelled write's space stays retired, not free.
+        assert status["allocated_bytes"] == sum(
+            _allocated(core, core.snapshot_indexed_keys())
+        )
+    finally:
+        release_write.set()
+        core.close()
+
+
+@pytest.mark.no_shared_allocator
+@requires_rust_raw_block_io
+def test_header_invalidation_keeps_the_objects_placement_id(tmp_path: Path) -> None:
+    """The delete's header write lands on the object's FDP placement, like the
+    object did, so reuse affinity is not undone by the invalidation."""
+    fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
+    core = _uring_cmd_core(tmp_path, fake)
+    keys = [encode_object_key(make_object_key(i)) for i in (960, 961)]
+    try:
+        assert core.put_many(
+            keys,
+            [make_memory_obj(b"p" * 4096) for _ in keys],
+            placement_ids=[5, None],
+        ).results == [True, True]
+        headers = [core.entry_offset(k.encoded) for k in keys]
+        assert core.delete_many([k.encoded for k in keys]) == [True, True]
+        call = fake.batched_write_calls[-1]
+        assert call.offsets == headers
+        assert call.placement_ids == [5, None]
+    finally:
+        core.close()

@@ -1628,7 +1628,7 @@ Benchmark an O_DIRECT adapter with aligned L1 buffers:
 .. code-block:: bash
 
    lmcache bench l2 \
-       --l2-adapter '{"type":"raw_block","device_path":"/dev/nvme0n1","slot_bytes":4194304,"use_odirect":true,"block_align":4096}' \
+       --l2-adapter '{"type":"raw_block","device_path":"/dev/nvme0n1","use_odirect":true,"block_align":4096}' \
        --data-size-kb 1024 \
        --l1-align-bytes 4096
 

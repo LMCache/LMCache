@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypeVar
+import ctypes
 import errno
 import importlib
 import os
@@ -75,7 +76,6 @@ def make_raw_block_core_config(
         capacity_bytes=capacity_bytes,
         block_align=RAW_BLOCK_CI_BLOCK_ALIGN,
         header_bytes=RAW_BLOCK_CI_HEADER_BYTES,
-        slot_bytes=RAW_BLOCK_CI_SLOT_BYTES,
         use_odirect=False,
         enable_zero_copy=False,
         meta_total_bytes=RAW_BLOCK_CI_META_TOTAL_BYTES,
@@ -428,6 +428,14 @@ def install_lmcache_native_fallback() -> None:
 Buffer = bytes | bytearray | memoryview
 
 
+def _address(buf: Buffer) -> int:
+    """Return a buffer's start address, or -1 for read-only memory."""
+    try:
+        return ctypes.addressof((ctypes.c_byte * 1).from_buffer(buf))
+    except TypeError:
+        return -1
+
+
 @dataclass
 class _BatchedWriteCall:
     """Recorded arguments of one fake ``batched_write`` invocation."""
@@ -437,6 +445,8 @@ class _BatchedWriteCall:
     total_lens: list[int]
     placement_ids: list[int | None]
     payload_lens: list[int]
+    # Start address of each buffer, or -1 if it is not writable memory.
+    buffer_addresses: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -470,6 +480,16 @@ class _RecordingRawDevice:
     def worker_error(self) -> str | None:
         """Return the terminal worker failure independently of per-I/O errors."""
         return self.terminal_error
+
+    def reset_counts(self) -> None:
+        """Forget recorded calls, keeping stored bytes, e.g. after startup I/O."""
+        self.batched_write_calls.clear()
+        self.batched_read_buffer_lens.clear()
+        self.wait_iouring_count = 0
+        self.pwrite_count = 0
+        self.write_uring_count = 0
+        self.last_read_offsets.clear()
+        self.last_read_lens.clear()
 
     def size_bytes(self) -> int:
         return self.size
@@ -511,6 +531,7 @@ class _RecordingRawDevice:
                 total_lens=[int(total) for total in total_lens],
                 placement_ids=list(placement_ids or [None] * len(offsets)),
                 payload_lens=resolved_payload_lens,
+                buffer_addresses=[_address(buf) for buf in buffers],
             )
         )
         if self.fail_batched_write:
