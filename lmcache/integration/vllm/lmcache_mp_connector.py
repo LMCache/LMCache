@@ -71,6 +71,7 @@ from lmcache.integration.vllm.kv_cache_groups import (
     is_per_request_state_group,
     is_scratch_group,
     tokens_per_group_block,
+    vllm_mamba_cache_mode,
 )
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
@@ -453,7 +454,7 @@ def validate_mamba_step_alignment(
         ValueError: If Mamba groups have inconsistent block sizes or
             ``max_num_batched_tokens < block_size``.
     """
-    if getattr(vllm_config.cache_config, "mamba_cache_mode", "none") != "align":
+    if vllm_mamba_cache_mode(vllm_config, kv_cache_config) != "align":
         return
     mamba_block_sizes = {
         spec.block_size
@@ -664,7 +665,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config, kv_cache_config
         )
         self._prefix_replay_tokens = get_prefix_replay_tokens(kv_cache_config)
-        mamba_cache_mode = getattr(vllm_config.cache_config, "mamba_cache_mode", "none")
+        mamba_cache_mode = vllm_mamba_cache_mode(vllm_config, kv_cache_config)
         self._reserve_last_token_for_lookup = mamba_cache_mode in ("align", "all")
         scheduler_block_size = get_vllm_scheduler_block_size(
             vllm_config, kv_cache_config
