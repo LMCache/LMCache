@@ -49,12 +49,12 @@ from lmcache.v1.client.worker_transfer import (
     create_transfer_context,
 )
 from lmcache.v1.common.custom_types import EngineType
-from lmcache.v1.common.utils import LayoutHints
-from lmcache.v1.kv_layer_groups import (
+from lmcache.v1.common.kv_layer_groups import (
     DTYPE_MAP,
     format_kvcache_shape_spec,
     parse_kvcache_shape_spec,
 )
+from lmcache.v1.common.utils import LayoutHints
 
 if TYPE_CHECKING:
     # First Party

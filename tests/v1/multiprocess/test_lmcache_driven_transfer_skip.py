@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, call
 import pytest
 
 # First Party
-from lmcache.v1.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,

@@ -505,7 +505,7 @@ def create_engine_group_infos_from_vllm(
     the groups' ``layer_names`` from the v1 KV cache interface), maps each
     engine KV cache group's layer names to registered tensor indices, then
     splits the layers by physical transfer identity using the real tensors (via
-    the shared :func:`lmcache.v1.kv_layer_groups.group_layers_by_identity`).
+    the shared :func:`lmcache.v1.common.kv_layer_groups.group_layers_by_identity`).
     vLLM-specific field access is intentionally confined to this function.
 
     Args:
@@ -538,10 +538,10 @@ def create_engine_group_infos_from_vllm(
     # First Party
     from lmcache.v1.common.custom_types import EngineType
     from lmcache.v1.common.group_view import EXCLUDED_ENGINE_GROUP
+    from lmcache.v1.common.kv_layer_groups import group_layers_by_identity
     from lmcache.v1.common.utils import (
         normalize_and_discover_per_layer_formats,
     )
-    from lmcache.v1.kv_layer_groups import group_layers_by_identity
 
     # vLLM-specific field access (confined to this function): map each
     # registered KV tensor to its vLLM engine KV cache group index. vLLM places
