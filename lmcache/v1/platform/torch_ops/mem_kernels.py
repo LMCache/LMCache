@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Tuple
+from typing import Any, Tuple
 import ctypes
 
 # Third Party
@@ -371,6 +371,82 @@ def reshape_and_cache_back_flash(
     value_cache[block_indices, block_offsets] = v_src
 
 
+def _memcpy_async_symbol(lib: object) -> Any | None:
+    """Return the runtime's asynchronous device copy entry point.
+
+    CUDA and HIP spell it differently, and a runtime may expose neither. The
+    symbol is looked up once per call: ``ctypes`` caches the attribute on the
+    library object, so the cost is a dictionary lookup.
+    """
+    for name in ("cudaMemcpyAsync", "hipMemcpyAsync"):
+        symbol = getattr(lib, name, None)
+        if symbol is not None:
+            return symbol
+    return None
+
+
+def _current_stream_handle() -> int:
+    """Return the raw handle of the caller's current device stream.
+
+    ``0`` is the legacy default stream, which is also what a runtime uses when
+    no stream is recorded, so callers that never entered a stream keep working.
+    """
+    if not torch.cuda.is_available() or not torch.cuda.is_initialized():
+        return 0
+    return int(torch.cuda.current_stream().cuda_stream)
+
+
+def _copy_within_pin_chunks(
+    memcpy_async: Any,
+    dest: int,
+    src: int,
+    nbytes: int,
+    host_buffer_offset: int,
+    host_buffer_alignments: int,
+    stream: int,
+) -> None:
+    """Issue one asynchronous copy per host pin chunk.
+
+    ``cudaHostRegister`` pins the staging buffer in ``host_buffer_alignments``
+    chunks, and a device copy that crosses one of those boundaries fails with
+    ``cudaErrorInvalidValue`` (see #6617). The synchronous entry point stages
+    such a copy internally; the asynchronous one does not, so split it here.
+
+    The split follows the host side, which is the pinned one: the first chunk
+    ends at the next boundary after ``host_buffer_offset``. Both pointers move
+    together, so one offset describes the whole transfer.
+
+    Args:
+        memcpy_async: The runtime's asynchronous copy entry point.
+        dest: Destination pointer.
+        src: Source pointer.
+        nbytes: Bytes to copy in total.
+        host_buffer_offset: Byte offset of the host pointer inside the lazy
+            allocator's pinned arena.
+        host_buffer_alignments: Pin registration alignment, a power of two.
+        stream: Raw handle of the stream the copy belongs to.
+
+    Raises:
+        RuntimeError: If the runtime rejects a chunk.
+    """
+    copied = 0
+    while copied < nbytes:
+        to_boundary = host_buffer_alignments - (
+            (host_buffer_offset + copied) % host_buffer_alignments
+        )
+        chunk = min(nbytes - copied, to_boundary)
+        ret = memcpy_async(
+            ctypes.c_void_p(dest + copied),
+            ctypes.c_void_p(src + copied),
+            ctypes.c_size_t(chunk),
+            ctypes.c_int(4),  # cudaMemcpyDefault
+            ctypes.c_void_p(stream),
+        )
+        if ret != 0:
+            raise RuntimeError(f"cudaMemcpyAsync failed with error code {ret}")
+        copied += chunk
+
+
 def lmcache_memcpy_async(
     dest: int | torch.Tensor,
     src: int | torch.Tensor,
@@ -383,16 +459,25 @@ def lmcache_memcpy_async(
     Python fallback for lmcache_memcpy_async.
 
     - Tensor mode (non-CUDA devices like HPU): uses .to(device) + copy_()
-    - Pointer mode with libcudart: uses synchronous cudaMemcpy (cudaMemcpyDefault)
-    - Pointer mode without libcudart: uses CPU tensor copy
+    - Pointer mode with a CUDA or HIP runtime: uses the runtime's asynchronous
+      copy on the caller's current stream
+    - Pointer mode without such a runtime: uses CPU tensor copy
 
-    Unlike the C++ version (which uses cudaMemcpyAsync and must split copies
-    at cudaHostRegister boundaries), this Python fallback does NOT need
-    alignment-based chunking because:
-    - cudaMemcpy (synchronous) handles cross-cudaHostRegister boundaries
-      internally via staging buffers
-    - CPU tensor copy has no alignment constraints
-    - Tensor mode bypasses raw pointers entirely
+    Ordering: callers queue the copy on the current stream, and the compiled
+    ``cuda_ops`` path issues ``cudaMemcpyAsync`` there. A synchronous
+    ``cudaMemcpy`` would instead run on the legacy default stream, which does
+    not wait for the gather kernel queued on the cache context's non-blocking
+    stream; the copy could then read the staging buffer before that kernel
+    filled it, storing stale KV with nothing logged. This fallback therefore
+    issues the copy asynchronously on the current stream as well, which keeps
+    the ordering without ever synchronising the device. The entry point is
+    resolved by name, so ROCm's ``hipMemcpyAsync`` takes the same path.
+
+    Chunking: the host side is registered with ``cudaHostRegister`` in
+    ``host_buffer_alignments`` chunks, and a copy that crosses one of those
+    boundaries fails with ``cudaErrorInvalidValue``. ``cudaMemcpyAsync`` does
+    not split a copy for us the way the synchronous entry point does, so the
+    copy is issued once per chunk, starting from ``host_buffer_offset``.
 
     dest:
         - If int: raw memory pointer (used for CUDA/CPU devices where we
@@ -444,20 +529,25 @@ def lmcache_memcpy_async(
         )
 
     libcudart = _get_copy_lib()
-    if libcudart is not None and hasattr(libcudart, "cudaMemcpy"):
-        try:
-            # Synchronous cudaMemcpy handles cross-cudaHostRegister boundaries
-            # internally — no manual alignment splitting needed.
-            ret = libcudart.cudaMemcpy(
-                ctypes.c_void_p(dest),
-                ctypes.c_void_p(src),
-                ctypes.c_size_t(nbytes),
-                ctypes.c_int(4),  # cudaMemcpyDefault
-            )
-            if ret != 0:
-                raise RuntimeError(f"cudaMemcpy failed with error code {ret}")
-        except AttributeError:
-            raise
-    else:
-        # Pure CPU copy — no alignment constraints.
+    memcpy_async = _memcpy_async_symbol(libcudart) if libcudart is not None else None
+    if memcpy_async is None:
+        # No runtime exposes the async entry point, or there is no GPU runtime
+        # at all: copy through tensors, which is ordered by the tensor library's
+        # own stream handling.
         _copy_bytes_with_tensor(dest, src, nbytes)
+        return
+    # The copy belongs to the caller's current stream, exactly as the compiled
+    # cuda_ops path issues it. Anything queued there before this call -- the
+    # gather kernel that fills a staging buffer -- therefore completes first,
+    # and no explicit synchronization is needed. The gate is the async symbol,
+    # not `cudaMemcpy`: on ROCm the library exposes `hipMemcpy*` only, and a
+    # check for the CUDA spelling would send device pointers to the tensor path.
+    _copy_within_pin_chunks(
+        memcpy_async,
+        dest,
+        src,
+        nbytes,
+        host_buffer_offset,
+        host_buffer_alignments,
+        _current_stream_handle(),
+    )
