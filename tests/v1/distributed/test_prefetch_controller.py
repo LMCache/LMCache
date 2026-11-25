@@ -2440,7 +2440,7 @@ class TestP2PPeerFailures:
 
 
 # =============================================================================
-# Prefetch-locked bytes in the watermark, prefetch priority, stall rule
+# Prefetch-locked bytes in the watermark, prefetch priority
 # =============================================================================
 
 OBJECT_BYTES = 100 * 2 * 512 * 2
@@ -2565,37 +2565,3 @@ class TestPrefetchLockedBudget:
             ctrl.stop()
             adapter.close()
             l1_manager.close()
-
-    def test_stalled_head_is_admitted_after_timeout(self):
-        """With nothing in flight, a head blocked only by locked bytes is
-        admitted after the stall timeout, so an engine that waits on it in
-        order cannot deadlock."""
-        l1_manager = make_budget_l1()
-        adapter = make_adapter()
-        layout = make_layout()
-        held = [make_object_key(i) for i in range(3)]
-        late = [make_object_key(i) for i in range(10, 13)]
-        store_keys_in_l2(adapter, held + late, layout)
-        ctrl = make_controller(
-            l1_manager,
-            [adapter],
-            inflight_watermark=watermark_for(l1_manager, 5.5),
-        )
-        with patch(
-            "lmcache.v1.distributed.storage_controllers.prefetch_controller."
-            "PREFETCH_STALL_ADMIT_SECONDS",
-            0.2,
-        ):
-            ctrl.start()
-            try:
-                wait_for_result(
-                    ctrl, ctrl.submit_prefetch_request(single_row_spec(held))
-                )
-                late_id = ctrl.submit_prefetch_request(single_row_spec(late))
-                assert row_bits(wait_for_result(ctrl, late_id)) == [0, 1, 2]
-                assert ctrl.report_status()["stall_admissions"] == 1
-                l1_manager.finish_read(held + late)
-            finally:
-                ctrl.stop()
-                adapter.close()
-                l1_manager.close()

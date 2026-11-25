@@ -220,9 +220,7 @@ class BaseL1Manager(L1ManagerInterface):
         # Bytes held by staging objects (kept in sync with ``_staging``).
         self._staging_bytes: int = 0
         # Objects a prefetch read-locked for a request that has not consumed
-        # them yet. An entry leaves when its last reader finishes or the
-        # object leaves L1; one whose read TTL expired is dropped by
-        # get_prefetch_locked_bytes. So it only ever holds resident objects.
+        # them yet.
         self._prefetch_locked: dict[ObjectKey, L1ObjectState] = {}
 
         self._memory_manager = memory_manager

@@ -130,10 +130,6 @@ prefix leg) waits in its own queue, and no `NORMAL` request starts while one
 waits. It passes the same checks; its prefix leg was charged at the worst case
 of the whole prompt, so it fits once in-flight lookups settle.
 
-**Stall rule.** With nothing in flight, a head refused for
-`PREFETCH_STALL_ADMIT_SECONDS` (30 s) is admitted anyway, so an engine that
-waits on lookups in order (vLLM skips pending ones) cannot deadlock.
-
 The check runs at the end of every loop iteration, so a completed load (which
 wakes the loop) admits the next requests immediately. Staging held only by
 stores is re-checked at the poll timeout (500 ms) at the latest.

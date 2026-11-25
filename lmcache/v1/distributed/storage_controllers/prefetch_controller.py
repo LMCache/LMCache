@@ -23,7 +23,6 @@ import enum
 import itertools
 import select
 import threading
-import time
 
 # First Party
 from lmcache.lmcache_native import Bitmap
@@ -76,11 +75,6 @@ logger = init_logger(__name__)
 
 # Poll timeout in milliseconds for the prefetch loop
 PREFETCH_LOOP_POLL_TIMEOUT_MS = 500
-
-# With nothing in flight, a head blocked this long is admitted anyway: locked
-# bytes drain only as engines consume them, so an engine that waits on the
-# blocked lookup itself would otherwise never progress.
-PREFETCH_STALL_ADMIT_SECONDS = 30.0
 
 PrefetchRequestId = int
 
@@ -628,10 +622,6 @@ class PrefetchController(StorageControllerInterface):
         self._high_priority_queue: deque[tuple[PrefetchRequestId, PrefetchTaskSpec]] = (
             deque()
         )
-        # When the pending head was first refused (None while it is not
-        # blocked) and how many heads the stall rule admitted.
-        self._head_blocked_since: float | None = None
-        self._stall_admissions = 0
 
         # Thread-safe submission queue (external -> background)
         self._submission_lock = threading.Lock()
@@ -808,7 +798,6 @@ class PrefetchController(StorageControllerInterface):
             "submission_queue_size": submission_queue_size,
             "pending_queue_size": len(self._pending_queue),
             "high_priority_queue_size": len(self._high_priority_queue),
-            "stall_admissions": self._stall_admissions,
             "in_flight_request_count": len(in_flight),
             "lookup_phase_count": lookup_phase_count,
             "load_phase_count": len(in_flight) - lookup_phase_count,
@@ -1158,29 +1147,11 @@ class PrefetchController(StorageControllerInterface):
         ``_can_admit_new_prefetch``): ``HIGH`` priority first, in arrival
         order, then ``NORMAL`` ones, none of which starts while a ``HIGH`` one
         waits.
-
-        With no request in flight, a head refused for
-        ``PREFETCH_STALL_ADMIT_SECONDS`` is admitted anyway.
         """
         while self._high_priority_queue or self._pending_queue:
             queue = self._high_priority_queue or self._pending_queue
             if not self._can_admit_new_prefetch(queue[0][1]):
-                now = time.monotonic()
-                if self._head_blocked_since is None:
-                    self._head_blocked_since = now
-                if (
-                    self._in_flight_requests
-                    or now - self._head_blocked_since < PREFETCH_STALL_ADMIT_SECONDS
-                ):
-                    return
-                self._stall_admissions += 1
-                logger.warning(
-                    "Prefetch request %d waited %.0f s with nothing in flight; "
-                    "admitting it over the watermark",
-                    queue[0][0],
-                    now - self._head_blocked_since,
-                )
-            self._head_blocked_since = None
+                return
             request_id, spec = queue.popleft()
             try:
                 self._start_lookup_phase(request_id, spec)
