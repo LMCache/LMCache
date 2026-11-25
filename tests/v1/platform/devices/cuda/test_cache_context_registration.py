@@ -12,7 +12,7 @@ import torch
 
 # First Party
 from lmcache.v1.common.buffer_registration import BufferRegistration
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+from lmcache.v1.common.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.base.ipc_wrapper import KVCache
 from lmcache.v1.platform.cache_context import create_cache_context

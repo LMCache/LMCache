@@ -353,6 +353,14 @@ class L1ManagerInterface(Protocol):
         """Return bytes held by uncommitted write reservations."""
         ...
 
+    def track_prefetch_locked(self, keys: list[ObjectKey]) -> None:
+        """Track resident, read-locked objects a prefetch holds for a request."""
+        ...
+
+    def get_prefetch_locked_bytes(self) -> int:
+        """Return bytes of tracked objects that are still read-locked."""
+        ...
+
     def get_capacity_bytes(self) -> int:
         """Return the currently usable capacity in bytes."""
         ...

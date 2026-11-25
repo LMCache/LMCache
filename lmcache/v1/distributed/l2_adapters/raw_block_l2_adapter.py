@@ -1345,7 +1345,9 @@ class RawBlockL2Adapter(L2AdapterInterface):
         objects: list[MemoryObj],
     ) -> tuple[Bitmap, list[ObjectKey]]:
         specs = [encode_object_key(key) for key in keys]
-        results = self._core.load_many_into([spec.encoded for spec in specs], objects)
+        results = self._core.load_many_into(
+            [spec.encoded for spec in specs], objects, on_quarantine=self._on_quarantine
+        )
         bitmap = _make_bitmap(len(keys))
         accessed_keys: list[ObjectKey] = []
         for i, ok in enumerate(results):
@@ -1353,6 +1355,21 @@ class RawBlockL2Adapter(L2AdapterInterface):
                 bitmap.set(i)
                 accessed_keys.append(keys[i])
         return bitmap, accessed_keys
+
+    def _on_quarantine(self, encoded_keys: list[str]) -> None:
+        """Refresh capacity and notify eviction listeners about removed slot owners."""
+        with self._usage_lock:
+            self._max_capacity_bytes = self._core.report_status()[
+                "usable_capacity_bytes"
+            ]
+        if encoded_keys:
+            keys = [decode_object_key(key) for key in encoded_keys]
+            try:
+                self._notify_keys_deleted(keys, [self._core.slot_bytes] * len(keys))
+            except Exception as e:
+                logger.warning(
+                    "RawBlockL2Adapter quarantine notification failed: %s", e
+                )
 
     def _finish_load_task(
         self, task_id: L2TaskId, bitmap_size: int, future: Future[Any]

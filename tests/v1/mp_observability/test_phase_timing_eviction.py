@@ -20,6 +20,7 @@ def test_phase_timing_eviction_releases_cuda_events_unlocked(tmp_path: Path) -> 
     nvcc = shutil.which("nvcc")
     if sys.platform != "linux" or not nvcc or not torch.cuda.is_available():
         pytest.skip("requires a Linux CUDA development environment and a GPU")
+        return
     src = repo_path("csrc", "cuda")  # test-import: allow -- native build under test
     exe = tmp_path / "phase-timing-eviction"
     subprocess.run(

@@ -8,13 +8,15 @@
 # mypy: disable-error-code="union-attr,call-overload"
 # Standard
 from collections.abc import Hashable, Sequence
+from dataclasses import dataclass
 from typing import Optional, Union
+import hashlib
 
 # Third Party
 import torch
 
 # First Party
-from lmcache.utils import EngineType, lmcache_deprecate
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.kv_format import (
     concrete_shape,
     describe_shape,
@@ -24,11 +26,49 @@ from lmcache.v1.common.kv_format import (
     get_spec_class,
 )
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache, LayoutHints
-from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.logging import init_logger, lmcache_deprecate
 from lmcache.v1.common.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
+try:
+    # Third Party
+    from nvtx import annotate  # type: ignore
+except ImportError:
+
+    def annotate(*args, **kwargs):
+        """Dummy decorator when nvtx is not available."""
+
+        def decorator(func):
+            return func
+
+        return decorator
+
+
 logger = init_logger(__name__)
+
+
+try:
+    # First Party
+    from lmcache import _version  # type: ignore[attr-defined]
+
+    VERSION = getattr(_version, "__version__", "")
+    COMMIT_ID = getattr(_version, "__commit_id__", "")
+except ImportError:
+    VERSION = ""
+    COMMIT_ID = ""
+
+
+def get_version() -> str:
+    """Return a human-readable version string.
+
+    Returns:
+        ``"<version>-<commit-id>"``, with ``"NA"`` substituted when the
+        package version or commit id is not available (e.g. when running
+        from a source checkout without a tag).
+    """
+    version_display = VERSION if VERSION else "NA"
+    commit_id_display = COMMIT_ID if COMMIT_ID else "NA"
+    return f"{version_display}-{commit_id_display}"
 
 
 def assert_contiguous(tensor: torch.Tensor) -> None:
@@ -230,7 +270,7 @@ def normalize_and_discover_per_layer_formats(
     Returns:
         ``(normalized_kv_caches, engine_kv_formats)``: the canonical KV cache
         structure and one format per layer (length equals the layer count),
-        ready for :func:`lmcache.v1.kv_layer_groups.group_layers_by_identity`.
+        ready for :func:`lmcache.v1.common.kv_layer_groups.group_layers_by_identity`.
     """
 
     # Detect the whole structure once. A format that isn't a per-layer list (a
@@ -831,3 +871,75 @@ def _get_head_size_view(
         raise ValueError(f"k/v shape mismatch after decode: {k.shape} vs {v.shape}")
 
     return k.view(nb * bs, nh * hs), v.view(nb * bs, nh * hs)
+
+
+def round_down(x: int, y: int) -> int:
+    """Round down x to the nearest multiple of y."""
+    return (x // y) * y
+
+
+def round_up(x: int, y: int) -> int:
+    """Round up x to the nearest multiple of y."""
+    return ((x + y - 1) // y) * y
+
+
+def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
+    """
+    Calculate the size in bytes with the given shapes and dtypes.
+    """
+    assert len(shapes) == len(kv_dtypes), (
+        f"shapes and dtypes must have the same length, "
+        f"but got {len(shapes)} and {len(kv_dtypes)}"
+    )
+    return sum(
+        shape.numel() * kv_dtype.itemsize
+        for shape, kv_dtype in zip(shapes, kv_dtypes, strict=True)
+    )
+
+
+@dataclass
+class CacheStoreEvent:
+    block_hashes: list[int | bytes]
+    parent_block_hash: int | bytes | None
+    token_ids: list[int]
+    block_size: int
+
+    # Deprecated, use lora_name instead
+    # Retained for backwards compatibility
+    # Remove when vLLM removes it from BlockStored
+    lora_id: int | None
+
+    medium: str | None
+    lora_name: str | None
+
+
+@dataclass
+class CacheRemoveEvent:
+    """Removal of previously announced CPU chunks, paired with CacheStoreEvent."""
+
+    block_hashes: list[int | bytes]
+    medium: str | None
+
+
+CacheEvent = CacheStoreEvent | CacheRemoveEvent
+
+
+##### NVTX annotation #####
+_NVTX_COLORS = ["green", "blue", "purple", "rapids"]
+
+
+def _get_color_for_nvtx(name):
+    m = hashlib.sha256()
+    m.update(name.encode())
+    hash_value = int(m.hexdigest(), 16)
+    idx = hash_value % len(_NVTX_COLORS)
+    return _NVTX_COLORS[idx]
+
+
+def _lmcache_nvtx_annotate(func, domain="lmcache"):
+    """Decorator for applying nvtx annotations to methods in lmcache."""
+    return annotate(
+        message=func.__qualname__,
+        color=_get_color_for_nvtx(func.__qualname__),
+        domain=domain,
+    )(func)

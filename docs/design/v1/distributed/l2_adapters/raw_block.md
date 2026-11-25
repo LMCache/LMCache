@@ -135,7 +135,11 @@ after completion progress or exponential backoff from 1 to 100 ms. Permanent
 errors, or 30 seconds without submission or completion progress, stop new
 native I/O admission. `RawBlockCore.report_status()` then reports
 `is_healthy=False` and the terminal reason in `worker_error`. An ordinary
-per-request I/O error does not mark the worker as failed.
+per-request I/O error does not mark the worker as failed. On a confirmed NVMe
+unrecovered payload read, the core quarantines the physical slot until close,
+invalidates its owner and keeps successful sibling keys in the load bitmap.
+The prefetch controller combines available tiers and applies the request’s
+fetching policy. A full-attention prefix ends at the first missing chunk.
 
 An open adapter reports a known worker failure through its task results, not
 through a synchronous exception from `submit_*`. It allocates a task ID and

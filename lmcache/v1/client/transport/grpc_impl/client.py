@@ -17,11 +17,11 @@ import uuid
 import grpc
 
 # First Party
-from lmcache.v1.client.transport.grpc_impl.auth import (
-    GrpcClientAuthenticationInterceptor,
-)
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
+from lmcache.v1.transport.grpc.auth import (
+    GrpcClientAuthenticationInterceptor,
+)
 from lmcache.v1.transport.grpc.descriptors import (
     client_method_name,
     iter_methods,
