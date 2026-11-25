@@ -19,16 +19,20 @@ import torch
 import zmq
 
 # First Party
-from lmcache.utils import EngineType, init_logger
 from lmcache.v1.client.chunk_hashes import ChunkHashCache
 from lmcache.v1.client.heartbeat import HeartbeatThread
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import TransferContext, create_transfer_context
-from lmcache.v1.common.custom_types import CHUNK_HASH_BYTES, IPCCacheServerKey
+from lmcache.v1.common.custom_types import (
+    CHUNK_HASH_BYTES,
+    EngineType,
+    IPCCacheServerKey,
+)
 from lmcache.v1.common.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.transport.futures import MessagingFuture
 from lmcache.v1.transport.request_client import RequestClient
 

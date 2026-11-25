@@ -16,7 +16,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.utils import cdiv, init_logger, round_down
+from lmcache.utils import init_logger
+from lmcache.v1.common.utils import round_down
+from lmcache.v1.distributed.utils import cdiv
 from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
 
 if TYPE_CHECKING:

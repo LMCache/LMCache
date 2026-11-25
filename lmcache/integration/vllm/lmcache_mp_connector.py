@@ -90,10 +90,10 @@ from lmcache.integration.vllm.mp_server_launcher import (
 from lmcache.integration.vllm.utils import (
     vllm_layout_hints,
 )
-from lmcache.utils import CacheRemoveEvent
-from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.client.worker_transfer import LMCacheDrivenTransferContext
 from lmcache.v1.common.banner import print_banner_once
+from lmcache.v1.common.logging import init_logger as lmcache_init_logger
+from lmcache.v1.common.utils import CacheRemoveEvent
 
 try:
     # First Party

@@ -13,7 +13,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import EngineType
 import lmcache.lmcache_native as lmcache_native
 
 # TRT-LLM connector path is CUDA-only.

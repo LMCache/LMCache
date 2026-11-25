@@ -18,7 +18,6 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.utils import EngineType
 from lmcache.v1.client.transfer_context.base import (
     EngineDrivenContextMetadata,
     create_engine_driven_context,
@@ -30,6 +29,7 @@ from lmcache.v1.client.transfer_context.tensor_wire import (
     encode_tensors,
 )
 from lmcache.v1.common.custom_types import (
+    EngineType,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextResponse,
