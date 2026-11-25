@@ -30,7 +30,6 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     ParallelStrategy,
     get_lmcache_chunk_size,
 )
-from lmcache.v1.client.transport.errors import MPServerUnavailableError
 from lmcache.v1.common.custom_types import (
     KVEventBatch,
     KVEventRecord,
@@ -45,6 +44,7 @@ from lmcache.v1.platform.ipc_policy import (
     set_isolated_ipc,
     set_use_vmm_api,
 )
+from lmcache.v1.transport.errors import MPServerUnavailableError
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 from lmcache.v1.transport.request_client import RequestClient
 

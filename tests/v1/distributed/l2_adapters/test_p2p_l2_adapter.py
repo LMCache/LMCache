@@ -15,7 +15,6 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.common.transfer_channel.api import (
     TransferChannelAddress,
     TransferChannelTransferResult,
@@ -34,6 +33,7 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     PeerL2AdapterBase,
 )
 from lmcache.v1.distributed.p2p import P2PClient
+from lmcache.v1.transport.errors import MPRequestError
 from lmcache.v1.transport.futures import MessagingFuture
 
 _LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])

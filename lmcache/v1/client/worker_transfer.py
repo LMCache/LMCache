@@ -18,14 +18,12 @@ from lmcache import torch_dev
 from lmcache.v1.client.transfer_context.base import (
     ContextClosedError,
     EngineDrivenContext,
-    EngineDrivenContextMetadata,
     compute_kv_layout,
     create_engine_driven_context,
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
 from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
-from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.common.api import MemoryLayoutDesc
 from lmcache.v1.common.custom_types import (
     EngineType,
@@ -36,6 +34,7 @@ from lmcache.v1.common.custom_types import (
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.transfer_context import EngineDrivenContextMetadata
 from lmcache.v1.common.utils import (
     LayoutHints,
     get_device,
@@ -52,6 +51,7 @@ from lmcache.v1.platform.base.event_ipc import (
 )
 from lmcache.v1.platform.kv_wrap import kv_wrapper_fds_delivered, wrap_kv_caches
 from lmcache.v1.platform.transfer_mode import MPTransferMode
+from lmcache.v1.transport.errors import REQUEST_FAILURES
 from lmcache.v1.transport.futures import MessagingFuture
 from lmcache.v1.transport.request_client import RequestClient
 import lmcache.lmcache_native as lmcache_native
