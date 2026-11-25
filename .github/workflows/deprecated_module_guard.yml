@@ -1,0 +1,108 @@
+name: Reject deprecated-module changes
+
+# This workflow runs from the trusted base revision and only reads PR metadata.
+# It never checks out or executes code from the pull request.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    branches:
+      - dev
+      - "release-**"
+
+concurrency:
+  group: deprecated-module-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  guard:
+    name: Check deprecated modules
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: true
+          egress-policy: audit
+
+      - name: Checkout trusted guard policy
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          sparse-checkout: |
+            .github/deprecated-modules.toml
+            .github/scripts/deprecated_pr_guard.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Read changed-file metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp \
+            "repos/${REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
+            | jq '[.[][] | {filename, status, additions, deletions}]' \
+            > "${RUNNER_TEMP}/changed-files.json"
+
+      - name: Classify changes
+        id: classify
+        run: |
+          set -euo pipefail
+          jq '[.pull_request.labels[].name]' "${GITHUB_EVENT_PATH}" \
+            > "${RUNNER_TEMP}/pr-labels.json"
+          python .github/scripts/deprecated_pr_guard.py \
+            --config .github/deprecated-modules.toml \
+            --files "${RUNNER_TEMP}/changed-files.json" \
+            --labels "${RUNNER_TEMP}/pr-labels.json" \
+            --decision "${RUNNER_TEMP}/decision.json" \
+            --comment "${RUNNER_TEMP}/comment.md"
+          should_close=$(jq -r '.should_close' "${RUNNER_TEMP}/decision.json")
+          should_comment=$(jq -r '.should_comment' "${RUNNER_TEMP}/decision.json")
+          echo "should_close=${should_close}" >> "${GITHUB_OUTPUT}"
+          echo "should_comment=${should_comment}" >> "${GITHUB_OUTPUT}"
+          cat "${RUNNER_TEMP}/decision.json"
+
+      - name: Reconcile deprecated-module warning
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+          SHOULD_CLOSE: ${{ steps.classify.outputs.should_close }}
+          SHOULD_COMMENT: ${{ steps.classify.outputs.should_comment }}
+        run: |
+          set -euo pipefail
+          marker='<!-- lmcache-deprecated-module-guard -->'
+          comment_id=$(
+            gh api --paginate --slurp \
+              "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" \
+              | jq -r --arg marker "${marker}" \
+                '[.[][] | select(.body | contains($marker)) | .id][0] // empty'
+          )
+
+          if [[ "${SHOULD_COMMENT}" == "true" ]]; then
+            if [[ -n "${comment_id}" ]]; then
+              jq -Rs '{body: .}' < "${RUNNER_TEMP}/comment.md" \
+                | gh api --method PATCH \
+                  "repos/${REPOSITORY}/issues/comments/${comment_id}" \
+                  --input - >/dev/null
+            else
+              jq -Rs '{body: .}' < "${RUNNER_TEMP}/comment.md" \
+                | gh api --method POST \
+                  "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" \
+                  --input - >/dev/null
+            fi
+          elif [[ -n "${comment_id}" ]]; then
+            gh api --method DELETE \
+              "repos/${REPOSITORY}/issues/comments/${comment_id}"
+          fi
+
+          if [[ "${SHOULD_CLOSE}" == "true" ]]; then
+            gh api --method PATCH "repos/${REPOSITORY}/pulls/${PR_NUMBER}" \
+              -f state=closed >/dev/null
+          fi
