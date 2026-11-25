@@ -26,8 +26,8 @@ import threading
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.utils import get_size_bytes
 from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.utils import get_size_bytes
 from lmcache.v1.distributed.api import (
     FetchingPolicy,
     GroupedObjectKeys,
