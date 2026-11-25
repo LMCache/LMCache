@@ -38,52 +38,52 @@ x-pod-1gpu-dshm: &pod-1gpu-dshm
 steps:
   - group: ":zap: Multiprocess PR-Smoke (1-GPU)"
     steps:
-      - label: ":zap: vllm / lm_eval_lmcache_driven / zmq"
+      - label: ":zap: vllm / lm_eval_lmcache_driven / grpc"
         command: .buildkite/k3_tests/multiprocess/run.sh lm_eval
         env:
           INFERENCE_ENGINE: "vllm"
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
         timeout_in_minutes: 30
         retry: *flaky-retry
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu-dshm } }]
         artifact_paths: ["*.log"]
 
-      - label: ":zap: vllm / restart_recovery / zmq"
+      - label: ":zap: vllm / restart_recovery / grpc"
         command: .buildkite/k3_tests/multiprocess/run.sh restart_recovery
         env:
           INFERENCE_ENGINE: "vllm"
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":zap: vllm / cache_stats / zmq"
+      - label: ":zap: vllm / cache_stats / grpc"
         command: .buildkite/k3_tests/multiprocess/run.sh cache_stats
         env:
           INFERENCE_ENGINE: "vllm"
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":zap: vllm / lazy_offload / zmq"
+      - label: ":zap: vllm / lazy_offload / grpc"
         command: .buildkite/k3_tests/multiprocess/run.sh lazy_offload
         env:
           INFERENCE_ENGINE: "vllm"
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":zap: vllm / http_api / zmq"
+      - label: ":zap: vllm / http_api / grpc"
         command: .buildkite/k3_tests/multiprocess/run.sh http_api
         env:
           INFERENCE_ENGINE: "vllm"
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
@@ -106,7 +106,7 @@ steps:
               - "inline"
               - "server_copy"
             request_transport:
-              - "zmq"
+              - "grpc"
         env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
