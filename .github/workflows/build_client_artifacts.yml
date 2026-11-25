@@ -19,6 +19,7 @@ on:
             - 'setup.py'
             - 'setup_extensions/**'
             - 'csrc/lmcache_native/**'
+            - 'csrc/*.h'
             - 'pyproject.toml'
             - 'requirements/build.txt'
             - '.github/scripts/build_client_wheel.sh'
