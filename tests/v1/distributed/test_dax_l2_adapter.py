@@ -36,6 +36,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
     get_registered_l2_adapter_types,
 )
+from lmcache.v1.distributed.l2_adapters.dax.core import DaxCore
 from lmcache.v1.distributed.l2_adapters.dax_l2_adapter import (
     DaxDeviceConfig,
     DaxL2Adapter,
@@ -211,6 +212,21 @@ def load_and_wait(
     return bitmap_to_bools(bitmap, len(keys))
 
 
+def block_first_unmap(monkeypatch: pytest.MonkeyPatch) -> list[memoryview]:
+    """Keep an exported view so the first core's real close raises BufferError."""
+    views: list[memoryview] = []
+    close = DaxCore.close
+
+    def close_with_export(core: DaxCore[ObjectKey]) -> None:
+        if not views:
+            assert core.arena_view is not None
+            views.append(core.arena_view[:1])
+        close(core)
+
+    monkeypatch.setattr(DaxCore, "close", close_with_export)
+    return views
+
+
 def test_dax_adapter_registers_and_has_distinct_eventfds(tmp_path):
     adapter, _ = make_adapter(tmp_path)
     try:
@@ -220,6 +236,70 @@ def test_dax_adapter_registers_and_has_distinct_eventfds(tmp_path):
         load_fd = adapter.get_load_event_fd()
         assert len({store_fd, lookup_fd, load_fd}) == 3
     finally:
+        adapter.close()
+
+
+def test_failed_remove_keeps_ownership_without_usable_capacity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed unmap stays unavailable and owned until a removal retry succeeds."""
+    adapter = make_hotplug_adapter(tmp_path)
+    source = adapter.hotplug_status()["devices"][0]["device_path"]
+    views = block_first_unmap(monkeypatch)
+    obj = create_memory_obj(fill_value=7)
+    try:
+        with pytest.raises(BufferError):
+            adapter.hotplug_remove_device(source, "evict")
+        assert adapter.hotplug_status()["devices"][0]["state"] == "removing"
+        assert adapter.get_usage().total_capacity_bytes == 4096
+        assert adapter.owns_range(source, 0, 4096)
+        with pytest.raises(L2ReconfigureError) as draining:
+            adapter.hotplug_remove_device(source, "drain")
+        assert draining.value.status_code == 409
+        with pytest.raises(L2ReconfigureError, match="overlaps"):
+            adapter.hotplug_add_device(source, 2048)
+        store_and_wait(adapter, create_object_key(900), obj)
+        assert adapter.hotplug_status()["devices"][1]["live_slot_count"] == 1
+
+        views[0].release()
+        assert adapter.hotplug_remove_device(source, "evict")["state"] == "removed"
+        assert not adapter.owns_range(source, 0, 4096)
+    finally:
+        for view in views:
+            view.release()
+        obj.ref_count_down()
+        adapter.close()
+
+
+def test_failed_close_still_closes_other_devices_and_notifiers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Partial shutdown releases independent resources and retries its failed core."""
+    adapter = make_hotplug_adapter(tmp_path)
+    source = adapter.hotplug_status()["devices"][0]["device_path"]
+    views = block_first_unmap(monkeypatch)
+    try:
+        with pytest.raises(BufferError):
+            adapter.close()
+        assert [d["state"] for d in adapter.hotplug_status()["devices"]] == [
+            "removing",
+            "closed",
+        ]
+        assert adapter.owns_range(source, 0, 4096)
+        assert adapter.get_usage().total_capacity_bytes == 0
+        assert adapter.get_store_event_fd() == -1
+        assert adapter.get_lookup_and_lock_event_fd() == -1
+        assert adapter.get_load_event_fd() == -1
+        with pytest.raises(RuntimeError, match="closing"):
+            adapter.submit_store_task([], [])
+
+        views[0].release()
+        adapter.close()
+        assert not adapter.owns_range(source, 0, 4096)
+        assert all(d["state"] == "closed" for d in adapter.hotplug_status()["devices"])
+    finally:
+        for view in views:
+            view.release()
         adapter.close()
 
 

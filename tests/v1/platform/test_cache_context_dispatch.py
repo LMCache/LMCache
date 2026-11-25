@@ -23,6 +23,7 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.platform import get_device_spec
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 from lmcache.v1.platform.cache_context import create_cache_context
 
 
@@ -76,6 +77,8 @@ class _FakeContext(BaseCacheContext):
         engine_type: Any,
         separate_object_groups: bool = True,
         full_sw_kv: bool = False,
+        *,
+        object_group_transfer: ObjectGroupTransfer | None = None,
     ) -> None:
         # Skip ``BaseCacheContext.__init__`` -- it requires real
         # KVLayerGroupsManager / shape descriptors that are out of
