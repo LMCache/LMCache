@@ -1410,8 +1410,10 @@ and response bytes are unchanged.
   server cannot answer the longer request. Upgrade ZMQ deployments together.
 
 There is no handshake or fallback. Profiles live until unregister, reap or
-shutdown. STORE bindings, the first integration sending and checking a
-profile, and native event records remain later steps of
+shutdown. A profiled STORE may now carry native block bindings for complete
+chunks. Current integrations still send none and the publisher retains its
+existing chunk-level output. Engine-side preparation and native event records
+remain later steps of
 `issue #5932 <https://github.com/LMCache/LMCache/issues/5932>`_.
 
 Anonymous Usage Statistics

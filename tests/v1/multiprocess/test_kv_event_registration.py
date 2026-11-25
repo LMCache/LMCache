@@ -3,6 +3,7 @@
 
 # Standard
 from collections.abc import Iterator
+from dataclasses import replace
 from typing import Any, Literal, cast
 from unittest.mock import MagicMock
 
@@ -16,8 +17,18 @@ from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.transport.zmq_impl.mq_client import MessageQueueClient
 from lmcache.v1.common.api import MemoryLayoutDesc
 from lmcache.v1.common.attn_window import AttnWindowDesc
-from lmcache.v1.common.custom_types import EngineType, KVEventProfile
+from lmcache.v1.common.custom_types import (
+    EngineType,
+    EventBinding,
+    IPCCacheServerKey,
+    KVEventProfile,
+)
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    ipc_key_to_object_keys,
+)
+from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as transfer
@@ -35,6 +46,7 @@ from lmcache.v1.transport.zmq.wire import (
     decode_operation,
     encode_operation,
 )
+from tests.v1.multiprocess.test_worker_liveness import _event_module
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 import lmcache.v1.transport.grpc._proto_gen.lmcache_driven_service_pb2 as transfer_pb2
 
@@ -99,6 +111,87 @@ def registration(
         yield module, created
     finally:
         module.close()
+
+
+def test_partial_copy_keeps_binding_until_abort_despite_duplicate_store(
+    registration: tuple[transfer.LMCacheDrivenTransferModule, list[MagicMock]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A no-op retry cannot rebind a failed transfer's still-reserved chunks."""
+    module, caches = registration
+    module.register_kv_cache(*_payload())
+    events, bus = _event_module(world_size=2)
+    module.bind_store_events = events.bind_store
+    ctx = cast(MagicMock, module.context)
+    ctx.event_bus.publish.side_effect = bus.publish
+    ctx.event_bus.has_subscribers.return_value = False
+    cache = caches[0]
+    cache.calculate_num_blocks.return_value = 16
+    cache.kv_layer_groups_manager.num_kernel_groups = 1
+    cache.kv_layer_groups_manager.object_groups = [
+        ObjectGroupInfo(kernel_group_indices=[0])
+    ]
+    monkeypatch.setattr(transfer, "downsample_and_stage_block_ids", lambda _, ids: ids)
+    submit = MagicMock()
+    monkeypatch.setattr(transfer, "submit_callback_to_stream", submit)
+
+    key = IPCCacheServerKey.from_token_ids(
+        "model", 2, 1, range(512), start=0, end=512, request_id="first"
+    )
+    bindings = (
+        EventBinding(PROFILE, tuple(range(16)), None),
+        EventBinding(PROFILE, tuple(range(16, 32)), 15),
+    )
+    key = replace(key, event_bindings=bindings)
+    hasher = ctx.layout_desc_registry.get_token_hasher("model", 2)
+    objects = ipc_key_to_object_keys(
+        key,
+        hasher.compute_packed_chunk_hashes(key.token_bytes),
+        [0],
+        DEFAULT_SHARD_REPLICATION_DESC,
+    )[0]
+    ctx.resolve_obj_keys.return_value = [objects]
+    reserved = {obj: MagicMock() for obj in objects}
+    for memory in reserved.values():
+        memory.get_l1_manager.return_value = 3
+        memory.get_size.return_value = 4096
+    ctx.storage_manager.reserve_write.side_effect = [reserved, {}, {}]
+    cache.transfer_object_group.side_effect = [RuntimeError("partial copy"), None, None]
+    blocks = [list(range(1, 33))]
+    assert not module.store(key, 1, blocks, b"producer")[1]
+    assert module.store(replace(key, request_id="duplicate"), 1, blocks, b"producer")[1]
+    bus.stop()
+    conflicting = replace(
+        key,
+        request_id="different",
+        event_bindings=(
+            bindings[0],
+            replace(bindings[1], block_hashes=tuple(range(32, 48))),
+        ),
+    )
+    last_seen = module.context_entries_snapshot()[1].last_seen
+    with pytest.raises(InvalidRequestError, match="conflict"):
+        module.store(conflicting, 1, blocks, b"producer")
+    assert module.context_entries_snapshot()[1].last_seen == last_seen
+    assert ctx.resolve_obj_keys.call_count == 2
+    assert ctx.storage_manager.reserve_write.call_count == 2
+    ctx.storage_manager.abort_write.assert_not_called()
+
+    handlers = {
+        call.args[0]: call.args[1]
+        for call in cast(
+            MagicMock, transfer.DeviceHostFuncDispatcher
+        ).return_value.register.call_args_list
+    }
+    for call in submit.call_args_list:
+        _, kind, payload = call.args
+        handlers[kind](payload)
+    bus.stop()
+    ctx.storage_manager.abort_write.assert_called_once_with(
+        objects, dict.fromkeys(objects, 3)
+    )
+    assert all(events.get_store_binding(obj) is None for obj in objects)
+    assert module.store(conflicting, 1, blocks, b"producer")[1]
 
 
 @pytest.mark.parametrize("profile_id,block_size", [("", 16), ("v1", 0), ("v1", -1)])
