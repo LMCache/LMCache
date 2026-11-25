@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform import get_device_spec
 
@@ -36,11 +36,12 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     # First Party
+    from lmcache.v1.common.buffer_registration import BufferRegistration
     from lmcache.v1.common.group_view import EngineGroupInfo
-    from lmcache.v1.common.object_group_transfer import ObjectGroupTransfer
     from lmcache.v1.common.utils import LayoutHints
     from lmcache.v1.platform.base.cache_context import BaseCacheContext
     from lmcache.v1.platform.base.ipc_wrapper import KVCache
+    from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 
 
 logger = init_logger(__name__)
@@ -84,6 +85,7 @@ def create_cache_context(
     full_sw_kv: bool = False,
     *,
     object_group_transfer: ObjectGroupTransfer | None = None,
+    buffer_registration: BufferRegistration | None = None,
 ) -> BaseCacheContext:
     """Create the appropriate cache context for *kv_caches*.
 
@@ -116,6 +118,9 @@ def create_cache_context(
             the device context constructor. Required only when invoking the
             base ``transfer_object_group`` implementation; device overrides
             remain active. None leaves the default transfer unavailable.
+        buffer_registration: Optional external staging-buffer registration.
+            Applied after construction without changing the DeviceSpec hook's
+            arguments. If absent, no storage registration is performed.
 
     Returns:
         A concrete cache context instance.
@@ -123,6 +128,8 @@ def create_cache_context(
     Raises:
         ValueError: If *kv_caches* is empty, mixes device types, or
             targets a device type with no registered backend.
+        RuntimeError: If staging registration fails; the context is closed
+            before the failure propagates.
     """
     if not kv_caches:
         raise ValueError("create_cache_context requires a non-empty kv_caches list")
@@ -136,7 +143,7 @@ def create_cache_context(
             "entry point provides a DeviceSpec whose ``create_cache_context`` "
             "hook returns a BaseCacheContext instance." % device_type
         )
-    return spec.create_cache_context(
+    context = spec.create_cache_context(
         kv_caches,
         lmcache_tokens_per_chunk,
         layout_hints,
@@ -146,3 +153,10 @@ def create_cache_context(
         full_sw_kv,
         object_group_transfer=object_group_transfer,
     )
+    if buffer_registration is not None:
+        try:
+            context.register_staging_buffer(buffer_registration)
+        except BaseException:
+            context.close()
+            raise
+    return context

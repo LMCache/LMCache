@@ -29,7 +29,7 @@ change the hook deliberately and treat it as an extension-API change.
 # Standard
 from types import SimpleNamespace
 from typing import Any, Callable, cast
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 import inspect
 import threading
 
@@ -133,6 +133,7 @@ def test_register_builds_the_context_through_the_hook():
             engine_type,
             layout_hints,
             engine_group_infos,
+            chunk_size,
         ):
             seen.update(
                 kv_caches=kv_caches,
@@ -140,10 +141,12 @@ def test_register_builds_the_context_through_the_hook():
                 engine_type=engine_type,
                 layout_hints=layout_hints,
                 engine_group_infos=engine_group_infos,
+                chunk_size=chunk_size,
             )
             raise _StopHere
 
     module = _Module.__new__(_Module)
+    module._ctx = MagicMock(chunk_size=256)
     module._lock = threading.Lock()
     module._cache_contexts = {}
     kv_caches, infos = object(), [object()]
@@ -161,6 +164,7 @@ def test_register_builds_the_context_through_the_hook():
         "engine_type": engine_type,
         "layout_hints": None,
         "engine_group_infos": infos,
+        "chunk_size": 256,
     }
 
 
@@ -180,18 +184,23 @@ def test_default_cache_context_hook_applies_server_settings(monkeypatch):
         engine_type=engine_type,
         layout_hints=None,
         engine_group_infos=infos,
+        chunk_size=320,
     )
 
     assert result == "context"
     create.assert_called_once_with(
         kv_caches,
-        128,
+        320,
         layout_hints=None,
         engine_group_infos=infos,
         engine_type=engine_type,
         separate_object_groups=True,
         full_sw_kv=True,
         object_group_transfer=mod.transfer_kv_per_object_group,
+        buffer_registration=ANY,
+    )
+    assert isinstance(
+        create.call_args.kwargs["buffer_registration"], mod.GDSBufferRegistration
     )
 
 
@@ -299,7 +308,7 @@ def test_connector_worker_role_routes_through_the_adapter_hook():
         (
             LMCacheDrivenTransferModule._create_cache_context,
             "self, kv_caches, *, instance_id, engine_type, layout_hints, "
-            "engine_group_infos",
+            "engine_group_infos, chunk_size",
         ),
         (
             LMCacheMPWorkerAdapter._create_transfer_context,

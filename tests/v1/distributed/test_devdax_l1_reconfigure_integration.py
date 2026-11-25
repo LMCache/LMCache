@@ -26,7 +26,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import get_dax_device_geometry
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -40,6 +39,7 @@ from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.utils import get_dax_device_geometry
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxArenaState,
     DevDaxRemoveMode,
