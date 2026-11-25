@@ -20,12 +20,12 @@ from lmcache.v1.client.async_engine_driven import (
 from lmcache.v1.client.transfer_context.base import (
     ContextClosedError,
     EngineDrivenContext,
-    EngineDrivenContextMetadata,
 )
 from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
 )
+from lmcache.v1.common.transfer_context import EngineDrivenContextMetadata
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 
 
