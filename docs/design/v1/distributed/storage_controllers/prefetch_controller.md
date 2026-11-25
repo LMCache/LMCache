@@ -121,10 +121,10 @@ once, so without them a burst fills L1 with locked data for requests minutes
 from running, and later prefetches fail. Condition (2) keeps a request from
 starting when L1, full of resident data, could not hold its loads.
 
-**Continuations.** `PrefetchAdmission.CONTINUATION` (the CacheBlend sparse leg
-after its prefix leg) waits in its own queue, and no `NEW` request starts
-while one waits. It passes the same checks; its prefix leg was charged at the
-worst case of the whole prompt, so it fits once in-flight lookups settle.
+**Priority.** `PrefetchPriority.HIGH` (the CacheBlend sparse leg after its
+prefix leg) waits in its own queue, and no `NORMAL` request starts while one
+waits. It passes the same checks; its prefix leg was charged at the worst case
+of the whole prompt, so it fits once in-flight lookups settle.
 
 **Stall rule.** With nothing in flight, a head refused for
 `PREFETCH_STALL_ADMIT_SECONDS` (30 s) is admitted anyway, so an engine that

@@ -33,7 +33,7 @@ from lmcache.v1.distributed.api import (
     MemorySegment,
     MemoryTags,
     ObjectKey,
-    PrefetchAdmission,
+    PrefetchPriority,
     PrefetchLockMode,
     PrefetchResult,
     PrefetchTaskSpec,
@@ -141,7 +141,7 @@ def make_spec(
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK,
     allowed_l1_memory_tags: frozenset[MemoryTags] | None = None,
     allowed_l2_memory_tags: frozenset[MemoryTags] | None = None,
-    admission: PrefetchAdmission = PrefetchAdmission.NEW,
+    priority: PrefetchPriority = PrefetchPriority.NORMAL,
 ) -> PrefetchTaskSpec:
     """Build a request over the given rows."""
     return PrefetchTaskSpec(
@@ -150,7 +150,7 @@ def make_spec(
         lock_mode=lock_mode,
         allowed_l1_memory_tags=allowed_l1_memory_tags,
         allowed_l2_memory_tags=allowed_l2_memory_tags,
-        admission=admission,
+        priority=priority,
     )
 
 
@@ -2440,7 +2440,7 @@ class TestP2PPeerFailures:
 
 
 # =============================================================================
-# Retained bytes in the watermark, continuation priority, stall rule
+# Retained bytes in the watermark, prefetch priority, stall rule
 # =============================================================================
 
 OBJECT_BYTES = 100 * 2 * 512 * 2
@@ -2521,9 +2521,9 @@ class TestRetainedBudget:
             ctrl.stop()
             adapter.close()
 
-    def test_continuation_starts_ahead_of_waiting_new_request(self):
-        """A continuation that fits starts while an earlier NEW request is
-        still waiting for budget."""
+    def test_high_priority_starts_ahead_of_waiting_normal_request(self):
+        """A HIGH-priority request that fits starts while an earlier NORMAL
+        request is still waiting for budget."""
         l1_manager = make_budget_l1()
         adapter = make_adapter()
         layout = make_layout()
@@ -2550,7 +2550,7 @@ class TestRetainedBudget:
                 lambda: ctrl.report_status()["pending_queue_size"] == 1
             )
             cont_id = ctrl.submit_prefetch_request(
-                single_row_spec(cont_keys, admission=PrefetchAdmission.CONTINUATION)
+                single_row_spec(cont_keys, priority=PrefetchPriority.HIGH)
             )
             assert row_bits(wait_for_result(ctrl, cont_id)) == [0]
             assert ctrl.report_status()["pending_queue_size"] == 1

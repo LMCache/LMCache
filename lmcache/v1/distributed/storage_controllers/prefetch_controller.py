@@ -35,7 +35,7 @@ from lmcache.v1.distributed.api import (
     MemoryResidency,
     MemoryTags,
     ObjectKey,
-    PrefetchAdmission,
+    PrefetchPriority,
     PrefetchLockMode,
     PrefetchResult,
     PrefetchTaskSpec,
@@ -624,8 +624,8 @@ class PrefetchController(StorageControllerInterface):
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
         self._pending_queue: deque[tuple[PrefetchRequestId, PrefetchTaskSpec]] = deque()
-        # CONTINUATION requests: strict priority over pending NEW requests.
-        self._continuation_queue: deque[tuple[PrefetchRequestId, PrefetchTaskSpec]] = (
+        # HIGH-priority requests: none of the NORMAL ones starts while one waits.
+        self._high_priority_queue: deque[tuple[PrefetchRequestId, PrefetchTaskSpec]] = (
             deque()
         )
         # When the pending head was first refused (None while it is not
@@ -807,7 +807,7 @@ class PrefetchController(StorageControllerInterface):
             "inflight_watermark": self._inflight_watermark,
             "submission_queue_size": submission_queue_size,
             "pending_queue_size": len(self._pending_queue),
-            "continuation_queue_size": len(self._continuation_queue),
+            "high_priority_queue_size": len(self._high_priority_queue),
             "stall_admissions": self._stall_admissions,
             "in_flight_request_count": len(in_flight),
             "lookup_phase_count": lookup_phase_count,
@@ -1143,27 +1143,27 @@ class PrefetchController(StorageControllerInterface):
 
     def _drain_submission_queue(self) -> None:
         """Move items from the thread-safe submission queue to the pending
-        and continuation queues."""
+        and high-priority queues."""
         with self._submission_lock:
             items = self._submission_queue
             self._submission_queue = []
         for item in items:
-            if item[1].admission == PrefetchAdmission.CONTINUATION:
-                self._continuation_queue.append(item)
+            if item[1].priority == PrefetchPriority.HIGH:
+                self._high_priority_queue.append(item)
             else:
                 self._pending_queue.append(item)
 
     def _start_pending_requests(self) -> None:
         """Start queued requests while L1 can admit them (see
-        ``_can_admit_new_prefetch``): continuations first, in arrival order,
-        then pending NEW requests, none of which starts while a continuation
+        ``_can_admit_new_prefetch``): ``HIGH`` priority first, in arrival
+        order, then ``NORMAL`` ones, none of which starts while a ``HIGH`` one
         waits.
 
         With no request in flight, a head refused for
         ``PREFETCH_STALL_ADMIT_SECONDS`` is admitted anyway.
         """
-        while self._continuation_queue or self._pending_queue:
-            queue = self._continuation_queue or self._pending_queue
+        while self._high_priority_queue or self._pending_queue:
+            queue = self._high_priority_queue or self._pending_queue
             if not self._can_admit_new_prefetch(queue[0][1]):
                 now = time.monotonic()
                 if self._head_blocked_since is None:
