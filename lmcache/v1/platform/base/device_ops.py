@@ -11,11 +11,11 @@ kernels via :meth:`DeviceOps.bind_native`.
 from __future__ import annotations
 
 # Standard
+from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, ClassVar
 
-if TYPE_CHECKING:
-    # Third Party
-    import torch
+# Third Party
+import torch
 
 # First Party
 from lmcache.v1.common import ops_types
@@ -23,6 +23,10 @@ from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform import torch_ops
 import lmcache.lmcache_native as lmcache_native
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.common.kv_format.types import DiscoverableKVCache
 
 logger = init_logger(__name__)
 
@@ -89,7 +93,7 @@ class DeviceOps:
         Guarded by ``_native_bound`` so it runs at most once per instance.
         """
 
-    def bind_native(self, module: object) -> None:
+    def bind_native(self, module: object, *, skip: Collection[str] = ()) -> None:
         """Rebind ops and types from a compiled native module.
 
         Walks the native module's public symbols.  For each callable or
@@ -100,7 +104,7 @@ class DeviceOps:
         bound_ops = 0
         bound_types = 0
         for name in dir(module):
-            if name.startswith("_"):
+            if name.startswith("_") or name in skip:
                 continue
             native_sym = getattr(module, name, None)
             if native_sym is None:
@@ -195,8 +199,8 @@ class DeviceOps:
 
     def multi_layer_block_kv_transfer(
         self,
-        paged_buffer_ptrs_tensor: "torch.Tensor | list",
-        lmcache_objects_ptrs: "list[int] | list[torch.Tensor]",
+        paged_kv: "DiscoverableKVCache",
+        chunks: "list[torch.Tensor]",
         block_ids: "torch.Tensor | list[int]",
         device: "torch.device | str",
         direction: lmcache_native.TransferDirection,
@@ -206,8 +210,8 @@ class DeviceOps:
         skip_prefix_n_blocks: int,
     ) -> None:
         return torch_ops.multi_layer_block_kv_transfer(
-            paged_buffer_ptrs_tensor,
-            lmcache_objects_ptrs,
+            paged_kv,
+            chunks,
             block_ids,
             device,
             direction,
