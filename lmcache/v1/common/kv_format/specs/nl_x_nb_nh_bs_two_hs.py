@@ -19,9 +19,9 @@ from typing import cast
 import torch
 
 # First Party
-from lmcache.utils import lmcache_deprecate
 from lmcache.v1.common.kv_format.specs.base import KVFormatSpec
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache
+from lmcache.v1.common.logging import lmcache_deprecate
 import lmcache.lmcache_native as lmcache_native
 
 

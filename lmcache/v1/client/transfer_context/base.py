@@ -28,9 +28,8 @@ import time
 import torch
 
 # First Party
-from lmcache.utils import EngineType
 from lmcache.v1.common.api import MemoryLayoutDesc
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.platform import resolve_device_ops

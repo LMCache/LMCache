@@ -16,7 +16,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache
 from lmcache.v1.common.ops_types import PageBufferShapeDesc
 from lmcache.v1.common.utils import (
