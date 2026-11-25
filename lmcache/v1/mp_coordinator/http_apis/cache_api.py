@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 import httpx
 
 # First Party
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.mp_coordinator.controllers.prefetch_manager import PrefetchManager
 from lmcache.v1.mp_coordinator.http_apis.dependencies import (
     get_context,
@@ -32,6 +33,9 @@ from lmcache.v1.mp_coordinator.schemas import (
     PrefetchResponse,
 )
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
+from lmcache.v1.multiprocess.cache_control.key_resolver import (
+    resolve_chunk_object_keys,
+)
 
 router = APIRouter()
 
@@ -41,23 +45,26 @@ router = APIRouter()
 
 @router.post("/cache/prefetches")
 async def request_prefetch(body: PrefetchRequest, request: Request) -> PrefetchResponse:
-    """Submit a warm prefetch of keys, or a token sequence, on one MP server.
+    """Submit a warm prefetch of keys, chunk hashes or a token sequence on one
+    MP server.
 
     Resolves ``body.instance_id`` in the registry and proxies to that server's
     ``POST /cache/prefetches``, which submits the load and returns a
     ``request_id``. Poll ``GET /cache/prefetches/{instance_id}/{request_id}``.
 
     Args:
-        body: Target instance, and the ``keys`` to warm or model/world_size,
-            the token_ids to warm, and the per-tenant cache_salt.
+        body: Target instance, and the ``keys`` to warm, or model/world_size,
+            the token_ids or chunk_hashes to warm, and the per-tenant
+            cache_salt.
 
     Returns:
         ``PrefetchResponse`` carrying the server's ``request_id`` (empty when the
         sequence was shorter than one chunk -- ``status`` ``"noop"``).
 
     Raises:
-        HTTPException: 404 if ``instance_id`` is not registered; 502 if the
-            target server is unreachable or rejects the submit.
+        HTTPException: 400 if a chunk-hash form's key field is invalid; 404
+            if ``instance_id`` is not registered; 502 if the target server
+            is unreachable or rejects the submit.
     """
     ctx = get_context(request)
     prefetch = ctx.controllers.get(PrefetchManager)
@@ -140,10 +147,35 @@ def _forwarded_prefetch_body(body: PrefetchRequest) -> dict[str, Any]:
 
     Carries only the form ``body`` uses: a server without the keys form then
     rejects a keys request rather than reading empty token fields as a
-    sub-chunk sequence and answering noop.
+    sub-chunk sequence and answering noop. The chunk-hash form goes as the
+    keys form, one key per distinct chunk: the server warms a chunk by any
+    one of its keys, and one per rank could exceed its key cap.
+
+    Raises:
+        HTTPException: 400 if a chunk-hash form's key field (e.g.
+            ``cache_salt``) is invalid.
     """
     if body.keys:
         return {"keys": [asdict(key) for key in body.keys]}
+    if body.chunk_hashes:
+        try:
+            keys, _ = resolve_chunk_object_keys(
+                [bytes.fromhex(h) for h in body.chunk_hashes],
+                body.model_name,
+                body.world_size,
+                body.cache_salt,
+                tags=body.tags,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        key_per_chunk: dict[bytes, ObjectKey] = {}
+        for key in keys:
+            key_per_chunk.setdefault(key.chunk_hash, key)
+        return {
+            "keys": [
+                asdict(key.to_encoded_object_key()) for key in key_per_chunk.values()
+            ]
+        }
     forwarded: dict[str, Any] = {
         "model_name": body.model_name,
         "world_size": body.world_size,

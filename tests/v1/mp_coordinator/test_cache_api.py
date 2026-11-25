@@ -366,6 +366,23 @@ def test_pin_by_keys_pins_only_the_named_mid_prompt_chunk():
         ),
         pytest.param("both-forms", id="both-forms"),
         pytest.param("too-many-keys", id="too-many-keys"),
+        pytest.param(
+            {"chunk_hashes": ["aa"], "world_size": 1}, id="chunk-hashes-without-model"
+        ),
+        pytest.param(
+            {"chunk_hashes": ["aa"], "model_name": "m"},
+            id="chunk-hashes-without-world-size",
+        ),
+        pytest.param(
+            {"chunk_hashes": ["zz"], "model_name": "m", "world_size": 1},
+            id="chunk-hash-not-hex",
+        ),
+        pytest.param(
+            {"chunk_hashes": [""], "model_name": "m", "world_size": 1},
+            id="empty-chunk-hash",
+        ),
+        pytest.param("keys-and-chunk-hashes", id="keys-and-chunk-hashes"),
+        pytest.param("too-many-chunk-hashes", id="too-many-chunk-hashes"),
     ],
 )
 @pytest.mark.parametrize(
@@ -380,17 +397,31 @@ def test_pin_by_keys_pins_only_the_named_mid_prompt_chunk():
 def test_key_controls_reject_request_without_exactly_one_form(
     method: str, path: str, body: dict | str
 ):
-    """Pin, delete and prefetch bodies carry exactly one of keys / token_ids;
-    the tokens form needs model_name and world_size -- a defaulted world size
-    would resolve another parallel setup's keys and report success -- and
-    the keys form is capped at MAX_KEYS_PER_REQUEST. Anything else is a
-    422."""
+    """Pin, delete and prefetch bodies carry exactly one of keys / token_ids /
+    chunk_hashes; the tokens and chunk-hash forms need model_name and
+    world_size -- a defaulted world size would resolve another parallel
+    setup's keys and report success -- each hash is non-empty hex, and the
+    keys and chunk-hash forms are capped at MAX_KEYS_PER_REQUEST. Anything
+    else is a 422."""
     with _pin_client() as client:
         key = _wire_key(_resolve(client.app.state.ctx)[0])
         if body == "both-forms":
             body = {**_pin_body(), "keys": [key]}
         elif body == "too-many-keys":
             body = {"keys": [key] * (MAX_KEYS_PER_REQUEST + 1)}
+        elif body == "keys-and-chunk-hashes":
+            body = {
+                "keys": [key],
+                "chunk_hashes": ["aa"],
+                "model_name": "m",
+                "world_size": 1,
+            }
+        elif body == "too-many-chunk-hashes":
+            body = {
+                "chunk_hashes": ["aa"] * (MAX_KEYS_PER_REQUEST + 1),
+                "model_name": "m",
+                "world_size": 1,
+            }
         assert isinstance(body, dict)
         request_body = {**body, "instance_id": "mp-1"}
         assert client.request(method, path, json=request_body).status_code == 422
@@ -995,6 +1026,135 @@ def test_a_pin_by_key_holds_back_every_rank_from_a_delete_by_key():
         assert sorted(k["kv_rank"] for k in call["keys"]) == sorted(
             key.kv_rank for key in tp2[2:]
         )
+
+
+def _chunk_body(chunk_hashes: list[bytes], world_size: int = 2, **extra) -> dict:
+    """A chunk-hash form body for the TP=2 setup these tests store."""
+    return {
+        "chunk_hashes": [h.hex() for h in chunk_hashes],
+        "model_name": "m",
+        "world_size": world_size,
+        "cache_salt": "alice",
+        **extra,
+    }
+
+
+def test_a_chunk_hash_pins_its_mid_prompt_chunk_on_every_rank():
+    """At TP=2 a hash names the second chunk without its prefix: the pin covers
+    both ranks, so a non-force delete by hash holds both back, and naming the
+    hash twice counts one chunk. Unpinning by hash releases it."""
+    deletes: list = []
+    with _registered_delete_client(deletes) as client:
+        ctx = client.app.state.ctx
+        tp2, _ = resolve_object_keys(ctx.token_hasher, "m", 2, TOKENS, "alice")
+        _store(ctx, tp2)
+        second = tp2[2].chunk_hash
+        pin_body = _chunk_body([second, second])
+
+        pinned = client.post("/cache/pins", json=pin_body)
+
+        assert pinned.status_code == 200, pinned.text
+        assert pinned.json() == {"requested": 1, "affected": 2, "status": "pinned"}
+        listed = client.get("/cache/pins").json()["pins"]
+        assert [p["key"]["chunk_hash_hex"] for p in listed] == [second.hex()]
+        held = client.post(
+            "/cache/delete", json=_chunk_body([second], instance_id="mp-1")
+        )
+        assert held.json()["skipped"] == 2
+        assert deletes == []
+
+        unpinned = client.request("DELETE", "/cache/pins", json=pin_body)
+
+        assert unpinned.json() == {"requested": 1, "affected": 2, "status": "unpinned"}
+        assert client.get("/cache/pins").json() == {"total": 0, "pins": []}
+
+
+def test_a_delete_by_chunk_hash_reaches_only_that_chunk_of_the_named_setup():
+    """The delete reaches every rank and object group the named chunk is
+    stored in, and leaves the prefix chunk and another world size's copy."""
+    deletes: list = []
+    with _registered_delete_client(deletes) as client:
+        ctx = client.app.state.ctx
+        tp2, _ = resolve_object_keys(ctx.token_hasher, "m", 2, TOKENS, "alice")
+        tp2_in_groups = [replace(k, object_group_id=g) for g in (0, 1) for k in tp2]
+        _store(ctx, tp2_in_groups + _resolve(ctx))
+        second = tp2[2].chunk_hash
+
+        resp = client.post(
+            "/cache/delete",
+            json=_chunk_body([second], instance_id="mp-1", tier="l2"),
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["requested"] == 1
+        [call] = deletes
+        sent = {
+            (k["chunk_hash_hex"], k["kv_rank"], k["object_group_id"])
+            for k in call["keys"]
+        }
+        assert sent == {
+            (k.chunk_hash.hex(), k.kv_rank, k.object_group_id)
+            for k in tp2_in_groups
+            if k.chunk_hash == second
+        }
+
+
+def test_prefetch_by_chunk_hash_forwards_each_chunk_once_as_a_key():
+    """The target warms a chunk by key, so the coordinator forwards each
+    distinct hash once, in order, as a key of the named setup."""
+    forwarded: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        forwarded.append(json.loads(request.content))
+        return httpx.Response(
+            202, json={"request_id": "abc", "chunks": 2, "status": "submitted"}
+        )
+
+    with _pin_client() as client:
+        client.post(
+            "/instances",
+            json={"instance_id": "mp-1", "ip": "127.0.0.1", "http_port": 8080},
+        )
+        client.app.state.outbound_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+        first, second = b"\x01" * 8, b"\x02" * 8
+        body = _chunk_body(
+            [second, first, second], instance_id="mp-1", tags={"adapter": "A"}
+        )
+
+        resp = client.post("/cache/prefetches", json=body)
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["chunks"] == 2
+        [sent] = forwarded
+        assert list(sent) == ["keys"]
+        assert [k["chunk_hash_hex"] for k in sent["keys"]] == [
+            second.hex(),
+            first.hex(),
+        ]
+        for key in sent["keys"]:
+            assert key["model_name"] == "m"
+            assert key["cache_salt"] == "alice"
+            assert key["tags"] == {"adapter": "A"}
+            assert ObjectKey.WorldSizeFromKVRank(key["kv_rank"]) == 2
+
+
+@pytest.mark.parametrize(
+    "method, path",
+    [
+        ("POST", "/cache/pins"),
+        ("DELETE", "/cache/pins"),
+        ("POST", "/cache/delete"),
+        ("POST", "/cache/prefetches"),
+        ("POST", "/directory/lookup"),
+    ],
+)
+def test_a_chunk_hash_form_with_an_invalid_cache_salt_is_a_400(method, path):
+    with _registered_delete_client([]) as client:
+        body = {**_chunk_body([b"\x01"]), "cache_salt": "bad@salt"}
+        resp = client.request(method, path, json={**body, "instance_id": "mp-1"})
+        assert resp.status_code == 400, resp.text
 
 
 def test_an_expanded_delete_is_sent_in_node_sized_batches(monkeypatch):

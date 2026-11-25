@@ -15,7 +15,7 @@ sequenceDiagram
     participant Co as coordinator
     participant M as mp server
 
-    Cl->>Co: POST /cache/prefetches {instance_id, keys | model_name, world_size, token_ids, cache_salt}
+    Cl->>Co: POST /cache/prefetches {instance_id, keys | model_name, world_size, token_ids | chunk_hashes, cache_salt}
     Co->>M: POST /cache/prefetches (the supplied form only)
     M-->>Co: {request_id, chunks, status: "submitted"}
     Co-->>Cl: {instance_id, request_id, chunks, status}
@@ -27,12 +27,13 @@ sequenceDiagram
     end
 ```
 
-A client names **one** registered MP server and either a **token sequence**
-(plus the model/world_size and tenant salt) or the **keys** of the chunks to
-warm. Token ids always
+A client names **one** registered MP server and a **token sequence** or
+**chunk hashes** (plus the model/world_size and tenant salt), or the **keys**
+of the chunks to warm. Token ids always
 cover every chunk from position 0, since chunk hashes are prefix-chained; keys
-reach a chunk in the middle of a prompt. The coordinator forwards only the
-supplied form, so a server that predates the keys form rejects the request
+and chunk hashes reach a chunk in the middle of a prompt. The coordinator
+resolves chunk hashes to one key per chunk and sends them as keys, since the
+server warms a chunk by any one of its keys. It forwards only the supplied form, so a server that predates the keys form rejects the request
 (422) instead of reading empty token fields as a sub-chunk `noop`. The coordinator resolves the target's address from the
 registry, `POST`s to its `/cache/prefetches`, and relays the server's
 `request_id` back. The client then polls
@@ -47,7 +48,7 @@ status calls are quick and the client drives completion on demand.
 ## Components
 
 - **`schemas.py`** — `PrefetchRequest {instance_id, keys | model_name,
-  world_size, token_ids, cache_salt}` (a `KeysOrTokensRequest`) and
+  world_size, token_ids | chunk_hashes, cache_salt}` (a `CacheContentRequest`) and
   `PrefetchResponse {instance_id, request_id, chunks, status}`.
 - **`controllers/prefetch_manager.py`** — `PrefetchManager`. `submit_prefetch`
   sends the body it is given to the target's `POST /cache/prefetches`, records

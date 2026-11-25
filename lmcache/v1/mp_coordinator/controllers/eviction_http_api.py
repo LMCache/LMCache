@@ -36,9 +36,9 @@ from lmcache.v1.mp_coordinator.http_apis.dependencies import (
 from lmcache.v1.mp_coordinator.persistence.durable_component import DurableComponent
 from lmcache.v1.mp_coordinator.persistence.metadata import MetadataWriteError
 from lmcache.v1.mp_coordinator.schemas import (
+    CacheContentRequest,
     DeleteRequest,
     DeleteResponse,
-    KeysOrTokensRequest,
     PinListResponse,
     PinnedKeyInfo,
     PinRequest,
@@ -54,7 +54,10 @@ from lmcache.v1.mp_coordinator.utils.http import instance_url
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
-from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
+from lmcache.v1.multiprocess.cache_control.key_resolver import (
+    resolve_chunk_object_keys,
+    resolve_object_keys,
+)
 from lmcache.v1.multiprocess.cache_control.object_service import MAX_DELETE_BATCH
 
 if TYPE_CHECKING:
@@ -337,14 +340,15 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
     async def request_pin(body: PinRequest, request: Request) -> PinResponse:
         """Pin keys in the L2 eviction plan.
 
-        Pins the chunks the body's ``keys`` name, or resolves its token
-        sequence to object keys locally, and records them so they are
+        Pins the chunks the body's ``keys`` or ``chunk_hashes`` name, or
+        resolves its token sequence to object keys locally, and records them so they are
         excluded from the L2 eviction plan (fleet-wide, per ``cache_salt``).
         A pin covers its chunk in every object group and on every rank of its
         world size. No MP-server round-trip.
 
         Args:
-            body: ``keys``, or model/world_size, token_ids, cache_salt.
+            body: ``keys``, or model/world_size, cache_salt with token_ids
+                or chunk_hashes.
 
         Returns:
             ``PinResponse`` with ``requested`` distinct chunks and
@@ -369,11 +373,12 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
     async def request_unpin(body: PinRequest, request: Request) -> PinResponse:
         """Unpin keys from the L2 eviction plan.
 
-        Symmetric with pin: takes the same two forms and releases the keys,
+        Symmetric with pin: takes the same three forms and releases the keys,
         making them eligible for L2 eviction again.
 
         Args:
-            body: ``keys``, or model/world_size, token_ids, cache_salt.
+            body: ``keys``, or model/world_size, cache_salt with token_ids
+                or chunk_hashes.
 
         Returns:
             ``PinResponse`` with ``requested`` distinct chunks and
@@ -434,7 +439,7 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
 
     @router.post("/cache/delete")
     async def request_delete(body: DeleteRequest, request: Request) -> DeleteResponse:
-        """Delete keys, or a token sequence's keys, on one MP server, per
+        """Delete chunks named by key, hash or token sequence on one MP server, per
         ``body.tier``.
 
         ``body.tier`` is ``l1``, ``l2`` or ``all``. When the delete touches L2,
@@ -444,8 +449,8 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
         eviction controller serves its own.
 
         Args:
-            body: Target instance, ``keys`` or model/world_size, token_ids,
-                cache_salt, and tier, force.
+            body: Target instance, ``keys`` or model/world_size, cache_salt
+                with token_ids or chunk_hashes, and tier, force.
 
         Returns:
             ``DeleteResponse`` with ``requested`` distinct chunks,
@@ -552,7 +557,7 @@ def build_routers(controller: FleetEvictionController) -> tuple[APIRouter, ...]:
 
 
 def _resolve_request_keys(
-    body: KeysOrTokensRequest, token_hasher: TokenHasher
+    body: CacheContentRequest, token_hasher: TokenHasher
 ) -> tuple[list[ObjectKey], int]:
     """Return a pin or delete body's keys and the count reported as
     ``requested``: whole chunks, so for the keys form the distinct chunks the
@@ -560,12 +565,20 @@ def _resolve_request_keys(
 
     Raises:
         HTTPException: 400 if the token cap is exceeded or a key field is
-            invalid (tokens form).
+            invalid (tokens and chunk-hash forms).
     """
     if body.keys:
         keys = [encoded.to_object_key() for encoded in body.keys]
         return keys, len({key.chunk_hash for key in keys})
     try:
+        if body.chunk_hashes:
+            return resolve_chunk_object_keys(
+                [bytes.fromhex(h) for h in body.chunk_hashes],
+                body.model_name,
+                body.world_size,
+                body.cache_salt,
+                tags=body.tags,
+            )
         return resolve_object_keys(
             token_hasher,
             body.model_name,

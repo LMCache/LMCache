@@ -1068,7 +1068,7 @@ repeat keys (snapshot semantics).
 ``POST /directory/lookup``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Resolve cache content to its placements and token ids. One endpoint, two
+Resolve cache content to its placements and token ids. One endpoint, three
 forms -- supply exactly one:
 
 * **keys form** -- ``{"keys": [...]}``: resolve keys you already have (e.g.
@@ -1076,6 +1076,12 @@ forms -- supply exactly one:
 * **tokens form** -- ``{"token_ids": [...], "model_name": ..., "world_size":
   ..., "cache_salt": ..., "tags": ...}``: resolve a request's tokens to the
   keys of its complete chunks (the same fan-out the pin APIs use).
+* **chunk-hash form** -- ``{"chunk_hashes": [...], "model_name": ...,
+  "world_size": ..., "cache_salt": ..., "tags": ...}``: resolve chunks named by
+  hash (the ``chunk_hash_hex`` of a key) exactly as the tokens form resolves
+  the chunks it hashes, so a chunk in the middle of a prompt is reached without
+  its prefix. ``model_name`` and ``world_size`` are required; at most 10,000
+  hashes, and a repeated hash counts once.
 
 .. important::
 
@@ -1136,8 +1142,10 @@ forms -- supply exactly one:
     }
 
 ``chunks`` is the number of complete chunks the tokens resolved to (keys form:
-the number of keys requested); ``results`` has one entry per resolved key, in
-request order (tokens form: ``chunks`` x the per-rank fan-out). ``placements``
+the number of keys requested; chunk-hash form: the distinct hashes);
+``results`` has one entry per resolved key, in request order (tokens and
+chunk-hash forms: ``chunks`` x the per-rank fan-out, in every object group the
+directory holds). ``placements``
 is empty for keys the directory does not know; ``token_ids`` is empty when the
 directory has no tokens for the key's chunk (never stored with token reporting
 on, or not yet re-reported after an event gap). ``access_count`` is the number
@@ -1153,8 +1161,10 @@ namespace. Tag names must be nonempty strings and values must be strings.
 - ``200``: results returned.
 - ``400``: the token sequence exceeds the per-request cap, or a resolution
   parameter is invalid (e.g. ``model_name`` contains ``@``).
-- ``422``: neither or both forms supplied, ``model_name`` missing with
-  ``token_ids``, or a key is malformed (e.g. ``chunk_hash_hex`` is not hex).
+- ``422``: not exactly one form supplied, ``model_name`` missing with
+  ``token_ids``, ``model_name`` or ``world_size`` missing with
+  ``chunk_hashes``, more than 10,000 hashes, or a key or hash is malformed
+  (e.g. not hex, or an empty hash).
 
 **Examples:**
 
@@ -1170,6 +1180,11 @@ namespace. Tag names must be nonempty strings and values must be strings.
       -H 'Content-Type: application/json' \
       -d '{"keys": [{"chunk_hash_hex": "aa12...", "model_name": "m", "kv_rank": 0}]}'
 
+    # Chunk-hash form -- one mid-prompt chunk on every rank of a TP=2 setup:
+    curl -s -X POST http://localhost:9300/directory/lookup \
+      -H 'Content-Type: application/json' \
+      -d '{"chunk_hashes": ["aa12..."], "model_name": "m", "world_size": 2}'
+
 Cache control
 -------------
 
@@ -1182,12 +1197,14 @@ KV for a known prompt **before** the requests arrive, so the first request hits
 L1 instead of paying the L2 fetch inline -- useful when you know a workload is
 about to be routed to a node (a traffic shift, a hot shared system prompt).
 
-You describe the content by **token ids** -- the unit the cache speaks -- or by
+You describe the content by **token ids** -- the unit the cache speaks -- by
 **keys** you already hold (from ``GET /directory/keys`` or
-``POST /directory/lookup``). Token ids always cover every chunk from position 0,
-since chunk hashes are prefix-chained; keys reach a chunk in the middle of a
-prompt without its prefix chunks. The coordinator forwards the supplied form
-alone to the named server, which resolves it, expands each chunk across the
+``POST /directory/lookup``), or by **chunk hashes** with the model and world
+size stated once. Token ids always cover every chunk from position 0, since
+chunk hashes are prefix-chained; keys and chunk hashes reach a chunk in the
+middle of a prompt without its prefix chunks. The coordinator forwards the
+supplied form alone to the named server (chunk hashes go as keys, one per
+chunk), which resolves it, expands each chunk across the
 node's object groups and ranks, loads the chunks from L2 into L1, and
 **retains** them so a later lookup hits.
 The submit returns a ``request_id``; poll the status endpoint until
@@ -1197,8 +1214,8 @@ clears the server-side job once the load finishes.
 ``POST /cache/prefetches``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Submit a warm prefetch of keys, or a token sequence, on one named server.
-Supply exactly one of ``keys`` / ``token_ids``.
+Submit a warm prefetch of keys, chunk hashes or a token sequence on one named
+server. Supply exactly one of ``keys`` / ``token_ids`` / ``chunk_hashes``.
 
 **Request body:**
 
@@ -1219,14 +1236,20 @@ Supply exactly one of ``keys`` / ``token_ids``.
        rank, with no sliding window (see the note below). The keys must agree
        on model, world size, ``cache_salt`` and ``tags``; at most 10,000 keys.
        The fields below are then ignored.
+   * - ``chunk_hashes``
+     - list[string]
+     - Chunk-hash form. Hex chunk hashes (a key's ``chunk_hash_hex``), each
+       warmed like a key of the setup the fields below name; at most 10,000,
+       and a repeated hash counts once.
    * - ``model_name``
      - string
-     - Tokens form, required. Model whose layout sizes the target's L1
-       buffers.
+     - Tokens and chunk-hash forms, required. Model whose layout sizes the
+       target's L1 buffers.
    * - ``world_size``
      - int
-     - Tokens form, required. World size (``>= 1``) selecting the KV layout
-       and the per-rank fan-out (``1`` for a single-GPU, TP=1 deployment).
+     - Tokens and chunk-hash forms, required. World size (``>= 1``) selecting
+       the KV layout and the per-rank fan-out (``1`` for a single-GPU, TP=1
+       deployment).
    * - ``token_ids``
      - list[int]
      - Tokens form. Prompt tokens whose complete ``chunk_size`` chunks are
@@ -1255,25 +1278,28 @@ When the sequence is shorter than one chunk, nothing is submitted and
     {"instance_id": "server-1", "request_id": "", "chunks": 0, "status": "noop"}
 
 ``request_id`` is the id to poll; ``chunks`` is the number of whole chunks
-submitted to warm (keys form: the distinct chunks the keys name).
+submitted to warm (keys and chunk-hash forms: the distinct chunks named).
 
 **HTTP status codes:**
 
 - ``200``: submitted (or a ``noop`` as above).
+- ``400``: a chunk-hash form's ``cache_salt`` or ``tags`` violate their
+  invariants.
 - ``404``: unknown ``instance_id`` (not registered).
 - ``502``: the target server was unreachable or rejected the submit.
-- ``422``: request body fails field-level validation, supplies both or neither
-  of ``keys`` / ``token_ids``, omits ``model_name`` or ``world_size`` in the
-  tokens form, carries more than 10,000 keys, or has keys that disagree on
+- ``422``: request body fails field-level validation, supplies not exactly one
+  of ``keys`` / ``token_ids`` / ``chunk_hashes``, omits ``model_name`` or
+  ``world_size`` in the tokens or chunk-hash form, carries more than 10,000
+  keys or hashes, has a hash that is empty or not hex, or has keys that disagree on
   model, world size, ``cache_salt`` or ``tags`` (or whose ``kv_rank`` packs no
   world size).
 
 .. note::
 
-   **Sliding-window models:** the two forms load different chunks. The tokens
+   **Sliding-window models:** the forms load different chunks. The tokens
    form keeps each object group's window, and a warm prefetch loads nothing on
-   a model with a sliding-window group. The keys form names chunks that need not
-   be a contiguous prefix, so it ignores the windows and loads every named
+   a model with a sliding-window group. The keys and chunk-hash forms name
+   chunks that need not be a contiguous prefix, so they ignore the windows and loads every named
    chunk in every group, and those chunks stay in L1 until evicted. Serving is
    unaffected: a lookup still applies each group's window.
 
@@ -1313,6 +1339,19 @@ submitted to warm (keys form: the distinct chunks the keys name).
             }]
         }'
     # -> {"instance_id": "server-1", "request_id": "def456", "chunks": 1, "status": "submitted"}
+
+    # Chunk-hash form: the same chunk, with the setup stated once.
+    curl -s -X POST http://localhost:9300/cache/prefetches \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "instance_id": "server-1",
+            "chunk_hashes": ["aa12..."],
+            "model_name": "Qwen/Qwen3-8B",
+            "world_size": 1,
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
+        }'
+    # -> {"instance_id": "server-1", "request_id": "ghi789", "chunks": 1, "status": "submitted"}
 
 ``GET /cache/prefetches/{instance_id}/{request_id}``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1368,7 +1407,7 @@ verbatim with its code.
 from L2 until unpinned. The coordinator records the keys in its L2 eviction plan
 (``POST``) or releases them (``DELETE``), excluding pinned keys from quota-based
 eviction, with no MP-server round-trip. L2 pins are fleet-wide (per
-``cache_salt``), so no target instance is named. One endpoint, two forms --
+``cache_salt``), so no target instance is named. One endpoint, three forms --
 supply exactly one:
 
 * **tokens form** -- ``{"token_ids": [...], "model_name": ..., "world_size":
@@ -1378,6 +1417,11 @@ supply exactly one:
 * **keys form** -- ``{"keys": [...]}``: pin the chunks these keys name, in the
   same wire form ``GET /directory/keys`` and ``POST /directory/lookup`` return.
   Use it to pin a chunk in the middle of a prompt without its prefix chunks.
+* **chunk-hash form** -- ``{"chunk_hashes": [...], "model_name": ...,
+  "world_size": ..., "cache_salt": ..., "tags": ...}``: pin the chunks these
+  hashes name (a key's ``chunk_hash_hex``), with the setup that stores them
+  stated once rather than per key. Each hash acts exactly as a key of that
+  setup would.
 
 Local resolution requires the coordinator's ``chunk_size`` and
 ``hash_algorithm`` (see `Configuration`_) to match the MP servers' ``--chunk-size``
@@ -1417,21 +1461,26 @@ Pin keys in the L2 eviction plan.
      - list[int]
      - Tokens form. Prompt tokens whose complete chunks are pinned; must match
        what was stored. A sub-chunk sequence pins nothing (``affected`` 0).
+   * - ``chunk_hashes``
+     - list[string]
+     - Chunk-hash form. Hex chunk hashes of the chunks to pin; at most 10,000,
+       and a repeated hash counts once.
    * - ``model_name``
      - string
-     - Tokens form, required. Model whose rank fan-out to use when resolving
-       keys.
+     - Tokens and chunk-hash forms, required. Model whose rank fan-out to use
+       when resolving keys.
    * - ``world_size``
      - int
-     - Tokens form, required. World size (``>= 1``) selecting the per-rank
-       fan-out.
+     - Tokens and chunk-hash forms, required. World size (``>= 1``) selecting
+       the per-rank fan-out.
    * - ``cache_salt``
      - string
-     - Tokens form. Optional (default ``""``). Per-tenant isolation salt.
+     - Tokens and chunk-hash forms. Optional (default ``""``). Per-tenant
+       isolation salt.
    * - ``tags``
      - map[string, string]
-     - Tokens form. Optional (default ``{}``). Matching tags used when the
-       content was stored, without the ``lmcache.tag.`` prefix.
+     - Tokens and chunk-hash forms. Optional (default ``{}``). Matching tags
+       used when the content was stored, without the ``lmcache.tag.`` prefix.
 
 **Response** (``200 OK``):
 
@@ -1441,8 +1490,9 @@ Pin keys in the L2 eviction plan.
 
 ``requested`` is the number of whole chunks resolved (keys form: the distinct
 chunks the keys name, so one chunk's keys on several ranks or groups count
-once); ``affected`` is the number of keys the request resolved to (tokens form:
-chunks times the per-rank fan-out), each covering its whole chunk. Unlike
+once; chunk-hash form: the distinct hashes); ``affected`` is the number of keys
+the request resolved to (tokens and chunk-hash forms: chunks times the per-rank
+fan-out), each covering its whole chunk. Unlike
 ``POST /directory/lookup``, which reports one ``chunks`` per key given, pin,
 delete and prefetch count chunks.
 
@@ -1451,9 +1501,10 @@ delete and prefetch count chunks.
 - ``200``: pinned.
 - ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt`` violates
   its invariants.
-- ``422``: request body fails field-level validation, supplies both or neither
-  of ``keys`` / ``token_ids``, omits ``model_name`` or ``world_size`` in the
-  tokens form, carries more than 10,000 keys, or has an undecodable key.
+- ``422``: request body fails field-level validation, supplies not exactly one
+  of ``keys`` / ``token_ids`` / ``chunk_hashes``, omits ``model_name`` or
+  ``world_size`` in the tokens or chunk-hash form, carries more than 10,000
+  keys or hashes, or has an undecodable key or hash.
 - ``503``: the metadata file (``--metadata-path``) could not be written; the
   change was undone, so retry once the storage is fixed.
 
@@ -1487,6 +1538,18 @@ delete and prefetch count chunks.
         }'
     # -> {"requested": 1, "affected": 1, "status": "pinned"}
 
+    # Chunk-hash form: the same chunk at TP=2, covering both ranks.
+    curl -s -X POST http://localhost:9300/cache/pins \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "chunk_hashes": ["aa12..."],
+            "model_name": "Qwen/Qwen3-8B",
+            "world_size": 2,
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
+        }'
+    # -> {"requested": 1, "affected": 2, "status": "pinned"}
+
 .. note::
 
    **Requires event reporting.** The coordinator can only exclude keys from
@@ -1496,7 +1559,7 @@ delete and prefetch count chunks.
 ``DELETE /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Unpin keys from the L2 eviction plan. Same request body (either form) as
+Unpin keys from the L2 eviction plan. Same request body (any form) as
 ``POST /cache/pins``. The response mirrors the pin (``affected`` is the number
 of keys unpinned), with ``status`` ``"unpinned"``. Pins are reference-counted: a
 chunk pinned *N* times needs *N* unpins before it can be evicted.
@@ -1585,11 +1648,12 @@ requested page in first-pinned order, each with its current ``pin_count``.
 ``POST /cache/delete``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Delete keys, or a token sequence's keys, on one named server.
+Delete chunks named by key, chunk hash or token sequence on one named server.
 
-**Request body:** ``instance_id``, the content in either form as documented
+**Request body:** ``instance_id``, the content in any form as documented
 for ``POST /cache/pins`` (``keys``, or ``model_name``, ``world_size``,
-``token_ids``, ``cache_salt`` and optional matching ``tags``), plus ``tier``
+``token_ids`` or ``chunk_hashes``, ``cache_salt`` and optional matching
+``tags``), plus ``tier``
 (``l1`` / ``l2`` / ``all``) and ``force``
 (bool, default ``false``). When ``force`` is ``true``, locked keys are deleted
 anyway (L1 read/write locks on the node and the coordinator's L2 pin set).
@@ -1600,8 +1664,8 @@ anyway (L1 read/write locks on the node and the coordinator's L2 pin set).
 
     {"instance_id": "server-1", "requested": 12, "affected": 24, "skipped": 0, "status": "deleted"}
 
-``requested`` is the number of whole chunks resolved (keys form: the distinct
-chunks the keys name). A key names its chunk: it is expanded to every copy the
+``requested`` is the number of whole chunks resolved (keys and chunk-hash
+forms: the distinct chunks named). A key or hash names its chunk: it is expanded to every copy the
 coordinator's directory holds of that chunk in the key's parallel setup -- every
 object group and every kv rank of the same world size -- so any one of the
 chunk's keys removes the whole chunk, not one rank's share. If any copy is
@@ -1619,9 +1683,10 @@ sequence returns ``status`` ``"noop"``.
 
 - ``200``: deleted (or a ``noop``).
 - ``404``: no server is registered under ``instance_id``.
-- ``422``: request body fails field-level validation, supplies both or neither
-  of ``keys`` / ``token_ids``, omits ``model_name`` or ``world_size`` in the
-  tokens form, or carries more than 10,000 keys.
+- ``422``: request body fails field-level validation, supplies not exactly one
+  of ``keys`` / ``token_ids`` / ``chunk_hashes``, omits ``model_name`` or
+  ``world_size`` in the tokens or chunk-hash form, or carries more than 10,000
+  keys or hashes.
 - ``502``: the target server was unreachable or rejected a batch. Earlier
   batches stay deleted, and ``detail`` says how many keys were removed.
 - ``503``: a forced delete removed the keys, but dropping their pins could not

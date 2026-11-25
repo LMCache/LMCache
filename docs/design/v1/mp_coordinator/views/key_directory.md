@@ -235,12 +235,15 @@ Duplicates and stale batches are counted in the response, not errors.
 See [ingest.md](../ingest.md).
 - `POST /directory/lookup` — resolve content to placements **and** token
 ids, in either direction (POST because the payload rides in the body).
-Supply exactly one of: `keys` (resolve keys directly) or `token_ids`
+Supply exactly one of: `keys` (resolve keys directly), `token_ids`
 (prefix-exact resolution via the fleet `TokenHasher` + per-rank fan-out,
 expanded to every stored object group -- see *Object groups* above;
 requires `model_name` / `world_size` / `cache_salt`
 since key identity includes them — and the sequence must be the
-request's whole prefix, since chunk hashes are prefix-chained). One
+request's whole prefix, since chunk hashes are prefix-chained), or
+`chunk_hashes` (the same fan-out and group expansion for chunks named by
+hash, so a mid-prompt chunk resolves without its prefix; `model_name` and
+`world_size` required). One
 result per resolved key, request order, with placements, token ids,
 and `access_count`. Unknown keys get empty lists and `0`.
 Position-independent token matching arrives with the content index
