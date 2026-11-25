@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Bearer authentication interceptor shared by worker and peer gRPC clients."""
+"""Bearer authentication interceptor for the gRPC request client."""
 
 # Standard
 from collections.abc import Callable, Sequence
