@@ -245,7 +245,7 @@ class NpuCacheContext(BaseCacheContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
-        separate_object_groups: bool = False,
+        separate_object_groups: bool = True,
         full_sw_kv: bool = False,
     ) -> None:
         """Build an NPU cache context from IPC-wrapped KV tensors.

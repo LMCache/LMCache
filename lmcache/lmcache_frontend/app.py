@@ -25,10 +25,8 @@ from lmcache.security.api_key import (
     load_api_keys,
     load_service_api_keys,
 )
-from lmcache.security.http import (
-    HTTPBearerAuthenticationMiddleware,
-    bearer_authorization_header,
-)
+from lmcache.security.bearer import bearer_authorization_header
+from lmcache.security.http import HTTPBearerAuthenticationMiddleware
 
 _PACKAGE = "lmcache.lmcache_frontend"
 FRONTEND_BACKEND_API_KEY_ENV_VAR = "LMCACHE_FRONTEND_BACKEND_API_KEY"

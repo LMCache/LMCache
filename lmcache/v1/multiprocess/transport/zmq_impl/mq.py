@@ -15,19 +15,13 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 from lmcache.security.api_key import APIKeyVerifier
-from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
-from lmcache.v1.multiprocess.custom_types import (
-    get_customized_decoder,
-    get_customized_encoder,
-)
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.platform import create_event_notifier
-from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.transport.futures import MessagingStream
-from lmcache.v1.transport.qstore import QRingInfo
 from lmcache.v1.transport.rpc import RpcOperation, RpcSpec, get_rpc_spec
+from lmcache.v1.transport.zmq.codec import msgspec_decode, msgspec_encode
 from lmcache.v1.transport.zmq.wire import (
     AUTH_ERROR_FRAME,
     ZMQ_ERROR_OPERATION,
@@ -53,56 +47,6 @@ def unwrap_request_payloads(
         for payload, cls in zip(b_payloads, payload_clss, strict=False)
     ]
     return decoded_payloads
-
-
-_SPECIAL_ENCODER_DECODERS = {
-    DeviceIPCWrapper: (
-        get_customized_encoder(DeviceIPCWrapper),
-        get_customized_decoder(DeviceIPCWrapper),
-    ),
-    list[DeviceIPCWrapper]: (
-        get_customized_encoder(list[DeviceIPCWrapper]),
-        get_customized_decoder(list[DeviceIPCWrapper]),
-    ),
-    list[QRingInfo]: (
-        get_customized_encoder(list[QRingInfo]),
-        get_customized_decoder(list[QRingInfo]),
-    ),
-    MemoryLayoutDesc: (
-        get_customized_encoder(MemoryLayoutDesc),
-        get_customized_decoder(MemoryLayoutDesc),
-    ),
-    dict[int, MemoryLayoutDesc]: (
-        get_customized_encoder(dict[int, MemoryLayoutDesc]),
-        get_customized_decoder(dict[int, MemoryLayoutDesc]),
-    ),
-}
-
-
-def msgspec_encode(obj: Any, cls: Any) -> bytes:
-    # Handle special cases
-    if cls in _SPECIAL_ENCODER_DECODERS:
-        encoder, _ = _SPECIAL_ENCODER_DECODERS[cls]
-        return encoder.encode(obj)
-    # Defensive guard: coerce obj to the declared cls so that
-    # e.g. a bool passed as int (or vice-versa) is encoded in the
-    # wire format that msgspec_decode expects for that cls.
-    if cls in (bool, int):
-        obj = cls(obj)
-    return msgspec.msgpack.encode(obj)
-
-
-def msgspec_decode(b_obj: bytes, cls: Any) -> Any:
-    # Handle special cases
-    if cls in _SPECIAL_ENCODER_DECODERS:
-        _, decoder = _SPECIAL_ENCODER_DECODERS[cls]
-        return decoder.decode(b_obj)
-    # Defensive guard: msgspec strict-validates wire format
-    # (bool ≠ int in msgpack), but runtime type may not match
-    # declared cls. Decode untyped, then coerce.
-    if cls in (bool, int):
-        return cls(msgspec.msgpack.decode(b_obj))
-    return msgspec.msgpack.decode(b_obj, type=cls)
 
 
 ResponseType = TypeVar("ResponseType", covariant=True)

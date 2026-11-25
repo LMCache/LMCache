@@ -80,6 +80,11 @@ P2P is enabled per server by the ``--p2p-advertise-url`` flag. The relevant
      - Address the transfer-channel server binds to. Defaults to
        ``--p2p-advertise-url``; set it to bind ``0.0.0.0`` while advertising a
        routable IP.
+   * - ``--p2p-rpc-port PORT``
+     - Independent P2P gRPC control port, bound on ``--host`` (default ``0``:
+       OS-assigned). Pin and allow this port when a firewall, Docker port
+       mapping, or NetworkPolicy restricts reachable ports; allowing only
+       the worker ``--port`` is insufficient.
    * - ``--p2p-lookup-timeout SECONDS``
      - Deadline for a peer lookup before it counts as a miss (default ``30``).
    * - ``--p2p-load-timeout SECONDS``
@@ -87,6 +92,15 @@ P2P is enabled per server by the ``--p2p-advertise-url`` flag. The relevant
        (default ``30``).
    * - ``--p2p-transfer-engine ENGINE``
      - Transfer-channel implementation (default ``nixl``).
+   * - ``--enable-p2p-write``
+     - Also store objects into peers' memory once the local L1 fills up, and
+       drop the local copy. Off by default. See :doc:`p2p_deployment`.
+   * - ``--p2p-write-l1-usage-threshold FRACTION``
+     - Local DRAM L1 usage from which new objects go to a peer
+       (default ``0.7``). Only used with ``--enable-p2p-write``.
+   * - ``--p2p-store-timeout SECONDS``
+     - Deadline for a store into a peer before it counts as a failure
+       (default ``30``). Only used with ``--enable-p2p-write``.
 
 P2P also reuses the coordinator connection flags (``--coordinator-url``,
 ``--coordinator-advertise-ip``, ``--coordinator-heartbeat-interval``); the
@@ -146,12 +160,13 @@ Running a multi-node deployment
 The example below brings up a two-node fleet. Adding more nodes is just more
 copies of the per-node step, all pointing at the same coordinator.
 
-**Step 1 — start the coordinator** (on a host all nodes can reach, here
+**Step 1 — start the coordinator** on a host all nodes can reach. Replace
+``<COORDINATOR_IP>`` with a routable address on that host (for example,
 ``10.0.0.1``):
 
 .. code-block:: bash
 
-   lmcache coordinator --host 0.0.0.0 --port 9300
+   lmcache coordinator --host <COORDINATOR_IP> --port 9300
 
 **Step 2 — on each node, start the LMCache server with P2P enabled.** Replace
 ``<NODE_IP>`` with that node's routable address (e.g. ``10.0.0.2``,
@@ -166,6 +181,7 @@ copies of the per-node step, all pointing at the same coordinator.
        --l1-align-bytes 65536 \
        --coordinator-url http://10.0.0.1:9300 \
        --coordinator-advertise-ip <NODE_IP> \
+       --p2p-rpc-port 9555 \
        --p2p-advertise-url <NODE_IP>:8500
 
 ``--coordinator-advertise-ip`` is the address peers use to reach this node's
@@ -207,7 +223,7 @@ coordinator. This is the recommended way to develop and debug P2P.
 .. code-block:: bash
 
    # Terminal 1 — coordinator
-   lmcache coordinator --host 0.0.0.0 --port 9300
+   lmcache coordinator --host 127.0.0.1 --port 9300
 
    # Terminal 2 — node "A": LMCache server
    lmcache server \
@@ -337,7 +353,9 @@ Each ``SKILL.md`` records the LMCache, vLLM and nixl versions it was last verifi
 Limitations
 -----------
 
-* **Read-only.** A node reads KV from its peers; it never writes into a peer's
-  memory. This keeps each node the sole owner of its L1.
+* **Read-only by default.** A node reads KV from its peers; it does not write
+  into a peer's memory unless it is started with ``--enable-p2p-write``. Writes
+  are meant for a server whose peers extend its memory, and only one side of a
+  pair may enable them. See :doc:`p2p_deployment`.
 * **One hop.** A node reads directly from the peer that holds the prefix; reads
   are not chained across multiple peers.

@@ -66,10 +66,12 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 )
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
-    get_tokens_per_block,
-    is_align_mode_mamba_spec,
-    is_per_request_state_spec,
-    is_scratch_spec,
+    group_prefix_replay_tokens,
+    group_specs,
+    is_align_mode_mamba_group,
+    is_per_request_state_group,
+    is_scratch_group,
+    tokens_per_group_block,
 )
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
@@ -148,6 +150,38 @@ _DCP_LAYOUT_NAMESPACE = "##lmcache-dcp-layout-v1-"
 # See ``get_request_tags`` in ``lmcache.v1.distributed.api``.
 _REVISION_TAG_KEY = "lmcache.tag.revision"
 _MAX_LCM_EXPANSION_FACTOR = 4
+_USE_VMM_API_KEY = "lmcache.mp.use_vmm_api"
+
+
+def _worker_extra_config(vllm_config: "VllmConfig") -> dict[str, Any]:
+    """Resolve the worker's VMM IPC mode from the active vLLM config.
+
+    An explicit ``lmcache.mp.use_vmm_api`` value remains authoritative. When
+    it is absent, the connector follows vLLM's resolved allocation mode:
+    extensible KV cache and the cuMem allocator both produce VMM-backed KV
+    memory.
+
+    Args:
+        vllm_config: The active, resolved vLLM engine configuration.
+
+    Returns:
+        Connector extra config with ``lmcache.mp.use_vmm_api`` resolved for
+        the worker adapter. The user-owned config mapping is not modified.
+    """
+    assert vllm_config.kv_transfer_config is not None
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    if _USE_VMM_API_KEY in extra_config:
+        return extra_config
+
+    model_config = getattr(vllm_config, "model_config", None)
+    use_vmm_api = bool(
+        getattr(vllm_config.cache_config, "enable_extensible_kv_cache", False)
+        or (
+            model_config is not None
+            and getattr(model_config, "enable_cumem_allocator", False)
+        )
+    )
+    return {**extra_config, _USE_VMM_API_KEY: use_vmm_api}
 
 
 def _convert_kv_event_hash(block_hash: bytes | int | None) -> bytes | int | None:
@@ -197,12 +231,7 @@ def _iter_kv_cache_specs(kv_cache_config: "KVCacheConfig | None") -> Iterable[An
     if kv_cache_config is None:
         return
     for group in kv_cache_config.kv_cache_groups:
-        group_spec = group.kv_cache_spec
-        per_layer_specs = getattr(group_spec, "kv_cache_specs", None)
-        if isinstance(per_layer_specs, dict):
-            yield from per_layer_specs.values()
-        else:
-            yield group_spec
+        yield from group_specs(group)
 
 
 def get_group_tokens_per_block(
@@ -231,9 +260,9 @@ def get_group_tokens_per_block(
         if kv_cache_config is not None
         else ()
     )
-    return [
-        get_tokens_per_block(group.kv_cache_spec, dcp_size) for group in groups
-    ] or [vllm_config.cache_config.block_size * dcp_size]
+    return [tokens_per_group_block(group, dcp_size) for group in groups] or [
+        vllm_config.cache_config.block_size * dcp_size
+    ]
 
 
 def get_prefix_replay_tokens(kv_cache_config: "KVCacheConfig | None") -> int:
@@ -249,10 +278,7 @@ def get_prefix_replay_tokens(kv_cache_config: "KVCacheConfig | None") -> int:
         else ()
     )
     return max(
-        (
-            int(getattr(group.kv_cache_spec, "prefix_replay_tokens", 0) or 0)
-            for group in groups
-        ),
+        (group_prefix_replay_tokens(group) for group in groups),
         default=0,
     )
 
@@ -383,11 +409,13 @@ def get_resolved_attention_block_sizes(
         The resolved attention block sizes. Falls back to vLLM's cache block
         size when group metadata is unavailable.
     """
+    groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else ()
     block_sizes = {
         spec.block_size
-        for spec in _iter_kv_cache_specs(kv_cache_config)
+        for group in groups
+        if not is_scratch_group(group)
+        for spec in group_specs(group)
         if any(cls.__name__ == "AttentionSpec" for cls in type(spec).__mro__)
-        and not is_scratch_spec(spec)
     }
     if block_sizes:
         return block_sizes
@@ -407,8 +435,8 @@ def validate_mamba_step_alignment(
     safely -- the request tracker nulls the slot of a relocated speculative
     block, ``store`` never commits an all-null-block chunk and ``retrieve``
     loads only each object group's sliding-window suffix -- so
-    ``max_num_batched_tokens`` may exceed ``2 * block_size`` (with
-    ``--separate-object-groups``). Only the lower bound remains: a step must
+    ``max_num_batched_tokens`` may exceed ``2 * block_size`` (with object-group
+    separation). Only the lower bound remains: a step must
     advance at least one full block, or vLLM's block-aligned splitting
     (``Scheduler._mamba_block_aligned_split``) yields empty chunks and prefill
     cannot progress.
@@ -673,7 +701,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._save_unfull_chunk
             and kv_cache_config is not None
             and any(
-                is_per_request_state_spec(group.kv_cache_spec)
+                is_per_request_state_group(group)
                 for group in kv_cache_config.kv_cache_groups
             )
         ):
@@ -849,7 +877,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 model_name=cache_model_name,
                 vllm_block_size=scheduler_block_size,
                 parallel_strategy=parallel_strategy,
-                extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
+                extra_config=_worker_extra_config(vllm_config),
                 required_chunk_alignment=scheduler_block_size,
             )
             # Requests whose blocks vLLM keeps until they are in finished_sending.
@@ -898,7 +926,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 for engine_group_idx, group in enumerate(
                     kv_cache_config.kv_cache_groups
                 )
-                if is_align_mode_mamba_spec(group.kv_cache_spec)
+                if is_align_mode_mamba_group(group)
             ]
             if kv_cache_config is not None
             else []
@@ -1871,20 +1899,24 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """Report how the LMCache server reaches the device KV cache.
 
         Args:
-            kv_transfer_config: This connector's transfer config. Its
-                ``lmcache.mp.use_vmm_api`` and ``lmcache.mp.isolated_ipc``
-                extra-config keys decide the result.
+            kv_transfer_config: This connector's transfer config. An explicit
+                ``lmcache.mp.use_vmm_api`` value overrides automatic VMM
+                detection; ``lmcache.mp.isolated_ipc`` selects the export
+                mechanism used by VMM allocations.
 
         Returns:
-            - ``LEGACY_IPC`` without ``use_vmm_api``.
-            - ``EXPORTS_FABRIC`` with ``use_vmm_api`` and ``isolated_ipc``.
-            - ``EXPORTS_FD`` with ``use_vmm_api`` alone.
+            - ``LEGACY_IPC`` when ``use_vmm_api`` is explicitly false.
+            - ``EXPORTS_FABRIC`` in automatic or explicit VMM mode with
+              ``isolated_ipc``.
+            - ``EXPORTS_FD`` in automatic or explicit VMM mode otherwise.
             - None when vLLM has no ``KVCacheAccess``.
         """
         if KVCacheAccess is None:
             return None
         extra_config = kv_transfer_config.kv_connector_extra_config
-        if not resolve_extra_config_value(extra_config, ExtraConfigDefault.use_vmm_api):
+        if _USE_VMM_API_KEY in extra_config and not resolve_extra_config_value(
+            extra_config, ExtraConfigDefault.use_vmm_api
+        ):
             # Legacy CUDA IPC handles cannot express driver-mapped memory, so
             # the KV cache must stay a plain allocation.
             return KVCacheAccess.LEGACY_IPC
@@ -2067,7 +2099,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 RequestAllocationRecord(
                     req_id=new_request.req_id,
                     new_block_ids=list(primary_block_ids),
-                    new_token_ids=tracker.get_token_ids_slice(0, total_tokens),
+                    new_token_ids=tracker.get_token_ids(0, total_tokens),
                 )
             )
 
@@ -2092,7 +2124,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tokens_per_block = self._group_tokens_per_block[0]
             start_token = (total_blocks - num_new_blocks) * tokens_per_block
             end_token = total_blocks * tokens_per_block
-            new_token_ids = tracker.get_token_ids_slice(start_token, end_token)
+            new_token_ids = tracker.get_token_ids(start_token, end_token)
             records.append(
                 RequestAllocationRecord(
                     req_id=request_id,

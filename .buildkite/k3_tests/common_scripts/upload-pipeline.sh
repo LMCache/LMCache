@@ -74,5 +74,13 @@ if [[ "${PIPELINE_FILE}" == */xpu/*/pipeline.yml ]]; then
     export XPU_CI_IMAGE
 fi
 
+if [[ "${PIPELINE_FILE}" == */rbln/pipeline.yml ]]; then
+    # The RBLN nightly lane uploads pipeline.yml itself with its candidate
+    # image; PR and dev builds run on the last image that lane verified.
+    # shellcheck source=.buildkite/k3_harness/resolve-pinned-vllm.sh
+    source "${SCRIPT_DIR}/../../k3_harness/resolve-pinned-vllm.sh"
+    export RBLN_SERVE_IMAGE="${PINNED_RBLN_IMAGE}"
+fi
+
 echo "--- :pipeline: Uploading ${PIPELINE_FILE}"
 exec buildkite-agent pipeline upload "${PIPELINE_FILE}"

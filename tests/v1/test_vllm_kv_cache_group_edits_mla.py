@@ -18,10 +18,11 @@ import torch
 pytest.importorskip("vllm", reason="group edits import vLLM specs")
 
 # Third Party
+from vllm.v1 import kv_cache_interface  # noqa: E402
 from vllm.v1.kv_cache_interface import (  # noqa: E402
     KVCacheConfig,
+    KVCacheSpec,
     MLAAttentionSpec,
-    UniformTypeKVCacheSpecs,
 )
 
 # First Party
@@ -71,16 +72,36 @@ def _kernel_paged(num_states: int, kernel_rows: int, width: int, dtype) -> torch
     return torch.arange(numel).to(dtype).reshape(pages, 1, kernel_rows, width)
 
 
-def _config(groups: list[SimpleNamespace]) -> KVCacheConfig:
-    """Config double: the edits read only the groups and the Mamba gate."""
+def _config(layer_specs: dict[str, KVCacheSpec]) -> KVCacheConfig:
+    """Build a version-compatible group and enable the hybrid-layout edit gate."""
+    if hasattr(kv_cache_interface, "KVCacheGroup"):
+        # Third Party
+        from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+
+        group = kv_cache_interface.KVCacheGroup(
+            kv_cache_specs=layer_specs,
+            manager_config=kv_cache_interface.ManagerConfig(
+                FullAttentionManager, FullAttentionManager.Params()
+            ),
+            block_size=BLOCK_SIZE,
+        )
+    else:
+        spec = (
+            kv_cache_interface.UniformTypeKVCacheSpecs(
+                block_size=BLOCK_SIZE, kv_cache_specs=layer_specs
+            )
+            if len(layer_specs) > 1
+            else next(iter(layer_specs.values()))
+        )
+        group = SimpleNamespace(layer_names=list(layer_specs), kv_cache_spec=spec)
     return cast(
         KVCacheConfig,
-        SimpleNamespace(kv_cache_groups=groups, has_mamba_layers=True),
+        SimpleNamespace(kv_cache_groups=[group], has_mamba_layers=True),
     )
 
 
 def _edit(spec: MLAAttentionSpec, kv_cache: torch.Tensor) -> torch.Tensor:
-    config = _config([SimpleNamespace(layer_names=["l"], kv_cache_spec=spec)])
+    config = _config({"l": spec})
     edited = apply_kv_cache_group_edits(config, {"l": kv_cache}, layout_hints={})["l"]
     assert isinstance(edited, torch.Tensor)
     return edited
@@ -113,11 +134,7 @@ def test_uniform_group_edits_each_layer_by_its_own_spec():
     mla_raw = _kernel_paged(BLOCK_SIZE, MLA_KERNEL_ROWS, MLA_WIDTH, torch.bfloat16)
     num_states = BLOCK_SIZE // INDEXER_TOKENS_PER_STATE
     idx_raw = _kernel_paged(num_states, INDEXER_KERNEL_ROWS, INDEXER_WIDTH, torch.uint8)
-    spec = UniformTypeKVCacheSpecs(
-        block_size=BLOCK_SIZE,
-        kv_cache_specs={"mla": _mla_spec(), "idx": _indexer_spec()},
-    )
-    config = _config([SimpleNamespace(layer_names=["mla", "idx"], kv_cache_spec=spec)])
+    config = _config({"mla": _mla_spec(), "idx": _indexer_spec()})
 
     edited = apply_kv_cache_group_edits(
         config, {"mla": mla_raw, "idx": idx_raw}, layout_hints={}

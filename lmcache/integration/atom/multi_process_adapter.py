@@ -28,8 +28,8 @@ from lmcache.v1.common.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.transport.futures import MessagingFuture
+from lmcache.v1.transport.request_client import RequestClient
 
 logger = init_logger(__name__)
 

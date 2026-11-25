@@ -264,11 +264,20 @@ steps:
       # Two LMCache MP instances + two vLLM instances + one coordinator on a
       # single 2-GPU pod (localhost). Verifies engine B serves a long prompt's
       # KV from engine A over P2P.
-      - label: ":compression: {{matrix.inference_engine}} / p2p / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / p2p / {{matrix.p2p_rpc_port_mode}} / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh p2p
-        matrix: *vllm-matrix
+        matrix:
+          setup:
+            inference_engine:
+              - "vllm"
+            p2p_rpc_port_mode:
+              - "default"
+              - "explicit"
+            request_transport:
+              - "zmq"
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          P2P_RPC_PORT_MODE: "{{matrix.p2p_rpc_port_mode}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
@@ -441,6 +450,22 @@ steps:
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
+
+      # One vLLM, a main LMCache server with --enable-p2p-write and a headless
+      # peer LMCache server (no engine) on one GPU over localhost. Prompts fill
+      # the main server's small L1 past the usage threshold: the first ones
+      # must stay local, later ones must land on the peer, and every prompt
+      # must be served from LMCache on replay.
+      - label: ":compression: {{matrix.inference_engine}} / p2p_write / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh p2p_write
+        matrix: *vllm-smoke-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log", "ci_results_*/p2p_write/*.json"]
 
       # Real GPU MP integration: vLLM is launched with FIFO lazy offload
       # (threshold=2, select_count=1). Three requests verify that the first

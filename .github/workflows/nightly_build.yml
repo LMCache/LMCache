@@ -185,6 +185,22 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
+      - name: Fast-forward XPU nightly branch to the candidate source
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags origin \
+            refs/heads/xpu-nightly:refs/remotes/origin/xpu-nightly
+          if ! git merge-base --is-ancestor \
+            refs/remotes/origin/xpu-nightly "${SOURCE_COMMIT}"; then
+            echo "::error::xpu-nightly cannot fast-forward to ${SOURCE_COMMIT}; refusing to rewind or replace its history." >&2
+            exit 1
+          fi
+          # Keep Buildkite's branch verification valid without using a moving dev tip.
+          git push origin "${SOURCE_COMMIT}:refs/heads/xpu-nightly"
       - name: Run both Buildkite XPU pipelines
         id: validate
         env:

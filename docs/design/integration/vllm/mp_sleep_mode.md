@@ -13,9 +13,9 @@ delegates. The logic lives in `LMCacheMPWorkerAdapter`
 
 In LMCache-driven transfer the server imports the worker's KV cache
 (CUDA IPC or VMM handles) and copies blocks on its own streams. With
-CUDA VMM memory (`lmcache.mp.use_vmm_api`, vLLM's
-`--enable-extensible-kv-cache`) an import keeps the physical memory
-alive, so a server that still holds it makes vLLM's release free
+CUDA VMM memory (auto-detected from vLLM's extensible KV cache or cuMem
+allocator, with `lmcache.mp.use_vmm_api` as an override) an import keeps
+the physical memory alive, so a server that still holds it makes vLLM's release free
 nothing. After wake-up the KV cache sits at the same virtual addresses
 but on new physical chunks, so the old import would also point at the
 wrong memory. See
@@ -103,8 +103,8 @@ one restore.
   `unregister`/`restore` group, both transfer modes with real transfer
   contexts and a stubbed request client) and
   `tests/v1/test_mp_connector_kv_roles.py::test_worker_sleep_hooks_drop_and_redo_registration`.
-- End to end: vLLM with `--enable-extensible-kv-cache --enable-sleep-mode`
-  and `lmcache.mp.use_vmm_api: true`. Send a prompt, `/sleep?level=1`,
+- End to end: vLLM with `--enable-extensible-kv-cache --enable-sleep-mode`.
+  Send a prompt, `/sleep?level=1`,
   `/wake_up`, then send the prompt twice more. vLLM should report
   `Sleep mode freed` close to the KV cache size, and the server should log
   `Unregistered KV cache` followed by `Registered KV cache`. vLLM's sleep

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
+from types import ModuleType
 from typing import ClassVar, Literal, cast
 import os
 import threading
@@ -452,6 +453,8 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
     #: :attr:`~lmcache.v1.platform.devices.cuda.CudaDeviceSpec.ipc_wrapper_cls`
     #: when the ``use_vmm_api`` switch is on.
     device_type: ClassVar[str] = "cuda"
+    #: Wire descriptor type; a subclass for another runtime brings its own tag.
+    _wire_cls: ClassVar[type[VmmCudaIPCData]] = VmmCudaIPCData
 
     @classmethod
     def wrap(cls, tensor: torch.Tensor) -> "VmmCudaIPCWrapper":
@@ -494,13 +497,14 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
 
         kind: str = ""
         payload: object = None
+        driver = self._driver()
         with torch.cuda.device(device_index):
-            _bind_primary_context(device_index)
+            self._bind_context(device_index)
             # Recover the allocation handle from the bare pointer (works
             # for interior pointers; adds one driver reference we must
             # release below).
-            err, alloc_handle = _cuda.driver.cuMemRetainAllocationHandle(int(data_ptr))
-            if err != _cuda.driver.CUresult.CUDA_SUCCESS:
+            err, alloc_handle = driver.cuMemRetainAllocationHandle(int(data_ptr))
+            if err != driver.CUresult.CUDA_SUCCESS:
                 raise RuntimeError(
                     f"cuMemRetainAllocationHandle failed: {err} "
                     f"(ptr=0x{data_ptr:x}); the tensor does not appear to "
@@ -526,10 +530,8 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
                 # One exported handle maps exactly one physical chunk.
                 # cuMemGetAddressRange on VMM reports the mapped chunk
                 # containing data_ptr, so the tensor must fit inside it.
-                range_result = _cuda.driver.cuMemGetAddressRange(
-                    _cuda.driver.CUdeviceptr(data_ptr)
-                )
-                if range_result[0] != _cuda.driver.CUresult.CUDA_SUCCESS:
+                range_result = driver.cuMemGetAddressRange(driver.CUdeviceptr(data_ptr))
+                if range_result[0] != driver.CUresult.CUDA_SUCCESS:
                     raise RuntimeError(
                         f"cuMemGetAddressRange failed: {range_result[0]} "
                         f"(ptr=0x{data_ptr:x})"
@@ -550,8 +552,8 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
                 # The exported fd/blob (or, failing that, the exporter's
                 # own live mapping) keeps the allocation reachable; the
                 # retained reference is ours to drop.
-                (release_err,) = _cuda.driver.cuMemRelease(alloc_handle)
-                if release_err != _cuda.driver.CUresult.CUDA_SUCCESS:
+                (release_err,) = driver.cuMemRelease(alloc_handle)
+                if release_err != driver.CUresult.CUDA_SUCCESS:
                     logger.warning(
                         "cuMemRelease of retained handle failed: %s", release_err
                     )
@@ -588,7 +590,7 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
 
     def to_wire(self) -> VmmCudaIPCData:
         """Return the VMM descriptor, excluding local fds and mapping counts."""
-        return VmmCudaIPCData(
+        return self._wire_cls(
             version=1,
             metadata=self.wire_metadata(),
             export_id=self._export_id,
@@ -602,7 +604,7 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
     @classmethod
     def from_wire(cls, data: WireIPCData) -> "VmmCudaIPCWrapper":
         """Restore a VMM descriptor with no local fd or imported mappings."""
-        if not isinstance(data, VmmCudaIPCData):
+        if not isinstance(data, cls._wire_cls):
             raise ValueError("Expected VMM CUDA IPC descriptor")
         obj = object.__new__(cls)
         obj.restore_metadata(data.metadata)
@@ -698,15 +700,16 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
                 return
             del _MAPPED_VMM_ALLOCATIONS[self._export_id]
             base_ptr, alloc_handle = entry.base_ptr, entry.alloc_handle
+            driver = self._driver()
             for what, result in (
-                ("cuMemUnmap", _cuda.driver.cuMemUnmap(base_ptr, self._alloc_size)),
+                ("cuMemUnmap", driver.cuMemUnmap(base_ptr, self._alloc_size)),
                 (
                     "cuMemAddressFree",
-                    _cuda.driver.cuMemAddressFree(base_ptr, self._alloc_size),
+                    driver.cuMemAddressFree(base_ptr, self._alloc_size),
                 ),
-                ("cuMemRelease", _cuda.driver.cuMemRelease(alloc_handle)),
+                ("cuMemRelease", driver.cuMemRelease(alloc_handle)),
             ):
-                if result[0] != _cuda.driver.CUresult.CUDA_SUCCESS:
+                if result[0] != driver.CUresult.CUDA_SUCCESS:
                     logger.warning(
                         "%s failed during VMM mapping close: %s (ptr=0x%x)",
                         what,
@@ -734,28 +737,27 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
             RuntimeError: If the allocation has no exportable handle type
                 or the export call fails.
         """
-        err, prop = _cuda.driver.cuMemGetAllocationPropertiesFromHandle(alloc_handle)
-        if err != _cuda.driver.CUresult.CUDA_SUCCESS:
+        driver = self._driver()
+        err, prop = driver.cuMemGetAllocationPropertiesFromHandle(alloc_handle)
+        if err != driver.CUresult.CUDA_SUCCESS:
             raise RuntimeError(f"cuMemGetAllocationPropertiesFromHandle failed: {err}")
         requested = int(prop.requestedHandleTypes)
 
-        handle_types = _cuda.driver.CUmemAllocationHandleType
+        handle_types = driver.CUmemAllocationHandleType
         fd_type = handle_types.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
         fabric_type = handle_types.CU_MEM_HANDLE_TYPE_FABRIC
 
         if requested & int(fd_type):
-            err, fd = _cuda.driver.cuMemExportToShareableHandle(
-                alloc_handle, fd_type, 0
-            )
-            if err != _cuda.driver.CUresult.CUDA_SUCCESS:
+            err, fd = driver.cuMemExportToShareableHandle(alloc_handle, fd_type, 0)
+            if err != driver.CUresult.CUDA_SUCCESS:
                 raise RuntimeError(f"cuMemExportToShareableHandle(fd) failed: {err}")
             return ("posix_fd", int(fd))
 
         if requested & int(fabric_type):
-            err, fabric = _cuda.driver.cuMemExportToShareableHandle(
+            err, fabric = driver.cuMemExportToShareableHandle(
                 alloc_handle, fabric_type, 0
             )
-            if err != _cuda.driver.CUresult.CUDA_SUCCESS:
+            if err != driver.CUresult.CUDA_SUCCESS:
                 raise RuntimeError(
                     f"cuMemExportToShareableHandle(fabric) failed: {err}"
                 )
@@ -781,7 +783,7 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
         Raises:
             RuntimeError: If any driver step fails.
         """
-        driver = _cuda.driver
+        driver = self._driver()
         if self._kind == "posix_fd":
             fd = resolve_fd(self._export_id)
             try:
@@ -828,3 +830,13 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
             raise RuntimeError(f"cuMemSetAccess failed: {err}")
 
         return _VmmMapping(base_ptr=int(base), alloc_handle=handle, refcount=0)
+
+    @staticmethod
+    def _driver() -> ModuleType:
+        """Return the bindings module providing the ``cuMem*`` driver calls."""
+        return _cuda.driver
+
+    @staticmethod
+    def _bind_context(device_index: int) -> None:
+        """Make ``device_index``'s context current for the driver calls."""
+        _bind_primary_context(device_index)

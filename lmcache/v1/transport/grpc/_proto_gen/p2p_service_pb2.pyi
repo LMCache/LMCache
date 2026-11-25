@@ -89,3 +89,31 @@ class P2pUnlockObjectsRequest(_message.Message):
 class P2pUnlockObjectsResponse(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
+
+class P2pReserveWriteRequest(_message.Message):
+    __slots__ = ("keys", "layout_desc")
+    KEYS_FIELD_NUMBER: _ClassVar[int]
+    LAYOUT_DESC_FIELD_NUMBER: _ClassVar[int]
+    keys: _containers.RepeatedCompositeFieldContainer[ObjectKey]
+    layout_desc: MemoryLayoutDesc
+    def __init__(self, keys: _Optional[_Iterable[_Union[ObjectKey, _Mapping]]] = ..., layout_desc: _Optional[_Union[MemoryLayoutDesc, _Mapping]] = ...) -> None: ...
+
+class P2pReserveWriteResponse(_message.Message):
+    __slots__ = ("addresses",)
+    ADDRESSES_FIELD_NUMBER: _ClassVar[int]
+    addresses: _containers.RepeatedCompositeFieldContainer[TransferChannelAddress]
+    def __init__(self, addresses: _Optional[_Iterable[_Union[TransferChannelAddress, _Mapping]]] = ...) -> None: ...
+
+class P2pFinishWriteRequest(_message.Message):
+    __slots__ = ("keys", "succeeded")
+    KEYS_FIELD_NUMBER: _ClassVar[int]
+    SUCCEEDED_FIELD_NUMBER: _ClassVar[int]
+    keys: _containers.RepeatedCompositeFieldContainer[ObjectKey]
+    succeeded: _containers.RepeatedScalarFieldContainer[bool]
+    def __init__(self, keys: _Optional[_Iterable[_Union[ObjectKey, _Mapping]]] = ..., succeeded: _Optional[_Iterable[bool]] = ...) -> None: ...
+
+class P2pFinishWriteResponse(_message.Message):
+    __slots__ = ("committed",)
+    COMMITTED_FIELD_NUMBER: _ClassVar[int]
+    committed: _containers.RepeatedScalarFieldContainer[bool]
+    def __init__(self, committed: _Optional[_Iterable[bool]] = ...) -> None: ...

@@ -183,12 +183,18 @@ Source: ``lmcache/v1/multiprocess/config.py``
        execution and only enable it on a trusted network.
    * - ``--shm-name``
      - ``""``
-     - SHM segment name for non-GPU KV transfer (only used when the
-       non-GPU path is loaded, i.e. ``--supported-transfer-mode`` is
+     - SHM segment name for engine-driven KV transfer (only used when the
+       engine-driven path is loaded, i.e. ``--supported-transfer-mode`` is
        ``auto`` or ``engine_driven``).
        ``""`` (empty string, default): SHM disabled; KV transfer uses
-       the typed inline path.  Any other value: create a SHM pool and use
-       that exact name for its segment.
+       the typed inline path, which serialises every KV chunk through the
+       request channel and is much slower.  Any other value: create a SHM
+       pool named ``lmcache_l1_pool_<name>`` and use it for KV transfers.
+       **Requires** ``--no-l1-use-lazy``; with the default lazy allocation
+       the name is ignored (the server logs a warning) and SHM stays
+       disabled.  Mutually exclusive with ``--l1-devdax-path`` and
+       ``--l1-use-hugepages``: either combination is rejected with a
+       ``ValueError`` at config validation.  See :ref:`mp-transfer-mode`.
    * - ``--kv-event-log-size``
      - ``32768``
      - CPU store-completion and eviction records retained for subscriptions
@@ -253,14 +259,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Blend only: don't store chunks fully covered by this request's
        fingerprint hits (content already cached under another prefix).
    * - ``--separate-object-groups`` / ``--no-separate-object-groups``
-     - ``False``
+     - ``True``
      - Split a hybrid model's kernel groups into one object group per
        cross-chunk attention window (full attention, each sliding-window
-       size, mamba/GDN) at KV-cache registration. Off by default; pass
-       ``--separate-object-groups`` to enable it. **Required for Mamba /
-       linear-attention hybrids** (it lets their recurrent state be cached
-       independently). For a non-hybrid model it makes no difference —
-       every layer resolves to one object group. See :doc:`/mp/hybrid_models`.
+       size, mamba/GDN) at KV-cache registration. Enabled by default; pass
+       ``--no-separate-object-groups`` to disable it. Keep it enabled for Mamba
+       / linear-attention hybrids so their recurrent state is cached
+       independently. For a non-hybrid model it makes no difference — every
+       layer resolves to one object group. See :doc:`/mp/hybrid_models`.
 
 Lookup Hash Logging
 -------------------
@@ -350,6 +356,12 @@ is set, which additionally requires a coordinator URL via
      - ``""``
      - Transfer-channel server ``host:port`` to bind. Defaults to
        ``--p2p-advertise-url``.
+   * - ``--p2p-rpc-port``
+     - ``0``
+     - Independent P2P gRPC control port, bound on ``--host``. ``0`` lets the
+       OS choose a free port. Pin and allow this port when a firewall,
+       Docker port mapping, or NetworkPolicy restricts reachable ports;
+       allowing only the worker ``--port`` is insufficient.
    * - ``--p2p-lookup-timeout``
      - ``30.0``
      - Seconds before a peer lookup result counts as a miss.
@@ -359,6 +371,22 @@ is set, which additionally requires a coordinator URL via
    * - ``--p2p-transfer-engine``
      - ``nixl``
      - Transfer-channel implementation to use.
+   * - ``--enable-p2p-write``
+     - off
+     - Store objects into peers' L1 once the local DRAM L1 is fuller than
+       ``--p2p-write-l1-usage-threshold``, and drop the local copy. Use it on
+       a server whose peers extend its DRAM, on only one side of a pair.
+       Selects the ``p2p`` store policy and the ``skip_l1`` prefetch policy
+       unless ``--l2-store-policy`` or ``--l2-prefetch-policy`` is set.
+       See :doc:`p2p_deployment`.
+   * - ``--p2p-write-l1-usage-threshold``
+     - ``0.7``
+     - Used fraction of the local DRAM L1, in ``(0, 1]``, at which new objects
+       are stored into a peer instead of staying local. Keep it below
+       ``--eviction-trigger-watermark``.
+   * - ``--p2p-store-timeout``
+     - ``30.0``
+     - Seconds before a store into a peer counts as a failure.
 
 L1 Memory Manager
 ------------------
@@ -386,7 +414,9 @@ single-L1 interface. For placing L1 on CXL-attached memory see
      - ``True``
      - Enable or disable lazy allocation for L1 memory.
        Pass ``--l1-use-lazy`` to enable (default) or
-       ``--no-l1-use-lazy`` to explicitly disable.
+       ``--no-l1-use-lazy`` to explicitly disable.  Lazy allocation
+       disables the SHM transfer pool: pass ``--no-l1-use-lazy`` whenever
+       you set ``--shm-name`` for engine-driven workers.
    * - ``--l1-init-size-gb``
      - ``20``
      - Initial allocation size (GB) when using lazy allocation.
@@ -404,8 +434,10 @@ single-L1 interface. For placing L1 on CXL-attached memory see
      - Optional ``/dev/dax*`` device or mmap-able file to use as the L1
        backing arena.  When set, disable lazy allocation with
        ``--no-l1-use-lazy`` and leave ``--shm-name`` at its default ``""``
-       (SHM transfer disabled) because the L1 bytes live in the DAX
-       mapping.  A ``dax`` L2 adapter may not map the same device range;
+       because the L1 bytes live in the DAX mapping; a non-empty
+       ``--shm-name`` (or ``--l1-use-lazy``) together with this flag is
+       rejected with a ``ValueError``.  A ``dax`` L2 adapter may not map the
+       same device range;
        give the L1 and the adapter disjoint ranges. Pass the device node,
        for example
        ``--l1-devdax-path /dev/dax0.0 --l1-size-gb 512 --no-l1-use-lazy
@@ -699,7 +731,11 @@ Source: ``lmcache/v1/distributed/config.py``
        The ``default`` policy stores all keys to all adapters and keeps L1.
        The ``skip_l1`` policy stores all keys to all adapters and then
        deletes them from L1 (buffer-only mode).
-       Choices: ``default``, ``skip_l1``.
+       The ``p2p`` policy keeps keys in L1 until its usage reaches
+       ``--p2p-write-l1-usage-threshold``, then stores new keys into one P2P
+       peer and deletes them from L1; ``--enable-p2p-write`` selects it
+       automatically (see :doc:`p2p_deployment`).
+       Choices: ``default``, ``skip_l1``, ``p2p``.
    * - ``--l2-prefetch-policy``
      - ``default``
      - L2 prefetch policy.  Determines which adapter loads each key
@@ -707,7 +743,8 @@ Source: ``lmcache/v1/distributed/config.py``
        The ``default`` policy picks the first adapter (lowest index) and
        keeps prefetched keys in L1.
        The ``skip_l1`` policy uses the same load plan, but prefetched keys
-       are temporary (deleted after the reader finishes).
+       are temporary (deleted after the reader finishes);
+       ``--enable-p2p-write`` selects it automatically.
        Choices: ``default``, ``skip_l1``.  ``retain`` is a deprecated alias
        of ``default``.
    * - ``--l2-prefetch-inflight-watermark``
@@ -1105,10 +1142,11 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        server's ``--isolated-ipc`` flag -- a mismatch fails at event
        import on whichever side receives the foreign handle.
    * - ``lmcache.mp.use_vmm_api``
-     - ``false``
-     - Set when the engine allocates its KV cache through the CUDA VMM
-       API (vLLM's ``--enable-cumem-allocator``, or its extensible KV
-       cache, ``--enable-extensible-kv-cache``): such memory has no
+     - auto-detected
+     - Selects VMM IPC when the engine allocates its KV cache through the
+       CUDA VMM API. LMCache detects vLLM's ``--enable-cumem-allocator`` and
+       resolved extensible-KV-cache mode automatically; set this key to
+       ``true`` or ``false`` only to override that result. VMM memory has no
        legacy CUDA IPC handle, so KV-cache registration exports it via
        ``cuMemExportToShareableHandle`` instead (a fabric handle when
        the allocation is fabric-exportable -- requires an IMEX channel

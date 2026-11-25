@@ -29,6 +29,7 @@ sleep 15
 
 VLLM_SERVER_DEV_MODE=1 vllm serve "$MODEL" --tensor-parallel-size "$TP" --port 8000 \
     --max-model-len 8192 --gpu-memory-utilization 0.85 --no-enable-prefix-caching \
+    --enable-extensible-kv-cache \
     --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"lmcache.mp.host":"tcp://localhost","lmcache.mp.port":6555,"lmcache.mp.mq_timeout":10}}' \
     > "$OUT/vllm.log" 2>&1 &
 VLLM=$!

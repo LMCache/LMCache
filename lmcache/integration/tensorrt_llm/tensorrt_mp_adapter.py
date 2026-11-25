@@ -38,13 +38,13 @@ from lmcache.utils import EngineType
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.kv_format.types import LayoutHints
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
 )
 from lmcache.v1.platform.base.ipc_wrapper import KVCache
 from lmcache.v1.platform.devices.cuda.ipc_wrapper import RawCudaIPCWrapper
+from lmcache.v1.transport.request_client import RequestClient
 
 logger = init_logger(__name__)
 

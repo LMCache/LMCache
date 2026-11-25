@@ -26,24 +26,53 @@ _SWAP = sys.byteorder == "little"
 """Whether native words need byte-swapping to reach big-endian order."""
 
 
-def pack_token_ids(token_ids: Sequence[int]) -> bytes:
-    """Pack token ids into the big-endian ``uint32`` wire buffer.
+def pack_token_ids(
+    token_ids: Sequence[int], start: int = 0, end: int | None = None
+) -> bytes:
+    """Pack a token-id range into the big-endian ``uint32`` wire buffer.
 
     Args:
         token_ids: The token ids to pack. Each must fit in a ``uint32``,
             which every real vocabulary does.
+        start: Start token index, following normal Python slice semantics.
+        end: End token index, following normal Python slice semantics. Defaults
+            to the end of ``token_ids``.
 
     Returns:
-        ``TOKEN_STRIDE * len(token_ids)`` bytes.
+        The selected token IDs as big-endian ``uint32`` words.
 
     Raises:
-        OverflowError: If a token id does not fit in a ``uint32``.
+        OverflowError: If a token id on the sequence path does not fit in a
+            ``uint32``.
+
+    Notes:
+        Some buffer-backed sequences expose slices as ``list[int]`` for
+        compatibility. Reading native integer arrays through the buffer
+        protocol preserves their packed representation.
     """
+    if end is None:
+        end = len(token_ids)
+    if (
+        _NATIVE_U32
+        and isinstance(token_ids, array.array)
+        and token_ids.itemsize == TOKEN_STRIDE
+        and token_ids.typecode in ("i", "I")
+    ):
+        words = array.array("I")
+        words.frombytes(memoryview(token_ids)[start:end].cast("B"))
+        if _SWAP:
+            words.byteswap()
+        return words.tobytes()
+
+    # Preserve the original no-slice path for full-sequence callers.
+    token_slice = (
+        token_ids if start == 0 and end == len(token_ids) else token_ids[start:end]
+    )
     if not _NATIVE_U32:
-        return struct.pack(f">{len(token_ids)}I", *token_ids)
+        return struct.pack(f">{len(token_slice)}I", *token_slice)
     # ~2x faster than struct.pack for long sequences: one bulk conversion
     # instead of unpacking the whole sequence as varargs.
-    words = array.array("I", token_ids)
+    words = array.array("I", token_slice)
     if _SWAP:
         words.byteswap()
     return words.tobytes()

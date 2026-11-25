@@ -211,7 +211,8 @@ _finalize_store(task_key, task)  [terminal execution]
   │
   ├─ 4. BaseL1Manager.finish_read(read_locked_keys)  → release read locks
   │
-  ├─ 5. If success: StorePolicy.select_l1_deletions(keys) → delete from L1
+  ├─ 5. If success: StorePolicy.select_l1_deletions(keys, adapter) → delete
+  │     from L1
   │     If failure: log warning (best-effort, no retry)
   │
   ▼
@@ -239,13 +240,19 @@ The policy decides two things:
    Which adapters get which keys. A key can go to multiple adapters.
    `DefaultStorePolicy`: all keys → all adapters.
 
-2. **`select_l1_deletions(keys) → list[ObjectKey]`**
-   Which keys to evict from L1 after successful L2 store.
+2. **`select_l1_deletions(keys, adapter) → list[ObjectKey]`**
+   Which keys to evict from L1 after `adapter` stored them successfully.
    `DefaultStorePolicy`: never delete (empty list).
+
+A policy is constructed with the storage manager's L1 managers, so it can
+base its decisions on L1 state such as memory usage.
 
 Policies are selected by name via `--l2-store-policy` (default: `"default"`).
 New policies self-register with `register_store_policy(name, cls)` at import
-time and are auto-discovered by `storage_controllers/__init__.py`.
+time and are auto-discovered by `storage_controllers/__init__.py`. The
+built-in policies, including the `p2p` policy that stores overflow objects
+into P2P peers, are described in
+[`storage_controllers/store_policy.md`](../storage_controllers/store_policy.md).
 
 ## PrefetchController
 
@@ -438,7 +445,7 @@ the hit cells split into those L1 already held and those loaded from L2.
 
 5. **The policy decides what is loaded.** Under `"prefix"` fetching only the
    cells of the longest prefix every key row can serve are loaded from L2;
-   under `"full"` every found cell is.
+   under `"full"` and `"whole_chunk"` every found cell is.
 
 6. **Listener callbacks run inside BaseL1Manager's lock.** `StoreListener` must be
    non-blocking (append + eventfd signal only). It must never call BaseL1Manager
@@ -535,18 +542,22 @@ from lmcache.v1.distributed.api import ObjectKey
 
 
 class TieredStorePolicy(StorePolicy):
+    # The inherited constructor keeps the L1 managers in self._l1_managers.
+
     def select_store_targets(self, keys, adapters):
         # custom logic ...
         ...
 
-    def select_l1_deletions(self, keys):
+    def select_l1_deletions(self, keys, adapter):
         return []
 
 
 register_store_policy("tiered", TieredStorePolicy)
 ```
 
-The policy is now available via `--l2-store-policy tiered`.
+The policy is now available via `--l2-store-policy tiered`. A policy that
+defines its own `__init__` takes the list of L1 managers and passes it to
+`super().__init__()`.
 
 ### Prefetch Policy
 

@@ -25,10 +25,10 @@ from lmcache.v1.multiprocess.config import CoordinatorConfig, MPServerConfig
 from lmcache.v1.multiprocess.engine_module import ModuleBuildContext
 from lmcache.v1.multiprocess.modules import management
 from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.platform.transfer_mode import MPTransferMode
 from lmcache.v1.transport.futures import MessagingFuture
+from lmcache.v1.transport.request_client import RequestClient
 from tests.v1.multiprocess.transport_test_utils import (
     REQUEST_TRANSPORTS,
     RequestTransport,

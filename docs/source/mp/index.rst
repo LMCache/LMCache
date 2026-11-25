@@ -580,8 +580,10 @@ Key Source Files
      - Transport-neutral ``EngineModule`` protocol
    * - ``lmcache/v1/transport/rpc.py``
      - RPC discovery and typed operation specifications
+   * - ``lmcache/v1/transport/request_client.py``
+     - Typed ``RequestClient`` contract
    * - ``lmcache/v1/multiprocess/transport/base.py``
-     - Typed ``RequestClient`` and ``RequestServer`` contracts
+     - ``RequestServer`` interface
    * - ``lmcache/v1/multiprocess/transport/server_factory.py``
      - Transport-neutral request-server construction boundary
    * - ``lmcache/v1/multiprocess/transport/zmq_impl/server.py``

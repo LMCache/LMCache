@@ -25,6 +25,10 @@ from lmcache.v1.multiprocess.engine_module import (
     ModuleBuildContext,
 )
 from lmcache.v1.multiprocess.modules.blend import reorder as blend_reorder
+from lmcache.v1.multiprocess.modules.blend.fingerprint_eviction import (
+    FingerprintEvictionMixin,
+    FingerprintEvictionTracker,
+)
 from lmcache.v1.multiprocess.modules.blend.lookup import (
     LookupMixin,
     _CBUnifiedJob,
@@ -61,6 +65,7 @@ def _handshake_response(client_version: int) -> tuple[int, bool]:
 
 class BlendModule(
     DiscoverableModule,
+    FingerprintEvictionMixin,
     LookupMixin,
     RegistrationMixin,
     RetrieveMixin,
@@ -222,6 +227,11 @@ class BlendModule(
         # can refresh the bucket first.
         self._stale_strike: dict[bytes, int] = {}
         self._STALE_STRIKE_THRESHOLD = 2
+
+        # Proactive eviction: storage key events name the chunks that lost a
+        # key, so their fingerprints go before a lookup has to miss on them.
+        self._fingerprint_eviction = FingerprintEvictionTracker()
+        self._subscribe_fingerprint_eviction()
 
     def _reset_token_range_matcher(self, chunk_size: int) -> None:
         """Recreate the blend matcher after chunk-size negotiation."""

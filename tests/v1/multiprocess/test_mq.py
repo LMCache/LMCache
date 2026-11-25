@@ -31,10 +31,9 @@ from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
 )
-from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
+from lmcache.v1.distributed.api import get_request_tags
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     BlockingRequestHandler,
     MessageQueueServer,
@@ -42,7 +41,6 @@ from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
 from lmcache.v1.multiprocess.transport.zmq_impl.server import (
     add_handler_helper,
     build_zmq_request_server,
-    get_zmq_handler_specs,
 )
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 
@@ -75,44 +73,6 @@ def _unused_tcp_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
-
-
-def test_zmq_handler_specs_cover_all_p2p_request_types() -> None:
-    """ZMQ discovers the same transport-neutral P2P annotations as gRPC."""
-
-    class P2PHandlers:
-        @request_handler(
-            HandlerType.BLOCKING,
-            operation="p2p_lookup_and_lock",
-        )
-        def lookup(
-            self,
-            keys: list[ObjectKey],
-            group_layout_descs: dict[int, MemoryLayoutDesc],
-        ) -> int:
-            return 0
-
-        @request_handler(
-            HandlerType.BLOCKING,
-            operation="p2p_query_lookup_results",
-        )
-        def query(self, task_id: int) -> list[TransferChannelAddress] | None:
-            return None
-
-        @request_handler(
-            HandlerType.BLOCKING,
-            operation="p2p_unlock_objects",
-        )
-        def unlock(self, keys: list[ObjectKey]) -> None:
-            return None
-
-    operations = {spec.operation for spec in get_zmq_handler_specs(P2PHandlers())}
-
-    assert operations == {
-        "p2p_lookup_and_lock",
-        "p2p_query_lookup_results",
-        "p2p_unlock_objects",
-    }
 
 
 def test_zmq_server_registers_out_of_tree_services() -> None:
@@ -1123,12 +1083,8 @@ def test_shared_loop_recreate():
     assert ClientPollingLoop._instance is None
 
 
-def test_polling_loop_does_not_load_server_implementation() -> None:
-    """The client polling loop starts and stops without loading server code.
-
-    MessageQueueClient still imports the shared codec from mq.py, so this
-    covers the loop module only.
-    """
+def test_zmq_client_does_not_load_server_implementation() -> None:
+    """Creating a ZMQ request client loads no server code."""
     script = r"""
 import importlib.abc
 import sys
@@ -1143,22 +1099,20 @@ banned = (
     "lmcache.v1.multiprocess.transport.grpc_impl",
     "lmcache.v1.multiprocess.transport.zmq_impl.mq",
     "lmcache.v1.multiprocess.transport.zmq_impl.server",
-    "lmcache.v1.transport.zmq.wire",
 )
 
 
 class ServerImportBlocker(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path, target=None):
         if any(fullname == name or fullname.startswith(name + ".") for name in banned):
-            raise ImportError(f"polling loop imported server module: {fullname}")
+            raise ImportError(f"ZMQ client imported server module: {fullname}")
         return None
 
 
 sys.meta_path.insert(0, ServerImportBlocker())
-from lmcache.v1.client.transport.zmq_impl.polling_loop import ClientPollingLoop
+from lmcache.v1.client.transport.factory import RequestClientFactory
 
-ClientPollingLoop.get_instance()
-ClientPollingLoop.release_instance()
+RequestClientFactory.create("tcp://127.0.0.1:1").close()
 """
     subprocess.run([sys.executable, "-c", script], check=True)
 
@@ -1374,12 +1328,9 @@ def test_client_socket_bounds_connect_attempts():
 def test_q_ring_info_list_zmq_serialization():
     """The ZMQ transport encodes GET_Q_RING replies, which carry IPC wrappers."""
     # First Party
-    from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
-        msgspec_decode,
-        msgspec_encode,
-    )
     from lmcache.v1.platform.devices.cuda.ipc_wrapper import CudaIPCWrapper
     from lmcache.v1.transport.qstore import QRingInfo
+    from lmcache.v1.transport.zmq.codec import msgspec_decode, msgspec_encode
 
     wrapper = CudaIPCWrapper(torch.randn(4, 2, 3, device=torch_device_type))
     rings = [

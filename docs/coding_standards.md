@@ -13,7 +13,7 @@ This document defines the coding quality standards and code review expectations 
 
 - **PRs must be small and focused.** If the number of changed files is large, break it down conceptually into multiple PRs. Each PR should do one thing well.
 - Prefer a series of small, reviewable PRs over one large omnibus PR.
-- If a feature spans multiple modules, split by module boundary or by logical phase (e.g., interface change first, then implementation, then tests).
+- If a feature spans multiple modules, split by module boundary or by logical phase (e.g., interface change first, then implementation together with its tests).
 
 ### 1.2 Documentation Requirements
 
@@ -189,6 +189,44 @@ A full docstring must include:
   simple pathlib and assignment/import aliases, not arbitrary dynamic code.
   Intentional source-inspection/build tests can exempt an expression or function
   with `# test-import: allow -- reason` on the same or preceding line.
+
+#### Test-first order
+
+New features, behavior changes, and bug fixes are test-first. Tests are written
+from the agreed behavior before the code that implements it, so they check the
+contract instead of echoing whatever the implementation happens to do.
+
+1. **Design the user-facing surface.** Write the design doc (Section 5.1) and,
+   if the feature has a CLI, define it: commands, flags and defaults, output,
+   exit codes, and error messages.
+2. **Write the end-to-end test before any implementation.** It drives the
+   feature through its outermost public entry point the way a user would (the
+   `lmcache` CLI in a subprocess, a server started and queried over its API, or
+   the inference-engine integration path) and asserts only on what the user
+   observes. Without a CLI, start from the outermost public API that reaches the
+   feature.
+3. **Finalize the interface.** Write the public classes and functions with full
+   type hints and docstrings (Section 3), with bodies that
+   `raise NotImplementedError`. The docstring is the behavior contract.
+4. **Write unit tests against that interface before implementing it.** The
+   rules above apply: test the docstring contract and never private members.
+5. **Confirm the new tests fail for the expected reason**, such as an unknown
+   command, `NotImplementedError`, or a wrong result. They must not fail because
+   the test itself is broken. A new test that passes before the implementation
+   exists is not testing the change.
+6. **Implement until the unit tests and then the end-to-end test pass.**
+
+For a bug fix, the regression test comes first. Reproduce the bug at the
+highest level that shows it, confirm that the test fails on the current code,
+then fix.
+
+Do not edit tests to fit the implementation. If implementing shows that the CLI
+or a docstring is wrong, change the design or docstring first, then update the
+affected tests, and call out the contract change in the PR description.
+
+Exempt from this order: refactors with no behavior change (existing tests must
+keep passing unchanged), and changes that only touch documentation, CI, or
+build config.
 
 ### 5.3 Reuse Existing Code
 
@@ -371,7 +409,7 @@ Reviews should **not** focus on:
 | Severity | Meaning | Examples |
 |----------|---------|----------|
 | **error** | Must fix before merge | Missing SPDX header, missing type hints on public function, missing docstring on public function, new feature with zero tests, cross-class private member access, poor architectural decision, ambiguous return values, `assert` used for runtime validation, **breaking change that leaves unchanged callers broken** |
-| **warning** | Should fix | Docstring could be more detailed, tests that test implementation details, naming could be clearer, code could be more modular, missing `strict=True` on `zip` of parallel lists, **caller assumptions weakened without audit** |
+| **warning** | Should fix | Docstring could be more detailed, tests that test implementation details, user-facing feature with no end-to-end test (Section 5.2), naming could be clearer, code could be more modular, missing `strict=True` on `zip` of parallel lists, **caller assumptions weakened without audit** |
 | **info** | Suggestion only, non-blocking | Optional naming improvement, minor refactor for readability, style preference, **backwards-compatible extension where a cleaner API break might be justified** |
 
 ### 9.3 Reviewer Guidelines

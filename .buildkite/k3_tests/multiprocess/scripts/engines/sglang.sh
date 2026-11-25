@@ -17,7 +17,6 @@ ENGINE_COMMON_WORKLOAD_BLACKLIST=(
     deadlock
     lm_eval_preemption
     long_doc_qa_l2
-    restart_recovery
 )
 
 engine_setup_environment() {

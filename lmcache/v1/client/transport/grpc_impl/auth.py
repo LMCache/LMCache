@@ -10,7 +10,7 @@ from typing import Any
 import grpc
 
 # First Party
-from lmcache.security.http import bearer_authorization_header
+from lmcache.security.bearer import bearer_authorization_header
 from lmcache.v1.transport.grpc.endpoint import AUTHORIZATION_METADATA_KEY
 
 

@@ -31,6 +31,7 @@ from lmcache.v1.client.transport.errors import (
     MPRequestError,
     MPServerUnavailableError,
 )
+from lmcache.v1.common.api import MemoryLayoutDesc
 from lmcache.v1.common.custom_types import (
     GroupLayout,
     RegisterEngineDrivenContextPayload,
@@ -42,9 +43,7 @@ from lmcache.v1.common.utils import (
     get_device,
     normalize_and_discover_per_layer_formats,
 )
-from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import (
     get_device_spec,
     resolve_kv_wrapper_factory,
@@ -57,6 +56,7 @@ from lmcache.v1.platform.base.event_ipc import (
 from lmcache.v1.platform.kv_wrap import kv_wrapper_fds_delivered, wrap_kv_caches
 from lmcache.v1.platform.transfer_mode import MPTransferMode
 from lmcache.v1.transport.futures import MessagingFuture
+from lmcache.v1.transport.request_client import RequestClient
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
