@@ -72,6 +72,7 @@ from lmcache.integration.vllm.kv_cache_groups import (
     is_scratch_group,
     is_windowed_group,
     tokens_per_group_block,
+    vllm_mamba_cache_mode,
 )
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
@@ -91,10 +92,10 @@ from lmcache.integration.vllm.mp_server_launcher import (
 from lmcache.integration.vllm.utils import (
     vllm_layout_hints,
 )
-from lmcache.utils import CacheRemoveEvent
-from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.client.worker_transfer import LMCacheDrivenTransferContext
 from lmcache.v1.common.banner import print_banner_once
+from lmcache.v1.common.logging import init_logger as lmcache_init_logger
+from lmcache.v1.common.utils import CacheRemoveEvent
 
 try:
     # First Party
@@ -454,7 +455,7 @@ def validate_mamba_step_alignment(
         ValueError: If Mamba groups have inconsistent block sizes or
             ``max_num_batched_tokens < block_size``.
     """
-    if getattr(vllm_config.cache_config, "mamba_cache_mode", "none") != "align":
+    if vllm_mamba_cache_mode(vllm_config, kv_cache_config) != "align":
         return
     mamba_block_sizes = {
         spec.block_size
@@ -575,17 +576,17 @@ def _ensure_transport_scheme(server_url: str) -> str:
     """Ensure a multiprocess server URL carries a transport scheme.
 
     Preserve explicit schemes so the request client factory can select the
-    transport. Bare endpoints retain the legacy ZMQ TCP behavior.
+    transport. Bare endpoints default to gRPC.
 
     Args:
         server_url: A server URL, with or without a ``<scheme>://`` prefix.
 
     Returns:
-        The URL with a transport scheme, defaulting to ``tcp://``.
+        The URL with a transport scheme, defaulting to ``grpc://``.
     """
     if "://" in server_url:
         return server_url
-    return f"tcp://{server_url}"
+    return f"grpc://{server_url}"
 
 
 class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
@@ -596,13 +597,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     Multi-server deployment:
     - lmcache.mp.server_urls: server URL list or comma-separated string,
-      e.g. "tcp://host1:6667,tcp://host2:6667".
+      e.g. "grpc://host1:6667,grpc://host2:6667".
 
     Single-server deployment:
     - lmcache.mp.host: the host of the LMCache server, e.g. "127.0.0.1" or
-      "tcp://127.0.0.1" (default "tcp://localhost"). The final URL is
-      "{host}:{port}". If no transport scheme is provided, "tcp://" is
-      automatically prepended.
+      "grpc://127.0.0.1" (default "grpc://localhost"). The final URL is
+      "{host}:{port}". If no transport scheme is provided, "grpc://" is
+      automatically prepended. "tcp://" selects the deprecated ZMQ transport.
     - lmcache.mp.port: the port of the LMCache server.
 
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
@@ -669,7 +670,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self._full_hit_holds_back_last_token = kv_cache_config is not None and any(
             is_windowed_group(group) for group in kv_cache_config.kv_cache_groups
         )
-        mamba_cache_mode = getattr(vllm_config.cache_config, "mamba_cache_mode", "none")
+        mamba_cache_mode = vllm_mamba_cache_mode(vllm_config, kv_cache_config)
         self._reserve_last_token_for_lookup = mamba_cache_mode in ("align", "all")
         scheduler_block_size = get_vllm_scheduler_block_size(
             vllm_config, kv_cache_config
@@ -743,15 +744,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             # Legacy single-server fallback.
             server_host = vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.host", "tcp://localhost"
+                "lmcache.mp.host", "grpc://localhost"
             )
             server_port = vllm_config.kv_transfer_config.get_from_extra_config(
                 "lmcache.mp.port", 5555
             )
             server_urls = [f"{server_host}:{server_port}"]
 
-        # Preserve explicit transport schemes and default bare host:port
-        # endpoints to the legacy ZMQ TCP transport.
         server_urls = [_ensure_transport_scheme(u) for u in server_urls]
 
         # The server count is derived from lmcache.mp.server_urls.

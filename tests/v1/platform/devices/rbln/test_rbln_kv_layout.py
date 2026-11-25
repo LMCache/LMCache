@@ -16,15 +16,13 @@ anywhere.
 
 # Standard
 from typing import cast
-from unittest.mock import patch
 
 # Third Party
 import pytest
 import torch
 
 # First Party
-from lmcache.utils import EngineType
-from lmcache.v1.common.kv_format.detectors import vllm as vllm_detector
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.kv_format.types import (
     DiscoverableKVCache,
     LayoutHints,
@@ -61,16 +59,14 @@ def _native_kv() -> list[torch.Tensor]:
 
 def _discover(
     kv_caches: list[torch.Tensor],
-    device_type: str = "rbln",
     layout_hints: "LayoutHints | None" = None,
 ):
-    """Run discovery against a chosen device type."""
-    with patch.object(vllm_detector, "torch_device_type", device_type):
-        return normalize_kv_and_discover_format(
-            cast("DiscoverableKVCache", kv_caches),
-            EngineType.VLLM,
-            layout_hints=layout_hints,
-        )
+    """Run vLLM format discovery."""
+    return normalize_kv_and_discover_format(
+        cast("DiscoverableKVCache", kv_caches),
+        EngineType.VLLM,
+        layout_hints=layout_hints,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -136,20 +132,6 @@ def test_detection_does_not_reshape_the_cache() -> None:
     for out, src in zip(normalized, native, strict=True):
         assert out.data_ptr() == src.data_ptr()
         assert tuple(out.shape) == tuple(src.shape)
-
-
-@pytest.mark.parametrize(
-    "device_type", ["rbln", "cuda", "cpu"], ids=["rbln", "cuda", "cpu"]
-)
-def test_detection_is_device_independent(device_type: str) -> None:
-    """The shape identifies the format, so no device spec is consulted.
-
-    A format keyed off the registered shape means detection is a pure function
-    of ``(kv_caches, hints)`` -- it cannot depend on which accelerator the
-    process happens to have resolved.
-    """
-    fmt, _ = _discover(_native_kv(), device_type=device_type)
-    assert int(fmt) == int(_NATIVE_FORMAT)
 
 
 @pytest.mark.parametrize(

@@ -34,6 +34,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess import object_group_transfer
 from lmcache.v1.multiprocess.engine_context import (
     LayoutDescRegistry,
@@ -553,6 +554,41 @@ def test_identical_prompt_resuming_before_its_last_token_hits_its_tail(
     assert hit == tail_boundary
 
 
+@pytest.mark.parametrize(
+    ("lookup_end", "grid", "expected_hit"),
+    [
+        # The repeat of the prompt: its lookup stops at P - 1 and the grid
+        # rounds it down to the stored tail.
+        (CHUNK_SIZE - 6, 4, 8),
+        # A lookup ending exactly at the stored tail.
+        (8, 0, 8),
+    ],
+    ids=["grid", "exact"],
+)
+def test_prompt_shorter_than_one_chunk_hits_its_tail(
+    lookup_module, lookup_end, grid, expected_hit
+):
+    """A prompt with no full chunk has no full-chunk hash, yet the tail it
+    stored inside chunk 0 is found on a repeat (#6745)."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(CHUNK_SIZE - 5))
+    _write(storage_manager, _unfull_keys(hasher, tokens, 8), is_temporary=False)
+
+    assert _lookup(module, tokens, lookup_end, "r1", grid=grid) == expected_hit
+
+
+def test_aligned_lookup_of_a_short_prompt_ignores_its_tail(lookup_module):
+    """A connector that does not load unfull chunks floors a short prompt's
+    lookup to 0 tokens: nothing is probed or locked."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(CHUNK_SIZE - 5))
+    _write(storage_manager, _unfull_keys(hasher, tokens, 8), is_temporary=True)
+
+    assert _lookup(module, tokens, 0, "r1", grid=4) == 0
+    # Never locked, so still there for a lookup that asks for it.
+    assert _lookup(module, tokens, 8, "r2") == 8
+
+
 def test_next_round_hits_the_previous_rounds_tail(lookup_module):
     """Round 2 extends round 1's prompt: its full-chunk hit stops at round 1's
     last chunk boundary, and the tail stored there extends it."""
@@ -584,6 +620,88 @@ def test_free_releases_the_unfull_chunk_at_the_hit_boundary(lookup_module):
     module.free_lookup_locks(_key(tokens, 2 * CHUNK_SIZE, hit, "r1"), tp_size=1)
     module.free_lookup_locks(_key(tokens, 0, hit, "r2"), tp_size=1)
     assert _lookup(module, tokens, len(tokens), "r3", grid=4) == 2 * CHUNK_SIZE
+
+
+@pytest.mark.parametrize("store_tail", [True, False], ids=["tail_hit", "tail_miss"])
+def test_tail_hit_is_counted_in_the_lookup_event(lookup_module, store_tail):
+    """The unfull chunk's tokens join both sides of the hit rate: the
+    denominator whenever it is probed, the L1 hit only when it hits."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+    if store_tail:
+        _write(
+            storage_manager,
+            _unfull_keys(hasher, tokens, len(tokens)),
+            is_temporary=False,
+        )
+
+    hit = _lookup(module, tokens, len(tokens), "r1")
+
+    meta = _end_metadata(module, "r1")
+    assert hit == (len(tokens) if store_tail else 2 * CHUNK_SIZE)
+    assert meta["requested_tokens"] == len(tokens)
+    assert meta["hit_tokens"] == hit
+    assert meta["l1_hit_tokens"] == hit
+    assert meta["l2_hit_tokens"] == 0
+    assert meta["request_hit_tokens"] == hit
+    assert meta["hit_tokens"] <= meta["requested_tokens"]
+
+
+def test_tail_hit_after_a_partial_full_chunk_hit_is_counted(lookup_module):
+    """Round 2 hits round 1's chunk and its grid tail: only the tail's
+    tokens past the full-chunk hit are added, and the ratio stays below 1."""
+    module, storage_manager, hasher = lookup_module
+    round_2 = list(range(4 * CHUNK_SIZE))
+    round_1_tail = CHUNK_SIZE + 8
+    _write(storage_manager, _chunk_keys(hasher, round_2, 1), is_temporary=False)
+    _write(
+        storage_manager, _unfull_keys(hasher, round_2, round_1_tail), is_temporary=False
+    )
+
+    assert _lookup(module, round_2, len(round_2) - 1, "r1", grid=4) == round_1_tail
+
+    meta = _end_metadata(module, "r1")
+    assert meta["requested_tokens"] == len(round_2) - 1
+    assert meta["hit_tokens"] == round_1_tail
+    assert meta["l1_hit_tokens"] == round_1_tail
+    assert meta["l2_hit_tokens"] == 0
+    assert meta["hit_tokens"] <= meta["requested_tokens"]
+
+
+def test_tail_hit_past_an_engine_covered_prefix_is_counted(lookup_module):
+    """When the engine holds every full chunk, only the tail is looked up:
+    it is both the denominator and the hit, and the covered prefix is
+    reported apart."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+    _write(
+        storage_manager, _unfull_keys(hasher, tokens, len(tokens)), is_temporary=False
+    )
+
+    module.lookup(_key(tokens, 2 * CHUNK_SIZE, len(tokens), "r1"), tp_size=1)
+
+    assert module.wait_prefetch_status("r1", timeout=5.0) == len(tokens)
+    meta = _end_metadata(module, "r1")
+    assert meta["apc_covered_tokens"] == 2 * CHUNK_SIZE
+    assert meta["requested_tokens"] == 5
+    assert meta["hit_tokens"] == 5
+    assert meta["l1_hit_tokens"] == 5
+    assert meta["request_hit_tokens"] == len(tokens)
+
+
+def _end_metadata(module: LookupModule, request_id: str) -> dict:
+    """The metadata of ``request_id``'s ``MP_LOOKUP_PREFETCH_END`` event."""
+    publish = cast(mock.Mock, module._ctx.event_bus.publish)
+    for call in publish.call_args_list:
+        event = call.args[0]
+        if (
+            event.event_type is EventType.MP_LOOKUP_PREFETCH_END
+            and event.session_id == request_id
+        ):
+            return event.metadata
+    raise AssertionError(f"no MP_LOOKUP_PREFETCH_END event for {request_id}")
 
 
 def _key(

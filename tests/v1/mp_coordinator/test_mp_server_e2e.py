@@ -13,6 +13,7 @@ skip them. The coordinator integration pipeline,
 """
 
 # Standard
+from urllib.parse import urlsplit
 import os
 import pathlib
 
@@ -80,13 +81,16 @@ def _entries(
 
 
 def test_a_store_is_reported_once_per_backend(tmp_path: pathlib.Path) -> None:
-    """MP-1: one STORE batch per backend the chunks landed in, carrying the
+    """MP-1: the default client stores through the default server transport.
+
+    One STORE batch per backend the chunks landed in, carrying the
     backend's tier, name and ``shared`` flag, and every chunk's size, tokens
     and offset."""
     with running_coordinator() as url:
         backends = [local_l2(), shared_l2(tmp_path / "pool")]
         with running_server(url, tmp_path, "mp-1", backends) as server:
-            with kv_client(server.rpc_url, MODEL) as client:
+            endpoint = urlsplit(server.rpc_url)
+            with kv_client(f"{endpoint.hostname}:{endpoint.port}", MODEL) as client:
                 client.store(TOKENS, cache_salt="alice")
                 size = client.chunk_bytes
             keys = keys_of(MODEL, TOKENS, "alice")

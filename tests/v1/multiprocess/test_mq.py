@@ -18,7 +18,6 @@ import zmq
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.utils import EngineType
 from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.client.transport.zmq_impl.mq_client import (
     CONNECT_TIMEOUT_MS,
@@ -29,6 +28,7 @@ from lmcache.v1.client.transport.zmq_impl.mq_client import (
 )
 from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
+    EngineType,
     IPCCacheServerKey,
 )
 from lmcache.v1.distributed.api import get_request_tags

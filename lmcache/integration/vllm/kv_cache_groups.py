@@ -208,11 +208,55 @@ def _is_chunked_local_attention_spec(spec: Any) -> bool:
 
 
 def group_mamba_cache_mode(group: Any, spec: Any) -> str:
-    """Return the Mamba cache mode set for one layer, ``"none"`` if unset."""
+    """Return the Mamba cache mode set for one layer, ``"none"`` if unset.
+
+    vLLM after vllm-project/vllm#63830 has no ``mamba_cache_mode``; its
+    manager params carry ``enable_prefix_caching``, which implies align mode.
+
+    Args:
+        group: A vLLM ``KVCacheGroup``.
+        spec: The layer's KV cache spec, read when the group has no manager
+            config.
+
+    Returns:
+        The Mamba cache mode, e.g. ``"align"``, ``"all"`` or ``"none"``.
+    """
     config = _manager_config(group)
-    if config is not None:
-        return getattr(config.params, "mamba_cache_mode", "none")
-    return getattr(spec, "mamba_cache_mode", "none")
+    if config is None:
+        return getattr(spec, "mamba_cache_mode", "none")
+    params = config.params
+    if hasattr(params, "mamba_cache_mode"):
+        return params.mamba_cache_mode
+    return "align" if getattr(params, "enable_prefix_caching", False) else "none"
+
+
+def vllm_mamba_cache_mode(vllm_config: Any, kv_cache_config: Any) -> str:
+    """Return vLLM's engine-wide Mamba cache mode.
+
+    vLLM before vllm-project/vllm#63830 stores it as
+    ``cache_config.mamba_cache_mode``. Later vLLM removed the field: align mode
+    is on exactly when prefix caching is enabled and the model has Mamba layers.
+
+    Args:
+        vllm_config: The vLLM ``VllmConfig``.
+        kv_cache_config: vLLM's resolved ``KVCacheConfig``, or ``None`` when
+            vLLM did not pass one.
+
+    Returns:
+        ``cache_config.mamba_cache_mode`` when vLLM has it. Otherwise
+        ``"align"`` when prefix caching is on and a KV cache group holds a
+        Mamba layer, else ``"none"``.
+    """
+    cache_config = vllm_config.cache_config
+    if hasattr(cache_config, "mamba_cache_mode"):
+        return cache_config.mamba_cache_mode
+    if kv_cache_config is None or not any(
+        _is_mamba_spec(spec)
+        for group in kv_cache_config.kv_cache_groups
+        for spec in group_specs(group)
+    ):
+        return "none"
+    return "align" if cache_config.enable_prefix_caching else "none"
 
 
 def _is_cachable_mamba(group: Any, spec: Any) -> bool:
@@ -521,7 +565,7 @@ def create_engine_group_infos_from_vllm(
         order used by store/retrieve block IDs.
     """
     # First Party
-    from lmcache.utils import EngineType
+    from lmcache.v1.common.custom_types import EngineType
     from lmcache.v1.common.group_view import EXCLUDED_ENGINE_GROUP
     from lmcache.v1.common.utils import (
         normalize_and_discover_per_layer_formats,
