@@ -349,9 +349,9 @@ def test_store_skips_chunk_with_null_block_in_multi_block_window(
     while null blocks before the window do not matter."""
     module, context, _reads, _transfers = _make_checkpoint_module(monkeypatch)
     context.lmcache_tokens_per_chunk = 4
-    # chunk_size is a read-only property on the typed context.
-    server_context: Any = module.context
-    server_context.chunk_size = 4
+    entry = module.get_and_touch_context_entry(1)
+    assert entry is not None
+    entry.chunk_size = 4
     # Kernel group 0 (full attention) transfers the whole chunk; kernel
     # groups 1 and 2 transfer the last 2 of their 4 blocks.
     context.kv_layer_groups_manager.get_subchunk_sw_size_tokens = lambda group: (
