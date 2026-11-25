@@ -518,6 +518,14 @@ Then examine each part of the path:
 Use the LMCache Operator
 ------------------------
 
+.. warning::
+
+   The LMCache Kubernetes operator (``operator/``) is deprecated and no
+   longer maintained. It is expected to be removed from this repository in
+   2027Q1. Existing release artifacts (e.g. ``operator-v*`` ``install.yaml``)
+   will not receive fixes or updates.
+   Prefer the manual manifests above for new deployments.
+
 The :doc:`LMCache Operator </mp/operator>` creates the same DaemonSet, Service
 and ConfigMap from an ``LMCacheEngine`` resource. The ConfigMap name is
 ``<engine-name>-connection``. With ``spec.pd``, the ConfigMap also has the

@@ -2,6 +2,7 @@
 """A borrowing peer adapter over an in-memory fake owner (``borrowing_mock``)."""
 
 # Standard
+from collections.abc import Callable
 from typing import Optional, cast
 from unittest.mock import MagicMock, patch
 import threading
@@ -55,6 +56,10 @@ class _Future:
 
     def result(self, timeout: float | None = None) -> object:
         return self._value
+
+    def add_done_callback(self, fn: Callable[["_Future"], None]) -> None:
+        # Already resolved, like a MessagingFuture whose reply has arrived.
+        fn(self)
 
 
 class _DoneRead:

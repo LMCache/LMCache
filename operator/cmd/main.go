@@ -92,6 +92,10 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	setupLog.Info("DEPRECATED: the LMCache Kubernetes operator is no longer maintained " +
+		"and is expected to be removed from the LMCache repository in 2027Q1; " +
+		"release artifacts will not receive fixes or updates")
+
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
 	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and

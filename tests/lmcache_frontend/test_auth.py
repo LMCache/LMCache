@@ -13,7 +13,7 @@ import pytest
 
 # First Party
 from lmcache.lmcache_frontend import app as frontend
-from lmcache.security.api_key import APIKeyVerifier
+from lmcache.v1.common.security.api_key import APIKeyVerifier
 
 
 @pytest.fixture(autouse=True)

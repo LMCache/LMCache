@@ -13,12 +13,8 @@ import threading
 import torch
 
 # First Party
-from lmcache.utils import (
-    _lmcache_nvtx_annotate,
-    check_dax_range,
-    get_device_identity,
-    get_size_bytes,
-)
+from lmcache.v1.common.utils import _lmcache_nvtx_annotate, get_size_bytes
+from lmcache.v1.distributed.utils import check_dax_range, get_device_identity
 from lmcache.v1.memory_allocators.buffer_allocator import BufferAllocator
 from lmcache.v1.memory_allocators.tensor_memory_allocator import TensorMemoryAllocator
 from lmcache.v1.memory_management import (
@@ -241,12 +237,29 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             return self._arenas[0].allocator.address_manager
         return None
 
-    def _open_devdax_mapping(
-        self,
+    @staticmethod
+    def open_devdax_mapping(
         device_path: str,
         size: int,
         offset: int,
     ) -> tuple[int, mmap.mmap, Any, torch.Tensor]:
+        """Map ``[offset, offset + size)`` of a Device-DAX device or regular file.
+
+        Args:
+            device_path: Device or file to map read-write with ``MAP_SHARED``.
+            size: Number of bytes to map.
+            offset: Byte offset into the device where the mapping starts.
+
+        Returns:
+            ``(fd, mmap_obj, mmap_buffer, buffer)``: the descriptor, the mapping,
+            its exported ctypes array and a flat ``torch.uint8`` view. Drop
+            ``buffer`` and ``mmap_buffer`` before closing ``mmap_obj``, then ``fd``.
+
+        Raises:
+            RuntimeError: If the range exceeds the device or breaks its alignment,
+                or the capacity cannot be determined.
+            OSError: If the path cannot be opened or mapped.
+        """
         fd: int | None = None
         mmap_obj: mmap.mmap | None = None
         try:
@@ -298,7 +311,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
                 its alignment, or the capacity cannot be determined.
             OSError: If the device cannot be opened or mapped.
         """
-        fd, mmap_obj, mmap_buffer, buffer = self._open_devdax_mapping(
+        fd, mmap_obj, mmap_buffer, buffer = self.open_devdax_mapping(
             device_path, size, offset
         )
         arena: _DevDaxArena | None = None

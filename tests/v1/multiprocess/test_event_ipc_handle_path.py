@@ -82,6 +82,9 @@ class _FakeStorageManager:
     ) -> None:
         return None
 
+    def abort_write(self, keys: list[object], l1_owners: dict[object, int]) -> None:
+        return None
+
     def finish_read_by_owner(self, batch: list[tuple[int, list[object]]]) -> None:
         return None
 
@@ -146,7 +149,9 @@ def test_worker_exports_events_through_platform_backend(
         1,
         1,
         1.0,
+        lmcache_chunk_tokens=256,
     )
+    assert client.register_kv_cache.call_args.args[-1] == 256
     unregister_future = context.unregister()
     stream = MagicMock(name="current_stream")
     monkeypatch.setattr(worker_transfer.torch_dev, "current_stream", lambda: stream)
@@ -284,6 +289,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         cache_context=cast(Any, cache_context),
         model_name="model",
         world_size=1,
+        chunk_size=256,
         event_backend=cast(Any, backend),
     )
     monkeypatch.setattr(
@@ -390,7 +396,7 @@ def test_close_delivers_pending_stream_callbacks(
     module = lmcache_driven_transfer.LMCacheDrivenTransferModule(MagicMock())
     for instance_id in range(num_contexts):
         module.register_kv_cache(
-            instance_id, [], "close-test", 1, EngineType.VLLM, {}, []
+            instance_id, [], "close-test", 1, EngineType.VLLM, {}, [], None
         )
 
     module.close()
@@ -428,7 +434,7 @@ def test_close_preserves_contexts_when_stream_sync_fails(
     module = lmcache_driven_transfer.LMCacheDrivenTransferModule(MagicMock())
     for instance_id in range(2):
         module.register_kv_cache(
-            instance_id, [], "close-sync-error", 1, EngineType.VLLM, {}, []
+            instance_id, [], "close-sync-error", 1, EngineType.VLLM, {}, [], None
         )
 
     with pytest.raises(RuntimeError, match="stream sync failed"):

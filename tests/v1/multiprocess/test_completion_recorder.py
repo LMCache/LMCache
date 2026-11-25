@@ -250,7 +250,7 @@ def _check_close_drains_pending_cuda_transfers(
     try:
         for instance_id in range(2):
             module.register_kv_cache(
-                instance_id, [], "close-cuda", 1, EngineType.VLLM, {}, []
+                instance_id, [], "close-cuda", 1, EngineType.VLLM, {}, [], None
             )
         for instance_id, (stream, host, device) in enumerate(
             zip(streams, hosts, devices, strict=True)
