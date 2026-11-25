@@ -118,6 +118,25 @@ def test_server_registration_owns_its_peer_backend(server: Any) -> None:
     assert module._cache_contexts[8].event_backend is shared.views[2]
 
 
+def test_registering_again_without_unregister_drops_the_old_imports(
+    server: Any,
+) -> None:
+    """A restarted engine that reuses its instance ID (same PID in a
+    container) registers while the old entry is still there."""
+    module, shared = server, server.shared
+    _register(module, 7)
+    entry = module._cache_contexts[7]
+    first = entry.event_backend
+    first.import_event(b"h", "d")
+
+    _register(module, 7)
+    assert module._cache_contexts[7] is entry  # the registration is kept
+    second = entry.event_backend
+    assert second is shared.views[1] and second is not first
+    second.import_event(b"h", "d")
+    assert _imports(shared) == [b"h", b"h"]
+
+
 def test_worker_registration_owns_its_peer_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

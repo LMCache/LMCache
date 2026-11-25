@@ -614,6 +614,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         f"chunk_size={existing.chunk_size}"
                     )
                 existing.last_seen = now
+                # The sender may be a restarted peer under the same ID: do not
+                # serve it the events imported from the previous one.
+                existing.event_backend = peer_event_ipc_backend(
+                    get_event_ipc_backend(existing.cache_context.device)
+                )
                 logger.info(
                     "Instance %d already registered; refreshing liveness",
                     instance_id,
