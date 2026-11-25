@@ -80,7 +80,7 @@ async def lookup_placements(
         try:
             if body.chunk_hashes:
                 obj_keys, chunks = resolve_chunk_object_keys(
-                    [bytes.fromhex(h) for h in body.chunk_hashes],
+                    body.chunk_hashes,
                     body.model_name,
                     body.world_size,
                     body.cache_salt,

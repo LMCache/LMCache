@@ -139,10 +139,9 @@ def resolve_chunk_object_keys(
     without its prefix. Each distinct hash expands into one key per rank in
     object group ``0``, in first-named order.
 
-    A ``world_size`` of ``0`` names each chunk in every parallel setup: it
-    resolves to one key per chunk whose ``kv_rank`` is ``0``, which packs no
-    world size and so is no stored key; the coordinator's pin table and key
-    directory read it as every world size.
+    A ``world_size`` of ``0`` names each chunk without a parallel setup: it
+    resolves to one key per chunk in object group ``0`` whose ``kv_rank`` is
+    ``0``, which packs no world size and so matches no stored key.
 
     Args:
         chunk_hashes: The chunks' hashes; a repeated hash counts once.

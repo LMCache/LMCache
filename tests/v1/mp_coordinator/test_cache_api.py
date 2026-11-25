@@ -378,6 +378,7 @@ def test_pin_by_keys_pins_only_the_named_mid_prompt_chunk():
             id="empty-chunk-hash",
         ),
         pytest.param("keys-and-chunk-hashes", id="keys-and-chunk-hashes"),
+        pytest.param("key-without-world-size", id="key-without-world-size"),
         pytest.param("too-many-chunk-hashes", id="too-many-chunk-hashes"),
     ],
 )
@@ -396,15 +397,18 @@ def test_key_controls_reject_request_without_exactly_one_form(
     """Pin, delete and prefetch bodies carry exactly one of keys / token_ids /
     chunk_hashes; the tokens and chunk-hash forms need model_name, and the
     tokens form a world_size -- a defaulted one would resolve another parallel
-    setup's keys and report success -- each hash is non-empty hex, and the
-    keys and chunk-hash forms are capped at MAX_KEYS_PER_REQUEST. Anything
-    else is a 422."""
+    setup's keys and report success -- each hash is non-empty hex, each key's
+    kv_rank packs a world size (one that packs none would act on every world
+    size), and the keys and chunk-hash forms are capped at
+    MAX_KEYS_PER_REQUEST. Anything else is a 422."""
     with _pin_client() as client:
         key = _wire_key(_resolve(client.app.state.ctx)[0])
         if body == "both-forms":
             body = {**_pin_body(), "keys": [key]}
         elif body == "too-many-keys":
             body = {"keys": [key] * (MAX_KEYS_PER_REQUEST + 1)}
+        elif body == "key-without-world-size":
+            body = {"keys": [{**key, "kv_rank": 0}]}
         elif body == "keys-and-chunk-hashes":
             body = {
                 "keys": [key],

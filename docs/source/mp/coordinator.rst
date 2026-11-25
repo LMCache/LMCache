@@ -1023,7 +1023,7 @@ List cached keys and their placements, one page at a time.
           "key": {
             "chunk_hash_hex": "aa12...",
             "model_name": "meta-llama/Llama-3.1-8B-Instruct",
-            "kv_rank": 0,
+            "kv_rank": 16777472,
             "object_group_id": 0,
             "cache_salt": ""
           },
@@ -1085,6 +1085,12 @@ forms -- supply exactly one:
   whatever the world size; a chunk stored nowhere then has no results. At most
   10,000 hashes, and a repeated hash counts once.
 
+In the tokens form, a ``world_size`` that is omitted, ``null`` or ``0`` means
+``1``. A key's ``kv_rank`` packs its world size and ranks
+(``world_size << 24 | global_rank << 16 | local_world_size << 8 |
+local_rank``): rank 0 of a TP=1 setup is ``16777472``, as in the examples
+below.
+
 .. important::
 
    ``token_ids`` must be the request's **whole** token sequence from position
@@ -1114,7 +1120,7 @@ forms -- supply exactly one:
         {
           "chunk_hash_hex": "aa12...",
           "model_name": "meta-llama/Llama-3.1-8B-Instruct",
-          "kv_rank": 0,
+          "kv_rank": 16777472,
           "object_group_id": 0,
           "cache_salt": "",
           "tags": {"adapter_revision": "abc123"}
@@ -1130,7 +1136,7 @@ forms -- supply exactly one:
       "chunks": 1,
       "results": [
         {
-          "key": {"chunk_hash_hex": "aa12...", "model_name": "...", "kv_rank": 0,
+          "key": {"chunk_hash_hex": "aa12...", "model_name": "...", "kv_rank": 16777472,
                   "object_group_id": 0, "cache_salt": "",
                   "tags": {"adapter_revision": "abc123"}},
           "placements": [
@@ -1179,7 +1185,7 @@ namespace. Tag names must be nonempty strings and values must be strings.
     # Keys form -- keys taken from GET /directory/keys:
     curl -s -X POST http://localhost:9300/directory/lookup \
       -H 'Content-Type: application/json' \
-      -d '{"keys": [{"chunk_hash_hex": "aa12...", "model_name": "m", "kv_rank": 0}]}'
+      -d '{"keys": [{"chunk_hash_hex": "aa12...", "model_name": "m", "kv_rank": 16777472}]}'
 
     # Chunk-hash form -- one mid-prompt chunk on every rank of a TP=2 setup:
     curl -s -X POST http://localhost:9300/directory/lookup \
@@ -1418,6 +1424,8 @@ supply exactly one:
 * **keys form** -- ``{"keys": [...]}``: pin the chunks these keys name, in the
   same wire form ``GET /directory/keys`` and ``POST /directory/lookup`` return.
   Use it to pin a chunk in the middle of a prompt without its prefix chunks.
+  Each key's ``kv_rank`` must pack a world size; to cover every world size,
+  use the chunk-hash form without one.
 * **chunk-hash form** -- ``{"chunk_hashes": [...], "model_name": ...,
   "world_size": ..., "cache_salt": ..., "tags": ...}``: pin the chunks these
   hashes name (a key's ``chunk_hash_hex``), with the setup that stores them
@@ -1509,8 +1517,9 @@ delete and prefetch count chunks.
   its invariants.
 - ``422``: request body fails field-level validation, supplies not exactly one
   of ``keys`` / ``token_ids`` / ``chunk_hashes``, omits ``model_name`` in
-  the tokens or chunk-hash form or ``world_size`` in the tokens form, carries more than 10,000
-  keys or hashes, or has an undecodable key or hash.
+  the tokens or chunk-hash form or ``world_size`` in the tokens form, carries
+  more than 10,000 keys or hashes, has an undecodable key or hash, or has a
+  key whose ``kv_rank`` packs no world size (such as ``0``).
 - ``503``: the metadata file (``--metadata-path``) could not be written; the
   change was undone, so retry once the storage is fixed.
 
@@ -1536,7 +1545,7 @@ delete and prefetch count chunks.
             "keys": [{
                 "chunk_hash_hex": "aa12...",
                 "model_name": "Qwen/Qwen3-8B",
-                "kv_rank": 0,
+                "kv_rank": 16777472,
                 "object_group_id": 0,
                 "cache_salt": "user-a",
                 "tags": {"adapter_revision": "abc123"}
@@ -1627,7 +1636,7 @@ under its rank-0 key in object group 0.
           "key": {
             "chunk_hash_hex": "aa12...",
             "model_name": "Qwen/Qwen3-8B",
-            "kv_rank": 0,
+            "kv_rank": 16777472,
             "object_group_id": 0,
             "cache_salt": "user-a",
             "tags": {"adapter_revision": "abc123"}
@@ -1693,8 +1702,9 @@ sequence returns ``status`` ``"noop"``.
 - ``404``: no server is registered under ``instance_id``.
 - ``422``: request body fails field-level validation, supplies not exactly one
   of ``keys`` / ``token_ids`` / ``chunk_hashes``, omits ``model_name`` in
-  the tokens or chunk-hash form or ``world_size`` in the tokens form, or carries more than 10,000
-  keys or hashes.
+  the tokens or chunk-hash form or ``world_size`` in the tokens form, carries
+  more than 10,000 keys or hashes, or has a key whose ``kv_rank`` packs no
+  world size (such as ``0``).
 - ``502``: the target server was unreachable or rejected a batch. Earlier
   batches stay deleted, and ``detail`` says how many keys were removed.
 - ``503``: a forced delete removed the keys, but dropping their pins could not

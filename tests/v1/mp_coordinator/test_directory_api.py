@@ -219,6 +219,18 @@ def test_lookup_tokens_selects_only_the_requested_tags():
         assert untagged_result["placements"] == []
 
 
+@pytest.mark.parametrize("world_size", [0, None])
+def test_lookup_tokens_without_a_world_size_resolves_a_single_gpu_setup(world_size):
+    with _client() as client:
+        explicit = client.post("/directory/lookup", json=_lookup_tokens_body(256))
+        body = {**_lookup_tokens_body(256), "world_size": world_size}
+
+        resp = client.post("/directory/lookup", json=body)
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == explicit.json()
+
+
 def test_lookup_tokens_invalid_model_name_is_400():
     with _client() as client:
         resp = client.post(

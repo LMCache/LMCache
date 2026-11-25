@@ -13,7 +13,7 @@ controller's state, so that controller brings them itself
 """
 
 # Standard
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 # Third Party
@@ -148,8 +148,8 @@ def _forwarded_prefetch_body(body: PrefetchRequest) -> dict[str, Any]:
     Carries only the form ``body`` uses: a server without the keys form then
     rejects a keys request rather than reading empty token fields as a
     sub-chunk sequence and answering noop. The chunk-hash form goes as the
-    keys form, one key per distinct chunk: the server warms a chunk by any
-    one of its keys, and one per rank could exceed its key cap.
+    keys form, one rank-0 key per distinct chunk: the server warms a chunk by
+    any one of its keys, and one per rank could exceed its key cap.
 
     Raises:
         HTTPException: 400 if a chunk-hash form's key field (e.g.
@@ -159,21 +159,26 @@ def _forwarded_prefetch_body(body: PrefetchRequest) -> dict[str, Any]:
         return {"keys": [asdict(key) for key in body.keys]}
     if body.chunk_hashes:
         try:
-            keys, _ = resolve_chunk_object_keys(
-                [bytes.fromhex(h) for h in body.chunk_hashes],
+            # World size 0 gives one key per chunk; rank 0 of the requested
+            # world size then names each chunk in the target's layout.
+            chunk_keys, _ = resolve_chunk_object_keys(
+                body.chunk_hashes,
                 body.model_name,
-                body.world_size,
+                0,
                 body.cache_salt,
                 tags=body.tags,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
-        key_per_chunk: dict[bytes, ObjectKey] = {}
-        for key in keys:
-            key_per_chunk.setdefault(key.chunk_hash, key)
+        kv_rank = ObjectKey.ComputeKVRank(body.world_size, 0, body.world_size, 0)
         return {
             "keys": [
-                asdict(key.to_encoded_object_key()) for key in key_per_chunk.values()
+                asdict(
+                    replace(
+                        key, identity=replace(key.identity, kv_rank=kv_rank)
+                    ).to_encoded_object_key()
+                )
+                for key in chunk_keys
             ]
         }
     forwarded: dict[str, Any] = {

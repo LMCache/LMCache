@@ -20,7 +20,9 @@ from pydantic import (
     BaseModel,
     BeforeValidator,
     Field,
+    PlainSerializer,
     StringConstraints,
+    WithJsonSchema,
     field_validator,
     model_validator,
 )
@@ -28,7 +30,7 @@ import numpy as np
 
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
-from lmcache.v1.distributed.api import Tier, validate_identity_tags
+from lmcache.v1.distributed.api import ObjectKey, Tier, validate_identity_tags
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.views.key_directory import Placement
 from lmcache.v1.multiprocess.cache_control.key_resolver import (
@@ -46,25 +48,34 @@ def _validate_matching_tags(value: dict[str, str]) -> dict[str, str]:
 MatchingTags = Annotated[dict[str, str], AfterValidator(_validate_matching_tags)]
 
 
-def _validate_chunk_hash_hex(value: str) -> str:
-    """Accept a chunk hash in the hex form the directory and pin listings use.
+def _decode_chunk_hash_hex(value: object) -> object:
+    """Decode a chunk hash from the hex form the directory and pin listings
+    use.
 
     Args:
         value: The hex-encoded chunk hash.
 
     Returns:
-        The unchanged hash.
+        The hash's bytes, or ``value`` unchanged when it is not a string, for
+        the type check to reject.
 
     Raises:
-        ValueError: If ``value`` is empty or not valid hex.
+        ValueError: If ``value`` is an empty or non-hex string.
     """
+    if not isinstance(value, str):
+        return value
     if not value:
         raise ValueError("a chunk hash must not be empty")
-    bytes.fromhex(value)
-    return value
+    return bytes.fromhex(value)
 
 
-ChunkHashHex = Annotated[str, AfterValidator(_validate_chunk_hash_hex)]
+# A chunk hash: hex on the wire, bytes once validated.
+ChunkHash = Annotated[
+    bytes,
+    BeforeValidator(_decode_chunk_hash_hex),
+    PlainSerializer(bytes.hex, return_type=str),
+    WithJsonSchema({"type": "string", "format": "hex"}),
+]
 
 
 def _null_as_every_world_size(value: object) -> object:
@@ -72,8 +83,9 @@ def _null_as_every_world_size(value: object) -> object:
     return 0 if value is None else value
 
 
-# A content request's world size: ``0`` -- also when omitted or ``null`` --
-# names every world size, which only the chunk-hash form accepts.
+# A content request's world size; omitted or ``null`` reads as ``0``. Each form
+# reads ``0`` its own way: every world size for chunk hashes, a rejection for
+# pin, delete and prefetch by tokens, and ``1`` for a lookup by tokens.
 ContentWorldSize = Annotated[
     int, BeforeValidator(_null_as_every_world_size), Field(ge=0)
 ]
@@ -460,7 +472,7 @@ class DirectoryLookupRequest(BaseModel):
     Attributes:
         keys: The keys to resolve (keys form).
         token_ids: The request's full token sequence (tokens form).
-        chunk_hashes: Hex-encoded chunk hashes (chunk-hash form).
+        chunk_hashes: Chunk hashes, hex-encoded on the wire (chunk-hash form).
         model_name: Model whose rank fan-out to use (tokens and chunk-hash
             forms).
         world_size: World size selecting the per-rank fan-out (tokens and
@@ -474,7 +486,7 @@ class DirectoryLookupRequest(BaseModel):
 
     keys: list[EncodedObjectKey] = Field(default_factory=list)
     token_ids: list[int] = Field(default_factory=list)
-    chunk_hashes: list[ChunkHashHex] = Field(
+    chunk_hashes: list[ChunkHash] = Field(
         default_factory=list, max_length=MAX_KEYS_PER_REQUEST
     )
     model_name: str = ""
@@ -559,7 +571,7 @@ class CacheContentRequest(BaseModel):
     Attributes:
         keys: Keys naming the chunks (keys form).
         token_ids: The full token sequence (tokens form).
-        chunk_hashes: Hex-encoded chunk hashes (chunk-hash form).
+        chunk_hashes: Chunk hashes, hex-encoded on the wire (chunk-hash form).
         model_name: Model whose rank fan-out to use (tokens and chunk-hash
             forms).
         world_size: World size selecting the per-rank fan-out: required in
@@ -573,7 +585,7 @@ class CacheContentRequest(BaseModel):
 
     keys: list[EncodedObjectKey] = Field(default_factory=list)
     token_ids: list[int] = Field(default_factory=list)
-    chunk_hashes: list[ChunkHashHex] = Field(
+    chunk_hashes: list[ChunkHash] = Field(
         default_factory=list, max_length=MAX_KEYS_PER_REQUEST
     )
     model_name: str = ""
@@ -594,7 +606,8 @@ class CacheContentRequest(BaseModel):
 
         Raises:
             ValueError: If there are more than ``MAX_KEYS_PER_REQUEST`` keys,
-                or a key cannot convert into an ``ObjectKey``.
+                a key cannot convert into an ``ObjectKey``, or a key's
+                ``kv_rank`` packs no world size.
         """
         if len(value) > MAX_KEYS_PER_REQUEST:
             raise ValueError(
@@ -602,7 +615,15 @@ class CacheContentRequest(BaseModel):
                 f"(limit={MAX_KEYS_PER_REQUEST}, got={len(value)})"
             )
         for encoded in value:
-            encoded.to_object_key()
+            # World size 0 names a chunk at every world size, which only the
+            # chunk-hash form asks for; a key carrying it would pin or delete
+            # far more than the one setup it appears to name.
+            if not ObjectKey.WorldSizeFromKVRank(encoded.to_object_key().kv_rank):
+                raise ValueError(
+                    "a key's kv_rank packs no world size; pass keys as the "
+                    "directory lists them, or use chunk_hashes without a "
+                    "world_size to name every world size"
+                )
         return value
 
     @model_validator(mode="after")
@@ -944,7 +965,7 @@ class DeleteResponse(BaseModel):
 
 
 def _require_one_form(
-    keys: list[EncodedObjectKey], token_ids: list[int], chunk_hashes: list[str]
+    keys: list[EncodedObjectKey], token_ids: list[int], chunk_hashes: list[bytes]
 ) -> None:
     """Require exactly one way of naming cache content.
 
