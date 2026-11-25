@@ -17,7 +17,7 @@ import tempfile
 
 # First Party
 from lmcache import __version__ as lmcache_version
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.mp_coordinator.api import CACHE_EVENT_SCHEMA_VERSION
 from lmcache.v1.mp_observability.config import ObservabilityConfig

@@ -139,9 +139,11 @@ def _make_free_locks_ctx(
     """
     ctx = MagicMock()
     ctx.get_read_owners.return_value = None
-    ctx.chunk_size = 256
-    ctx.token_hasher.chunk_size = 256
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    token_hasher = MagicMock()
+    token_hasher.chunk_size = 256
+    token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    ctx.layout_desc_registry.get_chunk_size.return_value = 256
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=windows, world_size=world_size
     )
@@ -282,7 +284,8 @@ def test_server_free_lookup_locks_floors_release_to_the_lookup_start():
     released = _released_chunks(ctx.storage_manager.finish_read_prefetched)
     assert released == {(0, b"h2"), (0, b"h3")}
     # The range was floored before hashing: [512, 1024), not [0, 1024).
-    hash_call = ctx.token_hasher.compute_packed_chunk_hashes.call_args
+    token_hasher = ctx.layout_desc_registry.get_token_hasher.return_value
+    hash_call = token_hasher.compute_packed_chunk_hashes.call_args
     assert hash_call.kwargs["start"] == 512
 
 
@@ -357,6 +360,7 @@ def test_server_free_lookup_locks_consumes_pending_result_first():
         row_windows=(-1,),
         request_id="req-sw",
         requested_tokens=768,
+        chunk_size=256,
     )
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
@@ -392,13 +396,16 @@ def test_server_free_lookup_locks_while_prefetch_running_releases_nothing():
         row_windows=(-1,),
         request_id="req-sw",
         requested_tokens=768,
+        chunk_size=256,
     )
 
     module.free_lookup_locks(_free_locks_key(1024, start=0, end=768), 1)
 
     ctx.storage_manager.finish_read_prefetched.assert_not_called()
     assert "req-sw" in module._prefetch_jobs
-    ctx.session_manager.get_or_create.return_value.record_prefetch_result.assert_not_called()
+    (
+        ctx.session_manager.get_or_create.return_value.record_prefetch_result
+    ).assert_not_called()
 
 
 def test_server_free_lookup_locks_no_matching_chunks():

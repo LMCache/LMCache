@@ -29,9 +29,9 @@ from fastapi import APIRouter, HTTPException, Query, Request
 import torch
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.utils import compress_slot_mapping
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import Tier
+from lmcache.v1.distributed.utils import compress_slot_mapping
 from lmcache.v1.multiprocess.http_apis.dependencies import get_context
 from lmcache.v1.multiprocess.http_apis.schemas import (
     ChecksumRequest,

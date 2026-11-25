@@ -43,12 +43,12 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _send_lookup,
     _wait_for_result,
 )
-from lmcache.utils import EngineType
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
     create_transfer_context,
 )
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import (
     DTYPE_MAP,
@@ -59,7 +59,7 @@ from lmcache.v1.kv_layer_groups import (
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.client.worker_transfer import IPCEvent, TransferContext
-    from lmcache.v1.multiprocess.transport.base import RequestClient
+    from lmcache.v1.transport.request_client import RequestClient
 
 
 @dataclass(frozen=True)
@@ -985,6 +985,7 @@ class ServerBenchClient:
                     layout_hints=layout_hints,
                     engine_group_infos=buffers.engine_group_infos,
                     engine_type=EngineType.VLLM,
+                    lmcache_chunk_tokens=self._chunk_size,
                 )
             except TimeoutError:
                 raise RuntimeError(

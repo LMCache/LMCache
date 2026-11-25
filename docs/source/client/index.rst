@@ -1,12 +1,13 @@
 .. _lmcache_client_distribution:
 
-Client distribution: choosing between ``lmcache`` and ``lmcache-client``
-========================================================================
+Client Distribution
+===================
 
-This page covers which LMCache distribution to install on an inference worker,
-how to install and replace it, how to configure the SDK and the supported
-engine integrations, and how to troubleshoot the problems that come up when a
-worker and a server are installed from different packages.
+Choosing between ``lmcache`` and ``lmcache-client`` for an inference worker:
+which distribution to install, how to install and replace it, how to configure
+the SDK and the supported engine integrations, and how to troubleshoot the
+problems that come up when a worker and a server are installed from different
+packages.
 
 .. note::
 
@@ -53,7 +54,7 @@ lighter distribution for that case.
      - You only run inference workers that talk to an LMCache server started
        elsewhere.
 
-Both distributions expose the **same ``lmcache`` import namespace**. They are
+Both distributions expose the same import namespace, ``lmcache``. They are
 alternatives for an environment, not packages to install side by side:
 installing both means two distributions own the same module files, which makes
 uninstall and upgrade behavior ambiguous. The full ``lmcache`` wheel remains the
@@ -181,19 +182,19 @@ is described in detail in :doc:`../mp/sdk`.
 
 .. code-block:: python
 
-   # First Party
    from lmcache.sdk import LMCacheSDKCacheKind, connect
 
    ctx = connect(
        kind=LMCacheSDKCacheKind.KV,
-       url="tcp://localhost:5555",     # multiprocess request endpoint
+       url="grpc://localhost:5555",    # multiprocess request endpoint
        http_url="http://localhost:8080",
        model_name="Qwen/Qwen2.5-0.5B-Instruct",
    )
 
-The ``url`` scheme selects the transport (``tcp://`` for ZMQ, ``grpc://`` for
-gRPC). ``model_name`` must match the name the server was started for; a
-mismatch shows up as a lookup that never resolves rather than an error.
+The ``url`` scheme selects the transport (``grpc://`` for gRPC, the default;
+``tcp://`` for the deprecated ZMQ). ``model_name`` must match the name the
+server was started for; a mismatch shows up as a lookup that never resolves
+rather than an error.
 
 Engine integrations stay at their existing import paths (``lmcache.integration``
 for vLLM, SGLang and TensorRT-LLM adapters) in both distributions. The engine
@@ -343,7 +344,9 @@ The MP transport requires the client and server to agree on the wire format and
 on the cache identity. A mismatch shows up as one of:
 
 - a handshake failure at connector or SDK startup;
-- ``tcp://`` requests that time out instead of returning a lookup result;
+- ``tcp://`` (ZMQ) requests that time out instead of returning a lookup result,
+  for example an older client pointed at a gRPC server (see
+  :ref:`mp-migrating-from-zmq`);
 - a server that stores objects but never retrieves them, because the two sides
   compute different object keys (see the cache-identity contract).
 
@@ -364,5 +367,5 @@ Contributing
 The distribution split is tracked in
 `#6305 <https://github.com/LMCache/LMCache/issues/6305>`_; the package layout and
 migration rules are in
-`docs/design/v1/package_boundaries.md <https://github.com/LMCache/LMCache/blob/92a1ffc8b7307c0ca1ec144227d42cdb99900224/docs/design/v1/package_boundaries.md>`_.
+`docs/design/v1/package_boundaries.md <https://github.com/LMCache/LMCache/blob/dev/docs/design/v1/package_boundaries.md>`_.
 Contribution mechanics are in :doc:`../developer_guide/contributing`.

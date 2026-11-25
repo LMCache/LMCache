@@ -8,15 +8,15 @@
 # mypy: disable-error-code="union-attr,call-overload"
 # Standard
 from collections.abc import Hashable, Sequence
+from dataclasses import dataclass
 from typing import Optional, Union
+import hashlib
 
 # Third Party
 import torch
 
 # First Party
-from lmcache import device_ops
-from lmcache.logging import init_logger
-from lmcache.utils import EngineType, lmcache_deprecate
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.kv_format import (
     concrete_shape,
     describe_shape,
@@ -26,10 +26,49 @@ from lmcache.v1.common.kv_format import (
     get_spec_class,
 )
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache, LayoutHints
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.common.logging import init_logger, lmcache_deprecate
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
+try:
+    # Third Party
+    from nvtx import annotate  # type: ignore
+except ImportError:
+
+    def annotate(*args, **kwargs):
+        """Dummy decorator when nvtx is not available."""
+
+        def decorator(func):
+            return func
+
+        return decorator
+
+
 logger = init_logger(__name__)
+
+
+try:
+    # First Party
+    from lmcache import _version  # type: ignore[attr-defined]
+
+    VERSION = getattr(_version, "__version__", "")
+    COMMIT_ID = getattr(_version, "__commit_id__", "")
+except ImportError:
+    VERSION = ""
+    COMMIT_ID = ""
+
+
+def get_version() -> str:
+    """Return a human-readable version string.
+
+    Returns:
+        ``"<version>-<commit-id>"``, with ``"NA"`` substituted when the
+        package version or commit id is not available (e.g. when running
+        from a source checkout without a tag).
+    """
+    version_display = VERSION if VERSION else "NA"
+    commit_id_display = COMMIT_ID if COMMIT_ID else "NA"
+    return f"{version_display}-{commit_id_display}"
 
 
 def assert_contiguous(tensor: torch.Tensor) -> None:
@@ -687,7 +726,7 @@ def make_page_buffer_shape_desc(
     Returns:
         A populated ``PageBufferShapeDesc``.
     """
-    desc = device_ops.PageBufferShapeDesc()
+    desc = PageBufferShapeDesc()
     desc.kv_size = get_kv_size(kv_caches, engine_kv_format)
     desc.nl = num_layers_in_group
     desc.nb = num_blocks
@@ -706,6 +745,19 @@ def make_page_buffer_shape_desc(
 
     resolved_stride = int(block_stride_elems) if block_stride_elems else 0
     desc.block_stride_elems = resolved_stride
+
+    if lmcache_native.is_kv_second_tuple(engine_kv_format):
+        # fmt 16/17 (Ascend MLA/DSA plane tuples) need per-plane token-row and
+        # block-stride bytes plus the plane count; the Ascend NPU kernels
+        # consume these fields, other backends ignore them.
+        planes = kv_caches[layer_idx]  # type: ignore[index]
+        desc.num_planes = len(planes)
+        desc.plane_slot_bytes = tuple(
+            int(t.shape[2]) * int(t.shape[3]) * int(t.element_size()) for t in planes
+        )
+        desc.plane_block_stride_bytes = tuple(
+            int(t.stride(0)) * int(t.element_size()) for t in planes
+        )
     return desc
 
 
@@ -819,3 +871,75 @@ def _get_head_size_view(
         raise ValueError(f"k/v shape mismatch after decode: {k.shape} vs {v.shape}")
 
     return k.view(nb * bs, nh * hs), v.view(nb * bs, nh * hs)
+
+
+def round_down(x: int, y: int) -> int:
+    """Round down x to the nearest multiple of y."""
+    return (x // y) * y
+
+
+def round_up(x: int, y: int) -> int:
+    """Round up x to the nearest multiple of y."""
+    return ((x + y - 1) // y) * y
+
+
+def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
+    """
+    Calculate the size in bytes with the given shapes and dtypes.
+    """
+    assert len(shapes) == len(kv_dtypes), (
+        f"shapes and dtypes must have the same length, "
+        f"but got {len(shapes)} and {len(kv_dtypes)}"
+    )
+    return sum(
+        shape.numel() * kv_dtype.itemsize
+        for shape, kv_dtype in zip(shapes, kv_dtypes, strict=True)
+    )
+
+
+@dataclass
+class CacheStoreEvent:
+    block_hashes: list[int | bytes]
+    parent_block_hash: int | bytes | None
+    token_ids: list[int]
+    block_size: int
+
+    # Deprecated, use lora_name instead
+    # Retained for backwards compatibility
+    # Remove when vLLM removes it from BlockStored
+    lora_id: int | None
+
+    medium: str | None
+    lora_name: str | None
+
+
+@dataclass
+class CacheRemoveEvent:
+    """Removal of previously announced CPU chunks, paired with CacheStoreEvent."""
+
+    block_hashes: list[int | bytes]
+    medium: str | None
+
+
+CacheEvent = CacheStoreEvent | CacheRemoveEvent
+
+
+##### NVTX annotation #####
+_NVTX_COLORS = ["green", "blue", "purple", "rapids"]
+
+
+def _get_color_for_nvtx(name):
+    m = hashlib.sha256()
+    m.update(name.encode())
+    hash_value = int(m.hexdigest(), 16)
+    idx = hash_value % len(_NVTX_COLORS)
+    return _NVTX_COLORS[idx]
+
+
+def _lmcache_nvtx_annotate(func, domain="lmcache"):
+    """Decorator for applying nvtx annotations to methods in lmcache."""
+    return annotate(
+        message=func.__qualname__,
+        color=_get_color_for_nvtx(func.__qualname__),
+        domain=domain,
+    )(func)

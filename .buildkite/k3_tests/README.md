@@ -72,6 +72,8 @@ Detection:
   (default `main`) using the merge-base.
 - Push builds diff `HEAD~1..HEAD`.
 - Scheduled builds (`BUILDKITE_SOURCE=schedule`) are never skipped.
+- Weekly full builds (`CI_WEEKLY_FULL=1`) are never skipped; see
+  [weekly/README.md](weekly/README.md).
 - If the script can't determine the changed files (shallow clone with no
   parent, missing base branch, etc.) it falls back to "do not skip".
 

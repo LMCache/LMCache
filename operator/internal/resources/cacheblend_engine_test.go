@@ -341,8 +341,8 @@ func TestBuildCBConnectionConfigMap_Default(t *testing.T) {
 		t.Fatalf("expected kv_role=kv_both, got %v", config["kv_role"])
 	}
 
-	if extra["lmcache.mp.host"] != "tcp://test-engine.default.svc.cluster.local" {
-		t.Fatalf("expected tcp:// node-local Service host, got %v", extra["lmcache.mp.host"])
+	if extra["lmcache.mp.host"] != "grpc://test-engine.default.svc.cluster.local" {
+		t.Fatalf("expected grpc:// node-local Service host, got %v", extra["lmcache.mp.host"])
 	}
 	if extra["lmcache.mp.port"] != "5555" {
 		t.Fatalf("expected lmcache.mp.port=5555, got %v", extra["lmcache.mp.port"])

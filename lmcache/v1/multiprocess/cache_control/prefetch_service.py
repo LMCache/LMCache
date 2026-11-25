@@ -96,8 +96,9 @@ class PrefetchService:
             # malformed request.
             raise unregistered from None
         try:
+            token_hasher = registry.get_token_hasher(model_name, world_size)
             key_groups, chunks = resolve_grouped_object_keys(
-                ctx.token_hasher,
+                token_hasher,
                 model_name,
                 world_size,
                 token_ids,
