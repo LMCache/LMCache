@@ -14,6 +14,7 @@ import torch
 # First Party
 from lmcache import torch_dev
 from lmcache.lmcache_native import EngineKVFormat
+from lmcache.v1.common.buffer_registration import BufferRegistration
 from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.group_view import engine_group_layer_indices
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache
@@ -24,10 +25,6 @@ from lmcache.v1.common.utils import (
     get_device,
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,
-)
-from lmcache.v1.gpu_connector.gds_context import (
-    deregister_gds_gpu_buffer,
-    register_gds_gpu_buffer,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.ipc_wrapper import KVCache
@@ -272,7 +269,7 @@ class NpuCacheContext(BaseCacheContext):
             ValueError: If reconstructed tensors are not NPU tensors.
         """
         self._ipc_wrappers: tuple[Any, ...] = tuple(kv_caches)
-        self._gds_buffer_registered = False
+        self._buffer_registration: BufferRegistration | None = None
         try:
             self._initialize(
                 kv_caches,
@@ -368,9 +365,6 @@ class NpuCacheContext(BaseCacheContext):
         self.stream_ = torch_dev.Stream(device=self.device_)
         self.host_callback_stream_ = _NpuHostCallbackStream(self.stream_)
 
-        with torch_dev.stream(self.stream_):
-            self._register_gds_buffer()
-
         logger.debug(
             "NpuCacheContext: %d layers, %d blocks, dtype=%s",
             self.num_layers_,
@@ -378,48 +372,61 @@ class NpuCacheContext(BaseCacheContext):
             self.kv_layer_groups_manager_.kernel_groups[0].dtype,
         )
 
-    def _register_gds_buffer(self) -> None:
-        """Register flat staging memory with the process GDS context on this stream."""
-        with torch_dev.stream(self.stream_):
-            register_gds_gpu_buffer(self._temp_buffer.buffer)
-        self._gds_buffer_registered = True
+    def register_staging_buffer(self, registration: BufferRegistration) -> None:
+        """Register the full staging buffer on the context's transfer stream.
 
-    def _deregister_gds_buffer(self) -> None:
-        """Deregister staging memory if this context registered it."""
-        if not getattr(self, "_gds_buffer_registered", False):
-            return
-        stream = getattr(self, "stream_", None)
-        synchronize = getattr(stream, "synchronize", None)
-        if callable(synchronize):
-            synchronize()
-        try:
-            with torch_dev.stream(self.stream_):
-                deregister_gds_gpu_buffer(self._temp_buffer.buffer)
-        finally:
-            self._gds_buffer_registered = False
+        Args:
+            registration: External registration, retained after success until
+                ``close``. Call once after construction and before transfers.
+
+        Raises:
+            RuntimeError: If registration fails; the adapter must roll back.
+        """
+        with torch_dev.stream(self.stream_):
+            registration.register(self._temp_buffer.buffer)
+        self._buffer_registration = registration
 
     def close(self) -> None:
-        """Synchronize transfers and release receiver-side IPC owners."""
-        wrappers = self._ipc_wrappers
-        if not wrappers:
-            return
+        """Synchronize transfers and release receiver-side IPC owners.
 
-        self._deregister_gds_buffer()
-
+        Also releases any staging registration on the context's NPU stream
+        before releasing IPC wrappers.
+        """
         stream = getattr(self, "stream_", None)
-        synchronize = getattr(stream, "synchronize", None)
-        if callable(synchronize):
-            synchronize()
+        temp_buffer = getattr(self, "_temp_buffer", None)
+        wrappers = getattr(self, "_ipc_wrappers", ())
+        if not wrappers and self._buffer_registration is None:
+            return
+        try:
+            synchronize = getattr(stream, "synchronize", None)
+            if callable(synchronize):
+                synchronize()
 
-        kv_tensors = getattr(self, "kv_caches_", None)
-        if isinstance(kv_tensors, list):
-            kv_tensors.clear()
+            # Deregister only after a complete registration succeeded. A
+            # failed constructor may have created the staging buffer without
+            # owning a registration for it.
+            if (
+                self._buffer_registration is not None
+                and temp_buffer is not None
+                and stream is not None
+            ):
+                with torch_dev.stream(stream):
+                    self._buffer_registration.deregister(temp_buffer.buffer)
+                self._buffer_registration = None
 
-        for wrapper in wrappers:
-            close = getattr(wrapper, "close", None)
-            if callable(close):
-                close()
-        self._ipc_wrappers = ()
+            kv_tensors = getattr(self, "kv_caches_", None)
+            if isinstance(kv_tensors, list):
+                kv_tensors.clear()
+        finally:
+            # IPC owners are independent of staging registration and must be
+            # released even when synchronization or deregistration fails.
+            try:
+                for wrapper in wrappers:
+                    close = getattr(wrapper, "close", None)
+                    if callable(close):
+                        close()
+            finally:
+                self._ipc_wrappers = ()
 
     @property
     def stream(self) -> Any:

@@ -19,6 +19,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.buffer_registration import BufferRegistration
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.common.utils import get_group_data_ptrs
@@ -208,6 +209,7 @@ def test_close_synchronizes_before_releasing_ipc_owners(
             if with_stream:
                 self.stream_ = _Stream()  # type: ignore[assignment]
             self._ipc_wrappers = tuple(_Wrapper(n) for n in names)  # type: ignore[assignment]
+            self._buffer_registration = None
             self.kv_caches_ = ["keep"]  # type: ignore[assignment]
 
     context = _TestContext()
@@ -220,8 +222,9 @@ def test_close_synchronizes_before_releasing_ipc_owners(
 def test_close_deregisters_gds_staging_buffer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Close deregisters the staging buffer from GDS before IPC release."""
+    """Close deregisters the staging buffer before IPC release."""
     calls: list[str] = []
+    staging = torch.empty(1, dtype=torch.uint8)
 
     class _Stream:
         def synchronize(self) -> None:
@@ -235,27 +238,29 @@ def test_close_deregisters_gds_staging_buffer(
         def __init__(self) -> None:
             self.stream_ = _Stream()  # type: ignore[assignment]
             self._ipc_wrappers = (_Wrapper(),)  # type: ignore[assignment]
-            self._gds_buffer_registered = True
-            self._temp_buffer = cast(Any, SimpleNamespace(buffer="STAGING"))
+            self._buffer_registration = None
+            self._temp_buffer = cast(Any, SimpleNamespace(buffer=staging))
             self.kv_caches_ = []
 
-    monkeypatch.setattr(
-        npu_ctx_mod,
-        "deregister_gds_gpu_buffer",
-        lambda buffer: calls.append(f"deregister:{buffer}"),
-    )
+    class _Registration(BufferRegistration):
+        def register(self, buffer: torch.Tensor) -> None:
+            assert buffer is staging
+
+        def deregister(self, buffer: torch.Tensor) -> None:
+            assert buffer is staging
+            calls.append("deregister")
+
     monkeypatch.setattr(
         npu_ctx_mod.torch_dev, "stream", lambda _s: contextlib.nullcontext()
     )
 
     context = _TestContext()
+    context.register_staging_buffer(_Registration())
     context.close()
     context.close()
 
-    assert calls.index("synchronize") < calls.index("deregister:STAGING")
-    assert calls.index("deregister:STAGING") < calls.index("wrapper.close")
-    assert calls.count("deregister:STAGING") == 1
-    assert not context._gds_buffer_registered
+    assert calls == ["synchronize", "deregister", "wrapper.close"]
+    assert context._buffer_registration is None
 
 
 def test_device_spec_creates_npu_cache_context(
