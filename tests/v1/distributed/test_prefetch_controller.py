@@ -1484,7 +1484,7 @@ _NOT_RACED_L1_CALLS = frozenset(
         "get_memory_tags",
         "get_memory_usage",
         "get_staging_memory_usage",
-        "get_prefetch_retained_bytes",
+        "get_prefetch_locked_bytes",
     }
 )
 
@@ -2440,7 +2440,7 @@ class TestP2PPeerFailures:
 
 
 # =============================================================================
-# Retained bytes in the watermark, prefetch priority, stall rule
+# Prefetch-locked bytes in the watermark, prefetch priority, stall rule
 # =============================================================================
 
 OBJECT_BYTES = 100 * 2 * 512 * 2
@@ -2459,7 +2459,7 @@ def watermark_for(l1_manager: DramL1Manager, num_objects: float) -> float:
     return OBJECT_BYTES * num_objects / total
 
 
-class TestRetainedBudget:
+class TestPrefetchLockedBudget:
     def test_unconsumed_loads_hold_back_new_requests(self):
         """Loaded-but-unconsumed objects count against the watermark:
         once they fill it, a new request waits with nothing in flight, and it
@@ -2483,7 +2483,7 @@ class TestRetainedBudget:
                 ctrl, ctrl.submit_prefetch_request(single_row_spec(keys[2:4]))
             )
             assert row_bits(first) == [0, 1] and row_bits(second) == [0, 1]
-            assert l1_manager.get_prefetch_retained_bytes() == 4 * OBJECT_BYTES
+            assert l1_manager.get_prefetch_locked_bytes() == 4 * OBJECT_BYTES
 
             third_id = ctrl.submit_prefetch_request(single_row_spec(keys[4:6]))
             assert wait_for_condition(
@@ -2496,14 +2496,15 @@ class TestRetainedBudget:
             third = wait_for_result(ctrl, third_id)
             assert row_bits(third) == [0, 1]
             l1_manager.finish_read(keys[2:6])
-            assert l1_manager.get_prefetch_retained_bytes() == 0
+            assert l1_manager.get_prefetch_locked_bytes() == 0
         finally:
             ctrl.stop()
             adapter.close()
             l1_manager.close()
 
-    def test_l1_hits_are_not_charged(self, l1_manager):
-        """Objects L1 already held cost no new memory and are not charged."""
+    def test_l1_hits_are_charged_until_released(self, l1_manager):
+        """L1 hits stay pinned for the request like loads from L2, so they
+        count until the reader releases them."""
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
         write_keys_to_l1(l1_manager, keys, layout)
@@ -2515,8 +2516,9 @@ class TestRetainedBudget:
                 ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
             )
             assert hit_counts(result) == (3, 0)
-            assert l1_manager.get_prefetch_retained_bytes() == 0
+            assert l1_manager.get_prefetch_locked_bytes() == 3 * OBJECT_BYTES
             l1_manager.finish_read(keys)
+            assert l1_manager.get_prefetch_locked_bytes() == 0
         finally:
             ctrl.stop()
             adapter.close()
@@ -2565,7 +2567,7 @@ class TestRetainedBudget:
             l1_manager.close()
 
     def test_stalled_head_is_admitted_after_timeout(self):
-        """With nothing in flight, a head blocked only by retained bytes is
+        """With nothing in flight, a head blocked only by locked bytes is
         admitted after the stall timeout, so an engine that waits on it in
         order cannot deadlock."""
         l1_manager = make_budget_l1()

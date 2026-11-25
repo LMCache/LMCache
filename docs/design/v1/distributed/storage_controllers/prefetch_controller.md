@@ -94,7 +94,7 @@ queue when, for every L1 manager that receives loads from a non-draining L2
 adapter, both conditions hold:
 
 ```
-(1) staging_bytes + lookup_bytes + retained_bytes + request_bytes
+(1) staging_bytes + lookup_bytes + prefetch_locked_bytes + request_bytes
         <= inflight_watermark * total_bytes
 (2) total_bytes - used_bytes - lookup_bytes >= request_bytes
 ```
@@ -108,17 +108,21 @@ adapter, both conditions hold:
 - `request_bytes` is the same worst case for the head request.
 - `used_bytes, total_bytes` come from `get_memory_usage()`, the same numbers
   eviction uses (the total is the grown heap on the lazy tier).
-- `retained_bytes` is `get_prefetch_retained_bytes()`: objects this controller
-  loaded from L2 (`charge_prefetch_retained`) that are still resident and
-  read-locked, i.e. not yet consumed by their request. L1 hits are not charged.
-- With no request in flight and no retained bytes, the head request is
+- `prefetch_locked_bytes` is `get_prefetch_locked_bytes()`: objects this
+  controller read-locked for a request that has not consumed them yet, both L1
+  hits and loads from L2 (`track_prefetch_locked`). An object leaves the count
+  when its last reader finishes or it leaves L1; a read lock that expires (read
+  TTL) is dropped at the next check. Read locks the store path takes while
+  writing to L2 are not counted: they are short-lived and belong to no waiting
+  request.
+- With no request in flight and no prefetch-locked bytes, the head request is
   admitted regardless, so a request that can never fit does not block the
   queue; its reservations then fail per cell as before (`l1_oom`).
 
 Condition (1) bounds everything prefetch holds for requests that have not run
-yet. Retained bytes must count: an engine looks up its whole waiting queue at
-once, so without them a burst fills L1 with locked data for requests minutes
-from running, and later prefetches fail. Condition (2) keeps a request from
+yet. Prefetch-locked bytes must count: an engine looks up its whole waiting
+queue at once, so without them a burst fills L1 with locked data for requests
+minutes from running, and later prefetches fail. Condition (2) keeps a request from
 starting when L1, full of resident data, could not hold its loads.
 
 **Priority.** `PrefetchPriority.HIGH` (the CacheBlend sparse leg after its

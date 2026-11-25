@@ -77,7 +77,7 @@ logger = init_logger(__name__)
 # Poll timeout in milliseconds for the prefetch loop
 PREFETCH_LOOP_POLL_TIMEOUT_MS = 500
 
-# With nothing in flight, a head blocked this long is admitted anyway: retained
+# With nothing in flight, a head blocked this long is admitted anyway: locked
 # bytes drain only as engines consume them, so an engine that waits on the
 # blocked lookup itself would otherwise never progress.
 PREFETCH_STALL_ADMIT_SECONDS = 30.0
@@ -1196,11 +1196,11 @@ class PrefetchController(StorageControllerInterface):
         The request can be admitted when both of the following conditions
         are met:
 
-        1. staging bytes + lookup bytes + retained bytes + request bytes
+        1. staging bytes + lookup bytes + prefetch-locked bytes + request bytes
            <= ``inflight_watermark`` * capacity.
         2. free bytes - lookup bytes >= request bytes.
 
-        With no request in flight and no retained bytes, ``spec`` is admitted
+        With no request in flight and no prefetch-locked bytes, ``spec`` is admitted
         regardless, so a request that can never fit does not block the
         queue.
 
@@ -1227,11 +1227,11 @@ class PrefetchController(StorageControllerInterface):
             used_bytes, total_bytes = l1_manager.get_memory_usage()
             if total_bytes == 0:
                 continue  # a shadow L1: views cost no local bytes
-            retained_bytes = l1_manager.get_prefetch_retained_bytes()
-            if idle and retained_bytes == 0:
+            locked_bytes = l1_manager.get_prefetch_locked_bytes()
+            if idle and locked_bytes == 0:
                 continue  # nothing of prefetch's to wait for in this L1
             held_bytes = (
-                l1_manager.get_staging_memory_usage() + lookup_bytes + retained_bytes
+                l1_manager.get_staging_memory_usage() + lookup_bytes + locked_bytes
             )
             if held_bytes + request_bytes > self._inflight_watermark * total_bytes:
                 return False
@@ -1329,11 +1329,17 @@ class PrefetchController(StorageControllerInterface):
                     ).items()
                 }
                 res_bitmap = Bitmap(len(flattened_keys))
+                locked_keys: list[ObjectKey] = []
                 for i, key in enumerate(flattened_keys):
                     error, _obj = result[key]
                     if error != L1Error.SUCCESS:
                         continue
                     res_bitmap.set(i)
+                    locked_keys.append(key)
+                # Hits stay pinned for the request until it is consumed, like
+                # loads from L2, so they count against the watermark too.
+                if locked_keys:
+                    l1_manager.track_prefetch_locked(locked_keys)
                 l1_found_bitmap = _scatter_bitmaps_full_global(
                     res_bitmap, num_rows, num_cols
                 )
@@ -1690,7 +1696,7 @@ class PrefetchController(StorageControllerInterface):
                     )
             # Loads count against the watermark until their reader is done.
             if loaded_keys:
-                l1_manager.charge_prefetch_retained(loaded_keys)
+                l1_manager.track_prefetch_locked(loaded_keys)
             if failed_keys:
                 l1_manager.finish_write_and_delete(failed_keys, tag=tag)
 
