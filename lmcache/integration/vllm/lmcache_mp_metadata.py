@@ -98,6 +98,11 @@ class LMCacheMPRequestTracker:
     # Whether a STORE was sent to the workers since this tracker was created.
     store_scheduled: bool = False
 
+    # Last chunk end whose windowed objects a STORE of this request keeps
+    # under ``lmcache.mp.sparse_state_every_n_chunks``; None before the first
+    # full-chunk STORE.
+    last_kept_state_end: int | None = None
+
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
     num_vllm_hit_tokens: int = 0
     num_lmcache_hit_tokens: int = 0
@@ -153,6 +158,7 @@ class LMCacheMPRequestTracker:
         self.num_engine_computed_tokens = 0
         self.num_stored_tokens = 0
         self.store_scheduled = False
+        self.last_kept_state_end = None
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
         self.unfull_chunk_boundaries = set()
@@ -703,10 +709,11 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
 
     Attributes:
         completed_store_requests: Newly completed stores of this worker, as
-            ``{request_id: 1}``. ``aggregate()`` sums the counts across the
-            workers of one step; the scheduler-side manager accumulates
-            across steps and settles a store only once its count reaches
-            ``world_size``.
+            ``{receipt id: 1}``. The receipt id is the request id with lazy
+            offload and the STORE's pin key (``lmcache.hint.store_pin``)
+            otherwise. ``aggregate()`` sums the counts across the workers of
+            one step; the scheduler accumulates across steps and settles a
+            store only once its count reaches ``world_size``.
         failed_store_requests: Requests whose store did not succeed on this
             worker, either with a failed result or dropped while unhealthy.
             Their completion receipts are still counted -- the pinned blocks
@@ -728,8 +735,8 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             other: The report of another rank, for the same scheduler step.
 
         Returns:
-            A new metadata whose completion counts are summed per request,
-            and whose failed-request sets are unioned.
+            A new metadata whose completion counts are summed per key, and
+            whose failed-request sets are unioned.
         """
         assert isinstance(other, LMCacheMPWorkerMetadata)
         merged = dict(self.completed_store_requests)

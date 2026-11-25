@@ -18,6 +18,7 @@ import pytest
 
 # First Party
 from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.common.sparse_state import SPARSE_STATE_KEEP_HINT
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
@@ -262,6 +263,58 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
         call(2, 1),
         call(2, 2),
     ]
+
+
+@pytest.mark.parametrize(
+    ("request_configs", "state_keys"),
+    [
+        # No hint: every chunk that holds a state stores it.
+        (None, ["g1c0", "g1c1"]),
+        # A keep hint: only the named chunk ends.
+        ({SPARSE_STATE_KEEP_HINT: "4"}, ["g1c1"]),
+        ({SPARSE_STATE_KEEP_HINT: "2,4"}, ["g1c0", "g1c1"]),
+        ({SPARSE_STATE_KEEP_HINT: ""}, []),
+    ],
+)
+def test_store_keeps_recurrent_state_only_at_the_hinted_chunk_ends(
+    monkeypatch: pytest.MonkeyPatch,
+    request_configs: dict | None,
+    state_keys: list[str],
+) -> None:
+    """Two chunks of two tokens, both ending on a real state block. The
+    attention group stores both; the recurrent group follows the hint."""
+    module, context, _reads, _transfers = _make_checkpoint_module(monkeypatch)
+    context.kv_layer_groups_manager.object_groups = [
+        _og([0]),
+        ObjectGroupInfo(kernel_group_indices=[1, 2], sw_size_chunks=1, recurrent=True),
+    ]
+    key: Any = SimpleNamespace(
+        request_id="req",
+        worker_id=1,
+        start=0,
+        end=4,
+        request_configs=request_configs,
+        has_unfull_chunk=_no_unfull,
+    )
+
+    _handle, ok, mask = module.store_with_chunk_mask(
+        key,
+        1,
+        [[0, 1, 2, 3], [0, 1, 2, 3], [4, 5, 6, 7]],
+        b"producer",
+    )
+
+    assert ok
+    reserved = [
+        call.args[0]
+        for call in cast(
+            MagicMock, module.context.storage_manager.reserve_write
+        ).call_args_list
+    ]
+    # The attention objects of both chunks are stored either way.
+    assert reserved == [["g0c0", "g0c1"], state_keys]
+    # A chunk counts as stored only when every object group committed it.
+    assert mask == [f"g1c{i}" in state_keys for i in range(2)]
 
 
 def test_store_skip_chunks_drops_caller_masked_chunks(

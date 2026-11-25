@@ -1106,6 +1106,32 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        transfer mode; not supported with speculative decoding,
        ``lmcache.mp.lazy_offload``, or compressed-attention models with a
        per-request ring (DeepSeek-V4.1, GLM-5.3, Qwen3.8-Flash-Next) yet.
+   * - ``lmcache.mp.sparse_state_every_n_chunks``
+     - ``0``
+     - For hybrid models whose KV cache has recurrent state (align-mode
+       Mamba / linear attention) or a sliding window of at most one chunk.
+       ``N > 0`` stores that state for only some full chunks: a chunk that
+       holds a state stores it when at least ``N`` chunks passed since the
+       request's last stored state (or its LMCache hit), or when it is the
+       prompt's last full chunk. Attention KV is still stored for every
+       chunk, and so is a sliding window longer than one chunk. ``0`` stores
+       every state. Requires the ``lmcache_driven`` transfer mode.
+
+       A cache hit can only end at a chunk whose state is stored, so this
+       option trades hit length for store volume. It suits append-only
+       sessions: a request that extends an earlier prompt hits at that
+       prompt's last stored state, which is its last full chunk when a
+       prefill step ended there. A request that shares only part of an
+       earlier prompt (the same system prompt for different users) hits at
+       the last stored state inside the shared part, which can be up to
+       ``N`` chunks before its end. For a prompt stored into a cold cache,
+       a shared part shorter than ``N`` chunks gets no hit. Example with
+       9216-token chunks and a 95,000-token prompt prefilled one chunk per
+       step: a request sharing its first 60,000 tokens hits 55,296 tokens
+       with ``0``, 36,864 with ``4`` and none with ``8``. With
+       ``lmcache.mp.save_decode_cache``, chunks
+       of generated tokens follow the same rule, so the next turn can hit
+       up to ``N - 1`` chunks short of the generated text it shares.
    * - ``lmcache.mp.server_urls``
      - *(unset)*
      - Multi-server deployment: list (or comma-separated string) of

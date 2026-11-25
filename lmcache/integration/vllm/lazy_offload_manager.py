@@ -42,6 +42,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (
     LoadStoreOp,
 )
 from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.sparse_state import merge_sparse_state_keep
 
 if TYPE_CHECKING:
     # Third Party
@@ -168,7 +169,9 @@ def _coalesce_store_metadata(
         direction="STORE",
         op=merged_op,
         cache_salt=first.cache_salt,
-        request_configs=first.request_configs,
+        request_configs=merge_sparse_state_keep(
+            meta.request_configs for meta in request_metas
+        ),
     )
 
 

@@ -60,6 +60,7 @@ def _make_worker_adapter(
     adapter._dropped_retrieves = set()
     adapter.error_block_ids = set()
     adapter._completed_store_requests = {}
+    adapter._pinned_store_futures = {}
     adapter._failed_store_requests = set()
     return adapter
 

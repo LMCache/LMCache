@@ -232,6 +232,7 @@ def _make_connector() -> _Harness:
     connector._save_decode_cache = False
     connector._save_unfull_chunk = False
     connector._mamba_relocation_window = 0
+    connector._store_pins = {}
     return _Harness(connector, manager, adapter)
 
 
