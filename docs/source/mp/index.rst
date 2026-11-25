@@ -6,6 +6,7 @@ Overview
 
    request_transport
    multi_l1
+   memory_pooling
    chunk_size_negotiation
 
 LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
@@ -53,8 +54,8 @@ LMCache ships two server entry points:
    * - Entry Point
      - Description
    * - ``lmcache server``
-     - **Recommended.** Configurable request transport (ZMQ by default, or
-       gRPC) + FastAPI HTTP frontend — see :doc:`http_api`.
+     - **Recommended.** Configurable request transport (gRPC by default, or
+       the deprecated ZMQ) + FastAPI HTTP frontend; see :doc:`http_api`.
    * - ``python3 -m lmcache.v1.multiprocess.server``
      - (Legacy) Request server with no HTTP endpoints; same
        ``--engine-type`` / ``--supported-transfer-mode`` flags as

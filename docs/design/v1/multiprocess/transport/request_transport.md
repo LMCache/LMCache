@@ -146,8 +146,8 @@ not from "ordered RPC" machinery.
 
 | Scheme | Implementation |
 |---|---|
-| no scheme, `tcp`, `ipc`, `inproc` | ZMQ |
-| `grpc`, `grpc+unix` | gRPC |
+| no scheme, `grpc`, `grpc+unix` | gRPC |
+| `tcp`, `ipc`, `inproc` | ZMQ (deprecated) |
 
 The gRPC adapter discovers generated service methods from protobuf descriptors.
 Each snake-case descriptor method must match one shared RPC operation. Its
