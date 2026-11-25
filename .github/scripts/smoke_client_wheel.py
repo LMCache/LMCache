@@ -27,11 +27,11 @@ def main() -> None:
         path.startswith(("lmcache/lmcache_redis.", "lmcache/lmcache_fs."))
         for path in files
     )
-    assert "lmcache/v1/multiprocess/server.py" not in files
     assert not any(
         path.startswith(
             (
                 "lmcache/inprocess/",
+                "lmcache/v1/multiprocess/",
                 "lmcache/v1/gpu_connector/",
                 "lmcache/v1/distributed/",
                 "lmcache/v1/mp_coordinator/",
@@ -45,8 +45,6 @@ def main() -> None:
         "lmcache.v1.client.worker_transfer",
         "lmcache.v1.platform.devices.cpu.cache_context",
         "lmcache.v1.platform.devices.gcu.cache_context",
-        "lmcache.v1.multiprocess.custom_types",
-        "lmcache.v1.multiprocess.group_view",
         "lmcache.cli.metrics",
     ):
         import_module(module)
