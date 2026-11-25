@@ -538,8 +538,6 @@ def gather_paged_kv_to_cpu(
             0,
         )
 
-    # The device copy may still be in flight: the caller must synchronize the
-    # KV tensor device before consuming these chunks.
     return chunks
 
 
