@@ -34,7 +34,7 @@ if [[ "${BUILDKITE_BRANCH:-}" == "ci-weekly-full" && "${CI_WEEKLY_FULL:-0}" != "
 fi
 
 case "${PIPELINE_FILE}" in
-    *k3_tests/multiprocess/pipeline.yml)
+    *k3_tests/multiprocess/pipeline.yml|*k3_tests/multiprocess/smoke-pipeline.yml)
         expensive_pipeline_name="multiprocess"
         ;;
     *)
@@ -64,6 +64,18 @@ if [[ "${XPU_CANDIDATE_VALIDATION:-0}" != "1" ]] && should_skip_ci "${PIPELINE_F
             --style success \
             --context "path-filter-skip" \
             "Skipped: no relevant files changed for ${PIPELINE_FILE}. Add a \`force-ci\` label to the PR to force a full run." \
+            || true
+    fi
+    exit 0
+fi
+
+if should_skip_multiprocess_heavy "${PIPELINE_FILE}"; then
+    echo "+++ :fast_forward: Bypassing heavy multiprocess tier on PR (covered by PR-smoke)"
+    if command -v buildkite-agent >/dev/null 2>&1; then
+        buildkite-agent annotate \
+            --style success \
+            --context "mp-heavy-skip" \
+            "Bypassed heavy multiprocess tier on PR; PR-smoke runs independently in parallel. Add \`force-ci\` label (or set \`MP_FULL_ON_PR=true\`) to run heavy." \
             || true
     fi
     exit 0

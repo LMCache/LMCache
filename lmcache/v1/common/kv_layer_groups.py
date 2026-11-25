@@ -13,11 +13,10 @@ import torch
 
 # First Party
 from lmcache import device_ops
-from lmcache.utils import lmcache_deprecate
 from lmcache.v1.common.attn_window import AttnWindowDesc, GroupKind
 from lmcache.v1.common.group_view import EXCLUDED_ENGINE_GROUP
-from lmcache.v1.common.logging import init_logger
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.common.logging import init_logger, lmcache_deprecate
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:

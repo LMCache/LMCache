@@ -130,7 +130,7 @@ def lmcache_version() -> str:
     """Return the installed lmcache version, with its commit when known.
 
     Read from the build-generated ``lmcache._version`` rather than
-    ``lmcache.utils``, which imports torch (absent from ``lmcache-cli``).
+    ``lmcache.v1.distributed.utils``, which imports torch (absent from ``lmcache-cli``).
     """
     try:
         # First Party

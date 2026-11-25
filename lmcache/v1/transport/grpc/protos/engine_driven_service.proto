@@ -15,11 +15,11 @@ message GroupLayout {
   int64 hidden_dim_size = 2;
   string dtype_str = 3;
   int64 tokens_per_block = 4;
+  int64 num_physical_slots = 9;
   int64 window_tokens = 5;
   int64 kv_size = 6;
   int64 window_chunks = 7;
   bool recurrent = 8;
-  optional int64 num_physical_slots = 9;
 }
 
 message RegisterKvCacheEngineDrivenContextRequest {
@@ -31,7 +31,8 @@ message RegisterKvCacheEngineDrivenContextRequest {
   int64 hidden_dim_size = 6;
   string dtype_str = 7;
   bool use_mla = 8;
-  optional int64 num_physical_slots = 9;
+  int64 chunk_size = 11;
+  int64 num_physical_slots = 9;
   repeated GroupLayout group_layouts = 10;
 }
 
