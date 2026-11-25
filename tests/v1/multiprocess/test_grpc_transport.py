@@ -197,15 +197,29 @@ def grpc_client(
             requires_client_affinity=True,
         )
         def prepare_retrieve(
-            self, key: IPCCacheServerKey, instance_id: int
+            self,
+            key: IPCCacheServerKey,
+            instance_id: int,
+            chunk_start: int = 0,
+            chunk_count: int = 0,
         ) -> PrepareRetrieveResponse:
             assert key.request_configs == {"blend": True}
             assert instance_id == 7
+            assert (chunk_start, chunk_count) == (2, 3)
             return PrepareRetrieveResponse(
                 success=True,
                 data=b"retrieved",
                 context={"slot": 3},
             )
+
+        @request_handler(
+            HandlerType.BLOCKING,
+            requires_client_affinity=True,
+        )
+        def commit_retrieve(
+            self, key: IPCCacheServerKey, instance_id: int, failed: bool = False
+        ) -> bool:
+            return failed
 
         @request_handler()
         def register_kv_cache_engine_driven_context(
@@ -453,7 +467,7 @@ import sys
 
 banned = (
     "cachetools",
-    "lmcache.utils",
+    "lmcache.v1.distributed.utils",
     "lmcache.v1.transport.futures",
     "lmcache.v1.transport.request_client",
 )
@@ -719,11 +733,13 @@ def test_generated_grpc_services_communicate_end_to_end(
             "skipped": [[0, 1], [], [3]],
         }
     )
-    assert client.prepare_retrieve(key, 7).result(5) == PrepareRetrieveResponse(
+    assert client.prepare_retrieve(key, 7, 2, 3).result(5) == PrepareRetrieveResponse(
         success=True,
         data=b"retrieved",
         context={"slot": 3},
     )
+    assert client.commit_retrieve(key, 7, True).result(5) is True
+    assert client.commit_retrieve(key, 7).result(5) is False
     registration = client.register_kv_cache_engine_driven_context(
         RegisterEngineDrivenContextPayload(
             instance_id=7,

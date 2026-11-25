@@ -61,7 +61,7 @@ jobs:
                         - 'csrc/storage_backends/**'
                         - 'docker/**'
                         - '.github/workflows/test.yml'
-                        - '.github/workflows/code_quality_checks.yml'
+                        - '.github/workflows/pre_commit.yml'
                         - '.github/workflows/publish.yml'
                         - '.github/workflows/build_main_artifacts.yml'
                         - '.github/workflows/build_cli_artifacts.yml'
@@ -192,7 +192,7 @@ jobs:
         needs: changes
         if: needs.changes.outputs.lmcache == 'true'
         name: Run code quality checks
-        uses: ./.github/workflows/code_quality_checks.yml
+        uses: ./.github/workflows/pre_commit.yml
 
     # Push to Test PyPI when:
     # - a new GitHub release is published

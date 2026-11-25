@@ -13,7 +13,7 @@ import threading
 import torch
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 
 logger = init_logger(__name__)

@@ -12,22 +12,19 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.logging import init_logger
-from lmcache.utils import (
-    EngineType,
-    _lmcache_nvtx_annotate,
-)
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey, KVEventProfile
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
-from lmcache.v1.common.utils import LayoutHints
+from lmcache.v1.common.utils import LayoutHints, _lmcache_nvtx_annotate
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     ShardReplicationDesc,
 )
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
+from lmcache.v1.gpu_connector.gds_context import GDSBufferRegistration
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
@@ -47,15 +44,11 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     get_unfull_chunk_layout_desc,
     get_unfull_chunk_staging_buffer,
     split_unfull_chunk_block_ids,
+    transfer_kv_per_object_group,
     transfer_unfull_chunk,
     trim_and_stage_unfull_chunk_block_ids,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.rocm_host_event_wait import (
-    HostEventWaiter,
-    create_host_event_waiter,
-    current_run_entry,
-)
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -68,6 +61,7 @@ from lmcache.v1.platform.fd_channel import (
     fd_channel_path,
     is_fd_channel_supported,
 )
+from lmcache.v1.transport.errors import InvalidRequestError
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -209,6 +203,8 @@ class ContextEntry:
             PING. Selects the reap window (timeout vs registration grace).
             Latched only by PING, never by traffic.
         event_backend: Cached event backend selected for this context's device.
+        event_profile: Native identity contract retained until unregister, reap
+            or shutdown. None retains current event behavior.
     """
 
     cache_context: BaseCacheContext
@@ -217,6 +213,7 @@ class ContextEntry:
     last_seen: float = 0.0
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
+    event_profile: KVEventProfile | None = None
 
 
 class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
@@ -235,7 +232,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     """
 
     module_name = "lmcache_driven_transfer"
-    _host_event_waiter: HostEventWaiter | None = None
 
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
@@ -243,14 +239,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         mode = build_ctx.mp_config.supported_transfer_mode
         if mode == "engine_driven":
             return None
-        module = cls(
+        return cls(
             build_ctx.engine_context,
             fd_socket_path=fd_channel_path(build_ctx.mp_config.port),
         )
-        module._host_event_waiter = create_host_event_waiter(
-            build_ctx.mp_config.rocm_host_event_wait
-        )
-        return module
 
     def __init__(self, ctx: MPCacheServerContext, fd_socket_path: str = "") -> None:
         self._ctx = ctx
@@ -371,17 +363,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             entry = self._cache_contexts.get(instance_id)
             if entry is not None:
                 entry.last_seen = now
-        if self._host_event_waiter is not None:
-            bound = current_run_entry()
-            if bound is not None and entry is not bound:
-                self._host_event_waiter.count("stale")
-                logger.warning(
-                    "Dropping a waiting transfer for GPU instance ID %d: its "
-                    "registration changed while it waited",
-                    instance_id,
-                )
-                return None
-        return entry
+            return entry
 
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.
@@ -503,18 +485,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 "kv_cache_layout": ctx.report_status(),
             }
 
-        status = {
+        return {
             "registered_gpu_ids": registered_gpu_ids,
             "cache_context_meta": cache_context_meta,
         }
-        if self._host_event_waiter is not None:
-            status["rocm_host_event_wait"] = self._host_event_waiter.stats()
-        return status
 
     def close(self) -> None:
         """Release GPU resources owned by this module."""
-        if self._host_event_waiter is not None:
-            self._host_event_waiter.stop()
         # Stop the drain thread before storage_manager.close() so any
         # in-flight completions reach a live storage manager.
         self._device_host_func_dispatcher.stop()
@@ -537,7 +514,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
-    ) -> None:
+        event_profile: KVEventProfile | None,
+    ) -> KVEventProfile | None:
         """Register the KV cache tensors for a given GPU instance ID.
 
         Args:
@@ -552,7 +530,39 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 GPUCacheContext for GPU KV format detection.
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
+            event_profile: Optional native identity contract. All active
+                registrations for the same model/world must agree, including
+                whether a profile is present. This does not change event output.
+
+        Returns:
+            The profile recorded for this registration, or None when absent.
+
+        Raises:
+            InvalidRequestError: If the profile conflicts with an active
+                registration, has invalid world/block geometry, or the engine
+                groups are not one full-attention block address space.
+
+        Profile validation precedes context creation, layout registration and
+        liveness refresh. Rejection leaves existing registrations untouched.
         """
+        if event_profile is not None:
+            if world_size <= 0 or self._ctx.chunk_size % event_profile.block_size:
+                raise InvalidRequestError(
+                    "KV event profile requires a positive world size and "
+                    "a block size that divides the server chunk size"
+                )
+            if not engine_group_infos or any(
+                group.engine_group_id != 0
+                or group.sw_size_tokens != -1
+                or group.recurrent_state
+                or group.extra_object_group_tag != 0
+                or group.tokens_per_block != event_profile.block_size
+                for group in engine_group_infos
+            ):
+                raise InvalidRequestError(
+                    "KV event profile requires one full-attention engine group "
+                    "with the declared block size"
+                )
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
@@ -560,13 +570,33 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # is SERIALIZED on the MQ main loop, so it is the sole inserter.
         with self._lock:
             existing = self._cache_contexts.get(instance_id)
+            for registered_id, entry in self._cache_contexts.items():
+                same_context = (entry.model_name, entry.world_size) == (
+                    model_name,
+                    world_size,
+                )
+                if same_context and entry.event_profile != event_profile:
+                    raise InvalidRequestError(
+                        f"KV event profile conflicts with registration {registered_id} "
+                        f"for model {model_name!r}, world size {world_size}"
+                    )
+            if existing is not None and (
+                event_profile is not None or existing.event_profile is not None
+            ):
+                if (existing.model_name, existing.world_size) != (
+                    model_name,
+                    world_size,
+                ):
+                    raise InvalidRequestError(
+                        "KV event registration instance context mismatch"
+                    )
             if existing is not None:
                 existing.last_seen = now
                 logger.info(
                     "Instance %d already registered; refreshing liveness",
                     instance_id,
                 )
-                return
+                return existing.event_profile
 
         # Build the context and layout descriptor outside the lock.
         cache_context = self._create_cache_context(
@@ -580,8 +610,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         num_object_groups = kv_groups_manager.num_object_groups
         event_backend = get_event_ipc_backend(cache_context.device)
         event_backend.check_event_support(cache_context.device)
-        if self._host_event_waiter is not None:
-            event_backend = self._host_event_waiter.wrap(event_backend)
         layout_desc = get_layout_desc(
             cache_context, self._ctx.chunk_size, object_group_id=0
         )
@@ -620,6 +648,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
+                event_profile=event_profile,
             )
 
         logger.info(
@@ -627,6 +656,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             instance_id,
             cache_context.num_layers,
         )
+        return event_profile
 
     @request_handler()
     def unregister_kv_cache(self, instance_id: int) -> None:
@@ -664,20 +694,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
-        """Store the GPU KV cache blocks to CPU; see store_with_chunk_mask.
-
-        With the ROCm host event wait, a store whose producer event has not
-        completed yet returns a ``DeferredResponse`` for the same tuple.
-        """
-        waiter = self._host_event_waiter
-        if waiter is not None and not waiter.in_run():
-            return waiter.submit_after_event(
-                instance_id,
-                self.get_and_touch_context_entry(instance_id),
-                event_ipc_handle,
-                lambda: self.store(key, instance_id, gpu_block_ids, event_ipc_handle),
-                lambda: (b"", False),
-            )
+        """Store the GPU KV cache blocks to CPU; see store_with_chunk_mask."""
         handle, ok, _ = self.store_with_chunk_mask(
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
@@ -1037,7 +1054,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
         ``instance_id`` is the registering instance. The default ignores it;
         a subclass can use it to look up per-instance data that its worker
-        sent before registering.
+        sent before registering. Overrides using the base context transfer
+        implementation must pass ``object_group_transfer`` at construction.
         """
         return create_cache_context(
             kv_caches,
@@ -1047,6 +1065,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             engine_type=engine_type,
             separate_object_groups=self._ctx.separate_object_groups,
             full_sw_kv=self._ctx.full_sw_kv,
+            object_group_transfer=transfer_kv_per_object_group,
+            buffer_registration=GDSBufferRegistration(),
         )
 
     @request_handler(
@@ -1080,9 +1100,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             A tuple where the first element is the IPC handle of the event
             that signals the completion of the retrieve operation, and the
             second element indicates whether the key was successfully retrieved.
-            The event handle is empty when no device work was submitted. With
-            the ROCm host event wait, a retrieve whose producer event has not
-            completed yet returns a ``DeferredResponse`` for the same tuple.
+            The event handle is empty when no device work was submitted.
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
@@ -1095,21 +1113,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             the unfull chunk only when the range has no full chunk (the
             engine's prefix cache already holds part of the unfull chunk).
         """
-        waiter = self._host_event_waiter
-        if waiter is not None and not waiter.in_run():
-            return waiter.submit_after_event(
-                instance_id,
-                self.get_and_touch_context_entry(instance_id),
-                event_ipc_handle,
-                lambda: self.retrieve(
-                    key,
-                    instance_id,
-                    gpu_block_ids,
-                    event_ipc_handle,
-                    skip_first_n_tokens,
-                ),
-                lambda: (b"", False),
-            )
         st = time.perf_counter()
 
         entry = self.get_and_touch_context_entry(instance_id)

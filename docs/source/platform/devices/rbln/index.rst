@@ -60,7 +60,7 @@ As on GPUs, start an LMCache server and point vLLM-RBLN at it with
            "kv_role": "kv_both",
            "kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector",
            "kv_connector_extra_config": {
-               "lmcache.mp.host": "tcp://127.0.0.1",
+               "lmcache.mp.host": "grpc://127.0.0.1",
                "lmcache.mp.port": 6555
            }
        }'

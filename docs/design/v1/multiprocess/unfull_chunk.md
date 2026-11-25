@@ -94,6 +94,9 @@ the unfull chunk `[kC, end)`.
 A connector with the feature off sends an aligned LOOKUP `end` and no grid
 hint, so the server never hands it a tail it cannot load. The other transfer
 paths (engine-driven, qstore, server transfer) still floor an unaligned `end`.
+A key carrying client-computed `chunk_hashes` instead of tokens has hashes for
+complete chunks only, so it never addresses a tail on any path: its `end` is
+floored and the lookup does not probe tail lengths for it.
 
 ## Interface changes
 
@@ -101,7 +104,7 @@ Wire / IPC:
 
 | Interface | Change |
 |---|---|
-| `IPCCacheServerKey` | No new field. New method `has_unfull_chunk(chunk_size)`: `end % chunk_size != 0`. |
+| `IPCCacheServerKey` | No new field. New method `has_unfull_chunk(chunk_size)`: `end % chunk_size != 0` for a key carrying tokens; always false for a key carrying `chunk_hashes`. |
 | QUERY_PREFETCH_STATUS / WAIT_PREFETCH_STATUS reply | **Always a token count** now, for every lookup (was a chunk count). It is a multiple of `C` unless the hit ends with a tail. Every MP client is updated (vLLM `LookupState`, SGLang, TensorRT-LLM, ATOM, SDK, `lmcache bench server`); server and clients must be upgraded together. |
 | STORE / RETRIEVE on the LMCache-driven path | An unaligned `end` now also stores or loads the tail `[kC, end)`; its block IDs follow the full chunks' in every group. vLLM, SGLang, TensorRT-LLM, the SDK and the bench send aligned ends unless they mean a tail; ATOM's ranges come from ATOM. |
 | FREE_LOOKUP_LOCKS | An unaligned `end` also frees the tail ending exactly there, if this request's lookup locked it. |
@@ -229,6 +232,10 @@ chunks, tries `336` first and hits. A next round with 900 tokens hits the same
 two chunks (round 1 stored no chunk `[256, 384)`), tries `368, 352, 336` and
 hits `336`.
 
+- A prompt shorter than one chunk (`L < C`) has no full chunk: stage 1 is
+  skipped (`k = 0`) and stage 2 searches chunk 0, so a repeat of the prompt
+  hits its own tail. With the feature off its lookup end is 0 and nothing is
+  probed (`early_exit_reason = "empty_chunk_hashes"`).
 - Stage 2 searches only the chunk after the full-chunk hit. With 256 tokens
   of chunks and a 32-token tail stored, a 1000-token lookup tries tail lengths
   between 256 and the next chunk boundary, never near 1000.
@@ -360,8 +367,6 @@ multiple of `T`.)
 - Tails are served from L1 only. A persistent tail copied to L2 is not looked
   up there, and tails are not shared over P2P L1. P2P lookup of tails is a
   follow-up for LMCache-native PD.
-- A prompt shorter than one chunk has no full chunk to look up, so its tail is
-  never tried.
 - A lookup tries up to `C / g` tail lengths, one L1-only prefetch (and one
   hash) each. The count is in `MP_LOOKUP_PREFETCH_END` (`unfull_chunk_probes`).
 - Requests with `max_tokens == 1` always store an exact tail. Without PD

@@ -15,7 +15,6 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.utils import EngineType, init_logger
 from lmcache.v1.client.transfer_context.base import (
     ContextClosedError,
     EngineDrivenContext,
@@ -29,11 +28,13 @@ from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
 from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.common.api import MemoryLayoutDesc
 from lmcache.v1.common.custom_types import (
+    EngineType,
     GroupLayout,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.utils import (
     LayoutHints,
     get_device,
@@ -620,6 +621,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                     engine_type,
                     layout_hints or {},
                     list(engine_group_infos),
+                    None,
                 )
             )
             future.result(timeout=mq_timeout)
@@ -1274,7 +1276,7 @@ class EngineDrivenTransferContext(TransferContext):
                     # releasing the SHM slot (server may immediately reuse it
                     # after commit_retrieve).
                     synchronize_device(device)
-                ctx.commit_retrieve(key, self._instance_id)
+                ctx.commit_retrieve(key, self._instance_id, not ok)
         except ContextClosedError:
             # Context is being swapped/shut down; report a miss so the
             # engine recomputes the blocks.
@@ -1557,7 +1559,9 @@ class EngineDrivenTransferContext(TransferContext):
             (state.layout_desc.shapes[0], state.layout_desc.dtypes[0], num_chunks)
             for state, (_, num_chunks) in zip(self._group_states, windows, strict=True)
         ]
-        groups = ctx.prepare_retrieve_multigroup(key, self._instance_id, expected)
+        groups = ctx.prepare_retrieve_multigroup(
+            key, self._instance_id, expected, [first for first, _ in windows]
+        )
         if groups is not None and (
             len(groups) != len(self._group_states)
             or any(
@@ -1593,7 +1597,7 @@ class EngineDrivenTransferContext(TransferContext):
                 logger.exception("Failed to scatter retrieved CPU context chunks")
                 ok = False
             synchronize_device(device)
-        ctx.commit_retrieve(key, self._instance_id)
+        ctx.commit_retrieve(key, self._instance_id, not ok)
         future.set_result(ok)
         return future
 
@@ -1651,7 +1655,7 @@ class EngineDrivenTransferContext(TransferContext):
                 ok = False
             # Complete device writes before the server may reuse the slots.
             synchronize_device(device)
-        ctx.commit_retrieve(key, self._instance_id)
+        ctx.commit_retrieve(key, self._instance_id, not ok)
         future.set_result(ok)
         return future
 

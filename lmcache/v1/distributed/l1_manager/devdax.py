@@ -2,7 +2,7 @@
 """Device-DAX L1 manager with runtime arena hot-plug."""
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import (
     L1BackendType,
     MemoryResidency,
