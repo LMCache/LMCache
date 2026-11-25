@@ -33,28 +33,17 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Distinct paged sets a backend may see is small, but the tables hold device
-# memory, so the cache is bounded rather than keyed for process lifetime.
-# Eviction synchronizes the evicted table's own device first (the ops
-# instance is shared across device indices): a table may have fed launches
-# on streams the allocator cannot attribute to it, and dropping the
-# reference must not recycle its block while a kernel still reads it.
-_MAX_PAGED_TABLE_CACHE_ENTRIES = 64
-
 
 def _paged_pointer_table(
     paged_kv: DiscoverableKVCache,
     engine_kv_format: lmcache_native.EngineKVFormat,
     num_layers: int,
     device: torch.device,
-    cache: dict[tuple[tuple[int, ...], torch.device], torch.Tensor],
 ) -> torch.Tensor:
     """Kernel-ordered per-layer base addresses of ``paged_kv``.
 
     Returns a 1-D int64 tensor on ``device`` in the order
-    ``KVFormatSpec.data_ptrs`` defines for the format. Uploaded tables are
-    kept in ``cache`` (owned by the calling backend) so a paged set whose
-    addresses have not changed does not repeat the blocking device upload.
+    ``KVFormatSpec.data_ptrs`` defines for the format.
     """
     # Imported lazily, not at module scope: the specs package reads
     # ``lmcache.device_ops``, which is resolved only once the backends that
@@ -62,27 +51,10 @@ def _paged_pointer_table(
     # First Party
     from lmcache.v1.common.kv_format.specs.registry import get_spec
 
-    addresses = tuple(
-        get_spec(paged_kv, engine_kv_format).data_ptrs(list(range(num_layers)))
-    )
-    key = (addresses, device)
-    table = cache.pop(key, None)
-    if table is None:
-        # Addresses are unsigned; the kernel reads the same bits as int64.
-        as_int64 = np.array(addresses, dtype=np.uint64).view(np.int64)
-        table = torch.from_numpy(as_int64).to(device=device)
-    if len(cache) >= _MAX_PAGED_TABLE_CACHE_ENTRIES:
-        # First Party
-        # Function-local: device spec discovery imports this module while
-        # platform/__init__ is still initializing, before synchronize_device
-        # is defined.
-        from lmcache.v1.platform import synchronize_device
-
-        oldest_key = next(iter(cache))
-        synchronize_device(cache[oldest_key].device)
-        cache.pop(oldest_key)
-    cache[key] = table
-    return table
+    addresses = get_spec(paged_kv, engine_kv_format).data_ptrs(list(range(num_layers)))
+    # Addresses are unsigned; the kernel reads the same bits as int64.
+    as_int64 = np.array(addresses, dtype=np.uint64).view(np.int64)
+    return torch.from_numpy(as_int64).to(device=device)
 
 
 def _stage_unpinned_host_chunks(
@@ -170,7 +142,6 @@ def transfer_with_address_kernel(
     engine_kv_format: lmcache_native.EngineKVFormat,
     skip_prefix_n_blocks: int,
     max_chunks_per_launch: int,
-    paged_table_cache: dict[tuple[tuple[int, ...], torch.device], torch.Tensor],
 ) -> None:
     """Serve :meth:`DeviceOps.multi_layer_block_kv_transfer` on an address kernel.
 
@@ -186,9 +157,6 @@ def transfer_with_address_kernel(
             remaining operands follow the method contract.
         max_chunks_per_launch: Chunks one kernel launch can address; each
             backend passes its own limit.
-        paged_table_cache: The backend's cache of uploaded paged pointer
-            tables, keyed on the addresses themselves. Unused for the
-            forwarded address form.
     """
     if not all(isinstance(chunk, torch.Tensor) for chunk in lmcache_objects_ptrs):
         # LMCache-driven callers still pass addresses they batched
@@ -213,7 +181,7 @@ def transfer_with_address_kernel(
     kernel_chunks, needs_sync = _stage_unpinned_host_chunks(chunks, is_d2h)
 
     paged_addresses = _paged_pointer_table(
-        paged_kv, engine_kv_format, int(shape_desc.nl), device, paged_table_cache
+        paged_kv, engine_kv_format, int(shape_desc.nl), device
     )
     _launch_block_transfer_batches(
         kernel,

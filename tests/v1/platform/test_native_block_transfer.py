@@ -143,7 +143,6 @@ def test_tensor_operands_lower_to_kernel_launches(
         fmt,
         1,
         4,
-        paged_table_cache={},
     )
 
     layer_addresses = [layer.data_ptr() for layer in _layers(paged)]
@@ -182,7 +181,6 @@ def test_skip_spanning_launches_carries_into_later_launches() -> None:
         fmt,
         9,
         4,
-        paged_table_cache={},
     )
 
     # Launch 1 holds blocks 0-7 (all skipped); launch 2 holds 8-9 (one skipped).
@@ -208,7 +206,6 @@ def test_pinned_chunks_keep_the_async_path(monkeypatch: pytest.MonkeyPatch) -> N
         fmt,
         0,
         4,
-        paged_table_cache={},
     )
 
     assert [launch.chunks for launch in kernel.launches] == [[0x3000]]
@@ -246,7 +243,6 @@ def test_unpinned_h2d_chunks_sync_after_launch(
         fmt,
         0,
         4,
-        paged_table_cache={},
     )
 
     assert [launch.chunks for launch in kernel.launches] == [[0x2000]]
@@ -289,7 +285,6 @@ def test_cuda_tensor_round_trip_across_launches(cuda_kernel: object) -> None:
         fmt,
         0,
         4,
-        paged_table_cache={},
     )
     torch.cuda.synchronize()
     for i, chunk in enumerate(chunks):
@@ -310,7 +305,6 @@ def test_cuda_tensor_round_trip_across_launches(cuda_kernel: object) -> None:
         fmt,
         0,
         4,
-        paged_table_cache={},
     )
     torch.cuda.synchronize()
     for source, target in zip(_layers(paged), _layers(restored), strict=True):
@@ -337,7 +331,6 @@ def test_cuda_unpinned_output_is_staged_in_place(cuda_kernel: object) -> None:
         fmt,
         0,
         4,
-        paged_table_cache={},
     )
 
     # Staging synchronizes before copying back, so no extra sync is needed.

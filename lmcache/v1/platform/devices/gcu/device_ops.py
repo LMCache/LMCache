@@ -32,8 +32,13 @@ import torch
 from lmcache import torch_dev
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform.base.device_ops import DeviceOps
+from lmcache.v1.platform.device_ops_helper import transfer_with_address_kernel
 
 logger = init_logger(__name__)
+
+#: Chunks one kernel launch can address; matches the batching the shared
+#: address-kernel helper applied to GCU upstream.
+MAX_CHUNKS_PER_LAUNCH = 4
 
 
 def _device_index(device: torch.device | str | None) -> int:
@@ -196,11 +201,7 @@ class GcuDeviceOps(DeviceOps):
     def multi_layer_block_kv_transfer(
         self,
         paged_buffer_ptrs_tensor: torch.Tensor | list,
-        # Declared ``list[int]`` (not a tensor list) so the MP gather/scatter
-        # detection routes through address conversion: the GCU Triton kernel
-        # reads each object's *host* address as a raw pointer, which requires
-        # pinned (registered) host memory that the address path guarantees.
-        lmcache_objects_ptrs: list[int],
+        lmcache_objects_ptrs: list[int] | list[torch.Tensor],
         block_ids: torch.Tensor | list[int],
         device: torch.device | str,
         direction: Any,
@@ -209,34 +210,22 @@ class GcuDeviceOps(DeviceOps):
         engine_kv_format: Any,
         skip_prefix_n_blocks: int,
     ) -> None:
-        dev = device if isinstance(device, torch.device) else torch.device(device)
-        dtype_code = _dtype_to_code(getattr(shape_desc, "dtype", None))
-        # Pin the calling thread's current device for the launch. torch.gcu
-        # tracks the current device per thread, and the Triton GCU backend
-        # launches on the thread-local current device (not on the tensors'
-        # device). A thread whose current device is still 0 otherwise fails
-        # TOPS launch validation when the KV tensors live on another GCU
-        # (e.g. TP1's gcu:1), so route the launch through the real device.
-        with torch_dev.device(dev):
-            self._op("multi_layer_block_kv_transfer")(
-                paged_buffer_ptrs_tensor,
-                lmcache_objects_ptrs,
-                block_ids,
-                _device_index(device),
-                int(direction),
-                shape_desc.kv_size,
-                shape_desc.nl,
-                shape_desc.nb,
-                shape_desc.bs,
-                shape_desc.nh,
-                shape_desc.hs,
-                shape_desc.element_size,
-                shape_desc.block_stride_elems,
-                lmcache_chunk_size,
-                int(engine_kv_format),
-                skip_prefix_n_blocks,
-                dtype_code,
-            )
+        # The GCU Triton kernel reads each object's *host* address on pinned
+        # (registered) host memory, so tensor operands are lowered to the
+        # shared address form; pointer operands forward unchanged.
+        transfer_with_address_kernel(
+            self._launch_block_transfer,
+            paged_buffer_ptrs_tensor,
+            lmcache_objects_ptrs,
+            block_ids,
+            device,
+            direction,
+            shape_desc,
+            lmcache_chunk_size,
+            engine_kv_format,
+            skip_prefix_n_blocks,
+            max_chunks_per_launch=MAX_CHUNKS_PER_LAUNCH,
+        )
 
     def load_and_reshape_flash(
         self,
@@ -449,3 +438,44 @@ class GcuDeviceOps(DeviceOps):
         if not bus:
             return None
         return str(bus)
+
+    def _launch_block_transfer(
+        self,
+        paged_addresses: torch.Tensor | list,
+        chunk_addresses: list[int],
+        launch_block_ids: torch.Tensor | list[int],
+        device: torch.device | str,
+        direction: Any,
+        shape_desc: Any,
+        lmcache_chunk_size: int,
+        engine_kv_format: Any,
+        skip_prefix_n_blocks: int,
+    ) -> None:
+        dev = device if isinstance(device, torch.device) else torch.device(device)
+        dtype_code = _dtype_to_code(getattr(shape_desc, "dtype", None))
+        # Pin the calling thread's current device for the launch. torch.gcu
+        # tracks the current device per thread, and the Triton GCU backend
+        # launches on the thread-local current device (not on the tensors'
+        # device). A thread whose current device is still 0 otherwise fails
+        # TOPS launch validation when the KV tensors live on another GCU
+        # (e.g. TP1's gcu:1), so route the launch through the real device.
+        with torch_dev.device(dev):
+            self._op("multi_layer_block_kv_transfer")(
+                paged_addresses,
+                chunk_addresses,
+                launch_block_ids,
+                _device_index(device),
+                int(direction),
+                shape_desc.kv_size,
+                shape_desc.nl,
+                shape_desc.nb,
+                shape_desc.bs,
+                shape_desc.nh,
+                shape_desc.hs,
+                shape_desc.element_size,
+                shape_desc.block_stride_elems,
+                lmcache_chunk_size,
+                int(engine_kv_format),
+                skip_prefix_n_blocks,
+                dtype_code,
+            )

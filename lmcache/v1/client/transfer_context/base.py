@@ -489,12 +489,17 @@ def gather_paged_kv_to_cpu(
     if out is None:
         # One object plane per K/V entry: MLA and fused-K/V formats
         # (kv_size == 1) store a single plane, split formats store K and V.
+        # Prefer pinned output so a DMA-capable backend can fill it in
+        # place; whether it can is the platform's call, not this layer's.
+        # A CPU peer has no DMA path, so it stays pageable.
+        prefer_pinned = device.type != "cpu"
         if get_kv_size(normalized, engine_kv_format) == 1:
             chunks = [
                 torch.empty(
                     (num_layers, window_tokens, content_size),
                     dtype=get_dtype(normalized, engine_kv_format),
                     device=torch.device("cpu"),
+                    pin_memory=prefer_pinned,
                 )
                 for _ in iter_indices
             ]
@@ -504,6 +509,7 @@ def gather_paged_kv_to_cpu(
                     (2, num_layers, window_tokens, content_size),
                     dtype=get_dtype(normalized, engine_kv_format),
                     device=torch.device("cpu"),
+                    pin_memory=prefer_pinned,
                 )
                 for _ in iter_indices
             ]

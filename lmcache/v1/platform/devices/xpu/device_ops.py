@@ -39,9 +39,6 @@ class XpuDeviceOps(DeviceOps):
     def __init__(self) -> None:
         super().__init__()
         self._block_transfer_kernel: Callable[..., None] | None = None
-        self._paged_table_cache: dict[
-            tuple[tuple[int, ...], torch.device], torch.Tensor
-        ] = {}
 
     def ensure_native(self) -> None:
         if self._native_bound:
@@ -91,5 +88,4 @@ class XpuDeviceOps(DeviceOps):
             self._block_transfer_kernel,
             *args,
             max_chunks_per_launch=MAX_CHUNKS_PER_LAUNCH,
-            paged_table_cache=self._paged_table_cache,
         )
