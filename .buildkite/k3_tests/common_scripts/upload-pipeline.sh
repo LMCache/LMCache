@@ -35,7 +35,7 @@ fi
 
 # Temporary dedicated jobs for the #6972 wheel experiment.
 if [[ "${BUILDKITE_BRANCH:-}" == "test/client-wheel-6972-platforms" ||
-    "${BUILDKITE_BRANCH:-}" == */test/client-wheel-6972-platforms ]]; then
+    "${BUILDKITE_BRANCH:-}" == *:test/client-wheel-6972-platforms ]]; then
     case "${PIPELINE_FILE}" in
         */multiprocess/smoke-pipeline.yml) backend=cuda ;;
         */amd/pipeline.yml) backend=rocm ;;
