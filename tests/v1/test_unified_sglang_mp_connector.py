@@ -169,6 +169,10 @@ def _run_staggered_recovery(rank: int, rendezvous: str, parallel_axis: str) -> N
             suffix = _submit_store(connector, 24)
             assert (suffix.start, suffix.end) == (16, 24)
             assert connector.complete_store(suffix)
+
+        # Keep both ranks alive until every collective and connector close has
+        # completed before either tears down Gloo.
+        dist.barrier()
     finally:
         dist.destroy_process_group()
 
