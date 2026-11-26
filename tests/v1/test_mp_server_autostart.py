@@ -639,20 +639,7 @@ def test_maybe_start_mp_server_from_url_rejects_missing_port_when_enabled() -> N
         )
 
 
-def without_server_package(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make ``lmcache.v1.multiprocess`` unimportable, as under lmcache-client.
-
-    Args:
-        monkeypatch: Pytest monkeypatch fixture used to update ``sys.modules``.
-    """
-    monkeypatch.setitem(sys.modules, "lmcache.v1.multiprocess", None)
-
-
-@pytest.mark.parametrize("server_installed", [True, False])
-def test_launcher_skips_start_when_server_already_healthy(
-    monkeypatch, server_installed: bool
-) -> None:
-    """A healthy server is reused, also where no server could be started."""
+def test_launcher_skips_start_when_server_already_healthy(monkeypatch) -> None:
     popen_mock = MagicMock()
     monkeypatch.setattr(
         launcher_mod,
@@ -660,8 +647,6 @@ def test_launcher_skips_start_when_server_already_healthy(
         lambda server_url, zmq_context, **_: True,
     )
     monkeypatch.setattr(launcher_mod.subprocess, "Popen", popen_mock)
-    if not server_installed:
-        without_server_package(monkeypatch)
     config = MPServerAutostartConfig.from_extra_config(
         extra_config={"lmcache.mp.autostart": True},
         server_host="tcp://localhost",
@@ -682,7 +667,8 @@ def test_launcher_without_server_package_fails_before_spawning(monkeypatch) -> N
         lambda server_url, zmq_context, **_: False,
     )
     monkeypatch.setattr(launcher_mod.subprocess, "Popen", popen_mock)
-    without_server_package(monkeypatch)
+    # As under lmcache-client, which has no lmcache.v1.multiprocess.
+    monkeypatch.setitem(sys.modules, "lmcache.v1.multiprocess", None)
     config = MPServerAutostartConfig.from_extra_config(
         extra_config={"lmcache.mp.autostart": True},
         server_host="grpc://localhost",

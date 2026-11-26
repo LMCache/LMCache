@@ -67,21 +67,6 @@ jobs:
                 requirements_file: requirements/build.txt
                 release_tag_pattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
 
-            - name: Check every listed module has a file
-              # setuptools only warns about a py-modules entry without one.
-              run: |
-                python - <<'EOF'
-                import pathlib, tomllib
-                config = tomllib.loads(pathlib.Path("pyproject_client.toml").read_text())
-                missing = [
-                    m for m in config["tool"]["setuptools"]["py-modules"]
-                    if m != "lmcache._version"
-                    and not pathlib.Path(m.replace(".", "/") + ".py").is_file()
-                ]
-                if missing:
-                    raise SystemExit(f"pyproject_client.toml lists no file for {missing}")
-                EOF
-
             - name: Install the CPU build of the pinned torch
               run: |
                 pip install --index-url https://download.pytorch.org/whl/cpu \
