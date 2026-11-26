@@ -107,7 +107,9 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     python3 -c 'import pygrpc_native' && \
     uv pip install -r requirements/kafka.txt && \
     python3 -c 'import confluent_kafka' && \
-    python3 -c 'import nixl, lmcache_nixl'
+    python3 -c 'import nixl, lmcache_nixl' && \
+    uv pip install -r requirements/valkey.txt && \
+    python3 -c 'from glide_sync import GlideClient'
 
 WORKDIR /workspace
 USER lmcache
