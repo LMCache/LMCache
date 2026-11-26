@@ -4,10 +4,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-# Pin the official ROCm 10 nightly built from vLLM 9c1d45c21836370104d4eb51d3b46eda20719c47.
-# It includes the startup-ready hook required by deferred KV registration.
-# Override via VLLM_ROCM_IMAGE for explicit candidate validation.
-VLLM_ROCM_IMAGE="${VLLM_ROCM_IMAGE:-vllm/vllm-openai-rocm@sha256:694108707f333787b1041caa0e948dd18b86f2450365a94e38819f026275ee32}"
+# Pin to a released vLLM ROCm image so LMCache regressions can be separated
+# from upstream image changes. Override via VLLM_ROCM_IMAGE for explicit bumps.
+VLLM_ROCM_IMAGE="${VLLM_ROCM_IMAGE:-vllm/vllm-openai-rocm:v0.26.0}"
 MODE="${1:-}"
 SERIALIZE_ENV=()
 DOCKER=(docker)

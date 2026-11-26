@@ -1495,7 +1495,7 @@ class LMCacheMPWorkerAdapter:
         self._health_event.set()
 
         # The connector starts heartbeat after startup-ready registration.
-        # Direct adapter users retain lazy start on their first transfer.
+        # Old vLLM and direct adapter users retain lazy start on first transfer.
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat: HeartbeatThread | None = None
         self._heartbeat_lock = threading.Lock()

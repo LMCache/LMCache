@@ -144,9 +144,11 @@ the worker adapter warns at startup when `3 x interval` exceeds the 30 s floor.
 
 ### 6.1 Start policy
 
-The shared heartbeat does not choose its start time. vLLM defers GPU KV
-registration until its startup-ready callback and starts the heartbeat after
-successful registration, before accepting requests.
+The shared heartbeat does not choose its start time. vLLM with the readiness hook
+defers GPU KV registration until its startup-ready callback and starts the
+heartbeat after successful registration, before accepting requests. Older vLLM
+warns, registers immediately, and retains lazy heartbeat startup on the first
+cache operation.
 SGLang starts on the first cache operation, while ATOM starts after successful
 KV-cache registration. The registration grace still covers clients that start
 heartbeats lazily and interrupted registration/ACK exchanges. Each adapter starts

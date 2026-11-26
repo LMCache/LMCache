@@ -1150,15 +1150,38 @@ def test_startup_registration_failure_does_not_start_heartbeat(
         worker.shutdown()
 
 
-def test_worker_rejects_vllm_without_ready_hook(
-    mock_io: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+def test_worker_without_ready_hook_keeps_legacy_registration(
+    mock_io: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """An old engine is rejected before creating a transfer context."""
+    """Old engines warn, register immediately, and start heartbeat on first I/O."""
     monkeypatch.delattr(KVConnectorBase_V1, "on_kv_cache_ready")
+    monkeypatch.setattr(connector_mod.logger, "handlers", [caplog.handler])
     config = _config(
         KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
     )
-    with pytest.raises(RuntimeError, match="requires vLLM's on_kv_cache_ready"):
-        LMCacheMPConnector(config, KVConnectorRole.WORKER)
-    mock_io.transfer.register.assert_not_called()
-    mock_io.heartbeat.assert_not_called()
+    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
+    try:
+        assert "on_kv_cache_ready" in caplog.text
+        assert "Upgrade vLLM" in caplog.text
+        mock_io.transfer.register.assert_not_called()
+        worker.register_kv_caches(mock_io.kv_caches)
+        mock_io.transfer.register.assert_called_once()
+        worker.register_kv_caches(mock_io.kv_caches)
+        assert mock_io.transfer.register.call_count == 2
+        mock_io.heartbeat.assert_not_called()
+        worker.worker_adapter.submit_retrieve_request(
+            "request",
+            LoadStoreOp(
+                token_bytes=pack_token_ids([1, 2, 3, 4]),
+                block_ids=[[2]],
+                end=4,
+            ),
+            None,
+        )
+        mock_io.transfer.submit_retrieve.assert_called_once()
+        mock_io.heartbeat.return_value.start.assert_called_once_with()
+        assert worker.get_finished(set()) == (set(), {"request"})
+    finally:
+        worker.shutdown()
