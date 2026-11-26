@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import contextlib
 import gc
 import inspect
 import weakref
@@ -17,6 +18,7 @@ from lmcache.v1.platform.base.event_ipc import (
     get_event_ipc_backend,
 )
 from lmcache.v1.platform.devices.cpu import CpuDeviceSpec
+from lmcache.v1.platform.devices.npu.event_ipc import NpuEventIPCBackend
 from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
 from lmcache.v1.platform.devices.cuda.timeline_semaphore_event_ipc import (
     TimelineSemaphoreEventIPCBackend,
@@ -255,6 +257,123 @@ def test_cpu_device_spec_exposes_cached_default_event_backend() -> None:
     spec = CpuDeviceSpec()
     assert isinstance(spec.event_ipc_backend, DefaultEventIPCBackend)
     assert spec.event_ipc_backend is spec.event_ipc_backend
+
+
+def test_npu_backend_evicts_oldest_and_settles_it():
+    """NPU driver events are scarce: the oldest exported event must be
+    settled before its last reference is dropped."""
+
+    class _NpuFakeEventModule:
+        Event = _FakeEvent
+
+        @staticmethod
+        def device(_device):
+            return contextlib.nullcontext()
+
+    backend = NpuEventIPCBackend(
+        event_module=_NpuFakeEventModule(), exported_event_ring_size=3
+    )
+    events = []
+    for _ in range(5):
+        ev = backend.create_event(_Device("npu"))
+        backend.export_event(ev, _Device("npu"))
+        events.append(ev)
+
+    assert len(backend._exported_events) == 3
+    assert all(("synchronize",) in ev.calls for ev in events[:2])
+    assert ("synchronize",) not in events[2].calls
+
+
+def test_npu_backend_ring_size_defaults_from_env(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LMCACHE_NPU_EVENT_RING_SIZE", "7")
+    backend = NpuEventIPCBackend(event_module=_FakeEventModule())
+    assert backend._exported_event_ring_size == 7
+
+
+def test_npu_backend_settle_failure_does_not_block_export():
+    """A failing settle must not block the export path."""
+
+    class _BrokenSettleEvent(_FakeEvent):
+        def synchronize(self) -> None:
+            raise RuntimeError("device gone")
+
+    class _BrokenSettleNpuModule:
+        Event = _BrokenSettleEvent
+
+        @staticmethod
+        def device(_device):
+            return contextlib.nullcontext()
+
+    backend = NpuEventIPCBackend(
+        event_module=_BrokenSettleNpuModule(), exported_event_ring_size=1
+    )
+    first = backend.create_event(_Device("npu"))
+    backend.export_event(first, _Device("npu"))
+    second = backend.create_event(_Device("npu"))
+    backend.export_event(second, _Device("npu"))
+
+    assert len(backend._exported_events) == 1
+    assert backend._exported_events[0] is second
+
+
+class _RecordingDeviceModule:
+    """Fake event module recording every device context the backend enters."""
+
+    Event = _FakeEvent
+
+    def __init__(self) -> None:
+        self.entered: list[object] = []
+
+    def device(self, device):
+        entered = self.entered
+
+        @contextlib.contextmanager
+        def _ctx():
+            entered.append(device)
+            yield
+
+        return _ctx()
+
+
+class _FakeStream:
+    """Minimal stream stub exposing the ``device`` property."""
+
+    def __init__(self, device: object) -> None:
+        self.device = device
+
+
+def test_npu_backend_import_event_pins_owning_device():
+    """CANN derives the imported event from the calling thread's current
+    device context, so the import must run with the owning device pinned."""
+    module = _RecordingDeviceModule()
+    backend = NpuEventIPCBackend(event_module=module)
+    device = _Device("npu")
+    event = backend.import_event(b"handle", device)
+    assert module.entered == [device]
+    assert ("from_ipc_handle", device, b"handle") in event.calls
+
+
+def test_npu_backend_record_and_wait_pin_stream_device():
+    """Record/wait create and queue work against the stream's device, which
+    must be current to avoid allocating events in a stale context's pool."""
+    module = _RecordingDeviceModule()
+    backend = NpuEventIPCBackend(event_module=module)
+    device = _Device("npu")
+    stream = _FakeStream(device)
+    event = _FakeEvent()
+    backend.record_event(event, stream)
+    backend.wait_event(event, stream)
+    assert module.entered == [device, device]
+    assert ("record", stream) in event.calls
+    assert ("wait", stream) in event.calls
+
+
+def test_default_backend_keeps_historical_ring_size():
+    """The default backend keeps the historical 2048-event window."""
+    backend = DefaultEventIPCBackend(
+        event_module=_FakeEventModule(), device_type="fake"
+    )
+    assert backend._exported_event_ring_size == _EXPORTED_EVENT_RING_SIZE
 
 
 @pytest.fixture

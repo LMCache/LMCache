@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 # Standard
+import os
 from typing import Any
 
 # First Party
@@ -38,21 +39,60 @@ class NpuEventIPCBackend(DefaultEventIPCBackend):
     torch_npu implements the CUDA-style event ABI (``interprocess=True``,
     ``ipc_handle``, ``from_ipc_handle``), so the default adapter applies
     directly; ``check_event_support`` fails closed on builds lacking it.
+
+    CANN device event resources (notify slots backing each ``aclrtCreateEvent``)
+    are far scarcer than CUDA's, so the exported-event liveness window shrinks
+    from the historical 2048 to a small ring; aged-out events are settled via
+    ``synchronize()`` before their last reference is dropped, so
+    ``aclrtDestroyEvent`` reclaims them deterministically. Without this, a
+    long-serving MP worker accumulates live driver events until event
+    creation fails with error 207001 ("driver error: out of memory").
     """
 
-    def __init__(self, event_module: Any | None = None) -> None:
+    _DEFAULT_RING_SIZE = 128
+    _RING_SIZE_ENV = "LMCACHE_NPU_EVENT_RING_SIZE"
+
+    def __init__(
+        self,
+        event_module: Any | None = None,
+        exported_event_ring_size: int | None = None,
+    ) -> None:
         """Create an NPU event IPC backend.
 
         Args:
             event_module: Optional torch.npu-like module. Defaults to the
                 installed torch_npu; injectable for tests.
+            exported_event_ring_size: Liveness-window size for exported
+                events. Defaults to the ``LMCACHE_NPU_EVENT_RING_SIZE``
+                environment variable or 128.
         """
+        if exported_event_ring_size is None:
+            raw = os.environ.get(self._RING_SIZE_ENV)
+            exported_event_ring_size = (
+                int(raw) if raw is not None else self._DEFAULT_RING_SIZE
+            )
         super().__init__(
             event_module=(
                 event_module if event_module is not None else _torch_npu_module()
             ),
             device_type="npu",
+            exported_event_ring_size=exported_event_ring_size,
         )
+
+    def _on_event_evicted(self, event: Any) -> None:
+        """Settle an event before its last reference is dropped.
+
+        Args:
+            event: The evicted backend-native event.
+        """
+        try:
+            event.synchronize()
+        except Exception:
+            logger.warning(
+                "NPU exported-event reclaim: synchronize failed; "
+                "dropping reference anyway.",
+                exc_info=True,
+            )
 
     def export_event(self, event: object, device: object) -> bytes:
         """Serialize an event for another process.
@@ -74,7 +114,13 @@ class NpuEventIPCBackend(DefaultEventIPCBackend):
             return super().export_event(event, device)
 
     def import_event(self, handle: bytes, device: object) -> object:
-        """Import a serialized event handle, diagnosing failures.
+        """Import a serialized event handle under ``device``'s context.
+
+        CANN derives the imported event from the calling thread's current
+        device context (``aclIpcOpenEventHandle``), not from the ``device``
+        argument alone, so a handler thread serving several devices must pin
+        the owning device before opening the handle — the same guard
+        :meth:`export_event` applies on the way out.
 
         Args:
             handle: Serialized event handle from another process.
@@ -88,7 +134,8 @@ class NpuEventIPCBackend(DefaultEventIPCBackend):
                 the handle summary and target device for triage.
         """
         try:
-            return super().import_event(handle, device)
+            with self._event_module.device(device):  # type: ignore[attr-defined]
+                return super().import_event(handle, device)
         except Exception as exc:
             logger.warning(
                 "NPU event import failed: device=%s %s error=%s",
@@ -97,3 +144,33 @@ class NpuEventIPCBackend(DefaultEventIPCBackend):
                 exc,
             )
             raise
+
+    def record_event(self, event: object, stream: object) -> None:
+        """Record ``event`` on ``stream`` under the stream's device context.
+
+        torch_npu creates the underlying driver event lazily at record time
+        (``AclrtCreateEventWithFlag``), bound to the calling thread's current
+        device context. Recording under a stale context allocates the event
+        in the wrong device's event pool — it is then never reclaimed by the
+        owning device (error 207001) and the record itself can be rejected
+        (EE1010, "stream does not belong to the current context").
+
+        Args:
+            event: Backend-native event to record.
+            stream: Stream that should record the event.
+        """
+        with self._event_module.device(stream.device):  # type: ignore[attr-defined]
+            super().record_event(event, stream)
+
+    def wait_event(self, event: object, stream: object) -> None:
+        """Make ``stream`` wait for ``event`` under the stream's device context.
+
+        The stream-side wait is queued against the stream's device context,
+        so the same pinning as :meth:`record_event` applies.
+
+        Args:
+            event: Backend-native event to wait on.
+            stream: Stream that should wait for the event.
+        """
+        with self._event_module.device(stream.device):  # type: ignore[attr-defined]
+            super().wait_event(event, stream)

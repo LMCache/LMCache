@@ -1581,6 +1581,10 @@ class LMCacheMPWorkerAdapter:
             layout_hints if layout_hints is not None else vllm_layout_hints()
         )
         self._send_register_kv_caches_request(kv_caches)
+        # Start the heartbeat on registration: a worker that goes idle before
+        # its first store/retrieve would otherwise send no PING and be reaped
+        # after the registration grace period.
+        self._ensure_heartbeat_started()
 
     def unregister_kv_caches(self) -> None:
         """Drop the server's registration of the KV caches so the engine can
@@ -1746,7 +1750,8 @@ class LMCacheMPWorkerAdapter:
         return True
 
     def _ensure_heartbeat_started(self) -> None:
-        """Lazily start the heartbeat on first store or retrieve.
+        """Start the heartbeat on registration and lazily on first store
+        or retrieve.
 
         The heartbeat starts healthy (the event was set at construction). A
         live worker pings every interval, refreshing its server-side

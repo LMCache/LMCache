@@ -20,7 +20,9 @@ the registered per-layer structure directly.
 from __future__ import annotations
 
 # Standard
+import contextlib
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from typing import Any, ClassVar
 
 # Third Party
@@ -40,6 +42,24 @@ from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 #: ``handle`` is the opaque payload of ``UntypedStorage._share_npu_()``;
 #: everything else mirrors the base-class interface fields, per plane.
 PlaneRecord = tuple[Any, torch.dtype, tuple[int, ...], tuple[int, ...], int]
+
+
+def _npu_device_ctx(device_index: Any) -> AbstractContextManager:
+    """Switch the calling thread's device context for the NPU backend.
+
+    torch_npu opens a shared storage's IPC event handle under the
+    calling thread's *current* device context, not the ``device_index``
+    argument passed to ``_new_shared_npu``. A server thread that just
+    served another device therefore opens the handle under a stale
+    context and ``aclIpcOpenEventHandle`` fails with error 107017
+    (invalid handle). Callers must wrap every handle-open in this guard,
+    mirroring the ``torch.cuda.device`` guard in ``RawCudaIPCWrapper``.
+    Falls back to a no-op when ``torch.npu`` is unavailable (CPU tests).
+    """
+    npu_module = getattr(torch, "npu", None)
+    if npu_module is not None and hasattr(npu_module, "device"):
+        return npu_module.device(device_index)
+    return contextlib.nullcontext()
 
 
 class NpuIPCWrapper(DeviceIPCWrapper):
@@ -166,6 +186,10 @@ class NpuIPCWrapper(DeviceIPCWrapper):
         Note:
             ``torch.npu`` must be initialized before this function is
             called (guarded by ``torch_dev.init()`` at the call sites).
+            Each handle is opened under the owning device's context
+            (see :func:`_npu_device_ctx`); without that guard a server
+            thread serving several devices interleavely opens handles
+            under a stale device context (error 107017, invalid handle).
 
         Returns:
             The bare tensor, or the tuple of the layer's plane tensors in
@@ -174,11 +198,14 @@ class NpuIPCWrapper(DeviceIPCWrapper):
         device_index = self._get_device_index_from_uuid(self.device_uuid)
         tensors: list[torch.Tensor] = []
         for handle, dtype, shape, stride, storage_offset in self._plane_records:
-            storage = torch.UntypedStorage._new_shared_npu(  # type: ignore[attr-defined]  # noqa: SLF001
-                device_index, *handle[1:]
-            )
-            t = torch.empty((), device=device_index, dtype=dtype)
-            t.set_(storage, storage_offset, shape, stride)
+            # Open the handle under the owning device's context; see
+            # :func:`_npu_device_ctx` for why this is load-bearing.
+            with _npu_device_ctx(device_index):
+                storage = torch.UntypedStorage._new_shared_npu(  # type: ignore[attr-defined]  # noqa: SLF001
+                    device_index, *handle[1:]
+                )
+                t = torch.empty((), device=device_index, dtype=dtype)
+                t.set_(storage, storage_offset, shape, stride)
             tensors.append(t)
         if self._bare:
             return tensors[0]
