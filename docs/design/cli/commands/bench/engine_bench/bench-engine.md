@@ -598,8 +598,9 @@ their chunks hold document content alone and match. Without this they land
 off-phase and nothing matches, silently.
 
 The padding lives in `quality/alignment.py` (`ChunkAligner`) and the prompt
-text in `quality/prompts.py`, outside the workload, so other answer-quality
-benchmarks can build byte-identical prompts.
+text in `quality/prompts.py`, shared with `lmcache bench quality`
+(`docs/design/cli/commands/bench/quality_bench/bench-quality.md`), which
+compares a CacheBlend stack against a recompute reference in one run.
 
 **Set it to the deployment's LMCache chunk size** — the default 256 is
 LMCache's own default, not a detected value. It is configured rather than

@@ -4,16 +4,23 @@
 
 ```
 lmcache/integration/tensorrt_llm/
-├── __init__.py             # Optional-import surface
-├── tensorrt_adapter.py     # Compatibility exports for the lmcache preset
+├── __init__.py            # Optional-import surface
 └── tensorrt_mp_adapter.py  # Multi-process — engine in standalone server
 
-lmcache/inprocess/integration/tensorrt_llm/
+LMCache_inprocess/lmcache/integration/tensorrt_llm/
+└── tensorrt_adapter.py    # Compatibility exports for the lmcache preset
+
+LMCache_inprocess/lmcache/inprocess/integration/tensorrt_llm/
 ├── __init__.py
 ├── utils.py               # ENGINE_NAME, lmcache_get_config,
 │                          # create_trtllm_metadata
 └── tensorrt_adapter.py    # In-process — engine in TRT-LLM process
 ```
+
+The core package initializer exports only the MP scheduler and worker.
+InProcess package-level exports belong to
+`lmcache.inprocess.integration.tensorrt_llm` in `LMCache_inprocess`; importing
+the core TensorRT package does not load the InProcess engine.
 
 Both adapters subclass TRT-LLM's `KvCacheConnectorScheduler` and
 `KvCacheConnectorWorker`. The TRT-LLM imports are *guarded at module
@@ -31,7 +38,8 @@ maps:
 | `lmcache-mp` | `lmcache.integration.tensorrt_llm.tensorrt_mp_adapter` | `LMCacheMPKvConnectorScheduler` | `LMCacheMPKvConnectorWorker` |
 
 The `lmcache` preset still uses the old module path in TensorRT-LLM's registry.
-That module re-exports the scheduler and worker from the canonical
+The external `lmcache_inprocess` distribution owns that compatibility module
+and re-exports the scheduler and worker from the canonical
 `lmcache.inprocess.integration.tensorrt_llm.tensorrt_adapter` module until
 upstream migrates its registry.
 
@@ -74,8 +82,8 @@ V3's transfer path is wrong for TRT-LLM:
 `TRTLLMGPUConnector` is therefore a *standalone* `GPUConnectorInterface`
 implementation. It also exposes a bespoke
 `register_kv_caches(kv_cache_tensor)` method called by the worker once
-at init — separate from `to_gpu`/`from_gpu`. The factory in
-`lmcache/inprocess/v1/gpu_connector/__init__.py` constructs it from
+at init — separate from `to_gpu`/`from_gpu`. The factory in the external
+[`LMCache_inprocess`](https://github.com/LMCache/LMCache_inprocess) package constructs it from
 `LMCacheMetadata` plus the device, and the adapter wires the pool
 tensor in afterwards.
 

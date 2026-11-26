@@ -31,13 +31,16 @@ class _FakeSM:
     ``self.events`` so the FIFO ordering can be verified.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, owner: int | None = None) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.events: list[str] = []
+        self._owner = owner
 
     def reserve_write(self, **kw: Any) -> dict[Any, Any]:
         self.calls.append(("reserve_write", kw))
-        return {}
+        if self._owner is None:
+            return {}
+        return {key: _FakeObj(self._owner) for key in kw["keys"]}
 
     def finish_write(self, **kw: Any) -> None:
         self.calls.append(("finish_write", kw))
@@ -50,6 +53,14 @@ class _FakeSM:
 
     def read_prefetched_results(self, keys: list[ObjectKey]) -> "_FakeCM":
         return _FakeCM(self, keys)
+
+
+class _FakeObj:
+    def __init__(self, owner: int) -> None:
+        self._owner = owner
+
+    def get_l1_manager(self) -> int:
+        return self._owner
 
 
 class _FakeCM:
@@ -121,6 +132,38 @@ class TestDefaultDispatcher:
                 "reserve_write",
                 {"keys": [_key(1)], "layout_desc": "LAYOUT", "mode": "new"},
             ),
+        ]
+
+    def test_finish_write_carries_owners_from_the_replayed_reservation(self):
+        sm = _FakeSM(owner=7)
+        ctx = ReplayContext(sm=sm)
+        d = build_default_dispatcher()
+        d.dispatch(
+            f"{_SM_PREFIX}.reserve_write",
+            ctx,
+            {"keys": [_key(1), _key(2)], "layout_desc": "LAYOUT"},
+        )
+        d.dispatch(f"{_SM_PREFIX}.finish_write", ctx, {"keys": [_key(1), _key(2)]})
+        assert sm.calls[-1] == (
+            "finish_write",
+            {"keys": [_key(1), _key(2)], "l1_owners": {_key(1): 7, _key(2): 7}},
+        )
+        assert ctx.write_owners == {}
+
+    def test_finish_write_without_reservation_is_warning_only(self):
+        """Keys with no replayed reservation are skipped; the rest still finish."""
+        sm = _FakeSM(owner=7)
+        ctx = ReplayContext(sm=sm)
+        d = build_default_dispatcher()
+        d.dispatch(
+            f"{_SM_PREFIX}.reserve_write",
+            ctx,
+            {"keys": [_key(1)], "layout_desc": "LAYOUT"},
+        )
+        d.dispatch(f"{_SM_PREFIX}.finish_write", ctx, {"keys": [_key(1), _key(2)]})
+        d.dispatch(f"{_SM_PREFIX}.finish_write", ctx, {"keys": [_key(3)]})
+        assert [c for c in sm.calls if c[0] == "finish_write"] == [
+            ("finish_write", {"keys": [_key(1)], "l1_owners": {_key(1): 7}}),
         ]
 
     def test_read_prefetched_enter_exit_fifo(self):

@@ -13,7 +13,7 @@ logged and retried, and it never takes the MP server down.
 """
 
 # Standard
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 import asyncio
 import contextlib
 
@@ -22,7 +22,7 @@ from pydantic import ValidationError
 import httpx
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.mp_coordinator.schemas import (
     ChunkSizeBindRequest,
     ChunkSizeBindResponse,
@@ -42,12 +42,19 @@ def bind_coordinator_chunk_size(
     base_url: str,
     chunk_size: int,
     timeout: float = _DEFAULT_CHUNK_SIZE_BIND_TIMEOUT,
+    api_key_files: Sequence[str] = (),
 ) -> int:
     """Synchronously bind coordinator hashing to an MP server's final size."""
+    # First Party
+    from lmcache.v1.transport.auth import (
+        request_client_auth_headers,
+    )
+
     body = ChunkSizeBindRequest(chunk_size=chunk_size)
     response = httpx.put(
         f"{base_url.rstrip('/')}/config/chunk-size",
         json=body.model_dump(mode="json"),
+        headers=request_client_auth_headers(api_key_files),
         timeout=timeout,
     )
     response.raise_for_status()
@@ -75,7 +82,7 @@ async def register(
         instance_id: Desired id; empty lets the coordinator assign one.
         p2p_advertised_url: Transfer-channel URL to advertise for P2P. Empty
             when P2P is disabled.
-        mq_port: Port of this server's ZMQ message-queue server for P2P lookup
+        mq_port: Port of this server's P2P gRPC listener for P2P lookup
             RPCs. 0 when P2P is disabled.
         chunk_size: Finalized MP chunk size, if negotiation has completed.
 
@@ -134,7 +141,7 @@ async def keep_registered(
         heartbeat_interval: Seconds between heartbeats.
         p2p_advertised_url: Transfer-channel URL to advertise for P2P. Empty
             when P2P is disabled.
-        mq_port: Port of this server's ZMQ message-queue server for P2P lookup
+        mq_port: Port of this server's P2P gRPC listener for P2P lookup
             RPCs. 0 when P2P is disabled.
         on_registered: Called after every successful registration, including
             a re-registration. Required, not defaulted: the coordinator keeps

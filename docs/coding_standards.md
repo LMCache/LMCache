@@ -13,7 +13,7 @@ This document defines the coding quality standards and code review expectations 
 
 - **PRs must be small and focused.** If the number of changed files is large, break it down conceptually into multiple PRs. Each PR should do one thing well.
 - Prefer a series of small, reviewable PRs over one large omnibus PR.
-- If a feature spans multiple modules, split by module boundary or by logical phase (e.g., interface change first, then implementation, then tests).
+- If a feature spans multiple modules, split by module boundary or by logical phase (e.g., interface change first, then implementation together with its tests).
 
 ### 1.2 Documentation Requirements
 
@@ -108,6 +108,12 @@ A full docstring must include:
 ### 4.4 Class Design
 
 - **Minimize the public interface.** Follow the principle of minimal surface area -- only add a new public method or property when there is a concrete need.
+- When a project-owned class intentionally implements a project-owned base
+  interface or `Protocol`, prefer explicit inheritance (e.g.,
+  `class LocalStore(StorageInterface):`) to make that relationship clear. Do not
+  omit inheritance merely because a `Protocol` supports structural typing.
+  Omitting it requires a concrete, explainable benefit, such as adapting an
+  external type that cannot be modified.
 - **Class fields with internal state** must have:
   - A clear, documented meaning
   - A clear invariant (at any point in time, a developer should know what the value should be without running the code)
@@ -180,6 +186,53 @@ A full docstring must include:
   - **Not access private members** (`_`-prefixed) of the class under test.
   - Not test private helper functions directly. Exercise them through the public API.
 - Test files should mirror the source structure under `tests/`.
+- Use `tests.import_utils.lmcache_path()` for product files,
+  `lmcache_subprocess_env()` for product subprocess environments, and `repo_path()`
+  only for checkout resources. Do not derive product paths from the test location
+  or inject the checkout into import paths.
+- The `check-test-imports` pre-commit hook catches literal checkout package paths,
+  checkout `sys.path`/`PYTHONPATH` injection, and forced checkout `cwd`. It follows
+  simple pathlib and assignment/import aliases, not arbitrary dynamic code.
+  Intentional source-inspection/build tests can exempt an expression or function
+  with `# test-import: allow -- reason` on the same or preceding line.
+
+#### Test-first order
+
+New features, behavior changes, and bug fixes are test-first. Tests are written
+from the agreed behavior before the code that implements it, so they check the
+contract instead of echoing whatever the implementation happens to do.
+
+1. **Design the user-facing surface.** Write the design doc (Section 5.1) and,
+   if the feature has a CLI, define it: commands, flags and defaults, output,
+   exit codes, and error messages.
+2. **Write the end-to-end test before any implementation.** It drives the
+   feature through its outermost public entry point the way a user would (the
+   `lmcache` CLI in a subprocess, a server started and queried over its API, or
+   the inference-engine integration path) and asserts only on what the user
+   observes. Without a CLI, start from the outermost public API that reaches the
+   feature.
+3. **Finalize the interface.** Write the public classes and functions with full
+   type hints and docstrings (Section 3), with bodies that
+   `raise NotImplementedError`. The docstring is the behavior contract.
+4. **Write unit tests against that interface before implementing it.** The
+   rules above apply: test the docstring contract and never private members.
+5. **Confirm the new tests fail for the expected reason**, such as an unknown
+   command, `NotImplementedError`, or a wrong result. They must not fail because
+   the test itself is broken. A new test that passes before the implementation
+   exists is not testing the change.
+6. **Implement until the unit tests and then the end-to-end test pass.**
+
+For a bug fix, the regression test comes first. Reproduce the bug at the
+highest level that shows it, confirm that the test fails on the current code,
+then fix.
+
+Do not edit tests to fit the implementation. If implementing shows that the CLI
+or a docstring is wrong, change the design or docstring first, then update the
+affected tests, and call out the contract change in the PR description.
+
+Exempt from this order: refactors with no behavior change (existing tests must
+keep passing unchanged), and changes that only touch documentation, CI, or
+build config.
 
 ### 5.3 Reuse Existing Code
 
@@ -254,7 +307,7 @@ import os
 import torch
 
 # First Party
-from lmcache.inprocess.v1.config import LMCacheEngineConfig
+from lmcache.v1.multiprocess.config import LMCacheMPServerConfig
 
 # Local
 from .utils import helper
@@ -300,7 +353,7 @@ than adding Python execution machinery to cover unusual indirection.
 
 ### 7.4 Logging
 
-- Use the project's `init_logger(__name__)` from `lmcache.logging`, not bare `logging.getLogger()`.
+- Use the project's `init_logger(__name__)` from `lmcache.v1.common.logging`, not bare `logging.getLogger()`.
 - Operational logs (store/retrieve activity, background task progress) should be at `DEBUG` level, not `INFO`.
 - Log levels must be appropriate: do not use `WARNING` for conditions that are expected during normal concurrent operation (e.g., a key not found due to a benign race condition).
 - Use lazy `%`-formatting, not f-strings, in log calls so interpolation only runs when the record is emitted: `logger.info("instance %s", instance_id)`, not `logger.info(f"instance {instance_id}")`.
@@ -362,7 +415,7 @@ Reviews should **not** focus on:
 | Severity | Meaning | Examples |
 |----------|---------|----------|
 | **error** | Must fix before merge | Missing SPDX header, missing type hints on public function, missing docstring on public function, new feature with zero tests, cross-class private member access, poor architectural decision, ambiguous return values, `assert` used for runtime validation, **breaking change that leaves unchanged callers broken** |
-| **warning** | Should fix | Docstring could be more detailed, tests that test implementation details, naming could be clearer, code could be more modular, missing `strict=True` on `zip` of parallel lists, **caller assumptions weakened without audit** |
+| **warning** | Should fix | Docstring could be more detailed, tests that test implementation details, user-facing feature with no end-to-end test (Section 5.2), naming could be clearer, code could be more modular, missing `strict=True` on `zip` of parallel lists, **caller assumptions weakened without audit** |
 | **info** | Suggestion only, non-blocking | Optional naming improvement, minor refactor for readability, style preference, **backwards-compatible extension where a cleaner API break might be justified** |
 
 ### 9.3 Reviewer Guidelines

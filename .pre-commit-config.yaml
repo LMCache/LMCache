@@ -19,6 +19,19 @@ repos:
         lmcache/v1/platform/.*|
         tests/v1/platform/.*
       )$
+  - id: check-test-imports
+    name: Check test import paths
+    entry: python3 tools/check_test_imports.py
+    language: system
+    types: [python]
+    files: ^tests/
+  - id: check-module-deps
+    name: Check module dependency directions
+    entry: python tools/check_module_deps.py
+    language: python
+    additional_dependencies: ['pyyaml']
+    pass_filenames: false
+    files: ^(lmcache/.*\.py|tools/check_module_deps\.py|tools/module_deps\.yaml|docs/design/MODULE_DEPENDENCIES\.md)$
   - id: ban-cuda-host-register
     name: Ban cudaHostRegister/Unregister outside platform
     entry: >-
@@ -53,7 +66,7 @@ repos:
         echo "========================================";
         echo "  BANNED: raw raise of builtin TimeoutError";
         echo "  Fix: raise LMCacheTimeoutError from";
-        echo "       lmcache.v1.mp_observability.errors so the timeout";
+        echo "       lmcache.v1.common.errors so the timeout";
         echo "       is reported to MP observability (OTel).";
         echo "========================================";
         echo "";

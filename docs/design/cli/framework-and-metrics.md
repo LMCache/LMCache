@@ -184,7 +184,7 @@ Metrics ──emit()──▶ Handler (destination) ──▶ Formatter (renderi
 ### File layout
 
 ```
-lmcache/cli/metrics/
+lmcache/v1/common/metrics/
 ├── __init__.py       # re-exports
 ├── metrics.py        # Metrics collector
 ├── section.py        # Section data class
@@ -198,7 +198,7 @@ Each metric has a **machine key** (used in JSON output) and a **human-readable
 label** (used in terminal output). Sections work the same way.
 
 ```python
-from lmcache.cli.metrics import Metrics, StreamHandler, TerminalFormatter
+from lmcache.v1.common.metrics import Metrics, StreamHandler, TerminalFormatter
 
 metrics = Metrics(title="Bench KV Cache Result (30s)")
 

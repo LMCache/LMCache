@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
+from contextlib import ExitStack
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 import argparse
 import shutil
 import signal
@@ -14,11 +16,11 @@ import time
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.logging import init_logger
 from lmcache.usage_telemetry.l1_usage import InitializeL1Usage
 from lmcache.usage_telemetry.l2_usage import InitializeL2ConnectorUsage
 from lmcache.usage_telemetry.mp import InitializeMPUsageContext
 from lmcache.usage_telemetry.mp_continuous import InitializeMPContinuousUsage
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
@@ -33,10 +35,12 @@ from lmcache.v1.mp_observability.config import (
     parse_args_to_observability_config,
     resolve_grpc_metrics_enabled,
 )
+from lmcache.v1.mp_observability.event_bus import EventBus
 from lmcache.v1.mp_observability.gc_monitor import (
     init_gc_monitor,
     shutdown_gc_monitor,
 )
+from lmcache.v1.mp_observability.otel_init import shutdown_grpc_otel_metrics
 from lmcache.v1.mp_observability.trace import maybe_initialize_trace_recorder
 from lmcache.v1.multiprocess.config import (
     DEFAULT_COORDINATOR_CONFIG,
@@ -53,6 +57,7 @@ from lmcache.v1.multiprocess.engine_module import (
     EngineModule,
     ModuleBuildContext,
     discover_modules,
+    modules_for_service,
     order_modules,
 )
 from lmcache.v1.multiprocess.ext_server_module import (
@@ -67,6 +72,13 @@ from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.ipc_policy import set_isolated_ipc
+from lmcache.v1.transport.zmq import ZMQ_MIGRATION_DOC_URL
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
+        GrpcMultiprocessServerBase,
+    )
 
 logger = init_logger(__name__)
 
@@ -81,20 +93,32 @@ class MPCacheServer:
     Args:
         context: The shared engine context.
         modules: Engine modules in construction and handler-registration order.
+        p2p_server: Independent peer listener owned by this engine lifecycle.
     """
 
     def __init__(
         self,
         context: MPCacheServerContext,
         modules: list[EngineModule],
+        p2p_server: GrpcMultiprocessServerBase | None = None,
     ) -> None:
         self._context = context
         self._modules = modules
+        self._p2p_server = p2p_server
 
     @property
     def context(self) -> MPCacheServerContext:
         """Return the shared engine context."""
         return self._context
+
+    @property
+    def mq_port(self) -> int:
+        """Return the independent peer listener port, or zero when disabled."""
+        return self._p2p_server.bound_port if self._p2p_server is not None else 0
+
+    def attach_p2p_server(self, p2p_server: GrpcMultiprocessServerBase) -> None:
+        """Attach an already built peer listener; ``close`` then owns it."""
+        self._p2p_server = p2p_server
 
     def report_status(self) -> dict:
         """Return an aggregated status dict from all modules.
@@ -118,6 +142,8 @@ class MPCacheServer:
 
     def close(self) -> None:
         """Close modules in reverse build order, then release shared resources."""
+        if self._p2p_server is not None:
+            self._p2p_server.close(wait=True)
         for module in reversed(self._modules):
             module.close()
         self._context.close()
@@ -299,6 +325,44 @@ def run_cache_server(
         If return_engine is True: tuple of (request server, MPCacheServer).
         If return_engine is False: None (blocks until interrupted).
     """
+    try:
+        server, engine, event_bus = _start_cache_server(
+            mp_config,
+            storage_manager_config,
+            obs_config,
+            start_prometheus_http_server,
+            coordinator_config,
+        )
+    except BaseException:
+        # The gRPC metrics plugin's export thread isn't a daemon, so the
+        # process couldn't exit after a failed start.
+        shutdown_grpc_otel_metrics()
+        raise
+
+    if return_engine:
+        return server, engine
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Shutting down server...")
+        event_bus.stop()
+        server.close()
+        engine.close()
+    finally:
+        shutdown_gc_monitor()
+        shutdown_grpc_otel_metrics()
+    return None
+
+
+def _start_cache_server(
+    mp_config: MPServerConfig,
+    storage_manager_config: StorageManagerConfig,
+    obs_config: ObservabilityConfig,
+    start_prometheus_http_server: bool,
+    coordinator_config: CoordinatorConfig,
+) -> tuple[RequestServer, MPCacheServer, EventBus]:
     # Before any event IPC backend is resolved (KV-cache registration), so
     # the setting is observed by every resolver in this process.
     set_isolated_ipc(mp_config.isolated_ipc)
@@ -334,7 +398,21 @@ def run_cache_server(
         mem_cfg = storage_manager_config.l1_manager_config.memory_config
         if mp_config.shm_name is not None:
             mem_cfg.shm_name = mp_config.shm_name
-        if mem_cfg.shm_name and sys.platform.startswith("linux"):
+        if mem_cfg.shm_name and (mem_cfg.use_lazy or mem_cfg.devdax_path):
+            # _compute_shm_pool_info advertises an empty pool for these
+            # combinations; warn here where the operator's explicit
+            # --shm-name intent is still visible.
+            logger.warning(
+                "--shm-name %r is set but SHM transfer is disabled: %s. "
+                "Engine-driven workers will fall back to pickle transfers.",
+                mem_cfg.shm_name,
+                "lazy L1 allocation cannot back a named SHM segment "
+                "(--l1-use-lazy defaults to on; pass --no-l1-use-lazy)"
+                if mem_cfg.use_lazy
+                else "a devdax-backed L1 cannot back a named SHM segment "
+                "(unset --l1-devdax-path)",
+            )
+        elif mem_cfg.shm_name and sys.platform.startswith("linux"):
             logger.info("Checking if shm capacity is larger than L1 request")
             try:
                 free_bytes = shutil.disk_usage("/dev/shm").free
@@ -370,59 +448,80 @@ def run_cache_server(
     )
 
     components = _build_server_components(ctx, mp_config, coordinator_config)
-    engine = MPCacheServer(ctx, components.modules)
+    with ExitStack() as startup_resources:
+        # Registered before the peer listener is built, so a bind failure still
+        # releases the modules and the context.
+        engine = MPCacheServer(ctx, components.modules)
+        startup_resources.callback(engine.close)
 
-    InitializeMPUsageContext(mp_config, storage_manager_config)
-    continuous_usage = InitializeMPContinuousUsage(event_bus, ctx.chunk_size)
-    if continuous_usage is not None:
-        ctx.add_chunk_size_bind_listener(continuous_usage.update_chunk_size)
-    if coordinator_config.url:
+        p2p_server = None
+        if mp_config.p2p_config.enabled:
+            # First Party
+            from lmcache.v1.distributed.p2p import P2PClient
+            from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
+                build_grpc_request_server,
+            )
 
-        def bind_chunk_size_to_coordinator(chunk_size: int) -> None:
-            bind_coordinator_chunk_size(coordinator_config.url, chunk_size)
+            p2p_server = build_grpc_request_server(
+                modules_for_service(components.modules, "p2p"),
+                replace(mp_config, port=mp_config.p2p_config.rpc_port),
+                rpc_client=P2PClient,
+            )
+            engine.attach_p2p_server(p2p_server)
 
-        ctx.add_chunk_size_bind_listener(bind_chunk_size_to_coordinator)
-    InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
-    InitializeL1Usage(event_bus, ctx.storage_manager)
+        InitializeMPUsageContext(mp_config, storage_manager_config)
+        continuous_usage = InitializeMPContinuousUsage(event_bus, ctx.chunk_size)
+        if continuous_usage is not None:
+            ctx.add_chunk_size_bind_listener(continuous_usage.update_chunk_size)
+        if coordinator_config.url:
 
-    transport = mp_config.transport
-    server: RequestServer = create_request_server(
-        components.modules,
-        mp_config,
-    )
+            def bind_chunk_size_to_coordinator(chunk_size: int) -> None:
+                bind_coordinator_chunk_size(
+                    coordinator_config.url,
+                    chunk_size,
+                    api_key_files=mp_config.api_key_files,
+                )
 
-    logger.info(
-        "LMCache %s cache server is running on %s:%d",
-        transport,
-        mp_config.host,
-        mp_config.port,
-    )
+            ctx.add_chunk_size_bind_listener(bind_chunk_size_to_coordinator)
+        InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
+        InitializeL1Usage(event_bus, ctx.storage_manager)
 
-    if not hasattr(torch_dev, "init"):
-        logger.warning(
-            "Backend '%s' does not support init(), skipping device init",
-            torch_device_type,
+        transport = mp_config.transport
+        if transport == "zmq":
+            logger.warning(
+                "The zmq request transport is deprecated and will be removed "
+                "in a future release. Start the server with --transport grpc "
+                "and point clients at grpc://host:port. See %s",
+                ZMQ_MIGRATION_DOC_URL,
+            )
+        server: RequestServer = create_request_server(
+            modules_for_service(components.modules, "worker"),
+            mp_config,
         )
-    else:
-        torch_dev.init()
-    server.start()
+        startup_resources.callback(server.close)
+
+        logger.info(
+            "LMCache %s cache server is running on %s:%d",
+            transport,
+            mp_config.host,
+            mp_config.port,
+        )
+
+        if not hasattr(torch_dev, "init"):
+            logger.warning(
+                "Backend '%s' does not support init(), skipping device init",
+                torch_device_type,
+            )
+        else:
+            torch_dev.init()
+        server.start()
+        if p2p_server is not None:
+            p2p_server.start()
+        startup_resources.pop_all()
 
     logger.info("LMCache cache server is running...")
 
-    if return_engine:
-        return server, engine
-
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Shutting down server...")
-        event_bus.stop()
-        server.close()
-        engine.close()
-    finally:
-        shutdown_gc_monitor()
-    return None
+    return server, engine, event_bus
 
 
 def parse_args():

@@ -18,12 +18,16 @@ StoreController / PrefetchController
         RawBlockL2Adapter
                 |
                 v
-           RawBlockCore
-      (index, locks, slots, checkpoints)
+          RawBlockCore
+       (index, locks, slots, checkpoints)
                 |
                 v
-         lmcache_rust_raw_block_io
-      (pwrite_from_buffer / pread_into)
+          RawBlockIO engine
+         (posix / io_uring)
+                |
+                v
+          lmcache_rust_raw_block_io
+       (pwrite_from_buffer / pread_into)
                 |
                 v
          raw block device / file
@@ -89,14 +93,24 @@ The implementation is split into:
 - `RawBlockL2Adapter` in `lmcache/v1/distributed/l2_adapters/`
 - `RustRawBlockBackend` as the legacy non-MP wrapper
 
-`RawBlockCore` owns the durable state and blocking I/O:
+`RawBlockCore` owns the durable state and orchestrates I/O through a pluggable
+`RawBlockIO` engine:
 
 - raw device open/close
 - in-memory key index
 - free-slot tracking
 - lock refcounts used by MP lookup/load/unlock
 - metadata checkpointing and recovery
-- direct reads and writes through the Rust binding
+
+The low-level "direct reads and writes through the Rust binding" responsibility
+lives in the `RawBlockIO` engine so storage and transfer behavior stays behind a
+single interface. `PosixBlockIO` implements synchronous `pread`/`pwrite` for
+`io_engine="posix"`; `IoUringBlockIO` implements batched io_uring reads/writes for
+`io_engine="io_uring"`, including optional NVMe raw-command (`use_uring_cmd`)
+passthrough. `RawBlockCore` holds one `RawBlockIO` instance and leases buffers
+through its `lease_buffer` / `lease_buffers` context managers, so callers never
+touch the engine's buffer primitives directly. This keeps the durable-state logic
+in one place while letting the I/O strategy be swapped without touching the core.
 
 This avoids maintaining separate raw-block implementations for MP and non-MP
 mode.
@@ -121,7 +135,11 @@ after completion progress or exponential backoff from 1 to 100 ms. Permanent
 errors, or 30 seconds without submission or completion progress, stop new
 native I/O admission. `RawBlockCore.report_status()` then reports
 `is_healthy=False` and the terminal reason in `worker_error`. An ordinary
-per-request I/O error does not mark the worker as failed.
+per-request I/O error does not mark the worker as failed. On a confirmed NVMe
+unrecovered payload read, the core quarantines the physical slot until close,
+invalidates its owner and keeps successful sibling keys in the load bitmap.
+The prefetch controller combines available tiers and applies the request’s
+fetching policy. A full-attention prefix ends at the first missing chunk.
 
 An open adapter reports a known worker failure through its task results, not
 through a synchronous exception from `submit_*`. It allocates a task ID and
@@ -221,6 +239,12 @@ Important validation rules:
 - with `use_odirect=true`, raw-block I/O rejects offsets and total I/O lengths
   that are not aligned to `block_align`; misaligned write buffers use an
   aligned bounce buffer
+- with `io_engine="io_uring"` and `enable_zero_copy=true`, a payload that is
+  not a multiple of `block_align` (for example after AES-GCM serde) is
+  transferred straight from its L1 allocation when that allocation covers the
+  aligned length, which the L1 alignment rule above guarantees for L1 objects.
+  Writes zero the padding after the payload in place; objects without such
+  padding keep the bounce buffer
 
 ## Relationship to Non-MP Mode
 
@@ -232,5 +256,6 @@ while the MP adapter uses the core's full-bitmap lookup/load API.
 
 - Implementation: `lmcache/v1/distributed/l2_adapters/raw_block_l2_adapter.py`
 - Shared core: `lmcache/v1/distributed/l2_adapters/raw_block/core.py`
+- I/O engine: `lmcache/v1/distributed/l2_adapters/raw_block/io_engine.py`
 - User docs: `docs/source/mp/l2_storage/raw_block.rst`
 - Rust device layer: `rust/raw_block/README.md`

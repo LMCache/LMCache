@@ -3,7 +3,7 @@
 import socket
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 
@@ -14,7 +14,8 @@ def get_ip():
 
     Kept here because it is used by the multiprocess coordinator; the ZMQ
     helpers and IPC socket-path builder moved to
-    ``lmcache.inprocess.v1.rpc_utils``.
+    ``lmcache.inprocess.v1.rpc_utils`` in the external LMCache_inprocess
+    package.
     """
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:

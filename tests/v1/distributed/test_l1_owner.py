@@ -13,7 +13,7 @@ import torch
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
     PagedTensorMemoryAllocator,
 )
@@ -27,7 +27,7 @@ from lmcache.v1.memory_management import (
 
 
 @pytest.fixture
-def managers() -> Iterator[tuple[L1Manager, L1Manager]]:
+def managers() -> Iterator[tuple[DramL1Manager, DramL1Manager]]:
     """Keep real L1 lifecycle/allocation, replacing only CPU pinning calls."""
     with (
         patch(
@@ -43,7 +43,7 @@ def managers() -> Iterator[tuple[L1Manager, L1Manager]]:
                 size_in_bytes=4096, use_lazy=False, align_bytes=64, shm_name=""
             )
         )
-        first, second = L1Manager(config), L1Manager(config)
+        first, second = DramL1Manager(config), DramL1Manager(config)
         try:
             yield first, second
         finally:
@@ -52,7 +52,7 @@ def managers() -> Iterator[tuple[L1Manager, L1Manager]]:
 
 
 def test_l1_reservation_owner_survives_prefetch_completion(
-    managers: tuple[L1Manager, L1Manager],
+    managers: tuple[DramL1Manager, DramL1Manager],
 ) -> None:
     """Direct and prefetch reservations stamp the actual L1 before exposure."""
     first, second = managers

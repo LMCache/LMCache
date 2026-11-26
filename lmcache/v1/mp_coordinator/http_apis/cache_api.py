@@ -12,6 +12,10 @@ controller's state, so that controller brings them itself
 (:mod:`lmcache.v1.mp_coordinator.controllers.eviction_http_api`).
 """
 
+# Standard
+from dataclasses import asdict
+from typing import Any
+
 # Third Party
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -37,15 +41,15 @@ router = APIRouter()
 
 @router.post("/cache/prefetches")
 async def request_prefetch(body: PrefetchRequest, request: Request) -> PrefetchResponse:
-    """Submit a warm prefetch of a token sequence on one MP server.
+    """Submit a warm prefetch of keys, or a token sequence, on one MP server.
 
     Resolves ``body.instance_id`` in the registry and proxies to that server's
     ``POST /cache/prefetches``, which submits the load and returns a
     ``request_id``. Poll ``GET /cache/prefetches/{instance_id}/{request_id}``.
 
     Args:
-        body: Target instance, model/world_size, the token_ids to warm, and the
-            per-tenant cache_salt.
+        body: Target instance, and the ``keys`` to warm or model/world_size,
+            the token_ids to warm, and the per-tenant cache_salt.
 
     Returns:
         ``PrefetchResponse`` carrying the server's ``request_id`` (empty when the
@@ -69,10 +73,7 @@ async def request_prefetch(body: PrefetchRequest, request: Request) -> PrefetchR
         result = await prefetch.submit_prefetch(
             target=target,
             http_client=get_outbound_client(request),
-            model_name=body.model_name,
-            world_size=body.world_size,
-            token_ids=body.token_ids,
-            cache_salt=body.cache_salt,
+            body=_forwarded_prefetch_body(body),
         )
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -132,3 +133,23 @@ async def get_prefetch_status(
         ) from None
 
     return JSONResponse(status_code=code, content=payload)
+
+
+def _forwarded_prefetch_body(body: PrefetchRequest) -> dict[str, Any]:
+    """The MP server's ``POST /cache/prefetches`` body for ``body``.
+
+    Carries only the form ``body`` uses: a server without the keys form then
+    rejects a keys request rather than reading empty token fields as a
+    sub-chunk sequence and answering noop.
+    """
+    if body.keys:
+        return {"keys": [asdict(key) for key in body.keys]}
+    forwarded: dict[str, Any] = {
+        "model_name": body.model_name,
+        "world_size": body.world_size,
+        "token_ids": body.token_ids,
+        "cache_salt": body.cache_salt,
+    }
+    if body.tags:
+        forwarded["tags"] = dict(body.tags)
+    return forwarded

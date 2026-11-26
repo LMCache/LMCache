@@ -1,5 +1,48 @@
 # Memory orchestrator
 
+## Private resource pooling
+
+`pooling.py` provides a separate control workflow for existing private L1/L2
+DAX backends. It does not use the shared-region object state machine below.
+`MemoryPoolProvider.acquire/release` manages exclusive physical ranges;
+`MemoryPoolController.grow/shrink` uses the worker's existing HTTP hotplug APIs.
+The deployment supplies a memory-pool provider adapter and invokes the
+controller from its policy loop. Each worker retains its own allocator/index.
+The target tier uses `Tier.L1`/`Tier.L2`; `shrink()` returns
+`ShrinkResult.DRAINING` or `ShrinkResult.RELEASED` rather than a boolean.
+
+```text
+grow:   provider.acquire -> worker hotplug add
+shrink: worker drain/remove -> confirmed unmapped -> provider.release
+```
+
+The controller records grants before attaching. An ambiguous HTTP result
+retains the grant and blocks further automated actions for that request;
+there is no speculative rollback release. A confirmed detached grant survives
+a provider-release failure so a retry does not touch the backend again.
+Provider request IDs include the worker incarnation; the provider must retain
+grants until explicit release and reject reuse of completed request IDs.
+Invalid provider results leave an uncertain request with no validated allocation;
+unrelated requests continue while the failed request remains fenced.
+
+The reconfiguration middleware checks an optional expected worker incarnation
+before dispatch and tags replies. This makes a restarted worker's empty status
+insufficient to release an older worker's memory. After an acknowledged L1
+drain, a repeated remove retries cleanup; a same-instance 404 proves that the
+previous drain already unmapped that range.
+The header and error contract is described in
+[HTTP reconfiguration](../multiprocess/http_reconfigure.md). HTTP status alone
+does not prove that an allocation is unmapped, even for add rejections.
+L2 removal uses non-forced eviction and requires successful strict DAX close;
+an unmap error cannot certify removal. Backend code already publishes capacity
+changes. Controllers serialize their own operations; deployments must not
+concurrently mutate their ranges through another controller or manual hotplug.
+
+The controller and its HTTP client have deployment-owned lifetimes. No worker
+agent, scheduler, new RPC protocol, persistent journal or automatic restart
+recovery is added. On controller loss, fence the worker and reconcile retained
+provider grants offline. See the MP private-memory-pooling guide for usage.
+
 ## Scope
 
 `lmcache memory` is one process per shared memory region. It owns the
@@ -73,6 +116,7 @@ explicit wire contract rather than being inferred from Python field order.
 | `FinishWrite` / `AbortWrite` | tokens: `WRITING` to `VALID` / to `CONSUMED` (the extent is never reused) |
 | `ReserveRead` / `FinishRead` | per key: `READ_GRANTED` (handle, layout, leases), `MISS`, `BUSY_WRITING`; release leases |
 | `Usage`, `CloseClient` | counters; retire this incarnation |
+| `DeleteObjects` / `DeletePublished` | per key: `DELETED`, `MISS`, `BUSY_WRITING` / every `VALID` object written under the caller's `client_id`: `VALID` to `CONSUMED`; leases already issued stay releasable |
 
 These RPCs sit below `L1ManagerInterface`. The shared L1 binding will translate
 its existing key-based calls: write keys and `MemoryLayoutDesc` become entries
@@ -88,20 +132,23 @@ client/region envelope; the binding retains them behind the local L1 API.
 
 ```text
               ReserveWrite               FinishWrite
-(no object) ---------------> WRITING -----------------> VALID (terminal here:
-                                |                       no eviction or reuse)
-                                |
-                                |  Write expiry, AbortWrite, CloseClient, or
-                                |  the writer registering again (new incarnation)
-                                v
-                            CONSUMED
+(no object) ---------------> WRITING -----------------> VALID
+                                |                         |
+                                |  Write expiry,          |  DeleteObjects,
+                                |  AbortWrite,            |  DeletePublished
+                                |  CloseClient, or the    |
+                                |  writer registering     |
+                                |  again                  |
+                                v                         |
+                            CONSUMED <--------------------+
             record dropped, extent never reused; a later store
             of the key gets a new extent
 ```
 
 A client sends `FinishWrite` only once its copies into the extent are complete
-and visible to other hosts; reads are granted on `VALID` only, and `VALID` is
-terminal here. A write reservation expires after `--write-ttl-seconds`
+and visible to other hosts; reads are granted on `VALID` only, and `VALID`
+leaves only through a delete, which hides the key without reclaiming the
+extent. A write reservation expires after `--write-ttl-seconds`
 (default 600). Key and write-token access lazily consume expired reservations
 under the state lock. Their tokens become stale and a later store gets a fresh
 extent. Usage counters reflect expiry once processed; idle records are not
@@ -164,11 +211,10 @@ flow, replay, startup marker, batch splitting and rollback).
 
 ## Follow-ups
 
-External eviction needs a delete/eviction RPC in the reclamation follow-up.
-A metadata-only delete could hide a key, but would not recover capacity with
-this monotonic allocator. Extent reuse needs coordinated reader/writer
-retirement and protection against late accesses; this PR keeps committed
-objects immutable rather than offering a delete that implies reclamation.
+`DeleteObjects` and `DeletePublished` hide keys but recover no capacity: the
+allocator stays monotonic, so a delete never implies reclamation. Eviction and
+extent reuse need coordinated reader/writer retirement and protection against
+late accesses.
 
 Read lease TTL and client fencing (`Renew`, quarantine of orphaned extents);
 reclamation and eviction (`RequestEvict`, `VALID -> EVICTING -> FREE`,

@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from lmcache.v1.memory_management import MemoryObj
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 
@@ -225,6 +225,10 @@ class L2AdapterInterface(ABC):
 
         Returns:
             L2TaskId: the task id of the submitted store task.
+
+        Notes:
+            Upstream modules may enrich ``ObjectKey.extra_attributes`` before
+            dispatch; L2 adapters should not mutate it.
         """
         pass
 

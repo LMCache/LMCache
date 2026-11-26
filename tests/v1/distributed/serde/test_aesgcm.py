@@ -2,7 +2,7 @@
 """Tests for the AES-GCM encryption serde.
 
 These use a byte-buffer stand-in exposing ``.byte_array`` so they do not need
-an L1Manager or GPU; they verify the pure transform + factory wiring through
+an BaseL1Manager or GPU; they verify the pure transform + factory wiring through
 the public interface.
 """
 
@@ -151,6 +151,53 @@ def test_wrong_tenant_key_fails():
     with pytest.raises(InvalidTag):
         deserializer.deserialize(
             _ByteBuf(bytearray(frame)), _ByteBuf(bytearray(120)), _key("bob")
+        )
+
+
+@pytest.mark.parametrize(
+    "field_change",
+    [
+        {"chunk_hash": b"\x22" * 32},
+        {"model_name": "other-model"},
+        {"kv_rank": 1},
+        {"object_group_id": 1},
+        {"tags": {"lora": "a"}},
+    ],
+)
+def test_frame_bound_to_object_key(field_change):
+    """A frame loaded under a key other than its own, with the same salt,
+    fails authentication instead of loading as that key's KV."""
+    serializer, deserializer = _serde()
+    plaintext = b"kv-for-chunk-a" * 8
+    frame = _encrypt(serializer, plaintext, _key())
+    other = ObjectKey(identity=_key().identity, **field_change)
+    with pytest.raises(InvalidTag):
+        deserializer.deserialize(
+            _ByteBuf(bytearray(frame)), _ByteBuf(bytearray(len(plaintext))), other
+        )
+
+
+def test_extra_attributes_not_bound():
+    """Request-scoped ``extra_attributes`` are not part of the object identity,
+    so they do not affect loading."""
+    serializer, deserializer = _serde()
+    plaintext = b"kv" * 64
+    frame = _encrypt(serializer, plaintext, _key())
+    loaded = ObjectKey(identity=_key().identity, extra_attributes={"request": 1})
+    dst = _ByteBuf(bytearray(len(plaintext)))
+    deserializer.deserialize(_ByteBuf(bytearray(frame)), dst, loaded)
+    assert bytes(dst.buf) == plaintext
+
+
+def test_version_1_frame_rejected():
+    """Frames in the previous format (version 1) are rejected."""
+    serializer, deserializer = _serde()
+    plaintext = b"old" * 40
+    frame = bytearray(_encrypt(serializer, plaintext, _key()))
+    frame[0] = 1
+    with pytest.raises(ValueError):
+        deserializer.deserialize(
+            _ByteBuf(frame), _ByteBuf(bytearray(len(plaintext))), _key()
         )
 
 

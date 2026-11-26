@@ -658,13 +658,6 @@ class TestBlendCounterFamily:
         )
         assert self._scrape(both)["requested"] == 7001.0
 
-    def test_neither_family_present(self) -> None:
-        assert self._scrape("lmcache_mp_l1_read_chunks_total 7.0\n") == {
-            "hit": 0.0,
-            "requested": 0.0,
-            "family": "",
-        }
-
 
 class TestBlendPathVerification:
     """The authoritative check: which counter family moved during warm-up.

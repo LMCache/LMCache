@@ -4,8 +4,8 @@
 ``detect_format`` normalizes a raw ``kv_caches`` and discovers its
 ``EngineKVFormat``. These cases feed canonical (already-normalized)
 structures plus the engine and layout hints, and assert the detected
-format -- covering the vLLM NHD/HND branch, the SGLang depth-1/depth-2
-branch, and the TRT-LLM cross-layer branch.
+format -- covering the vLLM NHD/HND branch, the unified SGLang branch,
+and the TRT-LLM cross-layer branch.
 """
 
 # Standard
@@ -16,11 +16,9 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
-from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format import detect_format, extract_kv_cache_shapes
-from lmcache.v1.gpu_connector.kv_format.detectors import vllm as vllm_detector
-from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
+from lmcache.v1.common.custom_types import EngineType
+from lmcache.v1.common.kv_format import detect_format, extract_kv_cache_shapes
+from lmcache.v1.common.kv_format.detectors import vllm as vllm_detector
 import lmcache.lmcache_native as lmcache_native
 
 NB, NL, BS, NH, HS = 7, 5, 3, 2, 4
@@ -40,21 +38,13 @@ def test_vllm_cross_layer():
     assert out.data_ptr() == kv.data_ptr()
 
 
-# The CPU-HND safeguard forces HND regardless of hint when running on a CPU
-# host; bypass it so the hint-driven NHD/HND branch is exercised on any host.
-_VLLM_DEV = "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type"
-_MOCK_DEVICE_TYPE = "cuda" if torch_device_type == "cpu" else torch_device_type
-
-
-def test_vllm_flash_attn_hnd(monkeypatch):
-    monkeypatch.setattr(_VLLM_DEV, _MOCK_DEVICE_TYPE)
+def test_vllm_flash_attn_hnd():
     kv = [_t(2, NB, BS, NH, HS) for _ in range(NL)]
     fmt_hnd, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "HND"})
     assert fmt_hnd == F.NL_X_TWO_NB_NH_BS_HS
 
 
-def test_vllm_flash_infer_nhd(monkeypatch):
-    monkeypatch.setattr(_VLLM_DEV, _MOCK_DEVICE_TYPE)
+def test_vllm_flash_infer_nhd():
     kv = [_t(NB, 2, BS, NH, HS) for _ in range(NL)]
     fmt, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
     assert fmt == F.NL_X_NB_TWO_BS_NH_HS
@@ -67,11 +57,10 @@ def test_vllm_mla():
 
 
 @pytest.mark.parametrize("hint", [{}, {"kv_layout": "NHD"}, {"kv_layout": "HND"}])
-def test_vllm_rbln_native_singleton_axis(monkeypatch, hint):
+def test_vllm_rbln_native_singleton_axis(hint):
     # vLLM-RBLN's 6-D HND layout is its own format, so it is detected from the
     # shape alone on any host and whatever the hint says (vLLM-RBLN reports no
     # layout, and the format is HND by definition).
-    monkeypatch.setattr(_VLLM_DEV, "cuda")
     kv = [_t(2, NB, NH, 1, BS, HS) for _ in range(NL)]
     with patch.object(vllm_detector.logger, "warning") as mock_warning:
         fmt, out = detect_format(kv, EngineType.VLLM, hint)
@@ -82,11 +71,10 @@ def test_vllm_rbln_native_singleton_axis(monkeypatch, hint):
     assert out[0].data_ptr() == kv[0].data_ptr()
 
 
-def test_vllm_rbln_num_blocks_2_keeps_kv_first_reading(monkeypatch):
+def test_vllm_rbln_num_blocks_2_keeps_kv_first_reading():
     # [2, 2, NH, 1, BS, HS] fits both RBLN layouts; the K/V-first reading wins
     # and the ambiguity is logged. LMCache loggers do not propagate, so the
     # module logger is patched instead of using caplog.
-    monkeypatch.setattr(_VLLM_DEV, "cuda")
     kv = [_t(2, 2, NH, 1, BS, HS) for _ in range(NL)]
     with patch.object(vllm_detector.logger, "warning") as mock_warning:
         fmt, _ = detect_format(kv, EngineType.VLLM, {})
@@ -94,35 +82,27 @@ def test_vllm_rbln_num_blocks_2_keeps_kv_first_reading(monkeypatch):
     mock_warning.assert_called_once()
 
 
-def test_vllm_blocks_first_fused_num_heads_2(monkeypatch):
+def test_vllm_blocks_first_fused_num_heads_2():
     # Raw 4-D [NB, NH, BS, 2*HS] with NH == 2 (a common GQA config): a 5-D
     # split would make the K/V axis and the head axis both equal 2, ambiguous
     # with flash-infer. Detection must use the rank-4 shape to land on the
     # content-size format, and keep the tensor raw.
-    monkeypatch.setattr(_VLLM_DEV, _MOCK_DEVICE_TYPE)
     raw = [_t(NB, 2, BS, 2 * HS) for _ in range(NL)]
     fmt, out = detect_format(raw, EngineType.VLLM, {"kv_layout": "HND"})
     assert fmt == F.NL_X_NB_NH_BS_CS
     assert tuple(out[0].shape) == (NB, 2, BS, 2 * HS)
 
 
-def test_vllm_blocks_first_fused_hnd(monkeypatch):
-    monkeypatch.setattr(_VLLM_DEV, _MOCK_DEVICE_TYPE)
+def test_vllm_blocks_first_fused_hnd():
     raw_hnd = [_t(NB, NH, BS, 2 * HS) for _ in range(NL)]
     fmt_hnd, _ = detect_format(raw_hnd, EngineType.VLLM, {"kv_layout": "HND"})
     assert fmt_hnd == F.NL_X_NB_NH_BS_CS
 
 
-def test_sglang_mla_depth1():
-    kv = [_t(NB * BS, 1, HS) for _ in range(NL)]
-    fmt, _ = detect_format(kv, EngineType.SGLANG, {})
-    assert fmt == F.NL_X_NBBS_ONE_HS
-
-
 def test_sglang_unified_components_keep_explicit_block_geometry() -> None:
     kv = [_t(NB, BS, NH, HS) for _ in range(2 * NL)]
 
-    fmt, out = detect_format(kv, EngineType.SGLANG, {"kv_list_layout": "unified"})
+    fmt, out = detect_format(kv, EngineType.SGLANG)
 
     assert fmt == F.NL_X_NB_BS_NH_HS
     assert isinstance(out, list)
@@ -133,53 +113,12 @@ def test_sglang_unified_components_keep_explicit_block_geometry() -> None:
 def test_sglang_unified_mla_keeps_single_latent_plane() -> None:
     kv = [_t(NB, BS, HS) for _ in range(NL)]
 
-    fmt, out = detect_format(kv, EngineType.SGLANG, {"kv_list_layout": "unified"})
+    fmt, out = detect_format(kv, EngineType.SGLANG)
 
     assert fmt == F.NL_X_NB_BS_HS
     assert isinstance(out, list)
     assert isinstance(out[0], torch.Tensor)
     assert tuple(out[0].shape) == (NB, BS, HS)
-
-
-def test_sglang_mha_depth2_fused():
-    kv = [[_t(NB * BS, NH, HS) for _ in range(NL)] for _ in range(2)]
-    fmt, _ = detect_format(kv, EngineType.SGLANG, {})
-    assert fmt == F.TWO_X_NL_X_NBBS_NH_HS
-
-
-def test_sglang_mha_mp_reshape():
-    # MP path: flat list of 2*NL 3-D tensors + explicit split-K/V and
-    # tokens-per-block hints; detection should un-flatten + reshape to the
-    # 4-D inner MP format.
-    if not hasattr(F, "TWO_X_NL_X_NB_BS_NH_HS"):
-        pytest.skip("extension lacks TWO_X_NL_X_NB_BS_NH_HS")
-    flat = [_t(NB * BS, NH, HS) for _ in range(2 * NL)]
-    hints = {"tokens_per_block": BS, "kv_list_layout": "k_v"}
-    fmt, out = detect_format(flat, EngineType.SGLANG, hints)
-    assert fmt == F.TWO_X_NL_X_NB_BS_NH_HS
-    # Canonical depth-2 [K_layers, V_layers], inner reshaped to 4-D.
-    assert len(out) == 2 and len(out[0]) == NL
-    assert tuple(out[0][0].shape) == (NB, BS, NH, HS)
-
-
-def test_sglang_mha_mp_single_head_is_not_mla() -> None:
-    """TP may reduce split K/V to one head without changing its MHA layout."""
-    flat = [_t(NB * BS, 1, HS) for _ in range(2 * NL)]
-    hints: LayoutHints = {"tokens_per_block": BS, "kv_list_layout": "k_v"}
-    fmt, out = detect_format(flat, EngineType.SGLANG, hints)
-    assert fmt == F.TWO_X_NL_X_NB_BS_NH_HS
-    assert isinstance(out, list)
-    assert isinstance(out[0], list)
-    assert isinstance(out[0][0], torch.Tensor)
-    assert tuple(out[0][0].shape) == (NB, BS, 1, HS)
-
-
-def test_sglang_mha_mp_rejects_non_divisible_page_buffer() -> None:
-    """Split K/V registration rejects invalid paged-buffer geometry."""
-    flat = [_t(NB * BS + 1, 1, HS) for _ in range(2 * NL)]
-    hints: LayoutHints = {"tokens_per_block": BS, "kv_list_layout": "k_v"}
-    with pytest.raises(ValueError, match="not divisible"):
-        detect_format(flat, EngineType.SGLANG, hints)
 
 
 def test_trtllm_cross_layer_6d():

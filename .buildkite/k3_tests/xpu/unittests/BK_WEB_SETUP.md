@@ -3,7 +3,7 @@
 **Steps editor**: paste the contents of `buildkite-pipeline.yml`.
 
 **GitHub trigger settings**:
-- Filter: `build.pull_request.labels includes "xpu" || build.pull_request.labels includes "full" || build.branch == 'dev'`
+- Filter: `build.pull_request.labels includes "xpu" || build.pull_request.labels includes "full"`
 - Rebuild on PR label change: Yes
 - Skip queued / cancel running branch builds: Yes
 
@@ -42,9 +42,9 @@ needs the compiler environment.
 
 The verifier triggers the existing `unit-tests-xpu` and `xpu-mp-test` Buildkite
 pipelines with `branch: xpu-nightly` and the exact GitHub Actions source commit.
-This separates nightly builds from `dev` builds when Buildkite skips queued or
-cancels running builds on the same branch; it does not require a separate
-nightly pipeline or checkout of an `xpu-nightly` Git branch. Configure
+This separates nightly builds from ordinary PR builds when Buildkite skips
+queued or cancels running builds on the same branch; it does not require a
+separate nightly pipeline or checkout of an `xpu-nightly` Git branch. Configure
 `BUILD_KITE_API_TOKEN` as a secret with `read_builds` and `write_builds` scopes.
 The existing `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` must be able to push to
 the public `lmcache/vllm-openai-xpu-ci` repository; XPU nodes must be able to
@@ -55,12 +55,12 @@ GitHub Actions must be able to update `buildkite_latest_tested_vllm`.
 
 ### Trigger strategy
 
-The XPU pipeline is intentionally lightweight, so it is label/branch gated:
+The XPU pipeline is label-gated for PRs:
 
 | Condition | Result |
 |-----------|--------|
+| PR label includes `xpu` | upload the XPU pipeline |
 | PR label includes `full` | upload the XPU pipeline |
-| branch is `dev` | upload the XPU pipeline |
 | any docs/asset-only change | path filter skips upload |
 | any change under `.buildkite/` | path filter forces upload |
 

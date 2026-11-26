@@ -388,6 +388,7 @@ async def test_execute_evictions_dispatches_to_registered_instance():
                 "kv_rank": 0,
                 "object_group_id": 0,
                 "cache_salt": "alice",
+                "tags": {},
             }
         ]
     }
@@ -633,7 +634,8 @@ def test_list_pins_reflects_unpin_and_drop():
     ctrl, _, _ = _setup()
     k1 = _make_key("a", h="01")
     k2 = _make_key("a", h="02")
-    ctrl.pin([k1, k1, k2])
+    ctrl.pin([k1, k2])
+    ctrl.pin([k1])
 
     ctrl.unpin([k1])
     assert ctrl.list_pins("", "", 0, 10) == (2, [PinnedKey(k1, 1), PinnedKey(k2, 1)])
@@ -999,3 +1001,59 @@ def test_restored_pins_on_other_groups_merge_into_one_entry():
     assert ctrl.filter_unpinned([k]) == []  # one of the two pins remains
     ctrl.unpin([k])
     assert ctrl.filter_unpinned([k]) == [k]
+
+
+# -- Pins across ranks ----------------------------------------------------------
+#
+# A TP=2 chunk is stored once per rank. A pin on any rank's key covers every
+# rank of that world size: otherwise eviction or a delete could take one rank's
+# share and leave the pinned chunk unusable.
+
+
+def _on_rank(key: ObjectKey, world_size: int, rank: int) -> ObjectKey:
+    kv_rank = ObjectKey.ComputeKVRank(world_size, rank, world_size, rank)
+    return replace(key, identity=replace(key.identity, kv_rank=kv_rank))
+
+
+def test_a_pin_covers_its_chunk_on_every_rank_of_its_world_size():
+    ctrl, _, kd = _setup(eviction_ratio=1.0)
+    k = _make_key("a")
+    rank0, rank1 = _on_rank(k, 2, 0), _on_rank(k, 2, 1)
+    other_setup = _on_rank(k, 1, 0)
+    for key in (rank0, rank1, other_setup):
+        _store(ctrl, kd, key, 100)
+
+    ctrl.pin([rank0])
+
+    assert ctrl.compute_eviction_plan()["a"] == [other_setup]
+    assert ctrl.filter_unpinned([rank1, other_setup]) == [other_setup]
+
+
+def test_one_pin_call_counts_each_chunk_once():
+    """A tokens-form pin at TP=2 names each chunk once per rank; it counts
+    once, so one unpin, by any rank's key, releases it."""
+    ctrl, _, _ = _setup()
+    rank0, rank1 = _on_rank(_make_key("a"), 2, 0), _on_rank(_make_key("a"), 2, 1)
+
+    ctrl.pin([rank0, rank1])
+    ctrl.unpin([rank1])
+
+    assert ctrl.filter_unpinned([rank0, rank1]) == [rank0, rank1]
+
+
+def test_restored_per_rank_pins_load_as_one_pin():
+    """A table saved while pins were per rank holds one entry per rank of a
+    chunk, written by the same pin calls; they load as one pin, not their sum,
+    so the matching unpins still release it."""
+    source, _, _ = _setup()
+    rank0, rank1 = _on_rank(_make_key("a"), 2, 0), _on_rank(_make_key("a"), 2, 1)
+    source.pin([rank0])
+    entry = dict(source.capture()["entries"][0])
+    rank1_entry = {**entry, "key": {**entry["key"], "kv_rank": rank1.kv_rank}}
+
+    ctrl, _, _ = _setup()
+    ctrl.restore({"entries": [entry, rank1_entry]})
+
+    assert ctrl.list_pins("", "", 0, 10)[0] == 1
+    ctrl.unpin([rank0])
+    assert ctrl.filter_unpinned([rank1]) == [rank1]

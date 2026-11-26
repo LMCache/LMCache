@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.token_hasher import (
+from lmcache.v1.common.token_hasher import (
     TokenHasher,
     chunk_hash_windows_numba,
     rolling_hash_windows_numba,

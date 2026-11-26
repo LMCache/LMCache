@@ -34,7 +34,9 @@ the Rust wheel's version, so pin it yourself to guarantee a matching pair:
 - ``meta_magic`` / ``meta_version``: Metadata checkpoint identity/version knobs.
 - ``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` /
   ``meta_enable_periodic`` / ``meta_verify_on_load``: Checkpoint and recovery
-  controls carried over from the legacy raw-block backend.
+  controls carried over from the legacy raw-block backend. A periodic
+  checkpoint waits for ``meta_idle_quiet_ms`` without I/O, but not for more
+  than one extra interval, so steady traffic cannot hold it off.
 - ``load_checkpoint_on_init``: Load an existing on-device metadata checkpoint
   during startup (default ``true``). Set to ``false`` to start with an empty
   in-memory index instead.
@@ -227,6 +229,10 @@ direct-buffer I/O.
 
 **Configuration examples:**
 
+Pass these L2 options to ``lmcache server``. For a server on
+``127.0.0.1:5555``, use the MP client endpoint ``grpc://127.0.0.1:5555``.
+A bare ``127.0.0.1:5555`` also selects the default gRPC request transport.
+
 .. code-block:: bash
 
     # Basic raw_block with posix I/O
@@ -257,6 +263,34 @@ retry after completion progress or 1–100 ms exponential backoff. Permanent
 errors, or 30 seconds without submission or completion progress, mark the
 worker unhealthy and stop new native I/O. The core status exposes the failure
 reason as ``worker_error``.
+
+On an initialized MP adapter with ``io_engine="io_uring"`` and
+``use_uring_cmd=true``, a read completion with NVMe SCT 2 / SC 0x81
+confirms an Unrecovered Read Error (UECC). The status mask ignores CRD,
+More and DNR. POSIX and ordinary ``io_uring`` surface Linux errors and
+retain per-request handling.
+
+Slot quarantine requires a matching raw-block wheel with typed completion
+errors. Older wheels report failed reads as per-request misses.
+
+On a confirmed UECC while loading a cached payload, the core quarantines
+the affected data slot until the handle closes. Lookup and load miss for
+the slot's key. The worker keeps serving other slots, including successful
+keys in the same load. A later store can cache the recomputed key in a
+different slot. Each quarantined slot reduces usable capacity by one slot.
+
+For a full-attention prefix request for A, B and C, if B fails and no
+other tier supplies B, the serving caller gets only A. If A fails, the
+prefix is empty. The prefetch controller applies this rule after combining
+the available tiers. A separate request can still use healthy C.
+
+The core logs the failed byte range and raw NVMe status. The adapter's core
+status exposes ``quarantined_slot_count``, ``last_payload_uecc`` and the
+remaining ``usable_capacity_bytes``. A payload UECC alone leaves the worker
+healthy. Checkpointing continues and records the remaining indexed keys.
+The quarantine set is local to the open handle. After restart the allocator
+can reuse the slot, and an unreadable range can trigger quarantine again.
+Checkpoint and slot-header recovery reads retain their per-request handling.
 
 After a known worker failure, new prefetch tasks report failure through their
 normal task results and new stores are skipped. The adapter still publishes

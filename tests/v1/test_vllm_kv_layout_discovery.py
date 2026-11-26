@@ -176,6 +176,20 @@ class TestVllmLayoutHints:
         config = SimpleNamespace(cache_config=LegacyCacheConfig())
         assert vllm_layout_hints(config) == {"kv_layout": "HND"}
 
+    @pytest.mark.parametrize(
+        ("device_type", "expected"),
+        [("cpu", {"kv_layout": "HND"}), ("cuda", {})],
+    )
+    def test_unknown_layout_falls_back_by_device(
+        self, monkeypatch, device_type, expected
+    ):
+        monkeypatch.setattr(
+            "lmcache.integration.vllm.utils.torch_device_type", device_type
+        )
+        monkeypatch.setitem(sys.modules, "vllm", None)
+        monkeypatch.setitem(sys.modules, "vllm.config", None)
+        assert vllm_layout_hints() == expected
+
     def test_unresolved_layout_raises_through_hints(self):
         with pytest.raises(ValueError, match="resolved"):
             vllm_layout_hints(make_unresolved_vllm_config())
@@ -185,22 +199,17 @@ class TestResolveVllmKVLayout:
     @pytest.fixture
     def resolve(self):
         detectors_vllm = pytest.importorskip(
-            "lmcache.v1.gpu_connector.kv_format.detectors.vllm"
+            "lmcache.v1.common.kv_format.detectors.vllm"
         )
         return detectors_vllm.resolve_vllm_kv_layout
 
-    def test_cpu_backend_honors_explicit_layout(self, resolve):
-        assert resolve({"kv_layout": "NHD"}, cpu_attention_backend=True) == "NHD"
-
     def test_missing_hint_defaults_to_nhd(self, resolve):
-        assert resolve({}, cpu_attention_backend=False) == "NHD"
+        assert resolve({}) == "NHD"
 
-    def test_missing_cpu_hint_keeps_legacy_hnd_default(self, resolve):
-        assert resolve({}, cpu_attention_backend=True) == "HND"
-
-    def test_hnd_hint_passes_through(self, resolve):
-        assert resolve({"kv_layout": "HND"}, cpu_attention_backend=False) == "HND"
+    def test_hint_passes_through(self, resolve):
+        assert resolve({"kv_layout": "HND"}) == "HND"
+        assert resolve({"kv_layout": "NHD"}) == "NHD"
 
     def test_unsupported_hint_rejected(self, resolve):
         with pytest.raises(ValueError, match="LHBNC"):
-            resolve({"kv_layout": "LHBNC"}, cpu_attention_backend=False)
+            resolve({"kv_layout": "LHBNC"})

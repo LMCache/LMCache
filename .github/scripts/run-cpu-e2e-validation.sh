@@ -18,7 +18,7 @@ LMCACHE_PID=""
 VLLM_PID=""
 LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
 LMCACHE_REQUEST_PORT="${LMCACHE_REQUEST_PORT:-${LMCACHE_ZMQ_PORT:-5555}}"
-LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
+LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-grpc}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 LMCACHE_L1_SIZE_GB="${LMCACHE_L1_SIZE_GB:-1}"
 LMCACHE_EVICTION_POLICY="${LMCACHE_EVICTION_POLICY:-LRU}"
@@ -80,18 +80,20 @@ VLLM_HF_OFFLINE="${VLLM_HF_OFFLINE:-1}"
 LMCACHE_SHM_NAME="${LMCACHE_SHM_NAME-__default__}"
 LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-engine_driven}"
 
-# grpc-native is the gRPC transport served by --grpc-server-mode native.
+# grpc-aio and grpc-native are the gRPC transport served by
+# --grpc-server-mode aio and native.
 LMCACHE_TRANSPORT_ARGS=(--transport "${LMCACHE_REQUEST_TRANSPORT}")
 case "${LMCACHE_REQUEST_TRANSPORT}" in
   zmq) LMCACHE_REQUEST_SCHEME="tcp" ;;
   grpc) LMCACHE_REQUEST_SCHEME="grpc" ;;
-  grpc-native)
+  grpc-aio|grpc-native)
     LMCACHE_REQUEST_SCHEME="grpc"
-    LMCACHE_TRANSPORT_ARGS=(--transport grpc --grpc-server-mode native)
+    LMCACHE_TRANSPORT_ARGS=(--transport grpc
+      --grpc-server-mode "${LMCACHE_REQUEST_TRANSPORT#grpc-}")
     ;;
   *)
     echo "Unknown LMCACHE_REQUEST_TRANSPORT='${LMCACHE_REQUEST_TRANSPORT}'" >&2
-    echo "Valid values: zmq, grpc, grpc-native" >&2
+    echo "Valid values: zmq, grpc, grpc-aio, grpc-native" >&2
     exit 1
     ;;
 esac
@@ -374,9 +376,9 @@ start_vllm() {
   local kv_cache_bytes
   kv_cache_bytes="$(python3 -c "print(int(${VLLM_CPU_KVCACHE_SPACE} * 1024 * 1024 * 1024))")"
   # Tell LMCacheMPConnector where the lmcache server actually listens.
-  # Without this it falls back to tcp://localhost:5555 and dies with
-  # "Cannot reach the LMCache MP server" whenever the selected request
-  # transport or port differs from that legacy default.
+  # Without this it falls back to the connector's default endpoint and dies
+  # with "Cannot reach the LMCache MP server" whenever the selected request
+  # transport or port differs from that default.
   local kv_transfer_config
   kv_transfer_config="$(python3 -c "
 import json
@@ -387,6 +389,8 @@ print(json.dumps({
     'kv_connector_extra_config': {
         'lmcache.mp.host': '${LMCACHE_REQUEST_SCHEME}://localhost',
         'lmcache.mp.port': int('${LMCACHE_REQUEST_PORT}'),
+        # CPU tensors use shared memory, not CUDA driver-mapped allocations.
+        'lmcache.mp.use_vmm_api': False,
     },
 }))")"
   # Optional flags — appended only when set, so unrelated callers stay
@@ -405,7 +409,7 @@ print(json.dumps({
   fi
   echo "vLLM model: ${VLLM_MODEL_ID}"
   echo "vLLM extra args: ${extra_serve_args[*]:-<none>}"
-  vllm serve "${VLLM_MODEL_ID}" \
+  PYTHONFAULTHANDLER=1 vllm serve "${VLLM_MODEL_ID}" \
     --port "${VLLM_PORT}" \
     --dtype bfloat16 \
     --disable-hybrid-kv-cache-manager \
@@ -447,6 +451,11 @@ on_error() {
   echo "❌ CPU install validation failed (exit code: ${exit_code})"
   set +e
   print_failure_logs
+  if [[ "${RUNNER_OS:-}" == "Linux" && -n "${VLLM_PID:-}" ]]; then
+    # A worker killed by the kernel cannot write its own traceback.
+    sudo -n journalctl -k -b --since "@${CPU_VALIDATION_STARTED_AT}" --no-pager \
+      --grep='Out of memory|oom-kill|Killed process|segfault|invalid opcode|general protection' || true
+  fi
   cleanup_processes
   upload_artifacts
   cleanup_workspace || echo "❌ Workspace cleanup failed"
@@ -454,6 +463,7 @@ on_error() {
   exit "$exit_code"
 }
 
+CPU_VALIDATION_STARTED_AT=$(date +%s)
 trap on_error ERR
 
 if [ "${SKIP_INSTALL}" = "1" ]; then
@@ -601,6 +611,15 @@ if ! wait_for_endpoint_contains "http://localhost:${LMCACHE_HTTP_PORT}/healthche
   false
 fi
 echo "✅ LMCache server is healthy"
+case "${LMCACHE_REQUEST_TRANSPORT}" in
+  grpc-aio|grpc-native)
+    # A wrong flag would quietly start the sync server instead.
+    if ! grep -q "gRPC cache server (${LMCACHE_REQUEST_TRANSPORT#grpc-})" "${LMCACHE_LOG}"; then
+      echo "❌ LMCache server is not in ${LMCACHE_REQUEST_TRANSPORT#grpc-} mode. See ${LMCACHE_LOG}"
+      false
+    fi
+    ;;
+esac
 
 echo "[Phase 2 / Step 4] Installing system libs (Linux only) and starting vLLM server"
 if [ "$(uname -s)" = "Linux" ]; then
@@ -741,10 +760,9 @@ print(story, end='')
 " > "${PROMPT_FILE}"
 echo "Generated prompt file: ${PROMPT_FILE} ($(wc -c < "${PROMPT_FILE}") bytes)"
 
-# Reset metrics to have a clean baseline
-echo "[Phase 3 / Step 1] Resetting LMCache metrics"
-curl -fsS -X POST "http://localhost:${LMCACHE_HTTP_PORT}/metrics/reset" >/dev/null
-echo "✅ Metrics reset"
+# /metrics/reset is a no-op in MP mode (OTel counters are cumulative), so the
+# checks below compare /metrics scrapes taken before and after each request.
+echo "[Phase 3 / Step 1] Using before/after metric deltas (no metrics reset)"
 
 # Start vLLM instance 1
 echo "[Phase 3 / Step 2] Starting vLLM (instance 1)"

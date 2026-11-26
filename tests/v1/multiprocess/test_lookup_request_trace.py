@@ -5,9 +5,9 @@
 from unittest.mock import MagicMock
 
 # First Party
-from lmcache.v1.distributed.api import AttnWindowDesc
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.mp_observability.event import EventType
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
 TOKEN_IDS = (11, 22, 33)
@@ -25,7 +25,10 @@ def test_lookup_event_carries_key_token_ids():
         num_chunks_in_sw=[-1], world_size=1
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {}
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = [b"h"]
+    token_hasher = MagicMock()
+    token_hasher.compute_packed_chunk_hashes.return_value = [b"h"]
+    ctx.layout_desc_registry.get_chunk_size.return_value = 256
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     key = IPCCacheServerKey.from_token_ids(
         model_name="m",
         world_size=1,
@@ -34,7 +37,6 @@ def test_lookup_event_carries_key_token_ids():
         start=0,
         end=0,
         request_id="req-1",
-        num_kv_readers=1,
     )
 
     LookupModule(ctx).lookup(key, tp_size=1)

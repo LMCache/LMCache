@@ -9,7 +9,7 @@
 #   3. Kill the LMCache server, relaunch on the same port.
 #   4. Wait for the new server to be ready and for the worker to
 #      re-register (poll /status until transfer-context metadata is non-empty).
-#   5. Run the same bench round again.
+#   5. Clear the engine-local prefix/radix cache and run another bench round.
 #   6. Snapshot the metric again.
 #   7. Assert run2 > 0 and run2 >= 0.8 * run1.
 #
@@ -264,6 +264,14 @@ echo ""
 echo "============================================"
 echo "=== Round 2: bench against restarted server ==="
 echo "============================================"
+# Engine-local KV entries survive an LMCache-only restart. Clear them so
+# round 2 cannot bypass prefill and stores using round 1's prefix/radix hits.
+echo "Clearing ${ENGINE_NAME} local cache before round 2..."
+if ! engine_clear_local_cache "$ENGINE_PORT"; then
+    echo "FAIL: could not clear ${ENGINE_NAME} local cache before round 2"
+    exit 1
+fi
+
 if ! run_bench_round "round2" "42"; then
     echo "FAIL: round 2 bench failed"
     echo "--- ${ENGINE_NAME} log (last 80 lines) ---"

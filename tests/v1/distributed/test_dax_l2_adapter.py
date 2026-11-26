@@ -19,6 +19,7 @@ import torch
 # First Party
 from lmcache.lmcache_native import Bitmap
 from lmcache.v1.distributed.api import (
+    L1BackendType,
     MemoryLayoutDesc,
     ObjectKey,
 )
@@ -29,13 +30,13 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L2AdapterListener
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.internal_api import L1ManagerInterface, L2AdapterListener
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
     get_registered_l2_adapter_types,
 )
+from lmcache.v1.distributed.l2_adapters.dax.core import DaxCore
 from lmcache.v1.distributed.l2_adapters.dax_l2_adapter import (
     DaxDeviceConfig,
     DaxL2Adapter,
@@ -46,7 +47,7 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigureError,
 )
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.memory_allocators.ad_hoc_memory_allocator import AdHocMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,
@@ -211,6 +212,21 @@ def load_and_wait(
     return bitmap_to_bools(bitmap, len(keys))
 
 
+def block_first_unmap(monkeypatch: pytest.MonkeyPatch) -> list[memoryview]:
+    """Keep an exported view so the first core's real close raises BufferError."""
+    views: list[memoryview] = []
+    close = DaxCore.close
+
+    def close_with_export(core: DaxCore[ObjectKey]) -> None:
+        if not views:
+            assert core.arena_view is not None
+            views.append(core.arena_view[:1])
+        close(core)
+
+    monkeypatch.setattr(DaxCore, "close", close_with_export)
+    return views
+
+
 def test_dax_adapter_registers_and_has_distinct_eventfds(tmp_path):
     adapter, _ = make_adapter(tmp_path)
     try:
@@ -220,6 +236,70 @@ def test_dax_adapter_registers_and_has_distinct_eventfds(tmp_path):
         load_fd = adapter.get_load_event_fd()
         assert len({store_fd, lookup_fd, load_fd}) == 3
     finally:
+        adapter.close()
+
+
+def test_failed_remove_keeps_ownership_without_usable_capacity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed unmap stays unavailable and owned until a removal retry succeeds."""
+    adapter = make_hotplug_adapter(tmp_path)
+    source = adapter.hotplug_status()["devices"][0]["device_path"]
+    views = block_first_unmap(monkeypatch)
+    obj = create_memory_obj(fill_value=7)
+    try:
+        with pytest.raises(BufferError):
+            adapter.hotplug_remove_device(source, "evict")
+        assert adapter.hotplug_status()["devices"][0]["state"] == "removing"
+        assert adapter.get_usage().total_capacity_bytes == 4096
+        assert adapter.owns_range(source, 0, 4096)
+        with pytest.raises(L2ReconfigureError) as draining:
+            adapter.hotplug_remove_device(source, "drain")
+        assert draining.value.status_code == 409
+        with pytest.raises(L2ReconfigureError, match="overlaps"):
+            adapter.hotplug_add_device(source, 2048)
+        store_and_wait(adapter, create_object_key(900), obj)
+        assert adapter.hotplug_status()["devices"][1]["live_slot_count"] == 1
+
+        views[0].release()
+        assert adapter.hotplug_remove_device(source, "evict")["state"] == "removed"
+        assert not adapter.owns_range(source, 0, 4096)
+    finally:
+        for view in views:
+            view.release()
+        obj.ref_count_down()
+        adapter.close()
+
+
+def test_failed_close_still_closes_other_devices_and_notifiers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Partial shutdown releases independent resources and retries its failed core."""
+    adapter = make_hotplug_adapter(tmp_path)
+    source = adapter.hotplug_status()["devices"][0]["device_path"]
+    views = block_first_unmap(monkeypatch)
+    try:
+        with pytest.raises(BufferError):
+            adapter.close()
+        assert [d["state"] for d in adapter.hotplug_status()["devices"]] == [
+            "removing",
+            "closed",
+        ]
+        assert adapter.owns_range(source, 0, 4096)
+        assert adapter.get_usage().total_capacity_bytes == 0
+        assert adapter.get_store_event_fd() == -1
+        assert adapter.get_lookup_and_lock_event_fd() == -1
+        assert adapter.get_load_event_fd() == -1
+        with pytest.raises(RuntimeError, match="closing"):
+            adapter.submit_store_task([], [])
+
+        views[0].release()
+        adapter.close()
+        assert not adapter.owns_range(source, 0, 4096)
+        assert all(d["state"] == "closed" for d in adapter.hotplug_status()["devices"])
+    finally:
+        for view in views:
+            view.release()
         adapter.close()
 
 
@@ -634,11 +714,14 @@ def _wire_capacity_publishing(sm: StorageManager) -> None:
     sm._capacity_publish_lock = threading.Lock()
     sm._event_bus = cast(EventBus, _RecordingBus())
     # Declares no L1, keeping these tests about the L2 path.
-    sm._l1_manager = cast(
-        L1Manager,
-        SimpleNamespace(get_capacity_bytes_by_backend=lambda: {}),
-    )
-    sm._l1_managers_by_id = {0: sm._l1_manager}
+    sm._l1_managers = [
+        cast(
+            L1ManagerInterface,
+            SimpleNamespace(
+                get_capacity_bytes=lambda: 0, backend_type=L1BackendType.DRAM
+            ),
+        )
+    ]
     if not hasattr(sm, "_adapter_descriptors"):
         sm._adapter_descriptors = {
             adapter_id: cast(L2AdapterDescriptor, _FakeAdapterDescriptor("fake"))
@@ -650,6 +733,7 @@ def test_storage_manager_routes_generic_l2_reconfigure_to_adapter():
     sm = StorageManager.__new__(StorageManager)
     adapter = _FakeReconfigurableAdapter()
     sm._adapters_lock = threading.Lock()
+    sm._closing_adapters = set()
     sm._l2_adapters = {0: cast(L2AdapterInterface, adapter)}
     # Reconfiguring changes capacity, so the call also announces the new
     # topology; that needs enough state to build a capacity snapshot.
@@ -669,6 +753,7 @@ def test_storage_manager_routes_generic_l2_reconfigure_to_adapter():
 def test_storage_manager_finds_serde_wrapped_reconfigurable_adapter():
     sm = StorageManager.__new__(StorageManager)
     sm._adapters_lock = threading.Lock()
+    sm._closing_adapters = set()
     sm._l2_adapters = {
         0: cast(L2AdapterInterface, _SerdeLikeWrapper(_FakeReconfigurableAdapter()))
     }
@@ -987,6 +1072,7 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
             ]
         ),
         store_policy="skip_l1",
+        prefetch_policy="skip_l1",
     )
 
     layout = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
@@ -1001,7 +1087,7 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
         assert key in reserved
         assert reserved[key].tensor is not None
         reserved[key].tensor.fill_(11)
-        sm.finish_write([key])
+        sm.finish_write(list(reserved), l1_owners_of(reserved))
 
         assert wait_for_condition(
             lambda: (
@@ -1027,10 +1113,10 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
             assert torch.all(results[0].tensor == 11)
 
         assert adapter.report_status()["locked_key_count"] == 0
-        assert sm._l1_manager.delete([key])[key] == L1Error.KEY_IS_LOCKED
+        assert sm.l1_managers()[0].delete([key])[key] == L1Error.KEY_IS_LOCKED
 
         sm.finish_read_prefetched([key])
-        assert sm._l1_manager.delete([key])[key] == L1Error.KEY_NOT_EXIST
+        assert sm.l1_managers()[0].delete([key])[key] == L1Error.KEY_NOT_EXIST
     finally:
         sm.close()
 
@@ -1094,7 +1180,7 @@ def test_storage_manager_dax_adapter_uses_global_l2_eviction(tmp_path):
             assert key in reserved
             assert reserved[key].tensor is not None
             reserved[key].tensor.fill_(fill_value)
-            sm.finish_write([key])
+            sm.finish_write(list(reserved), l1_owners_of(reserved))
             assert wait_for_condition(
                 lambda: (
                     adapter.get_usage().usage_fraction == pytest.approx(usage_fraction)

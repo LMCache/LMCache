@@ -39,7 +39,7 @@ from lmcache.v1.distributed.serde.turboquant import (
     TurboQuantSerdeConfig,
     TurboQuantSerializer,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import current_device_spec
 
@@ -403,6 +403,8 @@ def _make_turboquant_storage_manager(preset: str) -> StorageManager:
         ),
         eviction_config=EvictionConfig(eviction_policy="LRU"),
         l2_adapter_config=L2AdaptersConfig(adapters=[adapter_cfg]),
+        # The cleanup checks expect loaded keys to leave L1 after the read.
+        prefetch_policy="skip_l1",
     )
     return StorageManager(cfg)
 
@@ -459,7 +461,7 @@ def test_turboquant_storage_manager_roundtrip(
             obj.tensor.copy_(data)
             original_by_key[key] = data.detach().clone()
 
-        sm.finish_write(list(ret.keys()))
+        sm.finish_write(list(ret), l1_owners_of(ret))
 
         ok = _wait_for_mock_l2_store(
             sm,
@@ -640,6 +642,8 @@ def _make_turboquant_fs_storage_manager(
         ),
         eviction_config=EvictionConfig(eviction_policy="LRU"),
         l2_adapter_config=L2AdaptersConfig(adapters=[adapter_cfg]),
+        # The cleanup checks expect loaded keys to leave L1 after the read.
+        prefetch_policy="skip_l1",
     )
     return StorageManager(cfg)
 
@@ -689,7 +693,7 @@ def test_turboquant_fs_storage_manager_roundtrip(
             obj.tensor.copy_(data)
             original_by_key[key] = data.detach().clone()
 
-        sm.finish_write(list(ret.keys()))
+        sm.finish_write(list(ret), l1_owners_of(ret))
 
         ok = _wait_for_fs_l2_store(
             sm,

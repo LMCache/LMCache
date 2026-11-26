@@ -62,9 +62,8 @@ class StreamPosition:
 
         Returns:
             One past the last recorded offset, or ``None`` if nothing was
-            ever recorded for it -- the caller then leaves positioning to
-            the consumer's own default (the group's committed offset, or
-            ``auto.offset.reset`` if the group has none either).
+            ever recorded for it -- the caller then reads the partition
+            from its beginning.
         """
         with self._lock:
             offset = self._offsets.get((topic, partition))

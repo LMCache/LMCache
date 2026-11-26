@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import argparse
 import asyncio
 import contextlib
+import dataclasses
 
 # Third Party
 from fastapi import FastAPI
@@ -13,7 +14,7 @@ import uvicorn
 
 # First Party
 from lmcache import torch_dev
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
@@ -30,12 +31,14 @@ from lmcache.v1.mp_observability.config import (
     parse_args_to_observability_config,
 )
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import shutdown_grpc_otel_metrics
 from lmcache.v1.mp_observability.trace.lifecycle import EVENTS_LEVEL
 from lmcache.v1.multiprocess.config import (
     DEFAULT_COORDINATOR_CONFIG,
     CoordinatorConfig,
     HTTPFrontendConfig,
     MPServerConfig,
+    P2PConfig,
     add_coordinator_args,
     add_http_frontend_args,
     add_mp_server_args,
@@ -53,6 +56,7 @@ from lmcache.v1.multiprocess.http_auth import (
     HTTPAuthenticationConfig,
     HTTPAuthenticationMiddleware,
 )
+from lmcache.v1.multiprocess.http_reconfigure import ReconfigureInstanceMiddleware
 from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
     MPRuntimePluginLauncher,
 )
@@ -64,6 +68,70 @@ logger = init_logger(__name__)
 # Module-level config holders, set by run_http_server() before FastAPI startup.
 # Stored in a dict so the lifespan closure captures the mutable container.
 _configs: dict = {}
+
+
+def _with_p2p_write_policies(
+    storage_manager_config: StorageManagerConfig,
+    p2p_config: P2PConfig,
+) -> StorageManagerConfig:
+    """Pick the L2 policies of a server that stores objects into its peers.
+
+    Args:
+        storage_manager_config: The storage manager configuration as parsed.
+        p2p_config: P2P configuration with writes enabled.
+
+    Returns:
+        The configuration with the ``p2p`` store policy and the ``skip_l1``
+        prefetch policy, each replacing a policy that was ``default``. A
+        policy that was chosen explicitly is kept.
+    """
+    store_policy = storage_manager_config.store_policy
+    prefetch_policy = storage_manager_config.prefetch_policy
+    if store_policy in ("default", "p2p"):
+        l1_config = storage_manager_config.l1_manager_config
+        eviction = l1_config.eviction or storage_manager_config.eviction_config
+        if (
+            eviction.eviction_policy != "noop"
+            and p2p_config.write_l1_usage_threshold >= eviction.trigger_watermark
+        ):
+            logger.warning(
+                "--p2p-write-l1-usage-threshold (%s) is not below the L1 "
+                "eviction trigger watermark (%s): local eviction will discard "
+                "objects before they are stored into a peer",
+                p2p_config.write_l1_usage_threshold,
+                eviction.trigger_watermark,
+            )
+        store_policy = "p2p"
+    else:
+        logger.warning(
+            "P2P writes are enabled with store policy %r: it decides which "
+            "objects go to peers, and --p2p-write-l1-usage-threshold does not "
+            "apply",
+            store_policy,
+        )
+
+    # An object read back from a peer must not stay in the local L1: the
+    # copies would fill it and evict objects that live nowhere else.
+    if prefetch_policy == "default":
+        prefetch_policy = "skip_l1"
+    elif prefetch_policy != "skip_l1":
+        logger.warning(
+            "P2P writes are enabled with prefetch policy %r: objects read "
+            "back from a peer may stay in the local L1 and evict objects "
+            "that are stored nowhere else",
+            prefetch_policy,
+        )
+
+    logger.info(
+        "P2P writes are enabled: using store policy %r and prefetch policy %r",
+        store_policy,
+        prefetch_policy,
+    )
+    return dataclasses.replace(
+        storage_manager_config,
+        store_policy=store_policy,
+        prefetch_policy=prefetch_policy,
+    )
 
 
 # ----------------------------
@@ -129,7 +197,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     coordinator_client = None
     coordinator_registration_task = None
     if coordinator_config.url and http_config is not None:
-        coordinator_client = httpx.AsyncClient(timeout=10.0)
+        # Present the shared fleet key when one is configured, so registration
+        # and heartbeats pass a coordinator that enforces authentication.
+        # First Party
+        from lmcache.v1.transport.auth import (
+            request_client_auth_headers,
+        )
+
+        coordinator_client = httpx.AsyncClient(
+            timeout=10.0,
+            headers=request_client_auth_headers(mp_config.api_key_files),
+        )
         # Canonical id resolved by run_cache_server above; shared with
         # the OTel service.instance.id so membership matches metrics/traces.
         coordinator_registration_task = asyncio.create_task(
@@ -141,7 +219,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 advertise_ip=coordinator_config.advertise_ip,
                 heartbeat_interval=coordinator_config.heartbeat_interval,
                 p2p_advertised_url=mp_config.p2p_config.advertise_url,
-                mq_port=mp_config.port if mp_config.p2p_config.enabled else 0,
+                mq_port=engine.mq_port,
                 on_registered=engine.storage_manager.publish_capacity,
                 chunk_size_provider=lambda: engine.context.finalized_chunk_size,
             )
@@ -149,7 +227,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Optionally emit cache events: to the coordinator, to an events-level
     # trace file, or both.
     subscriber = maybe_create_cache_event_subscriber(
-        mp_config, http_config, coordinator_config
+        mp_config,
+        http_config,
+        coordinator_config,
+        mq_port=engine.mq_port,
     )
     if subscriber is not None:
         get_event_bus().register_subscriber(subscriber)
@@ -179,11 +260,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     get_event_bus().stop()
     request_server.close()
     engine.close()
+    shutdown_grpc_otel_metrics()
     logger.info("LMCache HTTP server stopped")
 
 
 app = FastAPI(title="LMCache HTTP API", version="1.0.0", lifespan=lifespan)
 app.state.http_authentication = HTTPAuthenticationConfig()
+app.add_middleware(ReconfigureInstanceMiddleware)
 app.add_middleware(HTTPAuthenticationMiddleware)
 
 # Automatically discover and register all HTTP API endpoints
@@ -218,7 +301,8 @@ def run_http_server(
 
     Raises:
         ValueError: If P2P is enabled without a coordinator URL, or with an L1
-            tier that is not a single registerable memory region; or if
+            tier that is not a single registerable memory region; if P2P
+            writes are enabled without P2P; or if
             coordinator event reporting or ``--trace-level events`` is enabled
             with observability disabled (the cache-event stream rides the
             event bus).
@@ -236,6 +320,14 @@ def run_http_server(
                 "can register; it is incompatible with GDS L1 (--gds-l1-path) "
                 "and Device-DAX L1 (--l1-devdax-path)."
             )
+    if mp_config.p2p_config.enable_write:
+        if not mp_config.p2p_config.enabled:
+            raise ValueError(
+                "--enable-p2p-write requires P2P: set --p2p-advertise-url."
+            )
+        storage_manager_config = _with_p2p_write_policies(
+            storage_manager_config, mp_config.p2p_config
+        )
     if coordinator_config.event_reporting and not obs_config.enabled:
         raise ValueError(
             "--coordinator-event-reporting rides the observability event "

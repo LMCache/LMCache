@@ -108,34 +108,6 @@ _path_filter_should_skip_for_pipeline() {
                     ;;
             esac
             ;;
-        integration)
-            case "$changed_file" in
-                .buildkite/k3_tests/integration/*|.buildkite/configs/local_cpu.yaml|.buildkite/configs/local_disk.yaml)
-                    return 1
-                    ;;
-                examples/*)
-                    # Example-only changes should not trigger integration tests.
-                    return 0
-                    ;;
-                tests/*|.buildkite/k3_tests/*)
-                    return 0
-                    ;;
-            esac
-            ;;
-        correctness)
-            case "$changed_file" in
-                .buildkite/correctness/*|.buildkite/k3_tests/correctness/*)
-                    return 1
-                    ;;
-                examples/*)
-                    # Example-only changes should not trigger correctness tests.
-                    return 0
-                    ;;
-                tests/*|.buildkite/k3_tests/*)
-                    return 0
-                    ;;
-            esac
-            ;;
         multiprocess)
             case "$changed_file" in
                 benchmarks/long_doc_qa/*|.buildkite/k3_tests/multiprocess/*)
@@ -143,24 +115,6 @@ _path_filter_should_skip_for_pipeline() {
                     ;;
                 examples/*)
                     # Example-only changes should not trigger multiprocess tests.
-                    return 0
-                    ;;
-                tests/*|.buildkite/k3_tests/*)
-                    return 0
-                    ;;
-            esac
-            ;;
-        comprehensive)
-            case "$changed_file" in
-                .buildkite/configs/*|benchmarks/*|.buildkite/k3_tests/comprehensive/*)
-                    return 1
-                    ;;
-                examples/disagg_prefill*/*)
-                    return 1
-                    ;;
-                examples/*)
-                    # Keep other example changes out of the comprehensive pipeline.
-                    # They are treated as safe no-op paths for this suite.
                     return 0
                     ;;
                 tests/*|.buildkite/k3_tests/*)
@@ -226,15 +180,12 @@ _path_filter_should_skip_for_pipeline() {
 _path_filter_pipeline_kind() {
     case "$1" in
         *k3_tests/unit/pipeline.yml) echo unit ;;
-        *k3_tests/integration/pipeline.yml) echo integration ;;
-        *k3_tests/correctness/pipeline.yml) echo correctness ;;
-        *k3_tests/multiprocess/pipeline.yml) echo multiprocess ;;
+        *k3_tests/multiprocess/pipeline.yml|*k3_tests/multiprocess/smoke-pipeline.yml) echo multiprocess ;;
         *k3_tests/blend/pipeline.yml) echo blend ;;
         *k3_tests/xpu/*/pipeline.yml) echo xpu ;;
         *k3_tests/musa/pipeline.yml) echo musa ;;
         *k3_tests/rbln/pipeline.yml) echo rbln ;;
         *k3_tests/amd/pipeline.yml) echo amd ;;
-        *k3_tests/comprehensive/pipeline.yml) echo comprehensive ;;
         *) echo generic ;;
     esac
 }
@@ -316,6 +267,13 @@ should_skip_ci() {
         return 1
     fi
 
+    # The weekly full build must run every suite; a skip would report a
+    # passing full run that tested nothing.
+    if [[ "${CI_WEEKLY_FULL:-0}" == "1" ]]; then
+        echo "path-filter: weekly full build (CI_WEEKLY_FULL=1) → not skipping" >&2
+        return 1
+    fi
+
     # Never skip scheduled builds (e.g. nightly baselines with NEED_UPLOAD=true).
     if [[ "${BUILDKITE_SOURCE:-}" == "schedule" ]]; then
         echo "path-filter: scheduled build (BUILDKITE_SOURCE=schedule) → not skipping" >&2
@@ -376,5 +334,72 @@ should_skip_ci() {
     fi
 
     echo "path-filter: no relevant files changed for ${pipeline_kind} → SKIP" >&2
+    return 0
+}
+
+# Returns 0 if any changed file is a shared CI/build dependency that must
+# trigger all affected tiers (including heavy multiprocess on PRs).
+has_shared_ci_dependency_change() {
+    local changed_files f
+    if ! changed_files=$(_path_filter_get_changed_files); then
+        return 0
+    fi
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        [[ "$f" == *.md ]] && continue
+        case "$f" in
+            .buildkite/k3_tests/*|.buildkite/k3_harness/*|pyproject.toml|setup.py|requirements/*|Dockerfile*|docker/*)
+                return 0
+                ;;
+        esac
+    done <<< "$changed_files"
+    return 1
+}
+
+# Returns 0 if any changed file is only exercised by the heavy pipeline.
+# smoke-pipeline.yml only runs vLLM and has no long_doc_qa step, so SGLang
+# integration/format-detector edits and long_doc_qa benchmark edits must keep
+# heavy multiprocess enabled on ordinary PRs.
+has_heavy_only_path_change() {
+    local changed_files f
+    if ! changed_files=$(_path_filter_get_changed_files); then
+        return 0
+    fi
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        [[ "$f" == *.md ]] && continue
+        case "$f" in
+            lmcache/integration/sglang/*|lmcache/v1/common/kv_format/detectors/sglang.py|benchmarks/long_doc_qa/*)
+                return 0
+                ;;
+        esac
+    done <<< "$changed_files"
+    return 1
+}
+
+# Returns 0 if the heavy multiprocess pipeline should be skipped on an ordinary PR.
+should_skip_multiprocess_heavy() {
+    local pipeline_file="${1:-}"
+    [[ "${pipeline_file}" == *k3_tests/multiprocess/pipeline.yml ]] || return 1
+
+    if [[ -z "${BUILDKITE_PULL_REQUEST:-}" || "${BUILDKITE_PULL_REQUEST:-}" == "false" ]]; then
+        return 1
+    fi
+    if [[ "${BUILDKITE_SOURCE:-}" == "schedule" ]]; then
+        return 1
+    fi
+    if [[ "${VERIFY_AND_PIN_VLLM:-}" == "true" || "${VERIFY_AND_PIN_SGLANG:-}" == "true" ]]; then
+        return 1
+    fi
+    # 1-env-flag rollback to restore heavy multiprocess on every PR.
+    if [[ "${MP_FULL_ON_PR:-false}" == "true" ]]; then
+        return 1
+    fi
+    if [[ ",${BUILDKITE_PULL_REQUEST_LABELS:-}," == *",force-ci,"* ]]; then
+        return 1
+    fi
+    if has_shared_ci_dependency_change || has_heavy_only_path_change; then
+        return 1
+    fi
     return 0
 }

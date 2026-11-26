@@ -17,15 +17,15 @@ The command exercises the full store / retrieve data path:
 Usage examples::
 
     # GPU mode: real CUDA tensors + IPC
-    lmcache bench server --rpc-url tcp://localhost:5555 \\
+    lmcache bench server --rpc-url grpc://localhost:5555 \\
         --num-tokens 512 --start 0 --end 3
 
     # Custom KV cache shape (multi-group spec)
-    lmcache bench server --rpc-url tcp://localhost:5555 \\
+    lmcache bench server --rpc-url grpc://localhost:5555 \\
         --kvcache-shape-spec '(2,32,1024,8,128):float16:32'
 
     # Run forever starting from sequence 0
-    lmcache bench server --rpc-url tcp://localhost:5555
+    lmcache bench server --rpc-url grpc://localhost:5555
 """
 
 # Future
@@ -183,6 +183,12 @@ def run_server_bench(
         args: Parsed CLI arguments for ``lmcache bench server``.
     """
     config = parse_args_to_config(args)
+    # The IPC policy is process-wide and the CUDA event backend is cached on
+    # first resolution, so set it before any client starts.
+    # First Party
+    from lmcache.v1.platform.ipc_policy import set_isolated_ipc
+
+    set_isolated_ipc(config.isolated_ipc)
     stop = threading.Event()
     cases = _build_cases(config, args, stop)
 
@@ -266,6 +272,7 @@ def _emit_server_bench_metrics(
     cfg_section.add("num_tokens", "Tokens / request", args.num_tokens)
     cfg_section.add("interval", "Interval (s)", args.interval)
     cfg_section.add("concurrency", "Concurrency", getattr(args, "concurrency", 1))
+    cfg_section.add("isolated_ipc", "Isolated IPC", args.isolated_ipc)
 
     result_section = metrics.add_section("results", "Results")
     result_section.add("total_requests", "Total requests", result.completed_runs)

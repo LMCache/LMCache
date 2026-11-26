@@ -1,12 +1,12 @@
 # DAX L2 Adapter Design
 
 This document describes the built-in `dax` L2 adapter for LMCache
-multiprocess mode and how it shares implementation with the non-MP DAX
-storage backend.
+multiprocess mode and how its reusable core can be consumed by the separate
+[`LMCache_inprocess`](https://github.com/LMCache/LMCache_inprocess) package.
 
 ## Goals
 
-- Reuse one synchronous DAX core for MP and non-MP DAX storage.
+- Keep one synchronous DAX core reusable by MP and external consumers.
 - Keep the MP controller flow unchanged: adapters still use the normal
   submit, event-fd, and query-result contract.
 - Keep the adapter facade stable while the runtime DAX device pool changes.
@@ -20,9 +20,8 @@ the mapped DAX arena, fixed-size slot allocation, in-memory index, LRU order,
 in-flight writes, external lock refcounts, active read borrow counts, close
 coordination, and direct `ctypes.memmove` copies.
 
-`lmcache/inprocess/v1/storage_backend/plugins/dax_backend.py` is the non-MP wrapper. It
-keeps existing non-MP behavior such as the local CPU backend requirement, TP=1
-validation, optional async put, and the staging-slab batched restore path.
+The external `LMCache_inprocess` package owns the non-MP wrapper and its
+mode-specific validation, async put, and staging-slab restore behavior.
 
 `lmcache/v1/distributed/l2_adapters/dax_l2_adapter.py` is the MP adapter. It
 self-registers adapter type `dax`, owns separate event notifiers and worker
@@ -138,8 +137,15 @@ slot capacity because the DAX arena is exhausted by slot count. The eviction
 controller calls `delete(keys)`, which skips externally locked keys and
 reclaims slots after active read borrows drain.
 
-Runtime capacity is the sum of active, draining, migrating, resizing, and
-removing device capacities. Closed, removed, and failed devices are excluded.
+Runtime capacity is the sum of active, draining, migrating, and resizing device
+capacities. Removing, closed, removed, and failed devices are excluded.
+
+An unmap failure leaves a device `removing`: it cannot serve reads/writes or
+return to `draining`, but still owns its range and supports another removal
+attempt. The storage manager republishes capacity even when cleanup raises.
+Adapter shutdown attempts every device and closes its event notifiers before
+re-raising the first cleanup error. It stays closing until cleanup succeeds,
+so a later `close()` can retry retained mappings.
 
 ## Current Limits
 

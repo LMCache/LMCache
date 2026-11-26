@@ -60,8 +60,34 @@ def test_bind_coordinator_chunk_size(monkeypatch):
     request.assert_called_once_with(
         f"{_BASE}/config/chunk-size",
         json={"chunk_size": 640},
+        headers={},
         timeout=3.0,
     )
+
+
+def test_bind_coordinator_chunk_size_uses_cli_key_file(tmp_path, monkeypatch):
+    key_file = tmp_path / "key"
+    key_file.write_text("fleet-secret\n", encoding="utf-8")
+    for name in (
+        "LMCACHE_API_KEY",
+        "LMCACHE_API_KEY_FILE",
+        "LMCACHE_HTTP_API_KEY",
+        "LMCACHE_HTTP_API_KEY_FILE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    response = httpx.Response(
+        200,
+        json={"chunk_size": 640},
+        request=httpx.Request("PUT", f"{_BASE}/config/chunk-size"),
+    )
+    request = MagicMock(return_value=response)
+    monkeypatch.setattr(httpx, "put", request)
+
+    bind_coordinator_chunk_size(_BASE, 640, api_key_files=[str(key_file)])
+
+    assert request.call_args.kwargs["headers"] == {
+        "Authorization": "Bearer fleet-secret"
+    }
 
 
 def test_register_forwards_p2p_and_mq_fields():

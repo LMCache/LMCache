@@ -11,16 +11,19 @@ import abc
 import torch
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.custom_types import (
     IPCCacheServerKey,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
 )
-from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
-from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
-from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.transfer_context import (
+    EngineDrivenContextMetadata,
+    ShmSlotDescriptor,
+)
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.storage_manager import l1_owners_of
+from lmcache.v1.transport.tensor_wire import (
     decode_grouped_tensors,
     decode_tensors,
     encode_grouped_tensors,
@@ -30,6 +33,8 @@ from lmcache.v1.multiprocess.transfer_context.tensor_wire import (
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.distributed.storage_manager import StorageManager
+
+TransferKey = tuple[int, IPCCacheServerKey, tuple[tuple[str, str], ...]]
 
 logger = init_logger(__name__)
 
@@ -45,12 +50,10 @@ def create_transfer_strategy(
     read_owner_resolver: Callable[[str], dict[ObjectKey, int] | None] | None = None,
     shm_name: str,
     pool_size: int,
-    pending_writes: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
-    pending_reads: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
+    pending_writes: dict[TransferKey, dict[ObjectKey, int]],
+    pending_reads: dict[TransferKey, list[ObjectKey]],
     pending_lock: LockType,
-    transfer_key_factory: Callable[
-        [IPCCacheServerKey, int], tuple[int, IPCCacheServerKey]
-    ],
+    transfer_key_factory: Callable[[IPCCacheServerKey, int], TransferKey],
 ) -> "TransferStrategy":
     """Create the non-GPU transfer strategy for a registered context.
 
@@ -58,10 +61,11 @@ def create_transfer_strategy(
         storage_manager: Storage manager used by the selected strategy.
         shm_name: Shared-memory pool name advertised to workers.
         pool_size: Shared-memory pool size in bytes.
-        pending_writes: Map of pending SHM write reservations keyed by transfer key.
+        pending_writes: Map of pending SHM write reservations keyed by transfer
+            key; each value maps the reserved keys to their L1 owner.
         pending_reads: Map of pending SHM read reservations keyed by transfer key.
         pending_lock: Lock guarding shared pending SHM reservation state.
-        transfer_key_factory: Factory that builds the `(instance_id, key)` lookup key
+        transfer_key_factory: Factory for `(instance_id, key, tags)` lookup keys
             used in the pending SHM reservation maps.
 
     Returns:
@@ -128,6 +132,7 @@ class TransferStrategy(abc.ABC):
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
         group_keys: "list[list[ObjectKey]] | None" = None,
+        chunk_range: "tuple[int, int] | None" = None,
     ) -> bool:
         """Finalize a store request.
 
@@ -139,6 +144,8 @@ class TransferStrategy(abc.ABC):
             resolve_obj_keys: Callable that resolves object keys from ``key``.
             group_keys: Group-major object keys for grouped-protocol workers,
                 including a single compressed group; ``None`` for legacy workers.
+            chunk_range: ``[start, end)`` chunk positions this inline page
+                carries; ``None`` means the whole range.
 
         Returns:
             ``True`` when the strategy successfully commits the store request.
@@ -282,12 +289,11 @@ class InlineTransferStrategy(TransferStrategy):
                 written_keys.append(obj_key)
         finally:
             # Complete by owner: with several L1 managers the reservations can
-            # live in different ones, and finish_write(keys) refuses that case.
+            # live in different ones.
             if written_keys:
-                self._storage_manager.finish_write_by_owner(
-                    self._storage_manager.prepare_write_completion(
-                        {k: reserved_dict[k] for k in written_keys}
-                    )
+                self._storage_manager.finish_write(
+                    written_keys,
+                    l1_owners=l1_owners_of({k: reserved_dict[k] for k in written_keys}),
                 )
             # Release reservations that were never written so their write
             # locks don't wedge later operations on the same keys, then drop
@@ -295,10 +301,9 @@ class InlineTransferStrategy(TransferStrategy):
             written = set(written_keys)
             leftover = [k for k in reserved_dict if k not in written]
             if leftover:
-                self._storage_manager.finish_write_by_owner(
-                    self._storage_manager.prepare_write_completion(
-                        {k: reserved_dict[k] for k in leftover}
-                    )
+                self._storage_manager.finish_write(
+                    leftover,
+                    l1_owners=l1_owners_of({k: reserved_dict[k] for k in leftover}),
                 )
                 self._storage_manager.delete_l1_keys(leftover)
 
@@ -323,13 +328,19 @@ class InlineTransferStrategy(TransferStrategy):
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
         group_keys: "list[list[ObjectKey]] | None" = None,
+        chunk_range: "tuple[int, int] | None" = None,
     ) -> bool:
         """Deserialize and write validated inline chunks into reserved objects.
 
         Legacy payloads are a flat tensor envelope; explicit group layouts use
         a group-major envelope even for one group. Each group is validated and
         written against its own layout from ``context.group_layouts``.
-        Validation runs before any storage access.
+        Validation runs before any storage access. A page carries only the
+        chunks in ``chunk_range``: exactly those for a flat envelope, a subset
+        of them for a grouped one.
+
+        Raises:
+            ValueError: If a grouped page names a chunk outside ``chunk_range``.
 
         Returns:
             ``True`` when every reserved object is written successfully.
@@ -352,6 +363,14 @@ class InlineTransferStrategy(TransferStrategy):
                     for layout, g_keys in zip(group_layouts, group_keys, strict=True)
                 ],
             )
+            if chunk_range is not None:
+                start, end = chunk_range
+                for gid, (g_indices, _) in enumerate(decoded):
+                    if g_indices and not start <= g_indices[0] <= g_indices[-1] < end:
+                        raise ValueError(
+                            f"inline store page [{start}, {end}) carries group "
+                            f"{gid} chunks {g_indices[0]}..{g_indices[-1]}"
+                        )
             # Each group carries only the chunks the worker stores; all-null
             # chunks are absent and their keys are never reserved.
             ok = True
@@ -367,6 +386,8 @@ class InlineTransferStrategy(TransferStrategy):
             return ok
 
         obj_keys = resolve_obj_keys(key)
+        if chunk_range is not None:
+            obj_keys = obj_keys[chunk_range[0] : chunk_range[1]]
         chunks = decode_tensors(
             cpu_data,
             expected_shape=context.layout_desc.shapes[0],
@@ -400,30 +421,19 @@ class InlineTransferStrategy(TransferStrategy):
         )
 
         group_chunks: list[list[torch.Tensor]] = []
-        for g_keys in group_keys:
-            prefetched_keys: list[ObjectKey] = []
-            try:
-                read_ctx = self._storage_manager.read_prefetched_results(
-                    g_keys, l1_owners=owners
-                )
-                with read_ctx as maybe_memory_objs:
-                    if not maybe_memory_objs or len(maybe_memory_objs) != len(g_keys):
-                        return PrepareRetrieveResponse(
-                            success=False, data=b"", context={}
-                        )
-                    prefetched_keys = g_keys[: len(maybe_memory_objs)]
-                    chunks: list[torch.Tensor] = []
-                    for memory_obj in maybe_memory_objs:
-                        if memory_obj.tensor is None:
-                            return PrepareRetrieveResponse(
-                                success=False, data=b"", context={}
-                            )
-                        chunks.append(memory_obj.tensor.cpu().clone())
-                    group_chunks.append(chunks)
-            finally:
-                if prefetched_keys:
+        gid = -1
+        try:
+            for gid, g_keys in enumerate(group_keys):
+                chunks = self._read_group(g_keys, owners)
+                if chunks is None:
+                    return PrepareRetrieveResponse(success=False, data=b"", context={})
+                group_chunks.append(chunks)
+        finally:
+            if len(group_chunks) < len(group_keys):
+                unread = [k for g_keys in group_keys[gid + 1 :] for k in g_keys]
+                if unread:
                     self._storage_manager.finish_read_prefetched(
-                        prefetched_keys, l1_owners=owners
+                        unread, l1_owners=owners
                     )
 
         if grouped:
@@ -437,6 +447,37 @@ class InlineTransferStrategy(TransferStrategy):
         else:
             data = encode_tensors(group_chunks[0])
         return PrepareRetrieveResponse(success=True, data=data, context={})
+
+    def _read_group(
+        self, g_keys: list[ObjectKey], owners: "dict[ObjectKey, int] | None"
+    ) -> list[torch.Tensor] | None:
+        """Copy one group's prefetched chunks and release their read locks.
+
+        Returns:
+            The chunks, or None if any of them is missing.
+        """
+        if not g_keys:
+            return []
+        prefetched_keys: list[ObjectKey] = []
+        try:
+            read_ctx = self._storage_manager.read_prefetched_results(
+                g_keys, l1_owners=owners
+            )
+            with read_ctx as maybe_memory_objs:
+                if not maybe_memory_objs or len(maybe_memory_objs) != len(g_keys):
+                    return None
+                prefetched_keys = g_keys[: len(maybe_memory_objs)]
+                chunks: list[torch.Tensor] = []
+                for memory_obj in maybe_memory_objs:
+                    if memory_obj.tensor is None:
+                        return None
+                    chunks.append(memory_obj.tensor.cpu().clone())
+                return chunks
+        finally:
+            if prefetched_keys:
+                self._storage_manager.finish_read_prefetched(
+                    prefetched_keys, l1_owners=owners
+                )
 
     def commit_retrieve(
         self,
@@ -459,12 +500,10 @@ class ShmTransferStrategy(TransferStrategy):
     def __init__(
         self,
         storage_manager: "StorageManager",
-        pending_writes: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
-        pending_reads: dict[tuple[int, IPCCacheServerKey], list[ObjectKey]],
+        pending_writes: dict[TransferKey, dict[ObjectKey, int]],
+        pending_reads: dict[TransferKey, list[ObjectKey]],
         pending_lock: LockType,
-        transfer_key_factory: Callable[
-            [IPCCacheServerKey, int], tuple[int, IPCCacheServerKey]
-        ],
+        transfer_key_factory: Callable[[IPCCacheServerKey, int], TransferKey],
         fallback_strategy: InlineTransferStrategy,
     ) -> None:
         """Initialize SHM transfer strategy.
@@ -474,7 +513,7 @@ class ShmTransferStrategy(TransferStrategy):
             pending_writes: Shared pending SHM write reservations map.
             pending_reads: Shared pending SHM read reservations map.
             pending_lock: Lock guarding shared pending SHM maps.
-            transfer_key_factory: Factory to build `(instance_id, key)` transfer keys.
+            transfer_key_factory: Factory for `(instance_id, key, tags)` transfers.
             fallback_strategy: Safe inline fallback for non-empty ``cpu_data``
                 payloads.
         """
@@ -519,6 +558,7 @@ class ShmTransferStrategy(TransferStrategy):
         chunk_indices: list[int] = []
         group_ids: list[int] = []
         reserved_keys: list[ObjectKey] = []
+        owners: dict[ObjectKey, int] = {}
         for gid, (g_keys, g_layout) in enumerate(
             zip(group_keys, group_layouts, strict=True)
         ):
@@ -528,6 +568,7 @@ class ShmTransferStrategy(TransferStrategy):
             reserved = self._storage_manager.reserve_write(
                 [k for idx, k in enumerate(g_keys) if idx not in skip], g_layout
             )
+            g_owners = l1_owners_of(reserved)
             g_reserved: list[ObjectKey] = []
             try:
                 for idx, obj_key in enumerate(g_keys):
@@ -553,8 +594,11 @@ class ShmTransferStrategy(TransferStrategy):
                     obj_key for obj_key in reserved if obj_key not in g_reserved_set
                 ]
                 if unused_keys:
-                    self._storage_manager.finish_write(unused_keys)
+                    self._storage_manager.finish_write(
+                        unused_keys, l1_owners={k: g_owners[k] for k in unused_keys}
+                    )
             reserved_keys.extend(g_reserved)
+            owners.update({k: g_owners[k] for k in g_reserved})
 
         if not reserved_keys:
             empty: dict[str, Any] = {"slots": [], "chunk_indices": []}
@@ -563,7 +607,7 @@ class ShmTransferStrategy(TransferStrategy):
             return PrepareStoreResponse(context=empty)
         transfer_key = self._transfer_key_factory(key, instance_id)
         with self._pending_lock:
-            self._pending_writes[transfer_key] = reserved_keys
+            self._pending_writes[transfer_key] = owners
         ctx: dict[str, Any] = {"slots": slots, "chunk_indices": chunk_indices}
         if grouped:
             ctx["group_ids"] = group_ids
@@ -577,6 +621,7 @@ class ShmTransferStrategy(TransferStrategy):
         context: EngineDrivenContextMetadata,
         resolve_obj_keys: Callable[[IPCCacheServerKey], list[ObjectKey]],
         group_keys: "list[list[ObjectKey]] | None" = None,
+        chunk_range: "tuple[int, int] | None" = None,
     ) -> bool:
         """Finalize SHM store write locks or use the safe inline fallback.
 
@@ -591,14 +636,15 @@ class ShmTransferStrategy(TransferStrategy):
                 context=context,
                 resolve_obj_keys=resolve_obj_keys,
                 group_keys=group_keys,
+                chunk_range=chunk_range,
             )
         transfer_key = self._transfer_key_factory(key, instance_id)
         with self._pending_lock:
-            reserved_keys = self._pending_writes.pop(transfer_key, None)
-        if reserved_keys is None:
+            pending = self._pending_writes.pop(transfer_key, None)
+        if pending is None:
             return False
-        if reserved_keys:
-            self._storage_manager.finish_write(reserved_keys)
+        if pending:
+            self._storage_manager.finish_write(list(pending.keys()), l1_owners=pending)
         return True
 
     def prepare_retrieve(

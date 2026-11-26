@@ -14,23 +14,24 @@ import torch
 # First Party
 from lmcache import torch_dev
 from lmcache.lmcache_native import EngineKVFormat
-from lmcache.logging import init_logger
-from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.custom_types import EngineType
+from lmcache.v1.common.group_view import engine_group_layer_indices
+from lmcache.v1.common.kv_format.types import DiscoverableKVCache
+from lmcache.v1.common.kv_layer_groups import KVLayerGroupsManager
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.utils import (
     LayoutHints,
     get_device,
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,
 )
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.custom_types import KVCache
-from lmcache.v1.multiprocess.group_view import engine_group_layer_indices
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.base.ipc_wrapper import KVCache
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+    from lmcache.v1.common.group_view import EngineGroupInfo
+    from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 
 logger = init_logger(__name__)
 
@@ -134,6 +135,11 @@ class _TempNpuBuffer:
     def max_batch_size(self) -> int:
         """Return the number of chunks that fit in the staging buffer."""
         return self._max_batch_size
+
+    @property
+    def buffer(self) -> torch.Tensor:
+        """Return the flat staging tensor."""
+        return self._temp_buffer
 
     def get_temp_kernel_group_buffer(
         self,
@@ -240,8 +246,10 @@ class NpuCacheContext(BaseCacheContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
-        separate_object_groups: bool = False,
+        separate_object_groups: bool = True,
         full_sw_kv: bool = False,
+        *,
+        object_group_transfer: ObjectGroupTransfer | None = None,
     ) -> None:
         """Build an NPU cache context from IPC-wrapped KV tensors.
 
@@ -253,6 +261,8 @@ class NpuCacheContext(BaseCacheContext):
             engine_type: Serving engine that produced the KV cache.
             separate_object_groups: Whether to split object groups by window.
             full_sw_kv: Whether sliding-window groups transfer their full KV.
+            object_group_transfer: Optional callback for the base full-chunk
+                transfer method; device overrides remain active.
 
         Raises:
             ValueError: If reconstructed tensors are not NPU tensors.
@@ -267,6 +277,7 @@ class NpuCacheContext(BaseCacheContext):
                 engine_type,
                 separate_object_groups,
                 full_sw_kv,
+                object_group_transfer,
             )
         except BaseException:
             self.close()
@@ -281,6 +292,7 @@ class NpuCacheContext(BaseCacheContext):
         engine_type: EngineType,
         separate_object_groups: bool,
         full_sw_kv: bool,
+        object_group_transfer: ObjectGroupTransfer | None,
     ) -> None:
         """Initialize reconstructed tensors and NPU transfer resources."""
         unwrapped = cast(
@@ -324,6 +336,7 @@ class NpuCacheContext(BaseCacheContext):
             kv_layer_groups_manager=kv_layer_groups_manager,
             block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+            object_group_transfer=object_group_transfer,
         )
 
         # CUDA-shaped device int64 pointer table per kernel group. The native
@@ -445,6 +458,21 @@ class NpuCacheContext(BaseCacheContext):
             batch_idx,
             object_group_idx,
         )
+
+    def get_temp_staging_buffer(self, num_bytes: int) -> torch.Tensor | None:
+        """Return the start of the transfer staging buffer as one flat region.
+
+        Args:
+            num_bytes: Bytes the region must hold.
+
+        Returns:
+            A flat uint8 view of the buffer's first ``num_bytes`` bytes, or
+            None when the staging buffer is smaller than ``num_bytes``.
+        """
+        staging_buffer = self._temp_buffer.buffer
+        if num_bytes > staging_buffer.numel():
+            return None
+        return staging_buffer[:num_bytes]
 
     def get_kernel_group_shape_dtype(
         self,

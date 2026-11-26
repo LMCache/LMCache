@@ -36,8 +36,8 @@ from lmcache.v1.multiprocess.modules import management as management_mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.protocols.server_module import ServerModuleCallRequest
 from lmcache.v1.multiprocess.request_handler import iter_request_handlers
+from lmcache.v1.transport.server_module import ServerModuleCallRequest
 
 
 class _FakePluginModule(DiscoverableModule):

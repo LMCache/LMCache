@@ -24,7 +24,7 @@ what it accelerates and inherits the torch baseline for everything else.
 | Compiled CUDA ops | `PYBIND11_MODULE(cuda_ops)` — CUDA/HIP native kernels loaded only by `CudaDeviceOps` | `csrc/cuda/pybind.cpp` |
 | Compiled SYCL ops | `PYBIND11_MODULE(xpu_ops)` — 12 ops + 2 enums (+`GPUKVFormat`); **24 ops fall back to torch** | `csrc/sycl/pybind_sycl.cpp` |
 | Torch/CPU reference | `torch_ops.py` — 36 ops (migrated from former `python_ops_fallback.py`) | `lmcache/v1/platform/torch_ops.py` |
-| Shared types | `lmcache_native` owns `TransferDirection`, `EngineKVFormat`, `PageBufferShapeDesc`, `StagingCopy`, `LaunchVar`, `BatchStep`, `KernelGroupSpec`; `ops_types.py` re-exports them and adds `set_shape_desc_dtype` fallback glue | `csrc/lmcache_native/pybind.cpp`, `lmcache/v1/platform/ops_types.py` |
+| Shared types | `lmcache_native` owns `TransferDirection`, `EngineKVFormat`, `PageBufferShapeDesc`, `StagingCopy`, `LaunchVar`, `BatchStep`, `KernelGroupSpec`; `ops_types.py` re-exports them and adds `set_shape_desc_dtype` fallback glue | `csrc/lmcache_native/pybind.cpp`, `lmcache/v1/common/ops_types.py` |
 | MUSA ops | Python override: 1 native op, rest inherited | `lmcache/v1/platform/devices/musa/device_ops.py` |
 | HPU ops | None — uses torch baseline entirely | (via `DeviceOps` inheritance) |
 | Runtime selection | `device_ops = resolve_device_ops(torch_device_type)` | `lmcache/__init__.py` |
@@ -69,8 +69,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, ClassVar
 import inspect
 
-from lmcache.v1.platform import ops_types, torch_ops
-from lmcache.v1.platform.ops_types import (
+from lmcache.v1.common import ops_types
+from lmcache.v1.platform import torch_ops
+from lmcache.v1.common.ops_types import (
     BatchStep, EngineKVFormat, KernelGroupSpec, LaunchVar,
     PageBufferShapeDesc, StagingCopy, TransferDirection, set_shape_desc_dtype,
 )
@@ -160,8 +161,8 @@ class DeviceOps:
 |-----|-----|
 | `lmcache/python_ops_fallback.py` — 36 ops | `platform/torch_ops.py` (module functions) |
 | — private helpers (`_transfer_*`, `_tensor_from_ptr`, ...) | `platform/torch_ops.py` (private) |
-| — types (`TransferDirection`, `EngineKVFormat`, ...) | `platform/ops_types.py` |
-| `import lmcache.python_ops_fallback` (call sites) | `from lmcache.v1.platform.ops_types import ...` |
+| — types (`TransferDirection`, `EngineKVFormat`, ...) | `common/ops_types.py` |
+| `import lmcache.python_ops_fallback` (call sites) | `from lmcache.v1.common.ops_types import ...` |
 
 ---
 
@@ -335,6 +336,7 @@ the `lmcache` / `lmcache.v1.platform` import cycle.
 # platform/__init__.py
 _FALLBACK_CPU_SPEC: DeviceSpec = DeviceSpec()
 
+@lru_cache(maxsize=None)
 def _resolve_device_spec(device_type: str) -> DeviceSpec:
     spec = _DEVICE_REGISTRY.get(device_type)
     if spec is not None:
@@ -354,6 +356,12 @@ Resolution is **fail-fast for accelerators**: if `"cuda"` / `"xpu"` / `"musa"` /
 `"hpu"` has no registered `DeviceSpec`, it raises instead of silently falling
 back. The CPU path resolves through `CpuDeviceSpec -> CpuDeviceOps`; only `""`
 (and a deliberately cleared CPU registry in tests) uses the bare fallback.
+
+`_resolve_device_spec` is `lru_cache`d per `device_type`. It runs on every
+transfer and once per layer during KV-cache registration. When several backends
+share a `device_type` (CUDA and ROCm both use `"cuda"`), an uncached lookup
+re-probes `is_available()` and re-logs the auto-selection on each call, which
+prints TP × num_layers lines at registration. Failures raise and are not cached.
 
 ### 5.3 Import cycle: `_device_detect.py`
 

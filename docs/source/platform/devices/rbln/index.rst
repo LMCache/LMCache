@@ -19,9 +19,20 @@ Install the RBLN driver and the matching runtime stack (``torch-rbln`` and
 `RBLN SDK documentation <https://docs.rbln.ai>`_, then install ``vllm-rbln``.
 Do not let the LMCache installation replace the vendor's PyTorch.
 
-Build LMCache's common C++ extensions against that PyTorch installation. RBLN
-adds no native extension; the build selects the RBLN profile when
-``torch_rbln`` is installed, and ``BUILD_WITH_RBLN=1`` forces it:
+Each LMCache release publishes an RBLN wheel, built against the ``torch`` that
+``torch-rbln`` pins, to a ``v<version>-rbln`` GitHub Release. Install it into
+that environment (see the *Rebellions RBLN* tab of :ref:`installation_guide`):
+
+.. code-block:: bash
+
+   VERSION=X.Y.Z  # target LMCache release
+   pip install lmcache==${VERSION}+rbln \
+       --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VERSION}-rbln
+
+To build from source instead, build LMCache's common C++ extensions against
+that PyTorch installation. RBLN adds no native extension; the build selects
+the RBLN profile when ``torch_rbln`` is installed, and ``BUILD_WITH_RBLN=1``
+forces it:
 
 .. code-block:: bash
 
@@ -48,7 +59,7 @@ As on GPUs, start an LMCache server and point vLLM-RBLN at it with
            "kv_role": "kv_both",
            "kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector",
            "kv_connector_extra_config": {
-               "lmcache.mp.host": "tcp://127.0.0.1",
+               "lmcache.mp.host": "grpc://127.0.0.1",
                "lmcache.mp.port": 6555
            }
        }'

@@ -279,15 +279,18 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
    * - ``lmcache_mp.lookup_requested``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Total tokens submitted for lookup (denominator of the L1+L2
-       token-level hit rate). Only chunk-aligned tokens are counted.
+       token-level hit rate). Counts the full chunks, plus the sub-chunk
+       tail when the lookup probes an unfull chunk.
    * - ``lmcache_mp.lookup_hit``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Total tokens found in L1 or L2 during lookup (numerator of the
-       L1+L2 token-level hit rate). Counts the contiguous prefix hit only.
+       L1+L2 token-level hit rate). Counts the contiguous prefix hit only,
+       including an unfull-chunk (tail) hit.
    * - ``lmcache_mp.lookup_hit_l1``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Of ``lookup_hit``: tokens L1 could serve on its own under each
-       object group's attention-window rule.
+       object group's attention-window rule. An unfull-chunk hit is
+       always counted here, since unfull chunks are served from L1 only.
    * - ``lmcache_mp.lookup_hit_l2``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Of ``lookup_hit``: tokens L2 added beyond the L1-servable prefix.
@@ -723,7 +726,7 @@ Adapters with no in-flight work emit no datapoint for that scrape.
    * - ``lmcache_mp.l1_usage_ratio``
      - ObservableGauge
      - L1 used/total ratio (``0.0``–``1.0``), sampled at scrape time
-       from ``L1Manager.get_memory_usage()``. Returns ``0.0`` when the
+       from ``BaseL1Manager.get_memory_usage()``. Returns ``0.0`` when the
        gauge target is not yet wired up or ``total_bytes`` is zero, so
        the callback never raises during a scrape. Compare against the
        eviction watermark (default ``0.8``) to read whether the
@@ -808,9 +811,9 @@ each metric see ``docs/design/v1/mp_observability/METRICS.md`` and
 gRPC Runtime Metrics
 ~~~~~~~~~~~~~~~~~~~~
 
-When metrics are enabled and the MP request transport is gRPC, LMCache also
-registers gRPC Python's OpenTelemetry observability plugin against the same
-OTel ``MeterProvider``. ZMQ mode does not register this plugin, so the
+When metrics are enabled and the MP request transport is gRPC (the default),
+LMCache also registers gRPC Python's OpenTelemetry observability plugin
+against the same OTel ``MeterProvider``. ZMQ mode does not register this plugin, so the
 existing LMCache EventBus metrics remain unchanged. The plugin is provided by
 ``grpcio-observability`` and is installed only on Linux, which is the platform
 currently supported by that upstream package. On non-Linux developer hosts the
@@ -894,8 +897,9 @@ Coordinator Metrics
 Coordinator metrics use the ``lmcache_coordinator.`` prefix, so a series'
 origin is clear from its name even when the coordinator and the MP servers
 share one Prometheus.  The coordinator's resource carries
-``service.name=lmcache-mp-coordinator`` and ``service.instance.id`` set to the
-host name (the pod name under Kubernetes).
+``service.name=lmcache-mp-coordinator`` and ``service.instance.id`` set to
+``<host name>:<port>`` (the host name is the pod name under Kubernetes), so
+coordinators sharing a host stay apart.
 
 The Key Directory gauges always emit one observation for each ``tier`` value,
 ``l1`` and ``l2``, including zero-valued observations for an empty tier.  A
@@ -1094,6 +1098,7 @@ counted, and the loop keeps running.
      - ObservableCounter
      - Total time the coordinator's event loop was blocked.  Its rate is the
        fraction of time request handlers, heartbeats and loops were stalled.
+       Delays of 10 ms or less are timer jitter and are not counted.
    * - ``lmcache_coordinator.registry.server_seconds_since_heartbeat``
      - ObservableGauge (attr: ``instance_id``)
      - Seconds since each registered server's last heartbeat.

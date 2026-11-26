@@ -1,0 +1,36 @@
+# Module dependency rules, checked by tools/check_module_deps.py.
+# See docs/design/MODULE_DEPENDENCIES.md.
+
+# Part of any lmcache module that no entry below places.
+default: server
+
+# Packages in each part. A module belongs to the part with the longest matching
+# package.
+parts:
+  common: [lmcache.v1.common, lmcache.lmcache_native, lmcache._version]
+  platform: [lmcache.v1.platform, lmcache.cuda_ops, lmcache.musa_ops, lmcache.xpu_ops]
+  transport: [lmcache.v1.transport]
+  client: [lmcache.v1.client]
+  integration: [lmcache.integration]
+
+# Single modules, placed without their submodules.
+modules:
+  lmcache: platform     # re-exports platform values and runs on every import
+  lmcache.v1: common    # runs before every part under lmcache.v1
+
+# Not part of the tree: not checked, and any part may use them.
+outside: [lmcache.cli, lmcache.sdk]
+
+# The diagram's arrows. A part may import every part its arrows lead to,
+# directly or through other parts. Imports within a part are always allowed.
+allowed:
+  common: []
+  platform: [common]
+  transport: [common, platform]
+  server: [common, platform, transport]
+  client: [common, platform, transport]
+  integration: [client]
+
+# Imports that break the tree today, as "<part or package> -> <part or package>".
+# Delete a line once nothing matches it; the check fails on a stale line.
+exceptions: []

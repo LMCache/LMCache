@@ -8,7 +8,7 @@ these events see [METRICS.md](METRICS.md).
 
 ---
 
-## L1Manager Events
+## BaseL1Manager Events
 
 | EventType | Metadata keys | Types |
 |---|---|---|
@@ -22,7 +22,7 @@ these events see [METRICS.md](METRICS.md).
 
 `L1_WRITE_RESERVED.tag` names the writer that staged the keys (e.g.
 `prefetch:<request_id>`, `storage_manager`); see
-`../../distributed/l1_manager.md`. A staging object that is discarded or
+`../distributed/l1_manager/staging-and-write-tags.md`. A staging object that is discarded or
 reclaimed without becoming resident publishes **no** event (it is logged at
 debug level): `L1_KEYS_EVICTED` is reserved for admitted objects, which is
 what the coordinator cache-event reporter and the L1 byte metrics assume.
@@ -35,7 +35,7 @@ and the policy ran this cycle, `False` otherwise.
 
 ## L1 Failure Events
 
-Published at the caller of the L1 API — **not** inside `L1Manager` — so the
+Published at the caller of the L1 API — **not** inside `BaseL1Manager` — so the
 caller context (`during`) can be attached without leaking caller identity
 into the manager. See LM-291 for the health-monitoring rationale.
 
@@ -137,7 +137,7 @@ Health-monitoring event for the L2 prefetch path. See LM-291.
 
 Producers (all in `PrefetchController`):
 - `reason=l1_oom` — emitted when `reserve_write` of a load's L1 staging buffer returns `OUT_OF_MEMORY`. The affected cells drop their L2 lock and the request is re-planned on what was reserved.
-- `reason=l1_contended` — emitted when `reserve_write` returns `KEY_NOT_WRITABLE` because the key became resident in L1 between the lookup and the reserve step. The cell is treated like an out-of-memory cell.
+- `reason=l1_contended` — emitted when `reserve_write` returns `KEY_NOT_WRITABLE` because the key is resident in the adapter's affinity L1 and the request may not read that L1. The cell is treated like an out-of-memory cell. A key that lands in a readable L1 during the lookup is loaded again instead and is not reported.
 - `reason=not_found` — emitted in `_poll_load_results` for keys reserved in L1 but missing from the adapter's load bitmap (L2 reported the key present at lookup but produced no data).
 
 The third reason `serde_failure` will be added as an additive, non-breaking
@@ -149,8 +149,9 @@ needed when that happens.
 
 ## Timeout Events
 
-Cross-component health event. Published by `LMCacheTimeoutError.__init__`
-(see `lmcache/v1/mp_observability/errors.py`) every time the exception is
+Cross-component health event. Published by `publish_timeout`
+(`lmcache/v1/mp_observability/errors.py`), which `init_event_bus()` registers
+as the `LMCacheTimeoutError` observer, every time the exception is
 constructed, gated by `is_observability_enabled()` so it is a no-op outside
 the MP server process. The `session_id` on the `Event` dataclass correlates
 the timeout with the originating request when the raise site has it; it is
@@ -225,8 +226,10 @@ per-transfer `transfer.kernel_interval` / `transfer.staging` child spans (see
 ### `num_tokens` on `MP_STORE_END` / `MP_RETRIEVE_END`
 
 Denormalized token count (`num_chunks * chunk_size`) so subscribers need
-not know `chunk_size`.  Fail-closed, matching `total_bytes`: `0` when the
-store committed nothing (`stored_count == 0`) or the retrieve did not
+not know `chunk_size`. For a store, `num_chunks` counts unique chunk positions
+for which at least one object group committed a new object; chunks that were
+already fully present are excluded. Fail-closed, matching `total_bytes`: `0`
+when the store committed nothing (`stored_count == 0`) or the retrieve did not
 fully succeed.
 
 ### `MP_LOOKUP_PREFETCH_END` metadata
@@ -298,7 +301,7 @@ denormalized token-level counts so subscribers need not know `chunk_size`:
   |---|---|---|
   | `""` | Normal path (including a genuine cold miss) | None — inspect the hit rate |
   | `no_gpu_context` | No layout registered for this model / world size | Configuration or registration bug; also logged at `error` |
-  | `empty_chunk_hashes` | Prompt shorter than one chunk | None — a workload property, not a cache failure |
+  | `empty_chunk_hashes` | Prompt shorter than one chunk, looked up without its unfull chunk (aligned `end`) | None — a workload property, not a cache failure |
   | `no_group_layout_descs` | No per-object-group layouts registered for this model / world size | Configuration or registration bug; also logged at `error` |
 
   Without it `found_count == 0` conflates a cold miss with every early

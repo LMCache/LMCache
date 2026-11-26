@@ -10,14 +10,14 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
-from lmcache.v1.gpu_connector.kv_format.types import LayoutHints
-from lmcache.v1.multiprocess.transfer_context.base import (
+from lmcache.v1.client.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
+from lmcache.v1.common.kv_format.types import LayoutHints
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.devices.mlu import MluDeviceSpec
 from lmcache.v1.platform.devices.mlu.device_ops import MluDeviceOps
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 pytestmark = pytest.mark.no_shared_allocator
 

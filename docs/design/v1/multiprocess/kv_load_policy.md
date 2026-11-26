@@ -24,7 +24,7 @@ engine connector                           server: LookupModule.lookup
                                                  no  → register empty job,
                                                        early_exit_reason=
                                                        "load_policy_recompute"
-  ◄── QUERY_PREFETCH_STATUS → hit chunks ──────  0 when declined
+  ◄── QUERY_PREFETCH_STATUS → hit tokens ──────  0 when declined
   └─ 0 hits → engine prefills the prompt
 ```
 
@@ -44,7 +44,7 @@ work.
   tokens as unserved (other early exits report 0 because nothing could be
   served).
 - The engine treats the miss like any other and stores the prompt KV. Chunks
-  already resident in L1 are rejected cheaply at `L1Manager.reserve_write`
+  already resident in L1 are rejected cheaply at `BaseL1Manager.reserve_write`
   (`KEY_NOT_WRITABLE`); chunks only in L2 are written to L1 again.
 
 ## Interface

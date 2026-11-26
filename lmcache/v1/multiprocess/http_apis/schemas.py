@@ -8,10 +8,13 @@ belong to the ``cache_control`` services. ``Tier`` is imported from the domain
 """
 
 # Standard
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 # First Party
-from lmcache.v1.distributed.api import EncodedObjectKey, Tier
+from lmcache.v1.distributed.api import EncodedObjectKey, Tier, validate_identity_tags
+from lmcache.v1.multiprocess.cache_control.key_resolver import MAX_KEYS_PER_REQUEST
+from lmcache.v1.utils.frozen_dict import freeze_dict
 
 
 @dataclass(frozen=True)
@@ -36,17 +39,46 @@ class DeleteObjectsRequest:
 class PrefetchRequest:
     """Wire body for ``POST /cache/prefetches``.
 
-    Callers describe content by ``token_ids``; the server resolves the per-rank
-    keys itself. ``source_tier`` / ``target_tier`` are request data (today only
-    ``l2`` -> ``l1``).
+    Supply exactly one form. ``token_ids`` (with ``model_name`` /
+    ``world_size``): the server resolves the per-rank keys of the sequence's
+    whole chunks itself. ``keys``: each key names a chunk, which is warmed in
+    every object group and rank; this reaches a chunk in the middle of a
+    prompt without its prefix chunks. ``source_tier`` / ``target_tier`` are
+    request data (today only ``l2`` -> ``l1``).
+
+    Raises:
+        ValueError: both or neither of ``keys`` / ``token_ids`` is supplied,
+            ``token_ids`` comes without ``model_name`` or a ``world_size`` of
+            at least 1, there are more than ``MAX_KEYS_PER_REQUEST`` keys, a
+            key cannot convert into an ``ObjectKey``, or a tag is invalid
+            (surfaced as 422).
     """
 
-    model_name: str
-    world_size: int
-    token_ids: list[int]
+    model_name: str = ""
+    world_size: int = 0
+    token_ids: list[int] = field(default_factory=list)
     cache_salt: str = ""
     source_tier: Tier = Tier.L2
     target_tier: Tier = Tier.L1
+    tags: Mapping[str, str] = field(default_factory=dict)
+    keys: list[EncodedObjectKey] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if bool(self.keys) == bool(self.token_ids):
+            raise ValueError("supply exactly one of 'keys' or 'token_ids'")
+        if self.token_ids and not self.model_name:
+            raise ValueError("'model_name' is required with 'token_ids'")
+        if self.token_ids and self.world_size < 1:
+            raise ValueError("'world_size' (>= 1) is required with 'token_ids'")
+        if len(self.keys) > MAX_KEYS_PER_REQUEST:
+            raise ValueError(
+                f"too many keys in a single request "
+                f"(limit={MAX_KEYS_PER_REQUEST}, got={len(self.keys)})"
+            )
+        for encoded in self.keys:
+            encoded.to_object_key()
+        validate_identity_tags(self.tags)
+        object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
 
 @dataclass(frozen=True)

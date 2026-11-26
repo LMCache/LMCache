@@ -23,7 +23,12 @@ Expected log output:
 
 .. code-block:: text
 
-    LMCache INFO: MP coordinator listening on http://0.0.0.0:9300
+    LMCache INFO: MP coordinator listening on http://127.0.0.1:9300
+
+By default, the coordinator is reachable only from the local machine. For MP
+servers on other hosts, bind it to a reachable interface explicitly, for
+example ``lmcache coordinator --host <COORDINATOR_IP>``, and configure
+API-key authentication before exposing it to an untrusted network.
 
 See :doc:`/cli/coordinator` for the full flag list. Equivalently, the
 coordinator can be launched as a module with
@@ -43,7 +48,7 @@ keeps the default below.
      - Default
      - Description
    * - ``--host``
-     - ``0.0.0.0``
+     - ``127.0.0.1``
      - Host the HTTP server binds to.
    * - ``--port``
      - ``9300``
@@ -101,6 +106,16 @@ keeps the default below.
      - (empty)
      - File the operator-set state (L2 pins and per-``cache_salt`` quotas)
        is stored in. Empty means that state is lost on restart.
+   * - ``--public-endpoint PATH``
+     - ``/healthz``
+     - Serve ``PATH`` without credentials when API-key authentication is on.
+       Repeat the flag for several paths. The value **replaces** the default
+       list, which is ``/healthz`` alone, rather than extending it. Matching is
+       exact: no prefix or wildcard rules.
+   * - ``--no-public-endpoints``
+     - off
+     - Require a valid API key for every HTTP path, including ``/healthz``.
+       Cannot be combined with ``--public-endpoint``.
    * - ``--extra-config``
      - (empty)
      - JSON object of settings the core flags do not name, read by whichever
@@ -250,7 +265,51 @@ created:
 
 .. code-block:: bash
 
-   curl http://localhost:9300/metrics
+   curl -H "Authorization: Bearer $FLEET_KEY" http://localhost:9300/metrics
+
+``/metrics`` requires the fleet key: the gauges describe placement and
+reported-byte counts, so the coordinator does not publish them to an
+unauthenticated caller. The only path served without credentials is
+``/healthz``, the liveness probe.
+
+``--public-endpoint`` **replaces** that default rather than extending it, so a
+deployment that wants public metrics has to name the probe as well:
+
+.. code-block:: bash
+
+   lmcache coordinator --api-key-file /run/secrets/fleet-key \
+       --public-endpoint /healthz --public-endpoint /metrics
+
+Passing only ``--public-endpoint /metrics`` makes ``/healthz`` require the key,
+and an orchestrator's probe would then get 401 and restart the pod. If that is
+what you want, Kubernetes ``httpGet`` probes can send a credential:
+
+.. code-block:: yaml
+
+   livenessProbe:
+     httpGet:
+       path: /healthz
+       port: 9300
+       httpHeaders:
+         - name: Authorization
+           value: Bearer <fleet-key>
+
+``--no-public-endpoints`` goes one step further and requires a key for every
+path, including the probe.
+
+A scraper sends the credential through Prometheus' ``credentials_file``:
+
+.. code-block:: yaml
+
+   scrape_configs:
+     - job_name: lmcache-coordinator
+       authorization:
+         credentials_file: /etc/prometheus/lmcache-fleet-key
+       static_configs:
+         - targets: ["coordinator:9300"]
+
+The file must contain the raw key, which is the same value the coordinator
+accepts through ``--api-key-file``.
 
 Set ``--otlp-endpoint http://collector:4317`` to push metrics to an
 OpenTelemetry Collector instead. In OTLP push mode, and when
@@ -335,8 +394,8 @@ HTTP endpoints
 
 The coordinator's HTTP surface (base URL ``http://localhost:9300``) groups into:
 
-- **Fleet membership and health** -- registration and liveness
-  (``/instances``, ``/healthz``).
+- **Fleet membership and health** -- registration, liveness, and a debugging
+  snapshot (``/instances``, ``/healthz``, ``/status``).
 - **Quota, usage, and eviction** -- the ``/quota`` group: per-tenant byte
   budgets, usage accounting, and the usage-event ingest that drives fleet-wide
   eviction.
@@ -367,8 +426,8 @@ Fleet membership and health
 ---------------------------
 
 MP servers register, heartbeat, and deregister automatically (see
-`Connecting MP servers`_); ``GET /instances`` and ``GET /healthz`` are read-only
-operator views.
+`Connecting MP servers`_); ``GET /instances``, ``GET /healthz`` and
+``GET /status`` are read-only operator views.
 
 ``POST /instances``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -387,8 +446,10 @@ startup.
      - Description
    * - ``ip``
      - string
-     - IP/host of the server's HTTP API; the coordinator dials this address, so
-       it must be non-empty.
+     - Bare IPv4 address, IPv6 address, or resolver host name of the server's
+       HTTP API. Do not include a scheme, port, path, query, fragment, or
+       userinfo; ``http_port`` supplies the port separately. Resolver-specific
+       names such as Docker service names containing underscores are accepted.
    * - ``http_port``
      - int
      - Port of the server's HTTP API.
@@ -405,10 +466,9 @@ startup.
        when it is not in P2P.
    * - ``mq_port``
      - int
-     - Optional (default ``0``). Request-server port P2P peers send
-       lookup/unlock RPCs to. The field name is retained for compatibility;
-       the server's configured ZMQ or gRPC transport is used. ``0`` when P2P
-       is disabled.
+     - Optional (default ``0``). Port of the P2P gRPC listener
+       (``--p2p-rpc-port``) that P2P peers send lookup/unlock RPCs to. The
+       field name is retained for compatibility. ``0`` when P2P is disabled.
 
 **Response** (``200 OK``):
 
@@ -422,8 +482,8 @@ it); ``re_registered`` is ``true`` when this replaced an existing registration.
 **HTTP status codes:**
 
 - ``200``: registered.
-- ``422``: request body fails field-level validation (e.g. blank ``ip`` or
-  out-of-range ``http_port``).
+- ``422``: request body fails field-level validation (e.g. blank or URL-shaped
+  ``ip``, or out-of-range ``http_port``).
 
 **Example:**
 
@@ -540,6 +600,92 @@ Coordinator liveness probe (for Kubernetes).
 
     curl -s http://localhost:9300/healthz
     # -> {"status": "healthy"}
+
+``GET /status``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+One JSON snapshot of the coordinator's state, for a person debugging it. Each
+section reads the same snapshot the corresponding metrics read, so the page and
+the dashboards never disagree. Use ``/healthz`` for probes; this endpoint is
+for people.
+
+**Response** (``200 OK``, trimmed to one consumer):
+
+.. code-block:: json
+
+    {
+      "event_source": {"source_name": "http", "replay_capability": "none"},
+      "ingest": {
+        "batches_applied": 1,
+        "batches_duplicate": 0,
+        "batches_stale": 0,
+        "batches_missing": 0,
+        "events_dropped": 0,
+        "streams": {
+          "mp-0": {
+            "incarnation": 1,
+            "last_seq": 1,
+            "gap_detected": false,
+            "missing_batches": 0,
+            "events_dropped": 0,
+            "seconds_since_last_event": 1.1,
+            "event_delivery_delay_seconds": null
+          }
+        }
+      },
+      "consumers": {
+        "KeyDirectory": {
+          "batches_delivered": 1,
+          "apply_seconds": 0.00001,
+          "consume_failures": 0,
+          "fence_failures": 0
+        }
+      },
+      "registry": {"seconds_since_heartbeat": {"mp-0": 1.1}},
+      "controllers": {"FleetEvictionController": true, "PrefetchManager": true},
+      "background_loops": {
+        "health": {
+          "interval_seconds": 10.0,
+          "last_success_timestamp": 1792441340.6,
+          "passes_ok": 2,
+          "passes_failed": 0,
+          "last_error": null,
+          "last_error_timestamp": null,
+          "seconds_since_last_success": 0.1
+        }
+      },
+      "event_loop": {"blocked_seconds": 0.003}
+    }
+
+- ``event_source``: the source feeding the coordinator. With Kafka it also
+  carries ``reads``: records read by outcome, ``partitions_assigned``, and per
+  partition ``unread_records`` and ``next_offsets`` (the position the next
+  checkpoint records).
+- ``ingest``: fleet-wide batch counts, and each server's stream under
+  ``streams``. ``gap_detected: true`` means the coordinator knows it is missing
+  part of that server's cache.
+- ``consumers``: each view or controller fed by the event stream. A non-zero
+  ``consume_failures`` or ``fence_failures`` means that consumer now disagrees
+  with the others.
+- ``registry``: seconds since each registered server's last heartbeat.
+- ``controllers``: ``false`` means the controller failed to start (see the
+  startup logs) and its work is not happening.
+- ``background_loops``: each periodic loop (``health``, ``checkpoint``,
+  ``eviction``). ``last_error`` is the latest failed pass; it stays after later
+  successes, so compare ``last_error_timestamp`` with
+  ``last_success_timestamp``. The ``checkpoint`` loop is absent when periodic
+  checkpoints are off.
+- ``event_loop``: total seconds the coordinator's event loop was blocked.
+
+**HTTP status codes:**
+
+- ``200``: always, so the page is available exactly when something is wrong.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:9300/status
 
 Quota, usage, and eviction
 --------------------------
@@ -928,8 +1074,8 @@ forms -- supply exactly one:
 * **keys form** -- ``{"keys": [...]}``: resolve keys you already have (e.g.
   from ``GET /directory/keys``).
 * **tokens form** -- ``{"token_ids": [...], "model_name": ..., "world_size":
-  ..., "cache_salt": ...}``: resolve a request's tokens to the keys of its
-  complete chunks (the same fan-out the pin APIs use).
+  ..., "cache_salt": ..., "tags": ...}``: resolve a request's tokens to the
+  keys of its complete chunks (the same fan-out the pin APIs use).
 
 .. important::
 
@@ -947,7 +1093,8 @@ forms -- supply exactly one:
       "token_ids": [15496, 11, 995, 314],
       "model_name": "meta-llama/Llama-3.1-8B-Instruct",
       "world_size": 1,
-      "cache_salt": ""
+      "cache_salt": "",
+      "tags": {"adapter_revision": "abc123"}
     }
 
 **Request body** (keys form):
@@ -961,7 +1108,8 @@ forms -- supply exactly one:
           "model_name": "meta-llama/Llama-3.1-8B-Instruct",
           "kv_rank": 0,
           "object_group_id": 0,
-          "cache_salt": ""
+          "cache_salt": "",
+          "tags": {"adapter_revision": "abc123"}
         }
       ]
     }
@@ -975,7 +1123,8 @@ forms -- supply exactly one:
       "results": [
         {
           "key": {"chunk_hash_hex": "aa12...", "model_name": "...", "kv_rank": 0,
-                  "object_group_id": 0, "cache_salt": ""},
+                  "object_group_id": 0, "cache_salt": "",
+                  "tags": {"adapter_revision": "abc123"}},
           "placements": [
             {"instance_id": "server-1", "incarnation": 1770000000, "tier": "l1",
              "backend": "dram", "size_bytes": 8388608, "shared": false}
@@ -993,6 +1142,11 @@ is empty for keys the directory does not know; ``token_ids`` is empty when the
 directory has no tokens for the key's chunk (never stored with token reporting
 on, or not yet re-reported after an event gap). ``access_count`` is the number
 of ``access`` events applied to the key, ``0`` for unknown keys.
+
+``tags`` is optional (default ``{}``) in both forms. For token-addressed
+content, pass the exact ``lmcache.tag.*`` values used at store time with the
+prefix removed. Empty tags select only untagged content, not every tag
+namespace. Tag names must be nonempty strings and values must be strings.
 
 **HTTP status codes:**
 
@@ -1028,11 +1182,14 @@ KV for a known prompt **before** the requests arrive, so the first request hits
 L1 instead of paying the L2 fetch inline -- useful when you know a workload is
 about to be routed to a node (a traffic shift, a hot shared system prompt).
 
-You describe the content by **token ids** -- the unit the cache speaks -- never
-by internal cache keys, which you cannot construct (a key is a content hash
-plus a per-rank layout bitmap). The coordinator forwards the request to the
-named server, which hashes the tokens, expands them across the node's ranks,
-loads the chunks from L2 into L1, and **retains** them so a later lookup hits.
+You describe the content by **token ids** -- the unit the cache speaks -- or by
+**keys** you already hold (from ``GET /directory/keys`` or
+``POST /directory/lookup``). Token ids always cover every chunk from position 0,
+since chunk hashes are prefix-chained; keys reach a chunk in the middle of a
+prompt without its prefix chunks. The coordinator forwards the supplied form
+alone to the named server, which resolves it, expands each chunk across the
+node's object groups and ranks, loads the chunks from L2 into L1, and
+**retains** them so a later lookup hits.
 The submit returns a ``request_id``; poll the status endpoint until
 ``completed``. The warm acquires no lock -- the poll simply reports progress and
 clears the server-side job once the load finishes.
@@ -1040,7 +1197,8 @@ clears the server-side job once the load finishes.
 ``POST /cache/prefetches``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Submit a warm prefetch of a token sequence on one named server.
+Submit a warm prefetch of keys, or a token sequence, on one named server.
+Supply exactly one of ``keys`` / ``token_ids``.
 
 **Request body:**
 
@@ -1054,22 +1212,34 @@ Submit a warm prefetch of a token sequence on one named server.
    * - ``instance_id``
      - string
      - Target MP server; must be registered.
+   * - ``keys``
+     - list[object]
+     - Keys form. Each key, in the wire form ``GET /directory/keys`` returns,
+       names its chunk; the server warms that chunk in every object group and
+       rank, with no sliding window (see the note below). The keys must agree
+       on model, world size, ``cache_salt`` and ``tags``; at most 10,000 keys.
+       The fields below are then ignored.
    * - ``model_name``
      - string
-     - Model whose layout sizes the target's L1 buffers.
+     - Tokens form, required. Model whose layout sizes the target's L1
+       buffers.
    * - ``world_size``
      - int
-     - World size (``>= 1``) selecting the KV layout and the per-rank fan-out
-       (``1`` for a single-GPU, TP=1 deployment).
+     - Tokens form, required. World size (``>= 1``) selecting the KV layout
+       and the per-rank fan-out (``1`` for a single-GPU, TP=1 deployment).
    * - ``token_ids``
      - list[int]
-     - Prompt tokens whose complete ``chunk_size`` chunks are warmed; must match
-       what was stored (same tokenizer / special tokens). A sub-chunk sequence
-       is a ``noop``.
+     - Tokens form. Prompt tokens whose complete ``chunk_size`` chunks are
+       warmed; must match what was stored (same tokenizer / special tokens). A
+       sub-chunk sequence is a ``noop``.
    * - ``cache_salt``
      - string
      - Optional (default ``""``). Per-tenant isolation salt applied to the
        produced keys.
+   * - ``tags``
+     - map[string, string]
+     - Optional (default ``{}``). Matching tags used when the content was
+       stored, without the ``lmcache.tag.`` prefix.
 
 **Response** (``200 OK``):
 
@@ -1085,14 +1255,27 @@ When the sequence is shorter than one chunk, nothing is submitted and
     {"instance_id": "server-1", "request_id": "", "chunks": 0, "status": "noop"}
 
 ``request_id`` is the id to poll; ``chunks`` is the number of whole chunks
-submitted to warm.
+submitted to warm (keys form: the distinct chunks the keys name).
 
 **HTTP status codes:**
 
 - ``200``: submitted (or a ``noop`` as above).
 - ``404``: unknown ``instance_id`` (not registered).
 - ``502``: the target server was unreachable or rejected the submit.
-- ``422``: request body fails field-level validation.
+- ``422``: request body fails field-level validation, supplies both or neither
+  of ``keys`` / ``token_ids``, omits ``model_name`` or ``world_size`` in the
+  tokens form, carries more than 10,000 keys, or has keys that disagree on
+  model, world size, ``cache_salt`` or ``tags`` (or whose ``kv_rank`` packs no
+  world size).
+
+.. note::
+
+   **Sliding-window models:** the two forms load different chunks. The tokens
+   form keeps each object group's window, and a warm prefetch loads nothing on
+   a model with a sliding-window group. The keys form names chunks that need not
+   be a contiguous prefix, so it ignores the windows and loads every named
+   chunk in every group, and those chunks stay in L1 until evicted. Serving is
+   unaffected: a lookup still applies each group's window.
 
 .. note::
 
@@ -1110,9 +1293,26 @@ submitted to warm.
             "model_name": "Qwen/Qwen3-8B",
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
         }'
     # -> {"instance_id": "server-1", "request_id": "abc123", "chunks": 12, "status": "submitted"}
+
+    # Keys form: warm one mid-prompt chunk found via /directory/lookup.
+    curl -s -X POST http://localhost:9300/cache/prefetches \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "instance_id": "server-1",
+            "keys": [{
+                "chunk_hash_hex": "aa12...",
+                "model_name": "Qwen/Qwen3-8B",
+                "kv_rank": 16777472,
+                "object_group_id": 0,
+                "cache_salt": "user-a",
+                "tags": {"adapter_revision": "abc123"}
+            }]
+        }'
+    # -> {"instance_id": "server-1", "request_id": "def456", "chunks": 1, "status": "submitted"}
 
 ``GET /cache/prefetches/{instance_id}/{request_id}``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1164,25 +1364,40 @@ verbatim with its code.
     curl -s http://localhost:9300/cache/prefetches/server-1/abc123
     # -> {"status": "completed", "found_keys": 12, "total_keys": 12}
 
-**Pin/unpin (protecting cache from eviction).** Pin a token sequence's cache so
-it is not evicted from L2 until unpinned. The coordinator resolves the token
-sequence to its object keys **locally** (no MP-server round-trip) and records
-them in its L2 eviction plan (``POST``) or releases them (``DELETE``), excluding
-pinned keys from quota-based eviction. L2 pins are fleet-wide (per
-``cache_salt``), so no target instance is named.
+**Pin/unpin (protecting cache from eviction).** Pin cache so it is not evicted
+from L2 until unpinned. The coordinator records the keys in its L2 eviction plan
+(``POST``) or releases them (``DELETE``), excluding pinned keys from quota-based
+eviction, with no MP-server round-trip. L2 pins are fleet-wide (per
+``cache_salt``), so no target instance is named. One endpoint, two forms --
+supply exactly one:
+
+* **tokens form** -- ``{"token_ids": [...], "model_name": ..., "world_size":
+  ..., "cache_salt": ..., "tags": ...}``: the coordinator resolves the token
+  sequence to the keys of its complete chunks **locally**. Chunk hashes are
+  prefix-chained, so this always covers every chunk from position 0.
+* **keys form** -- ``{"keys": [...]}``: pin the chunks these keys name, in the
+  same wire form ``GET /directory/keys`` and ``POST /directory/lookup`` return.
+  Use it to pin a chunk in the middle of a prompt without its prefix chunks.
 
 Local resolution requires the coordinator's ``chunk_size`` and
 ``hash_algorithm`` (see `Configuration`_) to match the MP servers' ``--chunk-size``
 / ``--hash-algorithm``; otherwise the resolved keys will not match what was
-stored and the pin protects nothing. Under ``--separate-object-groups`` a chunk
-is stored once per object group; a pin covers the chunk in every group,
-including groups it is not stored in yet, so ``GET /cache/pins`` lists one entry
-per chunk and rank rather than per group.
+stored and the pin protects nothing.
+
+A pin is on a whole chunk. A chunk is stored once per kv rank and, with
+object-group separation (the default), once per object group; a pin taken
+through any one of its keys covers every group and every rank of that key's
+world size, including copies not stored yet. Otherwise eviction or a delete
+could remove one rank's share and leave the pinned chunk unusable.
+``GET /cache/pins`` therefore lists one entry per chunk, under its rank-0 key
+in group 0. One request pins (or unpins) each chunk once, however many of its
+keys it names, so a tokens-form pin at TP=2 is released by one unpin in either
+form.
 
 ``POST /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Pin a token sequence's keys in the L2 eviction plan.
+Pin keys in the L2 eviction plan.
 
 **Request body:**
 
@@ -1193,19 +1408,30 @@ Pin a token sequence's keys in the L2 eviction plan.
    * - Field
      - Type
      - Description
-   * - ``model_name``
-     - string
-     - Model whose rank fan-out to use when resolving keys.
-   * - ``world_size``
-     - int
-     - World size (``>= 1``) selecting the per-rank fan-out.
+   * - ``keys``
+     - list[object]
+     - Keys form. Keys naming the chunks to pin, each ``{"chunk_hash_hex",
+       "model_name", "kv_rank", "object_group_id", "cache_salt", "tags"}``; at
+       most 10,000. The other fields below are ignored.
    * - ``token_ids``
      - list[int]
-     - Prompt tokens whose complete chunks are pinned; must match what was
-       stored. A sub-chunk sequence pins nothing (``affected`` 0).
+     - Tokens form. Prompt tokens whose complete chunks are pinned; must match
+       what was stored. A sub-chunk sequence pins nothing (``affected`` 0).
+   * - ``model_name``
+     - string
+     - Tokens form, required. Model whose rank fan-out to use when resolving
+       keys.
+   * - ``world_size``
+     - int
+     - Tokens form, required. World size (``>= 1``) selecting the per-rank
+       fan-out.
    * - ``cache_salt``
      - string
-     - Optional (default ``""``). Per-tenant isolation salt.
+     - Tokens form. Optional (default ``""``). Per-tenant isolation salt.
+   * - ``tags``
+     - map[string, string]
+     - Tokens form. Optional (default ``{}``). Matching tags used when the
+       content was stored, without the ``lmcache.tag.`` prefix.
 
 **Response** (``200 OK``):
 
@@ -1213,15 +1439,21 @@ Pin a token sequence's keys in the L2 eviction plan.
 
     {"requested": 12, "affected": 12, "status": "pinned"}
 
-``requested`` is the number of whole chunks resolved; ``affected`` is the number
-of L2 keys pinned (chunks times the per-rank fan-out).
+``requested`` is the number of whole chunks resolved (keys form: the distinct
+chunks the keys name, so one chunk's keys on several ranks or groups count
+once); ``affected`` is the number of keys the request resolved to (tokens form:
+chunks times the per-rank fan-out), each covering its whole chunk. Unlike
+``POST /directory/lookup``, which reports one ``chunks`` per key given, pin,
+delete and prefetch count chunks.
 
 **HTTP status codes:**
 
 - ``200``: pinned.
 - ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt`` violates
   its invariants.
-- ``422``: request body fails field-level validation.
+- ``422``: request body fails field-level validation, supplies both or neither
+  of ``keys`` / ``token_ids``, omits ``model_name`` or ``world_size`` in the
+  tokens form, carries more than 10,000 keys, or has an undecodable key.
 - ``503``: the metadata file (``--metadata-path``) could not be written; the
   change was undone, so retry once the storage is fixed.
 
@@ -1235,9 +1467,25 @@ of L2 keys pinned (chunks times the per-rank fan-out).
             "model_name": "Qwen/Qwen3-8B",
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
         }'
     # -> {"requested": 12, "affected": 12, "status": "pinned"}
+
+    # Keys form: pin one mid-prompt chunk found via /directory/lookup.
+    curl -s -X POST http://localhost:9300/cache/pins \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "keys": [{
+                "chunk_hash_hex": "aa12...",
+                "model_name": "Qwen/Qwen3-8B",
+                "kv_rank": 0,
+                "object_group_id": 0,
+                "cache_salt": "user-a",
+                "tags": {"adapter_revision": "abc123"}
+            }]
+        }'
+    # -> {"requested": 1, "affected": 1, "status": "pinned"}
 
 .. note::
 
@@ -1248,7 +1496,7 @@ of L2 keys pinned (chunks times the per-rank fan-out).
 ``DELETE /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Unpin a token sequence's keys from the L2 eviction plan. Same request body as
+Unpin keys from the L2 eviction plan. Same request body (either form) as
 ``POST /cache/pins``. The response mirrors the pin (``affected`` is the number
 of keys unpinned), with ``status`` ``"unpinned"``. Pins are reference-counted: a
 chunk pinned *N* times needs *N* unpins before it can be evicted.
@@ -1265,14 +1513,16 @@ chunk pinned *N* times needs *N* unpins before it can be evicted.
             "model_name": "Qwen/Qwen3-8B",
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
         }'
     # -> {"requested": 12, "affected": 12, "status": "unpinned"}
 
 ``GET /cache/pins``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-List the keys currently pinned in the L2 eviction plan.
+List the chunks currently pinned in the L2 eviction plan, one entry per chunk
+under its rank-0 key in object group 0.
 
 **Query parameters** (all optional):
 
@@ -1310,7 +1560,8 @@ List the keys currently pinned in the L2 eviction plan.
             "model_name": "Qwen/Qwen3-8B",
             "kv_rank": 0,
             "object_group_id": 0,
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
           },
           "pin_count": 2
         }
@@ -1334,13 +1585,14 @@ requested page in first-pinned order, each with its current ``pin_count``.
 ``POST /cache/delete``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Delete a token sequence on one named server.
+Delete keys, or a token sequence's keys, on one named server.
 
-**Request body:** (``model_name``,
-``world_size``, ``token_ids``, ``cache_salt``) plus ``tier`` (``l1`` / ``l2`` /
-``all``) and ``force`` (bool, default ``false``). When ``force`` is ``true``,
-locked keys are deleted anyway (L1 read/write locks on the node and the
-coordinator's L2 pin set).
+**Request body:** ``instance_id``, the content in either form as documented
+for ``POST /cache/pins`` (``keys``, or ``model_name``, ``world_size``,
+``token_ids``, ``cache_salt`` and optional matching ``tags``), plus ``tier``
+(``l1`` / ``l2`` / ``all``) and ``force``
+(bool, default ``false``). When ``force`` is ``true``, locked keys are deleted
+anyway (L1 read/write locks on the node and the coordinator's L2 pin set).
 
 **Response** (``200 OK``):
 
@@ -1348,7 +1600,14 @@ coordinator's L2 pin set).
 
     {"instance_id": "server-1", "requested": 12, "affected": 24, "skipped": 0, "status": "deleted"}
 
-``requested`` is the number of whole chunks resolved. ``affected`` and
+``requested`` is the number of whole chunks resolved (keys form: the distinct
+chunks the keys name). A key names its chunk: it is expanded to every copy the
+coordinator's directory holds of that chunk in the key's parallel setup -- every
+object group and every kv rank of the same world size -- so any one of the
+chunk's keys removes the whole chunk, not one rank's share. If any copy is
+pinned, a non-force delete holds back every copy. The expanded keys are sent to
+the server in batches of at most 10,000, the most it accepts per request.
+``affected`` and
 ``skipped`` are **totals across the tiers acted on**: ``affected`` counts L1 keys
 removed by the node plus L2 keys removed by the coordinator, and ``skipped``
 counts L1 keys the node refused plus L2 keys held back for an L2 pin (non-force
@@ -1360,7 +1619,11 @@ sequence returns ``status`` ``"noop"``.
 
 - ``200``: deleted (or a ``noop``).
 - ``404``: no server is registered under ``instance_id``.
-- ``502``: the target server was unreachable or rejected the delete.
+- ``422``: request body fails field-level validation, supplies both or neither
+  of ``keys`` / ``token_ids``, omits ``model_name`` or ``world_size`` in the
+  tokens form, or carries more than 10,000 keys.
+- ``502``: the target server was unreachable or rejected a batch. Earlier
+  batches stay deleted, and ``detail`` says how many keys were removed.
 - ``503``: a forced delete removed the keys, but dropping their pins could not
   be written to the metadata file; the pins are kept.
 
@@ -1376,6 +1639,7 @@ sequence returns ``status`` ``"noop"``.
             "world_size": 1,
             "token_ids": [101, 102, 103, "..."],
             "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"},
             "tier": "all",
             "force": false
         }'
@@ -1453,7 +1717,8 @@ The whole fleet: every server's compartments, plus the shared pools.
 ``shared_modules`` holds storage several servers mount -- one S3 bucket, one
 CXL region. These are counted **once for the fleet** and appear in no
 instance's ``modules``. Summing them per mounting server would multiply both
-the bytes and the capacity by the number of mounts.
+the bytes and the capacity by the number of mounts. A declared pool is listed
+even while it holds no bytes, with ``used_bytes: 0``.
 
 A server appears when it is registered, when it still holds bytes, or when it
 declared capacity. ``registered: false`` therefore means a departed server
@@ -1579,3 +1844,16 @@ match rather than one that misses at prefetch.
   ``uint32`` tokens, or it is supplied without ``model_name``.
 
 Index counts are reported under the ``blend`` key of ``GET /directory/stats``.
+
+``POST /directory/blend-lookup`` accepts an optional ``tags`` map. Supply the
+exact ``lmcache.tag.*`` values used when storing the content, without that
+prefix:
+
+.. code-block:: json
+
+   {"model_name": "model", "world_size": 1, "token_ids": [1, 2, 3, 4],
+    "cache_salt": "", "tags": {"adapter_revision": "abc123"}}
+
+The map defaults to ``{}``, selecting untagged content. Names must be nonempty
+strings and values must be strings. Matches are limited to the caller's complete
+``model_name`` / ``cache_salt`` / ``world_size`` / ``tags`` namespace.

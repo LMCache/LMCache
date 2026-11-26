@@ -39,7 +39,10 @@ use NVMe passthrough via the io_uring command interface for direct device access
   character devices.
 - `wait_iouring` returns a success bitmap and a sparse
   `(operation_index, error_message)` list after the worker releases the
-  request's global and per-batch in-flight accounting.
+  request's global and per-batch in-flight accounting. Use
+  `wait_iouring_exceptions(batch_id)` to get the same bitmap and the original
+  exception objects. Both methods consume the batch. A payload UECC is an
+  instance of `lmcache_rust_raw_block_io.NvmeUnrecoveredReadError`.
 
 ## MP Mode Integration
 
@@ -92,8 +95,8 @@ To compare `local_disk` vs `rust_raw_block` on a real NVMe device:
 - Unmount it.
 - Run `rust_raw_block` directly on the raw block device.
 
-Use the benchmark commands in:
-- `benchmarks/storage_backend_io/README.md`
+Use the multiprocess benchmark tooling under `lmcache bench` to compare the
+backends on the target host.
 
 No fixed numbers are included here because results are host/device/workload dependent.
 
@@ -181,7 +184,7 @@ To use the MP adapter from `lmcache server`, pass a `raw_block` L2 adapter
 config:
 
 ```bash
-lmcache server \
+lmcache server --transport grpc --host 127.0.0.1 --port 5555 \
   --l1-size-gb 10 \
   --eviction-policy LRU \
   --l1-align-bytes 4096 \
@@ -199,6 +202,9 @@ lmcache server \
     "num_load_workers": 4
   }'
 ```
+
+Connect the MP client to `grpc://127.0.0.1:5555`. The scheme-less endpoint
+`127.0.0.1:5555` also selects gRPC on the current default transport.
 
 Notes:
 

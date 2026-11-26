@@ -41,7 +41,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPRequestMetadata,
     LoadStoreOp,
 )
-from lmcache.utils import init_logger
+from lmcache.v1.common.logging import init_logger
 
 if TYPE_CHECKING:
     # Third Party
@@ -168,6 +168,7 @@ def _coalesce_store_metadata(
         direction="STORE",
         op=merged_op,
         cache_salt=first.cache_salt,
+        request_configs=first.request_configs,
     )
 
 

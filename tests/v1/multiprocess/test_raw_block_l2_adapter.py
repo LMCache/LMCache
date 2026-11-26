@@ -175,7 +175,7 @@ class _FakeFdpCore:
     def snapshot_indexed_keys(self) -> list[str]:
         return []
 
-    def register_fixed_buffer_range(self, ptr: int, size: int) -> None:
+    def register_io_buffer_range(self, ptr: int, size: int) -> None:
         self.fixed_buffer_range_calls.append((ptr, size))
         if self.fixed_buffer_registration_error is not None:
             raise self.fixed_buffer_registration_error

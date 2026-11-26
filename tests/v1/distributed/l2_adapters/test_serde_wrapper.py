@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for SerdeL2AdapterWrapper failure, shutdown and pass-through paths.
 
-The wrapper runs against a real CPU ``L1Manager`` (its temp buffers come from
+The wrapper runs against a real CPU ``DramL1Manager`` (its temp buffers come from
 L1, so leaks are visible through the public usage counters) and two
 scriptable fakes: an inner L2 adapter and a ``SerdeProcessor``. Each fake can
 make a stage succeed, report failure, raise on submit, or stay pending.
@@ -33,7 +33,7 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
 from lmcache.v1.distributed.serde import SerdeProcessor, SerdeTaskId
@@ -61,7 +61,7 @@ def make_key(index: int) -> ObjectKey:
 
 
 def commit_objects(
-    l1: L1Manager, count: int
+    l1: DramL1Manager, count: int
 ) -> tuple[list[ObjectKey], list[MemoryObj]]:
     """Write ``count`` resident KV objects into L1 and return them.
 
@@ -79,7 +79,7 @@ def commit_objects(
     return keys, objs
 
 
-def l1_usage(l1: L1Manager) -> tuple[int, int]:
+def l1_usage(l1: DramL1Manager) -> tuple[int, int]:
     """Return (used bytes, staging bytes): what a leaked temp would inflate."""
     return l1.get_memory_usage()[0], l1.get_staging_memory_usage()
 
@@ -348,14 +348,14 @@ class FakeSerde(SerdeProcessor):
 
 
 @pytest.fixture
-def l1(monkeypatch: pytest.MonkeyPatch) -> Iterator[L1Manager]:
+def l1(monkeypatch: pytest.MonkeyPatch) -> Iterator[DramL1Manager]:
     monkeypatch.setattr(
         memory_management,
         "_allocate_cpu_memory",
         lambda size, *args, **kwargs: torch.empty(size, dtype=torch.uint8),
     )
     monkeypatch.setattr(memory_management, "_free_cpu_memory", lambda *a, **k: None)
-    manager = L1Manager(
+    manager = DramL1Manager(
         L1ManagerConfig(
             L1MemoryManagerConfig(
                 size_in_bytes=L1_SLOTS * ALIGN, use_lazy=False, shm_name=""
@@ -378,7 +378,7 @@ def serde() -> FakeSerde:
 
 @pytest.fixture
 def wrapper(
-    l1: L1Manager, inner: FakeInnerAdapter, serde: FakeSerde
+    l1: DramL1Manager, inner: FakeInnerAdapter, serde: FakeSerde
 ) -> Iterator[SerdeL2AdapterWrapper]:
     adapter = SerdeL2AdapterWrapper(inner, serde, l1)
     yield adapter
@@ -391,7 +391,7 @@ def wrapper(
 
 
 def test_store_fails_when_l1_has_no_room_for_temp_buffers(
-    l1: L1Manager,
+    l1: DramL1Manager,
     inner: FakeInnerAdapter,
     serde: FakeSerde,
     wrapper: SerdeL2AdapterWrapper,
@@ -417,7 +417,7 @@ def test_store_fails_when_l1_has_no_room_for_temp_buffers(
     ],
 )
 def test_store_failure_at_any_stage_fails_task_and_releases_temps(
-    l1: L1Manager,
+    l1: DramL1Manager,
     inner: FakeInnerAdapter,
     serde: FakeSerde,
     wrapper: SerdeL2AdapterWrapper,
@@ -443,7 +443,7 @@ def test_store_failure_at_any_stage_fails_task_and_releases_temps(
 
 
 def test_store_success_reports_inner_bytes_and_releases_temps(
-    l1: L1Manager,
+    l1: DramL1Manager,
     inner: FakeInnerAdapter,
     serde: FakeSerde,
     wrapper: SerdeL2AdapterWrapper,
@@ -467,7 +467,7 @@ def test_store_success_reports_inner_bytes_and_releases_temps(
 
 
 def test_load_fails_when_temp_buffers_cannot_be_allocated(
-    l1: L1Manager, inner: FakeInnerAdapter, wrapper: SerdeL2AdapterWrapper
+    l1: DramL1Manager, inner: FakeInnerAdapter, wrapper: SerdeL2AdapterWrapper
 ) -> None:
     filler_keys, filler_objs = commit_objects(l1, L1_SLOTS)
     baseline = l1_usage(l1)
@@ -480,7 +480,7 @@ def test_load_fails_when_temp_buffers_cannot_be_allocated(
 
 
 def test_load_deserializes_only_keys_the_inner_adapter_found(
-    l1: L1Manager,
+    l1: DramL1Manager,
     inner: FakeInnerAdapter,
     serde: FakeSerde,
     wrapper: SerdeL2AdapterWrapper,
@@ -497,7 +497,7 @@ def test_load_deserializes_only_keys_the_inner_adapter_found(
 
 
 def test_load_skips_deserialize_when_inner_adapter_finds_nothing(
-    l1: L1Manager,
+    l1: DramL1Manager,
     inner: FakeInnerAdapter,
     serde: FakeSerde,
     wrapper: SerdeL2AdapterWrapper,
@@ -522,7 +522,7 @@ def test_load_skips_deserialize_when_inner_adapter_finds_nothing(
     ],
 )
 def test_load_failure_at_any_stage_reports_no_hits_and_releases_temps(
-    l1: L1Manager,
+    l1: DramL1Manager,
     inner: FakeInnerAdapter,
     serde: FakeSerde,
     wrapper: SerdeL2AdapterWrapper,
@@ -554,7 +554,7 @@ def test_load_failure_at_any_stage_reports_no_hits_and_releases_temps(
 
 @pytest.mark.parametrize("pending_stage", ["serialize", "inner_store"])
 def test_close_releases_temps_of_pending_store(
-    l1: L1Manager, inner: FakeInnerAdapter, serde: FakeSerde, pending_stage: str
+    l1: DramL1Manager, inner: FakeInnerAdapter, serde: FakeSerde, pending_stage: str
 ) -> None:
     if pending_stage == "serialize":
         serde.serialize_result = None
@@ -578,7 +578,7 @@ def test_close_releases_temps_of_pending_store(
 
 @pytest.mark.parametrize("pending_stage", ["inner_load", "deserialize"])
 def test_close_releases_temps_of_pending_load(
-    l1: L1Manager, inner: FakeInnerAdapter, serde: FakeSerde, pending_stage: str
+    l1: DramL1Manager, inner: FakeInnerAdapter, serde: FakeSerde, pending_stage: str
 ) -> None:
     if pending_stage == "inner_load":
         inner.load_hits = None

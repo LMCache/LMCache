@@ -24,15 +24,15 @@ import os
 import torch
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.custom_types import EngineType
+from lmcache.v1.common.group_view import engine_group_layer_indices
+from lmcache.v1.common.kv_layer_groups import KVLayerGroupsManager
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.utils import (
     LayoutHints,
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,
 )
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.group_view import engine_group_layer_indices
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.devices.cpu.stub_cpu_device import StubStream
 
@@ -41,8 +41,9 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     # First Party
-    from lmcache.v1.multiprocess.custom_types import KVCache
-    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+    from lmcache.v1.common.group_view import EngineGroupInfo
+    from lmcache.v1.platform.base.ipc_wrapper import KVCache
+    from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 
 logger = init_logger(__name__)
 
@@ -55,6 +56,9 @@ class CPUCacheContext(BaseCacheContext):
     replaced by :class:`StubStream` no-op objects so callers can keep
     using ``stream.synchronize()`` / ``wait_event(...)`` etc. without
     branching on the active backend.
+
+    ``object_group_transfer`` supplies the base full-chunk copy implementation;
+    it is optional for layout-only users and device transfer overrides.
 
     KV cache tensors are reconstructed from the
     :class:`CpuShmTensorWrapper` instances sent by the client over
@@ -72,8 +76,10 @@ class CPUCacheContext(BaseCacheContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         engine_type: EngineType = EngineType.VLLM,
-        separate_object_groups: bool = False,
+        separate_object_groups: bool = True,
         full_sw_kv: bool = False,
+        *,
+        object_group_transfer: ObjectGroupTransfer | None = None,
     ) -> None:
         if not kv_caches:
             raise ValueError(
@@ -89,6 +95,8 @@ class CPUCacheContext(BaseCacheContext):
 
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
         self.device_ = torch.device("cpu")
+        if engine_type == EngineType.VLLM and not (layout_hints or {}).get("kv_layout"):
+            layout_hints = {**(layout_hints or {}), "kv_layout": "HND"}
 
         # Discover layout & build KV layer groups via the same path
         # GPUCacheContext uses, so we don't need to hand-roll any
@@ -129,6 +137,7 @@ class CPUCacheContext(BaseCacheContext):
             kv_layer_groups_manager=kv_layer_groups_manager,
             block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+            object_group_transfer=object_group_transfer,
         )
 
         # Per-group KV pointer tensors (CPU). Reuse the same helper
@@ -286,6 +295,21 @@ class CPUCacheContext(BaseCacheContext):
         Mirrors :meth:`GPUCacheContext.get_kernel_group_kv_pointers`.
         """
         return self.group_kv_pointers_[kernel_group_idx]
+
+    def get_temp_staging_buffer(self, num_bytes: int) -> torch.Tensor | None:
+        """Return the start of the transfer staging buffer as one flat region.
+
+        Args:
+            num_bytes: Bytes the region must hold.
+
+        Returns:
+            A flat uint8 view of the buffer's first ``num_bytes`` bytes, or
+            None when the staging buffer is smaller than ``num_bytes``.
+        """
+        staging_buffer = self.tmp_cpu_buffer_
+        if num_bytes > staging_buffer.numel():
+            return None
+        return staging_buffer[:num_bytes]
 
     def get_kernel_group_shape_dtype(
         self,

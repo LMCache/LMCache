@@ -16,6 +16,13 @@ LMCache is a KV cache management engine for LLM serving that reduces Time To Fir
 
 The default branch is `dev`. Base all new branches and pull requests against `dev`.
 
+Unless the user explicitly instructs otherwise, create and push pull request
+branches to the user's fork, not the upstream repository. Before the first
+push, verify which remote is the user's fork and which is upstream; do not infer
+their roles from remote names such as `origin` or `upstream`. Open the pull
+request with the upstream repository as the base and the fork branch as the
+head.
+
 All commits in pull requests must include a DCO `Signed-off-by` trailer. Use
 `git commit -s` for new commits; if an existing commit is missing the trailer,
 amend or rebase to add it before pushing.
@@ -92,13 +99,13 @@ pytest -xvs --ignore=tests/disagg \
  --ignore=tests/v1/multiprocess/ \
  --ignore=tests/v1/distributed/ \
  --ignore=tests/skipped \
- --ignore=tests/v1/storage_backend/test_eic.py
+ --ignore=tests/inprocess/v1/storage_backend/test_eic.py
 
 # Run a single test file
-pytest -xvs tests/v1/test_cache_engine.py
+pytest -xvs tests/v1/test_kv_cache_groups.py
 
 # Run a single test
-pytest -xvs tests/v1/test_cache_engine.py::test_function_name
+pytest -xvs tests/v1/test_kv_cache_groups.py::test_function_name
 ```
 
 Test dependencies: `uv pip install -r requirements/test.txt`
@@ -107,10 +114,25 @@ Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator 
 
 ### CPU-only connector import checks
 
+CPU nightly wheels are produced by `LMCache/vllm-cpu`; this repository verifies
+them and writes `github_nightly_tested_vllm`. Compare the wheel's build time
+with `validated_at`: repeating a passing test does not make an old build fresh.
+Current history is `tested_runtimes.jsonl`; `tested_vllm_versions.csv` is legacy.
+For recovery, dispatch `nightly_build.yml` with `cpu_verify_only=true` to run
+CPU verification and pin reporting without rebuilding unrelated accelerators.
+CPU serving tests must set `lmcache.mp.use_vmm_api=false` in connector extra
+config: current vLLM checks the declared cache access before initializing the
+device and rejects the automatic CUDA VMM export mode on CPU.
+
 Use Python 3.12 with PyTorch and the common native extensions installed.
 A fresh worktree does not include ignored native build artifacts; build them
 with `NO_GPU_EXT=1 python setup.py build_ext --inplace` before running layout
-and connector import tests. For these focused checks, use
+and connector import tests. `build_ext` does not generate the ignored gRPC
+bindings. Before running multiprocess tests in a fresh checkout, install
+`requirements/proto.txt` and run
+`python lmcache/v1/transport/grpc/_proto_gen/_generate.py` from the repo root;
+this generates both transport and memory-orchestrator bindings in dependency
+order. For these focused checks, use
 `python -m pytest --confcutdir=tests/v1 tests/v1/gpu_connector/` so the root
 `tests/conftest.py` GPU allocator fixtures are not loaded. This validates CPU
 imports and shared layout/GDS behavior, not accelerator kernel roundtrips.
@@ -119,11 +141,39 @@ self-contained CPU checks spanning both trees; normal accelerator CI must
 retain the root fixtures. Mirrored test directories with identical module
 names need package `__init__.py` files to avoid pytest import mismatches.
 
+### Test-First Workflow
+
+Write tests before you write the implementation. The full order and its
+exemptions are in `docs/coding_standards.md` Section 5.2 ("Test-first order"):
+
+1. Design the user-facing surface: the design doc and, if there is one, the CLI
+   (commands, flags, output, exit codes).
+2. Write the **end-to-end test** against that surface before any implementation.
+3. Finalize the public interface: signatures, type hints, and docstrings, with
+   bodies that `raise NotImplementedError`.
+4. Write **unit tests** against the docstring contract before implementing.
+5. Run the new tests and confirm they fail for the expected reason.
+6. Implement until they pass. Never edit a test to fit the implementation. If
+   the contract was wrong, fix the design or docstring first and say so.
+
+Agents: if neither the user nor a design doc has fixed the CLI or the public
+interface, propose it and get the user's agreement before writing tests against
+it. Report both the failing run (step 5) and the passing run (step 6) in chat.
+
 ### Testing Practices
 
-- Write tests against the **public interface and docstring contract**, not the implementation. Test as if you don't know the internals — verify that behavior matches what the docstring describes.
-- Avoid accessing private members in tests unless strongly needed.
 - All new features and bug fixes should include corresponding tests.
+- Before adding tests, inspect the existing suite and do not duplicate behavior
+  that is already covered.
+- Every new test must protect a distinct public contract, regression, or
+  meaningful failure mode. Focus coverage on the core workflow and relevant
+  boundary cases; do not add cases solely to increase test count or coverage.
+- Write tests against the **public interface and docstring contract**, not the
+  implementation. Test as if you don't know the internals — verify that behavior
+  matches what the docstring describes.
+- Avoid accessing private members in tests unless strongly needed.
+- Do not copy production logic into test-only helpers or assert incidental mock
+  wiring. Consolidate overlapping cases with parametrization or shared setup.
 - Ensure existing tests still pass before submitting changes.
 
 ## Linting & Code Quality

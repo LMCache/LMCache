@@ -7,7 +7,7 @@ optional OTel log forwarding), and **tracing** (OTel spans for per-request
 latency).
 
 All three modes are powered by an internal **EventBus** that decouples
-producers (L1Manager, StorageManager, MPCacheServer) from subscribers.
+producers (BaseL1Manager, StorageManager, MPCacheServer) from subscribers.
 
 .. contents::
    :local:
@@ -228,7 +228,7 @@ Configuration
      - off
      - Skip gRPC Python runtime metrics while keeping LMCache EventBus
        metrics enabled. By default, the MP server enables these metrics only
-       for ``--transport grpc``; ZMQ mode keeps the existing LMCache metrics
+       for ``--transport grpc``, the default transport; ZMQ mode keeps the existing LMCache metrics
        unchanged.
    * - ``--disable-logging``
      - off

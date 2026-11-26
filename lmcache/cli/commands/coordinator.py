@@ -12,7 +12,8 @@ import json
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.security.api_key import add_api_key_args
 
 logger = init_logger(__name__)
 
@@ -50,7 +51,7 @@ class CoordinatorCommand(BaseCommand):
             "--host",
             type=str,
             default=None,
-            help="Host the coordinator's HTTP server binds to (default: 0.0.0.0).",
+            help="Host the coordinator's HTTP server binds to (default: 127.0.0.1).",
         )
         parser.add_argument(
             "--port",
@@ -244,6 +245,34 @@ class CoordinatorCommand(BaseCommand):
                 "--event-transport kafka."
             ),
         )
+        # Shared authentication option (--api-key-file / LMCACHE_API_KEY*). An
+        # unset flag leaves the coordinator open; supplying a key closes every
+        # route except /healthz.
+        add_api_key_args(parser)
+        parser.add_argument(
+            "--public-endpoint",
+            dest="public_endpoint",
+            action="append",
+            default=None,
+            metavar="PATH",
+            help=(
+                "Serve PATH without credentials when API-key authentication is "
+                "on. Repeat for several paths. Replaces the default list, which "
+                "is /healthz alone, instead of extending it; /metrics and every "
+                "other path require the key. Repeat this flag for each path you "
+                "want public. Matching is exact."
+            ),
+        )
+        parser.add_argument(
+            "--no-public-endpoints",
+            dest="no_public_endpoints",
+            action="store_true",
+            default=False,
+            help=(
+                "Require a valid API key for every HTTP path, including "
+                "/healthz. Cannot be combined with --public-endpoint."
+            ),
+        )
 
     def execute(self, args: argparse.Namespace) -> None:
         """Build the coordinator config and serve the app with uvicorn.
@@ -271,6 +300,9 @@ class CoordinatorCommand(BaseCommand):
             from lmcache.v1.mp_coordinator.config import (
                 KafkaCacheEventSourceConfig,
                 MPCoordinatorConfig,
+            )
+            from lmcache.v1.mp_coordinator.http_auth import (
+                CoordinatorAuthenticationConfig,
             )
             from lmcache.v1.mp_coordinator.observability import (
                 init_coordinator_metrics,
@@ -318,13 +350,20 @@ class CoordinatorCommand(BaseCommand):
             fields["event_source_config"] = KafkaCacheEventSourceConfig(**kafka_fields)
         if args.disable_metrics is not None:
             fields["metrics_enabled"] = not args.disable_metrics
+        public_endpoints = _resolve_public_endpoints(args)
+        if public_endpoints is not None:
+            fields["public_endpoints"] = public_endpoints
         extra_config = _parse_extra_config(args.extra_config)
         if extra_config is not None:
             fields["extra_config"] = extra_config
         config = MPCoordinatorConfig(**fields)
 
         init_coordinator_metrics(config)
-        app = create_app(config)
+        # ``api_key_file`` is registered by add_api_key_args; getattr keeps
+        # hand-built Namespaces (e.g. unit tests) working when they omit it.
+        key_files = getattr(args, "api_key_file", None) or []
+        http_authentication = CoordinatorAuthenticationConfig.from_sources(key_files)
+        app = create_app(config, http_authentication=http_authentication)
         uvicorn.run(
             app,
             host=config.host,
@@ -332,6 +371,32 @@ class CoordinatorCommand(BaseCommand):
             log_level="info",
             timeout_keep_alive=config.timeout_keep_alive,
         )
+
+
+def _resolve_public_endpoints(args: argparse.Namespace) -> tuple[str, ...] | None:
+    """Resolve the credential-free coordinator paths.
+
+    Args:
+        args: Parsed coordinator arguments.
+
+    Returns:
+        ``None`` when neither flag is set, so the config default (``/healthz``
+        and ``/metrics``) applies; an empty tuple for
+        ``--no-public-endpoints``; otherwise the given paths in order.
+
+    Raises:
+        ValueError: If both flags are used, or a path is not absolute.
+    """
+    paths = getattr(args, "public_endpoint", None) or []
+    if getattr(args, "no_public_endpoints", False):
+        if paths:
+            raise ValueError(
+                "--no-public-endpoints cannot be combined with --public-endpoint"
+            )
+        return ()
+    if not paths:
+        return None
+    return tuple(paths)
 
 
 def _parse_extra_config(raw: str | None) -> dict[str, object] | None:

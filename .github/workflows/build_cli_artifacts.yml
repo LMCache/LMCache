@@ -6,6 +6,7 @@ name: Build CLI Artifacts
 on:
     workflow_call:
     pull_request:
+        types: [opened, synchronize, reopened, ready_for_review]
         branches:
             - dev
             - "release-**"
@@ -33,6 +34,7 @@ permissions:
 
 jobs:
     build-cli-artifacts:
+        if: github.event.pull_request.draft != true
         name: Build CLI artifacts
         runs-on: ubuntu-24.04
         steps:

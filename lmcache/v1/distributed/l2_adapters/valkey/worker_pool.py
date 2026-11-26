@@ -33,7 +33,7 @@ import inspect
 import threading
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 
@@ -142,9 +142,8 @@ class ValkeyWorkerPool:
     thread has its own client, this yields true parallel I/O while the
     GIL is released across the glide FFI boundary.
 
-    The pool speaks only ``str`` keys and byte buffers — it has no
-    knowledge of ``ObjectKey`` / ``CacheEngineKey`` or any LMCache type,
-    so it can be shared by both the connector and the L2 adapter.
+    The pool speaks only ``str`` keys and byte buffers, so it can be shared
+    by both the connector and the L2 adapter.
 
     Args:
         addresses: One or more ``(host, port)`` seed nodes. In standalone
@@ -152,7 +151,7 @@ class ValkeyWorkerPool:
             auto-discovers the full topology from any reachable seed.
         num_workers: Number of worker threads (and clients); must be > 0.
         username: Optional auth username.
-        password: Optional auth password.
+        password: Auth password. Required when ``username`` is set.
         request_timeout: Per-request timeout in seconds.
         connection_timeout: Initial connection timeout in seconds.
         tls_enable: Whether to use TLS.
@@ -168,6 +167,8 @@ class ValkeyWorkerPool:
         ValueError: If ``addresses`` is empty or ``num_workers <= 0``.
         RuntimeError: If ``valkey-glide`` is not installed (raised during
             warmup).
+        ConfigurationError: If ``username`` is set without ``password``
+            (raised by glide at client creation during warmup).
     """
 
     def __init__(
@@ -221,8 +222,14 @@ class ValkeyWorkerPool:
         # connection / auth / missing-dependency error fails fast here
         # rather than on the first real operation.
         warmup = [self._executor.submit(self._get_client) for _ in range(num_workers)]
-        for f in warmup:
-            f.result(timeout=connection_timeout)
+        try:
+            for f in warmup:
+                f.result(timeout=connection_timeout)
+        except BaseException:
+            # No worker may outlive a failed construction: a straggler would
+            # keep connecting, or importing, after the caller has given up.
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            raise
 
         logger.info(
             "ValkeyWorkerPool: %d threads, mode=%s, nodes=%s, tls=%s, "
@@ -268,7 +275,13 @@ class ValkeyWorkerPool:
 
         credentials = None
         if self._username or self._password:
-            credentials = glide_sync.ServerCredentials(self._username, self._password)
+            # glide's positional order is (password, username); pass by keyword.
+            # An empty password becomes None so glide rejects a username-only
+            # config at client creation instead of connecting without AUTH.
+            credentials = glide_sync.ServerCredentials(
+                password=self._password or None,
+                username=self._username,
+            )
 
         addresses = [
             glide_sync.NodeAddress(host, port) for host, port in self._addresses
@@ -294,6 +307,7 @@ class ValkeyWorkerPool:
                 glide_sync.GlideClusterClientConfiguration
             ):
                 cfg_kwargs["client_info_tag"] = _lmcache_client_info_tag()
+            cfg_kwargs.update(self._client_config_extras(glide_sync))
             config = glide_sync.GlideClusterClientConfiguration(**cfg_kwargs)
             client = glide_sync.GlideClusterClient.create(config)
         else:
@@ -320,6 +334,7 @@ class ValkeyWorkerPool:
                 glide_sync.GlideClientConfiguration
             ):
                 cfg_kwargs["client_info_tag"] = _lmcache_client_info_tag()
+            cfg_kwargs.update(self._client_config_extras(glide_sync))
             config = glide_sync.GlideClientConfiguration(**cfg_kwargs)
             client = glide_sync.GlideClient.create(config)
 
@@ -334,6 +349,14 @@ class ValkeyWorkerPool:
                 )
 
         return client
+
+    def _client_config_extras(self, glide_sync: Any) -> dict[str, Any]:
+        """Extra glide client configuration arguments; a subclass hook.
+
+        Called on the worker thread building its client, with the lazily
+        imported ``glide_sync`` module.
+        """
+        return {}
 
     @property
     def has_buffer_get(self) -> bool:

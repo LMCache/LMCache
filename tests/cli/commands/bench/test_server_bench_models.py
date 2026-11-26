@@ -35,6 +35,7 @@ def _args(**overrides: object) -> argparse.Namespace:
         "start": 0,
         "end": 3,
         "quiet": False,
+        "isolated_ipc": False,
     }
     values.update(overrides)
     return argparse.Namespace(**values)

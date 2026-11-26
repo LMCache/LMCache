@@ -91,7 +91,9 @@ PY
         echo "Disabling vLLM prefix caching via --no-enable-prefix-caching"
         VLLM_PREFIX_ARGS=(--no-enable-prefix-caching)
     elif [[ -n "${MAMBA_CACHE_MODE:-}" ]]; then
-        VLLM_MAMBA_ARGS=(--mamba-cache-mode "$MAMBA_CACHE_MODE")
+        if vllm_supports_mamba_cache_mode; then
+            VLLM_MAMBA_ARGS=(--mamba-cache-mode "$MAMBA_CACHE_MODE")
+        fi
         VLLM_PREFIX_ARGS=(--enable-prefix-caching)
     fi
 
@@ -106,6 +108,36 @@ PY
     fi
     if [[ -n "${VLLM_MAX_LOGPROBS:-}" ]]; then
         VLLM_MODEL_ARGS+=(--max-logprobs "$VLLM_MAX_LOGPROBS")
+    fi
+    if [[ -n "${TENSOR_PARALLEL_SIZE:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--tensor-parallel-size "$TENSOR_PARALLEL_SIZE")
+    fi
+    if [[ "${VLLM_ENABLE_EXPERT_PARALLEL:-0}" == "1" ]]; then
+        VLLM_MODEL_ARGS+=(--enable-expert-parallel)
+    fi
+    if [[ -n "${VLLM_LOAD_FORMAT:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--load-format "$VLLM_LOAD_FORMAT")
+    fi
+    if [[ -n "${VLLM_HF_OVERRIDES:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--hf-overrides "$VLLM_HF_OVERRIDES")
+    fi
+    if [[ -n "${VLLM_KV_CACHE_DTYPE:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--kv-cache-dtype "$VLLM_KV_CACHE_DTYPE")
+    fi
+    if [[ -n "${VLLM_TOKENIZER_MODE:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--tokenizer-mode "$VLLM_TOKENIZER_MODE")
+    fi
+    if [[ -n "${VLLM_WORKER_EXTENSION_CLS:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--worker-extension-cls "$VLLM_WORKER_EXTENSION_CLS")
+    fi
+    if [[ -n "${MAX_NUM_SEQS:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--max-num-seqs "$MAX_NUM_SEQS")
+    fi
+    if [[ -n "${KV_CACHE_MEMORY_BYTES:-}" ]]; then
+        VLLM_MODEL_ARGS+=(--kv-cache-memory-bytes "$KV_CACHE_MEMORY_BYTES")
+    fi
+    if [[ "${VLLM_ENABLE_SLEEP_MODE:-0}" == "1" ]]; then
+        VLLM_MODEL_ARGS+=(--enable-sleep-mode)
     fi
 
     VLLM_BLOCK_ARGS=()
@@ -144,8 +176,12 @@ engine_kv_transfer_config() {
     LMCACHE_MP_MQ_TIMEOUT="${LMCACHE_MP_MQ_TIMEOUT:-10}" \
     VLLM_KV_LOAD_FAILURE_POLICY="${VLLM_KV_LOAD_FAILURE_POLICY:-recompute}" \
     LMCACHE_MP_LAZY_OFFLOAD="${LMCACHE_MP_LAZY_OFFLOAD:-false}" \
+    LMCACHE_MP_LAZY_OFFLOAD_POLICY="${LMCACHE_MP_LAZY_OFFLOAD_POLICY:-FIFO}" \
     LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD="${LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD:-2}" \
     LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT="${LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT:-1}" \
+    LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS="${LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS:-2.5}" \
+    NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-}" \
+    KV_CACHE_MEMORY_BYTES="${KV_CACHE_MEMORY_BYTES:-}" \
         python3 - <<'PY'
 import json
 import os
@@ -155,19 +191,39 @@ extra_config = {
     "lmcache.mp.port": int(os.environ["LMCACHE_PORT"]),
     "lmcache.mp.mq_timeout": int(os.environ["LMCACHE_MP_MQ_TIMEOUT"]),
 }
+if os.environ.get("VLLM_TARGET_DEVICE") == "xpu":
+    extra_config["lmcache.mp.use_vmm_api"] = False
+# A pinned KV pool (preemption_correctness sets NUM_GPU_BLOCKS_OVERRIDE) turns
+# off vLLM's extensible (VMM) KV cache. With use_vmm_api unset the connector
+# still declares POSIX-fd export, which needs that cache, so vLLM >= 0.34.0
+# refuses to start (LMCache#6620). Use legacy CUDA IPC, which is what these
+# runs used before vLLM added that check.
+if os.environ["NUM_GPU_BLOCKS_OVERRIDE"] or os.environ["KV_CACHE_MEMORY_BYTES"]:
+    extra_config["lmcache.mp.use_vmm_api"] = False
 if os.environ["LMCACHE_MP_LAZY_OFFLOAD"].lower() in {"1", "true"}:
-    extra_config.update(
-        {
-            "lmcache.mp.lazy_offload": True,
-            "lmcache.mp.lazy_offload_policy": "FIFO",
-            "lmcache.mp.lazy_offload_threshold": int(
-                os.environ["LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD"]
-            ),
-            "lmcache.mp.lazy_offload_select_count": int(
-                os.environ["LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT"]
-            ),
-        }
-    )
+    # The policy is selectable so a test can exercise one other than FIFO. It
+    # stays FIFO unless a test asks otherwise.
+    policy = os.environ["LMCACHE_MP_LAZY_OFFLOAD_POLICY"]
+    extra_config["lmcache.mp.lazy_offload"] = True
+    extra_config["lmcache.mp.lazy_offload_policy"] = policy
+    if policy == "FIFO":
+        extra_config.update(
+            {
+                "lmcache.mp.lazy_offload_threshold": int(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD"]
+                ),
+                "lmcache.mp.lazy_offload_select_count": int(
+                    os.environ["LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT"]
+                ),
+            }
+        )
+    else:
+        # EVICTION_AWARE ignores those two and reads its own tunables. Only
+        # the horizon is set here: it is what decides how early a buffered
+        # store comes due ahead of its blocks reaching the eviction head.
+        extra_config["lmcache.mp.lazy_offload_horizon_steps"] = float(
+            os.environ["LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS"]
+        )
 
 print(
     json.dumps(

@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
 # MetaX MACA bare-metal PR smoke tests. Runs on every PR build so contributors
-# get quick MACA feedback without waiting on the full suite (several thousand
-# tests across the whole tests/ tree; see run-unit-tests.sh, which runs
-# instead on push to dev). Same environment
-# setup as the full suite (common-setup.sh); only the test scope differs.
+# get quick MACA feedback without waiting on the manually triggered full suite
+# (several thousand tests across the whole tests/ tree; see run-unit-tests.sh).
+# Same environment setup as the full suite (common-setup.sh);
+# only the test scope differs.
 #
-# Scope keeps the smaller, single-process directories (core compute
-# kernels, platform detection/dispatch, native extension bindings,
-# connector/API glue) and excludes the largest, subprocess-/multi-node-heavy
-# directories -- distributed/, multiprocess/, mp_observability/,
-# mp_coordinator/, storage_backend/ (also I/O-heavy) -- which stay in the
-# full post-merge run. Can be refined further with real per-test timing
+# Scope keeps platform detection/dispatch, native extension bindings, and
+# connector/API glue, while excluding the largest subprocess and multi-node
+# directories. Can be refined further with real per-test timing
 # (durations/test.html from a full run) as it becomes available.
 set -euo pipefail
 
@@ -19,20 +16,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/common-setup.sh"
 
 LMCACHE_TRACK_USAGE="false" \
 pytest --maxfail=1 \
-    tests/v1/compute \
     tests/v1/platform \
     tests/v1/lmcache_native \
     tests/v1/gpu_connector \
-    tests/inprocess/v1/cache_controller \
-    tests/v1/internal_api_server \
-    tests/v1/shm_allocator \
-    tests/v1/lookup_client \
     tests/v1/plugin \
     tests/v1/cli \
     --ignore=tests/v1/platform/devices/cuda/test_cuda_ipc_wrapper.py \
     --ignore=tests/v1/platform/devices/cuda/test_timeline_semaphore_event_ipc.py \
-    --ignore=tests/v1/platform/devices/cuda/test_vmm_ipc_wrapper.py \
-    --deselect="tests/v1/shm_allocator/test_shm_allocator.py::TestShmFileConnector"
+    --ignore=tests/v1/platform/devices/cuda/test_vmm_ipc_wrapper.py
 
 # Whole files ignored -- all three depend on NVIDIA's `cuda.bindings`
 # (cuda-python) package for raw driver-level IPC calls
@@ -46,10 +37,6 @@ pytest --maxfail=1 \
 # The real fix is upstream: generalize the ROCm-only skip to cover any
 # environment without `cuda.bindings`.
 #
-# test_shm_allocator.py::TestShmFileConnector (all 3 tests, sharing one
-# fixture): its 5GB pinned-memory allocation fails MACA's mcHostRegister
-# with mcErrorInvalidValue on this host.
-
 # Matches the main CUDA pipeline.yml's own end-of-step cleanup on its
 # bare-metal queue: delete the whole workspace so the next build starts from
 # a fresh checkout instead of accumulating anything (build artifacts, stray

@@ -34,11 +34,12 @@ PYBIND11_MODULE(lmcache_hf3fs, m) {
       .def(py::init([](std::string mount_point, std::string base_paths,
                        int num_workers, int ior_entries, int io_depth,
                        int numa_id, size_t iov_size, int time_out,
-                       bool enable_key_buffer, py::object per_op_workers) {
+                       bool enable_key_buffer, bool shard_dirs,
+                       py::object per_op_workers) {
              return new lmcache::connector::Hf3fsConnector(
                  std::move(mount_point), std::move(base_paths), num_workers,
                  ior_entries, io_depth, numa_id, iov_size, time_out,
-                 enable_key_buffer,
+                 enable_key_buffer, shard_dirs,
                  lmcache::connector::pybind_utils::parse_per_op_workers(
                      per_op_workers));
            }),
@@ -46,7 +47,7 @@ PYBIND11_MODULE(lmcache_hf3fs, m) {
            py::arg("num_workers") = 8, py::arg("ior_entries") = 256,
            py::arg("io_depth") = 0, py::arg("numa_id") = -1,
            py::arg("iov_size") = 209715200, py::arg("time_out") = 200,
-           py::arg("enable_key_buffer") = true,
+           py::arg("enable_key_buffer") = true, py::arg("shard_dirs") = false,
            py::arg("per_op_workers") = py::none())
           LMCACHE_BIND_CONNECTOR_METHODS(lmcache::connector::Hf3fsConnector);
 }

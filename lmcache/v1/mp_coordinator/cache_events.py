@@ -26,7 +26,7 @@ import time
 import httpx
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import CapacitySnapshot, L1BackendType, ObjectKey, Tier
 from lmcache.v1.distributed.internal_api import L1ObjectMeta
 from lmcache.v1.mp_coordinator.api import (
@@ -120,9 +120,22 @@ class HttpCacheEventSink(CacheEventSink):
         timeout: Per-request timeout in seconds.
     """
 
-    def __init__(self, coordinator_url: str, timeout: float = 2.0) -> None:
+    def __init__(
+        self,
+        coordinator_url: str,
+        timeout: float = 2.0,
+        api_key_files: Sequence[str] = (),
+    ) -> None:
+        # First Party
+        from lmcache.v1.transport.auth import (
+            request_client_auth_headers,
+        )
+
         self._base_url = coordinator_url.rstrip("/")
-        self._client = httpx.Client(timeout=timeout)
+        self._client = httpx.Client(
+            timeout=timeout,
+            headers=request_client_auth_headers(api_key_files),
+        )
         self._dropped_events = 0
 
     def publish(self, batches: list[CacheEventBatch]) -> None:
@@ -791,11 +804,16 @@ class CacheEventSubscriber(EventSubscriber):
             self.flush()
 
 
-def create_cache_event_sink(config: CoordinatorConfig) -> CacheEventSink:
+def create_cache_event_sink(
+    config: CoordinatorConfig,
+    api_key_files: Sequence[str] = (),
+) -> CacheEventSink:
     """Create the configured MP-server cache-event transport.
 
     Args:
         config: Coordinator connection and event-sink configuration.
+        api_key_files: MP server key files, used to authenticate to the
+            coordinator.
 
     Returns:
         The configured HTTP or Kafka sink.
@@ -807,13 +825,15 @@ def create_cache_event_sink(config: CoordinatorConfig) -> CacheEventSink:
         return KafkaCacheEventSink(config.event_sink_config)
     if not config.url:
         raise ValueError("HTTP cache-event reporting requires a coordinator URL")
-    return HttpCacheEventSink(config.url)
+    return HttpCacheEventSink(config.url, api_key_files=api_key_files)
 
 
 def maybe_create_cache_event_subscriber(
     mp_config: MPServerConfig,
     http_config: HTTPFrontendConfig | None,
     coordinator_config: CoordinatorConfig,
+    *,
+    mq_port: int,
 ) -> CacheEventSubscriber | None:
     """Create the cache-event subscriber, or ``None`` if nothing wants the stream.
 
@@ -824,9 +844,10 @@ def maybe_create_cache_event_subscriber(
     with a ``start`` mark carrying it and the server's identity.
 
     Args:
-        mp_config: The server's identity and ports.
+        mp_config: The server's identity and event-sink configuration.
         http_config: The HTTP frontend, or ``None`` when it is not running.
         coordinator_config: Coordinator connection and event-sink settings.
+        mq_port: The bound P2P control RPC port, or ``0`` when P2P is disabled.
 
     Returns:
         The subscriber to register on the event bus, or ``None``.
@@ -837,7 +858,9 @@ def maybe_create_cache_event_subscriber(
         and coordinator_config.url
         and coordinator_config.event_reporting
     ):
-        sinks.append(create_cache_event_sink(coordinator_config))
+        sinks.append(
+            create_cache_event_sink(coordinator_config, mp_config.api_key_files)
+        )
     trace_sink: TraceCacheEventSink | None = None
     recorder = get_active_trace_recorder()
     if isinstance(recorder, EventsTraceRecorder):
@@ -854,7 +877,7 @@ def maybe_create_cache_event_subscriber(
             incarnation=incarnation,
             ip=coordinator_config.advertise_ip,
             http_port=http_config.http_port if http_config is not None else 0,
-            mq_port=mp_config.port if mp_config.p2p_config.enabled else 0,
+            mq_port=mq_port,
         )
     return CacheEventSubscriber(
         sink=sinks[0] if len(sinks) == 1 else MultiCacheEventSink(sinks),
