@@ -1,6 +1,6 @@
 # Module Dependencies
 
-LMCache code is split into seven parts. Each part may import the parts its arrows
+LMCache code is split into six parts. Each part may import the parts its arrows
 lead to, directly or through other parts: integration may import common, since
 integration depends on client and client on common. The rules live in one file,
 `tools/module_deps.yaml`, and `tools/check_module_deps.py` enforces them in
@@ -17,20 +17,17 @@ flowchart BT
     client --> common
     client --> platform
     client --> transport
-    sdk --> client
     integration --> client
-    integration --> sdk
 ```
 
 The dotted arrow means transport uses devices such as IPC wrappers on demand. The
 check treats it like a solid arrow, and fails if this diagram and the rules file
-disagree. It also fails if the arrows form a cycle.
+disagree.
 
 Imports within a part are always allowed. Server and client never import each
-other, sdk never imports server, and nothing imports integration except through
-the exceptions below. Server is
-every lmcache module that is not in another part. `lmcache.cli` is outside the
-diagram, is not server and is not checked.
+other, and nothing imports integration. Server is every lmcache module that is
+not in another part. Modules with their own name outside the diagram, such as
+`lmcache.cli` and `lmcache.sdk`, are not server and are not checked.
 
 Which packages make up each part, and where the files the diagram does not draw
 belong, is in `tools/module_deps.yaml`.
@@ -46,9 +43,7 @@ belong, is in `tools/module_deps.yaml`.
 ## Exceptions
 
 `exceptions` in the rules file lists the places that break the tree, by part or
-package. Today it has one line, `lmcache.sdk.qringbuffer -> integration`, a
-known cycle between sdk and integration that goes away once LMCache owns the Q
-ring buffer. An exception may form a cycle; the arrows may not. Delete a line once
+package, for example `transport -> client`. It is empty today. Delete a line once
 its imports are fixed; the check fails on a line that matches nothing. Do not add a
 line to get a new import past the check. Move the shared code into a part both
 sides may import instead, usually common.

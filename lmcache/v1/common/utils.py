@@ -883,11 +883,6 @@ def round_up(x: int, y: int) -> int:
     return ((x + y - 1) // y) * y
 
 
-def cdiv(a: int, b: int) -> int:
-    """Ceiling division."""
-    return -(a // -b)
-
-
 def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
     """
     Calculate the size in bytes with the given shapes and dtypes.

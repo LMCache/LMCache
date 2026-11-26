@@ -12,7 +12,6 @@ parts:
   transport: [lmcache.v1.transport]
   client: [lmcache.v1.client]
   integration: [lmcache.integration]
-  sdk: [lmcache.sdk]
 
 # Single modules, placed without their submodules.
 modules:
@@ -20,7 +19,7 @@ modules:
   lmcache.v1: common    # runs before every part under lmcache.v1
 
 # Not part of the tree: not checked, and any part may use them.
-outside: [lmcache.cli]
+outside: [lmcache.cli, lmcache.sdk]
 
 # The diagram's arrows. A part may import every part its arrows lead to,
 # directly or through other parts. Imports within a part are always allowed.
@@ -30,11 +29,8 @@ allowed:
   transport: [common, platform]
   server: [common, platform, transport]
   client: [common, platform, transport]
-  sdk: [client]
-  integration: [client, sdk]
+  integration: [client]
 
 # Imports that break the tree today, as "<part or package> -> <part or package>".
 # Delete a line once nothing matches it; the check fails on a stale line.
-exceptions:
-  - lmcache.sdk.qringbuffer -> integration
-
+exceptions: []
