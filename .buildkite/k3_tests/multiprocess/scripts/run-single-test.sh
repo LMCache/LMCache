@@ -122,6 +122,10 @@ elif [ "$TEST_NAME" = "deadlock" ]; then
     export CHUNK_SIZE=256
     export CPU_BUFFER_SIZE=50
     export MAX_WORKERS=2
+elif [ "$TEST_NAME" = "vllm_bench" ]; then
+    export MODEL="${MODEL:-$DEFAULT_MODEL}"
+    # Match baseline and connector block geometry for the throughput check.
+    export VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-64}"
 elif [ "$TEST_NAME" = "eviction_aware_lazy_offload" ]; then
     export LMCACHE_MP_LAZY_OFFLOAD=true
     export LMCACHE_MP_LAZY_OFFLOAD_POLICY=EVICTION_AWARE
