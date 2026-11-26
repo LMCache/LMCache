@@ -53,6 +53,7 @@ from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
+    wait_producer_event,
 )
 from lmcache.v1.platform.base.ipc_wrapper import KVCache, set_fd_resolver
 from lmcache.v1.platform.cache_context import create_cache_context
@@ -875,7 +876,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             producer_event = event_backend.import_event(
                 event_ipc_handle, cache_context.device
             )
-            event_backend.wait_event(producer_event, cache_context.stream)
+            wait_producer_event(event_backend, producer_event, cache_context.stream)
             import_token = cache_context.hold_imported_event(producer_event)
             submit_callback_to_stream(
                 cache_context.cupy_stream,
@@ -1259,7 +1260,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             producer_event = event_backend.import_event(
                 event_ipc_handle, cache_context.device
             )
-            event_backend.wait_event(producer_event, cache_context.stream)
+            wait_producer_event(event_backend, producer_event, cache_context.stream)
             import_token = cache_context.hold_imported_event(producer_event)
             submit_callback_to_stream(
                 cache_context.cupy_stream,

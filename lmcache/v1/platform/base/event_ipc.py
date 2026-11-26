@@ -17,11 +17,15 @@ from __future__ import annotations
 
 # Standard
 from collections import deque
-from typing import Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
 import inspect
+import time
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.v1.common.logging import init_logger
+
+logger = init_logger(__name__)
 
 
 def _accepts_interprocess(event_cls: object) -> bool:
@@ -166,6 +170,63 @@ class EventIPCBackend(Protocol):
 _EXPORTED_EVENT_RING_SIZE = 2048
 
 
+# Host polling of an imported producer event (``wait_producer_event``). A producer
+# fence trails the engine step in flight: a decode step is tens of ms, a prefill
+# step up to about a second.
+_PRODUCER_POLL_S = 0.0005
+_PRODUCER_SLOW_POLL_S = 0.002
+_PRODUCER_SLOW_AFTER_S = 0.1
+_PRODUCER_WARN_AFTER_S = 10.0
+_PRODUCER_WARN_EVERY_S = 60.0
+
+
+def wait_producer_event(
+    backend: EventIPCBackend,
+    event: object,
+    stream: object,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    pause: Callable[[float], None] = time.sleep,
+) -> None:
+    """Make ``stream`` wait for ``event``, a producer fence imported from
+    another process (``import_event``).
+
+    A backend whose GPU wait on an imported event can occupy a compute unit
+    while it waits sets ``host_ready_before_imported_wait``; there the host
+    polls ``query_event`` until the fence has completed and only then queues
+    the wait, which then returns at once. Every other backend queues the wait
+    directly.
+
+    There is no deadline: a fence that has not completed is logged after
+    ``_PRODUCER_WARN_AFTER_S`` and then every ``_PRODUCER_WARN_EVERY_S``.
+
+    Args:
+        backend: The event IPC backend that imported ``event``.
+        event: The imported producer event.
+        stream: Stream that should wait for ``event``.
+        clock: Monotonic clock in seconds; injectable for testing.
+        pause: Sleep function in seconds; injectable for testing.
+    """
+    if getattr(backend, "host_ready_before_imported_wait", False):
+        start = clock()
+        warn_at = _PRODUCER_WARN_AFTER_S
+        while not backend.query_event(event):
+            waited = clock() - start
+            if waited >= warn_at:
+                logger.warning(
+                    "Producer event not complete after %.0f s; the transfer "
+                    "stays queued until it is.",
+                    waited,
+                )
+                warn_at += _PRODUCER_WARN_EVERY_S
+            pause(
+                _PRODUCER_POLL_S
+                if waited < _PRODUCER_SLOW_AFTER_S
+                else _PRODUCER_SLOW_POLL_S
+            )
+    backend.wait_event(event, stream)
+
+
 class DefaultEventIPCBackend(EventIPCBackend):
     """CUDA-style event IPC backend over an injectable event module.
 
@@ -181,6 +242,10 @@ class DefaultEventIPCBackend(EventIPCBackend):
         device_type: Device-type label used in error messages. Defaults to the
             active ``torch_device_type``.
     """
+
+    # See ``wait_producer_event``: whether a producer event must have completed
+    # (host poll) before a stream is made to wait for it.
+    host_ready_before_imported_wait: bool = False
 
     def __init__(
         self,
