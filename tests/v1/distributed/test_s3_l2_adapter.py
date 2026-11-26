@@ -1256,7 +1256,7 @@ def _store_keys(adapter, ids):
 
 @pytest.mark.parametrize(
     "status,code",
-    [(501, "NotImplemented"), (405, "MethodNotAllowed"), (400, "InvalidRequest")],
+    [(501, "NotImplemented"), (405, "MethodNotAllowed"), (400, "XNotImplemented")],
 )
 def test_delete_falls_back_when_bulk_delete_unsupported(
     adapter, s3_warnings, status, code
@@ -1342,7 +1342,9 @@ def test_is_bulk_delete_unsupported_classification():
 
     assert s3mod._is_bulk_delete_unsupported(err(501, "NotImplemented"))
     assert s3mod._is_bulk_delete_unsupported(err(405, "MethodNotAllowed"))
-    assert s3mod._is_bulk_delete_unsupported(err(400, "InvalidRequest"))
+    # Supporting endpoints also return InvalidRequest; it must not make the
+    # sticky fallback fire.
+    assert not s3mod._is_bulk_delete_unsupported(err(400, "InvalidRequest"))
     assert s3mod._is_bulk_delete_unsupported(err(400, "XNotImplemented"))
     assert not s3mod._is_bulk_delete_unsupported(err(500, "InternalError"))
     assert not s3mod._is_bulk_delete_unsupported(err(403, "AccessDenied"))

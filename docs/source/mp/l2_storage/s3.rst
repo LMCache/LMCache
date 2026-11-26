@@ -44,8 +44,8 @@ Two behaviours are always on and have no setting:
   Keys that S3 reports as failed in the response stay tracked and are
   retried on a later sweep.  If the endpoint rejects ``DeleteObjects`` as
   unsupported (HTTP ``405`` or ``501``, or the S3 error codes
-  ``NotImplemented``, ``XNotImplemented``, ``MethodNotAllowed`` or
-  ``InvalidRequest``), the adapter deletes those keys one ``DeleteObject``
+  ``NotImplemented``, ``XNotImplemented`` or ``MethodNotAllowed``), the
+  adapter deletes those keys one ``DeleteObject``
   at a time, at most 64 in flight, in the same sweep.  It logs one WARNING
   and keeps using per-key deletes for the rest of the process.
 - **Write coalescing.**  A store of a key whose upload is already in flight

@@ -188,9 +188,12 @@ DELETE_FALLBACK_MAX_CONCURRENCY = 64
 
 # How an S3-compatible endpoint without multi-object delete answers
 # ``POST /?delete``: an HTTP status, or an S3 error code in the XML body.
+# ``InvalidRequest`` is deliberately absent: endpoints that do implement
+# ``DeleteObjects`` also return it for unrelated reasons (e.g. a missing
+# Content-MD5), and the fallback is sticky for the life of the process.
 _BULK_DELETE_UNSUPPORTED_STATUSES = frozenset({405, 501})
 _BULK_DELETE_UNSUPPORTED_CODES = frozenset(
-    {"NotImplemented", "XNotImplemented", "MethodNotAllowed", "InvalidRequest"}
+    {"NotImplemented", "XNotImplemented", "MethodNotAllowed"}
 )
 
 
