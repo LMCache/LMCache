@@ -37,16 +37,21 @@ bool marker_complete(const sycl::event& marker) {
     return marker.get_info<sycl::info::event::command_execution_status>() ==
            sycl::info::event_command_status::complete;
   } catch (const sycl::exception& exception) {
-    // Holding the record forever would leak whatever it releases.
+    // Keep the record pending and retry on the next drain. Releasing it
+    // would run its handler (commit a write, release a read lock) while
+    // the queued copy may still be running. A marker that never answers
+    // leaks its record instead.
     TORCH_WARN_ONCE("stream recorder could not query a queue marker (",
-                    exception.what(), "); releasing its record");
-    return true;
+                    exception.what(), "); keeping its record pending");
+    return false;
   }
 }
 
 // Records wait for their queue marker, then become drainable in submission
 // order. Markers on one in-order queue complete in order; records on
-// different queues are released as each queue reaches them.
+// different queues are released as each queue reaches them. A record whose
+// marker query fails waits for a later drain, so records behind it on the
+// same queue can be released first.
 template <typename T>
 class OrderedRecords {
  public:

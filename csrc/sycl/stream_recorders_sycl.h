@@ -16,7 +16,8 @@
 // rather than when the queue reaches it; an event timestamp can trail its
 // barrier by up to the 100 us poll interval; and if the barrier cannot be
 // submitted, recording blocks on queue.wait() instead of dropping the
-// record.
+// record. A record whose barrier status cannot be queried stays pending,
+// so a broken queue leaks records rather than releasing them early.
 
 #pragma once
 
