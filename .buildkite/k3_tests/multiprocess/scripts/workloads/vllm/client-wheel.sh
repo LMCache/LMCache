@@ -115,17 +115,6 @@ run_mode() (
         lmcache "${server_args[@]}" > "$LMCACHE_LOG" 2>&1 &
     server_pid=$!
     echo "$server_pid" >> "$PID_FILE"
-    # The next mode reuses the GPU, so wait until both processes exit. They end
-    # by SIGTERM or have exited already, so keep the test's own status.
-    stop_processes() {
-        local status=$?
-        set +e
-        kill $vllm_pid "$server_pid" 2>/dev/null
-        wait $vllm_pid "$server_pid" 2>/dev/null
-        sleep 5
-        exit "$status"
-    }
-    trap stop_processes EXIT
     local _
     for _ in $(seq 120); do
         curl --noproxy '*' -sf "http://localhost:${http_port}/healthcheck" > /dev/null && break
@@ -191,6 +180,13 @@ lmcache_driven_status=$?
 set -e
 if [[ "$lmcache_driven_status" -ne 0 ]]; then
     echo "FAIL: lmcache_driven on the lmcache-client wheel"
+    exit 1
+fi
+# engine_driven reuses the GPU. lmcache_driven's processes outlive run_mode's
+# subshell, so stop them here; failing to is a hard failure.
+mapfile -t pids < "$PID_FILE"
+if ! python3 "${MP_SCRIPT_DIR}/stop-processes.py" "${pids[@]}"; then
+    echo "FAIL: lmcache_driven's LMCache server and vLLM did not stop"
     exit 1
 fi
 set +e
