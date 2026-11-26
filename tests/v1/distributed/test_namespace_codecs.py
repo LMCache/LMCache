@@ -74,6 +74,12 @@ _CPP_PARITY_CASES = [
         {"kv_dtype": "bf16", "revision": "abc123"},
         id="several-tags",
     ),
+    pytest.param(
+        "org/model",
+        "a" * 128,
+        {"revision": "abc", "kv_dtype": "bf16"},
+        id="max-salt-mixed-tags",
+    ),
 ]
 
 
@@ -153,16 +159,19 @@ def test_cpp_codec_treats_the_tag_token_as_opaque(cpp_codec: Path, token: str) -
     assert result == [expected_filename, tagged, key.chunk_hash.hex()]
 
 
-def test_identity_shapes_round_trip() -> None:
-    """Whatever the framing, the tag set survives a store/load cycle."""
-    cases = [
-        ("org/model", "", {}),
-        ("org/model", "tenant", {"kv_dtype": "f16"}),
-        ("org/model", "a" * 128, {"revision": "abc", "kv_dtype": "bf16"}),
-    ]
-    for model_name, salt, tags in cases:
-        key = _key(model_name, salt=salt, tags=tags)
-        assert decode_storage_key(encode_storage_key(key)) == key
+@pytest.mark.parametrize(("model_name", "salt", "tags"), _CPP_PARITY_CASES)
+def test_identity_shapes_round_trip(
+    model_name: str, salt: str, tags: dict[str, str]
+) -> None:
+    """Every shape the C++ side frames must also decode in Python.
+
+    Reusing the parity list keeps the two tests from drifting: a shape added
+    for cross-language framing is also checked through the Python decoder,
+    instead of being exercised by C++ alone.
+    """
+    key = _key(model_name, salt=salt, tags=tags)
+
+    assert decode_storage_key(encode_storage_key(key)) == key
 
 
 @pytest.mark.parametrize(
