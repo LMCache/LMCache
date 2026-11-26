@@ -5,6 +5,7 @@ backend="${1:?Expected cuda, rocm, or musa}"
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 script="$root/.buildkite/k3_tests/client-wheel-probe"
 out="$root/client-wheel-evidence/$backend"
+wheel=lmcache_client-0.5.9rc102-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
 mkdir -p "$out"
 
 if [[ "${2:-}" != inside ]]; then
@@ -29,8 +30,12 @@ if [[ "${2:-}" != inside ]]; then
         "${docker_cmd[@]}" pull "$image"
     fi
     "${docker_cmd[@]}" image inspect --format '{{.Id}} {{json .RepoDigests}}' "$image" | tee "$out/image.txt"
+    fixture="$(mktemp -d)"
+    trap 'rm -rf "$fixture"' EXIT
+    url="https://github.com/maobaolong/LMCache/releases/download/client-wheel-6972-probe/$wheel"
+    curl -fLsS --retry 3 --max-time 120 "$url" -o "$fixture/$wheel"
     "${docker_cmd[@]}" run --rm --shm-size=4g "${devices[@]}" \
-        -v "$root:/checkout:ro" -v "$out:/evidence" -w /tmp \
+        -v "$root:/checkout:ro" -v "$out:/evidence" -v "$fixture:/fixture:ro" -w /tmp \
         --entrypoint bash "$image" /checkout/.buildkite/k3_tests/client-wheel-probe/run.sh "$backend" inside
     exit
 fi
@@ -47,8 +52,11 @@ export LMCACHE_TRACK_USAGE=false PYTHONHASHSEED=0 LMCACHE_LOG_LEVEL=INFO
 
 python3 -VV
 python3 -c 'import sys, torch, vllm; print("runtime", sys.executable, torch.__version__, torch.version.cuda, getattr(torch.version, "hip", None), vllm.__version__, "cxx11_abi", torch.compiled_with_cxx11_abi())'
-wheel=lmcache_client-0.5.9rc102-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-curl -fLsS --retry 3 "https://github.com/maobaolong/LMCache/releases/download/client-wheel-6972-probe/$wheel" -o "$wheel"
+if [[ -f "/fixture/$wheel" ]]; then
+    cp "/fixture/$wheel" "$wheel"
+else
+    curl -fLsS --retry 3 --max-time 120 "https://github.com/maobaolong/LMCache/releases/download/client-wheel-6972-probe/$wheel" -o "$wheel"
+fi
 echo "7410c6efb42cb987dca6e788f830d98746f00405d5fd49e142ec8f8f68ab734f  $wheel" | sha256sum -c
 python3 -m venv --system-site-packages worker
 echo 'STAGE: install original client wheel'
