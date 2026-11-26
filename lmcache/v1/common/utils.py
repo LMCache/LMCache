@@ -874,18 +874,7 @@ def _get_head_size_view(
 
 
 def cdiv(a: int, b: int) -> int:
-    """Return the ceiling of integer division of ``a`` by ``b``.
-
-    Args:
-        a: Integer dividend.
-        b: Nonzero integer divisor.
-
-    Returns:
-        The quotient rounded toward positive infinity.
-
-    Raises:
-        ZeroDivisionError: If ``b`` is zero.
-    """
+    """Ceiling division."""
     return -(a // -b)
 
 
