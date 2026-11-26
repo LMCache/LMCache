@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import quote as url_quote
 from urllib.parse import urlencode
 import asyncio
+import bisect
 import ctypes
 import threading
 import xml.etree.ElementTree as ET
@@ -238,6 +239,40 @@ class MemoryViewStream:
 
     def __len__(self):
         return len(self.mv)
+
+
+def _list_owned_buckets(client: Any, prefix: str, region: str) -> list[str]:
+    """Names of buckets owned by the caller's account that start with ``prefix``.
+
+    ``ListBuckets`` only returns buckets the requester owns, so membership
+    here is proof of ownership. ``Prefix``, ``BucketRegion`` and pagination
+    are used when the installed botocore knows them; otherwise the single
+    unfiltered page is filtered here.
+    """
+    try:
+        op = client.meta.service_model.operation_model("ListBuckets")
+        supported = set(op.input_shape.members)
+    except Exception:
+        supported = set()
+    params: dict[str, str] = {}
+    if prefix and "Prefix" in supported:
+        params["Prefix"] = prefix
+    if "BucketRegion" in supported:
+        params["BucketRegion"] = region
+    names: list[str] = []
+    token: Optional[str] = None
+    while True:
+        kwargs = dict(params)
+        if token:
+            kwargs["ContinuationToken"] = token
+        resp = client.list_buckets(**kwargs)
+        for bucket in resp.get("Buckets", []):
+            name = bucket.get("Name")
+            if name and name.startswith(prefix):
+                names.append(name)
+        token = resp.get("ContinuationToken")
+        if not token or "ContinuationToken" not in supported:
+            return names
 
 
 def _is_connection_error(error_msg: str) -> bool:
@@ -541,6 +576,12 @@ class S3L2Adapter(L2AdapterInterface):
 
         self._closed = False
 
+        # Tenant buckets that already exist survive a restart: find them in
+        # storage so listing covers them before their tenants come back.
+        self._tenant_buckets_discovered = False
+        if self._bucket_mode == "per_cache_salt":
+            self._discover_tenant_buckets()
+
         logger.info(
             "Initialized S3L2Adapter (endpoint=%s region=%s "
             "http2=%s s3express=%s tls=%s max_capacity_gb=%.2f)",
@@ -760,14 +801,27 @@ class S3L2Adapter(L2AdapterInterface):
             )
             entries, next_token = fut.result(timeout=30.0)
         else:
-            # Per-tenant buckets: list the base + every observed tenant bucket,
-            # paginating across them with a composite cursor
-            # (bucket_index, in-bucket-token). Deletes the eviction controller
-            # issues route back to the right bucket via _make_request.
+            # Per-tenant buckets: list the base, then every known tenant bucket
+            # in name order, paginating across them with a composite cursor
+            # (bucket name, in-bucket token). The cursor names the bucket
+            # rather than its position, so a tenant bucket that appears
+            # between pages cannot shift the walk: buckets sorting after the
+            # cursor are still visited once, and one sorting before it is
+            # picked up by the next pass. Deletes route back to the right
+            # bucket via _make_request.
+            if cursor is None and not self._tenant_buckets_discovered:
+                self._discover_tenant_buckets()  # retry a failed startup scan
             with self._lock:
                 tenant_buckets = set(self._tenant_buckets)
             hosts = _bucket_router.bucket_hosts(self._endpoint, tenant_buckets)
-            idx, token = _bucket_router.decode_cursor(cursor)
+            names = [_bucket_router.bucket_of_host(h) for h in hosts]
+            start, token = _bucket_router.decode_cursor(cursor)
+            if start is None or start == names[0]:
+                idx = 0
+            else:
+                idx = 1 + bisect.bisect_left(names[1:], start)
+            if idx >= len(names) or names[idx] != start:
+                token = None  # that bucket is gone: start the next one fresh
             entries, next_token = [], None
             while idx < len(hosts):
                 # Request only the remaining page budget so many small tenant
@@ -782,13 +836,13 @@ class S3L2Adapter(L2AdapterInterface):
                 e, t = fut.result(timeout=30.0)
                 entries.extend(e)
                 if t:  # this bucket has more pages → resume here next call
-                    next_token = _bucket_router.encode_cursor(idx, t)
+                    next_token = _bucket_router.encode_cursor(names[idx], t)
                     break
                 idx += 1  # bucket exhausted → continue into the next bucket
                 token = None
                 if len(entries) >= max_keys:  # page full → resume at next bucket
                     next_token = (
-                        _bucket_router.encode_cursor(idx, None)
+                        _bucket_router.encode_cursor(names[idx], None)
                         if idx < len(hosts)
                         else None
                     )
@@ -893,6 +947,56 @@ class S3L2Adapter(L2AdapterInterface):
                 self._ensure_bucket(host)
         return host
 
+    def _new_mgmt_client(self) -> Any:
+        """boto3 S3 client for bucket-level (control-plane) calls."""
+        # Third Party
+        import boto3
+
+        return boto3.client(
+            "s3",
+            region_name=self._region,
+            aws_access_key_id=self._config.aws_access_key_id,
+            aws_secret_access_key=self._config.aws_secret_access_key,
+        )
+
+    def _mgmt_client(self) -> Any:
+        with self._lock:
+            if self._mgmt_s3 is None:
+                self._mgmt_s3 = self._new_mgmt_client()
+            return self._mgmt_s3
+
+    def _discover_tenant_buckets(self) -> bool:
+        """Merge the account's existing tenant buckets into the known set.
+
+        Matches names against the template exactly, so unrelated buckets that
+        happen to share the prefix are ignored. Discovered buckets are owned
+        by this account (``ListBuckets`` returns nothing else), so they are
+        also recorded as provisioned and never re-created. Failure is logged
+        and retried at the start of the next listing pass.
+        """
+        prefix = _bucket_router.tenant_bucket_prefix(
+            self._bucket_template, self._base_bucket
+        )
+        pattern = _bucket_router.tenant_bucket_pattern(
+            self._bucket_template, self._base_bucket
+        )
+        try:
+            names = _list_owned_buckets(self._mgmt_client(), prefix, self._region)
+        except Exception:
+            logger.warning(
+                "S3L2Adapter could not list existing tenant buckets; listing "
+                "covers only buckets used by this process until a retry succeeds",
+                exc_info=True,
+            )
+            return False
+        found = {n for n in names if pattern.match(n) and n != self._base_bucket}
+        with self._lock:
+            self._tenant_buckets |= found
+            self._ensured_buckets |= found
+            self._tenant_buckets_discovered = True
+        logger.info("S3L2Adapter found %d existing tenant bucket(s)", len(found))
+        return True
+
     def _ensure_bucket(self, host: str) -> None:
         """Provision a tenant bucket (idempotent, once per process) + a TTL
         lifecycle, so per_cache_salt routing works without a separate
@@ -917,17 +1021,8 @@ class S3L2Adapter(L2AdapterInterface):
             try:
                 # Third Party
                 from botocore.exceptions import ClientError
-                import boto3
 
-                mgmt_s3 = self._mgmt_s3
-                if mgmt_s3 is None:
-                    mgmt_s3 = boto3.client(
-                        "s3",
-                        region_name=self._region,
-                        aws_access_key_id=self._config.aws_access_key_id,
-                        aws_secret_access_key=self._config.aws_secret_access_key,
-                    )
-                    self._mgmt_s3 = mgmt_s3
+                mgmt_s3 = self._mgmt_client()
                 try:
                     # us-east-1 is the S3 default region and rejects an explicit
                     # LocationConstraint; every other region requires it.

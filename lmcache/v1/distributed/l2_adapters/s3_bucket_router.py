@@ -152,6 +152,29 @@ def bucket_of_host(host: str) -> str:
     return host.split(".", 1)[0]
 
 
+# ---- discovery -----------------------------------------------------------------
+# What a {salt} token can look like: an optional readable part ending in "-",
+# then the salt hash.
+_TOKEN_RE = r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-)?[0-9a-f]{%d}" % SALT_HASH_LEN
+
+
+def _template_parts(template: str, base_bucket: str) -> tuple[str, str]:
+    marker = "\x00"
+    before, _, after = template.format(base=base_bucket, salt=marker).partition(marker)
+    return before, after
+
+
+def tenant_bucket_prefix(template: str, base_bucket: str) -> str:
+    """Literal prefix every tenant bucket name starts with (may be empty)."""
+    return _template_parts(template, base_bucket)[0]
+
+
+def tenant_bucket_pattern(template: str, base_bucket: str) -> re.Pattern[str]:
+    """Regex matching exactly the names :func:`tenant_bucket_name` produces."""
+    before, after = _template_parts(template, base_bucket)
+    return re.compile(f"^{re.escape(before)}{_TOKEN_RE}{re.escape(after)}$")
+
+
 # ---- per-bucket listing support ---------------------------------------------
 def bucket_hosts(base_endpoint: str, tenant_buckets: set[str]) -> list[str]:
     """Hosts to list, in cursor order: the base bucket, then tenant buckets
@@ -167,17 +190,23 @@ def bucket_hosts(base_endpoint: str, tenant_buckets: set[str]) -> list[str]:
     return hosts
 
 
-def encode_cursor(bucket_idx: int, token: str | None) -> str:
-    """Encode a bucket index and continuation token as one opaque cursor."""
-    return base64.urlsafe_b64encode(json.dumps([bucket_idx, token]).encode()).decode()
+def encode_cursor(bucket: str, token: str | None) -> str:
+    """Encode a bucket name and its continuation token as one opaque cursor."""
+    return base64.urlsafe_b64encode(json.dumps([bucket, token]).encode()).decode()
 
 
-def decode_cursor(cursor: str | None) -> tuple[int, str | None]:
-    """Decode cursor → (bucket_index, continuation token). Garbage → (0, None)."""
+def decode_cursor(cursor: str | None) -> tuple[str | None, str | None]:
+    """Decode cursor → (bucket name, continuation token).
+
+    ``(None, None)`` means "start from the first bucket" and is also what a
+    malformed cursor decodes to.
+    """
     if not cursor:
-        return 0, None
+        return None, None
     try:
-        i, tok = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
-        return int(i), tok
+        bucket, tok = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
     except Exception:
-        return 0, None
+        return None, None
+    if not isinstance(bucket, str) or not (tok is None or isinstance(tok, str)):
+        return None, None
+    return bucket, tok

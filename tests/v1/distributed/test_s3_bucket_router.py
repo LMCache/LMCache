@@ -134,7 +134,22 @@ def test_bucket_hosts():
 
 
 def test_cursor_roundtrip():
-    for i, tok in [(0, None), (2, "abc=="), (5, "x/y+z")]:
-        assert r.decode_cursor(r.encode_cursor(i, tok)) == (i, tok)
-    assert r.decode_cursor(None) == (0, None)
-    assert r.decode_cursor("garbage!!") == (0, None)
+    for bucket, tok in [("kv-cache", None), ("kv-cache-a-1", "abc=="), ("b", "x/y+z")]:
+        assert r.decode_cursor(r.encode_cursor(bucket, tok)) == (bucket, tok)
+    assert r.decode_cursor(None) == (None, None)
+    assert r.decode_cursor("garbage!!") == (None, None)
+    # Index-based cursors from an earlier revision restart the walk.
+    assert r.decode_cursor(r.encode_cursor(2, None)) == (None, None)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("template", ["{base}-{salt}", "{salt}", "kv-{salt}-x"])
+def test_pattern_matches_exactly_the_generated_names(template):
+    pattern = r.tenant_bucket_pattern(template, "kv-cache")
+    prefix = r.tenant_bucket_prefix(template, "kv-cache")
+    for salt in ("tenant:a", "!!!", "T" * 128, "xn--evil"):
+        name = r.tenant_bucket_name(salt, template, "kv-cache")
+        assert name.startswith(prefix)
+        assert pattern.match(name), name
+    # Unrelated buckets sharing the prefix are not tenant buckets.
+    for other in ("kv-cache", prefix + "logs", prefix + "backup-2024"):
+        assert not pattern.match(other), other
