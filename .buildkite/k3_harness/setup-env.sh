@@ -310,7 +310,9 @@ else
     exit 1
 fi
 
-# cu132 PTX needs newer userspace driver libraries on the CI 580 driver.
+# CI's 580-series driver cannot JIT the cu132 wheel's newer PTX.
+# Load NVIDIA's user-space compatibility libraries inside the container,
+# leaving the host kernel driver, nvcc and PyTorch CUDA version unchanged.
 if [[ "${VLLM_CUDA_VARIANT}" == "cu132" ]]; then
     nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
     host_driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1)"
