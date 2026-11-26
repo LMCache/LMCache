@@ -327,6 +327,11 @@ class TestTransferSpec:
         with pytest.raises(ValueError, match="names no blocks"):
             transfer_spec_from_atom(self._request(block_ids=[[]]))
 
+    def test_a_non_empty_transfer_without_any_block_list_is_rejected(self):
+        """An empty outer list names no group, so it cannot carry blocks."""
+        with pytest.raises(ValueError, match="names no block-id list"):
+            transfer_spec_from_atom(self._request(block_ids=[]))
+
     def test_start_past_end_is_rejected(self):
         with pytest.raises(ValueError, match="is past its end"):
             transfer_spec_from_atom(self._request(start=8, end=4))

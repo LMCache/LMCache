@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Convert ATOM's transfer request into LMCache's transfer spec.
 
-ATOM describes a transfer by the chunk hashes of one token range plus the
-engine block ids that range covers; LMCache submits it as
+ATOM describes a transfer by a prefix chunk-hash chain plus the engine block
+ids of the transferred range; LMCache submits it as
 :class:`AtomMPTransferSpec`. The request shape mirrors ``TransferRequest`` in
-the external-connector design (v2), where the scheduler computes the chunk-hash
-chain once and sends the slice for the range it is transferring.
+the external-connector design (v2): the scheduler computes the chain once, so
+``hashes`` covers ``[0, end)`` and ``start`` only selects which block ids the
+range uses. LMCache's chunk hashes are chained, so a transfer that begins
+mid-prefix still needs the hashes before its first chunk.
 """
 
 # Future
@@ -28,7 +30,10 @@ class AtomTransferRequest:
     """One ATOM transfer, as the external-connector API defines it.
 
     Attributes:
-        hashes: Concatenated chunk hashes for ``[start, end)``, 32 bytes each.
+        hashes: Concatenated chunk hashes for the prefix ``[0, end)``, 32 bytes
+            each. ``start`` selects the block ids of the range, not a slice of
+            this chain: LMCache's chunk hashes are chained from the first
+            token.
         block_ids: Engine block ids for the range; one list per engine group,
             or a flat list when the deployment has a single group.
         start: First token of the transferred range, inclusive.
@@ -159,6 +164,11 @@ def transfer_spec_from_atom(
         if not chunk_hashes:
             raise ValueError(
                 f"transfer covers tokens [{start}, {end}) but carries no chunk hashes"
+            )
+        if not block_ids:
+            raise ValueError(
+                f"transfer covers tokens [{start}, {end}) but names no block-id "
+                "list; a flat list is one group, an empty list names none"
             )
         for index, blocks in enumerate(block_ids):
             if not blocks:

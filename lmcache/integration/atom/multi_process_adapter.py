@@ -64,7 +64,8 @@ class AtomMPTransferSpec:
     """One ATOM token range, its engine-side block IDs and cache identity.
 
     ``cache_salt`` isolates tenants in the LMCache key; ``chunk_hashes`` is the
-    slice of the request's chunk-hash chain that covers ``[start, end)``, so a
+    request's chunk-hash chain, which covers ``[0, end)`` (LMCache hashes are
+    chained, so the prefix is what names the chunks of the range), so a
     worker can submit without recomputing it. Both are optional for callers
     that predate the external connector.
     """
