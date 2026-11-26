@@ -223,6 +223,12 @@ policy evicts a fraction of the least-recently-used keys.
    * - ``--eviction-trigger-watermark``
      - ``0.8``
      - L1 usage fraction [0, 1] above which eviction is triggered.
+   * - ``--eviction-target-watermark``
+     - ``0.0``
+     - Low watermark of the hysteresis band.  When above ``0`` (and below
+       the trigger watermark), a triggered cycle evicts down to this usage
+       fraction in one pass instead of ``--eviction-ratio``.  ``0`` keeps
+       the fixed ratio.
    * - ``--eviction-ratio``
      - ``0.2``
      - Fraction of currently allocated L1 memory to evict per cycle.
@@ -235,6 +241,8 @@ policy evicts a fraction of the least-recently-used keys.
     --eviction-trigger-watermark 0.8 \
     --eviction-ratio 0.2
 
+.. _mp-l2-eviction:
+
 L2 Eviction
 ~~~~~~~~~~~
 
@@ -246,7 +254,12 @@ sub-object to its ``--l2-adapter`` JSON spec. Adapters without an
 When L2 eviction is enabled for an adapter, a dedicated background
 thread monitors that adapter's ``get_usage()`` value. Once usage
 exceeds ``trigger_watermark``, the policy evicts keys until usage
-drops by ``eviction_ratio``.
+drops by ``eviction_ratio``.  With ``target_watermark`` set, it instead
+evicts down to ``target_watermark`` in one pass, so every sweep leaves
+headroom and eviction cannot fall behind a sustained write burst.  The
+ratio is computed by key count, which approximates bytes because KV
+chunks are close to uniform in size.  The same applies to per-``cache_salt``
+quotas under ``IsolatedLRU``, against each salt's quota.
 
 **``"eviction"`` sub-object fields:**
 
@@ -263,9 +276,15 @@ drops by ``eviction_ratio``.
    * - ``trigger_watermark``
      - ``0.8``
      - Adapter usage fraction [0, 1] above which eviction is triggered.
+   * - ``target_watermark``
+     - ``0.0``
+     - Low watermark of the hysteresis band.  Must be ``0`` or between ``0``
+       and ``trigger_watermark``; a triggered sweep evicts down to it.
+       ``0`` keeps the fixed ``eviction_ratio``.
    * - ``eviction_ratio``
      - ``0.2``
-     - Fraction of used capacity to evict per cycle.
+     - Fraction of used capacity to evict per cycle.  Ignored when
+       ``target_watermark`` is set.
 
 **Example — nixl_store with LRU eviction:**
 
@@ -309,11 +328,13 @@ because every ``L2AdapterEvictionState`` owns its own policy instance.
      - Full shared/global eviction support. ``delete`` recycles raw-block
        slots; locked entries are skipped and retried on the next cycle.
    * - ``s3``
-     - ``delete`` removes objects from the bucket and frees aggregate
-       byte accounting. ``get_usage`` reports ``usage_fraction == -1.0``
-       when ``max_capacity_gb`` is ``0`` (disabled); set a non-zero
-       ``max_capacity_gb`` to enable the watermark-triggered eviction
-       controller.
+     - ``delete`` removes objects from the bucket with ``DeleteObjects``
+       (falling back to per-key deletes on endpoints without it) and frees
+       aggregate byte accounting. ``get_usage`` reports
+       ``usage_fraction == -1.0`` when ``max_capacity_gb`` is ``0``
+       (disabled); set a non-zero ``max_capacity_gb`` to enable the
+       watermark-triggered eviction controller. See :doc:`s3` for the
+       write ceiling and coalescing.
    * - ``hfbucket``
      - ``delete`` removes objects from the bucket and frees aggregate
        byte accounting. ``get_usage`` reports ``usage_fraction == -1.0``

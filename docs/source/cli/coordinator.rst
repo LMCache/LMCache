@@ -52,6 +52,11 @@ Options
    * - ``--trigger-watermark RATIO``
      - Eviction fires when usage reaches this fraction of the quota, ``0.0``
        (exclusive) to ``1.0`` (default: ``1.0``).
+   * - ``--target-watermark RATIO``
+     - Low watermark of the hysteresis band: a salt over
+       ``--trigger-watermark`` is evicted down to this fraction of its quota
+       in one pass instead of ``--eviction-ratio``.  ``0.0`` (default) keeps
+       the fixed ratio.
    * - ``--chunk-size N``
      - Tokens per KV chunk (default: ``256``). Every registered MP server must
        report the same configured size for CacheBlend matching and pin-key

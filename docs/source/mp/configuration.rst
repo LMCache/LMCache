@@ -762,6 +762,14 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--eviction-trigger-watermark``
      - ``0.8``
      - Memory usage ratio (0.0--1.0) that triggers eviction.
+   * - ``--eviction-target-watermark``
+     - ``0.0``
+     - Low watermark of the eviction hysteresis band.  When above ``0`` and
+       below the trigger watermark, a triggered cycle evicts down to this
+       usage ratio in one pass instead of ``--eviction-ratio``.  ``0`` keeps
+       the fixed ratio.  ``--l1-manager`` entries inherit it like the other
+       eviction flags.  L2 adapters set their own ``target_watermark`` in
+       their ``eviction`` object.
    * - ``--eviction-ratio``
      - ``0.2``
      - Fraction of allocated memory to evict when triggered (0.0--1.0).
