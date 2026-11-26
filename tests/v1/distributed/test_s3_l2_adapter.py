@@ -69,6 +69,11 @@ class _FakeBackend:
         self._bulk_delete_fail_keys: set[str] = set()
         self._bulk_delete_requests = 0
         self._single_delete_requests = 0
+        # When set, a PUT signals ``_put_started`` and then waits on
+        # ``_put_gate`` before landing, so a test can hold one upload in
+        # flight while it submits another.
+        self._put_gate: threading.Event | None = None
+        self._put_started = threading.Event()
 
     def reset(self):
         with self._lock:
@@ -80,6 +85,8 @@ class _FakeBackend:
             self._bulk_delete_rejection = None
             self._bulk_delete_fail_keys = set()
             self._bulk_delete_requests = self._single_delete_requests = 0
+            self._put_gate = None
+            self._put_started = threading.Event()
 
     def get(self, key: str) -> bytes | None:
         with self._lock:
@@ -335,6 +342,10 @@ class _FakeS3Request:
                 raise RuntimeError(err_inj)
 
             if method == "PUT":
+                gate = _BACKEND._put_gate
+                if gate is not None:
+                    _BACKEND._put_started.set()
+                    gate.wait(timeout=5.0)
                 data = b""
                 body = request.body_stream
                 # body is a MemoryViewStream — read it fully
@@ -1394,4 +1405,40 @@ def test_store_coalesces_duplicate_keys():
         # In-flight set is released after completion.
         assert a.report_status()["store_in_flight_chunks"] == 0
     finally:
+        a.close()
+
+
+def test_store_coalesces_across_separate_tasks():
+    # Task 1's PUT is held in flight; task 2 stores the same key and must be
+    # coalesced: completed successfully with 0 bytes, no second PUT.
+    config = S3L2AdapterConfig(
+        s3_endpoint="s3://test-bucket",
+        s3_region="us-east-1",
+        s3_prefer_http2=False,
+        s3_num_io_threads=1,
+        max_capacity_gb=0.001,
+    )
+    a = S3L2Adapter(config)
+    gate = threading.Event()
+    _BACKEND._put_gate = gate
+    try:
+        k = create_object_key(9)
+        first = a.submit_store_task([k], [create_memory_obj()])
+        assert _BACKEND._put_started.wait(timeout=5.0)
+        assert a.report_status()["store_in_flight_chunks"] == 1
+
+        second = a.submit_store_task([k], [create_memory_obj()])
+        assert wait_for_event_fd(a.get_store_event_fd())
+        done = a.pop_completed_store_tasks()
+        assert done[second].is_successful()
+        assert done[second].bytes_transferred() == 0
+        assert first not in done
+        assert a.report_status()["store_coalesced_chunks"] == 1
+
+        gate.set()
+        assert wait_until(lambda: first in a.pop_completed_store_tasks(), timeout=5.0)
+        assert _BACKEND.counts()["put"] == 1
+        assert a.report_status()["store_in_flight_chunks"] == 0
+    finally:
+        gate.set()
         a.close()
