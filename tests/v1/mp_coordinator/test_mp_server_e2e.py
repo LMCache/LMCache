@@ -235,6 +235,33 @@ def test_a_coordinator_delete_reaches_the_server_and_comes_back(
     }
 
 
+def test_a_coordinator_delete_by_key_removes_only_that_chunk(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``POST /cache/delete`` with ``keys`` removes the named mid-prompt chunk
+    from both tiers and leaves its prefix chunk where it was."""
+    with running_coordinator() as url:
+        with running_server(url, tmp_path, "mp-1", [local_l2()]) as server:
+            with kv_client(server.rpc_url, MODEL) as client:
+                client.store(TOKENS, cache_salt="alice")
+                size = client.chunk_bytes
+            first, second = keys_of(MODEL, TOKENS, "alice")
+            assert settle(lambda: len(directory(url)), 4) == 4
+
+            response = httpx.post(
+                f"{url}/cache/delete",
+                json={"instance_id": "mp-1", "keys": encoded([second]), "tier": "all"},
+                timeout=5,
+            )
+            assert response.status_code == httpx.codes.OK, response.text
+            assert response.json()["requested"] == 1
+            kept = {
+                Placement("mp-1", *L1, first, size),
+                Placement("mp-1", *LOCAL_L2, first, size),
+            }
+            assert settle(lambda: directory(url), kept) == kept
+
+
 def test_capacity_is_declared_per_compartment_and_again_on_reregistration(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -355,3 +382,53 @@ def test_a_prefetch_through_the_coordinator_warms_l1(tmp_path: pathlib.Path) -> 
                 }
                 assert settle(status, finished) == finished
                 assert settle(lambda: directory(url), l1 | l2) == l1 | l2
+
+
+def test_a_prefetch_by_key_through_the_coordinator_loads_past_a_missing_chunk(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A prefetch with ``keys`` loads every named chunk L2 holds, not a
+    prefix: with the first chunk gone from both tiers, naming both chunks
+    still warms the second."""
+    with running_coordinator() as url:
+        with running_server(url, tmp_path, "mp-1", [local_l2()]) as server:
+            with kv_client(server.rpc_url, MODEL) as client:
+                client.store(TOKENS, cache_salt="alice")
+                size = client.chunk_bytes
+                first, second = keys_of(MODEL, TOKENS, "alice")
+                assert settle(lambda: len(directory(url)), 4) == 4
+
+                for keys, tier in (([first, second], "l1"), ([first], "l2")):
+                    response = httpx.request(
+                        "DELETE",
+                        f"{server.http_url}/cache/objects",
+                        json={"keys": encoded(keys), "tier": tier},
+                        timeout=5,
+                    )
+                    assert response.json()["deleted"] == len(keys)
+                l2 = {Placement("mp-1", *LOCAL_L2, second, size)}
+                assert settle(lambda: directory(url), l2) == l2
+
+                response = httpx.post(
+                    f"{url}/cache/prefetches",
+                    json={"instance_id": "mp-1", "keys": encoded([first, second])},
+                    timeout=5,
+                )
+                assert response.status_code == httpx.codes.OK, response.text
+                assert response.json()["chunks"] == 2
+                request_id = response.json()["request_id"]
+
+                def status() -> dict[str, object]:
+                    return httpx.get(
+                        f"{url}/cache/prefetches/mp-1/{request_id}", timeout=5
+                    ).json()
+
+                finished = {
+                    "request_id": request_id,
+                    "status": "completed",
+                    "found_keys": 1,
+                    "total_keys": 2,
+                }
+                assert settle(status, finished) == finished
+                warmed = l2 | {Placement("mp-1", *L1, second, size)}
+                assert settle(lambda: directory(url), warmed) == warmed
