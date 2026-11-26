@@ -8,7 +8,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.utils import _lmcache_nvtx_annotate, get_size_bytes
+from lmcache.v1.common.utils import _lmcache_nvtx_annotate, get_size_bytes
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,

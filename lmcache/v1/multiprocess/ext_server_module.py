@@ -13,13 +13,13 @@ import json
 
 # First Party
 from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.subclass_discovery import discover_subclasses
 from lmcache.v1.multiprocess.engine_module import DiscoverableModule, EngineModule
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.transport.server_module import (
     ServerModuleCallRequest,
     ServerModuleCallResponse,
 )
-from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
 if TYPE_CHECKING:
     # First Party
@@ -372,6 +372,17 @@ def register_grpc_services(
     Raises:
         TypeError: If a module exposes a non-callable registrar attribute.
     """
+    for module in modules:
+        if not hasattr(module, _GRPC_SERVICE_REGISTRAR) and hasattr(
+            module, _ZMQ_SERVICE_REGISTRAR
+        ):
+            logger.warning(
+                "%s implements %s but not %s, so its services are not "
+                "available on this gRPC server.",
+                type(module).__name__,
+                _ZMQ_SERVICE_REGISTRAR,
+                _GRPC_SERVICE_REGISTRAR,
+            )
     _register_transport_services(modules, server, _GRPC_SERVICE_REGISTRAR)
 
 

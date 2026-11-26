@@ -41,8 +41,6 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import consume_fd, create_event_notifier
 import lmcache.v1.memory_management as memory_management
 
-pytestmark = pytest.mark.no_shared_allocator
-
 ALIGN = 4096
 L1_SLOTS = 8
 # Every object in these tests (KV source/destination and serialized temp)

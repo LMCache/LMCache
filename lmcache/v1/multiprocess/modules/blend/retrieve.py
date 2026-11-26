@@ -643,7 +643,7 @@ class RetrieveMixin:
                 "before submitting retrieve requests"
             )
         rope_state = self._cb_rope_state[instance_id]
-        chunk_size = self._ctx.chunk_size
+        chunk_size = self._ctx.default_chunk_size
         # Blend's read set: attention (+ connector-private aux), never
         # recurrent-state groups. Legacy fused layout: every kernel group.
         read_groups, staged_kernel = self._cb_staged_groups(gpu_context)

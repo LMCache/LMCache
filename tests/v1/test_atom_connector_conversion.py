@@ -258,13 +258,13 @@ class TestTransferSpec:
             AtomTransferRequest(hashes=bytes([1]) * 32, block_ids=[0], start=0, end=8)
         )
 
-        assert spec.chunk_hashes == [bytes([1]) * 32]
+        assert spec.chunk_hashes == bytes([1]) * 32
         assert spec.block_ids == [[0]]
 
     def test_the_hash_blob_is_split_per_chunk(self):
         spec = transfer_spec_from_atom(self._request())
 
-        assert spec.chunk_hashes == [bytes([7]) * 32, bytes([7]) * 32]
+        assert spec.chunk_hashes == bytes([7]) * 64
 
     def test_a_partial_hash_is_rejected(self):
         with pytest.raises(ValueError, match="not a multiple of 32"):
@@ -276,7 +276,7 @@ class TestTransferSpec:
             self._request(hashes=bytes([7]) * 64, end=512), chunk_tokens=256
         )
 
-        assert len(spec.chunk_hashes) == 2
+        assert len(spec.chunk_hashes) == 2 * 32
 
     def test_the_hash_chain_covers_the_prefix_even_when_start_is_not_zero(self):
         """Hashes cover ``[0, end)``; ``start`` only selects the block ids."""
@@ -285,7 +285,7 @@ class TestTransferSpec:
             chunk_tokens=256,
         )
 
-        assert len(spec.chunk_hashes) == 2
+        assert len(spec.chunk_hashes) == 2 * 32
 
     def test_a_hash_count_that_does_not_match_the_range_is_rejected(self):
         with pytest.raises(ValueError, match="chunk hash"):
@@ -309,15 +309,6 @@ class TestTransferSpec:
             transfer_spec_from_atom(
                 self._request(block_ids=[0, 1]), num_engine_groups=2
             )
-
-    def test_the_salt_reaches_the_spec(self):
-        spec = transfer_spec_from_atom(self._request(cache_salt="tenant-a"))
-
-        assert spec.cache_salt == "tenant-a"
-
-    def test_a_salt_with_a_separator_is_rejected(self):
-        with pytest.raises(ValueError, match="cache_salt must not contain"):
-            transfer_spec_from_atom(self._request(cache_salt="a@b"))
 
     def test_a_non_empty_range_without_hashes_is_rejected(self):
         with pytest.raises(ValueError, match="carries no chunk hashes"):

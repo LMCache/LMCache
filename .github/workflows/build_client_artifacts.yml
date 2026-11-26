@@ -1,0 +1,150 @@
+name: Build Client Artifacts
+
+# Build the lmcache-client wheel from pyproject_client.toml (#6315), the way
+# build_cli_artifacts.yml builds lmcache-cli, and smoke-test the installed
+# wheel. pr_full_build.yml calls this on `full` PRs, and publish.yml with
+# `release` to also build the manylinux wheels it publishes.
+
+on:
+    workflow_call:
+        inputs:
+            release:
+                description: Also build and upload the manylinux release wheels.
+                type: boolean
+                default: false
+    workflow_dispatch:
+    pull_request:
+        types: [opened, synchronize, reopened, ready_for_review]
+        branches:
+            - dev
+            - "release-**"
+        paths:
+            - 'lmcache/**'
+            - 'pyproject_client.toml'
+            - 'requirements/client.txt'
+            - 'setup.py'
+            - 'setup_extensions/**'
+            - 'csrc/lmcache_native/**'
+            - 'csrc/*.h'
+            - 'pyproject.toml'
+            - 'requirements/build.txt'
+            - '.github/scripts/build_client_wheel.sh'
+            - '.github/scripts/smoke_client_wheel.py'
+            - '.github/workflows/build_client_artifacts.yml'
+
+env:
+    LC_ALL: en_US.UTF-8
+
+defaults:
+    run:
+        shell: bash
+
+concurrency:
+    # Under pr_full_build.yml github.workflow is the caller's name, so an
+    # unprefixed group equals the caller's and the call is cancelled as a deadlock.
+    group: build-client-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    build-client-cpu:
+        if: github.event.pull_request.draft != true
+        name: Build lmcache-client (CPU)
+        runs-on: ubuntu-24.04
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            - name: Prepare artifact build
+              uses: ./.github/actions/build-artifacts
+              with:
+                python_version: "3.13"
+                pip_packages: build
+                requirements_file: requirements/build.txt
+                release_tag_pattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+            - name: Install the CPU build of the pinned torch
+              run: |
+                pip install --index-url https://download.pytorch.org/whl/cpu \
+                  "$(grep -oE 'torch==[0-9][0-9.]*' pyproject_client.toml | head -1)"
+
+            - name: Build lmcache-client wheel
+              run: |
+                .github/scripts/build_client_wheel.sh dist --no-isolation
+                test -z "$(git status --porcelain)"
+
+            - name: Install the wheel in a clean venv
+              run: |
+                python -m venv "$RUNNER_TEMP/venv-client"
+                "$RUNNER_TEMP/venv-client/bin/pip" install --index-url https://download.pytorch.org/whl/cpu \
+                  "$(grep -oE 'torch==[0-9][0-9.]*' pyproject_client.toml | head -1)"
+                "$RUNNER_TEMP/venv-client/bin/pip" install dist/lmcache_client-*.whl
+
+            - name: Smoke-test the installed client wheel
+              # Outside the checkout and isolated, so lmcache is the installed wheel.
+              run: |
+                cd "$RUNNER_TEMP"
+                venv-client/bin/python -I "$GITHUB_WORKSPACE/.github/scripts/smoke_client_wheel.py"
+
+    build-client-release:
+        if: inputs.release
+        name: Build lmcache-client release (${{ matrix.arch }})
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - arch: amd64
+                      cibw_arch: x86_64
+                      runner: ubuntu-24.04
+                      artifact: release-client-artifacts
+                    - arch: arm64
+                      cibw_arch: aarch64
+                      runner: ubuntu-24.04-arm
+                      artifact: release-client-artifacts-arm64
+        runs-on: ${{ matrix.runner }}
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            - name: Prepare artifact build
+              uses: ./.github/actions/build-artifacts
+              with:
+                free_disk_space: "true"
+                python_version: "3.13"
+                pip_packages: cibuildwheel
+                requirements_file: requirements/build.txt
+
+            - name: Pin release version from tag
+              if: startsWith(github.ref, 'refs/tags/v')
+              run: echo "CLIENT_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+            - name: Build manylinux wheels with cibuildwheel
+              env:
+                CIBW_BUILD: cp3*-manylinux_${{ matrix.cibw_arch }}
+              run: |
+                .github/scripts/build_client_wheel.sh --cibuildwheel dist
+                test -z "$(git status --porcelain)"
+
+            - name: Upload client release artifacts to GHA
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                name: ${{ matrix.artifact }}
+                path: dist/

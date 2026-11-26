@@ -26,10 +26,6 @@ import psutil
 import pytest
 
 # First Party
-from lmcache.v1.client.transport.errors import (
-    MPRequestError,
-    MPServerUnavailableError,
-)
 from lmcache.v1.client.transport.grpc_impl.client import GrpcMultiprocessClient
 from lmcache.v1.common.custom_types import KVEventBatch
 from lmcache.v1.multiprocess.config import MPServerConfig
@@ -42,6 +38,10 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
 )
 from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
     build_grpc_request_server,
+)
+from lmcache.v1.transport.errors import (
+    MPRequestError,
+    MPServerUnavailableError,
 )
 from lmcache.v1.transport.futures import MessagingStream
 from lmcache.v1.transport.server_module import (
@@ -281,17 +281,19 @@ def test_serialized_handlers_run_one_at_a_time() -> None:
             return 256
 
         @request_handler()
-        def negotiate_chunk_size(self, required_chunk_alignment: int) -> int:
+        def noop(self) -> str:
             enter()
-            return required_chunk_alignment
+            return "ok"
 
     server = _serve([Module()], max_cpu_workers=4)
     client = _client(server)
     try:
-        futures = [client.get_chunk_size() for _ in range(4)]
-        futures += [client.negotiate_chunk_size(16) for _ in range(4)]
-        for future in futures:
-            future.result(5)
+        chunk_size_futures = [client.get_chunk_size() for _ in range(4)]
+        noop_futures = [client.noop() for _ in range(4)]
+        for chunk_size_future in chunk_size_futures:
+            chunk_size_future.result(5)
+        for noop_future in noop_futures:
+            noop_future.result(5)
     finally:
         client.close()
         server.close()

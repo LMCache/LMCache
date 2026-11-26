@@ -22,7 +22,6 @@ from typing import Any
 from .multi_process_adapter import AtomMPTransferSpec
 
 _CHUNK_HASH_BYTES = 32
-_SALT_FORBIDDEN = "@/\\\x00"
 
 
 @dataclass(frozen=True)
@@ -38,14 +37,12 @@ class AtomTransferRequest:
             or a flat list when the deployment has a single group.
         start: First token of the transferred range, inclusive.
         end: Last token of the transferred range, exclusive.
-        cache_salt: Per-tenant isolation salt, empty when single-tenant.
     """
 
     hashes: bytes
     block_ids: Sequence[int] | Sequence[Sequence[int]]
     start: int = 0
     end: int = 0
-    cache_salt: str = ""
 
 
 def _field(request: Any, name: str) -> Any:
@@ -98,14 +95,6 @@ def _block_id_lists(request: Any, *, num_engine_groups: int | None) -> list[list
     return groups
 
 
-def _cache_salt(request: Any) -> str:
-    """Read and validate the tenant salt a request carries."""
-    salt = str(_optional_field(request, "cache_salt", "") or "")
-    if any(char in salt for char in _SALT_FORBIDDEN):
-        raise ValueError(f"ATOM cache_salt must not contain any of {_SALT_FORBIDDEN!r}")
-    return salt
-
-
 def transfer_spec_from_atom(
     request: Any,
     *,
@@ -117,7 +106,6 @@ def transfer_spec_from_atom(
     Args:
         request: An ATOM ``TransferRequest`` (or :class:`AtomTransferRequest`)
             with ``hashes``, ``block_ids``, ``start``, ``end`` and optionally
-            ``cache_salt``.
         num_engine_groups: Number of registered engine groups, when the caller
             knows it. Passing it turns a missing or extra block-id list into an
             error here rather than inside the adapter.
@@ -133,7 +121,7 @@ def transfer_spec_from_atom(
 
     Raises:
         ValueError: If the hash blob is not a whole number of chunk hashes, the
-            token range or salt is invalid, the block-id lists do not match the
+            token range is invalid, the block-id lists do not match the
             engine group count, or a non-empty range names no blocks.
     """
     hashes = _field(request, "hashes")
@@ -182,8 +170,7 @@ def transfer_spec_from_atom(
         block_ids=block_ids,
         start=start,
         end=end,
-        cache_salt=_cache_salt(request),
-        chunk_hashes=chunk_hashes,
+        chunk_hashes=b"".join(chunk_hashes),
     )
 
 
