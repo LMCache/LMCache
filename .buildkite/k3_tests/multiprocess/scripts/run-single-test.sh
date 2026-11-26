@@ -148,7 +148,7 @@ elif [ "$TEST_NAME" = "lazy_offload" ]; then
     # kv-transfer configuration only for this integration test.
     export LMCACHE_MP_LAZY_OFFLOAD=true
     # Keep both sides aligned: this test counts stored chunks, while LMCache's
-    # chunk-size negotiation cannot change vLLM's paged-cache block size.
+    # chunk-size resolution cannot change vLLM's paged-cache block size.
     export CHUNK_SIZE="${CHUNK_SIZE:-16}"
     export VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-$CHUNK_SIZE}"
     export MODEL="${MODEL:-$DEFAULT_MODEL}"
