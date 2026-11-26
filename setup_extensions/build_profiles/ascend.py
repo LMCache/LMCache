@@ -123,19 +123,20 @@ def _ascend_env_script() -> Path:
     return home.parent / "set_env.sh"
 
 
-def _npu_soc_version() -> str:
-    """Return the target SoC name from ``npu-smi`` or ``SOC_VERSION``.
-
-    Raises:
-        RuntimeError: If neither the tool nor ``SOC_VERSION`` is available.
-    """
+def _soc_version_from_npu_smi() -> str | None:
+    """Return the SoC name of the first board ``npu-smi`` reports, if any."""
     for npu_id in range(8):
         try:
             output = subprocess.check_output(
                 ["npu-smi", "info", "-t", "board", "-i", str(npu_id), "-c", "0"],
                 text=True,
+                timeout=10,
             )
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            FileNotFoundError,
+        ):
             continue
         info: dict[str, str] = {}
         for line in output.splitlines():
@@ -148,7 +149,21 @@ def _npu_soc_version() -> str:
             if npu_name:
                 return f"{chip_name}_{npu_name}"
             return chip_name if chip_name.startswith("Ascend") else f"Ascend{chip_name}"
+    return None
 
+
+def _npu_soc_version() -> str:
+    """Return the target SoC name, from ``npu-smi`` or else ``SOC_VERSION``.
+
+    Returns:
+        The SoC name as CANN spells it (for example ``Ascend910_9382``).
+
+    Raises:
+        RuntimeError: If neither the tool nor ``SOC_VERSION`` is available.
+    """
+    soc_version = _soc_version_from_npu_smi()
+    if soc_version is not None:
+        return soc_version
     soc_version = os.environ.get("SOC_VERSION")
     if soc_version:
         return (
@@ -189,6 +204,21 @@ def _aicore_arch_number(soc_version: str) -> str:
     return config.get("version", "AIC_version").split("-")[-1]
 
 
+def _torch_npu_path() -> Path:
+    """Return the directory of the installed ``torch_npu`` package.
+
+    The package is located, not imported: importing it loads the CANN runtime
+    into the build process.
+
+    Raises:
+        ModuleNotFoundError: If ``torch_npu`` is not installed.
+    """
+    spec = importlib.util.find_spec("torch_npu")
+    if spec is None or spec.origin is None:
+        raise ModuleNotFoundError("torch_npu is required to build lmcache.npu_ops")
+    return Path(spec.origin).resolve().parent
+
+
 def _cmake_command(ext: CMakeExtension) -> str:
     """Build the shell command that configures, builds and installs *ext*.
 
@@ -200,7 +230,8 @@ def _cmake_command(ext: CMakeExtension) -> str:
         builds and installs the extension.
 
     Raises:
-        RuntimeError: If the CANN environment or ``torch_npu`` is missing.
+        RuntimeError: If the CANN environment is missing.
+        ModuleNotFoundError: If ``torch_npu`` is not installed.
         ValueError: If the SoC platform configuration cannot be found.
     """
     soc_version = _npu_soc_version()
@@ -213,11 +244,8 @@ def _cmake_command(ext: CMakeExtension) -> str:
             "set ASCEND_HOME_PATH to the toolkit root."
         )
 
-    # Third Party
-    import torch_npu
-
     torch_path = Path(torch.__file__).resolve().parent
-    torch_npu_path = Path(torch_npu.__file__).resolve().parent
+    torch_npu_path = _torch_npu_path()
     torch_cmake_dir = Path(torch.utils.cmake_prefix_path) / "Torch"
     install_path = BUILD_DIR / "install"
 
@@ -348,10 +376,14 @@ class AscendProfile(BuildProfile):
     def detect(self) -> bool:
         """Detect a usable CANN build environment.
 
-        Requires the toolkit directory and ``torch_npu``.  On a build host
-        without an NPU device, ``SOC_VERSION`` opts the profile in; with a
-        device present, ``torch.npu.is_available()`` is the signal.  This keeps
-        a CUDA host that merely has CANN installed from selecting Ascend.
+        Requires the toolkit directory and ``torch_npu``, plus a device
+        signal, any of: a board reported by the driver's ``npu-smi``,
+        ``SOC_VERSION`` on a build host that has no driver, or an available
+        ``torch.npu``. ``npu-smi`` is checked first: installing LMCache on
+        Ascend runs with ``TORCH_DEVICE_BACKEND_AUTOLOAD=0`` (loading
+        ``torch_npu`` in the build process breaks the gRPC generator that
+        ``build_py`` runs), and then ``torch.npu`` does not exist. A CUDA
+        host that merely has CANN installed has neither.
 
         Returns:
             ``True`` when the Ascend native extension should be built.
@@ -361,6 +393,8 @@ class AscendProfile(BuildProfile):
         if importlib.util.find_spec("torch_npu") is None:
             return False
         if os.environ.get("SOC_VERSION"):
+            return True
+        if _soc_version_from_npu_smi() is not None:
             return True
         try:
             return hasattr(torch, "npu") and torch.npu.is_available()

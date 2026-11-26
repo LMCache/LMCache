@@ -96,9 +96,9 @@ Verify the installation:
    lmcache server --help | grep supported-transfer-mode
 
 ``lmcache.npu_ops`` is built when the LMCache install finds the CANN toolkit
-and ``torch_npu`` and an NPU is visible. On a build host without a visible NPU,
-set ``BUILD_WITH_ASCEND=1`` and ``SOC_VERSION`` (for example
-``Ascend910B3``) before installing LMCache.
+and ``torch_npu`` and an NPU is visible (``npu-smi``). On a build host without
+the NPU driver, set ``SOC_VERSION`` (for example ``Ascend910B3``) before
+installing LMCache; ``BUILD_WITH_ASCEND=1`` selects the build unconditionally.
 
 LMCache selects ``npu`` automatically when ``torch.npu`` reports an
 available device. To pin the backend, set:
