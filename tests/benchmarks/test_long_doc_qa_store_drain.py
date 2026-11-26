@@ -8,15 +8,17 @@ local HTTP server.
 """
 
 # Standard
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
+import argparse
 import importlib.util
 import math
 import socket
 import sys
 import threading
+import time
 
 # Third Party
 import pytest
@@ -68,22 +70,36 @@ class _Clock:
 
     def __init__(self) -> None:
         self.now = 0.0
+        self.sleeps: list[float] = []
 
     def monotonic(self) -> float:
         return self.now
 
     def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
         self.now += seconds
 
 
 class _Script:
-    """A ``fetch`` that replays ``/metrics`` texts, repeating the last one."""
+    """A ``fetch`` that replays ``/metrics`` texts, repeating the last one.
 
-    def __init__(self, texts: list[str]) -> None:
+    It records each scrape timeout and, when given a clock, advances it by
+    ``latency`` to model a slow scrape.
+    """
+
+    def __init__(
+        self, texts: list[str], clock: "_Clock | None" = None, latency: float = 0.0
+    ) -> None:
         self._texts = texts
+        self._clock = clock
+        self._latency = latency
         self.calls = 0
+        self.timeouts: list[float] = []
 
-    def __call__(self) -> str:
+    def __call__(self, timeout: float) -> str:
+        self.timeouts.append(timeout)
+        if self._clock is not None:
+            self._clock.now += self._latency
         text = self._texts[min(self.calls, len(self._texts) - 1)]
         self.calls += 1
         return text
@@ -197,6 +213,116 @@ def test_wait_gives_up_at_the_timeout_when_stores_never_finish() -> None:
     assert result.snapshot == drain.StoreSnapshot(submitted=14, completed=10)
 
 
+def test_drained_reports_that_completion_is_an_estimate() -> None:
+    """A drained result must say it is an estimate, not a confirmed drain.
+
+    The counters only show stores that were already submitted. If the warm-up
+    round pauses for longer than the settle window before submitting its next
+    batch, the counters look drained even though stores are still coming, so
+    the server cannot confirm completion. The reason text is what the benchmark
+    prints, so it must carry that caveat.
+    """
+    result = _wait(_Script([_metrics(14, 14)]), _Clock())
+
+    assert result.drained
+    assert "estimate" in result.reason
+    # The caveat must name what is unknown, not just hedge.
+    assert "submitted all of its stores" in result.reason
+
+
+def test_a_sample_read_after_the_deadline_is_not_accepted() -> None:
+    """A scrape that returns after the timeout ends the wait as timed out.
+
+    Every scrape here takes 5 s on the fake clock and shows settled counters:
+      t=0   scrape starts, capped at min(5 s, 10 s left) = 5 s
+      t=5   returns 14/14; settle window opens; 5 s waited, under the timeout
+      t=6   after one 1 s poll sleep, the second scrape starts, capped at 4 s
+      t=11  returns 14/14; the window has been open 6 s, past the 3 s settle
+    Checking settle first would report drained at t=11, one second past a
+    10 s timeout. The deadline must be checked before the sample is used.
+    """
+    clock = _Clock()
+    fetch = _Script([_metrics(14, 14)], clock=clock, latency=5.0)
+
+    result = _wait(fetch, clock, timeout=10.0, poll_interval=1.0, settle_seconds=3.0)
+
+    assert not result.drained
+    assert result.reason == "timed out with 0 submitted chunks not yet stored"
+    assert result.waited_seconds == pytest.approx(11.0)
+    assert result.snapshot == drain.StoreSnapshot(submitted=14, completed=14)
+    # Exactly the two scrapes in the timeline, each capped by the time left.
+    assert fetch.timeouts == pytest.approx([5.0, 4.0])
+    assert clock.sleeps == pytest.approx([1.0])
+
+
+def test_sleep_and_scrape_timeout_stay_within_the_remaining_budget() -> None:
+    """No sleep or scrape may run past the timeout.
+
+    Stores never finish (14 submitted, 10 completed), so only the timeout can
+    end the wait. With a 2.5 s timeout and a 1 s poll interval:
+      scrapes at t=0, 1, 2 get read timeouts of 2.5, 1.5 and 0.5 s;
+      the sleeps are 1, 1 and then 0.5 s, the time left, not a full 1 s;
+      at t=2.5 no time is left, so the wait ends without a fourth scrape,
+      which would otherwise get a read timeout of 0 or less.
+    """
+    clock = _Clock()
+    fetch = _Script([_metrics(14, 10)])
+
+    result = _wait(fetch, clock, timeout=2.5, poll_interval=1.0)
+
+    assert not result.drained
+    assert result.reason == "timed out with 4 submitted chunks not yet stored"
+    assert result.waited_seconds == pytest.approx(2.5)
+    assert fetch.timeouts == pytest.approx([2.5, 1.5, 0.5])
+    assert clock.sleeps == pytest.approx([1.0, 1.0, 0.5])
+
+
+@pytest.mark.parametrize(
+    ("parse", "text", "error"),
+    [
+        # --store-drain-timeout. NaN is the case from review: every comparison
+        # with NaN is false, so `waited >= timeout` never ends the wait.
+        (drain.positive_finite_seconds, "nan", "must be finite"),
+        (drain.positive_finite_seconds, "inf", "must be finite"),
+        (drain.positive_finite_seconds, "-inf", "must be finite"),
+        # float() turns an out-of-range literal into inf; it is still rejected.
+        (drain.positive_finite_seconds, "1e309", "must be finite"),
+        # A zero timeout would end the wait before the first scrape can run.
+        (drain.positive_finite_seconds, "0", "must be greater than 0"),
+        (drain.positive_finite_seconds, "-1", "must be greater than 0"),
+        (drain.positive_finite_seconds, "soon", "not a number"),
+        # --store-drain-settle. An infinite settle window can never be met,
+        # so the wait would always run to the timeout.
+        (drain.non_negative_finite_seconds, "nan", "must be finite"),
+        (drain.non_negative_finite_seconds, "inf", "must be finite"),
+        (drain.non_negative_finite_seconds, "-1", "must not be negative"),
+        (drain.non_negative_finite_seconds, "soon", "not a number"),
+    ],
+)
+def test_store_drain_durations_reject_invalid_values(
+    parse: Callable[[str], float], text: str, error: str
+) -> None:
+    """argparse shows the message, so it must say what is wrong with the value."""
+    with pytest.raises(argparse.ArgumentTypeError, match=error):
+        parse(text)
+
+
+@pytest.mark.parametrize(
+    ("parse", "text", "expected"),
+    [
+        (drain.positive_finite_seconds, "300", 300.0),
+        (drain.positive_finite_seconds, "0.5", 0.5),
+        # Zero settle is valid: accept the first drained-looking sample.
+        (drain.non_negative_finite_seconds, "0", 0.0),
+        (drain.non_negative_finite_seconds, "3", 3.0),
+    ],
+)
+def test_store_drain_durations_accept_valid_values(
+    parse: Callable[[str], float], text: str, expected: float
+) -> None:
+    assert parse(text) == expected
+
+
 def test_wait_gives_up_early_when_no_new_stores_appear() -> None:
     clock = _Clock()
     result = _wait(
@@ -242,15 +368,23 @@ def test_missing_wait_warning(
 
 
 @pytest.fixture
-def metrics_server() -> Iterator[tuple[str, list[str]]]:
-    """Serve ``/metrics`` from a list of texts, advancing on every request."""
+def metrics_server() -> Iterator[tuple[str, list[str], list[float]]]:
+    """Serve ``/metrics`` from a list of texts, advancing on every request.
+
+    ``delays[i]``, when present, makes the i-th response wait that many
+    seconds first, to model a slow endpoint.
+    """
     texts: list[str] = []
+    delays: list[float] = []
     served = {"count": 0}
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 (http.server API)
-            body = texts[min(served["count"], len(texts) - 1)].encode()
+            index = served["count"]
             served["count"] += 1
+            if index < len(delays):
+                time.sleep(delays[index])
+            body = texts[min(index, len(texts) - 1)].encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -263,7 +397,7 @@ def metrics_server() -> Iterator[tuple[str, list[str]]]:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_address[1]}", texts
+        yield f"http://127.0.0.1:{server.server_address[1]}", texts, delays
     finally:
         server.shutdown()
         server.server_close()
@@ -271,15 +405,15 @@ def metrics_server() -> Iterator[tuple[str, list[str]]]:
 
 
 def test_wait_against_a_real_metrics_endpoint(
-    metrics_server: tuple[str, list[str]],
+    metrics_server: tuple[str, list[str], list[float]],
 ) -> None:
-    url, texts = metrics_server
+    url, texts, _ = metrics_server
     texts.extend(
         [_metrics(10, 10), _metrics(14, 10), _metrics(14, 13), _metrics(14, 14)]
     )
 
-    def fetch() -> str:
-        return drain.fetch_metrics(url)
+    def fetch(timeout: float) -> str:
+        return drain.fetch_metrics(url, timeout)
 
     result = drain.wait_for_store_drain(
         fetch,
@@ -291,6 +425,40 @@ def test_wait_against_a_real_metrics_endpoint(
     )
     assert result.drained
     assert result.snapshot == drain.StoreSnapshot(submitted=14, completed=14)
+
+
+def test_a_scrape_cut_short_by_the_deadline_reports_a_timeout(
+    metrics_server: tuple[str, list[str], list[float]],
+) -> None:
+    """A read that the remaining budget cuts off is a timeout, not a bad URL.
+
+    The first scrape answers at once with stores still pending. Every later
+    scrape takes 3 s, longer than the 1 s timeout, so the second scrape's read
+    timeout (the time left, about 0.7 s) expires. That must end the wait as
+    timed out. Raising MetricsEndpointError instead would abort the benchmark
+    with advice to fix --lmcache-url, which is reachable and correct.
+    """
+    url, texts, delays = metrics_server
+    texts.append(_metrics(14, 10))
+    delays.extend([0.0, 3.0, 3.0])
+
+    start = time.monotonic()
+    result = drain.wait_for_store_drain(
+        lambda timeout: drain.fetch_metrics(url, timeout),
+        baseline_submitted=10,
+        timeout=1.0,
+        poll_interval=0.3,
+        settle_seconds=0.1,
+        no_new_stores_grace=5.0,
+    )
+    elapsed = time.monotonic() - start
+
+    assert not result.drained
+    assert "timed out" in result.reason
+    # The last counters actually read are kept for the report.
+    assert result.snapshot == drain.StoreSnapshot(submitted=14, completed=10)
+    # The slow read was cut off at the deadline, not after its full 3 s.
+    assert elapsed < 2.0
 
 
 def _unused_url() -> str:

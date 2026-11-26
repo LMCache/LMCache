@@ -16,9 +16,12 @@ unreliable. It uses only the standard library.
 # Standard
 from dataclasses import dataclass
 from typing import Callable, Optional
+import argparse
+import functools
 import math
 import re
 import time
+import urllib.error
 import urllib.request
 
 # Prometheus names of the MP server's OTel counters; see
@@ -29,9 +32,17 @@ STORE_COMPLETED_METRIC = "lmcache_mp_l2_store_completed_objects_chunks_total"
 LOOKUP_HIT_METRIC = "lmcache_mp_lookup_hit_tokens_total"
 LOOKUP_REQUESTED_METRIC = "lmcache_mp_lookup_requested_tokens_total"
 
+# Upper bound on one /metrics read during the wait, as in fetch_metrics; the
+# remaining wait budget lowers it further.
+MAX_SCRAPE_SECONDS = 5.0
+
 
 class MetricsEndpointError(RuntimeError):
     """The LMCache ``/metrics`` endpoint is unreachable or is not LMCache's."""
+
+
+class MetricsReadTimeoutError(MetricsEndpointError):
+    """A ``/metrics`` read did not finish within its read timeout."""
 
 
 @dataclass(frozen=True)
@@ -66,7 +77,9 @@ class DrainResult:
 
     Attributes:
         drained: True when every submitted store had completed and the
-            counters stayed unchanged for the settle window.
+            counters stayed unchanged for the settle window. This is an
+            estimate: the counters cannot show whether the warm-up round has
+            submitted all of its stores yet.
         reason: One sentence saying why the wait ended.
         waited_seconds: Time spent waiting.
         snapshot: The last counters read.
@@ -90,6 +103,8 @@ def fetch_metrics(base_url: str, timeout: float = 5.0) -> str:
         The Prometheus exposition text.
 
     Raises:
+        MetricsReadTimeoutError: If the read does not finish within
+            ``timeout``.
         MetricsEndpointError: If the endpoint cannot be reached.
     """
     url = base_url.rstrip("/") + "/metrics"
@@ -97,6 +112,16 @@ def fetch_metrics(base_url: str, timeout: float = 5.0) -> str:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             return response.read().decode("utf-8", errors="replace")
     except OSError as exc:
+        # A timeout while reading the body is raised as TimeoutError; one while
+        # connecting arrives wrapped in URLError.
+        timed_out = isinstance(exc, TimeoutError) or (
+            isinstance(exc, urllib.error.URLError)
+            and isinstance(exc.reason, TimeoutError)
+        )
+        if timed_out:
+            raise MetricsReadTimeoutError(
+                f"Reading {url} took longer than {timeout:g}s."
+            ) from exc
         raise MetricsEndpointError(
             f"Cannot read {url}: {exc}. --lmcache-url must be the base URL of the "
             "LMCache MP HTTP server (port 8080 by default)."
@@ -197,8 +222,46 @@ def hit_rate_between(before: LookupSnapshot, after: LookupSnapshot) -> Optional[
     return hits / requested
 
 
+def positive_finite_seconds(text: str) -> float:
+    """Parse a duration that must be finite and greater than zero.
+
+    Args:
+        text: The command-line value.
+
+    Returns:
+        The duration in seconds.
+
+    Raises:
+        argparse.ArgumentTypeError: If the value is not a number, is NaN or
+            infinite, or is not greater than zero.
+    """
+    value = _parse_seconds(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"must be greater than 0, got {text!r}")
+    return value
+
+
+def non_negative_finite_seconds(text: str) -> float:
+    """Parse a duration that must be finite and not negative.
+
+    Args:
+        text: The command-line value.
+
+    Returns:
+        The duration in seconds.
+
+    Raises:
+        argparse.ArgumentTypeError: If the value is not a number, is NaN or
+            infinite, or is negative.
+    """
+    value = _parse_seconds(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must not be negative, got {text!r}")
+    return value
+
+
 def wait_for_store_drain(
-    fetch: Callable[[], str],
+    fetch: Callable[[float], str],
     baseline_submitted: float,
     *,
     timeout: float,
@@ -214,15 +277,23 @@ def wait_for_store_drain(
     submitted than at the baseline, every submitted chunk has completed, and
     both counters stayed unchanged for ``settle_seconds``. Equal counters alone
     are not enough: before the last store is submitted they sit at an equal,
-    older value.
+    older value. Even then the result is an estimate: if the warm-up round
+    submits its next stores after a gap longer than ``settle_seconds``, the
+    counters look drained early.
+
+    A sample read at or after ``timeout`` ends the wait as timed out, whatever
+    it shows. Each read and each sleep is capped by the time left before the
+    timeout.
 
     Args:
-        fetch: Returns the current ``/metrics`` text.
+        fetch: Returns the current ``/metrics`` text; it receives the read
+            timeout in seconds.
         baseline_submitted: ``submitted`` read before the round whose stores
             are awaited.
-        timeout: Give up after this many seconds.
+        timeout: Give up after this many seconds; finite and positive.
         poll_interval: Seconds between reads.
-        settle_seconds: How long drained-looking counters must stay unchanged.
+        settle_seconds: How long drained-looking counters must stay unchanged;
+            finite and not negative.
         no_new_stores_grace: Give up early if nothing was submitted after the
             baseline within this many seconds (L2 not configured, or the round
             stored nothing).
@@ -236,16 +307,39 @@ def wait_for_store_drain(
 
     Raises:
         MetricsEndpointError: If a read shows the endpoint is not LMCache's,
-            or a counter value is invalid.
+            a counter value is invalid, or a read fails other than by being
+            cut off by the remaining budget.
     """
     start = monotonic()
     candidate: Optional[StoreSnapshot] = None
     candidate_since = 0.0
     previous: Optional[StoreSnapshot] = None
     while True:
-        snapshot = read_store_snapshot(fetch)
+        remaining = timeout - (monotonic() - start)
+        # The last sleep ends exactly at the deadline. Stop here rather than
+        # start a scrape whose read timeout would be zero or negative.
+        # ``previous`` is set after the first scrape, and the first pass
+        # always has time left because ``timeout`` is positive.
+        if remaining <= 0 and previous is not None:
+            return _timed_out(previous, timeout - remaining)
+        # A slow or hung endpoint must not hold the wait past its deadline.
+        scrape_timeout = min(MAX_SCRAPE_SECONDS, remaining)
+        try:
+            snapshot = read_store_snapshot(functools.partial(fetch, scrape_timeout))
+        except MetricsReadTimeoutError:
+            # Cut off by the wait's own deadline after a good read: that is
+            # the wait timing out, so report it as one with the last counters.
+            # A read that times out at the full cap, or before any good read,
+            # means the endpoint itself is failing, so let the error surface.
+            if previous is None or scrape_timeout >= MAX_SCRAPE_SECONDS:
+                raise
+            return _timed_out(previous, monotonic() - start)
         now = monotonic()
         waited = now - start
+        # Check the deadline before using the sample: a scrape that returned
+        # late must not be accepted as drained just because it settled.
+        if waited >= timeout:
+            return _timed_out(snapshot, waited)
         if previous is not None and (
             snapshot.submitted < previous.submitted
             or snapshot.completed < previous.completed
@@ -261,12 +355,18 @@ def wait_for_store_drain(
         previous = snapshot
         has_new_stores = snapshot.submitted > baseline_submitted
         if has_new_stores and snapshot.completed >= snapshot.submitted:
+            # Any change to either counter restarts the settle window, so a
+            # store submitted mid-window is waited for.
             if snapshot != candidate:
                 candidate, candidate_since = snapshot, now
+            # Settled counters are an estimate: a warm-up round that pauses
+            # longer than settle_seconds between batches looks drained too.
             if now - candidate_since >= settle_seconds:
                 return DrainResult(
                     True,
-                    "every submitted L2 store completed and the counters settled",
+                    "every submitted L2 store completed and the counters settled "
+                    "(an estimate: the counters cannot show whether the warm-up "
+                    "round has submitted all of its stores)",
                     waited,
                     snapshot,
                 )
@@ -280,15 +380,8 @@ def wait_for_store_drain(
                 waited,
                 snapshot,
             )
-        if waited >= timeout:
-            pending = snapshot.submitted - snapshot.completed
-            return DrainResult(
-                False,
-                f"timed out with {pending:.0f} submitted chunks not yet stored",
-                waited,
-                snapshot,
-            )
-        sleep(poll_interval)
+        # Never sleep past the deadline; the next pass then ends the wait.
+        sleep(min(poll_interval, timeout - waited))
 
 
 def low_speedup_warning(
@@ -350,3 +443,25 @@ def _require_lmcache_metrics(text: str) -> str:
             "point at the LMCache MP HTTP server, and its metrics must be enabled."
         )
     return text
+
+
+def _parse_seconds(text: str) -> float:
+    # NaN compares false with everything, so a NaN timeout would never end the
+    # wait; inf (including an out-of-range literal) would never end it either.
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from exc
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError(f"must be finite, got {text!r}")
+    return value
+
+
+def _timed_out(snapshot: StoreSnapshot, waited: float) -> DrainResult:
+    pending = snapshot.submitted - snapshot.completed
+    return DrainResult(
+        False,
+        f"timed out with {pending:.0f} submitted chunks not yet stored",
+        waited,
+        snapshot,
+    )

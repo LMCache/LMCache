@@ -45,10 +45,14 @@ Commandline arguments:
                   almost no speed-up; use --sleep-time-after-warmup instead.
 
     --store-drain-timeout: Seconds to wait for the warm-up round's L2 stores
-                          when --lmcache-url is set. (Optional, default: 300)
+                          when --lmcache-url is set; finite and positive.
+                          (Optional, default: 300)
 
     --store-drain-settle: Seconds the store counters must stay unchanged before
-                         the wait ends. (Optional, default: 3)
+                         the wait ends; finite and not negative. The result is
+                         an estimate: a pause in the warm-up round's stores
+                         longer than this ends the wait early.
+                         (Optional, default: 3)
 
     --warn-speedup-below: Print a warning if the query round's mean TTFT is
                          less than this many times lower than the warm-up
@@ -96,6 +100,8 @@ from lmcache_store_drain import (
     hit_rate_between,
     low_speedup_warning,
     missing_wait_warning,
+    non_negative_finite_seconds,
+    positive_finite_seconds,
     read_lookup_snapshot,
     read_store_snapshot,
     wait_for_store_drain,
@@ -686,7 +692,8 @@ async def main(args):
         if query_hit_rate is not None:
             summary["query_lmcache_hit_rate"] = query_hit_rate
         if drain_result is not None:
-            summary["store_drain_complete"] = drain_result.drained
+            # An estimate; see DrainResult.drained.
+            summary["store_drain_estimated_complete"] = drain_result.drained
             summary["store_drain_wait_seconds"] = drain_result.waited_seconds
         print(json.dumps(summary))
 
@@ -797,16 +804,19 @@ def create_argument_parser():
 
     parser.add_argument(
         "--store-drain-timeout",
-        type=float,
+        type=positive_finite_seconds,
         default=300.0,
-        help="Seconds to wait for the warm-up round's L2 stores (needs --lmcache-url)",
+        help="Seconds to wait for the warm-up round's L2 stores (needs "
+        "--lmcache-url); finite and greater than 0",
     )
 
     parser.add_argument(
         "--store-drain-settle",
-        type=float,
+        type=non_negative_finite_seconds,
         default=3.0,
-        help="Seconds the L2 store counters must stay unchanged before the wait ends",
+        help="Seconds the L2 store counters must stay unchanged before the wait "
+        "ends; finite and not negative. The result is an estimate: a longer pause "
+        "between the warm-up round's stores also ends the wait",
     )
 
     parser.add_argument(
