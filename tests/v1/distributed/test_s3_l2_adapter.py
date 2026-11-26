@@ -8,10 +8,12 @@ routes PUT/GET/HEAD/DELETE against a shared dict.  No network required.
 
 # Standard
 from concurrent.futures import Future as ConcurrentFuture
+import logging
 import select
 import threading
 
 # Third Party
+from awscrt.s3 import S3ResponseError
 import pytest
 import torch
 
@@ -59,6 +61,14 @@ class _FakeBackend:
         self._get_count = 0
         self._delete_count = 0
         self._head_count = 0
+        # DeleteObjects behaviour. ``_bulk_delete_rejection`` = (status, code)
+        # makes every multi-delete fail the way an endpoint without
+        # DeleteObjects does; ``_bulk_delete_fail_keys`` are reported as
+        # per-key <Error> entries in an otherwise successful 200 response.
+        self._bulk_delete_rejection: tuple[int, str] | None = None
+        self._bulk_delete_fail_keys: set[str] = set()
+        self._bulk_delete_requests = 0
+        self._single_delete_requests = 0
 
     def reset(self):
         with self._lock:
@@ -67,6 +77,9 @@ class _FakeBackend:
             self._get_chunk_size = None
             self._put_count = self._get_count = 0
             self._delete_count = self._head_count = 0
+            self._bulk_delete_rejection = None
+            self._bulk_delete_fail_keys = set()
+            self._bulk_delete_requests = self._single_delete_requests = 0
 
     def get(self, key: str) -> bytes | None:
         with self._lock:
@@ -261,24 +274,54 @@ class _FakeS3Request:
             request.body_stream.seek(0)
             xml = bytes(request.body_stream.read())
             keys = _parse_delete_request_keys(xml)
+            with _BACKEND._lock:
+                _BACKEND._bulk_delete_requests += 1
+                rejection = _BACKEND._bulk_delete_rejection
+                fail_keys = set(_BACKEND._bulk_delete_fail_keys)
+            if rejection is not None:
+                # What the CRT raises for a non-2xx response: an
+                # S3ResponseError with the status and the XML error body.
+                status, code = rejection
+                self.finished_future.set_exception(
+                    S3ResponseError(
+                        code=14343,
+                        name="AWS_ERROR_S3_INVALID_RESPONSE_STATUS",
+                        message="Invalid response status from request",
+                        status_code=status,
+                        headers=[("content-type", "application/xml")],
+                        body=(
+                            f"<Error><Code>{code}</Code>"
+                            "<Message>not supported</Message></Error>"
+                        ).encode(),
+                        operation_name="DeleteObjects",
+                    )
+                )
+                _call_on_done(on_done, error=None, status_code=status)
+                return
             try:
                 with _BACKEND._lock:
                     _BACKEND._delete_count += len(keys)
                 for k in keys:
-                    _BACKEND.delete(k)
+                    if k not in fail_keys:
+                        _BACKEND.delete(k)
                 if on_headers is not None:
                     on_headers(200, [("content-type", "application/xml")])
-                # Quiet mode: empty DeleteResult body means every key succeeded.
+                # Quiet mode: the body lists only the keys that failed.
+                errors = "".join(
+                    f"<Error><Key>{k}</Key><Code>AccessDenied</Code></Error>"
+                    for k in keys
+                    if k in fail_keys
+                )
                 if on_body is not None:
                     on_body(
                         b'<?xml version="1.0"?><DeleteResult '
                         b'xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
-                        b"</DeleteResult>",
+                        + errors.encode()
+                        + b"</DeleteResult>",
                         0,
                     )
-                if on_done is not None:
-                    on_done(error=None, status_code=200)
                 self.finished_future.set_result(None)
+                _call_on_done(on_done, error=None, status_code=200)
             except Exception as e:
                 if not self.finished_future.done():
                     self.finished_future.set_exception(e)
@@ -343,6 +386,7 @@ class _FakeS3Request:
             elif method == "DELETE":
                 with _BACKEND._lock:
                     _BACKEND._delete_count += 1
+                    _BACKEND._single_delete_requests += 1
                 _BACKEND.delete(key_str)
                 if on_headers is not None:
                     on_headers(204, [])
@@ -1159,6 +1203,139 @@ def test_parse_delete_objects_errors_malformed_raises():
 
     with _pytest.raises(ValueError):
         _parse_delete_objects_errors(b"<not-xml")
+
+
+# =============================================================================
+# DeleteObjects fallback for endpoints without multi-object delete
+# =============================================================================
+
+
+class _WarningCapture(logging.Handler):
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+@pytest.fixture
+def s3_warnings():
+    """WARNING records from the adapter's logger, which does not propagate
+    to pytest's caplog."""
+    handler = _WarningCapture()
+    s3mod.logger.addHandler(handler)
+    try:
+        yield handler.messages
+    finally:
+        s3mod.logger.removeHandler(handler)
+
+
+def _bulk_counts() -> tuple[int, int]:
+    with _BACKEND._lock:
+        return _BACKEND._bulk_delete_requests, _BACKEND._single_delete_requests
+
+
+def _store_keys(adapter, ids):
+    keys = [create_object_key(i) for i in ids]
+    for k in keys:
+        _store_and_drain(adapter, [k], [create_memory_obj()])
+    return keys
+
+
+@pytest.mark.parametrize(
+    "status,code",
+    [(501, "NotImplemented"), (405, "MethodNotAllowed"), (400, "InvalidRequest")],
+)
+def test_delete_falls_back_when_bulk_delete_unsupported(
+    adapter, s3_warnings, status, code
+):
+    keys = _store_keys(adapter, range(3))
+    assert adapter.get_usage().total_bytes_used > 0
+    _BACKEND._bulk_delete_rejection = (status, code)
+
+    adapter.delete(keys)
+
+    # The same sweep frees the keys, one DeleteObject each.
+    assert not any(_BACKEND.contains(_object_key_to_string(k)) for k in keys)
+    assert adapter.get_usage().total_bytes_used == 0
+    assert _bulk_counts() == (1, 3)
+    assert adapter.report_status()["bulk_delete_supported"] is False
+    assert sum("rejected DeleteObjects" in m for m in s3_warnings) == 1
+
+
+def test_bulk_delete_fallback_is_sticky(adapter, s3_warnings):
+    _BACKEND._bulk_delete_rejection = (501, "NotImplemented")
+    adapter.delete(_store_keys(adapter, range(2)))
+    assert _bulk_counts() == (1, 2)
+
+    # Later sweeps skip the doomed bulk request and warn only once.
+    later = _store_keys(adapter, range(10, 14))
+    adapter.delete(later)
+    assert _bulk_counts() == (1, 6)
+    assert not any(_BACKEND.contains(_object_key_to_string(k)) for k in later)
+    assert sum("rejected DeleteObjects" in m for m in s3_warnings) == 1
+
+
+def test_bulk_delete_unsupported_mid_sweep_frees_every_batch(adapter):
+    # 1200 keys = two DeleteObjects batches, both rejected: all keys of the
+    # sweep must still be deleted through the fallback.
+    keys = [create_object_key(i) for i in range(1200)]
+    for k in keys:
+        _store_and_drain(adapter, [k], [create_memory_obj(size=4)])
+    _BACKEND._bulk_delete_rejection = (501, "NotImplemented")
+
+    adapter.delete(keys)
+
+    assert not any(_BACKEND.contains(_object_key_to_string(k)) for k in keys)
+    assert adapter.get_usage().total_bytes_used == 0
+    assert _bulk_counts() == (2, 1200)
+
+
+def test_per_key_delete_errors_do_not_trigger_fallback(adapter):
+    k0, k1 = _store_keys(adapter, range(2))
+    _BACKEND._bulk_delete_fail_keys = {_object_key_to_string(k1)}
+
+    adapter.delete([k0, k1])
+
+    # A 200 response with an <Error> entry is a partial failure: the failed
+    # key stays stored and tracked, and the bulk path stays in use.
+    assert not _BACKEND.contains(_object_key_to_string(k0))
+    assert _BACKEND.contains(_object_key_to_string(k1))
+    assert adapter.get_usage().total_bytes_used == create_memory_obj().get_size()
+    assert _bulk_counts() == (1, 0)
+    assert adapter.report_status()["bulk_delete_supported"] is True
+
+
+def test_other_bulk_delete_failures_do_not_trigger_fallback(adapter):
+    keys = _store_keys(adapter, range(2))
+    _BACKEND._bulk_delete_rejection = (500, "InternalError")
+
+    adapter.delete(keys)
+
+    assert all(_BACKEND.contains(_object_key_to_string(k)) for k in keys)
+    assert _bulk_counts() == (1, 0)
+    assert adapter.report_status()["bulk_delete_supported"] is True
+
+
+def test_is_bulk_delete_unsupported_classification():
+    def err(status, code):
+        return S3ResponseError(
+            code=1,
+            name="AWS_ERROR_S3_INVALID_RESPONSE_STATUS",
+            message="",
+            status_code=status,
+            headers=[],
+            body=f"<Error><Code>{code}</Code></Error>".encode(),
+        )
+
+    assert s3mod._is_bulk_delete_unsupported(err(501, "NotImplemented"))
+    assert s3mod._is_bulk_delete_unsupported(err(405, "MethodNotAllowed"))
+    assert s3mod._is_bulk_delete_unsupported(err(400, "InvalidRequest"))
+    assert s3mod._is_bulk_delete_unsupported(err(400, "XNotImplemented"))
+    assert not s3mod._is_bulk_delete_unsupported(err(500, "InternalError"))
+    assert not s3mod._is_bulk_delete_unsupported(err(403, "AccessDenied"))
+    assert not s3mod._is_bulk_delete_unsupported(RuntimeError("connection reset"))
 
 
 # =============================================================================

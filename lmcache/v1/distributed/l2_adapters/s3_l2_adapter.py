@@ -181,6 +181,47 @@ def _parse_delete_objects_errors(body: bytes) -> set[str]:
     return errored
 
 
+# Per-key ``DeleteObject`` requests in flight at once when an endpoint has no
+# ``DeleteObjects``. Bounded so one large sweep cannot crowd out stores and
+# loads sharing the same client.
+DELETE_FALLBACK_MAX_CONCURRENCY = 64
+
+# How an S3-compatible endpoint without multi-object delete answers
+# ``POST /?delete``: an HTTP status, or an S3 error code in the XML body.
+_BULK_DELETE_UNSUPPORTED_STATUSES = frozenset({405, 501})
+_BULK_DELETE_UNSUPPORTED_CODES = frozenset(
+    {"NotImplemented", "XNotImplemented", "MethodNotAllowed", "InvalidRequest"}
+)
+
+
+def _s3_error_code(body: Optional[bytes]) -> Optional[str]:
+    """Return the ``<Code>`` of an S3 XML error body, or ``None``."""
+    if not body or not body.strip():
+        return None
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError:
+        return None
+    for elem in root.iter():
+        if elem.tag.rsplit("}", 1)[-1] == "Code" and elem.text:
+            return elem.text.strip()
+    return None
+
+
+def _is_bulk_delete_unsupported(exc: BaseException) -> bool:
+    """Whether a failed ``DeleteObjects`` request means the endpoint does not
+    implement multi-object delete at all.
+
+    The CRT fails ``finished_future`` with an ``S3ResponseError`` carrying the
+    HTTP status and the XML error body. Only a whole-request rejection counts:
+    per-key ``<Error>`` entries in a 200 response are ordinary partial
+    failures and never reach this check.
+    """
+    if getattr(exc, "status_code", None) in _BULK_DELETE_UNSUPPORTED_STATUSES:
+        return True
+    return _s3_error_code(getattr(exc, "body", None)) in _BULK_DELETE_UNSUPPORTED_CODES
+
+
 def _format_safe_path(key_str: str) -> str:
     """URL-encode the object name to form a safe HTTP path."""
     return "/" + url_quote(key_str)
@@ -533,6 +574,9 @@ class S3L2Adapter(L2AdapterInterface):
         # Observability counters (surfaced via report_status / metrics).
         self._store_rejected_chunks: int = 0
         self._store_coalesced_chunks: int = 0
+        # Cleared the first time the endpoint rejects ``DeleteObjects`` as
+        # unsupported; every later sweep then deletes key by key.
+        self._bulk_delete_supported: bool = True
 
         # Cached HEAD-verified object sizes (keyed by S3 object name).
         self._object_size_cache: dict[str, int] = {}
@@ -812,6 +856,7 @@ class S3L2Adapter(L2AdapterInterface):
             disabled = self._connection_disabled
             rejected = self._store_rejected_chunks
             coalesced = self._store_coalesced_chunks
+            bulk_delete = self._bulk_delete_supported
             in_flight = len(self._in_flight_store_keys)
         usage = self.get_usage()
         # Eviction lag: how far usage sits over the cap (1.0). >0 means the evictor
@@ -834,6 +879,9 @@ class S3L2Adapter(L2AdapterInterface):
             "store_in_flight_chunks": in_flight,
             "store_rejected_chunks": rejected,
             "store_coalesced_chunks": coalesced,
+            # False once the endpoint rejected DeleteObjects; deletes then go
+            # key by key.
+            "bulk_delete_supported": bulk_delete,
         }
 
     def get_memory_tags(self) -> MemoryTags:
@@ -1065,6 +1113,19 @@ class S3L2Adapter(L2AdapterInterface):
             region=self._region,
         )
         return s3_req, body_chunks, captured
+
+    def _delete_one_request(self, key_str: str) -> s3.S3Request:
+        """Build a single-object ``DeleteObject`` request, the fallback for
+        endpoints without ``DeleteObjects``. A non-2xx response fails
+        ``finished_future`` with an ``S3ResponseError``."""
+        return s3.S3Request(
+            client=self._s3_client,
+            type=s3.S3RequestType.DEFAULT,
+            request=self._make_request("DELETE", key_str),
+            operation_name="DeleteObject",
+            credential_provider=self._credentials_provider,
+            region=self._region,
+        )
 
     def _list_request(
         self,
@@ -1415,62 +1476,121 @@ class S3L2Adapter(L2AdapterInterface):
     async def _execute_delete(
         self, keys: list[ObjectKey]
     ) -> tuple[list[ObjectKey], list[int]]:
-        """Bulk-delete keys via S3 ``DeleteObjects`` (≤1000 keys/request) and
-        drop their size-tracking entries.
+        """Delete keys from S3 and drop their size-tracking entries.
 
-        Batching into multi-object deletes means eviction issues one S3 round
-        trip per 1000 keys instead of one per key — so the evictor can keep up
-        with a high-concurrency write burst instead of falling behind (and
-        pinning usage at the cap). Returns parallel lists of successfully
-        deleted keys and their stored sizes, suitable for passing straight to
-        ``_notify_keys_deleted``. Keys whose size we never learned are reported
-        with size ``0`` so listener fanout still fires while base-class byte
-        accounting stays balanced.
+        Uses S3 ``DeleteObjects`` (up to 1000 keys per request), so eviction
+        costs one round trip per 1000 keys instead of one per key and can keep
+        up with a high-concurrency write burst instead of falling behind (and
+        pinning usage at the cap).
+
+        If the endpoint rejects ``DeleteObjects`` as unsupported (some
+        S3-compatible stores do not implement it), the keys of the rejected
+        batches are deleted one ``DeleteObject`` at a time in the same call,
+        so this sweep still frees its space, and every later call skips the
+        bulk request.
+
+        Returns parallel lists of successfully deleted keys and their stored
+        sizes, suitable for passing straight to ``_notify_keys_deleted``. Keys
+        whose size we never learned are reported with size ``0`` so listener
+        fanout still fires while base-class byte accounting stays balanced.
         """
+        deleted_keys: list[ObjectKey] = []
+        deleted_sizes: list[int] = []
+
+        def mark_deleted(key: ObjectKey, key_str: str) -> None:
+            with self._lock:
+                sz = self._key_sizes.pop(key, None)
+                self._object_size_cache.pop(key_str, None)
+            deleted_keys.append(key)
+            deleted_sizes.append(sz if sz is not None else 0)
+
+        pairs = [(key, _object_key_to_string(key)) for key in keys]
+        if not self._bulk_delete_supported:
+            for key, key_str in await self._delete_individually(pairs):
+                mark_deleted(key, key_str)
+            return deleted_keys, deleted_sizes
+
         # Build one DeleteObjects request per batch of up to 1000 keys.
-        batches: list[tuple[list[ObjectKey], list[str], list[bytes]]] = []
+        batches: list[tuple[list[tuple[ObjectKey, str]], list[bytes]]] = []
         futures: list["asyncio.Future[Any] | None"] = []
-        for i in range(0, len(keys), DELETE_OBJECTS_MAX_KEYS):
-            batch = keys[i : i + DELETE_OBJECTS_MAX_KEYS]
-            key_strs = [_object_key_to_string(k) for k in batch]
+        for i in range(0, len(pairs), DELETE_OBJECTS_MAX_KEYS):
+            batch = pairs[i : i + DELETE_OBJECTS_MAX_KEYS]
             try:
-                s3_req, body_chunks, _captured = self._delete_many_request(key_strs)
+                s3_req, body_chunks, _captured = self._delete_many_request(
+                    [key_str for _, key_str in batch]
+                )
                 futures.append(asyncio.wrap_future(s3_req.finished_future))
-                batches.append((batch, key_strs, body_chunks))
+                batches.append((batch, body_chunks))
             except Exception:
                 logger.exception("S3L2Adapter failed to launch DeleteObjects")
                 futures.append(None)
-                batches.append((batch, key_strs, []))
+                batches.append((batch, []))
 
         results = await asyncio.gather(
             *[f for f in futures if f is not None], return_exceptions=True
         )
         result_iter = iter(results)
 
-        deleted_keys: list[ObjectKey] = []
-        deleted_sizes: list[int] = []
-        for (batch, key_strs, body_chunks), fut in zip(batches, futures, strict=True):
+        unsupported: list[tuple[ObjectKey, str]] = []
+        for (batch, body_chunks), fut in zip(batches, futures, strict=True):
             if fut is None:
                 continue
             result = next(result_iter)
-            if isinstance(result, Exception):
-                logger.warning("S3L2Adapter DeleteObjects batch failed: %s", result)
+            if isinstance(result, BaseException):
+                if _is_bulk_delete_unsupported(result):
+                    unsupported.extend(batch)
+                else:
+                    logger.warning("S3L2Adapter DeleteObjects batch failed: %s", result)
                 continue
             try:
                 errored = _parse_delete_objects_errors(b"".join(body_chunks))
             except ValueError as e:
                 logger.warning("S3L2Adapter DeleteObjects response parse failed: %s", e)
                 continue
-            for key, key_str in zip(batch, key_strs, strict=True):
+            for key, key_str in batch:
                 if key_str in errored:
                     logger.warning("S3L2Adapter DELETE failed for %s", key_str)
                     continue
-                with self._lock:
-                    sz = self._key_sizes.pop(key, None)
-                    self._object_size_cache.pop(key_str, None)
-                deleted_keys.append(key)
-                deleted_sizes.append(sz if sz is not None else 0)
+                mark_deleted(key, key_str)
+
+        if unsupported:
+            with self._lock:
+                first = self._bulk_delete_supported
+                self._bulk_delete_supported = False
+            if first:
+                logger.warning(
+                    "S3L2Adapter: endpoint %s rejected DeleteObjects as "
+                    "unsupported; deleting key by key from now on "
+                    "(up to %d requests in flight).",
+                    self._endpoint,
+                    DELETE_FALLBACK_MAX_CONCURRENCY,
+                )
+            for key, key_str in await self._delete_individually(unsupported):
+                mark_deleted(key, key_str)
         return deleted_keys, deleted_sizes
+
+    async def _delete_individually(
+        self, pairs: list[tuple[ObjectKey, str]]
+    ) -> list[tuple[ObjectKey, str]]:
+        """Delete each ``(key, key_str)`` with its own ``DeleteObject``, at
+        most ``DELETE_FALLBACK_MAX_CONCURRENCY`` at once, and return the pairs
+        that are gone. A 404 counts as gone: the object no longer exists."""
+        semaphore = asyncio.Semaphore(DELETE_FALLBACK_MAX_CONCURRENCY)
+
+        async def delete_one(key_str: str) -> bool:
+            async with semaphore:
+                try:
+                    s3_req = self._delete_one_request(key_str)
+                    await asyncio.wrap_future(s3_req.finished_future)
+                    return True
+                except Exception as e:
+                    if getattr(e, "status_code", None) == 404:
+                        return True
+                    logger.warning("S3L2Adapter DELETE failed for %s: %s", key_str, e)
+                    return False
+
+        outcomes = await asyncio.gather(*(delete_one(key_str) for _, key_str in pairs))
+        return [pair for pair, ok in zip(pairs, outcomes, strict=True) if ok]
 
 
 # ---------------------------------------------------------------------------
