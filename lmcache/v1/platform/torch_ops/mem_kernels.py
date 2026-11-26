@@ -383,16 +383,19 @@ def lmcache_memcpy_async(
     Python fallback for lmcache_memcpy_async.
 
     - Tensor mode (non-CUDA devices like HPU): uses .to(device) + copy_()
-    - Pointer mode with libcudart: uses synchronous cudaMemcpy (cudaMemcpyDefault)
+    - Pointer mode with libcudart: uses synchronous cudaMemcpy, split at
+      every host_buffer_alignments boundary (see below)
     - Pointer mode without libcudart: uses CPU tensor copy
 
-    Unlike the C++ version (which uses cudaMemcpyAsync and must split copies
-    at cudaHostRegister boundaries), this Python fallback does NOT need
-    alignment-based chunking because:
-    - cudaMemcpy (synchronous) handles cross-cudaHostRegister boundaries
-      internally via staging buffers
-    - CPU tensor copy has no alignment constraints
-    - Tensor mode bypasses raw pointers entirely
+    Pointer mode with libcudart: the host buffer is pinned in
+    host_buffer_alignments-sized chunks (LazyMemoryAllocator), and ONE
+    cudaMemcpy spanning two registered chunks fails with
+    cudaErrorInvalidValue (error code 1) — measured on 4-bit NVFP4 KV stores
+    (LMCache/LMCache#6617). This fallback therefore splits the copy at every
+    host_buffer_alignments boundary, mirroring the C++ lmcache_memcpy_async
+    in csrc/cuda/mem_kernels.cu. The regression test
+    tests/v1/platform/test_memcpy_async_host_register_split.py locks this
+    contract in.
 
     dest:
         - If int: raw memory pointer (used for CUDA/CPU devices where we
