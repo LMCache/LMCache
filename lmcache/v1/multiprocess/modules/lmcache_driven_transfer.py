@@ -657,6 +657,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 shard_replication_desc=_fold_shard_replication_desc(
                     kv_groups_manager.object_groups, engine_group_infos
                 ),
+                group_content_descs={
+                    gid: tuple(
+                        kv_groups_manager.kernel_groups[idx].content_desc()
+                        for idx in group.kernel_group_indices
+                    )
+                    for gid, group in enumerate(kv_groups_manager.object_groups)
+                },
             )
         except ValueError:
             cache_context.close()

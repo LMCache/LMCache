@@ -15,6 +15,7 @@ import time
 
 # Third Party
 import grpc
+import msgspec
 import pytest
 import torch
 import zmq
@@ -32,6 +33,7 @@ from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
     CBUnifiedLookupResult,
+    GroupLayout,
     IPCCacheServerKey,
     KVEventBatch,
     KVEventRecord,
@@ -39,6 +41,12 @@ from lmcache.v1.common.custom_types import (
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
+)
+from lmcache.v1.common.group_view import (
+    CacheCategory,
+    EngineGroupInfo,
+    PartContentDesc,
+    StateComponentDesc,
 )
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.p2p import P2PClient
@@ -670,6 +678,100 @@ def test_service_message_codec_registry_round_trips_custom_types() -> None:
     assert shape_codec is not None
     shape_codec.writer(shape_message, shape)
     assert shape_codec.reader(shape_message) == shape
+
+
+def test_group_content_round_trips_over_grpc() -> None:
+    """A group's content descriptor survives both registration requests, and a
+    worker that sends none still decodes to ``None``."""
+    common_pb2 = importlib.import_module(
+        "lmcache.v1.transport.grpc._proto_gen.common_pb2"
+    )
+    engine_driven_service_pb2 = importlib.import_module(
+        "lmcache.v1.transport.grpc._proto_gen.engine_driven_service_pb2"
+    )
+    components = (
+        StateComponentDesc(0, 600, "bfloat16", (3, 100)),
+        StateComponentDesc(608, 4096, "float32", (4, 16, 16)),
+    )
+
+    info = EngineGroupInfo(
+        0,
+        (0, 1),
+        tokens_per_block=16,
+        cache_category=CacheCategory.RECURRENT,
+        state_components=components,
+    )
+    write, read = proto_codec._compile_message_codec(
+        common_pb2.EngineGroupInfo.DESCRIPTOR, EngineGroupInfo
+    )
+    message = common_pb2.EngineGroupInfo()
+    write(message, info)
+    assert read(message) == info
+
+    def _layout(content: PartContentDesc | None) -> GroupLayout:
+        return GroupLayout(
+            num_layers=2,
+            hidden_dim_size=304,
+            dtype_str="int8",
+            tokens_per_block=16,
+            num_physical_slots=16,
+            content=content,
+        )
+
+    payload = RegisterEngineDrivenContextPayload(
+        instance_id=1,
+        model_name="m",
+        world_size=1,
+        block_size=16,
+        num_layers=2,
+        hidden_dim_size=304,
+        dtype_str="int8",
+        use_mla=True,
+        chunk_size=16,
+        num_physical_slots=16,
+        group_layouts=[
+            _layout(PartContentDesc(CacheCategory.RECURRENT, components, 4864)),
+            _layout(None),
+        ],
+    )
+    encode, decode = proto_codec.compile_request_codec_for_types(
+        engine_driven_service_pb2.RegisterKvCacheEngineDrivenContextRequest,
+        (RegisterEngineDrivenContextPayload,),
+    )
+    (decoded,) = decode(encode((payload,), {}))
+    assert decoded == payload
+
+
+def test_group_content_omitted_by_old_peers_decodes_as_unknown() -> None:
+    """A peer that predates the fields sends none of them; gRPC and msgspec
+    must both decode the category as ``UNKNOWN``."""
+    common_pb2 = importlib.import_module(
+        "lmcache.v1.transport.grpc._proto_gen.common_pb2"
+    )
+    engine_driven_service_pb2 = importlib.import_module(
+        "lmcache.v1.transport.grpc._proto_gen.engine_driven_service_pb2"
+    )
+
+    _, read_info = proto_codec._compile_message_codec(
+        common_pb2.EngineGroupInfo.DESCRIPTOR, EngineGroupInfo
+    )
+    old_info = common_pb2.EngineGroupInfo(engine_group_id=0, layer_indices=[0])
+    assert read_info(old_info).cache_category is CacheCategory.UNKNOWN
+    old_payload = msgspec.msgpack.encode({"engine_group_id": 0, "layer_indices": [0]})
+    decoded = msgspec.msgpack.decode(old_payload, type=EngineGroupInfo)
+    assert decoded.cache_category is CacheCategory.UNKNOWN
+
+    # A content message present but without its category field.
+    _, read_layout = proto_codec._compile_message_codec(
+        engine_driven_service_pb2.GroupLayout.DESCRIPTOR, GroupLayout
+    )
+    layout = engine_driven_service_pb2.GroupLayout(
+        num_layers=1, hidden_dim_size=4, dtype_str="int8", tokens_per_block=16
+    )
+    layout.content.SetInParent()
+    content = read_layout(layout).content
+    assert content is not None
+    assert content.cache_category is CacheCategory.UNKNOWN
 
 
 def test_response_encoder_compiles_its_codec_once(

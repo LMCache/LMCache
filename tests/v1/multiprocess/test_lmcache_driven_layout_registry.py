@@ -2,6 +2,7 @@
 """Regression tests for GPU transfer layout registration lifetime."""
 
 # Standard
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 import sys
@@ -12,11 +13,20 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.group_view import (
+    CacheCategory,
+    PartContentDesc,
+    StateComponentDesc,
+)
 from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
+
+_RECURRENT_CONTENT = PartContentDesc(
+    CacheCategory.RECURRENT, (StateComponentDesc(0, 16, "float32", (4,)),), 64
+)
 
 
 class _FakeKVLayerGroupsManager:
-    """Minimal manager stub: one full-attention object group."""
+    """Minimal manager stub: one object group of one recurrent kernel group."""
 
     num_object_groups: int = 1
 
@@ -29,8 +39,13 @@ class _FakeKVLayerGroupsManager:
 
     @property
     def object_groups(self) -> list[Any]:
-        """Nothing replicated: no object groups to fold."""
-        return []
+        """The single object group, holding kernel group 0."""
+        return [SimpleNamespace(kernel_group_indices=[0])]
+
+    @property
+    def kernel_groups(self) -> list[Any]:
+        """Kernel group 0, describing its content."""
+        return [SimpleNamespace(content_desc=lambda: _RECURRENT_CONTENT)]
 
 
 class _FakeGPUContext:
@@ -180,6 +195,10 @@ def test_lmcache_registration_uses_effective_chunk_size_until_last_instance(
     assert entry is not None and entry.chunk_size == 512
     assert ctx.layout_desc_registry.get_chunk_size("shared-model", 1) == 512
     assert ctx.layout_desc_registry.find("shared-model", 1) is layout_desc
+    assert (
+        ctx.layout_desc_registry.find_part_content("shared-model", 0, 0)
+        == _RECURRENT_CONTENT
+    )
 
     with pytest.raises(ValueError, match="already registered"):
         module.register_kv_cache(
@@ -200,6 +219,7 @@ def test_lmcache_registration_uses_effective_chunk_size_until_last_instance(
 
     module.unregister_kv_cache(2)
     assert ctx.layout_desc_registry.find("shared-model", 1) is None
+    assert ctx.layout_desc_registry.find_part_content("shared-model", 0, 0) is None
 
 
 def _layout() -> Any:
@@ -377,3 +397,120 @@ def test_registry_rejects_shard_replication_not_matching_object_groups() -> None
             attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1, 2]),
             shard_replication_desc=ShardReplicationDesc(group_tp_replicas=(4,)),
         )
+
+
+def test_registry_part_content_roundtrip_until_last_unregister() -> None:
+    """find_part_content returns each part's registered content until the
+    last registration of its entry is gone; unknown parts give ``None``."""
+    # First Party
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    registry = LayoutDescRegistry()
+    contents = {0: (_RECURRENT_CONTENT, None)}
+    for _ in range(2):
+        registry.register(
+            "m",
+            1,
+            _layout(),
+            chunk_size=256,
+            hash_algorithm="blake3",
+            group_content_descs=contents,
+        )
+
+    assert registry.find_part_content("m", 0, 0) == _RECURRENT_CONTENT
+    assert registry.find_part_content("m", 0, 1) is None
+    assert registry.find_part_content("m", 0, 2) is None
+    assert registry.find_part_content("m", 1, 0) is None
+    assert registry.find_part_content("other", 0, 0) is None
+
+    registry.unregister("m", 1)
+    assert registry.find_part_content("m", 0, 0) == _RECURRENT_CONTENT
+    registry.unregister("m", 1)
+    assert registry.find_part_content("m", 0, 0) is None
+
+
+def test_registry_part_content_disagreeing_registrations_become_unknown() -> None:
+    """Registrations sharing an entry that describe a group differently make
+    it unknown rather than letting the latest one win."""
+    # First Party
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    other = PartContentDesc(CacheCategory.ATTENTION)
+    registry = LayoutDescRegistry()
+    registry.register(
+        "m",
+        1,
+        _layout(),
+        chunk_size=256,
+        hash_algorithm="blake3",
+        group_content_descs={0: (_RECURRENT_CONTENT,), 1: (other,)},
+    )
+    registry.register(
+        "m",
+        1,
+        _layout(),
+        chunk_size=256,
+        hash_algorithm="blake3",
+        group_content_descs={0: (other,), 1: (other,)},
+    )
+
+    assert registry.find_part_content("m", 0, 0) is None
+    assert registry.find_part_content("m", 1, 0) == other
+
+
+def test_registry_part_content_requires_world_sizes_to_agree() -> None:
+    """Object keys carry no world size, so registrations of one model with
+    different world sizes resolve only where they agree."""
+    # First Party
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    other = PartContentDesc(CacheCategory.ATTENTION)
+    registry = LayoutDescRegistry()
+    for world_size, contents in (
+        (1, {0: (_RECURRENT_CONTENT,), 1: (other,)}),
+        (2, {0: (other,), 1: (other,)}),
+    ):
+        registry.register(
+            "m",
+            world_size,
+            _layout(),
+            chunk_size=256,
+            hash_algorithm="blake3",
+            group_content_descs=contents,
+        )
+
+    assert registry.find_part_content("m", 0, 0) is None
+    assert registry.find_part_content("m", 1, 0) == other
+
+
+def test_server_context_resolves_part_content_from_its_registrations() -> None:
+    """The resolver the server context gives its storage manager answers from
+    the context's own registrations."""
+    # First Party
+    from lmcache.v1.distributed.api import ObjectKey
+    from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+
+    config = MagicMock()
+    config.l1_manager_config.gds_l1_config = None
+    config.l1_manager_config.memory_config.shm_name = ""
+    with (
+        patch("lmcache.v1.multiprocess.engine_context.StorageManager") as storage,
+        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
+        patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
+        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
+    ):
+        ctx = MPCacheServerContext(config)
+    resolver = storage.call_args.kwargs["part_content_resolver"]
+    key = ObjectKey(b"chunk", "m", 0, object_group_id=0)
+    assert resolver(key, 0) is None
+
+    ctx.layout_desc_registry.register(
+        "m",
+        1,
+        _layout(),
+        chunk_size=256,
+        hash_algorithm="blake3",
+        group_content_descs={0: (_RECURRENT_CONTENT,)},
+    )
+
+    assert resolver(key, 0) == _RECURRENT_CONTENT

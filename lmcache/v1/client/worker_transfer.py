@@ -1039,6 +1039,7 @@ class EngineDrivenTransferContext(TransferContext):
                         kv_size=kernel_group.shape_desc.kv_size,
                         window_chunks=max(window_chunks, 0),
                         recurrent=kernel_group.recurrent_state,
+                        content=kernel_group.content_desc(),
                         num_physical_slots=window_slots,
                     )
                 )

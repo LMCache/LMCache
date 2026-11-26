@@ -9,6 +9,7 @@ from typing import Any
 import msgspec
 
 # First Party
+from lmcache.v1.common.group_view import PartContentDesc
 from lmcache.v1.common.token_codec import (
     TOKEN_STRIDE,
     num_packed_tokens,
@@ -331,6 +332,9 @@ class GroupLayout(msgspec.Struct):
             (Mamba/GDN/linear attention) rather than per-token attention KV.
         num_physical_slots: Physical slots stored per chunk, after windowing
             and slot compression.
+        content: What the group's chunk tensor holds (spec type and, for a
+            Mamba group, its state layout). ``None`` from workers that predate
+            it.
     """
 
     num_layers: int
@@ -342,6 +346,7 @@ class GroupLayout(msgspec.Struct):
     kv_size: int = 0
     window_chunks: int = 0
     recurrent: bool = False
+    content: PartContentDesc | None = None
 
 
 class RegisterEngineDrivenContextPayload(msgspec.Struct):

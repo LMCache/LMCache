@@ -65,4 +65,21 @@ message EngineGroupInfo {
   bool recurrent_state = 6;
   int64 tp_replicas = 7;
   int64 dcp_shards = 8;
+  string cache_category = 9;
+  repeated StateComponentDesc state_components = 10;
+}
+
+// StateComponentDesc mirrors group_view.StateComponentDesc.
+message StateComponentDesc {
+  int64 byte_offset = 1;
+  int64 byte_length = 2;
+  string dtype_str = 3;
+  repeated int64 shape = 4;
+}
+
+// PartContentDesc mirrors group_view.PartContentDesc.
+message PartContentDesc {
+  string cache_category = 1;
+  repeated StateComponentDesc state_components = 2;
+  int64 page_bytes = 3;
 }

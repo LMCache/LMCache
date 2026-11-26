@@ -55,7 +55,7 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
 )
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
 from lmcache.v1.distributed.quota_manager import QuotaManager
-from lmcache.v1.distributed.serde import create_serde_processor
+from lmcache.v1.distributed.serde import PartContentResolver, create_serde_processor
 from lmcache.v1.distributed.storage_controllers import (
     L1EvictionController,
     L2AdapterEvictionState,
@@ -128,12 +128,19 @@ def _validate_write_targets(
 
 
 class StorageManager:
-    def __init__(self, config: StorageManagerConfig) -> None:
+    def __init__(
+        self,
+        config: StorageManagerConfig,
+        part_content_resolver: PartContentResolver | None = None,
+    ) -> None:
         """Create the configured L1 managers and their affinity-bound L2 controllers.
 
         Args:
             config: L1 managers, L2 adapters, eviction, policy and notifier
                 settings.
+            part_content_resolver: Resolver of object part contents, handed to
+                the content-aware serdes of L2 adapters this manager builds;
+                ``None`` when no KV cache registrations back this manager.
 
         Raises:
             ValueError: An L1 configuration is invalid or maps a Device-DAX
@@ -142,6 +149,7 @@ class StorageManager:
         """
         with ExitStack() as cleanup:
             self._event_bus = get_event_bus()
+            self._part_content_resolver = part_content_resolver
 
             # L1 Managers:
             self._l1_managers: list[L1ManagerInterface] = create_l1_managers(
@@ -1624,7 +1632,9 @@ class StorageManager:
         if config.serde_config is not None:
             adapter = SerdeL2AdapterWrapper(
                 inner=adapter,
-                serde=create_serde_processor(config.serde_config),
+                serde=create_serde_processor(
+                    config.serde_config, self._part_content_resolver
+                ),
                 l1_manager=manager,
             )
         descriptor = L2AdapterDescriptor(index=adapter_id, config=config)
