@@ -1098,7 +1098,7 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
         )
 
         handle = sm.submit_prefetch_task(single_row_spec([key], layout))
-        assert sm.wait_prefetch_status(handle, timeout=5.0)
+        assert sm.watch_prefetch_status(handle).result(timeout=5.0)
         result = sm.query_prefetch_status(handle)
         assert result is not None
         final_hits = result.hit_cells[0].count_leading_ones()

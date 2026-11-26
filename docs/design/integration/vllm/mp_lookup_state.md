@@ -51,9 +51,25 @@ spurious miss whose prefetch locks are never released (#4935). The race is
 between two RPCs to the same server, so each server's ack is enough; there is
 no cross-server barrier.
 
-**At most one QUERY_PREFETCH_STATUS per server per scheduler check.** While a
-prefetch runs the server answers `None` immediately, so re-sending on every
-`None` would spin an RPC loop on the shared client receive thread and the
+**The status query waits on the server.** Outside blocking mode the query is
+WAIT_PREFETCH_STATUS: the server answers when the prefetch finishes, so the
+reply lands before the next check and the request is admitted there. A
+QUERY_PREFETCH_STATUS sent at a check returns after that check, so a prefetch
+finishing between two checks would be seen one check later. The server holds
+the wait for at most 1 s (half the RPC deadline if shorter) and then answers
+`None`, which the rules below handle like any `None`; by then a check has
+normally run, so the callback sends the next wait at once.
+
+```
+check k      ─ q1 = WAIT sent at the ack
+prefetch done ─ q1 → hit count (callback resolves the server)
+check k+1    ─ result final, request admitted
+```
+
+**At most one QUERY_PREFETCH_STATUS per server per scheduler check.** A
+QUERY_PREFETCH_STATUS answers `None` at once while the prefetch runs, and a
+failed status query of either kind returns at once, so re-sending on every
+such reply would spin an RPC loop on the shared client receive thread and the
 server pool.
 The reply callback re-sends only if a check has run since that query was sent;
 otherwise the next check sends it. Example timeline for one server:
@@ -83,10 +99,11 @@ scheduler. A query that fails on every attempt is re-sent once per check
 without a limit; a server that is down stops being queried once the heartbeat
 marks it unhealthy.
 
-**Blocking mode.** With `lmcache.mp.nonblocking_lookup_status=false`,
-`on_scheduler_check()` also waits, up to each RPC's deadline, for the
-QUERY_PREFETCH_STATUS replies in flight. It never waits on a query that a
-reply handled during that wait re-sent. LOOKUP acks are never waited for.
+**Blocking mode.** With `lmcache.mp.nonblocking_lookup_status=false`, the
+status is queried with QUERY_PREFETCH_STATUS, and `on_scheduler_check()` also
+waits, up to each RPC's deadline, for the replies in flight. It never waits on
+a query that a reply handled during that wait re-sent. LOOKUP acks are never
+waited for.
 
 ## Threading
 
@@ -111,7 +128,9 @@ The scheduler thread calls everything else.
 
 - `request_finished` calls `cleanup_lookup_result` before `end_session`, and
   cleanup forgets the state, so `end_session` has nothing to drain for an
-  aborted mid-lookup request.
+  aborted mid-lookup request. The server drops that request's unconsumed
+  prefetch job at END_SESSION, so a status query still pending answers 0
+  instead of recreating the session.
 - A request id reused while the old state still has a QUERY_PREFETCH_STATUS
   in flight can let that query consume the new lookup's job. Connector paths
   reuse an id only after the old lookup resolved, so this does not occur

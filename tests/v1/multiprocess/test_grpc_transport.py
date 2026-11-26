@@ -3,6 +3,7 @@
 
 # Standard
 from collections.abc import Iterator
+from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -56,6 +57,7 @@ from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.plugin_modules.qstore import QStoreModule
 from lmcache.v1.multiprocess.request_handler import (
+    DeferredResponse,
     HandlerType,
     iter_request_handlers,
     request_handler,
@@ -816,6 +818,63 @@ def test_call_fails_like_a_timeout_when_the_server_goes_away(
         assert isinstance(info.value, ConnectionError)
     finally:
         release.set()
+        client.close()
+        server.close()
+
+
+@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
+def test_non_blocking_handler_answers_without_a_normal_worker(
+    grpc_server_mode: str,
+) -> None:
+    """A NON_BLOCKING call holds no normal worker while waiting, and runs its
+    continuation on a worker whether ready later or at once."""
+    pending: queue.Queue[Future[bool]] = queue.Queue()
+    resume_threads: list[str] = []
+
+    class Module:
+        @request_handler(HandlerType.NON_BLOCKING)
+        def ping(self, instance_id: int | None) -> DeferredResponse[bool]:
+            def resume() -> bool:
+                resume_threads.append(threading.current_thread().name)
+                return reply.result()
+
+            reply: DeferredResponse[bool] = DeferredResponse(resume)
+            if instance_id == 0:
+                reply.set_result(True)
+            else:
+                pending.put(reply)
+            return reply
+
+        @request_handler(HandlerType.BLOCKING)
+        def get_chunk_size(self) -> int:
+            return 256
+
+    config = MPServerConfig(
+        transport="grpc",
+        host="127.0.0.1",
+        port=0,
+        max_cpu_workers=1,
+        grpc_server_mode=cast(Any, grpc_server_mode),
+    )
+    server = build_grpc_request_server([cast(Any, Module())], config)
+    server.start()
+    client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        f"grpc://127.0.0.1:{server.bound_port}"
+    )
+    caller_thread = threading.current_thread().name
+    try:
+        ping = client.ping(1)
+        reply = pending.get(timeout=5)
+        assert client.get_chunk_size().result(5) == 256
+        assert not ping.query()
+        reply.set_result(True)
+        assert ping.result(5) is True
+        assert client.ping(0).result(5) is True
+        assert len(resume_threads) == 2
+        assert all(
+            name not in {caller_thread, "grpc-aio-loop"} for name in resume_threads
+        )
+    finally:
         client.close()
         server.close()
 

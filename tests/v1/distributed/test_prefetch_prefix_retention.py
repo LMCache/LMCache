@@ -155,7 +155,7 @@ def seed_l1(manager: DramL1Manager, keys: list[ObjectKey]) -> None:
 def prefetch(controller: PrefetchController, spec: PrefetchTaskSpec) -> PrefetchResult:
     """Submit a public prefetch request and consume its completed result."""
     request_id = controller.submit_prefetch_request(spec)
-    assert controller.wait_prefetch_result(request_id, timeout=10)
+    assert controller.watch_prefetch_result(request_id).result(timeout=10)
     result = controller.query_prefetch_result(request_id)
     assert result is not None
     return result

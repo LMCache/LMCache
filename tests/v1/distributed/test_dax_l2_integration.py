@@ -125,7 +125,7 @@ def _storage_roundtrip(tmp_path: Path, dax_l1: bool) -> None:
             )
         )
         handle = manager.submit_prefetch_task(single_row_spec([key], layout))
-        assert manager.wait_prefetch_status(handle, timeout=5.0)
+        assert manager.watch_prefetch_status(handle).result(timeout=5.0)
         result = manager.query_prefetch_status(handle)
         assert result is not None
         assert result.hit_cells[0].count_leading_ones() == 1

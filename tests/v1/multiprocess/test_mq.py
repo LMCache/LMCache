@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from concurrent.futures import Future
 from multiprocessing.synchronize import Barrier
 from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable, cast
@@ -32,7 +33,11 @@ from lmcache.v1.common.custom_types import (
 )
 from lmcache.v1.distributed.api import get_request_tags
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.request_handler import HandlerType
+from lmcache.v1.multiprocess.request_handler import (
+    DeferredResponse,
+    HandlerType,
+    request_handler,
+)
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
     BlockingRequestHandler,
     MessageQueueServer,
@@ -876,6 +881,79 @@ def test_blocking_handler_value_error_returns_remote_error() -> None:
         )
         assert isinstance(healthy, MessagingFuture)
         assert healthy.result(timeout=1) is None
+    finally:
+        client.close()
+        server.close()
+
+
+def test_non_blocking_handler_answers_without_a_normal_worker() -> None:
+    """A NON_BLOCKING request holds no normal worker while waiting, and runs
+    its continuation on a normal worker whether ready later or at once."""
+    pending: list[Future[bool]] = []
+    resume_threads: list[str] = []
+
+    class Module:
+        @request_handler(HandlerType.NON_BLOCKING)
+        def ping(self, instance_id: int | None) -> DeferredResponse[bool]:
+            def resume() -> bool:
+                resume_threads.append(threading.current_thread().name)
+                return ready.result()
+
+            ready: DeferredResponse[bool] = DeferredResponse(resume)
+            if instance_id == 0:
+                ready.set_result(True)
+            else:
+                pending.append(ready)
+            return ready
+
+        @request_handler(HandlerType.BLOCKING)
+        def get_chunk_size(self) -> int:
+            return 256
+
+    port = _unused_tcp_port()
+    server = build_zmq_request_server(
+        [cast(Any, Module())],
+        MPServerConfig(host="127.0.0.1", port=port, max_cpu_workers=1),
+    )
+    server.start()
+    client = MessageQueueClient(f"tcp://127.0.0.1:{port}", zmq.Context.instance())
+    try:
+        answer = cast(MessagingFuture[bool], client.submit_request("ping", [1]))
+        chunk_size = cast(
+            MessagingFuture[int], client.submit_request("get_chunk_size", [])
+        )
+        assert chunk_size.result(timeout=5) == 256
+        assert len(pending) == 1 and not answer.query()
+        pending[0].set_result(True)
+        assert answer.result(timeout=5) is True
+
+        immediate = cast(MessagingFuture[bool], client.submit_request("ping", [0]))
+        assert immediate.result(timeout=5) is True
+        assert len(resume_threads) == 2
+        assert all(name.startswith("normal-pool-") for name in resume_threads)
+    finally:
+        client.close()
+        server.close()
+
+
+def test_non_blocking_handler_error_returns_remote_error() -> None:
+    """A NON_BLOCKING handler that raises is answered with an error."""
+
+    class Module:
+        @request_handler(HandlerType.NON_BLOCKING)
+        def ping(self, instance_id: int | None) -> DeferredResponse[bool]:
+            raise ValueError("bad instance")
+
+    port = _unused_tcp_port()
+    server = build_zmq_request_server(
+        [cast(Any, Module())], MPServerConfig(host="127.0.0.1", port=port)
+    )
+    server.start()
+    client = MessageQueueClient(f"tcp://127.0.0.1:{port}", zmq.Context.instance())
+    try:
+        answer = cast(MessagingFuture[bool], client.submit_request("ping", [1]))
+        with pytest.raises(MPRequestError, match="bad instance"):
+            answer.result(timeout=5)
     finally:
         client.close()
         server.close()

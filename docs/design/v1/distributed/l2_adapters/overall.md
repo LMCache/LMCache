@@ -327,7 +327,7 @@ request_id = controller.submit_prefetch_request(spec)
 
 # Polled (or waited on) by the serving thread
 result = controller.query_prefetch_result(request_id)  # PrefetchResult | None
-controller.wait_prefetch_result(request_id, timeout)   # bool, does not consume
+controller.watch_prefetch_result(request_id)   # Future[bool], does not consume
 ```
 
 - `submit_prefetch_request` enqueues the request and signals the background
@@ -439,7 +439,7 @@ handle = sm.submit_prefetch_task(
 )
 
 # 2. Wait, then fetch the result (one hit bitmap per key row)
-sm.wait_prefetch_status(handle, timeout=1.0)
+sm.watch_prefetch_status(handle).result(timeout=1.0)
 result = sm.query_prefetch_status(handle)
 hit_chunks, retain = fold_unfold_grouped(result.hit_cells, windows=[-1])
 

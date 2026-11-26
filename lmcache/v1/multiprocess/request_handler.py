@@ -2,17 +2,31 @@
 """Transport-neutral request handler metadata and discovery."""
 
 # Standard
+from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Callable, TypeVar, get_type_hints
+from typing import Any, Callable, Generic, TypeVar, cast, get_type_hints
 import inspect
 
 # First Party
-from lmcache.v1.transport.rpc import RpcOperation, get_rpc_spec
+from lmcache.v1.transport.rpc import RpcOperation, RpcSpec, get_rpc_spec
 
 F = TypeVar("F", bound=Callable[..., Any])
+ResponseT = TypeVar("ResponseT")
 
 _HANDLER_OPTIONS_ATTR = "__lmcache_request_handler_options__"
+
+
+class DeferredResponse(Future, Generic[ResponseT]):
+    """A reply that is built by ``resume()`` once the future is done."""
+
+    def __init__(self, resume: Callable[[], ResponseT]) -> None:
+        super().__init__()
+        self._resume = resume
+
+    def resume(self) -> ResponseT:
+        """Return the reply. Call only once the future is done."""
+        return self._resume()
 
 
 class HandlerType(Enum):
@@ -20,6 +34,8 @@ class HandlerType(Enum):
 
     SERIALIZED = auto()
     BLOCKING = auto()
+    # Returns a DeferredResponse without blocking; the transport waits on it
+    # with no normal worker held, then runs its ``resume`` on one.
     NON_BLOCKING = auto()
 
 
@@ -76,9 +92,17 @@ def _normalize_none_type(value: Any) -> Any:
     return type(None) if value is None else value
 
 
+def handler_return_type(spec: RpcSpec, handler_type: HandlerType) -> Any:
+    """Return the annotation a handler of ``handler_type`` must declare."""
+    if handler_type is HandlerType.NON_BLOCKING:
+        return cast(Any, DeferredResponse)[spec.handler_response_type]
+    return spec.handler_response_type
+
+
 def validate_handler(
     operation: RpcOperation,
     handler: Callable[..., Any],
+    handler_type: HandlerType,
     rpc_client: type | None = None,
 ) -> None:
     """Check handler against operation's RPC types; raise TypeError on mismatch."""
@@ -99,7 +123,7 @@ def validate_handler(
             f"{spec.payload_types!r}"
         )
     if _normalize_none_type(response_type) != _normalize_none_type(
-        spec.handler_response_type
+        handler_return_type(spec, handler_type)
     ):
         raise TypeError(
             f"Handler {handler.__qualname__} return annotation "
@@ -125,7 +149,7 @@ def iter_request_handlers(
             raise ValueError(
                 f"{module_type.__name__} has multiple handlers for {operation!r}"
             )
-        validate_handler(operation, handler, rpc_client)
+        validate_handler(operation, handler, options.handler_type, rpc_client)
         seen.add(operation)
         handlers.append(
             BoundRequestHandler(

@@ -223,17 +223,20 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
      - Poll a prefetch job by request_id. Returns the hit token count
        when done, or ``None`` while the prefetch is still in progress.
    * - ``WAIT_PREFETCH_STATUS``
-     - BLOCKING
-     - (SGLang only) Block until a prefetch job completes, then return its
-       hit token count, or ``None`` on timeout. The blocking alternative
-       to polling ``QUERY_PREFETCH_STATUS``.
+     - NON_BLOCKING
+     - Answer when a prefetch job completes with its hit token count, or
+       with ``None`` on timeout, holding no normal-handler worker meanwhile.
+       The vLLM connector uses it instead of polling
+       ``QUERY_PREFETCH_STATUS`` unless ``lmcache.mp.nonblocking_lookup_status``
+       is false.
    * - ``FREE_LOOKUP_LOCKS``
      - BLOCKING
      - Release read locks from a cancelled lookup without doing a full
        RETRIEVE.
    * - ``END_SESSION``
      - BLOCKING
-     - Remove session state for a finished request.
+     - Remove session state for a finished request, and its prefetch job
+       if no status query consumed it.
    * - ``CLEAR``
      - BLOCKING
      - Clear cached data. The optional ``force`` flag defaults to ``False``;
@@ -340,11 +343,9 @@ methods:
 - ``submit_prefetch_task()`` / ``query_prefetch_status()`` -- Async lookup +
   L2 prefetch. ``query_prefetch_status()`` is non-blocking and returns
   ``None`` while the L2 prefetch is still in flight.
-- ``wait_prefetch_status()`` -- Blocking alternative to polling
-  ``query_prefetch_status()``: waits on a controller condition variable
-  until the prefetch result is published (or a timeout expires).
-  L1-only prefetches return immediately. Used by the
-  ``WAIT_PREFETCH_STATUS`` RPC to avoid busy-polling on the load path.
+- ``watch_prefetch_status()`` -- Non-blocking notification of publication:
+  returns a future that completes when the prefetch result is published. Used
+  by the ``WAIT_PREFETCH_STATUS`` RPC.
 - ``read_prefetched_results()`` / ``finish_read_prefetched()`` -- Read
   prefetched data from L1 with automatic lock management.
 

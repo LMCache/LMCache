@@ -158,7 +158,7 @@ def lend_keys(
     adapter.submit_store_task(keys, objs)
     assert wait_for_condition(lambda: all(adapter.debug_has_key(k) for k in keys))
     handle = sm.submit_prefetch_task(single_row_spec(keys, layout))
-    assert sm.wait_prefetch_status(handle, timeout=5.0)
+    assert sm.watch_prefetch_status(handle).result(timeout=5.0)
     result = sm.query_prefetch_status(handle)
     assert result is not None
     assert result.hit_cells[0].count_leading_ones() == len(keys)

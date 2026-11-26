@@ -15,7 +15,9 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from threading import Event
 from unittest.mock import MagicMock, patch
+import gc
 import time
+import weakref
 
 # Third Party
 import pytest
@@ -626,7 +628,7 @@ class TestRawBlockWorkerFailure:
                 store_keys_in_l2(healthy_adapter, keys[1:2], layout)
                 ctrl.start()
                 req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
-                assert ctrl.wait_prefetch_result(req_id, timeout=5)
+                assert ctrl.watch_prefetch_result(req_id).result(timeout=5)
                 result = ctrl.query_prefetch_result(req_id)
 
                 assert row_bits(result) == [0, 1]
@@ -835,10 +837,10 @@ class TestQueryResult:
         adapter.close()
 
 
-class TestWaitPrefetchResult:
-    def test_wait_blocks_until_ready_without_consuming(self, l1_manager):
-        """wait returns True once published and leaves the result in place."""
-        adapter = make_adapter()
+class TestWatchPrefetchResult:
+    def test_watch_completes_when_published_without_consuming(self, l1_manager):
+        """watch returns at once; its future turns True outside the results lock."""
+        adapter = make_adapter(bandwidth_gb=0.001)
         layout = make_layout()
         keys = [make_object_key(i) for i in range(5)]
         store_keys_in_l2(adapter, keys, layout)
@@ -846,22 +848,55 @@ class TestWaitPrefetchResult:
         ctrl.start()
 
         req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+        watched = ctrl.watch_prefetch_result(req_id)
+        seen_in_callback: list[bool] = []
+        watched.add_done_callback(
+            lambda _: seen_in_callback.append(
+                ctrl.watch_prefetch_result(req_id).result(timeout=0)
+            )
+        )
 
-        assert ctrl.wait_prefetch_result(req_id, timeout=10.0) is True
+        assert not watched.done()
+        assert watched.result(timeout=10.0) is True
+        assert seen_in_callback == [True]
         assert row_bits(ctrl.query_prefetch_result(req_id)) == [0, 1, 2, 3, 4]
         l1_manager.finish_read(keys)
         ctrl.stop()
         adapter.close()
 
-    def test_wait_times_out_for_unknown_request(self, l1_manager):
-        """wait returns False after genuinely waiting for an unknown id."""
-        ctrl = make_controller(l1_manager, [])
+    def test_cancelled_watch_is_unregistered_before_publish(self, l1_manager):
+        """Cancelling a pending watch drops it immediately so it neither stays
+        retained nor gets completed on a later publish."""
+        adapter = make_adapter(bandwidth_gb=0.001)
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(5)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = make_controller(l1_manager, [adapter])
         ctrl.start()
 
-        start = time.monotonic()
-        assert ctrl.wait_prefetch_result(999999, timeout=0.2) is False
-        assert time.monotonic() - start >= 0.2
+        req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+        cancelled = ctrl.watch_prefetch_result(req_id)
+        ref = weakref.ref(cancelled)
+        kept = ctrl.watch_prefetch_result(req_id)
+        assert cancelled.cancel()
+        del cancelled
+        gc.collect()
+        assert ref() is None
+
+        assert kept.result(timeout=10.0) is True
+        assert row_bits(ctrl.query_prefetch_result(req_id)) == [0, 1, 2, 3, 4]
+        l1_manager.finish_read(keys)
         ctrl.stop()
+        adapter.close()
+
+    def test_stop_completes_pending_watches(self, l1_manager):
+        """A watch still pending at stop completes with False."""
+        ctrl = make_controller(l1_manager, [])
+        ctrl.start()
+        watched = ctrl.watch_prefetch_result(999999)
+
+        ctrl.stop()
+        assert watched.result(timeout=0) is False
 
 
 # =============================================================================

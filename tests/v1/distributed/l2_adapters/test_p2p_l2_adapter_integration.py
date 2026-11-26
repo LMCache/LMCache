@@ -543,7 +543,7 @@ def test_p2p_store_policy_keeps_objects_local_until_the_usage_threshold() -> Non
             handle = main_sm.submit_prefetch_task(
                 single_row_spec(spilled, _LAYOUT, fetching_policy="full")
             )
-            assert main_sm.wait_prefetch_status(handle, timeout=10.0)
+            assert main_sm.watch_prefetch_status(handle).result(timeout=10.0)
             result = main_sm.query_prefetch_status(handle)
             assert result is not None
             assert result.l2_hit_cells[0].popcount() == len(spilled)

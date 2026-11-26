@@ -778,7 +778,9 @@ def test_tail_hit_past_an_engine_covered_prefix_is_counted(lookup_module):
 
     module.lookup(_key(tokens, 2 * CHUNK_SIZE, len(tokens), "r1"), tp_size=1)
 
-    assert module.wait_prefetch_status("r1", timeout=5.0) == len(tokens)
+    deferred = module.wait_prefetch_status("r1", timeout=5.0)
+    deferred.result(timeout=10)
+    assert deferred.resume() == len(tokens)
     meta = _end_metadata(module, "r1")
     assert meta["apc_covered_tokens"] == 2 * CHUNK_SIZE
     assert meta["requested_tokens"] == 5
@@ -866,7 +868,9 @@ def _lookup(
     grid: int = 0,
 ) -> int:
     module.lookup(_key(tokens, 0, end, request_id, grid), tp_size=1)
-    hits = module.wait_prefetch_status(request_id, timeout=5.0)
+    deferred = module.wait_prefetch_status(request_id, timeout=5.0)
+    deferred.result(timeout=10)
+    hits = deferred.resume()
     assert hits is not None
     return hits
 

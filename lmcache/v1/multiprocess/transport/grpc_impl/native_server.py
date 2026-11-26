@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, cast
+import functools
 import os
 import shutil
 import tempfile
@@ -22,7 +23,7 @@ from lmcache.v1.mp_observability.otel_init import (
     grpc_metrics_enabled,
     register_metrics_source,
 )
-from lmcache.v1.multiprocess.request_handler import HandlerType
+from lmcache.v1.multiprocess.request_handler import DeferredResponse, HandlerType
 from lmcache.v1.multiprocess.transport.grpc_impl.auth import AUTHENTICATION_ERROR
 from lmcache.v1.multiprocess.transport.grpc_impl.native_metrics import (
     native_metrics_source,
@@ -73,8 +74,6 @@ def _rejection(registered: GrpcRequestHandler) -> str | None:
     """Return why a method is answered with UNIMPLEMENTED, or None to serve it."""
     if registered.handler is None:
         return f"{registered.operation} is not enabled on this server"
-    if registered.handler_type not in (HandlerType.SERIALIZED, HandlerType.BLOCKING):
-        return f"{registered.handler_type.name} handlers are not supported"
     return None
 
 
@@ -381,6 +380,17 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
             # Only methods with a handler get a submitter.
             handler = cast(Callable[..., Any], registered.handler)
             result = handler(*registered.request_decoder(request))
+            if registered.handler_type is HandlerType.NON_BLOCKING:
+                deferred = cast(DeferredResponse[Any], result)
+                deferred.add_done_callback(
+                    functools.partial(
+                        self._schedule_non_blocking_resume,
+                        registered,
+                        call_id,
+                        deferred,
+                    )
+                )
+                return
             if method.server_streaming:
                 if not isinstance(result, MessagingStream):
                     raise TypeError(
@@ -405,6 +415,39 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
             self._fail_application(registered, call_id, exc)
             return
         front.respond(call_id, response)
+
+    def _schedule_non_blocking_resume(
+        self,
+        registered: GrpcRequestHandler,
+        call_id: int,
+        deferred: DeferredResponse[Any],
+        _ready: Future[Any],
+    ) -> None:
+        if self._closed.is_set():
+            return
+        try:
+            self._normal_pool.submit(
+                self._resume_non_blocking, registered, call_id, deferred
+            )
+        except RuntimeError:
+            if not self._closed.is_set():
+                raise
+
+    def _resume_non_blocking(
+        self,
+        registered: GrpcRequestHandler,
+        call_id: int,
+        deferred: DeferredResponse[Any],
+    ) -> None:
+        """Finish a NON_BLOCKING call on a normal worker and send its reply."""
+        try:
+            response = registered.response_encoder(
+                deferred.resume()
+            ).SerializeToString()
+        except Exception as exc:
+            self._fail_application(registered, call_id, exc)
+            return
+        self._front.respond(call_id, response)
 
     def _fail_application(
         self, registered: GrpcRequestHandler, call_id: int, exc: Exception

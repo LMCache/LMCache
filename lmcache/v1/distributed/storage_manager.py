@@ -6,6 +6,7 @@ Distributed multi-tier storage manager for MP mode
 # Standard
 from collections import Counter, defaultdict
 from collections.abc import Mapping
+from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import Any, Iterator, Optional, cast
 import threading
@@ -639,29 +640,27 @@ class StorageManager:
             )
         return result
 
-    def wait_prefetch_status(
+    def watch_prefetch_status(
         self,
         handle: PrefetchHandle,
-        timeout: float,
-    ) -> bool:
-        """
-        Block until the prefetch task for ``handle`` has a result, or timeout.
-
-        This lets a caller avoid busy-polling query_prefetch_status; the
-        status itself is still retrieved via query_prefetch_status afterwards.
+    ) -> Future[bool]:
+        """Return a future that completes when the prefetch task for ``handle``
+        has a result, without blocking the caller. The status itself is still
+        retrieved via query_prefetch_status afterwards.
 
         Args:
             handle (PrefetchHandle): The handle of the prefetch task.
-            timeout: Maximum number of seconds to wait for the result.
 
         Returns:
-            True if a result is available within the timeout, False if the
-            wait timed out.
+            A future that becomes True once the result is published, or False
+            if the controller stops first.
         """
         if handle.prefetch_request_id == -1:
-            return True
-        return self._prefetch_controller.wait_prefetch_result(
-            handle.prefetch_request_id, timeout
+            done: Future[bool] = Future()
+            done.set_result(True)
+            return done
+        return self._prefetch_controller.watch_prefetch_result(
+            handle.prefetch_request_id
         )
 
     def touch_cached_keys(self, keys: list[ObjectKey]) -> None:

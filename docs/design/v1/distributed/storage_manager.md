@@ -2,7 +2,7 @@
 
 Design notes for the prefetch entry points of
 `lmcache/v1/distributed/storage_manager.py`: `submit_prefetch_task`,
-`query_prefetch_status` and `wait_prefetch_status`. The storage manager owns
+`query_prefetch_status` and `watch_prefetch_status`. The storage manager owns
 the request handle and the logging; planning, locking and loading live in the
 prefetch controller (see
 [`storage_controllers/prefetch_controller.md`](storage_controllers/prefetch_controller.md)).
@@ -58,8 +58,9 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
   Callers fold `hit_cells` with `bitmap_ops.fold_unfold_grouped(rows,
   windows)`, passing each row's own `sliding_window_size`, to get the chunk
   hit count.
-- `wait_prefetch_status(handle, timeout) -> bool` blocks until the result is
-  published or the timeout elapses; it does not consume the result.
+- `watch_prefetch_status(handle) -> Future[bool]` returns a future that
+  completes when the result is published, without blocking; it does not
+  consume the result.
 - Validation happens in `PrefetchTaskSpec.__post_init__` and raises
   `ValueError`: empty `key_groups`, key groups of different sizes, and an
   unknown `fetching_policy`. `GroupedObjectKeys.__post_init__` rejects an

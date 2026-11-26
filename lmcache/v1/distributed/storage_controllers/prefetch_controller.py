@@ -17,6 +17,7 @@ releasing a request at any point is a walk over its maps.
 
 # Standard
 from collections import Counter, defaultdict, deque
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import enum
@@ -629,12 +630,14 @@ class PrefetchController(StorageControllerInterface):
         self._next_request_id: PrefetchRequestId = 0
         self._submission_efd = create_event_notifier()
 
-        # Thread-safe prefetch results (background -> external).  The condition
-        # variable lets a WAIT_PREFETCH_STATUS handler block until a result is
-        # published instead of busy-polling QUERY_PREFETCH_STATUS.
+        # Thread-safe prefetch results (background -> external).
         self._prefetch_results_lock = threading.Lock()
-        self._prefetch_results_cv = threading.Condition(self._prefetch_results_lock)
         self._completed_results: dict[PrefetchRequestId, PrefetchResult] = {}
+        # Futures from watch_prefetch_result waiting for a result; the thread
+        # that removes one from here is the one that completes it.
+        self._result_waiters: dict[PrefetchRequestId, list[Future[bool]]] = defaultdict(
+            list
+        )
 
         # Map eventfds to adapter indices for quick lookup in poll.
         # Relies on the L2AdapterInterface contract that every adapter
@@ -756,28 +759,40 @@ class PrefetchController(StorageControllerInterface):
         with self._prefetch_results_lock:
             return self._completed_results.pop(request_id, None)
 
-    def wait_prefetch_result(
-        self, request_id: PrefetchRequestId, timeout: float
-    ) -> bool:
-        """
-        Block until a prefetch request's result is published, or until timeout.
+    def watch_prefetch_result(self, request_id: PrefetchRequestId) -> Future[bool]:
+        """Return a future that completes when the request's result is
+        published, without blocking the caller.
 
-        Thread-safe. Lets a handler wait for prefetch completion instead of
-        busy-polling query_prefetch_result. Does not consume the result; the
-        caller still retrieves it via query_prefetch_result.
+        Thread-safe. It does not consume the result; the caller still
+        retrieves it via query_prefetch_result. Cancelling the future removes
+        the waiter.
 
         Args:
             request_id: The request ID from submit_prefetch_request.
-            timeout: Maximum number of seconds to wait for the result.
 
         Returns:
-            True if the result became available within the timeout, False if
-            the wait timed out.
+            A future that becomes True once the result is available, or
+            False if the controller stops first.
         """
-        with self._prefetch_results_cv:
-            return self._prefetch_results_cv.wait_for(
-                lambda: request_id in self._completed_results, timeout=timeout
-            )
+        future: Future[bool] = Future()
+        with self._prefetch_results_lock:
+            if request_id in self._completed_results:
+                future.set_result(True)
+                return future
+            self._result_waiters[request_id].append(future)
+
+        def _unwatch(done: Future[bool]) -> None:
+            if not done.cancelled():
+                return
+            with self._prefetch_results_lock:
+                waiters = self._result_waiters.get(request_id)
+                if waiters is not None and done in waiters:
+                    waiters.remove(done)
+                    if not waiters:
+                        del self._result_waiters[request_id]
+
+        future.add_done_callback(_unwatch)
+        return future
 
     def report_status(self) -> dict:
         """Return a status dict for the prefetch controller."""
@@ -889,6 +904,14 @@ class PrefetchController(StorageControllerInterface):
         self._submission_efd.notify()
         self._thread.join()
         self._cleanup_in_flight_requests()
+        with self._prefetch_results_lock:
+            waiters = [
+                future for group in self._result_waiters.values() for future in group
+            ]
+            self._result_waiters.clear()
+        for future in waiters:
+            if future.set_running_or_notify_cancel():
+                future.set_result(False)
         self._submission_efd.close()
         self._adapter_ctrl_efd.close()
 
@@ -1799,8 +1822,11 @@ class PrefetchController(StorageControllerInterface):
         """Store the request's result and wake any waiter."""
         with self._prefetch_results_lock:
             self._completed_results[request.request_id] = result
-            # Wake any WAIT_PREFETCH_STATUS handler blocked on this result.
-            self._prefetch_results_cv.notify_all()
+            waiters = self._result_waiters.pop(request.request_id, [])
+        # Outside the lock: a done-callback may query the result.
+        for future in waiters:
+            if future.set_running_or_notify_cancel():
+                future.set_result(True)
 
     def _abort_request(self, request: InFlightPrefetchRequest) -> None:
         """Give up on a request after an error: return everything it holds,

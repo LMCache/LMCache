@@ -119,7 +119,9 @@ class _Server:
     def load(self, tokens: list[int], request_id: str, start: int = 0) -> int | None:
         """LOOKUP ``tokens`` and wait for the prefetch; return the hit tokens."""
         self.lookup.lookup(_lookup_key(tokens, request_id, start), tp_size=1)
-        hit = self.lookup.wait_prefetch_status(request_id, WAIT_SECONDS)
+        deferred = self.lookup.wait_prefetch_status(request_id, WAIT_SECONDS)
+        deferred.result(timeout=WAIT_SECONDS)
+        hit = deferred.resume()
         _flush(self.bus)
         return hit
 
