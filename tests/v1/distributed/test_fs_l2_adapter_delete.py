@@ -228,3 +228,39 @@ class TestStoreLoadNotifications:
             time.sleep(0.01)
         assert bitmap is not None and bitmap.popcount() == 1
         assert listener.accessed == [k]
+
+
+def _long_key() -> ObjectKey:
+    """A key whose legacy name exceeds NAME_MAX, as in the filename tests."""
+    return ObjectKey(
+        chunk_hash=bytes(range(32)),
+        model_name="models--Qwen--Qwen3-1.7B/snapshots/" + "a" * 12,
+        kv_rank=1,
+        cache_salt="s" * 64,
+        tags={"kv_dtype": "f8pth", "revision": "abc123"},
+    )
+
+
+def test_a_long_name_key_stores_and_loads(adapter: AdapterFixture) -> None:
+    """The write and read paths must agree on the fallback name."""
+    adp, _listener = adapter
+    key = _long_key()
+    payload = b"z" * 64
+    _store_and_wait(adp, [key], [payload])
+
+    assert _lookup_and_wait(adp, [key]) == [True]
+
+    dst = _Buf(b"\x00" * len(payload))
+    task_id = adp.submit_load_task([key], cast("list[MemoryObj]", [dst]))
+    deadline = time.monotonic() + 5.0
+    bitmap = None
+    while time.monotonic() < deadline:
+        bitmap = adp.query_load_result(task_id)
+        if bitmap is not None:
+            break
+        time.sleep(0.01)
+    assert bitmap is not None and bitmap.popcount() == 1
+    assert bytes(dst.byte_array) == payload
+
+    adp.delete([key])
+    assert _lookup_and_wait(adp, [key]) == [False]

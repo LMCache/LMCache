@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Optional, Union
 import asyncio
 import ctypes
 import errno
+import hashlib
 import os
 import threading
 
@@ -160,9 +161,28 @@ async def _async_readinto_full(
     return total
 
 
+#: NAME_MAX is bytes, not characters, and the legacy key encoding reaches it
+#: once a long model path, a real 32-byte chunk hash, a salt and identity tags
+#: meet. Such a key still has to be storable, so it gets a digest name.
+_NAME_MAX_BYTES = 255
+_LONG_NAME_PREFIX = "l-"
+
+
 def _object_key_to_filename(key: ObjectKey) -> str:
-    """Return the filename shared by Python and native FS."""
-    return encode_fs_filename(key)
+    """Return the filename shared by Python and native FS.
+
+    A name that would exceed ``NAME_MAX`` is replaced by a digest, because the
+    key encoding is reversible only while it fits: a 32-byte hash costs 64 hex
+    characters, and the salt plus identity tags can push a previously valid
+    path over the limit. The digest keeps key -> path deterministic for
+    store/load/delete; :func:`_filename_to_object_key` returns ``None`` for
+    those names, so directory-wide tooling must use the key, not the name.
+    """
+    name = encode_fs_filename(key)
+    if len(name.encode()) <= _NAME_MAX_BYTES:
+        return name
+    digest = hashlib.sha256(name.encode()).hexdigest()
+    return f"{_LONG_NAME_PREFIX}{digest}.data"
 
 
 def _filename_to_object_key(
