@@ -46,7 +46,8 @@ def _key_to_filename_program(tmp_path: Path) -> Path:
 #include <iostream>
 #include "csrc/storage_backends/keys.h"
 int main(int argc, char** argv) {
-  std::cout << lmcache::connector::key_to_filename(argv[1]) << "\\n";
+  const bool shard = argc > 2 && std::string(argv[2]) == "shard";
+  std::cout << lmcache::connector::key_to_filename(argv[1], shard) << "\\n";
 }
 """
     )
@@ -89,3 +90,39 @@ def test_a_normal_name_is_still_the_legacy_encoding(tmp_path: Path) -> None:
 
     assert native == encode_fs_filename(key)
     assert native == _object_key_to_filename(key)
+
+
+def test_sharding_keeps_the_same_digest(tmp_path: Path) -> None:
+    """The shard prefix must wrap the digest, not change it."""
+    executable = _key_to_filename_program(tmp_path)
+    key = _long_key()
+
+    native = subprocess.check_output(
+        [str(executable), encode_storage_key(key), "shard"], text=True
+    ).strip()
+    digest = _object_key_to_filename(key)
+    chunk_hex = key.chunk_hash.hex()
+
+    assert native == f"{chunk_hex[:2]}/{chunk_hex[2:4]}/{digest}"
+    assert len(native.encode()) <= 255
+
+
+def test_a_non_ascii_model_hashes_the_same_bytes(tmp_path: Path) -> None:
+    """The digest is over UTF-8 bytes on both sides, not characters."""
+    executable = _key_to_filename_program(tmp_path)
+    key = ObjectKey(
+        identity=ObjectKeyIdentity(
+            chunk_hash=bytes(range(32)),
+            kv_rank=1,
+            model_name="models--" + "\u6a21\u578b" * 20,
+            cache_salt="s" * 64,
+            tags={"kv_dtype": "f8pth", "revision": "abc123"},
+        )
+    )
+
+    native = subprocess.check_output(
+        [str(executable), encode_storage_key(key)], text=True
+    ).strip()
+
+    assert native == _object_key_to_filename(key)
+    assert native.startswith("l-")
