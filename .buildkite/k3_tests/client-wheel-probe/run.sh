@@ -25,8 +25,10 @@ if [[ "${2:-}" != inside ]]; then
     if ! docker info >/dev/null 2>&1; then
         docker_cmd=(sudo -n docker)
     fi
-    "${docker_cmd[@]}" pull "$image"
-    "${docker_cmd[@]}" image inspect --format '{{index .RepoDigests 0}}' "$image" | tee "$out/image.txt"
+    if [[ "$backend" != musa ]] || ! "${docker_cmd[@]}" image inspect "$image" >/dev/null 2>&1; then
+        "${docker_cmd[@]}" pull "$image"
+    fi
+    "${docker_cmd[@]}" image inspect --format '{{.Id}} {{json .RepoDigests}}' "$image" | tee "$out/image.txt"
     "${docker_cmd[@]}" run --rm --shm-size=4g "${devices[@]}" \
         -v "$root:/checkout:ro" -v "$out:/evidence" -w /tmp \
         --entrypoint bash "$image" /checkout/.buildkite/k3_tests/client-wheel-probe/run.sh "$backend" inside
