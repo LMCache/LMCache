@@ -423,7 +423,7 @@ class MPCacheServerContext:
         session_ttl_seconds: float = SessionManager.DEFAULT_SESSION_TTL,
         requires_global_chunk_size: bool = False,
     ) -> None:
-        self._chunk_size = chunk_size
+        self._default_chunk_size = chunk_size
         self._null_block_id = null_block_id
         self._hash_algorithm = hash_algorithm
         self._requires_global_chunk_size = requires_global_chunk_size
@@ -434,11 +434,11 @@ class MPCacheServerContext:
             storage_manager_config
         )
         self._storage_manager = StorageManager(storage_manager_config)
-        self._token_hasher = TokenHasher(
+        self._default_token_hasher = TokenHasher(
             chunk_size=chunk_size, hash_algorithm=hash_algorithm
         )
         self._session_manager = SessionManager(
-            self._token_hasher, ttl=session_ttl_seconds
+            self._default_token_hasher, ttl=session_ttl_seconds
         )
         self._event_bus = get_event_bus()
         self._layout_desc_registry = LayoutDescRegistry()
@@ -451,9 +451,9 @@ class MPCacheServerContext:
         self._storage_manager.close()
 
     @property
-    def chunk_size(self) -> int:
+    def default_chunk_size(self) -> int:
         """Return the immutable server minimum chunk size."""
-        return self._chunk_size
+        return self._default_chunk_size
 
     @property
     def hash_algorithm_name(self) -> str:
@@ -471,15 +471,15 @@ class MPCacheServerContext:
                 differs from the server chunk size when one global size is
                 required.
         """
-        if chunk_size < self._chunk_size:
+        if chunk_size < self._default_chunk_size:
             raise ValueError(
                 f"chunk_size must be at least the server minimum "
-                f"{self._chunk_size}, got {chunk_size}"
+                f"{self._default_chunk_size}, got {chunk_size}"
             )
-        if self._requires_global_chunk_size and chunk_size != self._chunk_size:
+        if self._requires_global_chunk_size and chunk_size != self._default_chunk_size:
             raise ValueError(
                 "CacheBlend or Coordinator requires one global chunk size: "
-                f"the server uses {self._chunk_size}, but the KV cache "
+                f"the server uses {self._default_chunk_size}, but the KV cache "
                 f"registration uses {chunk_size}. Configure --chunk-size to a "
                 "value compatible with every connected model."
             )
@@ -521,9 +521,9 @@ class MPCacheServerContext:
         return session.get_prefetch_owners()
 
     @property
-    def token_hasher(self) -> TokenHasher:
-        """Return the single-size hasher retained for CacheBlend compatibility."""
-        return self._token_hasher
+    def default_token_hasher(self) -> TokenHasher:
+        """Return the token hasher built from the server defaults."""
+        return self._default_token_hasher
 
     @property
     def session_manager(self) -> SessionManager:

@@ -169,7 +169,7 @@ class ManagementModule(DiscoverableModule):
         Returns:
             The immutable server minimum chunk size.
         """
-        return self._ctx.chunk_size
+        return self._ctx.default_chunk_size
 
     @request_handler()
     def get_experimental(self) -> list[str]:

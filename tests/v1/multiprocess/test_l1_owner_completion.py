@@ -130,7 +130,7 @@ def test_store_owner_callback_round_trip(
     )
     keys = [ObjectKey(b"chunk", "model", 0, gid) for gid in range(2)]
     ctx = SimpleNamespace(
-        chunk_size=2,
+        default_chunk_size=2,
         null_block_id=0,
         storage_manager=storage,
         event_bus=MagicMock(),

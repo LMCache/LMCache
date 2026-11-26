@@ -89,7 +89,7 @@ class StoreMixin:
             session = self._ctx.session_manager.get(key.request_id)
             covered = session.extras.get(self.CACHED_CHUNKS_EXTRA) if session else None
             if covered:
-                cs = self._ctx.chunk_size
+                cs = self._ctx.default_chunk_size
                 extra["skip_chunks"] = [
                     i in covered for i in range(key.start // cs, key.end // cs)
                 ]
@@ -162,7 +162,7 @@ class StoreMixin:
                 return stored_mask[i] if i < len(stored_mask) else False
 
             jobs: list[FpJob] = []
-            chunk_size = self._ctx.chunk_size
+            chunk_size = self._ctx.default_chunk_size
             run_start: int | None = None
             for i in range(len(chunk_hashes) + 1):
                 if i < len(chunk_hashes) and _stored(i):
