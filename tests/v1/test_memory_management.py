@@ -9,7 +9,6 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
-from lmcache.v1.memory_allocators.host_memory_allocator import HostMemoryAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
     PagedTensorMemoryAllocator,
@@ -216,7 +215,6 @@ def test_tensor_allocator_zero_size_shape() -> None:
 @pytest.mark.parametrize(
     "alloc_cls",
     [
-        HostMemoryAllocator,
         PinMemoryAllocator,
         GPUMemoryAllocator,
         MixedMemoryAllocator,
@@ -252,7 +250,6 @@ def test_device_allocators(alloc_cls, use_paging):
 @pytest.mark.parametrize(
     "alloc_cls",
     [
-        HostMemoryAllocator,
         PinMemoryAllocator,
         GPUMemoryAllocator,
         MixedMemoryAllocator,
@@ -280,7 +277,6 @@ def test_inplace_modification(alloc_cls):
 @pytest.mark.parametrize(
     "alloc_cls",
     [
-        HostMemoryAllocator,
         PinMemoryAllocator,
         GPUMemoryAllocator,
         MixedMemoryAllocator,
@@ -318,7 +314,6 @@ def test_mixed_allocator_owns_returned_tensor_object():
 @pytest.mark.parametrize(
     "alloc_cls",
     [
-        HostMemoryAllocator,
         PinMemoryAllocator,
         GPUMemoryAllocator,
         MixedMemoryAllocator,

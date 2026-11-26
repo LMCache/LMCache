@@ -23,7 +23,7 @@ import threading
 import numpy as np
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
     UNKNOWN_TOKEN_OFFSET,
@@ -271,36 +271,6 @@ class KeyDirectory(View):
             self._blend_chunk_size = chunk_size
             self._blend_probe_stride = probe_stride
 
-    def bind_chunk_size(self, chunk_size: int) -> None:
-        """Rebuild the optional blend index for the fleet's finalized size."""
-        with self._lock:
-            if not self._blend_lookup_enabled or self._blend_chunk_size == chunk_size:
-                return
-
-            blend_index = BlendIndex(
-                chunk_size=chunk_size, probe_stride=self._blend_probe_stride
-            )
-            for chunk_hash, binding in self._token_bindings.items():
-                if (
-                    not binding.token_ids.size
-                    or binding.token_offset == UNKNOWN_TOKEN_OFFSET
-                ):
-                    continue
-                namespaces = {
-                    BlendNamespace.from_object_key(key) for key in binding.keys
-                }
-                for namespace in namespaces:
-                    if binding.is_missing_a_key_in(namespace):
-                        continue
-                    blend_index.add(
-                        binding.token_ids,
-                        chunk_hash,
-                        binding.token_offset,
-                        namespace,
-                    )
-            self._blend_index = blend_index
-            self._blend_chunk_size = chunk_size
-
     def consume(self, batch: CacheEventBatch) -> None:
         """Apply one gate-admitted batch, idempotently: re-storing
         upserts the placement (and its token binding), deleting an
@@ -362,6 +332,38 @@ class KeyDirectory(View):
             lookup_stats.chunks_found += chunks_found
             lookup_stats.chunks_found_per_request.observe(chunks_found)
 
+    def get_stored_keys_of_chunks(self, keys: list[ObjectKey]) -> list[ObjectKey]:
+        """Return every stored copy of the chunks ``keys`` name.
+
+        A key names its chunk: the copies are the stored keys that share its
+        chunk hash, model, cache salt, tags and world size, in any object
+        group and on any kv rank. A delete by key uses this, so any one of a
+        chunk's keys removes the whole chunk rather than one rank's share of
+        it. Another world size's copy is a different parallel setup's
+        object and is left alone.
+
+        Args:
+            keys: Keys naming the chunks.
+
+        Returns:
+            Each key, then the other stored copies of its chunk ordered by
+            ``(object_group_id, kv_rank)``; a key reached twice is returned
+            once, at its first position.
+        """
+        with self._lock:
+            stored_copies: dict[ObjectKey, None] = {}
+            for key in keys:
+                stored_copies[key] = None
+                stored_copies.update(
+                    dict.fromkeys(
+                        sorted(
+                            self._get_stored_copies_of_chunk(key),
+                            key=lambda copy: (copy.object_group_id, copy.kv_rank),
+                        )
+                    )
+                )
+            return list(stored_copies)
+
     def get_keys_across_object_groups(self, keys: list[ObjectKey]) -> list[ObjectKey]:
         """Return each key with its stored copies in other object groups.
 
@@ -383,6 +385,28 @@ class KeyDirectory(View):
                 key_in_each_group.sort(key=lambda group_key: group_key.object_group_id)
                 expanded_keys.extend(key_in_each_group)
             return expanded_keys
+
+    def _get_stored_copies_of_chunk(self, key: ObjectKey) -> list[ObjectKey]:
+        """Return the stored keys of ``key``'s chunk in its parallel setup:
+        same chunk hash, model, salt, tags and world size, any group or rank.
+
+        Call under the directory lock.
+        """
+        chunk_binding = self._token_bindings.get(key.chunk_hash)
+        if chunk_binding is None:
+            return []
+        world_size = ObjectKey.WorldSizeFromKVRank(key.identity.kv_rank)
+        return [
+            stored_key
+            for stored_key in chunk_binding.keys
+            if ObjectKey.WorldSizeFromKVRank(stored_key.identity.kv_rank) == world_size
+            and replace(
+                stored_key.identity,
+                object_group_id=key.identity.object_group_id,
+                kv_rank=key.identity.kv_rank,
+            )
+            == key.identity
+        ]
 
     def _get_stored_keys_in_other_groups(self, key: ObjectKey) -> list[ObjectKey]:
         """Return the stored keys that differ from ``key`` only in object group.

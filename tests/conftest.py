@@ -1,17 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-import importlib.util
 import os
 import time
 
 # Third Party
 import pytest
-
-if importlib.util.find_spec("pytest_benchmark") is None:
-
-    @pytest.fixture
-    def benchmark():
-        pytest.skip("pytest-benchmark is not installed")
 
 
 @pytest.fixture(scope="session", autouse=True)

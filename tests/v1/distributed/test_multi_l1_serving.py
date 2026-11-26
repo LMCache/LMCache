@@ -24,7 +24,6 @@ from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from tests.v1.distributed.utils import ROUND_ROBIN_WRITE_POLICY, single_row_spec
 import lmcache.v1.distributed.storage_manager as storage_module
 
-pytestmark = pytest.mark.no_shared_allocator
 LAYOUT = MemoryLayoutDesc([torch.Size([4096])], [torch.uint8])
 
 

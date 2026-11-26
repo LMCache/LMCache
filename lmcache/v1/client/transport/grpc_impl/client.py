@@ -17,11 +17,11 @@ import uuid
 import grpc
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.client.transport.grpc_impl.auth import (
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
+from lmcache.v1.transport.grpc.auth import (
     GrpcClientAuthenticationInterceptor,
 )
-from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 from lmcache.v1.transport.grpc.descriptors import (
     client_method_name,
     iter_methods,
@@ -201,8 +201,9 @@ class GrpcMultiprocessClient(RequestClient):
         if not _peer_speaks_zmtp(host, port):
             return
         self._wrong_transport = (
-            f"The server at {self._server_url} speaks ZMQ, not gRPC. Use "
-            f"tcp://{host}:{port}, or start the server with --transport grpc."
+            f"The server at {self._server_url} speaks ZMQ, not gRPC. Start "
+            "the server with --transport grpc, or use the deprecated "
+            f"tcp://{host}:{port} until it is upgraded."
         )
         logger.error("%s", self._wrong_transport)
         with self._pending_lock:

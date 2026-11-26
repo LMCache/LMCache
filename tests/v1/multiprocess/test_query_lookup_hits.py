@@ -47,7 +47,7 @@ def _captured_lookup_key_groups(
     # result before ``begin_lookup`` resets it.
     _sess = ctx.session_manager.get_or_create.return_value
     _sess.take_prefetch_release.return_value = None
-    ctx.chunk_size = 16
+    ctx.default_chunk_size = 16
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = MagicMock()  # non-None layout
     # lookup() requires a registered per-group layout map (it error-returns
@@ -121,7 +121,7 @@ def test_lookup_hashing_stops_at_key_end() -> None:
     # result before ``begin_lookup`` resets it.
     _sess = ctx.session_manager.get_or_create.return_value
     _sess.take_prefetch_release.return_value = None
-    ctx.chunk_size = 16
+    ctx.default_chunk_size = 16
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = MagicMock()
     token_hasher = MagicMock()
@@ -141,5 +141,5 @@ def test_lookup_hashing_stops_at_key_end() -> None:
     LookupModule(ctx).lookup(key, tp_size=1)
 
     token_hasher.compute_packed_chunk_hashes.assert_called_once_with(
-        pack_token_ids(range(32)), end=16
+        pack_token_ids(range(32)), start=0, end=16
     )

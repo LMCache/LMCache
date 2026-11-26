@@ -2,13 +2,11 @@
 """Shared context and layout descriptor registry for engine modules."""
 
 # Standard
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TypedDict
 import threading
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.attn_window import DEFAULT_ATTN_WINDOW_DESC, AttnWindowDesc
 from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_hasher import TokenHasher
@@ -21,10 +19,9 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.session import SessionManager
-
-logger = init_logger(__name__)
 
 
 class ShmPoolInfo(TypedDict):
@@ -53,6 +50,42 @@ class _LayoutDescEntry:
     shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC
     """How each object group is spread over the kv ranks; the default stores
     every group per rank."""
+
+
+def check_chunk_hash_key(ctx: "MPCacheServerContext", key: IPCCacheServerKey) -> None:
+    """Reject a chunk-hash key the server cannot use.
+
+    KV-event and coordinator reporting bind every stored chunk to its token
+    ids (``MP_TOKENS``) and drop store records that have none. A key carrying
+    client-computed chunk hashes has no token ids, so its stores would never
+    be reported. Its hashes must also be one per complete chunk of
+    ``[0, end)`` at the registration's chunk size (see
+    :meth:`IPCCacheServerKey.check_chunk_hash_count`); an unregistered key is
+    left to the caller.
+
+    Args:
+        ctx: The server context.
+        key: Key of an incoming lookup, lock release or transfer.
+
+    Raises:
+        ValueError: If ``key`` carries ``chunk_hashes`` while token bindings
+            have subscribers, or not one per complete chunk of ``[0, end)``.
+    """
+    if not key.chunk_hashes:
+        return
+    if ctx.event_bus.has_subscribers(EventType.MP_TOKENS):
+        raise ValueError(
+            "Keys carrying client-computed chunk hashes have no token ids, "
+            "which KV-event and coordinator reporting need; start the server "
+            "with --kv-event-log-size 0 (or --disable-observability) and "
+            "without --coordinator-event-reporting or --trace-level events, "
+            "or turn off client chunk hashes"
+        )
+    registry = ctx.layout_desc_registry
+    if registry.find(key.model_name, key.world_size) is not None:
+        key.check_chunk_hash_count(
+            registry.get_chunk_size(key.model_name, key.world_size)
+        )
 
 
 def finish_lookup_read(
@@ -367,15 +400,16 @@ class MPCacheServerContext:
 
     Args:
         storage_manager_config: Configuration for the storage manager.
-        chunk_size: Minimum chunk size for KV cache operations. vLLM connector
-            startup may negotiate this upward to satisfy model-specific KV
-            geometry.
+        chunk_size: Immutable server minimum chunk size for KV cache operations.
+            Clients resolve model-specific effective sizes before registration.
         hash_algorithm: Hash algorithm for token hashing.
         separate_object_groups: Whether to split kernel groups into one object
             group per sliding-window size at KV-cache registration. Default
             True.
         null_block_id: Engine block ID that denotes absent KV data.
         session_ttl_seconds: Idle seconds before a request session is reaped.
+        requires_global_chunk_size: Whether registrations must use the server
+            chunk size for CacheBlend or Coordinator compatibility.
     """
 
     def __init__(
@@ -387,17 +421,12 @@ class MPCacheServerContext:
         full_sw_kv: bool = False,
         null_block_id: int = 0,
         session_ttl_seconds: float = SessionManager.DEFAULT_SESSION_TTL,
+        requires_global_chunk_size: bool = False,
     ) -> None:
-        self._configured_chunk_size = chunk_size
-        self._chunk_size = chunk_size
+        self._default_chunk_size = chunk_size
         self._null_block_id = null_block_id
         self._hash_algorithm = hash_algorithm
-        self._session_ttl_seconds = session_ttl_seconds
-        self._chunk_size_lock = threading.Lock()
-        self._chunk_size_selected = False
-        self._chunk_size_finalized = False
-        self._chunk_size_bind_listeners: list[Callable[[int], None]] = []
-        self._next_chunk_size_bind_listener = 0
+        self._requires_global_chunk_size = requires_global_chunk_size
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
 
@@ -405,11 +434,11 @@ class MPCacheServerContext:
             storage_manager_config
         )
         self._storage_manager = StorageManager(storage_manager_config)
-        self._token_hasher = TokenHasher(
+        self._default_token_hasher = TokenHasher(
             chunk_size=chunk_size, hash_algorithm=hash_algorithm
         )
         self._session_manager = SessionManager(
-            self._token_hasher, ttl=session_ttl_seconds
+            self._default_token_hasher, ttl=session_ttl_seconds
         )
         self._event_bus = get_event_bus()
         self._layout_desc_registry = LayoutDescRegistry()
@@ -422,102 +451,38 @@ class MPCacheServerContext:
         self._storage_manager.close()
 
     @property
-    def chunk_size(self) -> int:
-        """Chunk size for KV cache operations."""
-        return self._chunk_size
-
-    @property
-    def finalized_chunk_size(self) -> int | None:
-        """Return the immutable chunk size, or ``None`` before negotiation."""
-        with self._chunk_size_lock:
-            return self._chunk_size if self._chunk_size_finalized else None
-
-    def finalize_chunk_size(self) -> int:
-        """Return the current chunk size and prevent future renegotiation."""
-        with self._chunk_size_lock:
-            self._chunk_size_selected = True
-            self._finalize_chunk_size_locked()
-            return self._chunk_size
+    def default_chunk_size(self) -> int:
+        """Return the immutable server minimum chunk size."""
+        return self._default_chunk_size
 
     @property
     def hash_algorithm_name(self) -> str:
         """Hash algorithm used for token hashing."""
         return self._hash_algorithm
 
-    def negotiate_chunk_size(self, required_alignment: int) -> int:
-        """Negotiate the server chunk size against model geometry.
+    def validate_chunk_size(self, chunk_size: int) -> None:
+        """Validate an effective chunk size against server-wide constraints.
 
         Args:
-            required_alignment: The least common multiple of all positive
-                cacheable ``tokens_per_block`` values for the registering
-                model.
-
-        Returns:
-            The concrete server chunk size.
+            chunk_size: Effective logical tokens per registered chunk.
 
         Raises:
-            ValueError: If ``required_alignment`` is not positive, if an
-                already-finalized chunk size is incompatible with
-                ``required_alignment``, or if a resize is requested after
-                sessions already exist.
+            ValueError: If the size is below the server chunk size, or
+                differs from the server chunk size when one global size is
+                required.
         """
-        if required_alignment < 1:
+        if chunk_size < self._default_chunk_size:
             raise ValueError(
-                f"required_chunk_alignment must be positive, got {required_alignment}"
+                f"chunk_size must be at least the server minimum "
+                f"{self._default_chunk_size}, got {chunk_size}"
             )
-        with self._chunk_size_lock:
-            if self._chunk_size_selected:
-                if self._chunk_size % required_alignment == 0:
-                    self._finalize_chunk_size_locked()
-                    return self._chunk_size
-                raise ValueError(
-                    f"LMCache chunk size {self._chunk_size} must be a multiple "
-                    f"of required chunk alignment {required_alignment}. This MP "
-                    f"server has already selected its chunk size; models that "
-                    f"require incompatible alignments must use separate MP servers."
-                )
-
-            resolved = _round_up_to_multiple(
-                self._configured_chunk_size, required_alignment
+        if self._requires_global_chunk_size and chunk_size != self._default_chunk_size:
+            raise ValueError(
+                "CacheBlend or Coordinator requires one global chunk size: "
+                f"the server uses {self._default_chunk_size}, but the KV cache "
+                f"registration uses {chunk_size}. Configure --chunk-size to a "
+                "value compatible with every connected model."
             )
-            if resolved != self._chunk_size:
-                if self._session_manager.active_count():
-                    raise ValueError(
-                        "Cannot negotiate LMCache chunk size after sessions "
-                        "have started"
-                    )
-                self._bind_chunk_size_locked(resolved)
-            self._chunk_size_selected = True
-            self._finalize_chunk_size_locked()
-            if resolved != self._configured_chunk_size:
-                logger.info(
-                    "Negotiated LMCache MP chunk size to %d "
-                    "(configured_min=%d, required_alignment=%d)",
-                    resolved,
-                    self._configured_chunk_size,
-                    required_alignment,
-                )
-            return resolved
-
-    def _finalize_chunk_size_locked(self) -> None:
-        """Notify dependents, then commit the current size as immutable.
-
-        A listener may perform a remote update and fail transiently. Keep the
-        size unfinalized until every listener succeeds so the next negotiation
-        retries the notification instead of returning a false success.
-        """
-        if self._chunk_size_finalized:
-            return
-        listeners = list(self._chunk_size_bind_listeners)
-        while self._next_chunk_size_bind_listener < len(listeners):
-            listener = listeners[self._next_chunk_size_bind_listener]
-            listener(self._chunk_size)
-            self._next_chunk_size_bind_listener += 1
-        self._chunk_size_finalized = True
-
-    def add_chunk_size_bind_listener(self, listener: Callable[[int], None]) -> None:
-        """Register a callback for chunk-size changes during negotiation."""
-        self._chunk_size_bind_listeners.append(listener)
 
     @property
     def null_block_id(self) -> int:
@@ -556,9 +521,9 @@ class MPCacheServerContext:
         return session.get_prefetch_owners()
 
     @property
-    def token_hasher(self) -> TokenHasher:
-        """The token hasher for computing chunk hashes."""
-        return self._token_hasher
+    def default_token_hasher(self) -> TokenHasher:
+        """Return the token hasher built from the server defaults."""
+        return self._default_token_hasher
 
     @property
     def session_manager(self) -> SessionManager:
@@ -581,7 +546,8 @@ class MPCacheServerContext:
         """Resolve per-object-group object keys from an IPC cache key.
 
         Uses the session manager to track token state and the token hasher
-        to compute chunk hashes for the requested range. A partial chunk
+        to compute chunk hashes for the requested range; a key carrying
+        client-computed chunk hashes supplies them directly. A partial chunk
         past the last chunk boundary is not included; see
         :meth:`resolve_unfull_chunk_obj_keys`.
 
@@ -594,9 +560,13 @@ class MPCacheServerContext:
             ``object_group_ids[i]``.
 
         Raises:
-            ValueError: If ``key.worker_id`` is ``None``, or no KV cache is
-                registered for the key's ``(model_name, world_size)``.
+            ValueError: If ``key.worker_id`` is ``None``, no KV cache is
+                registered for the key's ``(model_name, world_size)``, or
+                the key carries chunk hashes while cache events need token
+                ids or not one per complete chunk of ``[0, end)`` (see
+                :func:`check_chunk_hash_key`).
         """
+        check_chunk_hash_key(self, key)
         chunk_size = self.layout_desc_registry.get_chunk_size(
             key.model_name, key.world_size
         )
@@ -604,7 +574,7 @@ class MPCacheServerContext:
             key.model_name, key.world_size
         )
         session = self.session_manager.get_or_create(key.request_id, token_hasher)
-        session.set_tokens(key.token_bytes)
+        session.update_from_key(key)
         if session.lookup_ipc_key is None:
             session.lookup_ipc_key = key.no_worker_id_version()
         # A partial chunk past the last chunk boundary is not a full chunk;
@@ -624,7 +594,10 @@ class MPCacheServerContext:
         )
 
     def resolve_unfull_chunk_obj_keys(
-        self, key: IPCCacheServerKey, object_group_ids: list[int]
+        self,
+        key: IPCCacheServerKey,
+        object_group_ids: list[int],
+        chunk_size: int,
     ) -> list[ObjectKey]:
         """Resolve the object key of the unfull chunk that ends ``key``'s range.
 
@@ -632,9 +605,11 @@ class MPCacheServerContext:
             key: IPC cache key whose ``end`` is not chunk-aligned (see
                 :meth:`IPCCacheServerKey.has_unfull_chunk`).
             object_group_ids: Object group ids to produce keys for.
+            chunk_size: Effective full chunk size of the registered context.
 
         Returns:
-            One object key per entry of ``object_group_ids``, in order.
+            One object key per entry of ``object_group_ids``, in order. Each
+            key is tagged with the registration's effective full chunk size.
 
         Raises:
             ValueError: If ``key.worker_id`` is ``None`` or ``key.end`` is
@@ -657,6 +632,7 @@ class MPCacheServerContext:
                 self.layout_desc_registry.find_shard_replication_desc(
                     key.model_name, key.world_size
                 ),
+                chunk_size,
             )
         ]
 
@@ -680,27 +656,3 @@ class MPCacheServerContext:
         if not bare.startswith("lmcache_l1_pool_"):
             shm_name = f"lmcache_l1_pool_{bare}"
         return {"shm_name": shm_name, "pool_size": mem_cfg.size_in_bytes}
-
-    def _bind_chunk_size_locked(self, chunk_size: int) -> None:
-        """Initialize runtime state that depends on a concrete chunk size."""
-        previous_session_manager = getattr(self, "_session_manager", None)
-        destroy_listeners = (
-            list(previous_session_manager.destroy_listeners)
-            if previous_session_manager is not None
-            else []
-        )
-        if previous_session_manager is not None:
-            previous_session_manager.close()
-        self._chunk_size = chunk_size
-        self._token_hasher = TokenHasher(
-            chunk_size=chunk_size, hash_algorithm=self._hash_algorithm
-        )
-        self._session_manager = SessionManager(
-            self._token_hasher, ttl=self._session_ttl_seconds
-        )
-        self._session_manager.destroy_listeners.extend(destroy_listeners)
-
-
-def _round_up_to_multiple(value: int, multiple: int) -> int:
-    """Round *value* up to a positive multiple of *multiple*."""
-    return ((value + multiple - 1) // multiple) * multiple

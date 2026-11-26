@@ -95,11 +95,7 @@ BUILD_WITH_HIP=1 pip install -e .
 
 ```bash
 # Run standard test suite (mirrors CI)
-pytest -xvs --ignore=tests/disagg \
- --ignore=tests/v1/multiprocess/ \
- --ignore=tests/v1/distributed/ \
- --ignore=tests/skipped \
- --ignore=tests/inprocess/v1/storage_backend/test_eic.py
+pytest -xvs --ignore=tests/skipped
 
 # Run a single test file
 pytest -xvs tests/v1/test_kv_cache_groups.py
@@ -110,7 +106,9 @@ pytest -xvs tests/v1/test_kv_cache_groups.py::test_function_name
 
 Test dependencies: `uv pip install -r requirements/test.txt`
 
-Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
+Shared APIs used by the external in-process engine have contract tests under
+`tests/v1/inprocess_contract/`. MP CacheBlend scatter is covered in
+`tests/v1/multiprocess/test_cb_plan_executor_gpu.py`.
 
 ### CPU-only connector import checks
 
@@ -127,14 +125,14 @@ device and rejects the automatic CUDA VMM export mode on CPU.
 Use Python 3.12 with PyTorch and the common native extensions installed.
 A fresh worktree does not include ignored native build artifacts; build them
 with `NO_GPU_EXT=1 python setup.py build_ext --inplace` before running layout
-and connector import tests. For these focused checks, use
-`python -m pytest --confcutdir=tests/v1 tests/v1/gpu_connector/` so the root
-`tests/conftest.py` GPU allocator fixtures are not loaded. This validates CPU
-imports and shared layout/GDS behavior, not accelerator kernel roundtrips.
-When combining these tests with `tests/inprocess/`, use `--noconftest` for
-self-contained CPU checks spanning both trees; normal accelerator CI must
-retain the root fixtures. Mirrored test directories with identical module
-names need package `__init__.py` files to avoid pytest import mismatches.
+and connector import tests. `build_ext` does not generate the ignored gRPC
+bindings. Before running multiprocess tests in a fresh checkout, install
+`requirements/proto.txt` and run
+`python lmcache/v1/transport/grpc/_proto_gen/_generate.py` from the repo root;
+this generates both transport and memory-orchestrator bindings in dependency
+order. For focused CPU layout and shared API checks, run
+`python -m pytest -q tests/v1/gpu_connector/ tests/v1/inprocess_contract/`
+in the CPU-only environment. Accelerator CI also runs the hardware-gated cases.
 
 ### Test-First Workflow
 

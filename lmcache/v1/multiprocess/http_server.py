@@ -14,7 +14,7 @@ import uvicorn
 
 # First Party
 from lmcache import torch_dev
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
@@ -56,6 +56,7 @@ from lmcache.v1.multiprocess.http_auth import (
     HTTPAuthenticationConfig,
     HTTPAuthenticationMiddleware,
 )
+from lmcache.v1.multiprocess.http_reconfigure import ReconfigureInstanceMiddleware
 from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
     MPRuntimePluginLauncher,
 )
@@ -220,7 +221,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 p2p_advertised_url=mp_config.p2p_config.advertise_url,
                 mq_port=engine.mq_port,
                 on_registered=engine.storage_manager.publish_capacity,
-                chunk_size_provider=lambda: engine.context.finalized_chunk_size,
+                chunk_size=engine.context.default_chunk_size,
             )
         )
     # Optionally emit cache events: to the coordinator, to an events-level
@@ -265,6 +266,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="LMCache HTTP API", version="1.0.0", lifespan=lifespan)
 app.state.http_authentication = HTTPAuthenticationConfig()
+app.add_middleware(ReconfigureInstanceMiddleware)
 app.add_middleware(HTTPAuthenticationMiddleware)
 
 # Automatically discover and register all HTTP API endpoints

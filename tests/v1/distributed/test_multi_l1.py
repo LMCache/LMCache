@@ -45,8 +45,6 @@ from tests.v1.distributed.utils import (
 )
 import lmcache.v1.memory_management as memory_management
 
-pytestmark = pytest.mark.no_shared_allocator
-
 LAYOUT = MemoryLayoutDesc(shapes=[torch.Size([1024])], dtypes=[torch.float32])
 DRAM_LOCAL = MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)
 StorageFactory = Callable[..., tuple[StorageManager, tuple[BaseL1Manager, ...]]]

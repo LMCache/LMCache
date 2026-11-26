@@ -82,7 +82,6 @@ from lmcache.v1.distributed.internal_api import L2StoreResult
         pytest.param([(None, 0)], 0, [], 1, 0, id="single-timeout"),
     ],
 )
-@pytest.mark.no_shared_allocator
 def test_benchmark_excludes_warmup_from_reported_metrics(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

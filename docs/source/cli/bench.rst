@@ -18,7 +18,7 @@ layer of the stack:
        exercise different KV-cache reuse patterns.
    * - ``server``
      - End-to-end sanity test against a running LMCache MP cache server
-       (ZMQ + HTTP). Requires the full ``lmcache`` install and a GPU.
+       (gRPC + HTTP). Requires the full ``lmcache`` install and a GPU.
    * - ``l2``
      - Throughput / latency benchmark against an L2 cache adapter
        (store / lookup / load).
@@ -1034,7 +1034,7 @@ server
 
 The ``lmcache bench server`` command is an end-to-end sanity test for the
 LMCache Multi-Process (MP) cache server. It connects to a running server
-over ZMQ and exercises the full KV-cache data path for a sequence of
+over gRPC and exercises the full KV-cache data path for a sequence of
 synthetic requests, then verifies per-chunk checksums in local worker buffers.
 
 .. code-block:: bash
@@ -1043,7 +1043,7 @@ synthetic requests, then verifies per-chunk checksums in local worker buffers.
 
 Unlike :ref:`lmcache bench engine <lmcache-bench-engine>`, this command does
 **not** require an inference engine. It only needs a running LMCache MP
-server (ZMQ). GPU mode additionally requires a CUDA-capable device.
+server. GPU mode additionally requires a CUDA-capable device.
 It also requires the full ``lmcache`` install (not the lightweight
 ``lmcache-cli`` package).
 
@@ -1096,7 +1096,7 @@ Then in another terminal:
 .. code-block:: bash
 
    lmcache bench server \
-       --rpc-url tcp://localhost:15556 \
+       --rpc-url grpc://localhost:15556 \
        --url http://localhost:8080
 
 By default the tool runs forever (``--end`` unset); stop it with
@@ -1114,8 +1114,9 @@ Options
      - Default
      - Description
    * - ``--rpc-url URL``
-     - ``tcp://localhost:5555``
-     - ZMQ endpoint of the MP cache server.
+     - ``grpc://localhost:5555``
+     - Request endpoint of the MP cache server. A ``tcp://`` URL selects the
+       deprecated ZMQ transport.
    * - ``--url URL``
      - ``http://localhost:8080``
      - HTTP endpoint for checksum verification in ``lmcache_driven`` mode.
@@ -1236,7 +1237,7 @@ it. To use the zero-copy SHM handle path instead, pass
 
    # Terminal 2 -- run bench in CPU + lmcache_driven mode
    lmcache bench server \
-       --rpc-url tcp://localhost:5555 \
+       --rpc-url grpc://localhost:5555 \
        --url http://localhost:8080 \
        --mode cpu --transfer-mode lmcache_driven \
        --start 0 --end 2
@@ -1261,7 +1262,7 @@ Fields:
 * ``HS`` -- head size (in elements).
 * ``dtype`` -- element dtype (e.g. ``float16``, ``bfloat16``, ``float32``,
   ``uint8``). The full set matches the keys of ``DTYPE_MAP`` in
-  ``lmcache/v1/kv_layer_groups.py``.
+  ``lmcache/v1/common/kv_layer_groups.py``.
 * ``layers`` -- number of layers in this group.
 
 Multi-group specs let you model heterogeneous layers (for example, MLA
@@ -1270,7 +1271,7 @@ layers + classical attention layers in the same model):
 .. code-block:: bash
 
    lmcache bench server \
-       --rpc-url tcp://localhost:15556 \
+       --rpc-url grpc://localhost:15556 \
        --kvcache-shape-spec "(1,1024,16,1,128):float16:4;(2,1024,16,8,128):float16:28"
 
 All groups must share the same ``NB`` and ``BS`` (this is a physical
@@ -1295,7 +1296,7 @@ Pure MLA example (DeepSeek-V2-style, 61 layers, single latent head):
 .. code-block:: bash
 
    lmcache bench server \
-       --rpc-url tcp://localhost:15556 \
+       --rpc-url grpc://localhost:15556 \
        --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:61"
 
 Both transfer modes support MLA:
@@ -1339,7 +1340,7 @@ Example: MLA + TP=2, exercising rank 0 STORE + both-rank RETRIEVE:
 .. code-block:: bash
 
    lmcache bench server \
-       --rpc-url tcp://localhost:15556 \
+       --rpc-url grpc://localhost:15556 \
        --mode cpu --transfer-mode lmcache_driven \
        --kvcache-shape-spec "(1,1024,16,1,128):bfloat16:8" \
        --tp-size 2
@@ -1348,7 +1349,7 @@ Replicated readers use their writer's KV identity for deterministic filling.
 The bench verifies retrieved data on every rank and reports the rank and
 chunk for checksum mismatches.
 
-See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
+See ``parse_kvcache_shape_spec`` in ``lmcache/v1/common/kv_layer_groups.py``
 for the authoritative parsing rules and validation errors.
 
 
@@ -1366,7 +1367,7 @@ keys and the cold/warm checks stay valid.
 .. code-block:: bash
 
    lmcache bench server \
-       --rpc-url tcp://localhost:5555 --mode cpu \
+       --rpc-url grpc://localhost:5555 --mode cpu \
        --start 0 --end 400 --interval 0 --concurrency 8
 
 The summary adds ``Concurrency``, ``Elapsed (s)``, and ``Requests / s``.
@@ -1387,7 +1388,7 @@ affected warm lookups miss and fail their checks.
 Profiling the server
 ~~~~~~~~~~~~~~~~~~~~~
 
-``lmcache bench server`` is a ZMQ client: the store path it exercises
+``lmcache bench server`` is a request client: the store path it exercises
 (hashing, allocation, gather, D2H) runs inside the **server** process, not
 this benchmark. ``--flamegraph on`` therefore attaches the profiler to a
 server pid you supply, records for the duration of the load, and renders a
@@ -1396,7 +1397,7 @@ flame graph of the server, not of the client.
 .. code-block:: bash
 
    lmcache bench server \
-       --rpc-url tcp://localhost:5555 \
+       --rpc-url grpc://localhost:5555 \
        --start 0 --end 200 --interval 0.02 \
        --flamegraph on --flamegraph-mode gil \
        --profile-server-pid "$(pgrep -f 'lmcache server')"
@@ -1441,7 +1442,7 @@ to save the summary to a file.
 
    ================ Server Bench Result =================
    ---------------------- Configuration -----------------
-   RPC URL:                          tcp://localhost:15556
+   RPC URL:                          grpc://localhost:15556
    Mode:                             gpu
    Transfer mode:                    auto
    Tokens / request:                 512
@@ -1490,7 +1491,7 @@ During the run, progress messages are printed to stdout (suppressed by
 
 .. code-block:: text
 
-   Connecting to LMCache MP Server at tcp://localhost:15556 (mode=gpu) ...
+   Connecting to LMCache MP Server at grpc://localhost:15556 (mode=gpu) ...
    Server chunk_size = 256
    Resolved KV shape spec: (2,1024,16,8,128):float16:32
    [seq=0] LOOKUP cold:  0/2 chunks hit (1.82 ms)

@@ -1,0 +1,52 @@
+{
+  "description": "What the Intel XPU weekly full build runs and what counts as a successful full run. Read by .github/scripts/weekly_full_build.py.",
+  "organization": "lmcache",
+  "branch": "ci-weekly-full",
+  "env": {
+    "CI_WEEKLY_FULL": "1"
+  },
+  "suite_skip_annotations": [
+    "path-filter-skip",
+    "skip expensive ci",
+    "mp-heavy-skip"
+  ],
+  "workload_skip_annotation_prefix": "weekly-skip-",
+  "expected_unsupported": [],
+  "pipelines": [
+    {
+      "slug": "unit-tests-xpu",
+      "name": "XPU unit tests (1 XPU)",
+      "required": [
+        "^:intel-xpu-unit-tests$"
+      ],
+      "not_run_allowed": []
+    },
+    {
+      "slug": "xpu-mp-test",
+      "name": "XPU multiprocess matrix",
+      "required": [
+        "^:xpu: lm_eval_full_attn / engine_driven / inline$",
+        "^:xpu: lm_eval_full_attn / engine_driven / shm$",
+        "^:xpu: lm_eval_gdn / engine_driven / inline$",
+        "^:xpu: lm_eval_gdn / engine_driven / shm$",
+        "^:xpu: hma_kda_mla_correctness / engine_driven / inline$",
+        "^:xpu: hma_kda_mla_correctness / engine_driven / shm$",
+        "^:xpu: hma_swa_correctness / engine_driven / inline$",
+        "^:xpu: hma_swa_correctness / engine_driven / shm$",
+        "^:xpu: long_doc_qa_l2 / engine_driven / shm$",
+        "^:xpu: hma_dsv4_correctness / engine_driven / shm / grpc$",
+        "^:xpu: preemption_correctness / engine_driven / shm / async$",
+        "^:xpu: fault_tolerance / engine_driven / shm$",
+        "^:xpu: restart_recovery / engine_driven / shm$",
+        "^:xpu: mp_autostart_tp2 / engine_driven / shm$",
+        "^:xpu: long_doc_qa / engine_driven / shm$",
+        "^:xpu: p2p / engine_driven$",
+        "^:xpu: vllm_bench$",
+        "^:xpu: cache_stats$",
+        "^:xpu: lazy_offload$",
+        "^:xpu: http_api$"
+      ],
+      "not_run_allowed": []
+    }
+  ]
+}
