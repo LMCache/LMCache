@@ -146,12 +146,6 @@ def check_dax_range(device_path: str, fd: int, offset: int, size: int) -> None:
         )
 
 
-# Math utility functions
-def cdiv(a: int, b: int) -> int:
-    """Ceiling division."""
-    return -(a // -b)
-
-
 def compress_slot_mapping(slots: list[int]) -> list[Union[int, list[int]]]:
     """Compress a list of slot indices into ranges while preserving order.
 
