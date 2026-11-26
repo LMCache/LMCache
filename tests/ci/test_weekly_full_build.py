@@ -18,6 +18,7 @@ import subprocess
 
 # Third Party
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / ".github/scripts/weekly_full_build.py"
@@ -52,7 +53,11 @@ def _label_for(pattern: str) -> str:
         .rstrip("$")
         .replace("(?!preemption )[a-z_]+", "lmcache_driven")
     )
-    return label if label.startswith(":") else f":compression: vllm{label}zmq"
+    if label.startswith(":"):
+        return label
+    if pattern.startswith("^") and pattern.endswith("$"):
+        return re.sub(r"\\([()+])", r"\1", label)
+    return f":compression: vllm{label}zmq"
 
 
 def _passing_builds(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -98,14 +103,30 @@ def test_required_job_that_did_not_pass_fails_the_run(
     assert kind in _kinds(report)
 
 
+@pytest.mark.parametrize(
+    ("slug", "jobs", "context"),
+    [
+        ("k3-unit-tests", [_job(":pipeline: Upload pipeline")], "path-filter-skip"),
+        (
+            "k3-multiprocess-test",
+            [
+                _job(":fast_forward: Skip expensive multiprocess CI"),
+                _job(":pipeline: Upload pipeline", "broken"),
+            ],
+            "skip expensive ci",
+        ),
+    ],
+)
 def test_skipped_suite_fails_even_when_the_build_is_green(
-    gate: ModuleType, manifest: dict
+    gate: ModuleType,
+    manifest: dict,
+    slug: str,
+    jobs: list[dict[str, Any]],
+    context: str,
 ) -> None:
     builds = _passing_builds(manifest)
-    builds["k3-unit-tests"]["jobs"] = [_job(":pipeline: Upload pipeline")]
-    annotations = {
-        "k3-unit-tests": [{"context": "path-filter-skip", "body_html": "Skipped"}]
-    }
+    builds[slug]["jobs"] = jobs
+    annotations = {slug: [{"context": context, "body_html": "Skipped"}]}
     report = gate.evaluate(manifest, builds, annotations)
     assert not report["passed"]
     assert {"missing", "suite_skipped"} <= _kinds(report)
@@ -130,12 +151,45 @@ def test_unsupported_workload_skip_fails_unless_expected(
     assert gate.evaluate(expected, builds, annotations)["passed"]
 
 
-def test_pin_steps_that_never_run_are_allowed(gate: ModuleType, manifest: dict) -> None:
+def test_manifest_allows_expected_sglang_unsupported_skips(
+    gate: ModuleType, manifest: dict
+) -> None:
     builds = _passing_builds(manifest)
-    builds["k3-multiprocess-test"]["jobs"] += [
-        _job(":test_tube: Verify SGLang nightly / zmq", "broken"),
-        _job(":pushpin: Pin verified vLLM nightly", "broken"),
-    ]
+    annotations = {
+        "k3-multiprocess-test": [
+            {
+                "context": f"weekly-skip-{i}",
+                "body_html": (
+                    "<p>Skipped as unsupported: "
+                    f"<code>:compression: sglang / {workload} / grpc</code></p>"
+                ),
+            }
+            for i, workload in enumerate(
+                [
+                    "deadlock",
+                    "long_doc_qa_l2",
+                    "lm_eval_preemption / lmcache_driven",
+                    "lm_eval_preemption / engine_driven",
+                ]
+            )
+        ]
+    }
+    assert gate.evaluate(manifest, builds, annotations)["passed"]
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        ":test_tube: Verify SGLang nightly / zmq",
+        ":pushpin: Pin verified vLLM nightly",
+        ":fast_forward: Skip expensive multiprocess CI",
+    ],
+)
+def test_allowed_not_run_steps_may_stay_broken(
+    gate: ModuleType, manifest: dict, label: str
+) -> None:
+    builds = _passing_builds(manifest)
+    builds["k3-multiprocess-test"]["jobs"].append(_job(label, "broken"))
     assert gate.evaluate(manifest, builds, {})["passed"]
 
 
@@ -247,6 +301,86 @@ def test_every_multiprocess_workload_is_required(manifest: dict) -> None:
     assert not unlisted, f"add these workloads to {MANIFEST.name}: {sorted(unlisted)}"
 
 
+@pytest.mark.parametrize(
+    "manifest_rel",
+    [
+        ".buildkite/k3_tests/weekly/manifest-xpu.json",
+        ".buildkite/k3_tests/weekly/manifest-amd.json",
+        ".buildkite/k3_tests/weekly/manifest-rbln.json",
+    ],
+)
+def test_complete_vendor_passing_run_passes(
+    gate: ModuleType, manifest_rel: str
+) -> None:
+    vendor_manifest = json.loads((REPO / manifest_rel).read_text(encoding="utf-8"))
+    report = gate.evaluate(vendor_manifest, _passing_builds(vendor_manifest), {})
+    assert report["passed"], report
+
+
+def _expand_step_labels(pipeline: dict[str, Any]) -> list[str]:
+    """Expand Buildkite pipeline step/group labels across matrix combinations."""
+    # Standard
+    import itertools
+
+    labels: list[str] = []
+    for item in pipeline["steps"]:
+        steps = item.get("steps", [item]) if "steps" in item else [item]
+        for step in steps:
+            raw = step["label"]
+            setup = step.get("matrix", {}).get("setup", {})
+            if not setup:
+                labels.append(raw)
+                continue
+            keys = list(setup.keys())
+            for combo in itertools.product(*(setup[k] for k in keys)):
+                lbl = raw
+                for k, v in zip(keys, combo, strict=True):
+                    lbl = lbl.replace(f"{{{{matrix.{k}}}}}", str(v))
+                labels.append(lbl)
+    return labels
+
+
+@pytest.mark.parametrize(
+    ("manifest_rel", "slug", "pipeline_rel"),
+    [
+        (
+            ".buildkite/k3_tests/weekly/manifest-xpu.json",
+            "unit-tests-xpu",
+            ".buildkite/k3_tests/xpu/unittests/pipeline.yml",
+        ),
+        (
+            ".buildkite/k3_tests/weekly/manifest-xpu.json",
+            "xpu-mp-test",
+            ".buildkite/k3_tests/xpu/multiprocess/pipeline.yml",
+        ),
+        (
+            ".buildkite/k3_tests/weekly/manifest-amd.json",
+            "amd-mp-test",
+            ".buildkite/k3_tests/amd/pipeline.yml",
+        ),
+        (
+            ".buildkite/k3_tests/weekly/manifest-rbln.json",
+            "rbln-mp-test",
+            ".buildkite/k3_tests/rbln/pipeline.yml",
+        ),
+    ],
+)
+def test_every_vendor_job_is_required(
+    manifest_rel: str, slug: str, pipeline_rel: str
+) -> None:
+    """Every expanded job in a vendor pipeline must match its weekly manifest."""
+    vendor_manifest = json.loads((REPO / manifest_rel).read_text(encoding="utf-8"))
+    pipeline = yaml.safe_load((REPO / pipeline_rel).read_text(encoding="utf-8"))
+    labels = _expand_step_labels(pipeline)
+
+    spec = next(p for p in vendor_manifest["pipelines"] if p["slug"] == slug)
+    patterns = [re.compile(p) for p in spec["required"]]
+    unmatched = [lbl for lbl in labels if not any(p.search(lbl) for p in patterns)]
+    unused = [p.pattern for p in patterns if not any(p.search(lbl) for lbl in labels)]
+    assert not unmatched, f"add these jobs to {manifest_rel} ({slug}): {unmatched}"
+    assert not unused, f"unused patterns in {manifest_rel} ({slug}): {unused}"
+
+
 def test_fetch_annotations_paginates(
     gate: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -307,3 +441,55 @@ def test_api_request_retries_read_timeout(
     monkeypatch.setattr(gate.time, "sleep", lambda _: None)
     assert gate.api_request("https://example.test", "tok") == {"ok": True}
     assert attempts == 3
+
+
+def test_weekly_orchestrator_and_device_workflows_are_consistent() -> None:
+    """Orchestrator must schedule Sunday 08:00 UTC and wire all device workflows."""
+    workflows_dir = REPO / ".github/workflows"
+    orch = yaml.safe_load(
+        (workflows_dir / "weekly_full_build.yml").read_text(encoding="utf-8")
+    )
+    runner = yaml.safe_load(
+        (workflows_dir / "weekly_device_build.yml").read_text(encoding="utf-8")
+    )
+    triggers = orch.get("on") if "on" in orch else orch.get(True)
+    assert isinstance(triggers, dict)
+    schedule = triggers.get("schedule")
+    assert isinstance(schedule, list) and any(
+        item.get("cron") == "0 8 * * 0" for item in schedule
+    )
+    assert "workflow_dispatch" in triggers
+
+    runner_timeout = runner["jobs"]["full-build"]["timeout-minutes"]
+    device_wfs = sorted(workflows_dir.glob("weekly_full_build_*.yml"))
+    assert len(device_wfs) >= 4
+
+    orch_uses = {
+        job["uses"]
+        for name, job in orch["jobs"].items()
+        if name != "prepare" and "uses" in job
+    }
+    referenced_manifests: set[Path] = set()
+    for wf_path in device_wfs:
+        rel_use = f"./.github/workflows/{wf_path.name}"
+        assert rel_use in orch_uses, f"{wf_path.name} is not wired in orchestrator"
+        wf = yaml.safe_load(wf_path.read_text(encoding="utf-8"))
+        dev_triggers = wf.get("on") if "on" in wf else wf.get(True)
+        assert (
+            "workflow_call" in dev_triggers and "workflow_dispatch" not in dev_triggers
+        )
+
+        call = wf["jobs"]["weekly"]
+        assert call["uses"] == "./.github/workflows/weekly_device_build.yml"
+        inputs = call["with"]
+        timeout = inputs["timeout_minutes"]
+        assert isinstance(timeout, int) and 0 < timeout < runner_timeout
+        manifest_path = (REPO / inputs["manifest"]).resolve()
+        assert manifest_path.is_file(), f"missing manifest for {wf_path.name}"
+        referenced_manifests.add(manifest_path)
+
+    all_manifests = {
+        p.resolve()
+        for p in (REPO / ".buildkite/k3_tests/weekly").glob("manifest*.json")
+    }
+    assert referenced_manifests == all_manifests

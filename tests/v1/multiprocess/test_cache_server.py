@@ -11,9 +11,8 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.utils import EngineType
 from lmcache.v1.client.transport.factory import RequestClientFactory
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -367,6 +366,7 @@ def registered_instance(
         {},
         [],
         None,
+        256,
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None, "Register should return None"
@@ -415,6 +415,7 @@ def test_register_unregister_kv_cache(
         {},
         [],
         None,
+        256,
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None

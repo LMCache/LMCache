@@ -11,7 +11,7 @@ import abc
 import torch
 
 # First Party
-from lmcache.utils import get_size_bytes
+from lmcache.v1.common.utils import get_size_bytes
 
 
 class MemoryFormat(Enum):

@@ -1,0 +1,22 @@
+name: Weekly full build (AMD)
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-full-build-amd
+  cancel-in-progress: false
+
+jobs:
+  weekly:
+    uses: ./.github/workflows/weekly_device_build.yml
+    with:
+      label: AMD
+      manifest: .buildkite/k3_tests/weekly/manifest-amd.json
+      out_dir: weekly-full-build-amd
+      artifact: weekly-full-build-amd
+      timeout_minutes: 345
+    secrets: inherit

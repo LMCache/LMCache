@@ -92,6 +92,17 @@ export PINNED_VLLM_VERSION
 export PINNED_VLLM_ARCHIVE_INDEX_URL
 export PINNED_VLLM_FULL_SHA
 
+# Old pins use cu130; unpinned canaries follow the current cu132 nightly.
+if [[ -n "${PINNED_VLLM_ARCHIVE_INDEX_URL}" ]]; then
+    archive_path="${PINNED_VLLM_ARCHIVE_INDEX_URL%/}"
+    VLLM_CUDA_VARIANT="${archive_path##*/}"
+elif [[ -n "${PINNED_VLLM_VERSION}" ]]; then
+    VLLM_CUDA_VARIANT="${VLLM_CUDA_VARIANT:-cu130}"
+else
+    VLLM_CUDA_VARIANT="${VLLM_CUDA_VARIANT:-cu132}"
+fi
+export VLLM_CUDA_VARIANT
+
 if [[ -n "${PINNED_VLLM_VERSION}" ]]; then
     echo "[resolve-pinned-vllm] Pinned vLLM version: ${PINNED_VLLM_VERSION}" >&2
     if [[ -n "${PINNED_VLLM_ARCHIVE_INDEX_URL}" ]]; then

@@ -24,9 +24,8 @@ import zmq
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.utils import EngineType
 from lmcache.v1.client.transport.factory import RequestClientFactory
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey
 from lmcache.v1.common.errors import LMCacheTimeoutError
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.token_codec import pack_token_ids
@@ -44,7 +43,7 @@ from lmcache.v1.transport.request_client import RequestClient
 
 CHUNK = 16
 TIMEOUT = 30.0
-pytestmark = [pytest.mark.cuda, pytest.mark.no_shared_allocator]
+pytestmark = pytest.mark.cuda
 
 if not (torch_dev.is_available() and torch_device_type == "cuda"):
     pytest.skip("requires a CUDA or ROCm runtime", allow_module_level=True)
