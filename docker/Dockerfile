@@ -126,6 +126,7 @@ ARG LMCACHE_VERSION
 
 RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_native.txt \
     --mount=type=bind,source=requirements/kafka.txt,target=/tmp/kafka.txt \
+    --mount=type=bind,source=requirements/valkey.txt,target=/tmp/valkey.txt \
     --mount=type=bind,source=.github/scripts/assert_native_ops.py,target=/tmp/assert_native_ops.py \
     . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
@@ -151,7 +152,9 @@ RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_nativ
     python3 -c 'import pygrpc_native' && \
     uv pip install -r /tmp/kafka.txt && \
     python3 -c 'import confluent_kafka' && \
-    python3 -c 'import nixl, lmcache_nixl'
+    python3 -c 'import nixl, lmcache_nixl' && \
+    uv pip install -r /tmp/valkey.txt && \
+    python3 -c 'from glide_sync import GlideClient'
 
 WORKDIR /workspace
 USER lmcache

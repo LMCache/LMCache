@@ -1,0 +1,5 @@
+# valkey-glide-sync: Python Glide client for the Valkey L2 adapter
+# (lmcache/v1/distributed/l2_adapters/valkey_l2_adapter.py).
+# >= 2.6.0 is the first release on PyPI with RDMA support; TCP and
+# blob-tcp transports work with >= 2.3.0.
+valkey-glide-sync>=2.6.0
