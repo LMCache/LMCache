@@ -69,7 +69,6 @@ class MPContinuousUsageReporter(EventSubscriber):
 
     def __init__(
         self,
-        chunk_size: int,
         sender: UsageMessageSender | None = None,
         specs: list[MetricSpec] | None = None,
         max_buffered_samples: int = 65536,
@@ -77,8 +76,6 @@ class MPContinuousUsageReporter(EventSubscriber):
         """Initialize the reporter and start its flush thread.
 
         Args:
-            chunk_size: Retained for compatibility. Transfer events carry
-                their actual token counts.
             sender: Message transport; ``None`` selects the default HTTP
                 sender.
             specs: Metric definitions; ``None`` selects the defaults.
@@ -195,7 +192,6 @@ class MPContinuousUsageReporter(EventSubscriber):
 @swallow_telemetry_errors
 def InitializeMPContinuousUsage(
     event_bus: EventBus,
-    chunk_size: int,
     sender: UsageMessageSender | None = None,
 ) -> MPContinuousUsageReporter | None:
     """Start continuous usage reporting for a multiprocess cache server.
@@ -205,8 +201,6 @@ def InitializeMPContinuousUsage(
 
     Args:
         event_bus: The server's started EventBus.
-        chunk_size: Retained for compatibility. Transfer events carry their
-            actual token counts.
         sender: Message transport; ``None`` selects the default HTTP sender.
 
     Returns:
@@ -216,6 +210,6 @@ def InitializeMPContinuousUsage(
     if not is_usage_tracking_enabled():
         return None
     logger.info("Initializing MP continuous usage reporting.")
-    reporter = MPContinuousUsageReporter(chunk_size, sender)
+    reporter = MPContinuousUsageReporter(sender=sender)
     event_bus.register_subscriber(reporter)
     return reporter

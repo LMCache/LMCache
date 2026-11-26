@@ -228,7 +228,7 @@ class TestMPContinuous:
         sender = RecordingSender()
         bus = EventBus(EventBusConfig(enabled=True))
         bus.start()
-        reporter = InitializeMPContinuousUsage(bus, chunk_size=256, sender=sender)
+        reporter = InitializeMPContinuousUsage(bus, sender=sender)
         assert reporter is not None
 
         publish_mp_traffic(bus)
@@ -252,7 +252,7 @@ class TestMPContinuous:
         sender = RecordingSender()
         bus = EventBus(EventBusConfig(enabled=True))
         bus.start()
-        reporter = InitializeMPContinuousUsage(bus, chunk_size=256, sender=sender)
+        reporter = InitializeMPContinuousUsage(bus, sender=sender)
         assert reporter is not None
         publish_mp_traffic(bus)
         bus.stop()
@@ -263,36 +263,22 @@ class TestMPContinuous:
         assert sender.sent[1][1]["interval_num_stored_tokens"] == 0
         assert sender.sent[1][1]["sequence_number"] == 2
 
-    def test_event_token_counts_do_not_depend_on_server_default(self, usage_env):
-        sender = RecordingSender()
-        bus = EventBus(EventBusConfig(enabled=True))
-        bus.start()
-        reporter = InitializeMPContinuousUsage(bus, chunk_size=640, sender=sender)
-        assert reporter is not None
-
-        publish_mp_traffic(bus)
-        bus.stop()
-
-        payload = sender.sent[0][1]
-        assert payload["interval_num_hit_tokens"] == 4 * 256
-        assert payload["interval_num_stored_tokens"] == 2 * 256
-
     def test_initialize_returns_none_when_disabled(self, usage_env, monkeypatch):
         monkeypatch.setenv("LMCACHE_TRACK_USAGE", "false")
         bus = EventBus(EventBusConfig(enabled=True))
-        assert InitializeMPContinuousUsage(bus, chunk_size=256) is None
+        assert InitializeMPContinuousUsage(bus) is None
         bus.stop()
 
     def test_flush_drops_counters_when_disabled(self, usage_env, monkeypatch):
         sender = RecordingSender()
-        reporter = MPContinuousUsageReporter(chunk_size=256, sender=sender)
+        reporter = MPContinuousUsageReporter(sender=sender)
         monkeypatch.setenv("LMCACHE_TRACK_USAGE", "false")
         reporter.flush()
         assert sender.sent == []
         reporter.shutdown()
 
     def test_raising_sender_does_not_break_flush(self, usage_env):
-        reporter = MPContinuousUsageReporter(chunk_size=256, sender=RaisingSender())
+        reporter = MPContinuousUsageReporter(sender=RaisingSender())
         reporter.flush()
         reporter.shutdown()
 
@@ -300,7 +286,7 @@ class TestMPContinuous:
         monkeypatch.setenv("LMCACHE_USAGE_TRACK_INTERVAL", "10m")
         # MP: falls back to the default interval instead of losing telemetry.
         sender = RecordingSender()
-        reporter = MPContinuousUsageReporter(chunk_size=256, sender=sender)
+        reporter = MPContinuousUsageReporter(sender=sender)
         reporter.flush()
         assert sender.sent
         reporter.shutdown()
@@ -315,7 +301,7 @@ class TestMPContinuous:
             )
         ]
         with pytest.raises(ValueError, match="exactly once"):
-            MPContinuousUsageReporter(chunk_size=256, specs=incomplete)
+            MPContinuousUsageReporter(specs=incomplete)
 
     def test_custom_reduce_function(self, usage_env):
         def max_or_zero(samples):
@@ -345,7 +331,7 @@ class TestMPContinuous:
         sender = RecordingSender()
         bus = EventBus(EventBusConfig(enabled=True))
         bus.start()
-        reporter = MPContinuousUsageReporter(chunk_size=256, sender=sender, specs=specs)
+        reporter = MPContinuousUsageReporter(sender=sender, specs=specs)
         bus.register_subscriber(reporter)
         publish_mp_traffic(bus)
         publish_mp_traffic(bus)
@@ -362,9 +348,7 @@ class TestMPContinuous:
         sender = RecordingSender()
         bus = EventBus(EventBusConfig(enabled=True))
         bus.start()
-        reporter = MPContinuousUsageReporter(
-            chunk_size=256, sender=sender, max_buffered_samples=2
-        )
+        reporter = MPContinuousUsageReporter(sender=sender, max_buffered_samples=2)
         bus.register_subscriber(reporter)
         # Wake requests during the flush thread's initial wait are
         # deferred to the first run, so let the first periodic flush

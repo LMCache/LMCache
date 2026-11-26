@@ -472,7 +472,7 @@ def _start_cache_server(
             engine.attach_p2p_server(p2p_server)
 
         InitializeMPUsageContext(mp_config, storage_manager_config)
-        InitializeMPContinuousUsage(event_bus, ctx.chunk_size)
+        InitializeMPContinuousUsage(event_bus)
         InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
         InitializeL1Usage(event_bus, ctx.storage_manager)
 
