@@ -16,7 +16,7 @@ import pytest
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import PrefetchLockMode
+from lmcache.v1.distributed.api import PrefetchLockMode, PrefetchPriority
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     StorageManagerConfig,
@@ -33,8 +33,8 @@ from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
+    BufferOnlyPrefetchPolicy,
     DefaultPrefetchPolicy,
-    RetainPrefetchPolicy,
 )
 from lmcache.v1.distributed.storage_controllers.store_controller import (
     StoreController,
@@ -416,8 +416,15 @@ class TestLoadDeadline:
             ctrl.stop()
             adapter.close()
 
+    @pytest.mark.parametrize(
+        "priority, queue_size",
+        [
+            (PrefetchPriority.NORMAL, "pending_queue_size"),
+            (PrefetchPriority.HIGH, "high_priority_queue_size"),
+        ],
+    )
     def test_queue_deadline_behind_warmup_drains_then_resumes(
-        self, l1_manager, monkeypatch, events
+        self, l1_manager, monkeypatch, events, priority, queue_size
     ):
         poller = Mock(wraps=prefetch_controller.select.poll())
         monkeypatch.setattr(prefetch_controller.select, "poll", lambda: poller)
@@ -440,16 +447,16 @@ class TestLoadDeadline:
             assert wait_for_condition(lambda: draining_count(ctrl) == 1)
             assert ctrl.query_prefetch_result(busy_req) is not None
             warm_req = ctrl.submit_prefetch_request(
-                single_row_spec([warm], lock_mode=PrefetchLockMode.NO_LOCK)
+                single_row_spec(
+                    [warm], lock_mode=PrefetchLockMode.NO_LOCK, priority=priority
+                )
             )
-            assert wait_for_condition(
-                lambda: ctrl.report_status()["pending_queue_size"] == 1
-            )
+            assert wait_for_condition(lambda: ctrl.report_status()[queue_size] == 1)
             poller.poll.reset_mock()
-            queued_req = submit(ctrl, [queued])
-            assert wait_for_condition(
-                lambda: ctrl.report_status()["pending_queue_size"] == 2
+            queued_req = ctrl.submit_prefetch_request(
+                single_row_spec([queued], priority=priority)
             )
+            assert wait_for_condition(lambda: ctrl.report_status()[queue_size] == 2)
             assert wait_for_condition(
                 lambda: any(
                     0 < call.args[0] < 20 for call in poller.poll.call_args_list
@@ -692,9 +699,13 @@ def test_multi_l1_cli_preserves_deadline(timeout: float | None) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "policy_type", [DefaultPrefetchPolicy, BufferOnlyPrefetchPolicy]
+)
 def test_partial_deadline_keeps_affinity_and_drains_without_store(
     managers: list[DramL1Manager],
     monkeypatch: pytest.MonkeyPatch,
+    policy_type: type[DefaultPrefetchPolicy],
 ) -> None:
     policy, kept = "full", [0, 2]
     configs = [MockL2AdapterConfig(0.05, 10.0) for _ in managers]
@@ -723,7 +734,7 @@ def test_partial_deadline_keeps_affinity_and_drains_without_store(
         ],
         l2_adapters=list(adapters),
         adapter_descriptors=descriptors,
-        policy=RetainPrefetchPolicy(),
+        policy=policy_type(),
         l2_load_timeout=0.5,
         clock=clock,
     )
@@ -766,7 +777,9 @@ def test_partial_deadline_keeps_affinity_and_drains_without_store(
         assert all(
             manager.report_status()["staging_object_count"] == 0 for manager in managers
         )
-        assert managers[0].get_object_state(keys[1]) is not None
+        assert (managers[0].get_object_state(keys[1]) is not None) == (
+            policy_type is DefaultPrefetchPolicy
+        )
         assert managers[0].report_status()["read_locked_count"] == 0
         assert managers[1].report_status()["read_locked_count"] == len(kept)
         managers[1].finish_read([keys[index] for index in kept])

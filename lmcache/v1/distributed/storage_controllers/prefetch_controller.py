@@ -1979,13 +1979,13 @@ class PrefetchController(StorageControllerInterface):
             return PREFETCH_LOOP_POLL_TIMEOUT_MS
 
         nearest = min(self._armed.values()) if self._armed else None
-        for _request_id, spec in self._pending_queue:
-            queued_deadline = spec.deadline_at
-            if queued_deadline is None:
-                continue
-            if nearest is None or queued_deadline < nearest:
-                nearest = queued_deadline
-            break
+        for queue in (self._high_priority_queue, self._pending_queue):
+            for _, spec in queue:
+                if spec.deadline_at is None:
+                    continue
+                if nearest is None or spec.deadline_at < nearest:
+                    nearest = spec.deadline_at
+                break
         if nearest is None:
             return PREFETCH_LOOP_POLL_TIMEOUT_MS
 
@@ -2010,23 +2010,19 @@ class PrefetchController(StorageControllerInterface):
             if not request.inflight_lookup_tasks and not request.inflight_load_tasks:
                 self._finish_drain(request)
 
-        # Armed deadlines follow submission order; NO_LOCK entries are exempt.
-        kept: deque[tuple[PrefetchRequestId, PrefetchTaskSpec]] = deque()
+        # Armed deadlines are ordered within each queue.
         expired: list[tuple[PrefetchRequestId, PrefetchTaskSpec]] = []
-        while self._pending_queue:
-            request_id, spec = self._pending_queue.popleft()
-            queued_deadline = spec.deadline_at
-            if queued_deadline is None:
-                kept.append((request_id, spec))
-                continue
-            if queued_deadline <= now:
-                expired.append((request_id, spec))
-                continue
-            kept.append((request_id, spec))
-            kept.extend(self._pending_queue)
-            self._pending_queue.clear()
-            break
-        self._pending_queue = kept
+        for queue in (self._high_priority_queue, self._pending_queue):
+            exempt: list[tuple[PrefetchRequestId, PrefetchTaskSpec]] = []
+            while queue:
+                queued_deadline = queue[0][1].deadline_at
+                if queued_deadline is None:
+                    exempt.append(queue.popleft())
+                elif queued_deadline <= now:
+                    expired.append(queue.popleft())
+                else:
+                    break
+            queue.extendleft(reversed(exempt))
         for request_id, spec in expired:
             self._expire_queued_request(request_id, spec)
 

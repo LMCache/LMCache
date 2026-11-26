@@ -324,7 +324,7 @@ class L1ManagerInterface(Protocol):
     def finish_prefetch(
         self, keys: list[ObjectKey], tag: str = ""
     ) -> dict[ObjectKey, L1Error]:
-        """Admit prefetched buffers without read locks or an L2 store."""
+        """Admit retained prefetch buffers and discard temporary ones."""
         ...
 
     def finish_write_and_delete(

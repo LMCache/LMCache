@@ -223,15 +223,16 @@ reusing the caller's spec starts a fresh budget without modifying that spec.
 At expiry, the controller applies the fetching policy to the available L1
 cells and publishes that result once. `prefix` keeps a usable prefix, `full`
 keeps each available cell, and `whole_chunk` keeps columns present in every row.
-Only the selected cells keep caller read locks. Queued requests can expire
-without waiting for an admission slot.
+Only the selected cells keep caller read locks. Both priority queues can expire
+requests before admission. The controller processes ready completions before
+checking expiry.
 
 Outstanding I/O continues draining after the caller receives its fallback.
 The request keeps its staging buffers and L2 locks until that I/O completes,
-and its staging or lookup bytes still count toward admission. Late successful loads use
-`finish_prefetch`, which admits them without caller read locks or a new L2
-store notification; late failures release their staging buffers. Neither
-can change the published result or release its caller-owned locks.
+and its staging or lookup bytes still count toward admission. A late successful
+load admits retained data without taking caller read locks or scheduling an L2
+store. Late temporary data and failed loads release their staging buffers.
+The published result and its caller-owned locks stay intact.
 
 The deadline event reports retained and missed chunks, not rank cells.
 This is a caller latency budget, not adapter cancellation; existing lock

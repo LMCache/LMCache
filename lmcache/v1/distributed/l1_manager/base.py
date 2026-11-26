@@ -644,6 +644,7 @@ class BaseL1Manager(L1ManagerInterface):
         """Admit prefetched staging objects without taking read locks.
 
         Retained objects become evictable without triggering an L2 store.
+        Temporary staging objects are freed because they have no reader.
 
         Args:
             keys: Keys whose loads have completed.
@@ -1319,11 +1320,17 @@ class BaseL1Manager(L1ManagerInterface):
         notification_keys: list[ObjectKey] = []
         notification_keys_meta: list[L1ObjectMeta] = []
         discarded: list[MemoryObj] = []
+        gone_keys: list[ObjectKey] = []
 
         for key in keys:
             err, entry = self._take_staging(key, tag, "finish write")
             ret[key] = err
             if err != L1Error.SUCCESS or entry is None:
+                continue
+            if prefetched and entry.is_temporary:
+                discarded.append(entry.memory_obj)
+                if key not in self._objects and key not in self._staging:
+                    gone_keys.append(key)
                 continue
             if key in self._objects:
                 logger.debug(
@@ -1340,6 +1347,7 @@ class BaseL1Manager(L1ManagerInterface):
                 notification_keys_meta.append(self._object_meta(entry.memory_obj))
 
         self._memory_manager.free(discarded)
+        self._report_staging_gone(gone_keys)
 
         if notification_keys:
             for listener in self._registered_listeners:
