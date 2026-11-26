@@ -18,6 +18,7 @@ import subprocess
 
 # Third Party
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / ".github/scripts/weekly_full_build.py"
@@ -368,9 +369,6 @@ def test_every_vendor_job_is_required(
     manifest_rel: str, slug: str, pipeline_rel: str
 ) -> None:
     """Every expanded job in a vendor pipeline must match its weekly manifest."""
-    # Third Party
-    import yaml
-
     vendor_manifest = json.loads((REPO / manifest_rel).read_text(encoding="utf-8"))
     pipeline = yaml.safe_load((REPO / pipeline_rel).read_text(encoding="utf-8"))
     labels = _expand_step_labels(pipeline)
@@ -443,3 +441,55 @@ def test_api_request_retries_read_timeout(
     monkeypatch.setattr(gate.time, "sleep", lambda _: None)
     assert gate.api_request("https://example.test", "tok") == {"ok": True}
     assert attempts == 3
+
+
+def test_weekly_orchestrator_and_device_workflows_are_consistent() -> None:
+    """Orchestrator must schedule Sunday 08:00 UTC and wire all device workflows."""
+    workflows_dir = REPO / ".github/workflows"
+    orch = yaml.safe_load(
+        (workflows_dir / "weekly_full_build.yml").read_text(encoding="utf-8")
+    )
+    runner = yaml.safe_load(
+        (workflows_dir / "weekly_device_build.yml").read_text(encoding="utf-8")
+    )
+    triggers = orch.get("on") if "on" in orch else orch.get(True)
+    assert isinstance(triggers, dict)
+    schedule = triggers.get("schedule")
+    assert isinstance(schedule, list) and any(
+        item.get("cron") == "0 8 * * 0" for item in schedule
+    )
+    assert "workflow_dispatch" in triggers
+
+    runner_timeout = runner["jobs"]["full-build"]["timeout-minutes"]
+    device_wfs = sorted(workflows_dir.glob("weekly_full_build_*.yml"))
+    assert len(device_wfs) >= 4
+
+    orch_uses = {
+        job["uses"]
+        for name, job in orch["jobs"].items()
+        if name != "prepare" and "uses" in job
+    }
+    referenced_manifests: set[Path] = set()
+    for wf_path in device_wfs:
+        rel_use = f"./.github/workflows/{wf_path.name}"
+        assert rel_use in orch_uses, f"{wf_path.name} is not wired in orchestrator"
+        wf = yaml.safe_load(wf_path.read_text(encoding="utf-8"))
+        dev_triggers = wf.get("on") if "on" in wf else wf.get(True)
+        assert (
+            "workflow_call" in dev_triggers and "workflow_dispatch" not in dev_triggers
+        )
+
+        call = wf["jobs"]["weekly"]
+        assert call["uses"] == "./.github/workflows/weekly_device_build.yml"
+        inputs = call["with"]
+        timeout = inputs["timeout_minutes"]
+        assert isinstance(timeout, int) and 0 < timeout < runner_timeout
+        manifest_path = (REPO / inputs["manifest"]).resolve()
+        assert manifest_path.is_file(), f"missing manifest for {wf_path.name}"
+        referenced_manifests.add(manifest_path)
+
+    all_manifests = {
+        p.resolve()
+        for p in (REPO / ".buildkite/k3_tests/weekly").glob("manifest*.json")
+    }
+    assert referenced_manifests == all_manifests
