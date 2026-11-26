@@ -117,6 +117,23 @@ class VLLM_Detector(EngineDetector):
         ):
             return lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_ONE_BS_HS, kv_caches
         if list_depth == 1 and tensor_ndim == 5:
+            # The registration-time group edits synthesize one opaque page per
+            # logical block as (NB, 2, block_size, 1, head_size): two page
+            # halves, not semantic K/V, with a singleton synthetic head axis.
+            # Its token axis is dim 2 by construction, so an HND hint must not
+            # re-read it as heads -- block_size() would then come from dim 3
+            # (always 1) and every block would be addressed wrongly. A real
+            # NB-first HND tensor keeps block positions at dim 3 (block sizes
+            # are far above 1), so the singleton head axis identifies the
+            # opaque page. NB == 2 stays on the K/V-first reading below, like
+            # vLLM-RBLN rank 6.
+            if (
+                is_hnd
+                and int(first_tensor.shape[1]) == 2
+                and int(first_tensor.shape[3]) == 1
+                and int(first_tensor.shape[0]) != 2
+            ):
+                return lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS, kv_caches
             if first_tensor.shape[0] == 2:  # K/V axis first
                 if is_hnd:
                     return lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS, kv_caches

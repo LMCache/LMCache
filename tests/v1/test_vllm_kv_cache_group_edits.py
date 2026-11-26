@@ -268,7 +268,10 @@ def _hybrid_config(
 
 
 def _edit_attention(
-    edits, attention_cache: torch.Tensor, attention_spec: _Spec | None = None
+    edits,
+    attention_cache: torch.Tensor,
+    attention_spec: _Spec | None = None,
+    layout_hints: dict[str, str] | None = None,
 ) -> torch.Tensor:
     """Run the public entry point and return the edited attention tensor.
 
@@ -276,13 +279,17 @@ def _edit_attention(
         edits: The module under test.
         attention_cache: Registered tensor for the attention layer.
         attention_spec: Optional attention spec override.
+        layout_hints: Optional engine layout hints; the registration path
+            resolves the KV layout from them exactly like format detection.
 
     Returns:
         The attention layer's entry in the edited mapping. It is the *same
         object* as ``attention_cache`` when no rule matched.
     """
     config, kv_caches = _hybrid_config(attention_cache, attention_spec)
-    edited = edits.apply_kv_cache_group_edits(config, kv_caches, layout_hints={})
+    edited = edits.apply_kv_cache_group_edits(
+        config, kv_caches, layout_hints=layout_hints or {}
+    )
     return edited["attn.0"]
 
 
@@ -636,11 +643,14 @@ def _subpaged_kv_planes(
     num_kv_heads: int = 1,
     num_logical_blocks: int = 2,
     inner_stride: tuple[int, int, int, int] | None = None,
+    kv_layout: str = "NHD",
 ) -> tuple[torch.Tensor, torch.Tensor, _Spec, torch.Tensor]:
     """Rank-4 K and V planes paged below the scheduler block.
 
     Shape ``(num_kernel_pages, kernel_block_size, num_kv_heads, head_size)``
-    with ``kernel_block_size < spec.block_size``. ``interleaved=True`` is the
+    under ``kv_layout="NHD"`` or ``(num_kernel_pages, num_kv_heads,
+    kernel_block_size, head_size)`` under ``kv_layout="HND"``, with
+    ``kernel_block_size < spec.block_size``. ``interleaved=True`` is the
     vLLM-Ascend v0.30 pool: K's ``stride(0)`` covers one K row plus the
     following V row. ``contiguous=True`` is vLLM-Ascend <= v0.29: every K
     kernel page, then every V kernel page, each plane dense.
@@ -664,9 +674,19 @@ def _subpaged_kv_planes(
         dtype=torch.bfloat16,
     )
     storage[:prefix_elems] = -1
-    shape = (num_kernel_pages, kernel_block_size, num_kv_heads, head_size)
+    if kv_layout == "HND":
+        shape: tuple[int, ...] = (
+            num_kernel_pages,
+            num_kv_heads,
+            kernel_block_size,
+            head_size,
+        )
+        dense_inner_stride = (kernel_block_size * head_size, head_size, 1)
+    else:
+        shape = (num_kernel_pages, kernel_block_size, num_kv_heads, head_size)
+        dense_inner_stride = (num_kv_heads * head_size, head_size, 1)
     if inner_stride is None:
-        stride = (kernel_stride_elems, num_kv_heads * head_size, head_size, 1)
+        stride = (kernel_stride_elems, *dense_inner_stride)
     else:
         stride = inner_stride
     k_plane = storage.as_strided(shape, stride, storage_offset=prefix_elems)
@@ -936,6 +956,112 @@ def test_subpaged_plane_rules_are_ordered_and_exclusive(edits):
         ]
         expected = contiguous if contiguous_layout else interleaved
         assert matches == [expected]
+
+
+# --------------------------------------------------------------------------
+# HND (LBHNC): the same pool with heads before the block axis
+# --------------------------------------------------------------------------
+
+
+def test_hnd_interleaved_plane_edit_fires(edits):
+    """HND interleaved K/V planes must be re-paged like their NHD twin.
+
+    vLLM-Ascend pools K and V kernel pages interleaved under both
+    resolutions; only the plane's dim order changes (heads before block size
+    under HND). Before the fix the kernel block size was read from dim 1 --
+    the head axis under HND -- so no rule matched and the attention group was
+    silently treated as slot-compressed, keeping only ``1/ratio`` of each
+    page's bytes.
+    """
+    hints = {"kv_layout": "HND"}
+    for num_kv_heads in (1, 4):
+        k_plane, v_plane, spec, storage = _subpaged_kv_planes(
+            kv_layout="HND", num_kv_heads=num_kv_heads
+        )
+        pair = (k_plane, v_plane)
+        interleaved = edits._SubpagedAttentionInterleavedPlaneViewEdit()
+        contiguous = edits._SubpagedAttentionContiguousPlaneViewEdit()
+        assert interleaved.matches(spec, pair, layout_hints=hints)
+        assert not contiguous.matches(spec, pair, layout_hints=hints)
+        viewed = _edit_attention(edits, pair, attention_spec=spec, layout_hints=hints)
+        assert isinstance(viewed, torch.Tensor)
+        # HND planes are (pages, heads, kernel_block, head_size).
+        ratio = int(spec.block_size) // int(k_plane.shape[2])
+        num_blocks = int(k_plane.shape[0]) // ratio
+        synthetic_head_size = int(k_plane.shape[1]) * int(k_plane.shape[3])
+        page_elems = int(spec.page_size_bytes) // int(viewed.element_size())
+        assert tuple(viewed.shape) == (
+            num_blocks,
+            2,
+            int(spec.block_size),
+            1,
+            synthetic_head_size,
+        )
+        assert tuple(viewed.stride()) == (
+            page_elems,
+            page_elems // 2,
+            synthetic_head_size,
+            synthetic_head_size,
+            1,
+        )
+        assert (
+            viewed.untyped_storage().data_ptr() == k_plane.untyped_storage().data_ptr()
+        )
+        assert int(viewed.storage_offset()) == int(k_plane.storage_offset())
+        for block in range(num_blocks):
+            start = int(k_plane.storage_offset()) + block * page_elems
+            torch.testing.assert_close(
+                viewed[block].reshape(-1), storage[start : start + page_elems]
+            )
+
+
+def test_hnd_contiguous_plane_edit_rejected(edits):
+    """vLLM-Ascend <= v0.29 HND planes must fail loudly, not fall through.
+
+    Two separate dense planes re-viewed at the scheduler block keep their HND
+    dim order (``[NB, num_heads, LBS, head_size]``), and registration has no
+    two-plane HND format; re-viewing them into the NHD two-plane format would
+    address the block axis as heads. The rule therefore has to match (so the
+    group is not left silently compressed) and reject the combination.
+    """
+    hints = {"kv_layout": "HND"}
+    k_plane, v_plane, spec, _storage = _subpaged_kv_planes(
+        kv_layout="HND", contiguous=True
+    )
+    pair = (k_plane, v_plane)
+    interleaved = edits._SubpagedAttentionInterleavedPlaneViewEdit()
+    contiguous = edits._SubpagedAttentionContiguousPlaneViewEdit()
+    assert not interleaved.matches(spec, pair, layout_hints=hints)
+    assert contiguous.matches(spec, pair, layout_hints=hints)
+    with pytest.raises(ValueError, match="HND"):
+        contiguous.apply(spec, pair, hints)
+    with pytest.raises(ValueError, match="HND"):
+        _edit_attention(edits, pair, attention_spec=spec, layout_hints=hints)
+
+
+@pytest.mark.parametrize(
+    ("plane_layout", "hint"),
+    [("NHD", "HND"), ("HND", "NHD")],
+    ids=["nhd-planes-hnd-hint", "hnd-planes-nhd-hint"],
+)
+def test_plane_edits_do_not_cross_read_layouts(edits, plane_layout, hint):
+    """A layout hint that disagrees with the planes must not re-page them.
+
+    The block-size ratio of the other reading happens to divide the page on
+    this fixture, so the byte-tiling/locality checks are what keep the rules
+    from addressing a head axis as tokens.
+    """
+    k_plane, v_plane, spec, _storage = _subpaged_kv_planes(
+        kv_layout=plane_layout,
+        num_kv_heads=2,
+        num_logical_blocks=3,
+    )
+    pair = (k_plane, v_plane)
+    hints = {"kv_layout": hint}
+    interleaved = edits._SubpagedAttentionInterleavedPlaneViewEdit()
+    contiguous = edits._SubpagedAttentionContiguousPlaneViewEdit()
+    assert not interleaved.matches(spec, pair, layout_hints=hints)
+    assert not contiguous.matches(spec, pair, layout_hints=hints)
 
 
 @pytest.mark.parametrize("prefix_caching", [True, False], ids=["on", "off"])
