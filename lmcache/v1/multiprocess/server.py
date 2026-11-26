@@ -462,11 +462,15 @@ def _start_cache_server(
             from lmcache.v1.distributed.p2p import P2PClient
             from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
                 build_grpc_request_server,
+                resolve_grpc_server_mode,
             )
 
+            if mp_config.grpc_tls is not None:
+                # Check the worker mode before binding the peer listener.
+                resolve_grpc_server_mode(mp_config.grpc_server_mode, tls_enabled=True)
             p2p_server = build_grpc_request_server(
                 modules_for_service(components.modules, "p2p"),
-                replace(mp_config, port=mp_config.p2p_config.rpc_port),
+                replace(mp_config, port=mp_config.p2p_config.rpc_port, grpc_tls=None),
                 rpc_client=P2PClient,
             )
             engine.attach_p2p_server(p2p_server)

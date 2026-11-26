@@ -260,6 +260,41 @@ from the same per-service handlers in `_make_servicer` and returns a
 placeholder servicer for its internal `grpc.Server`, which never sees those
 methods since the front serves them.
 
+## TLS for the MP request listener
+
+The programmatic configuration uses PEM files loaded at server and client
+construction. `MPServerConfig.grpc_tls` takes a `GrpcServerTLSConfig` with a
+certificate chain and private key. For mTLS, set `require_client_cert=True` and
+provide the CA bundle that verifies client certificates. With TLS enabled,
+`grpc_server_mode="auto"` selects `aio`, `sync` and `aio` both support TLS, and
+explicit `native` raises `ValueError` before binding a port. The P2P listener
+keeps its existing transport configuration.
+
+```python
+from lmcache.v1.client.transport.grpc_impl.client import GrpcMultiprocessClient
+from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.transport.grpc.tls import GrpcClientTLSConfig, GrpcServerTLSConfig
+
+server_config = MPServerConfig(
+    host="cache.example.com",
+    grpc_tls=GrpcServerTLSConfig(cert_file="server.pem", key_file="server.key"),
+)
+client = GrpcMultiprocessClient(
+    "grpc://cache.example.com:5555",
+    tls_config=GrpcClientTLSConfig(enabled=True, ca_file="server-ca.pem"),
+)
+```
+
+An enabled client uses gRPC's default roots when `ca_file` is absent. Supply
+both `cert_file` and `key_file` to present a client identity. The endpoint name
+must match the server certificate. `server_name_override` supplies the name
+gRPC verifies when it differs from the dial address. Missing credential pairs,
+missing mTLS server CAs and TLS options on a disabled client raise `ValueError`.
+
+Omitting TLS configuration keeps plaintext as the default. TLS changes the
+channel and bind credentials only. The existing API key interceptors still
+check bearer metadata on both unary and streaming calls after the handshake.
+
 ## Adding an RPC
 
 An ordinary RPC requires three changes:

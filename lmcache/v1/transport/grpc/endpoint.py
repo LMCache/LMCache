@@ -20,7 +20,7 @@ def parse_grpc_target(server_url: str) -> str:
         server_url: gRPC endpoint.
 
     Returns:
-        A target accepted by ``grpc.insecure_channel``.
+        A target accepted by gRPC channel and port binding APIs.
 
     Raises:
         ValueError: If the URL scheme or target is invalid.

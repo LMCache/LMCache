@@ -34,6 +34,7 @@ from lmcache.v1.transport.grpc.method_registry import (
     GrpcMethodCodec,
     get_method_codec_registry,
 )
+from lmcache.v1.transport.grpc.tls import GrpcClientTLSConfig
 from lmcache.v1.transport.grpc.utils import GRPC_CHANNEL_OPTIONS, request_error
 from lmcache.v1.transport.request_client import RequestClient
 
@@ -97,12 +98,39 @@ ClientRpcCallable = Callable[..., MessagingFuture[Any] | MessagingStream[Any]]
 class GrpcMultiprocessClient(RequestClient):
     """Expose generated unary and server-streaming RPCs as client methods."""
 
-    def __init__(self, server_url: str, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        server_url: str,
+        api_key: str | None = None,
+        *,
+        tls_config: GrpcClientTLSConfig | None = None,
+    ) -> None:
+        """Open a request channel to an MP gRPC server.
+
+        Args:
+            server_url: Endpoint to dial.
+            api_key: Optional bearer key for unary and streaming RPCs.
+            tls_config: Optional TLS settings. Omit for a plaintext channel.
+
+        Raises:
+            ValueError: If the URL is invalid or a configured TLS file is
+                unreadable or empty.
+        """
         target = parse_grpc_target(server_url)
         self._server_url = server_url
-        channel: grpc.Channel = grpc.insecure_channel(
-            target, options=GRPC_CHANNEL_OPTIONS
-        )
+        channel: grpc.Channel
+        if tls_config is not None and tls_config.enabled:
+            options: tuple[tuple[str, int | str], ...] = GRPC_CHANNEL_OPTIONS
+            if tls_config.server_name_override is not None:
+                options = (
+                    *options,
+                    ("grpc.ssl_target_name_override", tls_config.server_name_override),
+                )
+            channel = grpc.secure_channel(
+                target, tls_config.channel_credentials(), options=options
+            )
+        else:
+            channel = grpc.insecure_channel(target, options=GRPC_CHANNEL_OPTIONS)
         if api_key is not None:
             channel = grpc.intercept_channel(
                 channel, GrpcClientAuthenticationInterceptor(api_key)

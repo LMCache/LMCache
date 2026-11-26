@@ -27,6 +27,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
 from lmcache.v1.transport.errors import InvalidRequestError
 from lmcache.v1.transport.futures import MessagingStream
 from lmcache.v1.transport.grpc.descriptors import ServiceBinding
+from lmcache.v1.transport.grpc.tls import GrpcServerTLSConfig
 
 logger = init_logger(__name__)
 
@@ -149,6 +150,7 @@ class GrpcMultiprocessServer(GrpcMultiprocessServerBase):
     Each call runs on one of ``grpc_server_workers`` threads. Normal handlers
     run on that thread, at most ``max_cpu_workers`` at a time, and affinity
     handlers are handed to the worker chosen for their client.
+    Pass ``tls_config`` to bind with PEM credentials.
     """
 
     def __init__(
@@ -159,6 +161,8 @@ class GrpcMultiprocessServer(GrpcMultiprocessServerBase):
         grpc_server_workers: int,
         authentication: APIKeyVerifier | None = None,
         rpc_client: type | None = None,
+        *,
+        tls_config: GrpcServerTLSConfig | None = None,
     ) -> None:
         super().__init__(
             bind_url,
@@ -167,6 +171,7 @@ class GrpcMultiprocessServer(GrpcMultiprocessServerBase):
             grpc_server_workers,
             authentication,
             rpc_client,
+            tls_config=tls_config,
         )
         self._normal_slots = threading.BoundedSemaphore(max_cpu_workers)
         self._affinity_submit_lock = threading.Lock()
