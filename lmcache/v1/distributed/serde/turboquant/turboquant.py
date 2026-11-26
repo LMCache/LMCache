@@ -432,6 +432,9 @@ def _normalize_cuda_device(cuda_device: str) -> torch.device:
 def _auto_select_cuda_device(required_bytes: int) -> torch.device:
     """Select a CUDA device with enough free memory and lowest utilization.
 
+    With one visible device, capacity determines admission and utilization
+    cannot change the choice, so the utilization query is skipped.
+
     Args:
         required_bytes: Estimated temporary CUDA memory required by the serde
             operation.
@@ -446,14 +449,16 @@ def _auto_select_cuda_device(required_bytes: int) -> torch.device:
         raise RuntimeError("TurboQuant Triton serde requires CUDA")
 
     candidates: list[tuple[int, int, int]] = []
-    for device_index in range(torch_dev.device_count()):
+    device_count = torch_dev.device_count()
+    for device_index in range(device_count):
         with torch_dev.device(device_index):
             free_bytes, _ = torch_dev.mem_get_info()
 
         if int(free_bytes) < required_bytes:
             continue
 
-        util = _cuda_utilization(device_index)
+        # A sole visible device is selected by capacity, not utilization.
+        util = 0 if device_count == 1 else _cuda_utilization(device_index)
         candidates.append((util, -int(free_bytes), device_index))
 
     if not candidates:
