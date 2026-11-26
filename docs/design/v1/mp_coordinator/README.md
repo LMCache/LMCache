@@ -117,9 +117,17 @@ sequenceDiagram
 Chunk size is a fleet invariant. Before an MP server reports chunk-size
 negotiation success, it calls `PUT /config/chunk-size`; the coordinator updates
 its `TokenHasher` and optional `BlendIndex` first. Repeating the same binding is
-idempotent, while a different value is rejected. An MP server also includes the
-value on later registrations once finalization has completed, so a restarted
-coordinator restores the same binding.
+idempotent, while a different value is rejected (409), which fails the
+negotiation. An MP server also includes the value on later registrations once
+finalization has completed, so a restarted coordinator restores the same binding.
+
+The coordinator only advises, so an unreachable coordinator does not fail the
+negotiation: the MP server finalizes its size, and the registration loop
+(`keep_registered`) delivers it once the coordinator answers, either on the next
+registration or, if the server registered before finalizing, with
+`PUT /config/chunk-size` on the next heartbeat tick. A 409 seen by that loop
+(the coordinator bound another size meanwhile) makes the server log an error,
+deregister and stop retrying; it keeps serving without the coordinator.
 
 A finalized MP server can serve another model only when its chunk size is a
 multiple of that model's required alignment. Otherwise, preconfigure a common

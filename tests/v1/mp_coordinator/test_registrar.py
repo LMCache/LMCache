@@ -10,6 +10,7 @@ the coordinator is unreachable.
 from unittest.mock import MagicMock
 import asyncio
 import contextlib
+import json
 
 # Third Party
 import httpx
@@ -344,6 +345,32 @@ def test_keep_registered_refreshes_chunk_size_on_reregistration():
     assert seen[:2] == [None, 640]
 
 
+def test_keep_registered_resends_bound_chunk_size_on_reregistration():
+    """A restarted coordinator 404s the heartbeat and has lost its in-memory
+    binding, so the re-registration must carry the size again."""
+    seen: list[int | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            seen.append(json.loads(request.content)["chunk_size"])
+            return httpx.Response(
+                200, json={"instance_id": "i1", "re_registered": False}
+            )
+        if request.method == "PUT":
+            return httpx.Response(404, json={"error": "unknown"})
+        return httpx.Response(204)
+
+    async def run():
+        async with _client(handler) as client:
+            await _run_loop_briefly(
+                client, instance_id="i1", chunk_size_provider=lambda: 640
+            )
+
+    asyncio.run(run())
+    assert len(seen) >= 2
+    assert set(seen) == {640}
+
+
 def test_on_registered_is_required():
     """No default hook: a caller that republishes nothing says so."""
     # Standard
@@ -352,3 +379,127 @@ def test_on_registered_is_required():
     parameter = inspect.signature(keep_registered).parameters["on_registered"]
     assert parameter.default is inspect.Parameter.empty
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def _chunk_size_handler(seen: dict, register_status: int = 200, bind_status: int = 200):
+    """Coordinator stub: records registrations, chunk-size binds and deletes."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            seen["register"].append(json.loads(request.content)["chunk_size"])
+            return httpx.Response(
+                register_status, json={"instance_id": "i1", "re_registered": False}
+            )
+        if request.url.path == "/config/chunk-size":
+            seen["bind"].append(json.loads(request.content)["chunk_size"])
+            return httpx.Response(bind_status, json={"chunk_size": 640})
+        if request.method == "PUT":
+            return httpx.Response(200, json={"instance_id": "i1"})
+        seen["delete"] = request.url.path
+        return httpx.Response(204)
+
+    return handler
+
+
+async def _run_loop_until_done(client: httpx.AsyncClient, **kwargs) -> bool:
+    """Run keep_registered for a few ticks; return whether it stopped itself."""
+    task = asyncio.create_task(
+        keep_registered(
+            client,
+            _BASE,
+            http_port=8080,
+            advertise_ip="127.0.0.1",
+            heartbeat_interval=0.03,
+            instance_id="i1",
+            on_registered=lambda: None,
+            **kwargs,
+        )
+    )
+    await asyncio.sleep(0.15)
+    stopped = task.done()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    return stopped
+
+
+def test_keep_registered_binds_chunk_size_finalized_after_registration():
+    """Registered before negotiation, e.g. the coordinator was down when the
+    size was finalized and came back with its state: the loop binds the size
+    once."""
+    seen: dict = {"register": [], "bind": [], "delete": None}
+    sizes = iter([None])
+
+    async def run() -> bool:
+        async with _client(_chunk_size_handler(seen)) as client:
+            return await _run_loop_until_done(
+                client, chunk_size_provider=lambda: next(sizes, 640)
+            )
+
+    assert not asyncio.run(run())
+    assert seen["register"] == [None]
+    assert seen["bind"] == [640]
+
+
+def test_keep_registered_does_not_rebind_size_sent_on_registration():
+    seen: dict = {"register": [], "bind": [], "delete": None}
+
+    async def run() -> bool:
+        async with _client(_chunk_size_handler(seen)) as client:
+            return await _run_loop_until_done(client, chunk_size_provider=lambda: 640)
+
+    assert not asyncio.run(run())
+    assert seen["register"] == [640]
+    assert seen["bind"] == []
+
+
+def test_keep_registered_leaves_coordinator_that_rejects_late_chunk_size():
+    """A coordinator bound to another size during an outage rejects the late
+    bind: the loop deregisters and stops instead of staying listed."""
+    seen: dict = {"register": [], "bind": [], "delete": None}
+    sizes = iter([None])
+
+    async def run() -> bool:
+        async with _client(_chunk_size_handler(seen, bind_status=409)) as client:
+            return await _run_loop_until_done(
+                client, chunk_size_provider=lambda: next(sizes, 640)
+            )
+
+    assert asyncio.run(run())
+    assert seen["bind"] == [640]
+    assert seen["delete"] == "/instances/i1"
+
+
+def test_keep_registered_stops_when_registration_rejects_chunk_size():
+    """A 409 on registration is not retried every tick."""
+    seen: dict = {"register": [], "bind": [], "delete": None}
+
+    async def run() -> bool:
+        async with _client(_chunk_size_handler(seen, register_status=409)) as client:
+            return await _run_loop_until_done(client, chunk_size_provider=lambda: 640)
+
+    assert asyncio.run(run())
+    assert seen["register"] == [640]
+    assert seen["delete"] is None
+
+
+def test_keep_registered_keeps_heartbeating_through_error_status():
+    """Only a 409 ends the loop; a 5xx is retried on the next tick."""
+    heartbeats = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                200, json={"instance_id": "i1", "re_registered": False}
+            )
+        if request.method == "PUT":
+            heartbeats.append(request.url.path)
+            return httpx.Response(500, json={"error": "transient"})
+        return httpx.Response(204)
+
+    async def run() -> bool:
+        async with _client(handler) as client:
+            return await _run_loop_until_done(client)
+
+    assert not asyncio.run(run())
+    assert len(heartbeats) > 1
