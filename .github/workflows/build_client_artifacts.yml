@@ -1,0 +1,159 @@
+name: Build Client Artifacts
+
+# Build the lmcache-client wheel from pyproject_client.toml (#6315), the way
+# build_cli_artifacts.yml builds lmcache-cli, audit it and its lmcache imports,
+# create request clients from the installed wheel, import each of its modules,
+# and check it against the full and CLI wheels. pr_full_build.yml calls this on
+# `full` PRs.
+
+on:
+    workflow_call:
+    pull_request:
+        types: [opened, synchronize, reopened, ready_for_review]
+        branches:
+            - dev
+            - "release-**"
+        paths:
+            - 'pyproject_client.toml'
+            - 'requirements/client.txt'
+            - 'setup.py'
+            - 'setup_extensions/**'
+            - 'csrc/lmcache_native/**'
+            - 'pyproject.toml'
+            - 'requirements/build.txt'
+            - '.github/scripts/build_client_wheel.sh'
+            - '.github/scripts/assert_client_wheel.py'
+            - '.github/scripts/check_client_imports.py'
+            - '.github/scripts/check_client_install.py'
+            - '.github/workflows/build_client_artifacts.yml'
+
+env:
+    LC_ALL: en_US.UTF-8
+
+defaults:
+    run:
+        shell: bash
+
+concurrency:
+    # Under pr_full_build.yml github.workflow is the caller's name, so an
+    # unprefixed group equals the caller's and the call is cancelled as a deadlock.
+    group: build-client-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    build-client-cpu:
+        if: github.event.pull_request.draft != true
+        name: Build lmcache-client (CPU)
+        runs-on: ubuntu-24.04
+        steps:
+            - name: "Harden Runner"
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                disable-sudo-and-containers: false
+                egress-policy: audit
+
+            - name: Checkout code
+              uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+              with:
+                fetch-depth: 0
+
+            - name: Prepare artifact build
+              uses: ./.github/actions/build-artifacts
+              with:
+                python_version: "3.13"
+                pip_packages: build
+                requirements_file: requirements/build.txt
+                release_tag_pattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+            - name: Check every listed module has a file
+              # setuptools only warns about a py-modules entry without one.
+              run: |
+                python - <<'EOF'
+                import pathlib, tomllib
+                config = tomllib.loads(pathlib.Path("pyproject_client.toml").read_text())
+                missing = [
+                    m for m in config["tool"]["setuptools"]["py-modules"]
+                    if m != "lmcache._version"
+                    and not pathlib.Path(m.replace(".", "/") + ".py").is_file()
+                ]
+                if missing:
+                    raise SystemExit(f"pyproject_client.toml lists no file for {missing}")
+                EOF
+
+            - name: Install the CPU build of the pinned torch
+              run: |
+                pip install --index-url https://download.pytorch.org/whl/cpu \
+                  "$(grep -oE 'torch==[0-9][0-9.]*' pyproject_client.toml | head -1)"
+
+            - name: Build lmcache-client wheel
+              run: |
+                NO_GPU_EXT=1 .github/scripts/build_client_wheel.sh dist --no-isolation
+                test -z "$(git status --porcelain)"
+
+            - name: Audit the wheel
+              run: python .github/scripts/assert_client_wheel.py dist/lmcache_client-*.whl
+
+            - name: Check the wheel's lmcache imports
+              run: python .github/scripts/check_client_imports.py dist/lmcache_client-*.whl
+
+            - name: Install the wheel in a clean venv
+              run: |
+                python -m venv "$RUNNER_TEMP/venv-client"
+                "$RUNNER_TEMP/venv-client/bin/pip" install --index-url https://download.pytorch.org/whl/cpu \
+                  "$(grep -oE 'torch==[0-9][0-9.]*' pyproject_client.toml | head -1)"
+                "$RUNNER_TEMP/venv-client/bin/pip" install dist/lmcache_client-*.whl
+
+            - name: Create and close a ZMQ and a gRPC request client
+              # Outside the checkout and isolated, so lmcache is the installed wheel.
+              run: |
+                cd "$RUNNER_TEMP"
+                venv-client/bin/python -I -c '
+                import importlib.metadata as md, pathlib, lmcache
+                init = md.distribution("lmcache-client").locate_file("lmcache/__init__.py")
+                assert pathlib.Path(lmcache.__file__).samefile(init), lmcache.__file__
+                print("lmcache from", lmcache.__file__)
+                from lmcache.v1.client.transport.factory import RequestClientFactory
+                for url in ("tcp://127.0.0.1:1", "grpc://127.0.0.1:1"):
+                    RequestClientFactory.create(url).close()
+                    print("created and closed", url)
+                '
+
+            - name: The full wheel must fail the audit
+              # Proves the server-file rule bites on a wheel that ships server code.
+              run: |
+                NO_GPU_EXT=1 python -m build --wheel --no-isolation --outdir "$RUNNER_TEMP/full"
+                if python .github/scripts/assert_client_wheel.py "$RUNNER_TEMP"/full/lmcache-*.whl \
+                    > "$RUNNER_TEMP/full-audit.txt"; then
+                  exit 1
+                fi
+                grep "server file not in pyproject_client.toml py-modules: lmcache/v1/multiprocess/server.py" \
+                  "$RUNNER_TEMP/full-audit.txt"
+
+            - name: Import every module of the wheel in its own process
+              run: |
+                python .github/scripts/check_client_install.py modules \
+                  "$RUNNER_TEMP/venv-client/bin/python" dist/lmcache_client-*.whl
+
+            - name: Build the lmcache-cli wheel
+              # As build_cli_artifacts.yml does, in a copy of HEAD.
+              run: |
+                version=$(python -m setuptools_scm | tail -1)
+                mkdir "$RUNNER_TEMP/cli-src"
+                git archive HEAD | tar -x -C "$RUNNER_TEMP/cli-src"
+                cd "$RUNNER_TEMP/cli-src" && cp pyproject_cli.toml pyproject.toml
+                SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE_CLI="$version" NO_NATIVE_EXT=1 \
+                  python -m build --wheel --no-isolation --outdir "$RUNNER_TEMP/cli"
+
+            - name: Replace and uninstall each lmcache distribution
+              run: |
+                python -m venv "$RUNNER_TEMP/venv-matrix"
+                python .github/scripts/check_client_install.py matrix "$RUNNER_TEMP/venv-matrix/bin/python" \
+                  dist/lmcache_client-*.whl "$RUNNER_TEMP"/full/lmcache-*.whl "$RUNNER_TEMP"/cli/*.whl
+
+            - name: The client wheel must be a subset of the full wheel
+              run: |
+                python .github/scripts/check_client_install.py superset \
+                  dist/lmcache_client-*.whl "$RUNNER_TEMP"/full/lmcache-*.whl
