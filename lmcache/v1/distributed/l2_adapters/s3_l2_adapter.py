@@ -241,6 +241,25 @@ class MemoryViewStream:
         return len(self.mv)
 
 
+class _BucketUnavailable(RuntimeError):
+    """A key routes to a tenant bucket this process must not use (yet).
+
+    Raised while building a request; the request is reported as failed
+    (store) or as a miss (lookup / load) without reaching S3.
+    """
+
+
+def _aws_error_code(exc: BaseException) -> str:
+    """The AWS error code of a botocore ``ClientError`` ("" for anything else).
+
+    Read from ``exc.response`` so that botocore is not imported here.
+    """
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return ""
+    return str(response.get("Error", {}).get("Code", ""))
+
+
 def _list_owned_buckets(client: Any, prefix: str, region: str) -> list[str]:
     """Names of buckets owned by the caller's account that start with ``prefix``.
 
@@ -322,6 +341,10 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
       ``"kv-cache-{salt}"`` or ``"{base}-{salt}"``. Empty (default) →
       ``"{base}-{salt}"``. Unsalted KV and ``"single"`` mode both use the
       ``s3_endpoint`` bucket unchanged.
+    - s3_expected_bucket_owner (str): optional 12-digit AWS account id. In
+      ``per_cache_salt`` mode, requests to tenant buckets carry
+      ``x-amz-expected-bucket-owner`` so S3 refuses them if the bucket is
+      owned by another account.
     """
 
     def __init__(
@@ -337,6 +360,7 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         max_capacity_gb: float = 0.0,
         s3_bucket_mode: str = "single",
         s3_bucket_template: str = "",
+        s3_expected_bucket_owner: Optional[str] = None,
     ):
         self.s3_endpoint = s3_endpoint
         self.s3_region = s3_region
@@ -353,6 +377,11 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             raise ValueError("s3_bucket_mode must be 'single' or 'per_cache_salt'")
         self.s3_bucket_mode = s3_bucket_mode
         self.s3_bucket_template = s3_bucket_template
+        if s3_expected_bucket_owner is not None and not (
+            len(s3_expected_bucket_owner) == 12 and s3_expected_bucket_owner.isdigit()
+        ):
+            raise ValueError("s3_expected_bucket_owner must be a 12-digit account id")
+        self.s3_expected_bucket_owner = s3_expected_bucket_owner
         # Fail fast on a template that can produce an illegal bucket name, at
         # config time rather than on the first request in per_cache_salt mode.
         if s3_bucket_mode == "per_cache_salt":
@@ -412,6 +441,7 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             max_capacity_gb=float(max_cap),
             s3_bucket_mode=d.get("s3_bucket_mode", "single"),
             s3_bucket_template=(_opt_str("s3_bucket_template") or ""),
+            s3_expected_bucket_owner=_opt_str("s3_expected_bucket_owner") or None,
         )
         cfg.eviction_config = cls._parse_eviction_config(d)
         return cfg
@@ -430,6 +460,12 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             "- aws_access_key_id / aws_secret_access_key (str): static creds; "
             "when unset, boto3 resolves credentials\n"
             "- max_capacity_gb (float): capacity for get_usage (0 = disabled)\n"
+            "- s3_bucket_mode (str): 'single' (default) or 'per_cache_salt' "
+            "(one bucket per cache_salt)\n"
+            "- s3_bucket_template (str): per_cache_salt bucket name, with "
+            "{salt} once and optional {base} (default '{base}-{salt}')\n"
+            "- s3_expected_bucket_owner (str): 12-digit account id sent as "
+            "x-amz-expected-bucket-owner on tenant-bucket requests\n"
             "- eviction (dict): optional, see L2AdapterConfigBase"
         )
 
@@ -485,6 +521,8 @@ class S3L2Adapter(L2AdapterInterface):
         self._host_suffix = endpoint.partition(".")[2]  # s3.<region>.amazonaws.com
         # Tenant bucket names (not salts) observed → buckets to list.
         self._tenant_buckets: set[str] = set()
+        # Tenant bucket names owned by another account: never read or written.
+        self._foreign_buckets: set[str] = set()
         self._ensured_buckets: set[str] = (
             set()
         )  # tenant buckets provisioned this process
@@ -939,13 +977,32 @@ class S3L2Adapter(L2AdapterInterface):
             template=self._bucket_template,
         )
         if host != self._endpoint:
+            bucket = _bucket_router.bucket_of_host(host)
+            with self._lock:
+                foreign = bucket in self._foreign_buckets
+            if foreign:
+                raise _BucketUnavailable(bucket)
+            if self._auto_create_bucket:
+                self._ensure_bucket(host)
             # remember which tenant buckets we've used, for per-bucket
             # listing (mutated from request threads → hold the lock).
             with self._lock:
-                self._tenant_buckets.add(_bucket_router.bucket_of_host(host))
-            if self._auto_create_bucket:
-                self._ensure_bucket(host)
+                self._tenant_buckets.add(bucket)
         return host
+
+    def _tenant_headers(self, host: str) -> list[tuple[str, str]]:
+        """Extra headers for a request to ``host``.
+
+        With ``s3_expected_bucket_owner`` set, every request to a tenant
+        bucket carries ``x-amz-expected-bucket-owner``, so S3 rejects it with
+        403 if that bucket name now belongs to another account (for example
+        after the bucket was deleted and the name taken). The base bucket is
+        left untouched, so single-bucket requests stay as they were.
+        """
+        owner = self._config.s3_expected_bucket_owner
+        if owner and host != self._endpoint:
+            return [("x-amz-expected-bucket-owner", owner)]
+        return []
 
     def _new_mgmt_client(self) -> Any:
         """boto3 S3 client for bucket-level (control-plane) calls."""
@@ -1001,14 +1058,24 @@ class S3L2Adapter(L2AdapterInterface):
         """Provision a tenant bucket (idempotent, once per process) + a TTL
         lifecycle, so per_cache_salt routing works without a separate
         onboarding step. Control-plane only — uses boto3 (not the CRT data
-        client). Failures are logged, not raised: a missing bucket surfaces
-        later as a normal PUT error rather than killing the request path.
+        client).
+
+        Only a bucket this account owns is ever used. ``create_bucket``
+        succeeding (including the ``200`` us-east-1 returns for a bucket the
+        caller already owns) or failing with ``BucketAlreadyOwnedByYou``
+        proves ownership. ``BucketAlreadyExists`` means another account owns
+        the name: the bucket is fenced off for the life of the process and
+        every request routed to it fails without touching it. Any other
+        failure is not cached, and the request that needed the bucket fails.
+
+        Raises:
+            _BucketUnavailable: the bucket is not usable by this request.
 
         Thread-safe: the bucket is only recorded in ``_ensured_buckets`` after
         a successful create+lifecycle, and provisioning is serialized by
         ``_bucket_creation_lock`` so concurrent writers to a new tenant don't
         race (a fast-path check avoids taking the lock once provisioned)."""
-        bucket = host.split(".", 1)[0]
+        bucket = _bucket_router.bucket_of_host(host)
         with self._lock:
             if bucket in self._ensured_buckets:
                 return
@@ -1018,10 +1085,9 @@ class S3L2Adapter(L2AdapterInterface):
             ):  # re-check: another thread may have finished while we waited
                 if bucket in self._ensured_buckets:
                     return
+                if bucket in self._foreign_buckets:
+                    raise _BucketUnavailable(bucket)
             try:
-                # Third Party
-                from botocore.exceptions import ClientError
-
                 mgmt_s3 = self._mgmt_client()
                 try:
                     # us-east-1 is the S3 default region and rejects an explicit
@@ -1036,9 +1102,19 @@ class S3L2Adapter(L2AdapterInterface):
                             },
                         )
                     logger.info("Auto-provisioned tenant KV bucket %s", bucket)
-                except ClientError as e:
-                    code = e.response.get("Error", {}).get("Code", "")
-                    if code not in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
+                except Exception as e:
+                    code = _aws_error_code(e)
+                    if code == "BucketAlreadyExists":
+                        with self._lock:
+                            self._foreign_buckets.add(bucket)
+                        logger.error(
+                            "Tenant bucket name %s is owned by another AWS "
+                            "account; KV for its tenant will not be stored or "
+                            "read until the bucket template changes",
+                            bucket,
+                        )
+                        raise _BucketUnavailable(bucket) from None
+                    if code != "BucketAlreadyOwnedByYou":
                         raise
                 mgmt_s3.put_bucket_lifecycle_configuration(
                     Bucket=bucket,
@@ -1052,21 +1128,32 @@ class S3L2Adapter(L2AdapterInterface):
                             }
                         ]
                     },
+                    **self._expected_owner_kwargs(),
                 )
                 # Only mark provisioned after success, so a failed create isn't
                 # cached as "done" (a later write would then 404 forever).
                 with self._lock:
                     self._ensured_buckets.add(bucket)
-            except Exception:
+            except _BucketUnavailable:
+                raise
+            except Exception as e:
                 logger.warning(
                     "Failed to auto-provision tenant bucket %s", bucket, exc_info=True
                 )
+                raise _BucketUnavailable(bucket) from e
+
+    def _expected_owner_kwargs(self) -> dict[str, str]:
+        owner = self._config.s3_expected_bucket_owner
+        return {"ExpectedBucketOwner": owner} if owner else {}
 
     def _make_request(
         self, method: str, key_str: str, *, body_stream=None, extra_headers=None
     ):
         headers = HttpHeaders()
-        headers.add("Host", self._endpoint_for_key(key_str))
+        host = self._endpoint_for_key(key_str)
+        headers.add("Host", host)
+        for k, v in self._tenant_headers(host):
+            headers.add(k, v)
         if extra_headers:
             for k, v in extra_headers:
                 headers.add(k, v)
@@ -1232,6 +1319,8 @@ class S3L2Adapter(L2AdapterInterface):
 
         headers = HttpHeaders()
         headers.add("Host", host or self._endpoint)
+        for k, v in self._tenant_headers(host or self._endpoint):
+            headers.add(k, v)
         req = HttpRequest("GET", path, headers)
 
         body_chunks: list[bytes] = []
@@ -1305,6 +1394,9 @@ class S3L2Adapter(L2AdapterInterface):
                 s3_req = self._put_request(key_str, obj)
                 futures.append(asyncio.wrap_future(s3_req.finished_future))
                 indexed.append((i, key, obj, key_str))
+            except _BucketUnavailable:
+                indexed.append((i, key, obj, None))
+                futures.append(None)
             except Exception:
                 logger.exception("S3L2Adapter failed to launch PUT")
                 indexed.append((i, key, obj, None))
@@ -1392,6 +1484,9 @@ class S3L2Adapter(L2AdapterInterface):
                 s3_req, captured = self._head_request(key_str)
                 futures.append(asyncio.wrap_future(s3_req.finished_future))
                 captured_list.append(captured)
+            except _BucketUnavailable:
+                futures.append(None)  # a miss
+                captured_list.append({"status": None, "len": None})
             except Exception:
                 logger.exception("S3L2Adapter failed to launch HEAD")
                 futures.append(None)
@@ -1479,6 +1574,8 @@ class S3L2Adapter(L2AdapterInterface):
                 s3_req, progress = self._get_request(key_str, obj)
                 futures.append(asyncio.wrap_future(s3_req.finished_future))
                 launched.append((i, key_str, expected, progress))
+            except _BucketUnavailable:
+                continue  # a miss
             except Exception:
                 logger.exception("S3L2Adapter failed to launch GET")
 
@@ -1559,6 +1656,8 @@ class S3L2Adapter(L2AdapterInterface):
                 s3_req = self._delete_request(key_str)
                 futures.append(asyncio.wrap_future(s3_req.finished_future))
                 indexed.append((key, key_str))
+            except _BucketUnavailable:
+                continue
             except Exception:
                 logger.exception("S3L2Adapter failed to launch DELETE")
 
