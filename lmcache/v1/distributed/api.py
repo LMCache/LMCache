@@ -11,6 +11,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, get_args
 import enum
+import os
+
+if os.environ.get("LMCACHE_USE_NATIVE_KEYS") == "1":
+    # Third Party
+    import lmcache_rust_core as _native_core
 
 # First Party
 from lmcache.v1.common.api import MemoryLayoutDesc as MemoryLayoutDesc
@@ -24,6 +29,7 @@ if TYPE_CHECKING:
     from lmcache.v1.common.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
+_USE_NATIVE_KEYS = os.environ.get("LMCACHE_USE_NATIVE_KEYS") == "1"
 
 _OBJECT_KEY_HASH_ATTR = "_hash_value"
 """Instance attribute holding an ``ObjectKey``'s hash once computed."""
@@ -266,6 +272,99 @@ class ObjectKeyIdentity:
         object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
 
+class _NativeObjectKeyIdentity(ObjectKeyIdentity):
+    _native_key: "_native_core.ObjectKey"
+
+    def __init__(
+        self,
+        chunk_hash: bytes,
+        kv_rank: int,
+        model_name: str,
+        object_group_id: int = 0,
+        cache_salt: str = "",
+        tags: Mapping[str, str] | None = None,
+    ) -> None:
+        object.__setattr__(
+            self,
+            "_native_key",
+            _native_core.ObjectKey(
+                chunk_hash,
+                model_name,
+                kv_rank,
+                object_group_id,
+                cache_salt,
+                dict(tags) if tags is not None else {},
+            ),
+        )
+
+    @classmethod
+    def from_native(cls, key: "_native_core.ObjectKey") -> "_NativeObjectKeyIdentity":
+        identity = object.__new__(cls)
+        object.__setattr__(identity, "_native_key", key)
+        return identity
+
+    @property
+    def native_key(self) -> "_native_core.ObjectKey":
+        return self._native_key
+
+    @property
+    def chunk_hash(self) -> bytes:
+        return self._native_key.chunk_hash
+
+    @property
+    def kv_rank(self) -> int:
+        return self._native_key.kv_rank
+
+    @property
+    def model_name(self) -> str:
+        return self._native_key.model_name
+
+    @property
+    def object_group_id(self) -> int:
+        return self._native_key.object_group_id
+
+    @property
+    def cache_salt(self) -> str:
+        return self._native_key.cache_salt
+
+    @property
+    def tags(self) -> Mapping[str, str]:
+        return freeze_dict(self._native_key.tags)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, _NativeObjectKeyIdentity):
+            return self._native_key == other.native_key
+        if isinstance(other, ObjectKeyIdentity):
+            return (
+                self.chunk_hash,
+                self.kv_rank,
+                self.model_name,
+                self.object_group_id,
+                self.cache_salt,
+                self.tags,
+            ) == (
+                other.chunk_hash,
+                other.kv_rank,
+                other.model_name,
+                other.object_group_id,
+                other.cache_salt,
+                other.tags,
+            )
+        return NotImplemented
+
+    __hash__ = ObjectKeyIdentity.__hash__
+
+    def __reduce__(self) -> tuple[object, tuple[object, ...]]:
+        return ObjectKeyIdentity, (
+            self.chunk_hash,
+            self.kv_rank,
+            self.model_name,
+            self.object_group_id,
+            self.cache_salt,
+            dict(self.tags),
+        )
+
+
 @dataclass(frozen=True, init=False)
 class ObjectKey:
     """
@@ -320,7 +419,10 @@ class ObjectKey:
         if identity is None:
             if chunk_hash is None or model_name is None or kv_rank is None:
                 raise TypeError("chunk_hash, model_name and kv_rank are required")
-            identity = ObjectKeyIdentity(
+            identity_type = (
+                _NativeObjectKeyIdentity if _USE_NATIVE_KEYS else ObjectKeyIdentity
+            )
+            identity = identity_type(
                 chunk_hash=chunk_hash,
                 model_name=model_name,
                 kv_rank=kv_rank,
@@ -355,6 +457,15 @@ class ObjectKey:
                 else identity.cache_salt,
                 tags=tags if tags is not None else identity.tags,
             )
+        if _USE_NATIVE_KEYS and not isinstance(identity, _NativeObjectKeyIdentity):
+            identity = _NativeObjectKeyIdentity(
+                identity.chunk_hash,
+                identity.kv_rank,
+                identity.model_name,
+                identity.object_group_id,
+                identity.cache_salt,
+                identity.tags,
+            )
         object.__setattr__(self, "identity", identity)
         object.__setattr__(
             self,
@@ -363,10 +474,10 @@ class ObjectKey:
         )
 
     def __hash__(self) -> int:
-        """Hash the identity, computing it at most once per object.
+        """Hash the identity once using the selected key backend.
 
         Returns:
-            The hash of ``identity``; ``extra_attributes`` never contributes.
+            The backend's identity hash; ``extra_attributes`` never contributes.
 
         Note:
             The value is kept as a non-field instance attribute, so it stays
@@ -377,7 +488,21 @@ class ObjectKey:
         # A miss is the common first call, so avoid raising KeyError for it.
         value = self.__dict__.get(_OBJECT_KEY_HASH_ATTR)
         if value is None:
-            value = hash(self.identity)
+            identity = self.identity
+            if _USE_NATIVE_KEYS:
+                if not isinstance(identity, _NativeObjectKeyIdentity):
+                    identity = _NativeObjectKeyIdentity(
+                        identity.chunk_hash,
+                        identity.kv_rank,
+                        identity.model_name,
+                        identity.object_group_id,
+                        identity.cache_salt,
+                        identity.tags,
+                    )
+                    object.__setattr__(self, "identity", identity)
+                value = hash(identity.native_key)
+            else:
+                value = hash(identity)
             self.__dict__[_OBJECT_KEY_HASH_ATTR] = value
         return value
 
@@ -886,6 +1011,57 @@ class PrefetchResult:
         return self._l2_hit_count
 
 
+def _make_object_keys(
+    chunk_hashes: list[bytes],
+    model_name: str,
+    kv_ranks: list[int],
+    object_group_id: int,
+    cache_salt: str,
+    tags: Mapping[str, str],
+    extra_attributes: dict[str, object],
+) -> list[ObjectKey]:
+    if (
+        _USE_NATIVE_KEYS
+        and chunk_hashes
+        and len(chunk_hashes[0]) > 0
+        and all(len(h) == len(chunk_hashes[0]) for h in chunk_hashes)
+    ):
+        packed = b"".join(chunk_hashes)
+        batches = [
+            _native_core.ObjectKeyBatch(
+                packed,
+                len(chunk_hashes[0]),
+                model_name,
+                rank,
+                object_group_id,
+                cache_salt,
+                dict(tags),
+            )
+            for rank in kv_ranks
+        ]
+        return [
+            ObjectKey(
+                identity=_NativeObjectKeyIdentity.from_native(batch[index]),
+                extra_attributes=extra_attributes,
+            )
+            for index in range(len(chunk_hashes))
+            for batch in batches
+        ]
+    return [
+        ObjectKey(
+            chunk_hash=chunk_hash,
+            model_name=model_name,
+            kv_rank=rank,
+            object_group_id=object_group_id,
+            cache_salt=cache_salt,
+            tags=tags,
+            extra_attributes=extra_attributes,
+        )
+        for chunk_hash in chunk_hashes
+        for rank in kv_ranks
+    ]
+
+
 def ipc_key_to_object_keys(
     ipc_key: "IPCCacheServerKey",
     chunk_hashes: list[bytes],
@@ -934,23 +1110,19 @@ def ipc_key_to_object_keys(
     tags = _get_object_identity_tags(ipc_key.request_configs, chunk_size)
 
     return [
-        [
-            ObjectKey(
-                chunk_hash=chunk_hash,
-                model_name=ipc_key.model_name,
-                kv_rank=kv_rank,
-                object_group_id=object_group_id,
-                cache_salt=cache_salt,
-                extra_attributes=extra_attributes,
-                tags=tags,
-            )
-            for chunk_hash in chunk_hashes
-            for kv_rank in _lookup_kv_ranks(
+        _make_object_keys(
+            chunk_hashes,
+            ipc_key.model_name,
+            _lookup_kv_ranks(
                 ipc_key,
                 shard_replication_desc.tp_replicas(object_group_id),
                 shard_replication_desc.dcp_shards(object_group_id),
-            )
-        ]
+            ),
+            object_group_id,
+            cache_salt,
+            tags,
+            extra_attributes,
+        )
         for object_group_id in object_group_ids
     ]
 
@@ -1027,18 +1199,15 @@ def ipc_key_to_grouped_object_keys(
         ):
             rows.append(
                 GroupedObjectKeys(
-                    keys=[
-                        ObjectKey(
-                            chunk_hash=chunk_hash,
-                            model_name=ipc_key.model_name,
-                            kv_rank=kv_rank,
-                            object_group_id=object_group_id,
-                            cache_salt=ipc_key.cache_salt,
-                            extra_attributes=extra_attributes,
-                            tags=tags,
-                        )
-                        for chunk_hash in chunk_hashes
-                    ],
+                    keys=_make_object_keys(
+                        chunk_hashes,
+                        ipc_key.model_name,
+                        [kv_rank],
+                        object_group_id,
+                        ipc_key.cache_salt,
+                        tags,
+                        extra_attributes,
+                    ),
                     object_group_id=object_group_id,
                     layout_desc=layout_desc,
                     sliding_window_size=window,

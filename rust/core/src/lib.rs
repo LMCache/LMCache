@@ -3,9 +3,9 @@
 use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use std::collections::{hash_map::DefaultHasher, BTreeMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, BTreeMap};
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 #[derive(PartialEq, Eq, Hash)]
 struct KeyContext {
@@ -224,71 +224,9 @@ impl ObjectKeyBatch {
     }
 }
 
-#[pyclass(frozen, module = "lmcache_rust_core")]
-#[derive(Default)]
-struct ObjectKeySet {
-    keys: RwLock<HashSet<ObjectKey>>,
-}
-
-#[pymethods]
-impl ObjectKeySet {
-    #[new]
-    fn new() -> Self {
-        Self::default()
-    }
-
-    fn insert(&self, py: Python<'_>, batch: &ObjectKeyBatch) -> usize {
-        let data = Arc::clone(&batch.data);
-        py.allow_threads(move || {
-            let mut keys = self.keys.write().unwrap();
-            let before = keys.len();
-            keys.extend((0..data.hashes.len()).map(|index| ObjectKey {
-                data: Arc::clone(&data),
-                index,
-            }));
-            keys.len() - before
-        })
-    }
-
-    fn contains(&self, py: Python<'_>, batch: &ObjectKeyBatch) -> Vec<bool> {
-        let data = Arc::clone(&batch.data);
-        py.allow_threads(move || {
-            let keys = self.keys.read().unwrap();
-            (0..data.hashes.len())
-                .map(|index| {
-                    keys.contains(&ObjectKey {
-                        data: Arc::clone(&data),
-                        index,
-                    })
-                })
-                .collect()
-        })
-    }
-
-    fn remove(&self, py: Python<'_>, batch: &ObjectKeyBatch) -> usize {
-        let data = Arc::clone(&batch.data);
-        py.allow_threads(move || {
-            let mut keys = self.keys.write().unwrap();
-            (0..data.hashes.len())
-                .filter(|&index| {
-                    keys.remove(&ObjectKey {
-                        data: Arc::clone(&data),
-                        index,
-                    })
-                })
-                .count()
-        })
-    }
-
-    fn __len__(&self) -> usize {
-        self.keys.read().unwrap().len()
-    }
-}
-
 #[pymodule]
 fn lmcache_rust_core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<ObjectKey>()?;
     module.add_class::<ObjectKeyBatch>()?;
-    module.add_class::<ObjectKeySet>()?;
     Ok(())
 }
