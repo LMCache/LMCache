@@ -649,13 +649,26 @@ if [ "$(uname -s)" = "Linux" ]; then
   fi
   if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
     echo "Installing missing system packages: ${MISSING_PKGS[*]}"
+    APT_GET=(apt-get)
     if command -v sudo >/dev/null 2>&1; then
-      sudo apt-get update -o Acquire::Retries=3
-      sudo apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}"
-    else
-      apt-get update -o Acquire::Retries=3
-      apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}"
+      APT_GET=(sudo apt-get)
     fi
+    # A mirror can remove a superseded .deb between the index refresh and
+    # the download. Refresh the indexes again before retrying the install.
+    for attempt in 1 2 3; do
+      if "${APT_GET[@]}" update -o Acquire::Retries=3 \
+           -o Acquire::http::No-Cache=true -o APT::Update::Error-Mode=any \
+         && "${APT_GET[@]}" install -y --no-install-recommends "${MISSING_PKGS[@]}"; then
+        break
+      else
+        apt_status=$?
+      fi
+      if [ "${attempt}" -eq 3 ]; then
+        (exit "${apt_status}") # Run the existing ERR trap and preserve the APT exit code.
+      fi
+      echo "APT setup failed (attempt ${attempt}/3), retrying in 5 seconds" >&2
+      sleep 5
+    done
   else
     echo "libnuma1 and FFmpeg runtime libs already present, skipping apt install"
   fi
