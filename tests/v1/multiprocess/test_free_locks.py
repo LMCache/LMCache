@@ -415,8 +415,8 @@ def test_server_free_lookup_locks_no_matching_chunks():
 
     ctx = MagicMock()
     ctx.get_read_owners.return_value = None
-    ctx.token_hasher.chunk_size = 256
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
+    ctx.default_token_hasher.chunk_size = 256
+    ctx.default_token_hasher.compute_packed_chunk_hashes.return_value = []
 
     module = LookupModule(ctx)
 

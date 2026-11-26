@@ -21,6 +21,13 @@ workloads:
     coverage_objective: CPU-only multiprocess E2E across shm, inline, and server_copy transfer modes.
     acceptance_check: All 3 modes pass on gRPC in smoke-pipeline.yml.
 
+  - workload: client_wheel
+    gpu_requirement: 1-GPU
+    tier: pr-smoke
+    trigger: pr (lmcache/** or shared CI deps)
+    coverage_objective: vLLM on the lmcache-client wheel against a full-lmcache server; KV store and L1 retrieve in lmcache_driven, then engine_driven (soft) on the same wheel.
+    acceptance_check: vllm / client_wheel / grpc passes in smoke-pipeline.yml.
+
   - workload: cache_stats
     gpu_requirement: 1-GPU
     tier: pr-smoke

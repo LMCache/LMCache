@@ -486,7 +486,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                 existing model layout, or the instance is already registered
                 with different metadata.
         """
-        chunk_size = self._ctx.chunk_size if chunk_size is None else chunk_size
+        chunk_size = self._ctx.default_chunk_size if chunk_size is None else chunk_size
         self._ctx.validate_chunk_size(chunk_size)
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering

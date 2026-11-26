@@ -16,8 +16,6 @@ from lmcache.v1.distributed.internal_api import L1ManagerInterface, L1ManagerLis
 from lmcache.v1.distributed.l1_manager import DevDaxL1Manager, DramL1Manager
 import lmcache.v1.memory_management as memory_management
 
-pytestmark = pytest.mark.no_shared_allocator
-
 ALIGN = 4096
 CAPACITY = 32 * ALIGN
 LAYOUT = MemoryLayoutDesc([torch.Size([1024])], [torch.float32])  # 4 KiB

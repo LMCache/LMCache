@@ -146,7 +146,7 @@ def test_register_builds_the_context_through_the_hook():
             raise _StopHere
 
     module = _Module.__new__(_Module)
-    module._ctx = MagicMock(chunk_size=256)
+    module._ctx = MagicMock(default_chunk_size=256)
     module._lock = threading.Lock()
     module._cache_contexts = {}
     kv_caches, infos = object(), [object()]
@@ -173,7 +173,7 @@ def test_default_cache_context_hook_applies_server_settings(monkeypatch):
     monkeypatch.setattr(mod, "create_cache_context", create)
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._ctx = SimpleNamespace(
-        chunk_size=128, separate_object_groups=True, full_sw_kv=True
+        default_chunk_size=128, separate_object_groups=True, full_sw_kv=True
     )
     kv_caches, infos = object(), [object()]
     engine_type = next(iter(mod.EngineType))

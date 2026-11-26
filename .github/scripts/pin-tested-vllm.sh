@@ -153,7 +153,7 @@ if [[ -n "${VLLM_SHORT_SHA}" ]]; then
 fi
 
 if [[ -n "${VLLM_FULL_SHA}" && "${PIN_BACKEND}" == "cuda" ]]; then
-    VLLM_ARCHIVE_INDEX="https://wheels.vllm.ai/${VLLM_FULL_SHA}/cu130"
+    VLLM_ARCHIVE_INDEX="https://wheels.vllm.ai/${VLLM_FULL_SHA}/${VLLM_CUDA_VARIANT:-cu130}"
     echo "Resolved full SHA: ${VLLM_FULL_SHA}"
     echo "Archive index:     ${VLLM_ARCHIVE_INDEX}"
 else

@@ -11,10 +11,7 @@ import torch
 # First Party
 from lmcache.v1.platform.devices.npu import NpuDeviceSpec
 
-pytestmark = [
-    pytest.mark.npu,
-    pytest.mark.no_shared_allocator,
-]
+pytestmark = pytest.mark.npu
 
 requires_npu = pytest.mark.skipif(
     not (hasattr(torch, "npu") and torch.npu.is_available()),

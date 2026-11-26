@@ -36,8 +36,6 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
 import lmcache.v1.memory_management as memory_management
 
-pytestmark = pytest.mark.no_shared_allocator
-
 PAGE = 4096
 LAYOUT = MemoryLayoutDesc(shapes=[torch.Size([PAGE])], dtypes=[torch.uint8])
 KEY = ObjectKey(chunk_hash=b"borrowed", model_name="shadow", kv_rank=0)

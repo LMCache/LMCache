@@ -31,7 +31,7 @@ Validated models
 
       Every model in this family needs the same settings: the ``align`` Mamba
       cache mode, prefix caching, and object-group separation on the LMCache
-      server (enabled by default). The chunk size is negotiated from vLLM's
+      server (enabled by default). The chunk size is resolved from vLLM's
       *unified block size*, which is model-specific — vLLM logs
       ``Setting attention block size to N tokens`` at startup:
 
@@ -77,7 +77,7 @@ Validated models
 
       **Qwen3.5-0.8B** (1 GPU, ``N = 544``): identical to the above, with
       ``--chunk-size 544``. A lower configured chunk-size minimum, including
-      the default 256, negotiates to 544; see
+      the default 256, resolves to 544; see
       :doc:`/mp/chunk_size_negotiation`.
 
       ``--mamba-cache-mode align`` is required (GDN does not support the

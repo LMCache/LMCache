@@ -245,6 +245,9 @@ class LookupModule(DiscoverableModule):
         via query_prefetch_status. When the KV load policy declines the
         request, no prefetch is submitted and the job reports zero hits.
 
+        Before a prefetch that could load from an L2 adapter, publishes the
+        token bindings of the looked-up chunks for cache-event subscribers.
+
         Args:
             key: Cache key with request_id embedded.
             tp_size: Legacy wire field; ignored (kept for payload arity).
@@ -425,6 +428,38 @@ class LookupModule(DiscoverableModule):
                 probe_unfull_chunk=True,
             )
             return
+
+        # The prefetch can commit chunks to L1 that this server's engine never
+        # stored: copies loaded from a shared L2 or a P2P peer. Bind their
+        # tokens first, as STORE does, so the cache events can announce them.
+        # Without an L2 adapter nothing can be loaded.
+        if (
+            self._ctx.event_bus.has_subscribers(EventType.MP_TOKENS)
+            and self._ctx.storage_manager.l2_adapters()
+        ):
+            token_ids = unpack_token_ids(key.token_bytes)
+            token_offsets = [
+                (start_chunk + index) * chunk_size
+                for index in range(len(suffix_hashes))
+            ]
+            self._ctx.event_bus.publish(
+                Event(
+                    event_type=EventType.MP_TOKENS,
+                    session_id=key.request_id,
+                    metadata={
+                        "chunk_hashes": suffix_hashes,
+                        "token_chunks": [
+                            token_ids[offset : offset + chunk_size]
+                            for offset in token_offsets
+                        ],
+                        "token_offsets": token_offsets,
+                        "parent_hashes": [
+                            chunk_hashes[start_chunk - 1] if start_chunk else None,
+                            *suffix_hashes[:-1],
+                        ],
+                    },
+                )
+            )
 
         spec = PrefetchTaskSpec(
             key_groups=ipc_key_to_grouped_object_keys(
@@ -648,6 +683,7 @@ class LookupModule(DiscoverableModule):
             unfull_obj_keys = self._all_object_keys(
                 key,
                 [TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(key.end))],
+                chunk_size,
             )
             locked_keys = session.get_prefetch_owners()
             if all(obj_key in locked_keys for obj_key in unfull_obj_keys):
@@ -705,6 +741,7 @@ class LookupModule(DiscoverableModule):
         self,
         key: IPCCacheServerKey,
         chunk_hashes: list[bytes],
+        chunk_size: int | None = None,
     ) -> list[ObjectKey]:
         """Resolve every object key of a request across all object groups.
 
@@ -715,6 +752,8 @@ class LookupModule(DiscoverableModule):
         Args:
             key: The IPC key (model/world/worker, salt).
             chunk_hashes: Chunk hashes to resolve keys for.
+            chunk_size: Effective full chunk size when resolving an
+                unfull chunk; adds it to object identity.
 
         Returns:
             The object keys of all groups and kv ranks for ``chunk_hashes``.
@@ -729,6 +768,7 @@ class LookupModule(DiscoverableModule):
             chunk_hashes,
             list(range(attn_desc.num_object_groups)),
             shard_replication_desc,
+            chunk_size,
         )
         return [obj_key for group_keys in per_group for obj_key in group_keys]
 
@@ -779,7 +819,9 @@ class LookupModule(DiscoverableModule):
                 request_id=key.request_id,
                 requested_tokens=requested_tokens,
                 chunk_size=(
-                    chunk_size if chunk_size is not None else self._ctx.chunk_size
+                    chunk_size
+                    if chunk_size is not None
+                    else self._ctx.default_chunk_size
                 ),
                 num_object_groups=num_object_groups,
                 attn_desc=attn_desc,
@@ -983,6 +1025,7 @@ class LookupModule(DiscoverableModule):
                 group_layout_descs,
                 attn_desc,
                 shard_replication_desc,
+                chunk_size,
             )
             handle = self._ctx.storage_manager.submit_prefetch_task(
                 PrefetchTaskSpec(
