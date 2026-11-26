@@ -1799,60 +1799,24 @@ class S3L2Adapter(L2AdapterInterface):
             )
             return False
 
-        # Reconcile: only keep sidecar entries whose object still exists
-        # in the bucket; append live objects missing from the sidecar
-        # using their LastModified as the order proxy (placed before the
-        # sidecar entries since a never-recorded object is, by access
-        # order, colder than anything we have a tick for).
-        live_by_name: dict[str, tuple[ObjectKey, int, Optional[float]]] = {}
-        for obj_key, size, mtime in entries:
-            live_by_name[_object_key_to_string(obj_key)] = (obj_key, size, mtime)
-
-        sidecar_names = {name for (name, _sz, _tick) in index}
-
-        # Sidecar entries are stored oldest-access first already.
-        sidecar_ordered: list[tuple[ObjectKey, int, int]] = []
-        for name, size, tick in index:
-            live = live_by_name.get(name)
-            if live is None:
-                continue  # object no longer in bucket — drop it
-            obj_key, live_size, _mtime = live
-            sidecar_ordered.append((obj_key, live_size, tick))
-
-        # Live objects not in the sidecar, ordered by LastModified.
-        missing = [
-            (obj_key, size, mtime)
-            for name, (obj_key, size, mtime) in live_by_name.items()
-            if name not in sidecar_names
-        ]
-        missing_ordered = _order_entries_by_last_modified(missing)
-
-        # Final LRU order: brand-new (never-recorded) objects are coldest,
-        # then sidecar entries by ascending access tick.
-        final_ordered: list[tuple[ObjectKey, int]] = [
-            (k, sz) for (k, sz) in missing_ordered
-        ]
-        final_ordered.extend((k, sz) for (k, sz, _tick) in sidecar_ordered)
-
+        final_ordered, n_from_sidecar, n_new = _reconcile_lru_index(index, entries)
         seeded = self._seed_policy_in_order(final_ordered)
 
-        # Rebuild the in-memory tick map so the next checkpoint continues
-        # from a monotonic counter above every restored tick.
+        # Rebuild the tick map from the reconciled order. Every live object
+        # gets a tick, including objects the sidecar never recorded, so a
+        # later read refreshes it (``_touch_access_ticks`` skips untracked
+        # names) and the next checkpoint keeps it. Ticks are only compared
+        # with each other, so renumbering 1..N preserves the order.
         with self._lock:
             self._access_ticks.clear()
-            max_tick = 0
-            for obj_key, size, tick in sidecar_ordered:
+            for tick, (obj_key, size) in enumerate(final_ordered, start=1):
                 self._access_ticks[_object_key_to_string(obj_key)] = (size, tick)
-                max_tick = max(max_tick, tick)
-            # Missing objects get fresh ticks below the sidecar floor so
-            # they remain the coldest in subsequent checkpoints until
-            # actually touched.
-            self._access_tick_counter = max_tick
+            self._access_tick_counter = len(final_ordered)
         logger.info(
             "S3L2Adapter restored LRU index from sidecar: %d from sidecar, "
             "%d new from listing, %d seeded total",
-            len(sidecar_ordered),
-            len(missing_ordered),
+            n_from_sidecar,
+            n_new,
             seeded,
         )
         return True
@@ -1930,6 +1894,51 @@ class S3L2Adapter(L2AdapterInterface):
 # ---------------------------------------------------------------------------
 # Module helpers for seeding (pure; unit-tested without S3)
 # ---------------------------------------------------------------------------
+
+
+def _reconcile_lru_index(
+    index: list[tuple[str, int, int]],
+    entries: list[tuple[ObjectKey, int, Optional[float]]],
+) -> tuple[list[tuple[ObjectKey, int]], int, int]:
+    """Merge a restored sidecar index with the live bucket listing.
+
+    Sidecar rows whose object is gone are dropped. Live objects the
+    sidecar never recorded (written after the last checkpoint, or by
+    another process) are placed first, ordered by ``LastModified``: with
+    no recorded access they are treated as colder than anything that has
+    a tick. Sidecar rows follow in ascending tick order, with the size
+    taken from the live listing.
+
+    Returns ``(final_ordered, n_from_sidecar, n_new)`` where
+    ``final_ordered`` is ``[(ObjectKey, size), ...]`` least recently used
+    first, ready for :meth:`S3L2Adapter._seed_policy_in_order`.
+    """
+    live_by_name: dict[str, tuple[ObjectKey, int, Optional[float]]] = {}
+    for obj_key, size, mtime in entries:
+        live_by_name[_object_key_to_string(obj_key)] = (obj_key, size, mtime)
+
+    sidecar_names = {name for (name, _sz, _tick) in index}
+
+    from_sidecar: list[tuple[ObjectKey, int, int]] = []
+    for name, _size, tick in index:
+        live = live_by_name.get(name)
+        if live is None:
+            continue  # object no longer in the bucket
+        obj_key, live_size, _mtime = live
+        from_sidecar.append((obj_key, live_size, tick))
+    from_sidecar.sort(key=lambda row: row[2])
+
+    new_since_checkpoint = _order_entries_by_last_modified(
+        [
+            (obj_key, size, mtime)
+            for name, (obj_key, size, mtime) in live_by_name.items()
+            if name not in sidecar_names
+        ]
+    )
+
+    final_ordered = list(new_since_checkpoint)
+    final_ordered.extend((k, sz) for (k, sz, _tick) in from_sidecar)
+    return final_ordered, len(from_sidecar), len(new_since_checkpoint)
 
 
 def _order_entries_by_last_modified(
