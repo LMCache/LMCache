@@ -83,6 +83,8 @@ class BenchmarkConfig:
             Reads are checked in the client's buffer; writes are checked in
             the server's buffer through the control side-channel.
         server_timeout: Seconds the server stays up serving catalog requests.
+        shm_name: Non-lazy L1 shared-memory name. ``None`` preserves the L1
+            configuration's default; an empty string disables shared memory.
     """
 
     role: str
@@ -103,6 +105,7 @@ class BenchmarkConfig:
     seed: int = 0
     verify: bool = False
     server_timeout: float = 1800.0
+    shm_name: str | None = None
 
     def __post_init__(self) -> None:
         """Apply derived defaults and validate the configuration.
@@ -214,6 +217,12 @@ def add_benchmark_arguments(parser: argparse.ArgumentParser) -> None:
         help="server source pool size; 0 means 5 * --num-objects.",
     )
     parser.add_argument(
+        "--shm-name",
+        default=None,
+        help="non-lazy L1 shared-memory name; omit to keep the L1 default, "
+        'or pass "" to disable shared memory.',
+    )
+    parser.add_argument(
         "--use-lazy",
         action="store_true",
         help="use the lazy L1 allocator (experimental for registration).",
@@ -265,4 +274,5 @@ def build_config(args: argparse.Namespace) -> BenchmarkConfig:
         seed=args.seed,
         verify=args.verify,
         server_timeout=args.server_timeout,
+        shm_name=args.shm_name,
     )
