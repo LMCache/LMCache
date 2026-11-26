@@ -102,6 +102,10 @@ class VmmCudaIPCData(IPCData, tag="cuda_vmm"):
             raise ValueError("IPC fabric handle does not match allocation kind")
 
 
+class VmmRocmIPCData(VmmCudaIPCData, tag="rocm_vmm"):
+    """HIP VMM allocation descriptor; same fields as :class:`VmmCudaIPCData`."""
+
+
 class CpuShmIPCData(IPCData, tag="cpu_shm"):
     """Named CPU shared-memory descriptor."""
 
@@ -111,6 +115,25 @@ class CpuShmIPCData(IPCData, tag="cpu_shm"):
     def __post_init__(self) -> None:
         if self.metadata.byte_span() > self.nbytes:
             raise ValueError("IPC view exceeds CPU shared-memory segment")
+
+
+class GcuIPCData(IPCData, tag="gcu"):
+    """PyTorch shared GCU storage descriptor."""
+
+    handle: tuple[
+        int,
+        bytes | None,
+        NonNegative,
+        NonNegative,
+        bytes | None,
+        NonNegative,
+        bytes | None,
+        bool,
+    ]
+
+    def __post_init__(self) -> None:
+        if self.metadata.byte_span() > self.handle[2]:
+            raise ValueError("IPC view exceeds GCU storage")
 
 
 class MusaIPCData(IPCData, tag="musa"):
@@ -179,7 +202,9 @@ WireIPCData: TypeAlias = (
     CudaIPCData
     | RawCudaIPCData
     | VmmCudaIPCData
+    | VmmRocmIPCData
     | CpuShmIPCData
+    | GcuIPCData
     | MusaIPCData
     | NpuIPCData
 )
@@ -189,7 +214,9 @@ WRAPPER_TYPES: dict[type[msgspec.Struct], tuple[str, str]] = {
     CudaIPCData: ("cuda.ipc_wrapper", "CudaIPCWrapper"),
     RawCudaIPCData: ("cuda.ipc_wrapper", "RawCudaIPCWrapper"),
     VmmCudaIPCData: ("cuda.ipc_wrapper", "VmmCudaIPCWrapper"),
+    VmmRocmIPCData: ("rocm.ipc_wrapper", "VmmRocmIPCWrapper"),
     CpuShmIPCData: ("cpu.shm", "CpuShmTensorWrapper"),
+    GcuIPCData: ("gcu.ipc_wrapper", "GcuIPCWrapper"),
     MusaIPCData: ("musa.ipc_wrapper", "MusaIPCWrapper"),
     NpuIPCData: ("npu.ipc_wrapper", "NpuIPCWrapper"),
 }

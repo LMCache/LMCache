@@ -19,19 +19,22 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.client import worker_transfer
 from lmcache.v1.client.transfer_context.base import (
-    EngineDrivenContextMetadata,
     compute_kv_layout,
 )
 from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
-from lmcache.v1.client.transfer_context.tensor_wire import (
-    decode_grouped_tensors,
-    encode_grouped_tensors,
-    encode_tensors,
-)
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
 )
+from lmcache.v1.common.custom_types import (
+    GroupLayout,
+    IPCCacheServerKey,
+    PrepareRetrieveResponse,
+    RegisterEngineDrivenContextPayload,
+    RegisterEngineDrivenContextResponse,
+)
+from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.transfer_context import EngineDrivenContextMetadata
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, get_request_tags
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -40,15 +43,7 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.custom_types import (
-    GroupLayout,
-    IPCCacheServerKey,
-    PrepareRetrieveResponse,
-    RegisterEngineDrivenContextPayload,
-    RegisterEngineDrivenContextResponse,
-)
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
 )
@@ -58,6 +53,11 @@ from lmcache.v1.multiprocess.modules.server_transfer import (
     ShmTransferStrategy,
 )
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
+from lmcache.v1.transport.tensor_wire import (
+    decode_grouped_tensors,
+    encode_grouped_tensors,
+    encode_tensors,
+)
 
 
 def _detected_block_size(kv_caches: dict[str, torch.Tensor]) -> int:
@@ -236,7 +236,7 @@ class _FakeGroupedContext:
         self.committed = True
         return True
 
-    def commit_retrieve(self, _key, _iid):
+    def commit_retrieve(self, _key, _iid, _failed=False):
         return True
 
     @contextmanager
@@ -337,7 +337,7 @@ def test_register_accepts_sliding_window_groups() -> None:
     sw_tokens = chunk_tokens // 2
 
     # First Party
-    from lmcache.v1.multiprocess.custom_types import (
+    from lmcache.v1.common.custom_types import (
         RegisterEngineDrivenContextResponse,
     )
 
@@ -443,7 +443,9 @@ def test_submit_retrieve_multigroup_inline_scatters_group_major(
     ctx, pctx, _ = _inline_worker_ctx(monkeypatch)
     ctx._engine_type = "sentinel-engine"
     payload = [([0], [torch.ones(1)]), ([0], [torch.ones(1) * 2])]
-    monkeypatch.setattr(pctx, "prepare_retrieve_multigroup", lambda _k, _i, _e: payload)
+    monkeypatch.setattr(
+        pctx, "prepare_retrieve_multigroup", lambda _k, _i, _e, _f: payload
+    )
     order: list[str] = []
     scattered: list[dict] = []
 
@@ -482,7 +484,7 @@ def test_submit_retrieve_multigroup_inline_group_count_mismatch(
     monkeypatch.setattr(
         pctx,
         "prepare_retrieve_multigroup",
-        lambda _k, _i, _e: [([0], [torch.ones(1)])],
+        lambda _k, _i, _e, _f: [([0], [torch.ones(1)])],
     )
     kv = {name: torch.zeros(1) for name in ("layer_0", "layer_1", "layer_2")}
     future = ctx.submit_retrieve("req", MagicMock(), kv, [[1, 2], [3]], MagicMock(), 2)
@@ -614,6 +616,41 @@ def test_inline_strategy_multigroup_store_retrieve_roundtrip() -> None:
     assert ret_miss.success is False
 
 
+def test_inline_strategy_group_miss_releases_later_groups() -> None:
+    """A group that misses ends the retrieve without leaving the groups after
+    it read-locked."""
+    shapes: dict[int, tuple[int, ...]] = {0: (2, 2, 8, 16), 1: (2, 1, 8, 4)}
+    sm = _FakeStorageManager(shapes)
+    strategy = InlineTransferStrategy(sm)  # type: ignore[arg-type]
+    key = IPCCacheServerKey.from_token_ids(
+        "m", 1, 0, [1] * 16, start=0, end=16, request_id="req-inline-miss"
+    )
+    group_keys = [
+        [_obj_key(1, 0), _obj_key(2, 0)],
+        [_obj_key(1, 1), _obj_key(2, 1)],
+    ]
+    assert strategy.commit_store(
+        key=key,
+        instance_id=7,
+        cpu_data=encode_grouped_tensors(
+            [([0, 1], [torch.zeros(shapes[g])] * 2) for g in (0, 1)]
+        ),
+        context=_group_metadata(),
+        resolve_obj_keys=lambda _k: group_keys[0],
+        group_keys=group_keys,
+    )
+
+    missing_first = [[_obj_key(1, 0), _obj_key(9, 0)], group_keys[1]]
+    ret = strategy.prepare_retrieve(
+        key=key,
+        instance_id=7,
+        resolve_obj_keys=lambda _k: missing_first[0],
+        group_keys=missing_first,
+    )
+    assert ret.success is False
+    assert sm.finished_reads == group_keys[1]
+
+
 def test_inline_strategy_store_shape_mismatch_releases_reservations() -> None:
     """A chunk whose shape disagrees with the reserved object fails the store,
     and the unwritten reservations are released and deleted -- they must not
@@ -685,10 +722,11 @@ def test_single_compressed_group_worker_server_roundtrip(
     module = EngineDrivenTransferModule(engine)
     lookup = LookupModule(engine)
     server = create_request_server(
-        [module, lookup], MPServerConfig(host="127.0.0.1", port=unused_tcp_port)
+        [module, lookup],
+        MPServerConfig(host="127.0.0.1", port=unused_tcp_port, transport="grpc"),
     )
     server.start()
-    client = RequestClientFactory.create(f"tcp://127.0.0.1:{unused_tcp_port}")
+    client = RequestClientFactory.create(f"grpc://127.0.0.1:{unused_tcp_port}")
     worker = EngineDrivenTransferContext(1, client)
     source = {
         "layer_0": torch.arange(
@@ -758,7 +796,7 @@ def test_register_payload_carries_group_layouts() -> None:
     kv = {f"layer_{i}": torch.zeros(2, 6, 4, 2, 8) for i in range(3)}
 
     # First Party
-    from lmcache.v1.multiprocess.custom_types import (
+    from lmcache.v1.common.custom_types import (
         RegisterEngineDrivenContextResponse,
     )
 
@@ -806,7 +844,7 @@ def _register_capturing_payload(
 ) -> tuple[RegisterEngineDrivenContextPayload, EngineDrivenTransferContext]:
     """Register ``kv`` and return the payload sent to the server."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import (
+    from lmcache.v1.common.custom_types import (
         RegisterEngineDrivenContextResponse,
     )
 
@@ -1057,7 +1095,7 @@ def test_register_uses_adapter_chunk_size_over_local_group_lcm() -> None:
     ]
 
     # First Party
-    from lmcache.v1.multiprocess.custom_types import (
+    from lmcache.v1.common.custom_types import (
         RegisterEngineDrivenContextResponse,
     )
 
@@ -1220,8 +1258,9 @@ def test_retrieve_multigroup_inline_serves_each_group_window(monkeypatch) -> Non
     requested: list[Any] = []
     a, b, c = torch.ones(1), torch.ones(1) * 2, torch.ones(1) * 3
 
-    def _prepare(_k, _i, expected):
+    def _prepare(_k, _i, expected, first_chunks):
         requested.append([count for _, _, count in expected])
+        assert first_chunks == [0, 2]
         return [([0, 1], [a, b]), ([2], [c])]
 
     monkeypatch.setattr(pctx, "prepare_retrieve_multigroup", _prepare)
@@ -1246,7 +1285,7 @@ def test_retrieve_multigroup_inline_rejects_chunks_outside_the_window(
     monkeypatch.setattr(
         pctx,
         "prepare_retrieve_multigroup",
-        lambda _k, _i, _e: [
+        lambda _k, _i, _e, _f: [
             ([0, 1], [torch.ones(1), torch.ones(1)]),
             ([1, 2], [torch.ones(1), torch.ones(1)]),
         ],

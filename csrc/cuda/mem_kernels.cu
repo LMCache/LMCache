@@ -57,93 +57,6 @@ inline void check_head_size(const EngineKVFormat engine_kv_format,
               static_cast<int>(engine_kv_format));
 }
 
-template <typename scalar_t>
-__global__ void load_and_reshape_flash_kernel(
-    scalar_t* __restrict__ key_value,  // [num_tokens, num_heads, head_size]
-    const scalar_t* __restrict__ key_cache,    // [num_blocks, block_size,
-                                               // num_heads, head_size]
-    const scalar_t* __restrict__ value_cache,  // [num_blocks, block_size,
-                                               // num_heads, head_size]
-    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-    const int block_stride_in_64bit, const int key_value_stride,
-    const int num_heads, const int head_size_in_64bit, const int block_size,
-    const int key_layer_offset, const int value_layer_offset) {
-  const int64_t token_idx = blockIdx.x;
-  const int64_t slot_idx = slot_mapping[token_idx];
-
-  if (slot_idx < 0) {
-    return;
-  }
-
-  const int64_t block_idx = slot_idx / block_size;
-  const int64_t block_offset = slot_idx % block_size;
-  const int n = num_heads * head_size_in_64bit;
-
-  for (int i = threadIdx.x; i < n; i += blockDim.x) {
-    const int64_t tgt_key_idx =
-        key_layer_offset + token_idx * key_value_stride + i;
-    const int64_t tgt_value_idx =
-        value_layer_offset + token_idx * key_value_stride + i;
-
-    const int head_idx = i / head_size_in_64bit;
-    const int head_offset = i % head_size_in_64bit;
-    const int64_t src_key_value_idx =
-        block_idx * block_stride_in_64bit +
-        block_offset * num_heads * head_size_in_64bit +
-        head_idx * head_size_in_64bit + head_offset;
-
-    scalar_t tgt_key = key_cache[src_key_value_idx];
-    scalar_t tgt_value = value_cache[src_key_value_idx];
-
-    key_value[tgt_key_idx] = tgt_key;
-    key_value[tgt_value_idx] = tgt_value;
-  }
-}
-
-template <typename scalar_t>
-__global__ void reshape_and_cache_back_flash_kernel(
-    const scalar_t* __restrict__ key_value,  // [num_tokens, num_heads,
-                                             // head_size]
-    scalar_t* __restrict__ key_cache,    // [num_blocks, block_size, num_heads,
-                                         // head_size]
-    scalar_t* __restrict__ value_cache,  // [num_blocks, block_size, num_heads,
-                                         // head_size]
-    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-    const int block_stride_in_64bit, const int key_value_stride,
-    const int num_heads, const int head_size_in_64bit, const int block_size,
-    const int key_layer_offset, const int value_layer_offset) {
-  const int64_t token_idx = blockIdx.x;
-  const int64_t slot_idx = slot_mapping[token_idx];
-
-  if (slot_idx < 0) {
-    return;
-  }
-
-  const int64_t block_idx = slot_idx / block_size;
-  const int64_t block_offset = slot_idx % block_size;
-  const int n = num_heads * head_size_in_64bit;
-
-  for (int i = threadIdx.x; i < n; i += blockDim.x) {
-    const int64_t tgt_key_idx =
-        key_layer_offset + token_idx * key_value_stride + i;
-    const int64_t tgt_value_idx =
-        value_layer_offset + token_idx * key_value_stride + i;
-
-    const int head_idx = i / head_size_in_64bit;
-    const int head_offset = i % head_size_in_64bit;
-    const int64_t src_key_value_idx =
-        block_idx * block_stride_in_64bit +
-        block_offset * num_heads * head_size_in_64bit +
-        head_idx * head_size_in_64bit + head_offset;
-
-    scalar_t tgt_key = key_value[tgt_key_idx];
-    scalar_t tgt_value = key_value[tgt_value_idx];
-
-    key_cache[src_key_value_idx] = tgt_key;
-    value_cache[src_key_value_idx] = tgt_value;
-  }
-}
-
 template <typename scalar_t, EngineKVFormat format>
 __global__ void single_layer_kv_transfer_kernel(
     scalar_t* __restrict__ lmc_key_value_cache,
@@ -248,26 +161,28 @@ page_buffer_offset(const int k_or_v, const int token_idx,
 
   // vllm cross layer
   if constexpr (format == EngineKVFormat::NB_NL_TWO_BS_NH_HS) {
-    return k_or_v * page_buffer_size * scalars_per_token +
-           token_idx * scalars_per_token + scalar_offset;
+    return static_cast<int64_t>(k_or_v) * page_buffer_size * scalars_per_token +
+           static_cast<int64_t>(token_idx) * scalars_per_token + scalar_offset;
   }
   // vllm flash attention (NHD)
   else if constexpr (format == EngineKVFormat::NL_X_TWO_NB_BS_NH_HS) {
-    return k_or_v * page_buffer_size * scalars_per_token +
-           token_idx * scalars_per_token + scalar_offset;
+    return static_cast<int64_t>(k_or_v) * page_buffer_size * scalars_per_token +
+           static_cast<int64_t>(token_idx) * scalars_per_token + scalar_offset;
   }
   // vllm flash infer (NHD)
   else if constexpr (format == EngineKVFormat::NL_X_NB_TWO_BS_NH_HS) {
     const int block_idx = token_idx / block_size;
     const int block_offset = token_idx % block_size;
-    return block_idx * 2 * block_size * scalars_per_token +
-           k_or_v * block_size * scalars_per_token +
-           block_offset * scalars_per_token + scalar_offset;
+    return static_cast<int64_t>(block_idx) * 2 * block_size *
+               scalars_per_token +
+           static_cast<int64_t>(k_or_v) * block_size * scalars_per_token +
+           static_cast<int64_t>(block_offset) * scalars_per_token +
+           scalar_offset;
   }
   // MLA formats: vLLM (NL_X_NB_BS_HS) and SGLang (NL_X_NBBS_ONE_HS)
   else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS ||
                      format == EngineKVFormat::NL_X_NBBS_ONE_HS) {
-    return token_idx * scalars_per_token + scalar_offset;
+    return static_cast<int64_t>(token_idx) * scalars_per_token + scalar_offset;
   }
   // vllm flash attention (HND) — physical: [2, NB, NH, BS, HS]
   else if constexpr (format == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS) {
@@ -276,10 +191,11 @@ page_buffer_offset(const int k_or_v, const int token_idx,
     const int head_idx = scalar_offset / head_size;
     const int head_offset = scalar_offset % head_size;
     const int num_heads = scalars_per_token / head_size;
-    return k_or_v * page_buffer_size * scalars_per_token +
-           block_idx * num_heads * block_size * head_size +
-           head_idx * block_size * head_size + block_offset * head_size +
-           head_offset;
+    return static_cast<int64_t>(k_or_v) * page_buffer_size * scalars_per_token +
+           static_cast<int64_t>(block_idx) * num_heads * block_size *
+               head_size +
+           static_cast<int64_t>(head_idx) * block_size * head_size +
+           static_cast<int64_t>(block_offset) * head_size + head_offset;
   }
   // vllm flash infer (HND) — physical: [NB, 2, NH, BS, HS]
   else if constexpr (format == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS) {
@@ -288,10 +204,11 @@ page_buffer_offset(const int k_or_v, const int token_idx,
     const int head_idx = scalar_offset / head_size;
     const int head_offset = scalar_offset % head_size;
     const int num_heads = scalars_per_token / head_size;
-    return block_idx * 2 * num_heads * block_size * head_size +
-           k_or_v * num_heads * block_size * head_size +
-           head_idx * block_size * head_size + block_offset * head_size +
-           head_offset;
+    return static_cast<int64_t>(block_idx) * 2 * num_heads * block_size *
+               head_size +
+           static_cast<int64_t>(k_or_v) * num_heads * block_size * head_size +
+           static_cast<int64_t>(head_idx) * block_size * head_size +
+           static_cast<int64_t>(block_offset) * head_size + head_offset;
   } else if constexpr (format == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS ||
                        format == EngineKVFormat::NL_X_NB_NH_BS_CS) {
     const int hs2 = 2 * head_size;  // packed K+V width per head (xword units)
@@ -305,8 +222,9 @@ page_buffer_offset(const int k_or_v, const int token_idx,
         block_stride_xwords > 0
             ? block_stride_xwords
             : static_cast<int64_t>(num_heads) * block_size * hs2;
-    return block_idx * block_step + head_idx * block_size * hs2 +
-           block_offset * hs2 + head_offset;
+    return block_idx * block_step +
+           static_cast<int64_t>(head_idx) * block_size * hs2 +
+           static_cast<int64_t>(block_offset) * hs2 + head_offset;
   } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS ||
                        format == EngineKVFormat::NL_X_NB_BS_NH_CS) {
     const int block_idx = token_idx / block_size;
@@ -339,9 +257,10 @@ __device__ __forceinline__ int64_t
 key_value_offset(const int k_or_v, const int layer_idx, const int token_idx,
                  const int scalar_offset, const int scalars_per_token,
                  const int num_tokens, const int num_layers) {
-  return k_or_v * num_layers * num_tokens * scalars_per_token +
-         layer_idx * num_tokens * scalars_per_token +
-         token_idx * scalars_per_token + scalar_offset;
+  return static_cast<int64_t>(k_or_v) * num_layers * num_tokens *
+             scalars_per_token +
+         static_cast<int64_t>(layer_idx) * num_tokens * scalars_per_token +
+         static_cast<int64_t>(token_idx) * scalars_per_token + scalar_offset;
 }
 
 // One chunk of a fused transfer. The whole pack travels by value in the
@@ -994,104 +913,6 @@ void single_layer_kv_transfer(
                   static_cast<int>(engine_kv_format));
   }
 #undef LAUNCH_SINGLE_LAYER_KERNEL
-}
-
-void load_and_reshape_flash(
-    torch::Tensor&
-        key_value,  // [2, num_layer, num_tokens, num_heads*head_size]
-                    // key/value must be on gpu/pinned cpu
-
-    torch::Tensor& key_cache,  // [num_blocks, block_size, num_heads, head_size]
-    torch::Tensor&
-        value_cache,  // [num_blocks, block_size, num_heads, head_size]
-                      // key_cache/value_cache must be on gpu
-    torch::Tensor& slot_mapping,  // [num_tokens],
-    const int layer_idx) {
-  int64_t* key_value_ptr = get_kernel_ptr<int64_t, torch::Tensor>(key_value);
-
-  int64_t* key_cache_ptr = get_kernel_ptr<int64_t, torch::Tensor>(key_cache);
-  int64_t* value_cache_ptr =
-      get_kernel_ptr<int64_t, torch::Tensor>(value_cache);
-
-  const int64_t* slot_mapping_ptr =
-      get_kernel_ptr<const int64_t, const torch::Tensor>(slot_mapping);
-
-  int elements_per_entry = 8 / key_cache.element_size();
-
-  int num_tokens = slot_mapping.size(0);
-  int num_heads = key_cache.size(2);
-  int head_size_in_64bit = key_cache.size(3) / elements_per_entry;
-
-  int block_size = key_cache.size(1);
-
-  int key_value_stride = key_value.stride(2) / elements_per_entry;
-
-  int num_layers = key_value.size(1);
-  int key_layer_offset = layer_idx * key_value.stride(1) / elements_per_entry;
-  int value_layer_offset =
-      (layer_idx + num_layers) * key_value.stride(1) / elements_per_entry;
-
-  int block_stride_in_64bit = key_cache.stride(0) / elements_per_entry;
-  TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
-
-  dim3 grid(num_tokens);
-  dim3 block(std::min(num_heads * head_size_in_64bit, 128));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(key_cache));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-  lmc::load_and_reshape_flash_kernel<int64_t><<<grid, block, 0, stream>>>(
-      key_value_ptr, key_cache_ptr, value_cache_ptr, slot_mapping_ptr,
-      block_stride_in_64bit, key_value_stride, num_heads, head_size_in_64bit,
-      block_size, key_layer_offset, value_layer_offset);
-}
-
-void reshape_and_cache_back_flash(
-    torch::Tensor&
-        key_value,  // [2, num_layer, num_tokens, num_heads*head_size]
-                    // key/value must be on gpu/pinned cpu
-
-    torch::Tensor& key_cache,  // [num_blocks, block_size, num_heads, head_size]
-    torch::Tensor&
-        value_cache,  // [num_blocks, block_size, num_heads, head_size]
-                      // key_cache/value_cache must be on gpu
-    torch::Tensor& slot_mapping,  // [num_tokens]
-    const int layer_idx) {
-  int64_t* key_cache_ptr = get_kernel_ptr<int64_t, torch::Tensor>(key_cache);
-  int64_t* value_cache_ptr =
-      get_kernel_ptr<int64_t, torch::Tensor>(value_cache);
-
-  int64_t* key_value_ptr = get_kernel_ptr<int64_t, torch::Tensor>(key_value);
-
-  const int64_t* slot_mapping_ptr =
-      get_kernel_ptr<const int64_t, const torch::Tensor>(slot_mapping);
-
-  int elements_per_entry = 8 / key_cache.element_size();
-
-  int num_tokens = slot_mapping.size(0);
-  int num_heads = key_cache.size(2);
-  int head_size_in_64bit = key_cache.size(3) / elements_per_entry;
-
-  int block_size = key_cache.size(1);
-
-  int key_value_stride = key_value.stride(2) / elements_per_entry;
-
-  int num_layers = key_value.size(1);
-  int key_layer_offset = layer_idx * key_value.stride(1) / elements_per_entry;
-  int value_layer_offset =
-      (layer_idx + num_layers) * key_value.stride(1) / elements_per_entry;
-
-  int block_stride_in_64bit = key_cache.stride(0) / elements_per_entry;
-  TORCH_CHECK(key_cache.stride(0) == value_cache.stride(0));
-
-  dim3 grid(num_tokens);
-  dim3 block(std::min(num_heads * head_size_in_64bit, 128));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(key_cache));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-  lmc::reshape_and_cache_back_flash_kernel<int64_t><<<grid, block, 0, stream>>>(
-      key_value_ptr, key_cache_ptr, value_cache_ptr, slot_mapping_ptr,
-      block_stride_in_64bit, key_value_stride, num_heads, head_size_in_64bit,
-      block_size, key_layer_offset, value_layer_offset);
 }
 
 /**

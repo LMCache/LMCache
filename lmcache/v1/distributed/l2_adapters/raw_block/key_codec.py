@@ -5,18 +5,12 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import Literal
 import hashlib
 import urllib.parse
 
 # First Party
-from lmcache.utils import CacheEngineKey, LayerCacheEngineKey, parse_cache_key
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.key_codec import decode_storage_key, format_storage_key
-
-RawBlockKeyNamespace = Literal["legacy", "object"]
-
-_UINT64_MASK = (1 << 64) - 1
 
 
 @dataclass(frozen=True)
@@ -71,73 +65,11 @@ def encode_object_key(key: ObjectKey) -> RawBlockKeySpec:
     encoded = object_key_to_string(key)
     return RawBlockKeySpec(
         encoded=encoded,
-        slot_identity=_object_slot_identity(encoded),
+        slot_identity=object_key_slot_identity(encoded),
     )
 
 
-def decode_legacy_key(encoded: str) -> CacheEngineKey | LayerCacheEngineKey:
-    """Deserialize a legacy non-MP cache key string.
-
-    Args:
-        encoded: String produced by ``CacheEngineKey.to_string`` or
-            ``LayerCacheEngineKey.to_string``.
-
-    Returns:
-        Parsed legacy cache key.
-
-    Raises:
-        TypeError: If parsing returns an unsupported key type.
-    """
-    parsed = parse_cache_key(encoded)
-    if not isinstance(parsed, (CacheEngineKey, LayerCacheEngineKey)):
-        raise TypeError(
-            "parse_cache_key returned unsupported key type "
-            f"{type(parsed).__name__} for {encoded!r}"
-        )
-    return parsed
-
-
-def encode_legacy_key(key: CacheEngineKey | LayerCacheEngineKey) -> RawBlockKeySpec:
-    """Encode a legacy non-MP cache key for raw-block storage.
-
-    Args:
-        key: Legacy cache key from the non-MP storage plugin path.
-
-    Returns:
-        Encoded key and slot-header identity derived from the chunk hash.
-    """
-    return RawBlockKeySpec(
-        encoded=key.to_string(),
-        slot_identity=int(key.chunk_hash) & _UINT64_MASK,
-    )
-
-
-def slot_identity_from_encoded_key(
-    encoded: str,
-    namespace: RawBlockKeyNamespace,
-) -> int:
-    """Return the stable slot-header identity for an encoded key.
-
-    Args:
-        encoded: Encoded raw-block key string.
-        namespace: Key namespace used when the key was encoded.
-
-    Returns:
-        Unsigned 64-bit identity stored in the per-slot header.
-
-    Raises:
-        ValueError: If ``namespace`` is unsupported.
-        TypeError: If legacy key parsing returns an unsupported key type.
-    """
-    if namespace == "legacy":
-        key = decode_legacy_key(encoded)
-        return int(key.chunk_hash) & _UINT64_MASK
-    if namespace == "object":
-        return _object_slot_identity(encoded)
-    raise ValueError(f"Unsupported raw-block key namespace: {namespace!r}")
-
-
-def _object_slot_identity(encoded: str) -> int:
+def object_key_slot_identity(encoded: str) -> int:
     """Return the stable 64-bit slot identity for an encoded ObjectKey.
 
     Args:

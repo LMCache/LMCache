@@ -96,6 +96,13 @@ exclusive process-global switches consulted in
 | `isolated_ipc` | `RawCudaIPCWrapper` (raw legacy IPC handles) |
 | `use_vmm_api` (`lmcache.v1.platform.ipc_policy`) | `VmmCudaIPCWrapper` |
 
+The vLLM connector derives `use_vmm_api` from the resolved engine config:
+the extensible KV cache and `enable_cumem_allocator` select the VMM wrapper.
+An explicit `lmcache.mp.use_vmm_api` value overrides detection. Before vLLM
+settles the extensible-cache default, the connector declares exportable VMM
+access unless the user explicitly disables it; this lets vLLM and LMCache
+agree on the allocator without a circular configuration dependency.
+
 `use_vmm_api` composes with `isolated_ipc`, enforced per allocation at
 wrap time: the fabric kind is isolation-clean (inline blob; the IMEX
 channel is device injection, not a shared namespace or volume — the

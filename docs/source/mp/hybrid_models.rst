@@ -129,19 +129,19 @@ Object-group separation
 -----------------------
 
 At KV-cache registration LMCache can bucket a hybrid model's layers into
-**object groups** — the unit it stores and retrieves as one object. With
-``--separate-object-groups`` each distinct cross-chunk attention window becomes
-its own object group: full-attention layers form one group, and each
-sliding-window size (mamba / GDN included) forms another. The default is
-**off** — every layer shares a single full-attention object group.
+**object groups** — the unit it stores and retrieves as one object. By default,
+each distinct cross-chunk attention window becomes its own object group:
+full-attention layers form one group, and each sliding-window size (mamba / GDN
+included) forms another. Pass ``--no-separate-object-groups`` to make every
+layer share a single full-attention object group.
 
 .. code-block:: bash
 
-   # default: a single full-attention object group for all layers
+   # default: one object group per attention window
    lmcache server --chunk-size 256 --l1-size-gb 100
 
-   # one object group per attention window (required for mamba / GDN hybrids)
-   lmcache server --chunk-size 256 --l1-size-gb 100 --separate-object-groups
+   # explicitly disable object-group separation
+   lmcache server --chunk-size 256 --l1-size-gb 100 --no-separate-object-groups
 
 For a non-hybrid model (a single attention behavior) the setting makes no
 difference — every layer resolves to one object group either way. For a
@@ -182,7 +182,7 @@ so it is model-specific. vLLM prints it once at startup::
     ensure that attention page size is >= mamba page size.
 
 Nothing has to be derived from ``N`` by hand: the LMCache server's
-``--chunk-size`` is a minimum, and the connector negotiates the smallest
+``--chunk-size`` is a minimum, and the connector resolves the smallest
 multiple of ``N`` that is at least that value (``N = 784`` resolves the default
 minimum of 256 to 784, while ``N = 544`` resolves it to 544). See
 :doc:`chunk_size_negotiation` for the full lifecycle and mixed-model
@@ -214,15 +214,17 @@ constraints. For reference, values grow with model size:
      - 1152
      - 4
 
-Required flags
-^^^^^^^^^^^^^^
+Required settings
+^^^^^^^^^^^^^^^^^
 
-#. **LMCache server** ``--separate-object-groups`` — gives the linear-attention
-   layers their own cache objects so their recurrent state is stored and loaded
-   independently of the full-attention layers. ``--chunk-size`` can stay at its
-   default; the connector negotiates it up to a multiple of ``N``::
+#. **LMCache server object-group separation** — enabled by default, this gives
+   the linear-attention layers their own cache objects so their recurrent state
+   is stored and loaded independently of the full-attention layers. Do not pass
+   ``--no-separate-object-groups`` for these models. ``--chunk-size`` can stay
+   at its default; the connector resolves an effective size that is a multiple
+   of ``N``::
 
-       lmcache server --chunk-size 256 --separate-object-groups \
+       lmcache server --chunk-size 256 \
            --l1-size-gb 100 --eviction-policy LRU
 
 #. **vLLM** ``--mamba-cache-mode align --enable-prefix-caching`` — ``align`` is
@@ -268,7 +270,7 @@ cannot serve correctly (``validate_kv_cache_groups`` in
 
 DeepSeek-V4-style **compressed / indexer caches are supported** — specs that
 declare slot compression (``compress_ratio > 1`` / ``tq_slot_size > 0``) are
-served by the compression path in ``lmcache.v1.kv_layer_groups`` and are *not*
+served by the compression path in ``lmcache.v1.common.kv_layer_groups`` and are *not*
 rejected. See the :doc:`DeepSeek-V4-Flash <../recipes/deepseek_v4_flash>` and
 :doc:`GLM 5.2 <../recipes/glm5_2>` recipes for validated end-to-end commands.
 

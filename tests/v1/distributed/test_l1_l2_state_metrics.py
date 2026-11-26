@@ -248,7 +248,7 @@ class TestNumInflightL2Stores:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(adapter_index)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -279,7 +279,7 @@ class TestNumInflightL2Stores:
             l1_manager=l1_manager,
             l2_adapters=adapters,  # type: ignore[arg-type]
             adapter_descriptors=descriptors,
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -417,7 +417,6 @@ class TestNumInflightL2Loads:
         adapter.close()
 
 
-@pytest.mark.no_shared_allocator
 def test_peer_l1_gauges_are_separate_and_removed_on_close() -> None:
     managers = [
         create_l1_manager(

@@ -19,13 +19,14 @@ sequence.
 
 ### All management goes through HTTP
 
-ZMQ is reserved for **performance-critical data-path** communication between the
-inference engine and LMCache (store, retrieve, prefetch). Every `lmcache kvcache`
-CLI operation goes through the **MP HTTP server**
-(`lmcache/v1/multiprocess/http_server.py`).
+The gRPC request transport is reserved for **performance-critical data-path**
+communication between the inference engine and LMCache (store, retrieve,
+prefetch). Every `lmcache kvcache` CLI operation goes through the **MP HTTP
+server** (`lmcache/v1/multiprocess/http_server.py`).
 
-Today some operations (e.g. `pin`) only have ZMQ implementations. These
-need new HTTP endpoints on the MP HTTP server before the CLI can use them.
+Today some operations (e.g. `pin`) only have request-transport
+implementations. These need new HTTP endpoints on the MP HTTP server before
+the CLI can use them.
 
 ### Indexing KV caches
 

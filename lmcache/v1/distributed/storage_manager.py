@@ -13,8 +13,8 @@ import time
 
 # First Party
 from lmcache.lmcache_native import PeriodicEventNotifier
-from lmcache.logging import init_logger
-from lmcache.utils import lmcache_deprecate
+from lmcache.v1.common.errors import LMCacheTimeoutError
+from lmcache.v1.common.logging import init_logger, lmcache_deprecate
 from lmcache.v1.distributed.api import (
     CapacitySnapshot,
     L1BackendType,
@@ -83,7 +83,6 @@ from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxRemoveMode,
 )
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
@@ -185,18 +184,19 @@ class StorageManager:
             # active for reads, touches, status or capacity.
             self._closing_adapters: set[int] = set()
 
+            # Before the adapters, so an unwind closes them first.
+            PeriodicEventNotifier.create(
+                interval_ms=config.periodic_notifier_interval_ms,
+                use_eventfd=HAS_EVENTFD,
+            )
+            cleanup.callback(PeriodicEventNotifier.shutdown)
+
             for ac in config.l2_adapter_config.adapters:
                 self._check_dax_devices_unowned(ac)
                 adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
                 cleanup.callback(adapter.close)
                 self._l2_adapters[adapter_id] = adapter
                 self._adapter_descriptors[adapter_id] = descriptor
-
-            PeriodicEventNotifier.create(
-                interval_ms=config.periodic_notifier_interval_ms,
-                use_eventfd=HAS_EVENTFD,
-            )
-            cleanup.callback(PeriodicEventNotifier.shutdown)
 
             # Per-cache_salt quota registry. Shared across the L2 eviction
             # controller (reads quotas each cycle) and the HTTP quota
@@ -249,7 +249,8 @@ class StorageManager:
                     manager,
                     [self._l2_adapters[d.index] for d in descriptors],
                     descriptors,
-                    create_store_policy(config.store_policy),
+                    create_store_policy(config.store_policy, self._l1_managers),
+                    eviction_config=manager.config.eviction or config.eviction_config,
                 )
                 self._store_controllers[manager.l1_manager_id] = controller
                 controller.start()
@@ -387,6 +388,30 @@ class StorageManager:
         )
 
         # TODO: global key states update
+
+    def abort_write(
+        self, keys: list[ObjectKey], l1_owners: dict[ObjectKey, int]
+    ) -> None:
+        """Discard reserved objects whose store failed, once their copies drained.
+
+        Schedule it on the copies' stream so every device write into the
+        buffers has finished. A private L1 frees them before write-TTL expiry;
+        a shared Device-DAX L1 aborts its grants, which would otherwise block
+        every later writer of the keys.
+
+        Args:
+            keys: Keys reserved by :meth:`reserve_write`.
+            l1_owners: The L1 manager each key was reserved in, from
+                :func:`l1_owners_of`.
+
+        Raises:
+            ValueError: ``l1_owners`` omits a key or names an unregistered L1
+                manager.
+        """
+        for owner, group in self._group_by_owner(keys, l1_owners).items():
+            self._l1_managers_by_id[owner].finish_write_and_delete(
+                group, tag=_L1_WRITE_TAG
+            )
 
     @contextmanager
     def read_prefetched_results(
@@ -1080,6 +1105,9 @@ class StorageManager:
     ) -> dict:
         """Route a runtime reconfiguration request to one L2 adapter.
 
+        Publish capacity after success or a cleanup error, since failed
+        unmapping can still make a device unavailable for new allocations.
+
         Args:
             adapter_index: Zero-based reconfigurable-adapter index.
             operation: Adapter-specific operation name.
@@ -1088,15 +1116,26 @@ class StorageManager:
         Returns:
             JSON-serializable operation result.
         """
-        with self._lifecycle_lock if operation in ("add", "resize") else nullcontext():
-            adapter = self._get_reconfigurable_l2_adapter(adapter_index)
-            result = adapter.reconfigure(
-                operation,
-                payload,
-                device_owners=lambda path, offset, size: self._device_owner_names(
-                    path, offset, size, adapter
-                ),
-            )
+        try:
+            with (
+                self._lifecycle_lock
+                if operation in ("add", "resize")
+                else nullcontext()
+            ):
+                adapter = self._get_reconfigurable_l2_adapter(adapter_index)
+                result = adapter.reconfigure(
+                    operation,
+                    payload,
+                    device_owners=lambda path, offset, size: self._device_owner_names(
+                        path, offset, size, adapter
+                    ),
+                )
+        except (BufferError, OSError):
+            try:
+                self._publish_capacity_changed()
+            except Exception:
+                logger.exception("Failed to publish L2 capacity after a cleanup error")
+            raise
         result["adapter_index"] = adapter_index
         self._publish_capacity_changed()
         return result
@@ -1257,6 +1296,7 @@ class StorageManager:
         Every L2 adapter is closed even if another fails. If any adapter
         fails to close, the L1 managers are left open, since that adapter
         may still access L1 buffers.
+        The periodic event notifier shuts down after the adapters close.
         """
         self._prefetch_controller.stop()
         for controller in self._store_controllers.values():
@@ -1264,8 +1304,6 @@ class StorageManager:
         for controller in self._eviction_controllers:
             controller.stop()
         self._l2_eviction_controller.stop()
-
-        PeriodicEventNotifier.shutdown()
 
         with self._adapters_lock:
             adapters = list(self._l2_adapters.items())
@@ -1276,6 +1314,8 @@ class StorageManager:
             except Exception:
                 logger.exception("L2 adapter %d failed to close", adapter_id)
                 close_failed = True
+        # After the adapters: they unregister from the notifier on close.
+        PeriodicEventNotifier.shutdown()
         if close_failed:
             # A close-failed adapter may still read or write L1 buffers (for
             # example a serde wrapper whose serializer is still running), so

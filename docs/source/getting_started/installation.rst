@@ -335,6 +335,10 @@ runtime, see :doc:`compatibility` before installing.
                         is missing, the helper below installs a compiler matching the
                         installed runtime without upgrading it. Run the helper as root
                         in the container, or with ``sudo`` on a host.
+                        For ``intel-sycl-rt``, it prefers an exact compiler release,
+                        falling back to the newest available patch not newer than the
+                        runtime within the same major/minor release. A dpkg-managed
+                        runtime still requires an exact package version match.
 
                         .. code-block:: bash
 
@@ -425,11 +429,19 @@ runtime, see :doc:`compatibility` before installing.
 
                 .. tab-set::
 
-                    .. tab-item:: CUDA 13.0
+                    .. tab-item:: CUDA 13.2
 
                         .. code-block:: bash
 
                             docker pull lmcache/vllm-openai:latest-nightly
+
+                        The nightly image follows vLLM main, which is built
+                        with CUDA 13.2. The host needs NVIDIA driver 595.45.04
+                        or newer, the driver NVIDIA lists for CUDA 13.2 in the
+                        `CUDA Toolkit release notes <https://docs.nvidia.com/cuda/archive/13.2.0/cuda-toolkit-release-notes/index.html#cuda-driver>`_;
+                        install it on the host. On a 580.x driver, some
+                        models fail to load with ``the provided PTX was
+                        compiled with an unsupported toolchain``.
 
             .. tab-item:: SGLang
 

@@ -11,8 +11,8 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.utils import EngineType
 from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -21,13 +21,10 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.custom_types import (
-    IPCCacheServerKey,
-    KVCache,
-)
 from lmcache.v1.multiprocess.server import run_cache_server
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+from lmcache.v1.platform.base.ipc_wrapper import KVCache
+from lmcache.v1.transport.request_client import RequestClient
 
 # Configuration constants
 SERVER_HOST = "localhost"
@@ -368,6 +365,8 @@ def registered_instance(
         EngineType.VLLM,
         {},
         [],
+        None,
+        256,
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None, "Register should return None"
@@ -380,8 +379,7 @@ def registered_instance(
         # retrieve paths can leave completed entries read-locked briefly, and
         # non-force clear intentionally preserves those objects.
         client.clear(force=True).result(timeout=DEFAULT_TIMEOUT)
-        future = client.unregister_kv_cache(instance_id)
-        future.result(timeout=DEFAULT_TIMEOUT)
+        client.unregister_kv_cache(instance_id).result(timeout=DEFAULT_TIMEOUT)
     except Exception as e:
         print(f"Error during unregister: {e}")
 
@@ -416,13 +414,14 @@ def test_register_unregister_kv_cache(
         EngineType.VLLM,
         {},
         [],
+        None,
+        256,
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None
 
     # Unregister
-    future = client.unregister_kv_cache(instance_id)
-    result = future.result(timeout=DEFAULT_TIMEOUT)
+    result = client.unregister_kv_cache(instance_id).result(timeout=DEFAULT_TIMEOUT)
     assert result is None
 
 

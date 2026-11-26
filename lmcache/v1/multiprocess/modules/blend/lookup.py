@@ -2,7 +2,7 @@
 """Blend unified lookup FSM: prefix, local-match, coordinator, and sparse legs."""
 
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 import threading
 import time
@@ -18,12 +18,19 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.logging import init_logger
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import (
+    CBMatchResult,
+    CBUnifiedLookupResult,
+    IPCCacheServerKey,
+)
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
+    FULL_ATTENTION_WINDOW_CHUNKS,
     MemoryLayoutDesc,
     ObjectKey,
+    PrefetchPriority,
     PrefetchTaskSpec,
     get_request_tags,
     ipc_key_to_grouped_object_keys,
@@ -33,13 +40,11 @@ from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.mp_coordinator.api import BlendNamespace
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.multiprocess.custom_types import (
-    CBMatchResult,
-    CBUnifiedLookupResult,
-    IPCCacheServerKey,
-)
 from lmcache.v1.multiprocess.engine_context import finish_lookup_read
-from lmcache.v1.multiprocess.modules.blend.matcher import _unique_token_coverage
+from lmcache.v1.multiprocess.modules.blend.matcher import (
+    _unique_token_coverage,
+    covered_chunks,
+)
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _BlendReadGroups,
     _classify_cb_read_groups,
@@ -98,6 +103,7 @@ class LookupMixin:
     if TYPE_CHECKING:
         # State owned by BlendModule.__init__ and the sibling mixins.
         UNRETRIEVED_KEYS_EXTRA: str
+        CACHED_CHUNKS_EXTRA: str
         _ctx: "MPCacheServerContext"
         _event_bus: Any
         _cb_jobs: dict[str, "_CBUnifiedJob"]
@@ -175,11 +181,15 @@ class LookupMixin:
             "tuple[_BlendReadGroups, dict[int, MemoryLayoutDesc], AttnWindowDesc]"
         ),
         matches: list[CBMatchResult],
+        priority: PrefetchPriority,
     ) -> "tuple[PrefetchHandle, dict[bytes, list], dict[bytes, int]]":
         """Coalesce all matches into one sparse L2->L1 prefetch (non-blocking).
 
         The caller polls ``query_prefetch_status(handle)`` then calls
         :meth:`_sparse_classify` with the found rows.
+
+        ``priority`` is ``HIGH`` when the prefix leg already admitted this
+        lookup.
 
         Returns:
             The prefetch handle, per-hash object keys (one per blend read
@@ -207,6 +217,11 @@ class LookupMixin:
                 key.model_name, key.world_size
             ),
         )
+        # "full" fetching rejects windowed rows.
+        key_groups = [
+            replace(row, sliding_window_size=FULL_ATTENTION_WINDOW_CHUNKS)
+            for row in key_groups
+        ]
         per_hash_obj_keys: dict[bytes, list] = {
             h: [row.keys[col] for row in key_groups] for h, col in hash_to_col.items()
         }
@@ -214,7 +229,8 @@ class LookupMixin:
         handle: PrefetchHandle = self._ctx.storage_manager.submit_prefetch_task(
             PrefetchTaskSpec(
                 key_groups=key_groups,
-                fetching_policy="full",
+                fetching_policy="whole_chunk",
+                priority=priority,
             ),
             external_request_id=key.request_id,
         )
@@ -284,7 +300,7 @@ class LookupMixin:
         if stale_hashes:
             with self._pending_fp_lock:
                 truly_evict: list[bytes] = []
-                for h in stale_hashes:
+                for h in dict.fromkeys(stale_hashes):
                     if h in self._pending_fp_hashes:
                         continue
                     n = self._stale_strike.get(h, 0) + 1
@@ -366,9 +382,10 @@ class LookupMixin:
             )
             return None, (), (), 0, True
         read, layouts, attn_desc = resolved
-        layout_desc = layouts[read.attn_gid]
+        # Group 0 may be recurrent, so use the first attention group.
+        layout_desc = layouts[read.attn_gids[0]]
 
-        chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
+        chunk_hashes = self._ctx.default_token_hasher.compute_packed_chunk_hashes(
             key.token_bytes
         )
         if not chunk_hashes:
@@ -384,7 +401,7 @@ class LookupMixin:
                         "request_id": rid,
                         "chunk_hashes": chunk_hashes,
                         "model_name": model_name,
-                        "chunk_size": self._ctx.chunk_size,
+                        "chunk_size": self._ctx.default_chunk_size,
                         "seq_len": key.num_tokens,
                         "dtypes": [str(d) for d in layout_desc.dtypes],
                         "shapes": [list(s) for s in layout_desc.shapes],
@@ -410,7 +427,7 @@ class LookupMixin:
         )
         row_windows = tuple(row.sliding_window_size for row in spec.key_groups)
         session = self._ctx.session_manager.get_or_create(rid)
-        session.set_tokens(key.token_bytes)
+        session.update_from_key(key)
         session.begin_lookup(key)
         handle = self._ctx.storage_manager.submit_prefetch_task(
             spec,
@@ -490,7 +507,7 @@ class LookupMixin:
             ends the request here (no retrieve will follow).
         """
         rid = key.request_id
-        chunk_size = self._ctx.chunk_size
+        chunk_size = self._ctx.default_chunk_size
 
         with self._cb_jobs_lock:
             job = self._cb_jobs.get(rid)
@@ -506,12 +523,16 @@ class LookupMixin:
                     metadata={"num_tokens": key.num_tokens},
                 )
             )
-            # Segmented prefix is forced OFF for recurrent registrations:
-            # pure-load post-gap rows would hole the recurrence scan, so a
-            # gap must truncate the prefix.
+            # Segmented prefix is forced OFF when any prefix row is windowed:
+            # only its in-window suffix is loaded, so a gap must truncate.
             resolved_pre = self._resolve_cb_read_layouts(key.model_name, key.world_size)
             use_segmented = self._segmented_prefix and not (
-                resolved_pre is not None and resolved_pre[0].recurrent_gids
+                resolved_pre is not None
+                and any(
+                    resolved_pre[2].num_chunks_in_sw[gid]
+                    != FULL_ATTENTION_WINDOW_CHUNKS
+                    for gid in resolved_pre[0].prefix_gids
+                )
             )
             (
                 prefix_handle,
@@ -611,7 +632,14 @@ class LookupMixin:
                         job.handle,
                         job.per_hash_obj_keys,
                         job.hash_to_col,
-                    ) = self._sparse_prefetch_submit(key, resolved, job.non_prefix)
+                    ) = self._sparse_prefetch_submit(
+                        key,
+                        resolved,
+                        job.non_prefix,
+                        PrefetchPriority.HIGH
+                        if job.prefix_handle is not None
+                        else PrefetchPriority.NORMAL,
+                    )
                     # Trace the span only when the prefetch actually reads L2.
                     job.l2_keys = job.handle.total_requested_keys
                     if job.l2_keys > 0:
@@ -691,7 +719,7 @@ class LookupMixin:
         # so the connector tags them ``prefix`` (pure load, no recompute).
         segmented_tail: list[CBMatchResult] = []
         if segmented and job.retained_chunks:
-            chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
+            chunk_hashes = self._ctx.default_token_hasher.compute_packed_chunk_hashes(
                 key.token_bytes
             )
             for i in job.retained_chunks:
@@ -739,6 +767,13 @@ class LookupMixin:
             )
         with self._cb_jobs_lock:
             self._cb_jobs.pop(rid, None)
+        if getattr(self, "_dedup_content_kv", False) and (found or segmented_tail):
+            # Chunk indices whose tokens are all already cached (verified
+            # loadable by the sparse/segmented legs); the store skips them.
+            session = self._ctx.session_manager.get_or_create(rid)
+            session.extras[self.CACHED_CHUNKS_EXTRA] = covered_chunks(
+                found + segmented_tail, chunk_size
+            )
         return CBUnifiedLookupResult(
             prefix_coverage_tokens=prefix_tokens,
             non_prefix_segments=found,
@@ -760,7 +795,7 @@ class LookupMixin:
             return False
         try:
             tokens = unpack_token_ids(key.token_bytes)
-            if len(tokens) < self._ctx.chunk_size:
+            if len(tokens) < self._ctx.default_chunk_size:
                 return False
             coordinator.submit_match(
                 key.request_id,
@@ -833,7 +868,7 @@ class LookupMixin:
         Returns:
             One :class:`CBMatchResult` per matched chunk (request order).
         """
-        chunk_size = self._ctx.chunk_size
+        chunk_size = self._ctx.default_chunk_size
         return [
             CBMatchResult(
                 old_st=m.old_st,

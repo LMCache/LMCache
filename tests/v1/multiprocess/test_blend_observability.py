@@ -17,11 +17,11 @@ import threading
 import time
 
 # First Party
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import CBMatchResult
 from lmcache.v1.common.token_codec import pack_token_ids
-from lmcache.v1.distributed.api import AttnWindowDesc
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import EventType
-from lmcache.v1.multiprocess.custom_types import CBMatchResult
 from lmcache.v1.multiprocess.modules.blend.lookup import _CBUnifiedJob
 from lmcache.v1.multiprocess.modules.blend.matcher import (
     BlendTokenRangeMatcher,
@@ -208,7 +208,7 @@ class TestPrefixLegNoGpuContext:
             )
         )
         eng._ctx = MagicMock()
-        eng._ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
+        eng._ctx.default_token_hasher.compute_packed_chunk_hashes.return_value = []
 
         handle, _, _, _, no_gpu_context = _bind(eng, "_submit_prefix_leg")(
             self._key(), 2
@@ -282,7 +282,7 @@ class TestFingerprintJobTuple:
         eng._pending_fp_hashes = set()
         eng._coordinator = None
         eng._ctx = MagicMock()
-        eng._ctx.chunk_size = 256
+        eng._ctx.default_chunk_size = 256
         eng._ctx.session_manager.get_or_create.return_value.get_hashes.return_value = [
             123,
             456,
@@ -361,7 +361,7 @@ class TestLookupOnlyRequestEnds:
     def _engine_with_finished_job(self, rid, job):
         eng = _make_engine()
         eng._ctx = MagicMock()
-        eng._ctx.chunk_size = _CHUNK
+        eng._ctx.default_chunk_size = _CHUNK
         eng._cb_jobs_lock = threading.Lock()
         eng._cb_jobs = {rid: job}
         eng._coordinator = None

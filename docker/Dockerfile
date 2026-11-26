@@ -6,9 +6,9 @@
 # docs/source/getting_started/installation.rst
 # docs/source/production/docker_deployment.rst
 
-ARG CUDA_VERSION=13.0
+ARG CUDA_VERSION=13.2
 ARG UBUNTU_VERSION=24.04
-ARG NGC_VERSION=25.09
+ARG NGC_VERSION=26.05
 ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:${NGC_VERSION}-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 
 #################### BASE BUILD IMAGE ####################
@@ -55,15 +55,6 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 FROM base AS image-build
 
-# Build and run the optional C++ NIXL storage connector against the NIXL SDK
-# headers from the validated source release and its matching packaged runtime.
-ARG NIXL_VERSION=1.3.1
-ENV BUILD_WITH_NIXL=1
-ENV NIXL_INCLUDE_DIR=/opt/nixl-source/src/api/cpp
-ENV NIXL_LIBRARY_DIR=/opt/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs
-ENV NIXL_PLUGIN_DIR=/opt/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs/plugins
-ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.12/site-packages/.nixl_cu13.mesonpy.libs:${LD_LIBRARY_PATH}
-
 # install build dependencies
 COPY ./requirements/build.txt build.txt
 
@@ -81,9 +72,6 @@ ARG VLLM_VERSION=nightly
 RUN --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
     uv pip install -r build.txt
-
-RUN git clone --depth 1 --branch "v${NIXL_VERSION}" \
-    https://github.com/ai-dynamo/nixl.git /opt/nixl-source
 
 ARG LMCACHE_COMMIT_ID=1
 
@@ -106,20 +94,20 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
         VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
             "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" ; \
     fi && \
-    uv pip install --reinstall-package nixl "nixl==${NIXL_VERSION}" && \
-    test -f "${NIXL_INCLUDE_DIR}/nixl.h" && \
-    test -f "${NIXL_LIBRARY_DIR}/libnixl.so" && \
-    test -f "${NIXL_PLUGIN_DIR}/libplugin_POSIX.so" && \
-    test -f "${NIXL_PLUGIN_DIR}/libplugin_OBJ.so" && \
+    uv pip install "nixl<2" && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
+    python3 -c 'import importlib.metadata as m; print("NIXL=", m.version("nixl"))' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
     bash docker/build_raw_block_wheel.sh dist_lmcache && \
+    bash docker/build_nixl_wheel.sh dist_lmcache && \
     uv pip install ./dist_lmcache/*.whl --verbose && \
+    python3 .github/scripts/assert_native_ops.py && \
     python3 -c 'import lmcache_rust_raw_block_io' && \
     uv pip install -r requirements/grpc_native.txt && \
     python3 -c 'import pygrpc_native' && \
     uv pip install -r requirements/kafka.txt && \
-    python3 -c 'import confluent_kafka'
+    python3 -c 'import confluent_kafka' && \
+    python3 -c 'import nixl, lmcache_nixl'
 
 WORKDIR /workspace
 USER lmcache
@@ -138,6 +126,7 @@ ARG LMCACHE_VERSION
 
 RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_native.txt \
     --mount=type=bind,source=requirements/kafka.txt,target=/tmp/kafka.txt \
+    --mount=type=bind,source=.github/scripts/assert_native_ops.py,target=/tmp/assert_native_ops.py \
     . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
     CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
@@ -146,9 +135,17 @@ RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_nativ
         vllm[runai,tensorizer,flashinfer] \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
-    uv pip install "lmcache${VER:+==${VER}}" \
+    # A torch-family pin that has no wheel for CUDA_TAG is installed from PyPI,
+    # built for another CUDA version, and vLLM then exits at startup.
+    # torchaudio checks this on import, so fail the build here instead.
+    python3 -c 'import torchaudio' && \
+    # The nixl extra adds the NIXL connector (lmcache-nixl) at lmcache's version.
+    uv pip install "lmcache[nixl]${VER:+==${VER}}" \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match --verbose && \
+    # The PyPI wheel is compiled against pyproject's torch pin, not the torch
+    # vLLM just installed; fail here if they drifted (cuda_ops ABI mismatch).
+    python3 /tmp/assert_native_ops.py && \
     # The Rust module is published at lmcache's version; pin it to the lmcache
     # actually installed, so the two match even when LMCACHE_VERSION is unset.
     LMCACHE_INSTALLED=$(python3 -c 'import importlib.metadata as m; print(m.version("lmcache"))') && \
@@ -158,8 +155,7 @@ RUN --mount=type=bind,source=requirements/grpc_native.txt,target=/tmp/grpc_nativ
     python3 -c 'import pygrpc_native' && \
     uv pip install -r /tmp/kafka.txt && \
     python3 -c 'import confluent_kafka' && \
-  
-    uv pip install --reinstall-package nixl nixl
+    python3 -c 'import nixl, lmcache_nixl'
 
 WORKDIR /workspace
 USER lmcache

@@ -21,7 +21,7 @@ python3 lmcache/v1/transport/grpc/_proto_gen/_generate.py
 
 python3 -m lmcache.v1.multiprocess.http_server \
     --l1-size-gb "${CPU_BUFFER_SIZE:-80}" --eviction-policy LRU \
-    --max-workers 8 --max-gpu-workers 8 --transport zmq \
+    --max-workers 8 --max-gpu-workers 8 --transport grpc \
     --port 6555 --http-port 6556 --chunk-size "${CHUNK_SIZE:-256}" \
     --supported-transfer-mode lmcache_driven > "$OUT/server.log" 2>&1 &
 SERVER=$!
@@ -29,7 +29,8 @@ sleep 15
 
 VLLM_SERVER_DEV_MODE=1 vllm serve "$MODEL" --tensor-parallel-size "$TP" --port 8000 \
     --max-model-len 8192 --gpu-memory-utilization 0.85 --no-enable-prefix-caching \
-    --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"lmcache.mp.host":"tcp://localhost","lmcache.mp.port":6555,"lmcache.mp.mq_timeout":10}}' \
+    --enable-extensible-kv-cache \
+    --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"lmcache.mp.host":"grpc://localhost","lmcache.mp.port":6555,"lmcache.mp.mq_timeout":10}}' \
     > "$OUT/vllm.log" 2>&1 &
 VLLM=$!
 for _ in $(seq 1 180); do

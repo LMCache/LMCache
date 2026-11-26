@@ -21,10 +21,10 @@ from lmcache.v1.client.transfer_context.base import compute_kv_layout
 from lmcache.v1.client.worker_transfer import (
     EngineDrivenTransferContext,
 )
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.custom_types import (
     RegisterEngineDrivenContextResponse,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.common.group_view import EngineGroupInfo
 
 # Shapes are (kv planes, blocks, block size, heads, head size). gemma-4's real
 # situation: the wide group has half the hidden size and twice the block size, so
@@ -32,10 +32,9 @@ from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 #
 # The two shapes must differ at BOTH dim 2 and dim 3, because which of the two is
 # the block size depends on the resolved kv_layout: NHD reads the block size at
-# dim 2, HND at dim 3 (VLLM_Detector forces HND whenever torch_device_type is
-# "cpu", so the CPU-only unit lane takes the latter). A fixture that differs at
-# only one of them collapses to a single block size under the other layout and
-# the mixed-geometry premise silently disappears.
+# dim 2, HND at dim 3. A fixture that differs at only one of them collapses to a
+# single block size under the other layout and the mixed-geometry premise
+# silently disappears.
 _NARROW_SHAPE = (2, 4, 4, 2, 8)
 _WIDE_PAGED_SHAPE = (2, 4, 8, 4, 2)
 

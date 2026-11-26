@@ -22,7 +22,14 @@ import zmq
 
 # First Party
 from lmcache.v1.client.transport.factory import RequestClientFactory
-from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc, ObjectKey
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.periodic_thread import PeriodicThreadRegistry
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    MemoryLayoutDesc,
+    ObjectKey,
+    ShardReplicationDesc,
+)
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -43,7 +50,6 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
-from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 
@@ -70,6 +76,7 @@ def _event_module(
     bus: EventBus | None = None,
     world_size: int = 1,
     groups: int = 1,
+    shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
 ) -> tuple[KVEventModule, EventBus]:
     bus = bus or EventBus(EventBusConfig())
     layouts = LayoutDescRegistry()
@@ -78,7 +85,10 @@ def _event_module(
             model,
             world_size,
             MemoryLayoutDesc([torch.Size([1])], [torch.float16]),
-            AttnWindowDesc(num_chunks_in_sw=[-1] * groups),
+            chunk_size=256,
+            hash_algorithm="blake3",
+            attn_desc=AttnWindowDesc(num_chunks_in_sw=[-1] * groups),
+            shard_replication_desc=shard_replication_desc,
         )
     ctx = MagicMock(event_bus=bus, layout_desc_registry=layouts)
     return KVEventModule(ctx, kv_event_log_size=size), bus
@@ -153,7 +163,9 @@ def test_gpu_register_inserts_unlatched_entry(monkeypatch) -> None:
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     module = _bare_gpu_module()
 
-    module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
+    module.register_kv_cache(
+        1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [], event_profile=None
+    )
 
     assert module.tracked_instance_count() == 1
     entry = module.get_and_touch_context_entry(1)
@@ -172,10 +184,14 @@ def test_gpu_noop_register_refreshes_without_latching(monkeypatch) -> None:
     monkeypatch.setattr(gpu_mod, "create_cache_context", create)
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     module = _bare_gpu_module()
-    module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
+    module.register_kv_cache(
+        1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [], event_profile=None
+    )
     module._cache_contexts[1].last_seen = 0.0
 
-    module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
+    module.register_kv_cache(
+        1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [], event_profile=None
+    )
 
     assert create.call_count == 1  # not rebuilt
     assert module._cache_contexts[1].last_seen > 0.0  # refreshed
@@ -185,7 +201,7 @@ def test_gpu_noop_register_refreshes_without_latching(monkeypatch) -> None:
 def test_gpu_touch_latches_get_does_not() -> None:
     """touch_instance marks ping-proven; get_and_touch_context_entry only refreshes."""
     module = _bare_gpu_module()
-    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, last_seen=0.0)
+    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, 256, last_seen=0.0)
 
     module.get_and_touch_context_entry(1)
     assert module._cache_contexts[1].last_seen > 0.0
@@ -201,10 +217,10 @@ def test_gpu_reap_two_tier_windows() -> None:
     until the larger registration grace."""
     module = _bare_gpu_module()
     old = time.monotonic() - 1000.0
-    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, old, True)
-    module._cache_contexts[2] = ContextEntry(MagicMock(), "m", 1, old, False)
+    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, 256, old, True)
+    module._cache_contexts[2] = ContextEntry(MagicMock(), "m", 1, 256, old, False)
     module._cache_contexts[3] = ContextEntry(
-        MagicMock(), "m", 1, time.monotonic(), True
+        MagicMock(), "m", 1, 256, time.monotonic(), True
     )
 
     reaped = module.reap_stale_instances(120.0, 3600.0)
@@ -219,7 +235,7 @@ def test_gpu_reap_two_tier_windows() -> None:
 def test_gpu_unregister_cleans_up() -> None:
     """unregister_kv_cache pops and releases; missing id is a no-op."""
     module = _bare_gpu_module()
-    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, time.monotonic())
+    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, 256, time.monotonic())
 
     module.unregister_kv_cache(1)
     assert module.tracked_instance_count() == 0
@@ -236,11 +252,11 @@ def test_non_gpu_reap_pops_strategy_as_pair() -> None:
     module = _bare_non_gpu_module()
     old = time.monotonic() - 1000.0
     module._engine_driven_contexts[1] = non_gpu_mod.EngineDrivenContextEntry(
-        MagicMock(), "m", 1, old, True
+        MagicMock(), "m", 1, 256, old, True
     )
     module._strategies[1] = MagicMock()
     module._engine_driven_contexts[2] = non_gpu_mod.EngineDrivenContextEntry(
-        MagicMock(), "m", 1, old, False
+        MagicMock(), "m", 1, 256, old, False
     )
     module._strategies[2] = MagicMock()
 
@@ -256,7 +272,7 @@ def test_non_gpu_resolve_for_transfer_refreshes_and_raises() -> None:
     last_seen; an unknown id raises ValueError."""
     module = _bare_non_gpu_module()
     module._engine_driven_contexts[1] = non_gpu_mod.EngineDrivenContextEntry(
-        MagicMock(), "m", 1, 0.0, False
+        MagicMock(), "m", 1, 256, 0.0, False
     )
     strategy = MagicMock()
     module._strategies[1] = strategy
@@ -478,6 +494,90 @@ def test_cpu_events_require_every_committed_rank_and_group(groups: int) -> None:
     assert module.read_kv_events("model", first.next_cursor, 8).events == []
 
 
+def test_cpu_events_announce_and_withdraw_tagged_chunks() -> None:
+    """Identity tags and salt survive the completeness probe and final eviction."""
+    module, bus = _event_module(world_size=2)
+    keys = [
+        ObjectKey(
+            identity=_event_key(1, rank=rank, world_size=2).identity,
+            cache_salt="tenant",
+            tags={"revision": "pinned"},
+        )
+        for rank in range(2)
+    ]
+    _bind_kv(bus, keys[:1])
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=keys[:1])
+    assert not module.read_kv_events("model", 0, 8).events
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=keys[1:])
+    stored = module.read_kv_events("model", 0, 8)
+    assert [r.kind for r in stored.events] == ["stored"]
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=keys[1:])
+    removed = module.read_kv_events("model", stored.next_cursor, 8)
+    assert [(r.kind, r.block_hashes) for r in removed.events] == [
+        ("removed", [keys[0].chunk_hash])
+    ]
+
+
+@pytest.mark.parametrize(
+    "world_size, replication, required",
+    [
+        (2, ShardReplicationDesc((2,), (1,)), [(0, 0)]),
+        (2, ShardReplicationDesc((2, 1), (1, 1)), [(0, 0), (0, 1), (1, 1)]),
+        (4, ShardReplicationDesc((4,), (2,)), [(0, 0), (1, 0)]),
+    ],
+    ids=["replicated", "hybrid", "dcp"],
+)
+def test_cpu_events_require_registered_shards_of_replicated_groups(
+    world_size: int,
+    replication: ShardReplicationDesc,
+    required: list[tuple[int, int]],
+) -> None:
+    """Only the keyed ranks of each registered group establish CPU residency."""
+    module, bus = _event_module(
+        world_size=world_size,
+        groups=replication.num_object_groups,
+        shard_replication_desc=replication,
+    )
+    keys = [
+        ObjectKey(
+            identity=_event_key(1, rank=rank, world_size=world_size).identity,
+            object_group_id=group,
+        )
+        for rank, group in required
+    ]
+    _bind_kv(bus, keys[:1])
+    assert not module.read_kv_events("model", 0, 8).events
+    for key in keys[:-1]:
+        _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[key])
+        assert not module.read_kv_events("model", 0, 8).events
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=keys[-1:])
+    stored = module.read_kv_events("model", 0, 8)
+    assert [r.kind for r in stored.events] == ["stored"]
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=keys[-1:])
+    removed = module.read_kv_events("model", stored.next_cursor, 8)
+    assert [r.kind for r in removed.events] == ["removed"]
+
+
+@pytest.mark.parametrize("tagged_first", [False, True])
+def test_cpu_events_keep_tagged_and_untagged_announcements_separate(
+    tagged_first: bool,
+) -> None:
+    """A batch containing both identities evaluates and tracks each independently."""
+    module, bus = _event_module(size=8)
+    plain = _event_key(1)
+    tagged = ObjectKey(identity=plain.identity, tags={"revision": "pinned"})
+    keys = [tagged, plain] if tagged_first else [plain, tagged]
+    _bind_kv(bus, keys[:1])
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=keys)
+    stored = module.read_kv_events("model", 0, 8)
+    assert [r.kind for r in stored.events] == ["stored", "stored"]
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=[tagged])
+    removed = module.read_kv_events("model", stored.next_cursor, 8)
+    assert [r.kind for r in removed.events] == ["removed"]
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[plain])
+    assert not module.read_kv_events("model", removed.next_cursor, 8).events
+
+
 @pytest.mark.parametrize("world_size", [1, 2])
 def test_cpu_events_keep_a_chunk_until_its_required_object_loses_all_copies(
     world_size: int,
@@ -675,7 +775,7 @@ def test_bus_loss_during_notification_cannot_replay_an_evicted_completion() -> N
     ] == ["stored"]
 
 
-@pytest.mark.parametrize("other", ["model", "salt", "world"])
+@pytest.mark.parametrize("other", ["model", "salt", "world", "tags"])
 def test_cpu_events_do_not_combine_objects_from_other_namespaces(other: str) -> None:
     """Equal chunk hashes in another namespace cannot complete the missing rank."""
     module, bus = _event_module(world_size=2)
@@ -684,6 +784,7 @@ def test_cpu_events_do_not_combine_objects_from_other_namespaces(other: str) -> 
         "model": ObjectKey(identity=replace(second.identity, model_name="other")),
         "salt": ObjectKey(identity=replace(second.identity, cache_salt="other")),
         "world": _event_key(1, rank=1, world_size=4),
+        "tags": ObjectKey(identity=second.identity, tags={"revision": "other"}),
     }[other]
     _bind_kv(bus, [first])
     _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[first, foreign])
@@ -702,12 +803,63 @@ def test_cpu_events_require_registered_nonempty_geometry(
     registry.unregister("model", 1)
     if groups is not None:
         registry.register(
-            "model", 1, MemoryLayoutDesc([], []), group_layout_descs=groups
+            "model",
+            1,
+            MemoryLayoutDesc([], []),
+            chunk_size=256,
+            hash_algorithm="blake3",
+            group_layout_descs=groups,
         )
     key = _event_key(1)
     _bind_kv(bus, [key])
     _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=[key])
     assert not module.read_kv_events("model", 0, 8).events
+
+
+@pytest.mark.parametrize("reregister", [False, True], ids=["reaped", "replaced"])
+def test_cpu_events_withdraw_all_chunks_during_registration_change(
+    monkeypatch: pytest.MonkeyPatch, reregister: bool
+) -> None:
+    """One eviction batch can span a change from two registered groups to one."""
+    module, bus = _event_module(size=8, groups=2)
+    group0 = [_event_key(1), _event_key(2)]
+    group1 = [ObjectKey(identity=key.identity, object_group_id=1) for key in group0]
+    _bind_kv(bus, group0)
+    _publish_kv(bus, EventType.L1_WRITE_FINISHED, keys=group0 + group1)
+    stored = module.read_kv_events("model", 0, 8)
+    assert [r.kind for r in stored.events] == ["stored", "stored"]
+    registry = module.context.layout_desc_registry
+    read_geometry = registry.find_group_shard_geometry
+
+    def change_registration_after_read(
+        model_name: str, world_size: int
+    ) -> tuple[tuple[int, ...], ShardReplicationDesc] | None:
+        geometry = read_geometry(model_name, world_size)
+        registry.unregister(model_name, world_size)
+        if reregister:
+            registry.register(
+                model_name,
+                world_size,
+                MemoryLayoutDesc([], []),
+                chunk_size=256,
+                hash_algorithm="blake3",
+                shard_replication_desc=ShardReplicationDesc((1,), (1,)),
+            )
+        return geometry
+
+    monkeypatch.setattr(
+        registry, "find_group_shard_geometry", change_registration_after_read
+    )
+    # The first chunk loses group 1 under the old layout. The second loses
+    # group 0, which is required under either layout.
+    keys = [group1[0], group0[1]]
+    _publish_kv(bus, EventType.L1_KEYS_EVICTED, keys=keys)
+    geometry = read_geometry("model", 1)
+    assert (geometry[0] if geometry is not None else ()) == ((0,) if reregister else ())
+    removed = module.read_kv_events("model", stored.next_cursor, 8)
+    assert [(r.kind, r.block_hashes) for r in removed.events] == [
+        ("removed", [key.chunk_hash]) for key in keys
+    ]
 
 
 @pytest.mark.parametrize(

@@ -6,6 +6,12 @@ syntax = "proto3";
 
 package lmcache.mp;
 
+// Native event identity contract; registration does not activate native output.
+message KVEventProfile {
+  string profile_id = 1;
+  int64 block_size = 2;
+}
+
 message ObjectKeyIdentity {
   bytes chunk_hash = 1;
   int64 kv_rank = 2;
@@ -29,6 +35,8 @@ message IpcCacheServerKey {
   optional bytes encoded_request_configs = 9;
   reserved 10;
   reserved "num_kv_readers";
+  // Client-computed chunk hashes of [0, end), sent instead of token_bytes.
+  bytes chunk_hashes = 11;
 }
 
 // Store / Retrieve and CacheBlend retrieve share this reply shape.

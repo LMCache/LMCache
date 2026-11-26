@@ -3,15 +3,33 @@
 
 # Standard
 from typing import Any
+import warnings
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.transport.request_client import RequestClient
+from lmcache.v1.transport.zmq import ZMQ_MIGRATION_DOC_URL
 
 logger = init_logger(__name__)
 
 _ZMQ_SCHEMES = frozenset({"inproc", "ipc", "tcp"})
 _GRPC_SCHEMES = frozenset({"grpc", "grpc+unix"})
+
+_zmq_deprecation_warned = False
+
+
+def _warn_zmq_deprecated(server_url: str) -> None:
+    global _zmq_deprecation_warned
+    if _zmq_deprecation_warned:
+        return
+    _zmq_deprecation_warned = True
+    message = (
+        f"The zmq request transport ({server_url}) is deprecated and will be "
+        "removed in a future release. Use grpc://host:port and start the "
+        f"server with --transport grpc. See {ZMQ_MIGRATION_DOC_URL}"
+    )
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
+    logger.warning(message)
 
 
 def _normalize_server_url(server_url: str) -> tuple[str, str]:
@@ -19,7 +37,7 @@ def _normalize_server_url(server_url: str) -> tuple[str, str]:
     if not url:
         raise ValueError("Request client server URL must not be empty")
     if "://" not in url:
-        return "tcp", f"tcp://{url}"
+        return "grpc", f"grpc://{url}"
 
     scheme, target = url.split("://", 1)
     scheme = scheme.lower()
@@ -40,13 +58,13 @@ class RequestClientFactory:
     ) -> RequestClient:
         """Create a request client selected by ``server_url`` scheme.
 
-        Bare ``host:port`` endpoints retain the existing behavior and default
-        to ``tcp://``. ZMQ handles ``tcp://``, ``ipc://``, and ``inproc://``;
-        gRPC handles ``grpc://`` and ``grpc+unix://``.
+        Bare ``host:port`` endpoints default to ``grpc://``. gRPC handles
+        ``grpc://`` and ``grpc+unix://``; the deprecated ZMQ transport handles
+        ``tcp://``, ``ipc://``, and ``inproc://``.
 
         Args:
             server_url: Multiprocess server endpoint, optionally without a
-                scheme for the legacy ZMQ TCP default.
+                scheme for the gRPC default.
             context: Optional transport context. ZMQ accepts a ``zmq.Context``;
                 transports that do not need a context may ignore it.
             api_key: Optional request-transport API key. If omitted, both
@@ -63,6 +81,7 @@ class RequestClientFactory:
         """
         scheme, normalized_url = _normalize_server_url(server_url)
         if scheme in _ZMQ_SCHEMES:
+            _warn_zmq_deprecated(normalized_url)
             # First Party
             from lmcache.v1.client.transport import zmq_impl
 

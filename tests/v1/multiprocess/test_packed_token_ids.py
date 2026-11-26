@@ -7,12 +7,14 @@ key moves. These tests pin that equivalence at each layer that hashes.
 """
 
 # Standard
+from array import array
 import struct
 
 # Third Party
 import pytest
 
 # First Party
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_codec import (
     TOKEN_STRIDE,
     num_packed_tokens,
@@ -20,7 +22,6 @@ from lmcache.v1.common.token_codec import (
     unpack_token_ids,
 )
 from lmcache.v1.common.token_hasher import TokenHasher
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import Session
 
 CHUNK_SIZE = 4
@@ -49,6 +50,11 @@ class TestTokenCodec:
     def test_big_endian_uint32_layout(self) -> None:
         """The layout blake3 already hashes; changing it would rekey the cache."""
         assert pack_token_ids([1, 258]) == b"\x00\x00\x00\x01\x00\x00\x01\x02"
+
+    def test_native_int32_buffer_and_slice_match_lists(self) -> None:
+        tokens = array("i", [10, 20, 30, 40, 50])
+        assert pack_token_ids(tokens) == pack_token_ids([10, 20, 30, 40, 50])
+        assert pack_token_ids(tokens, 1, 4) == pack_token_ids([20, 30, 40])
 
     def test_ragged_buffer_rejected(self) -> None:
         with pytest.raises(ValueError, match="not a multiple"):

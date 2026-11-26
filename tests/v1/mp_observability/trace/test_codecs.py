@@ -7,8 +7,8 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
     GroupedObjectKeys,
     MemoryLayoutDesc,
     MemoryResidency,

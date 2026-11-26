@@ -6,7 +6,7 @@ import msgspec
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import KVEventBatch
+from lmcache.v1.common.custom_types import KVEventBatch
 from lmcache.v1.transport.grpc.descriptors import (
     client_method_name,
     iter_methods,
@@ -50,9 +50,7 @@ FROZEN_LEGACY_OPERATION_IDS = {
     "cb_unregister_rope": 26,
     "cb_retrieve_pre_computed": 27,
     "cb_unified_lookup": 28,
-    "p2p_lookup_and_lock": 29,
-    "p2p_query_lookup_results": 30,
-    "p2p_unlock_objects": 31,
+    # Retired P2P IDs 29-31 are not reassigned.
     "get_experimental": 32,
     "cb_protocol_handshake": 33,
 }
@@ -80,9 +78,10 @@ def test_new_zmq_operations_use_names_without_registry_changes() -> None:
     assert decode_operation(encoded) == operation
 
 
-def test_unknown_legacy_zmq_operation_is_rejected() -> None:
+@pytest.mark.parametrize("operation_id", [29, 30, 31, 999])
+def test_unknown_legacy_zmq_operation_is_rejected(operation_id: int) -> None:
     with pytest.raises(ValueError, match="Unknown legacy ZMQ operation id"):
-        decode_operation(msgspec.msgpack.encode(999))
+        decode_operation(msgspec.msgpack.encode(operation_id))
 
 
 def test_request_contract_matches_generated_grpc_methods() -> None:
@@ -112,10 +111,6 @@ def test_rpc_types_come_from_request_client_annotations() -> None:
     assert stream.payload_types == (int, str, int, int)
     assert stream.response_type is KVEventBatch
     assert stream.streaming
-
-    negotiate = get_rpc_spec("negotiate_chunk_size")
-    assert negotiate.payload_types == (int,)
-    assert negotiate.response_type is int
 
     module_affinity = get_rpc_spec("server_module_affinity_call")
     assert module_affinity.payload_types == (ServerModuleCallRequest,)
