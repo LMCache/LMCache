@@ -10,6 +10,7 @@ zero changes to this file.
 from pathlib import Path
 from types import ModuleType
 import importlib.util
+import os
 import re
 import sys
 
@@ -94,7 +95,11 @@ class _EggInfoWithNixlConnector(_egg_info):
 if __name__ == "__main__":
     policy = BuildPolicy()
     profile = policy.resolve_profile()
-    ext_modules, cmdclass, req_file = policy.collect_extensions(profile)
+    if os.environ.get("LMCACHE_CLIENT_BUILD") == "1":
+        ext_modules, cmdclass = policy.collect_client_extensions(profile)
+        req_file = None
+    else:
+        ext_modules, cmdclass, req_file = policy.collect_extensions(profile)
     cmdclass["build_py"] = _BuildPyWithGrpcStubs
     cmdclass["egg_info"] = _EggInfoWithNixlConnector
 

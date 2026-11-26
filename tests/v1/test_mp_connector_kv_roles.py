@@ -50,8 +50,6 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.common.utils import CacheRemoveEvent, CacheStoreEvent  # noqa: E402
 
-pytestmark = pytest.mark.no_shared_allocator
-
 
 def _config(transfer_config: KVTransferConfig) -> VllmConfig:
     return cast(

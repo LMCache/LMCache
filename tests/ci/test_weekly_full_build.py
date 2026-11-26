@@ -22,9 +22,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / ".github/scripts/weekly_full_build.py"
 MANIFEST = REPO / ".buildkite/k3_tests/weekly/manifest.json"
-XPU_MANIFEST = REPO / ".buildkite/k3_tests/weekly/manifest-xpu.json"
 MP_PIPELINE = REPO / ".buildkite/k3_tests/multiprocess/pipeline.yml"
-XPU_MP_PIPELINE = REPO / ".buildkite/k3_tests/xpu/multiprocess/pipeline.yml"
 UPLOAD = REPO / ".buildkite/k3_tests/common_scripts/upload-pipeline.sh"
 
 
@@ -43,11 +41,6 @@ def manifest() -> dict[str, Any]:
     return json.loads(MANIFEST.read_text())
 
 
-@pytest.fixture(scope="module")
-def xpu_manifest() -> dict[str, Any]:
-    return json.loads(XPU_MANIFEST.read_text())
-
-
 def _job(name: str, state: str = "passed", **fields: Any) -> dict[str, Any]:
     return {"type": "script", "name": name, "state": state, "id": name, **fields}
 
@@ -59,7 +52,11 @@ def _label_for(pattern: str) -> str:
         .rstrip("$")
         .replace("(?!preemption )[a-z_]+", "lmcache_driven")
     )
-    return label if label.startswith(":") else f":compression: vllm{label}zmq"
+    if label.startswith(":"):
+        return label
+    if pattern.startswith("^") and pattern.endswith("$"):
+        return re.sub(r"\\([()+])", r"\1", label)
+    return f":compression: vllm{label}zmq"
 
 
 def _passing_builds(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -303,47 +300,87 @@ def test_every_multiprocess_workload_is_required(manifest: dict) -> None:
     assert not unlisted, f"add these workloads to {MANIFEST.name}: {sorted(unlisted)}"
 
 
-def test_complete_xpu_passing_run_passes(
-    gate: ModuleType, xpu_manifest: dict[str, Any]
+@pytest.mark.parametrize(
+    "manifest_rel",
+    [
+        ".buildkite/k3_tests/weekly/manifest-xpu.json",
+        ".buildkite/k3_tests/weekly/manifest-amd.json",
+        ".buildkite/k3_tests/weekly/manifest-rbln.json",
+    ],
+)
+def test_complete_vendor_passing_run_passes(
+    gate: ModuleType, manifest_rel: str
 ) -> None:
-    report = gate.evaluate(xpu_manifest, _passing_builds(xpu_manifest), {})
+    vendor_manifest = json.loads((REPO / manifest_rel).read_text(encoding="utf-8"))
+    report = gate.evaluate(vendor_manifest, _passing_builds(vendor_manifest), {})
     assert report["passed"], report
 
 
-def test_every_xpu_multiprocess_workload_is_required(
-    xpu_manifest: dict[str, Any],
+def _expand_step_labels(pipeline: dict[str, Any]) -> list[str]:
+    """Expand Buildkite pipeline step/group labels across matrix combinations."""
+    # Standard
+    import itertools
+
+    labels: list[str] = []
+    for item in pipeline["steps"]:
+        steps = item.get("steps", [item]) if "steps" in item else [item]
+        for step in steps:
+            raw = step["label"]
+            setup = step.get("matrix", {}).get("setup", {})
+            if not setup:
+                labels.append(raw)
+                continue
+            keys = list(setup.keys())
+            for combo in itertools.product(*(setup[k] for k in keys)):
+                lbl = raw
+                for k, v in zip(keys, combo, strict=True):
+                    lbl = lbl.replace(f"{{{{matrix.{k}}}}}", str(v))
+                labels.append(lbl)
+    return labels
+
+
+@pytest.mark.parametrize(
+    ("manifest_rel", "slug", "pipeline_rel"),
+    [
+        (
+            ".buildkite/k3_tests/weekly/manifest-xpu.json",
+            "unit-tests-xpu",
+            ".buildkite/k3_tests/xpu/unittests/pipeline.yml",
+        ),
+        (
+            ".buildkite/k3_tests/weekly/manifest-xpu.json",
+            "xpu-mp-test",
+            ".buildkite/k3_tests/xpu/multiprocess/pipeline.yml",
+        ),
+        (
+            ".buildkite/k3_tests/weekly/manifest-amd.json",
+            "amd-mp-test",
+            ".buildkite/k3_tests/amd/pipeline.yml",
+        ),
+        (
+            ".buildkite/k3_tests/weekly/manifest-rbln.json",
+            "rbln-mp-test",
+            ".buildkite/k3_tests/rbln/pipeline.yml",
+        ),
+    ],
+)
+def test_every_vendor_job_is_required(
+    manifest_rel: str, slug: str, pipeline_rel: str
 ) -> None:
-    """Every expanded job in xpu/multiprocess/pipeline.yml must match manifest-xpu."""
+    """Every expanded job in a vendor pipeline must match its weekly manifest."""
     # Third Party
     import yaml
 
-    pipeline = yaml.safe_load(XPU_MP_PIPELINE.read_text(encoding="utf-8"))
-    labels: list[str] = []
-    for group in pipeline["steps"]:
-        for step in group.get("steps", []):
-            raw = step["label"]
-            transports = step.get("matrix", {}).get("setup", {}).get("transport") or [
-                None
-            ]
-            for t in transports:
-                labels.append(
-                    raw.replace("{{matrix.transport}}", t) if t is not None else raw
-                )
+    vendor_manifest = json.loads((REPO / manifest_rel).read_text(encoding="utf-8"))
+    pipeline = yaml.safe_load((REPO / pipeline_rel).read_text(encoding="utf-8"))
+    labels = _expand_step_labels(pipeline)
 
-    spec = next(p for p in xpu_manifest["pipelines"] if p["slug"] == "xpu-mp-test")
+    spec = next(p for p in vendor_manifest["pipelines"] if p["slug"] == slug)
     patterns = [re.compile(p) for p in spec["required"]]
-    unmatched_labels = [
-        lbl for lbl in labels if not any(p.search(lbl) for p in patterns)
-    ]
-    unused_patterns = [
-        p.pattern for p in patterns if not any(p.search(lbl) for lbl in labels)
-    ]
-    assert not unmatched_labels, (
-        f"add these XPU jobs to {XPU_MANIFEST.name}: {unmatched_labels}"
-    )
-    assert not unused_patterns, (
-        f"unused patterns in {XPU_MANIFEST.name}: {unused_patterns}"
-    )
+    unmatched = [lbl for lbl in labels if not any(p.search(lbl) for p in patterns)]
+    unused = [p.pattern for p in patterns if not any(p.search(lbl) for lbl in labels)]
+    assert not unmatched, f"add these jobs to {manifest_rel} ({slug}): {unmatched}"
+    assert not unused, f"unused patterns in {manifest_rel} ({slug}): {unused}"
 
 
 def test_fetch_annotations_paginates(

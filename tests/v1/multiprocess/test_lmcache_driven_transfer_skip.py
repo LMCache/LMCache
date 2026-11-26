@@ -467,7 +467,6 @@ def _dsv4_swa_cache_context(chunk_tokens: int, sw_tokens: int, tpb: int):
     return ctx
 
 
-@pytest.mark.no_shared_allocator
 def test_downsample_keeps_last_window_of_each_chunk_dsv4_swa():
     """DSv4 SWA: chunk 4096, window 128, tpb 32 → keep last 4 block ids / chunk."""
     chunk, sw, tpb, n_chunks = 4096, 128, 32, 19
@@ -486,7 +485,6 @@ def test_downsample_keeps_last_window_of_each_chunk_dsv4_swa():
     assert out[0][start:] == original[-keep:]
 
 
-@pytest.mark.no_shared_allocator
 def test_downsample_full_attention_keeps_every_block():
     chunk, tpb, n_chunks = 4096, 128, 19
     ctx = _dsv4_swa_cache_context(chunk, sw_tokens=chunk, tpb=tpb)

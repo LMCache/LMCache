@@ -148,7 +148,7 @@ elif [ "$TEST_NAME" = "lazy_offload" ]; then
     # kv-transfer configuration only for this integration test.
     export LMCACHE_MP_LAZY_OFFLOAD=true
     # Keep both sides aligned: this test counts stored chunks, while LMCache's
-    # chunk-size negotiation cannot change vLLM's paged-cache block size.
+    # chunk-size resolution cannot change vLLM's paged-cache block size.
     export CHUNK_SIZE="${CHUNK_SIZE:-16}"
     export VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-$CHUNK_SIZE}"
     export MODEL="${MODEL:-$DEFAULT_MODEL}"
@@ -189,7 +189,7 @@ echo "Results dir: $RESULTS_DIR"
 echo ""
 
 # Tests that still handle their own server lifecycle.
-SELF_CONTAINED_TESTS=" mp_autostart_tp2 p2p p2p_write kimi_linear_tp dsv4_flash_tp "
+SELF_CONTAINED_TESTS=" mp_autostart_tp2 client_wheel p2p p2p_write kimi_linear_tp dsv4_flash_tp "
 
 # Tests that compare against a baseline engine (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
@@ -232,9 +232,12 @@ echo "============================================"
 echo "=== Running test: ${TEST_NAME} ==="
 echo "============================================"
 
-if ! "$exec_script"; then
-    echo "${TEST_NAME} test failed"
-    exit 1
+# Keep the workload's status: a step can soft-fail on one code (client_wheel: 42).
+"$exec_script"
+status=$?
+if [[ "$status" -ne 0 ]]; then
+    echo "${TEST_NAME} test failed (exit ${status})"
+    exit "$status"
 fi
 
 echo ""

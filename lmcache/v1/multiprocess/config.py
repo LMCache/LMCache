@@ -50,8 +50,8 @@ class MPServerConfig:
     """Request server port."""
 
     chunk_size: int = 256
-    """Minimum chunk size for KV cache operations. vLLM connector startup may
-    negotiate this upward to satisfy model-specific KV geometry."""
+    """Minimum chunk size for KV cache operations. Clients may resolve a larger
+    model-specific effective size before registration."""
 
     max_workers: int = 1
     """Base number of worker threads. Sets default for both GPU and CPU pools."""
@@ -452,8 +452,8 @@ def add_mp_server_args(
         "--chunk-size",
         type=int,
         default=256,
-        help="Minimum chunk size for KV cache operations. The vLLM connector "
-        "may negotiate this upward to satisfy model-specific KV geometry. "
+        help="Minimum chunk size for KV cache operations. Clients may resolve "
+        "a larger model-specific size before registration. "
         "Default is 256.",
     )
     mp_group.add_argument(
