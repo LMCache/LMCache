@@ -32,9 +32,9 @@ from opentelemetry import metrics
 
 # First Party
 from lmcache.lmcache_native import TransferDirection
+from lmcache.v1.common.ops_types import TransferPhase
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
-from lmcache.v1.platform.ops_types import TransferPhase
 
 # Label names derived from the enum members; pybind11 enums do not raise
 # ValueError on unknown values, so name lookup must not rely on construction.

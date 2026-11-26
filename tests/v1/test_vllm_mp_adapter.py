@@ -30,15 +30,13 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     ParallelStrategy,
     get_lmcache_chunk_size,
 )
-from lmcache.utils import CacheRemoveEvent, CacheStoreEvent
-from lmcache.v1.client.transport.errors import MPServerUnavailableError
 from lmcache.v1.common.custom_types import (
     KVEventBatch,
     KVEventRecord,
 )
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.token_codec import pack_token_ids
-from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.common.utils import CacheRemoveEvent, CacheStoreEvent
 from lmcache.v1.platform.ipc_policy import (
     is_isolated_ipc,
     is_use_vmm_api,
@@ -46,7 +44,9 @@ from lmcache.v1.platform.ipc_policy import (
     set_isolated_ipc,
     set_use_vmm_api,
 )
+from lmcache.v1.transport.errors import MPServerUnavailableError
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
+from lmcache.v1.transport.request_client import RequestClient
 
 # Test helpers
 from tests.v1.mp_scheduler_adapter_test_utils import (
@@ -2101,7 +2101,7 @@ def test_enabled_feature_receives_reclaim_and_shutdown(fake_adapter):
     adapter.get_finished(set())
     adapter.shutdown()
 
-    dispatcher.reclaim.assert_called_once_with()
+    dispatcher.reclaim.assert_called_once_with(finished_req_ids=set())
     dispatcher.shutdown.assert_called_once_with()
 
 

@@ -97,12 +97,20 @@ echo ""
 # Sets the global VLLM_PID and appends it to PID_FILE for cleanup.
 launch_vllm() {
     local log_file="$1"
+    local vmm_config=""
+    if [[ "${VLLM_TARGET_DEVICE:-}" == "xpu" ]]; then
+        vmm_config=', "lmcache.mp.use_vmm_api": false'
+    fi
     echo "=== Launching vLLM (Kimi-Linear, TP=2, port $VLLM_PORT) ==="
     echo "Log: $log_file"
     # Save and unset VLLM_PORT: vLLM's internal get_open_port() would otherwise
     # collide with the serving port for torch.distributed.
     local saved_port="$VLLM_PORT"
     unset VLLM_PORT
+    local -a mamba_args=()
+    if vllm_supports_mamba_cache_mode; then
+        mamba_args=(--mamba-cache-mode align)
+    fi
 
     VLLM_SERVER_DEV_MODE=1 vllm serve "$MODEL" \
         --tensor-parallel-size 2 \
@@ -111,13 +119,13 @@ launch_vllm() {
         --no-enable-flashinfer-autotune \
         --enable-prefix-caching \
         --moe-backend triton \
-        --mamba-cache-mode align \
+        "${mamba_args[@]}" \
         --max-model-len auto \
         --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS" \
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
         --port "$saved_port" \
         --block-size "$CHUNK_SIZE" \
-        --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 120}}" \
+        --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 120${vmm_config}}}" \
         > "$log_file" 2>&1 &
     VLLM_PID=$!
     echo "$VLLM_PID" >> "$PID_FILE"

@@ -28,8 +28,7 @@ import google.auth
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.logging import init_logger
-from lmcache.utils import TTLCache
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -59,6 +58,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
+from lmcache.v1.distributed.utils import TTLCache
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
 

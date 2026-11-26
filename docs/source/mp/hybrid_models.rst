@@ -269,7 +269,7 @@ cannot serve correctly (``validate_kv_cache_groups`` in
 
 DeepSeek-V4-style **compressed / indexer caches are supported** — specs that
 declare slot compression (``compress_ratio > 1`` / ``tq_slot_size > 0``) are
-served by the compression path in ``lmcache.v1.kv_layer_groups`` and are *not*
+served by the compression path in ``lmcache.v1.common.kv_layer_groups`` and are *not*
 rejected. See the :doc:`DeepSeek-V4-Flash <../recipes/deepseek_v4_flash>` and
 :doc:`GLM 5.2 <../recipes/glm5_2>` recipes for validated end-to-end commands.
 

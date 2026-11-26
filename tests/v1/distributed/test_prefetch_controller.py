@@ -11,9 +11,10 @@ the full integration without mocking internals.
 """
 
 # Standard
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from threading import Event
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 import time
 
 # Third Party
@@ -22,6 +23,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import (
     FULL_ATTENTION_WINDOW_CHUNKS,
     FetchingPolicy,
@@ -32,6 +34,7 @@ from lmcache.v1.distributed.api import (
     MemoryTags,
     ObjectKey,
     PrefetchLockMode,
+    PrefetchPriority,
     PrefetchResult,
     PrefetchTaskSpec,
 )
@@ -43,6 +46,7 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l1_manager import DramL1Manager, ShadowL1Manager
+from lmcache.v1.distributed.l2_adapters import p2p_l2_adapter as p2p_mod
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
     FaultInjectL2Adapter,
@@ -50,6 +54,10 @@ from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
+)
+from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
+    P2PL2Adapter,
+    P2PL2AdapterConfig,
 )
 from lmcache.v1.distributed.l2_adapters.raw_block import RawBlockCore, encode_object_key
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
@@ -133,6 +141,7 @@ def make_spec(
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK,
     allowed_l1_memory_tags: frozenset[MemoryTags] | None = None,
     allowed_l2_memory_tags: frozenset[MemoryTags] | None = None,
+    priority: PrefetchPriority = PrefetchPriority.NORMAL,
 ) -> PrefetchTaskSpec:
     """Build a request over the given rows."""
     return PrefetchTaskSpec(
@@ -141,6 +150,7 @@ def make_spec(
         lock_mode=lock_mode,
         allowed_l1_memory_tags=allowed_l1_memory_tags,
         allowed_l2_memory_tags=allowed_l2_memory_tags,
+        priority=priority,
     )
 
 
@@ -930,9 +940,10 @@ class TestAdmission:
         l1_manager.finish_read(all_keys)
 
     def test_watermark_holds_back_requests(self):
-        """Once in-flight requests reach the watermark, later requests wait
-        in the pending queue; the first is admitted even though it alone
-        exceeds the budget, and every request completes."""
+        """Once prefetch holds the watermark, later requests wait in the
+        pending queue; the first is admitted even though it alone exceeds the
+        budget, and each later one starts as soon as the one before is
+        consumed."""
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
         l1_manager = DramL1Manager(
@@ -957,11 +968,12 @@ class TestAdmission:
                     and ctrl.report_status()["in_flight_request_count"] == 1
                 )
             ), ctrl.report_status()
-            results = [wait_for_result(ctrl, r, timeout=15.0) for r in req_ids]
-
-            assert [row_bits(r) for r in results] == [[0, 1]] * 4
+            for i, req_id in enumerate(req_ids):
+                result = wait_for_result(ctrl, req_id, timeout=15.0)
+                assert row_bits(result) == [0, 1]
+                # Consuming the result releases the budget for the next one.
+                l1_manager.finish_read(all_keys[i * 2 : i * 2 + 2])
             assert l1_manager.get_staging_memory_usage() == 0
-            l1_manager.finish_read(all_keys)
         finally:
             ctrl.stop()
             adapter.close()
@@ -1467,6 +1479,16 @@ class AdmissionRacingL1Manager:
         return wrapped
 
 
+_NOT_RACED_L1_CALLS = frozenset(
+    {
+        "get_memory_tags",
+        "get_memory_usage",
+        "get_staging_memory_usage",
+        "get_prefetch_locked_bytes",
+    }
+)
+
+
 class EvictionRacingL1Manager:
     """DramL1Manager wrapper emulating a concurrent evictor, deterministically.
 
@@ -1492,8 +1514,10 @@ class EvictionRacingL1Manager:
     def __getattr__(self, name: str):
         attr = getattr(self._inner, name)
         # Memory tags are static metadata read when the controller is built,
-        # not a request-path call for the evictor to race with.
-        if not callable(attr) or name == "get_memory_tags":
+        # and the usage reads are admission bookkeeping made before the
+        # request locks anything: neither is a request-path call for the
+        # evictor to race with.
+        if not callable(attr) or name in _NOT_RACED_L1_CALLS:
             return attr
 
         def wrapped(*args, **kwargs):
@@ -1643,9 +1667,10 @@ class TestReservationFailures:
             adapter.close()
             l1_manager.close()
 
-    def test_contended_key_is_dropped_under_prefix(self, l1_manager):
-        """A key admitted by another writer after the lock pass fails to
-        reserve; under "prefix" the hit stops before it."""
+    def test_contended_key_is_served_under_prefix(self, l1_manager):
+        """A key another writer admits after the lock pass is still staged
+        (``allow_resident``); admission read-locks the resident copy, so
+        "prefix" keeps the whole hit instead of stopping before the key."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
@@ -1661,18 +1686,17 @@ class TestReservationFailures:
         req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
         result = wait_for_result(ctrl, req_id)
         ctrl.stop()
-        adapter.close()
 
         assert racing_l1.admitted, "the racing writer never interleaved"
-        assert row_bits(result) == [0]
-        assert_read_locked(l1_manager, keys[:1])
-        assert_absent(l1_manager, keys[2:])
+        assert row_bits(result) == [0, 1, 2]
+        assert_read_locked(l1_manager, keys)
         assert l1_manager.get_staging_memory_usage() == 0
-        l1_manager.finish_read(keys[:1])
-        l1_manager.delete([keys[1]])
+        assert_l2_unlocked(adapter)
+        adapter.close()
+        l1_manager.finish_read(keys)
 
-    def test_contended_key_is_dropped_under_full(self, l1_manager):
-        """Under "full" only the contended key is dropped."""
+    def test_contended_key_is_served_under_full(self, l1_manager):
+        """Under "full" the contended key is served as well."""
         adapter = make_adapter()
         layout = make_layout()
         keys = [make_object_key(i) for i in range(3)]
@@ -1690,14 +1714,14 @@ class TestReservationFailures:
         )
         result = wait_for_result(ctrl, req_id)
         ctrl.stop()
-        adapter.close()
 
         assert racing_l1.admitted
-        assert row_bits(result) == [1, 2]
-        assert_read_locked(l1_manager, keys[1:])
+        assert row_bits(result) == [0, 1, 2]
+        assert_read_locked(l1_manager, keys)
         assert l1_manager.get_staging_memory_usage() == 0
-        l1_manager.finish_read(keys[1:])
-        l1_manager.delete([keys[0]])
+        assert_l2_unlocked(adapter)
+        adapter.close()
+        l1_manager.finish_read(keys)
 
     def test_l1_hit_survives_racing_evictor(self, l1_manager):
         """A resident key is locked at lookup, so an evictor cannot remove
@@ -2277,3 +2301,267 @@ class TestBorrowing:
             ctrl.stop()
             adapter.close()
             shadow.close()
+
+
+# =============================================================================
+# P2P: one failing peer among several
+# =============================================================================
+
+
+class _PeerFuture:
+    """A peer RPC reply: resolved with a value or error, or never (``pending``)."""
+
+    def __init__(
+        self, value: object = None, exc: Exception | None = None, pending: bool = False
+    ) -> None:
+        self._value, self._exc, self._pending = value, exc, pending
+
+    def result(self, timeout: float | None = None) -> object:
+        if self._exc is not None:
+            raise self._exc
+        return self._value
+
+    def add_done_callback(self, fn) -> None:
+        if not self._pending:
+            fn(self)
+
+
+def _peer_client(behavior: str, num_keys: int) -> MagicMock:
+    """A peer request client that ``holds`` the keys, or fails in one way."""
+    client = MagicMock()
+    failure = RuntimeError("peer failed")
+    if behavior == "never_acks":
+        client.p2p_lookup_and_lock.return_value = _PeerFuture(pending=True)
+    elif behavior == "ack_fails":
+        client.p2p_lookup_and_lock.return_value = _PeerFuture(exc=failure)
+    else:
+        client.p2p_lookup_and_lock.return_value = _PeerFuture(value=7)
+    if behavior == "query_fails":
+        client.p2p_query_lookup_results.return_value = _PeerFuture(exc=failure)
+    else:
+        client.p2p_query_lookup_results.return_value = _PeerFuture(
+            value=[TransferChannelAddress(offset=i, size=1) for i in range(num_keys)]
+        )
+    client.p2p_unlock_objects.return_value = _PeerFuture()
+    return client
+
+
+@contextmanager
+def _p2p_peers(
+    behaviors: list[str], num_keys: int
+) -> Iterator[tuple[list[P2PL2Adapter], list[MagicMock]]]:
+    """P2P adapters over fake peers, with the peers' request clients; the
+    real periodic notifier pulses their fds, as in a server. Reads complete
+    at once and succeed."""
+    clients = [_peer_client(b, num_keys) for b in behaviors]
+    tc_client = MagicMock()
+    tc_client.submit_read.return_value = 1
+    tc_client.query_status.return_value = MagicMock(
+        is_finished=MagicMock(return_value=True), succeeded_mask=[True] * num_keys
+    )
+    tc_ctx = MagicMock()
+    tc_ctx.get_transfer_channel_client.return_value = tc_client
+    tc_ctx.get_transfer_channel_address.side_effect = lambda pairs: [
+        TransferChannelAddress(offset=o, size=n) for o, n in pairs
+    ]
+    adapters = []
+    with (
+        patch.object(p2p_mod, "P2PClient", side_effect=clients),
+        patch.object(p2p_mod, "get_transfer_channel_context", return_value=tc_ctx),
+    ):
+        for i in range(len(behaviors)):
+            adapters.append(
+                P2PL2Adapter(
+                    P2PL2AdapterConfig(
+                        peer_mq_server_url=f"grpc://peer{i}:5555",
+                        peer_transfer_channel_server_url=f"peer{i}:7600",
+                        lookup_timeout_s=30.0,
+                    )
+                )
+            )
+    try:
+        yield adapters, clients
+    finally:
+        for adapter in adapters:
+            adapter.close()
+
+
+class TestP2PPeerFailures:
+    @pytest.mark.parametrize("behavior", ["never_acks", "ack_fails", "query_fails"])
+    def test_a_failing_peer_does_not_lose_a_healthy_peers_hits(
+        self, l1_manager, behavior
+    ):
+        """One peer fails while another holds every key: the request is served
+        from the healthy peer, and a peer that never answers costs the RPC
+        timeout rather than the 30 s lookup deadline."""
+        keys = [make_object_key(i) for i in range(4)]
+        with (
+            patch.object(p2p_mod, "_LOOKUP_RPC_TIMEOUT_S", 0.2),
+            _p2p_peers([behavior, "holds"], len(keys)) as (adapters, _),
+        ):
+            ctrl = make_controller(l1_manager, adapters, DefaultPrefetchPolicy())
+            ctrl.start()
+            try:
+                start = time.monotonic()
+                req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+                result = wait_for_result(ctrl, req_id, timeout=5.0)
+                elapsed = time.monotonic() - start
+            finally:
+                ctrl.stop()
+        assert row_bits(result) == [0, 1, 2, 3]
+        assert elapsed < 2.0
+
+    def test_every_lock_taken_by_replica_peers_is_released(self, l1_manager):
+        """Several peers hold the same keys and several requests ask for them
+        at once: every request is served, and each peer gets back exactly
+        the read locks its lookups took, whether it was read from or not."""
+        keys = [make_object_key(i) for i in range(4)]
+        num_requests = 3
+        with _p2p_peers(["holds", "holds", "holds"], len(keys)) as (adapters, clients):
+            ctrl = make_controller(l1_manager, adapters, DefaultPrefetchPolicy())
+            ctrl.start()
+            try:
+                req_ids = [
+                    ctrl.submit_prefetch_request(single_row_spec(keys))
+                    for _ in range(num_requests)
+                ]
+                results = [wait_for_result(ctrl, r, timeout=5.0) for r in req_ids]
+            finally:
+                ctrl.stop()
+        assert all(row_bits(r) == [0, 1, 2, 3] for r in results)
+        for client in clients:
+            # Each answered query read-locked every key on that peer.
+            locked = client.p2p_query_lookup_results.call_count * len(keys)
+            unlocked = sum(
+                len(call.args[0]) for call in client.p2p_unlock_objects.call_args_list
+            )
+            assert locked == num_requests * len(keys)
+            assert unlocked == locked
+
+
+# =============================================================================
+# Prefetch-locked bytes in the watermark, prefetch priority
+# =============================================================================
+
+OBJECT_BYTES = 100 * 2 * 512 * 2
+
+
+def make_budget_l1(num_objects: int = 16) -> DramL1Manager:
+    """A non-lazy L1 that holds exactly ``num_objects`` test objects."""
+    return DramL1Manager(
+        make_l1_config(size_in_bytes=OBJECT_BYTES * num_objects + 65536, use_lazy=False)
+    )
+
+
+def watermark_for(l1_manager: DramL1Manager, num_objects: float) -> float:
+    """The in-flight watermark whose budget is ``num_objects`` test objects."""
+    _used, total = l1_manager.get_memory_usage()
+    return OBJECT_BYTES * num_objects / total
+
+
+class TestPrefetchLockedBudget:
+    def test_unconsumed_loads_hold_back_new_requests(self):
+        """Loaded-but-unconsumed objects count against the watermark:
+        once they fill it, a new request waits with nothing in flight, and it
+        starts as soon as the earlier reader releases its objects."""
+        l1_manager = make_budget_l1()
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(6)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = make_controller(
+            l1_manager,
+            [adapter],
+            inflight_watermark=watermark_for(l1_manager, 5.5),
+        )
+        ctrl.start()
+        try:
+            first = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys[0:2]))
+            )
+            second = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys[2:4]))
+            )
+            assert row_bits(first) == [0, 1] and row_bits(second) == [0, 1]
+            assert l1_manager.get_prefetch_locked_bytes() == 4 * OBJECT_BYTES
+
+            third_id = ctrl.submit_prefetch_request(single_row_spec(keys[4:6]))
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_queue_size"] == 1
+            ), ctrl.report_status()
+            assert ctrl.report_status()["in_flight_request_count"] == 0
+            assert ctrl.query_prefetch_result(third_id) is None
+
+            l1_manager.finish_read(keys[0:2])
+            third = wait_for_result(ctrl, third_id)
+            assert row_bits(third) == [0, 1]
+            l1_manager.finish_read(keys[2:6])
+            assert l1_manager.get_prefetch_locked_bytes() == 0
+        finally:
+            ctrl.stop()
+            adapter.close()
+            l1_manager.close()
+
+    def test_l1_hits_are_charged_until_released(self, l1_manager):
+        """L1 hits stay pinned for the request like loads from L2, so they
+        count until the reader releases them."""
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        write_keys_to_l1(l1_manager, keys, layout)
+        adapter = make_adapter()
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+        try:
+            result = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
+            )
+            assert hit_counts(result) == (3, 0)
+            assert l1_manager.get_prefetch_locked_bytes() == 3 * OBJECT_BYTES
+            l1_manager.finish_read(keys)
+            assert l1_manager.get_prefetch_locked_bytes() == 0
+        finally:
+            ctrl.stop()
+            adapter.close()
+
+    def test_high_priority_starts_ahead_of_waiting_normal_request(self):
+        """A HIGH-priority request that fits starts while an earlier NORMAL
+        request is still waiting for budget."""
+        l1_manager = make_budget_l1()
+        adapter = make_adapter()
+        layout = make_layout()
+        held, new_keys, cont_keys = (
+            [make_object_key(i) for i in range(3)],
+            [make_object_key(i) for i in range(10, 13)],
+            [make_object_key(20)],
+        )
+        store_keys_in_l2(adapter, held + new_keys + cont_keys, layout)
+        ctrl = make_controller(
+            l1_manager,
+            [adapter],
+            inflight_watermark=watermark_for(l1_manager, 5.5),
+        )
+        ctrl.start()
+        try:
+            assert row_bits(
+                wait_for_result(
+                    ctrl, ctrl.submit_prefetch_request(single_row_spec(held))
+                )
+            ) == [0, 1, 2]
+            new_id = ctrl.submit_prefetch_request(single_row_spec(new_keys))
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_queue_size"] == 1
+            )
+            cont_id = ctrl.submit_prefetch_request(
+                single_row_spec(cont_keys, priority=PrefetchPriority.HIGH)
+            )
+            assert row_bits(wait_for_result(ctrl, cont_id)) == [0]
+            assert ctrl.report_status()["pending_queue_size"] == 1
+            assert ctrl.query_prefetch_result(new_id) is None
+
+            l1_manager.finish_read(held + cont_keys)
+            assert row_bits(wait_for_result(ctrl, new_id)) == [0, 1, 2]
+            l1_manager.finish_read(new_keys)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            l1_manager.close()

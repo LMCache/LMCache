@@ -13,8 +13,8 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform import torch_ops
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 
 _FMT = EngineKVFormat.NL_X_NB_BSV_BSS
 _BS = 4  # tokens per block

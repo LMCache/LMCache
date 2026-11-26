@@ -5,12 +5,15 @@ Tests for runtime add/remove of L2 adapters.
 Covers both the controller-level primitives (StoreController /
 PrefetchController add_adapter / request_remove_adapter with graceful
 drain) and the StorageManager orchestration (add_l2_adapter /
-delete_l2_adapter), including stable-id semantics and the
-active/draining observability surface.
+delete_l2_adapter), including stable-id semantics, the
+active/draining observability surface, and teardown order against the
+periodic event notifier.
 """
 
 # Standard
+from collections.abc import Callable, Iterator
 from dataclasses import replace
+from unittest.mock import MagicMock, patch
 import time
 
 # Third Party
@@ -19,6 +22,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.v1.distributed import storage_manager as storage_manager_mod
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -34,11 +38,14 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.distributed.l1_manager import DramL1Manager
+from lmcache.v1.distributed.l2_adapters import p2p_l2_adapter as p2p_mod
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
 )
+from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
+from lmcache.v1.distributed.p2p import P2PClient
 from lmcache.v1.distributed.storage_controllers.store_controller import StoreController
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     DefaultStorePolicy,
@@ -222,7 +229,7 @@ class TestStoreControllerRuntimeAdapters:
             l1_manager=l1_manager,
             l2_adapters=[],
             adapter_descriptors=[],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
         try:
@@ -251,7 +258,7 @@ class TestStoreControllerRuntimeAdapters:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
         try:
@@ -281,7 +288,7 @@ class TestStoreControllerRuntimeAdapters:
             l1_manager=l1_manager,
             l2_adapters=[keep, drop],
             adapter_descriptors=[make_descriptor(0), make_descriptor(1)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
         try:
@@ -308,7 +315,7 @@ class TestStoreControllerRuntimeAdapters:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
         try:
@@ -570,3 +577,158 @@ class TestStorageManagerRuntimeAdapters:
             assert sm.report_status()["num_l2_adapters"] == 0
         finally:
             sm.close()
+
+
+# =============================================================================
+# Teardown order against the periodic event notifier
+# =============================================================================
+
+
+class _NotifierUsedAfterShutdown(RuntimeError):
+    """A notifier instance was used after ``shutdown`` freed it."""
+
+
+class _StrictNotifier:
+    """``PeriodicEventNotifier`` stand-in that raises when used after shutdown.
+
+    Using the native notifier after shutdown is undefined behavior (it can
+    hang), so a test cannot rely on it to fail.
+    """
+
+    _instance: "_StrictNotifier | None" = None
+    shutdown_count = 0
+    # fds still registered when the last shutdown ran.
+    fds_at_shutdown: set[int] = set()
+
+    def __init__(self) -> None:
+        self._alive = True
+        self.fds: set[int] = set()
+
+    @classmethod
+    def reset(cls) -> None:
+        """Clear state left by a previous test."""
+        cls._instance = None
+        cls.shutdown_count = 0
+        cls.fds_at_shutdown = set()
+
+    @classmethod
+    def create(cls, interval_ms: int, use_eventfd: bool) -> None:
+        """Create the singleton; a second call is a no-op."""
+        if cls._instance is None:
+            cls._instance = cls()
+
+    @classmethod
+    def get(cls) -> "_StrictNotifier | None":
+        """Return the singleton, or None if it does not exist."""
+        return cls._instance
+
+    @classmethod
+    def shutdown(cls) -> None:
+        """Release the singleton; idempotent."""
+        instance = cls._instance
+        if instance is None:
+            return
+        cls.shutdown_count += 1
+        cls.fds_at_shutdown = set(instance.fds)
+        instance._alive = False
+        cls._instance = None
+
+    def register_fd(self, fd: int) -> None:
+        """Start signaling ``fd``."""
+        self._check_alive()
+        self.fds.add(fd)
+
+    def unregister_fd(self, fd: int) -> None:
+        """Stop signaling ``fd``."""
+        self._check_alive()
+        self.fds.discard(fd)
+
+    def _check_alive(self) -> None:
+        if not self._alive:
+            raise _NotifierUsedAfterShutdown("notifier used after shutdown")
+
+
+@pytest.fixture
+def strict_notifier() -> Iterator[type[_StrictNotifier]]:
+    """Patch in the strict notifier and fake peer endpoints."""
+    _StrictNotifier.reset()
+    with (
+        patch.object(storage_manager_mod, "PeriodicEventNotifier", _StrictNotifier),
+        patch.object(p2p_mod, "PeriodicEventNotifier", _StrictNotifier),
+        patch.object(p2p_mod, "P2PClient", return_value=MagicMock(spec=P2PClient)),
+        patch.object(p2p_mod, "get_transfer_channel_context", return_value=MagicMock()),
+    ):
+        yield _StrictNotifier
+    _StrictNotifier.reset()
+
+
+def make_peer_config() -> P2PL2AdapterConfig:
+    return P2PL2AdapterConfig("grpc://peer:9555", "peer:7600")
+
+
+def with_peer_adapter(config: StorageManagerConfig) -> StorageManagerConfig:
+    """``config`` with one P2P peer adapter configured."""
+    return replace(
+        config, l2_adapter_config=L2AdaptersConfig(adapters=[make_peer_config()])
+    )
+
+
+def spy_on_l1_close(sm: StorageManager, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record each L1 manager close in the returned list."""
+    closed: list[str] = []
+    for manager in sm.l1_managers():
+        original = manager.close
+
+        def recording_close(original: Callable[[], None] = original) -> None:
+            closed.append("l1")
+            original()
+
+        monkeypatch.setattr(manager, "close", recording_close)
+    return closed
+
+
+class TestStorageManagerNotifierTeardown:
+    @pytest.mark.parametrize("added_at", ["construction", "runtime"])
+    def test_close_shuts_notifier_down_after_peer_adapters(
+        self,
+        strict_notifier: type[_StrictNotifier],
+        empty_storage_manager_config: StorageManagerConfig,
+        monkeypatch: pytest.MonkeyPatch,
+        added_at: str,
+    ) -> None:
+        """Peer adapters close before the notifier shuts down, and L1 closes."""
+        if added_at == "construction":
+            sm = StorageManager(with_peer_adapter(empty_storage_manager_config))
+        else:
+            sm = StorageManager(empty_storage_manager_config)
+            sm.add_l2_adapter(make_peer_config())
+        notifier = strict_notifier.get()
+        assert notifier is not None
+        assert notifier.fds, "the peer adapter should have registered its event fds"
+        l1_closed = spy_on_l1_close(sm, monkeypatch)
+
+        sm.close()
+
+        assert strict_notifier.shutdown_count == 1
+        assert strict_notifier.fds_at_shutdown == set()
+        # L1 stays open only if an adapter failed to close.
+        assert l1_closed == ["l1"]
+
+    def test_construction_failure_closes_peer_adapters_before_the_notifier(
+        self,
+        strict_notifier: type[_StrictNotifier],
+        empty_storage_manager_config: StorageManagerConfig,
+    ) -> None:
+        """A failed constructor closes peer adapters before the notifier."""
+        with (
+            patch.object(
+                storage_manager_mod,
+                "QuotaManager",
+                side_effect=RuntimeError("late construction failure"),
+            ),
+            pytest.raises(RuntimeError, match="late construction failure"),
+        ):
+            StorageManager(with_peer_adapter(empty_storage_manager_config))
+
+        assert strict_notifier.shutdown_count == 1
+        assert strict_notifier.fds_at_shutdown == set()
