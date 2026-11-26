@@ -9,6 +9,8 @@ from pathlib import Path
 import argparse
 import gc
 import importlib
+import os
+import subprocess
 import sys
 import textwrap
 import threading
@@ -101,6 +103,10 @@ def external_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterato
                     type(self).calls += 1
                     return super().plan_load(*args, **kwargs)
 
+            class MissingRetention(PrefetchPolicy):
+                def plan_load(self, *args, **kwargs):
+                    raise NotImplementedError
+
             class BrokenStore(DefaultStorePolicy):
                 def __init__(self):
                     raise RuntimeError("external constructor failed")
@@ -126,8 +132,10 @@ def external_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterato
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     importlib.invalidate_caches()
-    yield name
-    monkeypatch.delitem(sys.modules, name, raising=False)
+    try:
+        yield name
+    finally:
+        sys.modules.pop(name, None)
 
 
 @pytest.mark.parametrize("factory, class_name", FACTORIES)
@@ -209,6 +217,7 @@ def test_wrong_type_rejected(
     [
         (store_factory, "StorePolicy"),
         (create_prefetch_policy, "PrefetchPolicy"),
+        (create_prefetch_policy, "MissingRetention"),
         (store_factory, "ExternalPrefetch"),
         (create_prefetch_policy, "ExternalStore"),
     ],
@@ -254,6 +263,52 @@ def test_cli_preserves_external_selections_through_config(
         type(create_prefetch_policy(config.prefetch_policy)).__name__
         == "ExternalPrefetch"
     )
+
+
+@pytest.mark.parametrize(
+    "flag, selection, diagnostic",
+    [
+        ("--l2-store-policy", "{package}:BrokenStore", "external constructor failed"),
+        ("--l2-prefetch-policy", "unknown-policy", "Unknown prefetch policy"),
+    ],
+)
+def test_server_cli_exits_nonzero_on_invalid_policy(
+    external_package: str,
+    tmp_path: Path,
+    flag: str,
+    selection: str,
+    diagnostic: str,
+) -> None:
+    """The actual CLI reports application startup failures to its caller."""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, (str(tmp_path), env.get("PYTHONPATH")))
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "lmcache.cli.main",
+            "server",
+            "--l1-size-gb",
+            "0.03125",
+            "--no-l1-use-lazy",
+            "--eviction-policy",
+            "noop",
+            "--port",
+            "0",
+            "--http-port",
+            "0",
+            flag,
+            selection.format(package=external_package),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert diagnostic in result.stderr, result.stderr
+    assert result.returncode == 1, result.stderr
 
 
 def test_documented_server_command_loads_example_policies() -> None:
@@ -313,6 +368,7 @@ def test_storage_manager_executes_external_selectors(
         )
     )
     module = importlib.import_module(external_package)
+    assert module.ExternalStore.calls == module.ExternalPrefetch.calls == 0
     manager = StorageManager(config)
     try:
         key = ObjectKey(b"external-policy-key", "external-policy-test", 0)

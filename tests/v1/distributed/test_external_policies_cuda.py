@@ -61,6 +61,7 @@ def test_external_selector_cuda_fs_round_trip(
         )
     )
     module = importlib.import_module(external_package)
+    assert getattr(module, store_class).calls == module.ExternalPrefetch.calls == 0
     manager = StorageManager(config)
     try:
         key = ObjectKey(b"cuda-external-policy", "cuda-policy-test", 0)

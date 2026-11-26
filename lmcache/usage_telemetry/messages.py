@@ -193,8 +193,17 @@ class MPServerMessage(UsageMessage):
             ),
             l2_adapter_types=l2_adapter_types,
             l2_serde_types=l2_serde_types,
-            l2_store_policy=storage_manager_config.store_policy,
-            l2_prefetch_policy=storage_manager_config.prefetch_policy,
+            # Report the selection kind without sending operator package names.
+            l2_store_policy=(
+                "external"
+                if ":" in storage_manager_config.store_policy
+                else storage_manager_config.store_policy
+            ),
+            l2_prefetch_policy=(
+                "external"
+                if ":" in storage_manager_config.prefetch_policy
+                else storage_manager_config.prefetch_policy
+            ),
         )
 
 

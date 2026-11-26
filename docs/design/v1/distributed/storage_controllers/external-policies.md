@@ -30,6 +30,11 @@ different policy.
 Failed policy construction unwinds the manager's initialized resources. The
 server's startup stack also stops its EventBus and GC monitor; stopping the
 bus closes its trace subscribers before the startup error reaches the caller.
+A failed HTTP startup gives the server command a nonzero exit status and
+the original exception appears in the startup logs.
+
+Usage telemetry reports external selections as `external`. The import
+path remains in the operator configuration.
 
 The loader does not discover entry points, modify the registry or install
 files inside LMCache. These are trusted operator-installed Python classes,

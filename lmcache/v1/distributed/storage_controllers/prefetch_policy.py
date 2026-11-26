@@ -168,6 +168,7 @@ class PrefetchPolicy(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
     def plan_l1_retention(
         self,
         keys: list[ObjectKey],

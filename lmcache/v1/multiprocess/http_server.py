@@ -361,6 +361,8 @@ def run_http_server(
         http_config.http_port,
     )
     server.run()
+    if not server.started:
+        raise RuntimeError("LMCache HTTP server startup failed. See the startup logs.")
 
 
 def parse_args():

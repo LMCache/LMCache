@@ -709,6 +709,24 @@ class TestMPUsage:
         assert mp_payload["chunk_size"] == 256
         assert "instance_id" not in mp_payload
 
+    def test_external_policy_import_paths_are_not_sent(self, usage_env):
+        config = make_storage_manager_config()
+        config.store_policy = "my_private_package.policies:SelectiveStore"
+        config.prefetch_policy = "my_private_package.policies:RetainLoaded"
+        sender = RecordingSender()
+        context = MPUsageContext(MPServerConfig(), config, sender=sender)
+
+        context.report_once()
+
+        payload = next(
+            payload
+            for _, payload in sender.sent
+            if payload["message_type"] == "MPServerMessage"
+        )
+        assert payload["l2_store_policy"] == "external"
+        assert payload["l2_prefetch_policy"] == "external"
+        assert "my_private_package" not in json.dumps(sender.sent)
+
     def test_initialize_mp_returns_none_when_disabled(self, usage_env, monkeypatch):
         monkeypatch.setenv("DO_NOT_TRACK", "1")
         context = InitializeMPUsageContext(

@@ -17,13 +17,14 @@ The store flow around these two calls is described in
 
 ```python
 class StorePolicy(ABC):
-    def __init__(self, l1_managers: list[L1ManagerInterface]) -> None: ...
+    def __init__(self, l1_managers: list[L1ManagerInterface] | None = None) -> None: ...
     def select_store_targets(self, keys, adapters) -> dict[int, list[ObjectKey]]: ...
     def select_l1_deletions(self, keys, adapter) -> list[ObjectKey]: ...
 ```
 
-- **`l1_managers`** is every L1 manager of the storage manager, in
-  write-placement order. A policy that needs L1 state (memory usage, memory
+- **`l1_managers`** receives every L1 manager in write-placement order for
+  a registered policy. The external selector calls the class without manager
+  handles. A policy that needs L1 state (memory usage, memory
   tags, configuration) picks the manager it cares about from this list. The
   list is the same for every policy instance; a policy must not assume it only
   contains the L1 of the store controller that owns it.
@@ -50,7 +51,8 @@ that controller's loop thread, so a policy may keep plain (unlocked) state.
 Select one with `--l2-store-policy`. A new policy is a module in
 `storage_controllers/` that calls `register_store_policy(name, cls)` at
 import time; the package imports every module in the directory, so no
-existing file changes.
+existing file changes. An installed package can also expose a policy
+class for [explicit external selection](external-policies.md).
 
 ## `P2PStorePolicy`
 
