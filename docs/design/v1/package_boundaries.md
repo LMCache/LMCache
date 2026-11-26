@@ -85,9 +85,11 @@ The SDK depends on `client`, `common`, `transport` and `platform`, never server
 implementations such as `distributed`, `multiprocess`, `mp_coordinator` or
 `storage_backend`. Shared pure helpers such as `cdiv` belong in
 `lmcache.v1.common.utils`; callers use that canonical path directly.
-The [module dependency rules](../MODULE_DEPENDENCIES.md) check SDK together with
-engine integrations as the client entry layer, preserving their existing Q-ring
-calls while forbidding imports into the default server part.
+The [module dependency rules](../MODULE_DEPENDENCIES.md) check SDK as its own part,
+separate from engine integrations. Integration may depend on SDK. The existing
+worker-side `sdk.qringbuffer` dependency on vLLM integration is recorded as a
+module-specific migration exception; it does not permit SDK imports into the
+default server part.
 
 `common` and `transport` must not import endpoint implementations. Client-side
 packages must not import server implementations, including through package

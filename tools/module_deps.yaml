@@ -11,7 +11,8 @@ parts:
   platform: [lmcache.v1.platform, lmcache.cuda_ops, lmcache.musa_ops, lmcache.xpu_ops]
   transport: [lmcache.v1.transport]
   client: [lmcache.v1.client]
-  integration: [lmcache.integration, lmcache.sdk]
+  sdk: [lmcache.sdk]
+  integration: [lmcache.integration]
 
 # Single modules, placed without their submodules.
 modules:
@@ -29,8 +30,11 @@ allowed:
   transport: [common, platform]
   server: [common, platform, transport]
   client: [common, platform, transport]
-  integration: [client]
+  sdk: [client]
+  integration: [client, sdk]
 
 # Imports that break the tree today, as "<part or package> -> <part or package>".
 # Delete a line once nothing matches it; the check fails on a stale line.
-exceptions: []
+exceptions:
+  # Existing worker-side Q capture code; it belongs in the vLLM integration.
+  - lmcache.sdk.qringbuffer -> lmcache.integration.vllm
