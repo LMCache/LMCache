@@ -341,6 +341,13 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
       ``"kv-cache-{salt}"`` or ``"{base}-{salt}"``. Empty (default) →
       ``"{base}-{salt}"``. Unsalted KV and ``"single"`` mode both use the
       ``s3_endpoint`` bucket unchanged.
+    - s3_bucket_auto_create (bool): in ``per_cache_salt`` mode, create a
+      missing tenant bucket on the first store for its tenant (default
+      ``True``). With ``False``, tenant buckets must be created out of band;
+      a missing one makes stores for that tenant fail.
+    - s3_bucket_ttl_days (int): expiration rule, in days, put on a tenant
+      bucket the adapter creates (default ``30``; ``0`` = no rule). Never
+      applied to a bucket that already exists.
     - s3_expected_bucket_owner (str): optional 12-digit AWS account id. In
       ``per_cache_salt`` mode, requests to tenant buckets carry
       ``x-amz-expected-bucket-owner`` so S3 refuses them if the bucket is
@@ -361,6 +368,8 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         s3_bucket_mode: str = "single",
         s3_bucket_template: str = "",
         s3_expected_bucket_owner: Optional[str] = None,
+        s3_bucket_auto_create: bool = True,
+        s3_bucket_ttl_days: int = 30,
     ):
         self.s3_endpoint = s3_endpoint
         self.s3_region = s3_region
@@ -382,6 +391,10 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         ):
             raise ValueError("s3_expected_bucket_owner must be a 12-digit account id")
         self.s3_expected_bucket_owner = s3_expected_bucket_owner
+        if s3_bucket_ttl_days < 0:
+            raise ValueError("s3_bucket_ttl_days must be >= 0")
+        self.s3_bucket_auto_create = s3_bucket_auto_create
+        self.s3_bucket_ttl_days = s3_bucket_ttl_days
         # Fail fast on a template that can produce an illegal bucket name, at
         # config time rather than on the first request in per_cache_salt mode.
         if s3_bucket_mode == "per_cache_salt":
@@ -425,6 +438,10 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
                 raise ValueError(f"{key} must be a string")
             return v
 
+        ttl_days = d.get("s3_bucket_ttl_days", 30)
+        if not isinstance(ttl_days, int) or isinstance(ttl_days, bool) or ttl_days < 0:
+            raise ValueError("s3_bucket_ttl_days must be a non-negative integer")
+
         max_cap = d.get("max_capacity_gb", 0.0)
         if not isinstance(max_cap, (int, float)) or isinstance(max_cap, bool):
             raise ValueError("max_capacity_gb must be a number")
@@ -442,6 +459,8 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             s3_bucket_mode=d.get("s3_bucket_mode", "single"),
             s3_bucket_template=(_opt_str("s3_bucket_template") or ""),
             s3_expected_bucket_owner=_opt_str("s3_expected_bucket_owner") or None,
+            s3_bucket_auto_create=_bool("s3_bucket_auto_create", True),
+            s3_bucket_ttl_days=ttl_days,
         )
         cfg.eviction_config = cls._parse_eviction_config(d)
         return cfg
@@ -464,6 +483,10 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             "(one bucket per cache_salt)\n"
             "- s3_bucket_template (str): per_cache_salt bucket name, with "
             "{salt} once and optional {base} (default '{base}-{salt}')\n"
+            "- s3_bucket_auto_create (bool): create a missing tenant bucket on "
+            "its first store (default true)\n"
+            "- s3_bucket_ttl_days (int): expiration rule for tenant buckets the "
+            "adapter creates (default 30, 0 = none)\n"
             "- s3_expected_bucket_owner (str): 12-digit account id sent as "
             "x-amz-expected-bucket-owner on tenant-bucket requests\n"
             "- eviction (dict): optional, see L2AdapterConfigBase"
@@ -531,8 +554,10 @@ class S3L2Adapter(L2AdapterInterface):
         self._mgmt_s3: Optional[Any] = None
         # Auto-provision a tenant bucket on first use (+ TTL). Disable to require
         # buckets to be pre-created by an onboarding hook.
-        self._auto_create_bucket = config.s3_bucket_mode == "per_cache_salt"
-        self._bucket_ttl_days = 30
+        self._auto_create_bucket = (
+            config.s3_bucket_mode == "per_cache_salt" and config.s3_bucket_auto_create
+        )
+        self._bucket_ttl_days = config.s3_bucket_ttl_days
 
         # awscrt client setup (mirrors s3_connector.py:103-153)
         event_loop_group = io.EventLoopGroup(config.s3_num_io_threads)
@@ -1126,7 +1151,7 @@ class S3L2Adapter(L2AdapterInterface):
                         raise _BucketUnavailable(bucket) from None
                     if code != "BucketAlreadyOwnedByYou":
                         raise
-                if created:
+                if created and self._bucket_ttl_days > 0:
                     self._set_bucket_ttl(mgmt_s3, bucket)
                 # Only mark provisioned after success, so a failed create isn't
                 # cached as "done" (a later write would then 404 forever).
