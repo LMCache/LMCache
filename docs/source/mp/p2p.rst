@@ -160,23 +160,32 @@ must be set for RDMA; when they are omitted, Mooncake Transfer Engine uses TCP.
 HIXL on Ascend
 ~~~~~~~~~~~~~~
 
-Select ``--p2p-transfer-engine hixl`` with a compatible, HIXL-enabled
-LMCache-Ascend installation. This backend supports READ and WRITE without
-requiring Mooncake Transfer Engine. Its Ascend dependencies are loaded when
-the HIXL context is created, not when other transfer backends are discovered.
+Enable P2P with ``--p2p-advertise-url`` and select
+``--p2p-transfer-engine hixl`` with a compatible, HIXL-enabled
+LMCache-Ascend installation. This backend provides READ and WRITE transfers
+through native HIXL.
 
-Each LMCache process uses one logical NPU and one fixed, contiguous Host L1
-allocation. Set ``LMCACHE_HIXL_ENGINE_ID`` to a unique, reachable ``IP:port``;
-this is the native HIXL listener, separate from ``--p2p-advertise-url``.
-``LMCACHE_HIXL_DEVICE_ID`` selects the logical device within the process's
-visible devices and defaults to ``0``.
+Each MP server using this backend selects one logical NPU and registers
+its single local DRAM L1 buffer. Set ``LMCACHE_HIXL_ENGINE_ID`` to a unique,
+reachable ``IP:port`` for the native HIXL listener, separate from
+``--p2p-advertise-url``. ``LMCACHE_HIXL_DEVICE_ID`` selects the logical device
+within the process's visible devices and defaults to ``0``.
 
-For the ACL Host allocator supplied by LMCache-Ascend, set
-``LMCACHE_ASCEND_MP_HOST_MEMORY_ALLOCATOR=aclrt_malloc_host``, use
-``--no-l1-use-lazy``, and leave ``--shm-name`` empty. The allocation must remain
-alive until the channel has been closed; local transfers and remote access
-must stop before shutdown. Extra registered regions and direct NPU device
-memory transfers are not supported by this backend.
+The current Ascend HIXL integration requires ordinary non-lazy DRAM L1
+backed by ACL Host memory. Use a compatible LMCache-Ascend version that
+provides this allocation through its native pinned allocator; no additional
+allocator environment variable is required.
+
+Explicitly pass ``--no-l1-use-lazy``, leave ``--shm-name`` empty (the default),
+and keep hugepages disabled. When using ``--l1-manager`` JSON, set
+``"use_lazy": false`` on the local DRAM entry, with an empty ``shm_name``
+and ``use_hugepages`` disabled. Selecting ``hixl`` does not automatically
+change these allocation settings.
+
+The L1 allocation must remain alive until the transfer channel has closed.
+Stop local transfers and remote access before shutdown. Extra registered
+regions and direct NPU device memory transfers are not supported by this
+backend.
 
 See the `LMCache-Ascend MP documentation
 <https://github.com/LMCache/LMCache-Ascend/tree/main/docs/mp_mode>`_ for

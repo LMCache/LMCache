@@ -471,6 +471,9 @@ single-L1 interface. For placing L1 on CXL-attached memory see
        ``--no-l1-use-lazy`` to explicitly disable.  Lazy allocation
        disables the SHM transfer pool: pass ``--no-l1-use-lazy`` whenever
        you set ``--shm-name`` for engine-driven workers.
+       For the current Ascend HIXL P2P integration, explicitly pass
+       ``--no-l1-use-lazy``; selecting ``hixl`` does not change this setting.
+       See :doc:`p2p` for the supported allocation configuration.
    * - ``--l1-init-size-gb``
      - ``20``
      - Initial allocation size (GB) when using lazy allocation.
