@@ -5,13 +5,25 @@
 # Exports HEAD into a temporary directory, uses pyproject_client.toml as its
 # pyproject.toml and builds there, so the checkout is never modified.
 #
-# Usage: build_client_wheel.sh OUT_DIR [python -m build options]
+# Usage: build_client_wheel.sh [--cibuildwheel] OUT_DIR [options]
+#   options go to `python -m build`, or with --cibuildwheel to cibuildwheel,
+#   which builds the manylinux release wheels ([tool.cibuildwheel] in
+#   pyproject_client.toml).
 # Env:
 #   CLIENT_VERSION  wheel version (default: setuptools_scm on the checkout,
 #                   the version the full lmcache wheel gets)
 #   PYTHON          interpreter (default: python)
 set -euo pipefail
 
+if [[ "${1:-}" == --cibuildwheel ]]; then
+    builder=(-m cibuildwheel --output-dir)
+    shift
+else
+    builder=(-m build --wheel --outdir)
+    # Keeps a caller's BUILD_WITH_<device> or NO_GPU_EXT=0 from selecting a
+    # device profile: the local build is the CPU build.
+    export NO_GPU_EXT=1
+fi
 out_dir="$(mkdir -p "$1" && cd "$1" && pwd)"
 shift
 repo="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
@@ -25,7 +37,5 @@ cp "$stage/pyproject_client.toml" "$stage/pyproject.toml"
 
 echo "Building lmcache-client ${version} from $(git -C "$repo" rev-parse --short HEAD)"
 cd "$stage"
-# NO_GPU_EXT=1 keeps a caller's BUILD_WITH_<device> or NO_GPU_EXT=0 from selecting
-# a device profile: this wheel is the CPU build.
 SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE_CLIENT="$version" LMCACHE_CLIENT_BUILD=1 \
-    NO_GPU_EXT=1 "$python" -m build --wheel --outdir "$out_dir" "$@"
+    "$python" "${builder[@]}" "$out_dir" "$@"
