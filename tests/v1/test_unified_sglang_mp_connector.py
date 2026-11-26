@@ -1572,11 +1572,16 @@ def test_group_dtype_tag_lists_every_group() -> None:
     assert engine_a != engine_b
 
 
-def test_group_dtype_tag_sorts_within_a_group() -> None:
-    """Component order inside one group does not change the bytes."""
+def test_group_dtype_tag_keeps_tensor_order() -> None:
+    """Two components at different positions do not hold the same bytes."""
     # First Party
     from lmcache.integration.sglang.unified_lmcache_mp_connector import (
         _groups_kv_dtype_tag,
     )
 
-    assert _groups_kv_dtype_tag([_group(torch.float16, torch.bfloat16)]) == "bf16,f16"
+    forward = _groups_kv_dtype_tag([_group(torch.float16, torch.bfloat16)])
+    reverse = _groups_kv_dtype_tag([_group(torch.bfloat16, torch.float16)])
+
+    assert forward == "f16,bf16"
+    assert reverse == "bf16,f16"
+    assert forward != reverse

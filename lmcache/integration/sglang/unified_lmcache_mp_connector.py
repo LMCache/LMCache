@@ -71,15 +71,16 @@ def _groups_kv_dtype_tag(groups: Sequence[Any]) -> str:
 
     SGLang registers several component groups, and they can differ: an MLA
     latent in fp8 next to a bf16 indexer, or a recurrent state in fp32. The
-    tag lists each group's dtypes in order, so two engines that agree on the
-    first group but differ later cannot share keys. Within one group the set
-    is sorted and de-duplicated because component order does not change the
-    bytes.
+    tag lists every tensor's dtype in registration order, groups separated by
+    ``;`` and tensors by ``,``, so two engines that agree on the first group
+    but differ later cannot share keys, and neither can two that register the
+    same dtypes at different positions.
     """
     parts: list[str] = []
     for group in groups:
-        codes = sorted({kv_dtype_tag_code(tensor.dtype) for tensor in group.kv_tensors})
-        parts.append(",".join(codes))
+        parts.append(
+            ",".join(kv_dtype_tag_code(tensor.dtype) for tensor in group.kv_tensors)
+        )
     return ";".join(parts)
 
 
