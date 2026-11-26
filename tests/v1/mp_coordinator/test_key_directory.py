@@ -1123,3 +1123,16 @@ def test_a_tagged_delete_reaches_only_that_dtype():
 
     assert bf16 in stored
     assert fp8 not in stored
+
+
+def test_an_untagged_delete_does_not_cross_revisions():
+    """Only the KV dtype is loose; a revision still names a different object."""
+    bf16 = replace_entry(_key(1), {"kv_dtype": "bf16"})
+    bf16_revision = replace_entry(_key(1), {"kv_dtype": "bf16", "revision": "abc"})
+    directory = KeyDirectory()
+    directory.consume(_batch(keys=[bf16, bf16_revision]))
+
+    stored = directory.get_stored_keys_of_chunks([_key(1)])
+
+    assert bf16 in stored
+    assert bf16_revision not in stored

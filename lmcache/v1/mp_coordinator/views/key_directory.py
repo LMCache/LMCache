@@ -165,6 +165,13 @@ class _KeyRecord:
     access_count: int = 0
 
 
+#: The only tag a token-addressed delete may ignore. ``get_request_tags``
+#: strips the ``lmcache.tag.`` prefix, so this is the identity-side name; the
+#: caller cannot know the engine's KV dtype, but revision and blend namespaces
+#: still name a different object and must keep matching.
+_LOOSELY_MATCHED_TAG = "kv_dtype"
+
+
 def _identity_matches(
     stored: "ObjectKeyIdentity",
     expected: "ObjectKeyIdentity",
@@ -173,13 +180,19 @@ def _identity_matches(
 ) -> bool:
     """Whether ``stored`` is ``expected`` seen from one group and rank.
 
-    ``expected.tags`` empty means the caller did not name any tags, so the tag
-    dimension is matched loosely; otherwise it is part of the comparison.
+    ``expected.tags`` empty means the caller did not name any tags; only the
+    KV dtype is then ignored, so an untagged delete cannot reach another
+    revision's copy of the same chunk. With tags, the comparison is exact.
     """
     candidate = replace(stored, object_group_id=object_group_id, kv_rank=kv_rank)
     if expected.tags:
         return candidate == expected
-    return replace(candidate, tags={}) == expected
+    candidate_tags = {
+        name: value
+        for name, value in candidate.tags.items()
+        if name != _LOOSELY_MATCHED_TAG
+    }
+    return replace(candidate, tags=candidate_tags) == expected
 
 
 @dataclass
@@ -418,11 +431,6 @@ class KeyDirectory(View):
             return []
         world_size = ObjectKey.WorldSizeFromKVRank(key.identity.kv_rank)
         expected = key.identity
-        if not expected.tags:
-            # A caller that names the chunk without its tags (a token-addressed
-            # delete from a client that never saw the engine's dtype) still
-            # wants every stored identity of that chunk.
-            expected = replace(expected, tags={})
         return [
             stored_key
             for stored_key in chunk_binding.keys
