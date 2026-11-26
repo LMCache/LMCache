@@ -4,6 +4,7 @@
 # Standard
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
+import builtins
 import importlib
 import sys
 
@@ -161,3 +162,26 @@ def test_lookup_carries_trt_prefix_hit_hint(trt_mp_module) -> None:
 
     lookup_key = scheduler._req_client.lookup.call_args.args[0]
     assert lookup_key.request_configs == {"lmcache.hint.engine_computed_tokens": 4}
+
+
+def test_package_import_does_not_load_inprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MP package must not attempt to import the optional InProcess engine."""
+    original_import = builtins.__import__
+
+    def import_without_inprocess(
+        name: str,
+        globals: dict[str, object] | None = None,
+        locals: dict[str, object] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> ModuleType:
+        if name == "lmcache.inprocess" or name.startswith("lmcache.inprocess."):
+            pytest.fail(f"core TensorRT package attempted optional import: {name}")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_inprocess)
+    module = importlib.import_module("lmcache.integration.tensorrt_llm")
+    importlib.reload(module)
+    assert "LMCacheKvConnectorScheduler" not in module.__all__

@@ -1,0 +1,74 @@
+{
+  "description": "What the weekly full build runs and what counts as a successful full run. Read by .github/scripts/weekly_full_build.py; see README.md next to this file.",
+  "organization": "lmcache",
+  "branch": "ci-weekly-full",
+  "env": {
+    "CI_WEEKLY_FULL": "1"
+  },
+  "suite_skip_annotations": [
+    "path-filter-skip",
+    "skip expensive ci",
+    "mp-heavy-skip"
+  ],
+  "workload_skip_annotation_prefix": "weekly-skip-",
+  "expected_unsupported": [
+    "sglang / deadlock / grpc",
+    "sglang / long_doc_qa_l2 / grpc",
+    "sglang / lm_eval_preemption / lmcache_driven / grpc",
+    "sglang / lm_eval_preemption / engine_driven / grpc"
+  ],
+  "pipelines": [
+    {
+      "slug": "k3-unit-tests",
+      "name": "Unit tests (1 GPU)",
+      "required": [
+        "^:test_tube: Unit Tests$"
+      ],
+      "not_run_allowed": []
+    },
+    {
+      "slug": "k3-multiprocess-test",
+      "name": "Multiprocess, full matrix + DSV4 full-size",
+      "required": [
+        "^:compression: vllm / dsv4_flash_tp / ",
+        "^:compression: sglang / dsv4_flash_tp / ",
+        "^:compression: vllm / hma_dsv4_correctness / ",
+        "^:compression: sglang / hma_dsv4_correctness / ",
+        " / vllm_bench / ",
+        " / long_doc_qa / ",
+        " / long_doc_qa_l2 / ",
+        " / deadlock / ",
+        " / mp_autostart_tp2 / ",
+        " / p2p / ",
+        " / kimi_linear_tp / ",
+        " / lm_eval_(?!preemption )[a-z_]+ / ",
+        " / lm_eval_preemption / ",
+        "preemption_correctness / ",
+        " / fault_tolerance / ",
+        " / restart_recovery / ",
+        " / cache_stats / ",
+        " / p2p_write / ",
+        " / lazy_offload / ",
+        " / eviction_aware_lazy_offload / ",
+        " / sleep_mode / ",
+        " / http_api / ",
+        " / gds_smoke / ",
+        "cpu_e2e_validation "
+      ],
+      "not_run_allowed": [
+        "^:test_tube: Verify ",
+        "^:pushpin: Pin verified ",
+        "^:fast_forward: Skip expensive multiprocess CI\\Z"
+      ]
+    },
+    {
+      "slug": "k3-blend-test",
+      "name": "CacheBlend plugin compatibility",
+      "required": [
+        "^:jigsaw: CacheBlend plugin compat",
+        "^:satellite: CacheBlend coordinator global match"
+      ],
+      "not_run_allowed": []
+    }
+  ]
+}

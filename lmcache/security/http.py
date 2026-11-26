@@ -10,8 +10,8 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 # First Party
-from lmcache.security.api_key import APIKeyVerifier
-from lmcache.security.bearer import bearer_token
+from lmcache.v1.common.security.api_key import APIKeyVerifier
+from lmcache.v1.common.security.bearer import bearer_token
 
 
 class HTTPBearerAuthenticationMiddleware:

@@ -540,10 +540,15 @@ device = RawBlockDevice(
     sys.argv[1], writable=False, io_engine="io_uring", use_odirect=False
 )
 try:
-    batch = device.batched_read([int(sys.argv[2])], [bytearray(8)], [8])
-    success, errors = device.wait_iouring(batch)
-    assert success == [False], success
-    assert len(errors) == 1, errors
+    for wait, error_type in (
+        (device.wait_iouring, str), (device.wait_iouring_exceptions, Exception)
+    ):
+        batch = device.batched_read([int(sys.argv[2])], [bytearray(8)], [8])
+        success, errors = wait(batch)
+        assert success == [False], success
+        assert len(errors) == 1, errors
+        idx, error = errors[0]
+        assert idx == 0 and isinstance(error, error_type), errors
 finally:
     device.close()
 """,
@@ -559,7 +564,6 @@ finally:
 
 @pytest.mark.skipif(platform.system() != "Linux", reason="io_uring is Linux only")
 @pytest.mark.parametrize("cleanup", ["close", "drop", "exit"])
-@pytest.mark.no_shared_allocator
 def test_raw_block_device_iouring_cleanup_without_wait(
     tmp_path: Path, cleanup: str
 ) -> None:

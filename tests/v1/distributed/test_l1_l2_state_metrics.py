@@ -417,7 +417,6 @@ class TestNumInflightL2Loads:
         adapter.close()
 
 
-@pytest.mark.no_shared_allocator
 def test_peer_l1_gauges_are_separate_and_removed_on_close() -> None:
     managers = [
         create_l1_manager(

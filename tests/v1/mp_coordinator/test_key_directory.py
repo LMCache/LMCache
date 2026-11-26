@@ -1032,6 +1032,39 @@ def test_expansion_keeps_rank_and_namespace_apart():
     ]
 
 
+def _tp_key(hash_byte: int, group: int, world_size: int, rank: int) -> ObjectKey:
+    return ObjectKey(
+        chunk_hash=bytes([hash_byte]) * 4,
+        model_name="m",
+        kv_rank=ObjectKey.ComputeKVRank(world_size, rank, world_size, rank),
+        object_group_id=group,
+    )
+
+
+def test_a_chunk_copies_lookup_reaches_every_group_and_rank_of_its_setup():
+    """A key names its chunk for a delete: every stored group and rank of the
+    same parallel setup, each once, but not another world size's copy."""
+    directory = KeyDirectory()
+    stored = [
+        _tp_key(1, 0, 2, 0),
+        _tp_key(1, 0, 2, 1),
+        _tp_key(1, 1, 2, 1),
+        _tp_key(1, 0, 1, 0),
+    ]
+    directory.consume(_batch(keys=stored))
+
+    copies = directory.get_stored_keys_of_chunks(
+        [_tp_key(1, 0, 2, 0), _tp_key(1, 1, 2, 1)]
+    )
+
+    assert sorted(copies, key=lambda k: (k.object_group_id, k.kv_rank)) == [
+        _tp_key(1, 0, 2, 0),
+        _tp_key(1, 0, 2, 1),
+        _tp_key(1, 1, 2, 1),
+    ]
+    assert len(copies) == len(set(copies))
+
+
 def test_an_unstored_key_expands_to_itself():
     """A lookup of content nobody holds still answers for the key it asked
     about, with no placements, as it did before."""

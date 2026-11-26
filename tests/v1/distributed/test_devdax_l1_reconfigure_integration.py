@@ -26,7 +26,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import get_dax_device_geometry
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -40,6 +39,7 @@ from lmcache.v1.distributed.memory_manager.devdax_l1_memory_manager import (
     DevDaxL1MemoryManager,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.distributed.utils import get_dax_device_geometry
 from lmcache.v1.memory_allocators.devdax_memory_allocator import (
     DevDaxArenaState,
     DevDaxRemoveMode,
@@ -56,13 +56,10 @@ REAL_DEVICE_PATHS = [
 USING_REAL_DEVICES = bool(REAL_DEVICE_PATHS)
 SLOT_BYTES = int(os.environ.get("LMCACHE_TEST_DEVDAX_L1_SLOT_BYTES", str(2 << 20)))
 
-pytestmark = [
-    pytest.mark.no_shared_allocator,
-    pytest.mark.skipif(
-        not RUN_IT,
-        reason="Device-DAX L1 integration test (set RUN_DEVDAX_L1_INTEGRATION=1)",
-    ),
-]
+pytestmark = pytest.mark.skipif(
+    not RUN_IT,
+    reason="Device-DAX L1 integration test (set RUN_DEVDAX_L1_INTEGRATION=1)",
+)
 
 
 class _DeviceProvider:

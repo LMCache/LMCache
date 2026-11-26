@@ -249,6 +249,7 @@ func TestBuildContainerArgs_Defaults(t *testing.T) {
 
 	assertArg(t, args, "--host", "0.0.0.0")
 	assertArg(t, args, "--port", "5555")
+	assertArg(t, args, "--transport", "grpc")
 	assertArg(t, args, "--l1-size-gb", "10.0")
 	assertArg(t, args, "--chunk-size", "256")
 	assertArg(t, args, "--max-workers", "1")
@@ -1155,7 +1156,7 @@ func TestBuildConnectionConfigMap_Default(t *testing.T) {
 	}
 
 	extra := config["kv_connector_extra_config"].(map[string]any)
-	if extra["lmcache.mp.host"] != "tcp://test-engine.default.svc.cluster.local" {
+	if extra["lmcache.mp.host"] != "grpc://test-engine.default.svc.cluster.local" {
 		t.Fatalf("expected service DNS host, got %v", extra["lmcache.mp.host"])
 	}
 	if extra["lmcache.mp.port"] != "5555" {

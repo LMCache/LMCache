@@ -62,7 +62,6 @@ root = Path(".")
 #      are not ready yet.
 #   4. As tests become ready, shrink blocklist until XPU jobs run the full set.
 allowlist = {
-  "tests/benchmarks/test_*.py",
   "tests/test_*.py",
   "tests/cli/**/test_*.py",
   "tests/v1/**/test_*.py",
@@ -87,7 +86,11 @@ fi
 log "discovered ${#XPU_TEST_FILES[@]} XPU-related test files"
 printf '  %s\n' "${XPU_TEST_FILES[@]}"
 
-PYTEST_ARGS=(-q --maxfail=1 -m "not cuda and not musa")
+if [ "${CI_WEEKLY_FULL:-0}" = "1" ]; then
+  PYTEST_ARGS=(-rfEs --junitxml=junit-xpu-unit.xml -m "not cuda and not musa")
+else
+  PYTEST_ARGS=(-q --maxfail=1 -m "not cuda and not musa")
+fi
 if [ -n "${XPU_WHEEL_ARTIFACT_ID:-}" ]; then
   PYTEST_ARGS+=(--import-mode=importlib)
 fi

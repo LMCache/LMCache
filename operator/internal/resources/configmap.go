@@ -175,7 +175,7 @@ func buildMultiConnectorJSON(
 	nixlConnector := buildNixlConnectorConfig(kvRole, pd)
 
 	lmcacheConnectorExtra := map[string]any{
-		"lmcache.mp.host": fmt.Sprintf("tcp://%s", svcHost),
+		"lmcache.mp.host": fmt.Sprintf("grpc://%s", svcHost),
 		"lmcache.mp.port": fmt.Sprintf("%d", port),
 	}
 	maps.Copy(lmcacheConnectorExtra, lmcacheExtra)
@@ -228,7 +228,7 @@ func buildConnectionConfigMapCore(
 	svcHost := fmt.Sprintf("%s.%s.svc.cluster.local", LookupServiceName(name), namespace)
 
 	extra := map[string]any{
-		"lmcache.mp.host": fmt.Sprintf("tcp://%s", svcHost),
+		"lmcache.mp.host": fmt.Sprintf("grpc://%s", svcHost),
 		"lmcache.mp.port": fmt.Sprintf("%d", port),
 	}
 	maps.Copy(extra, extraConfig)

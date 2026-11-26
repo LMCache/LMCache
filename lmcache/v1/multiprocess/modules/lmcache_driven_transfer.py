@@ -12,23 +12,20 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.logging import init_logger
-from lmcache.utils import (
-    EngineType,
-    _lmcache_nvtx_annotate,
-)
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey, KVEventProfile
 from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
-from lmcache.v1.common.utils import LayoutHints
+from lmcache.v1.common.utils import LayoutHints, _lmcache_nvtx_annotate
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     ShardReplicationDesc,
 )
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
-from lmcache.v1.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.gpu_connector.gds_context import GDSBufferRegistration
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -47,15 +44,11 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     get_unfull_chunk_layout_desc,
     get_unfull_chunk_staging_buffer,
     split_unfull_chunk_block_ids,
+    transfer_kv_per_object_group,
     transfer_unfull_chunk,
     trim_and_stage_unfull_chunk_block_ids,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.rocm_host_event_wait import (
-    HostEventWaiter,
-    create_host_event_waiter,
-    current_run_entry,
-)
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -68,6 +61,7 @@ from lmcache.v1.platform.fd_channel import (
     fd_channel_path,
     is_fd_channel_supported,
 )
+from lmcache.v1.transport.errors import InvalidRequestError
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -203,20 +197,25 @@ class ContextEntry:
             shape and pointers to the registered KV cache tensors.
         model_name: The name of the model associated with this KV cache.
         world_size: The world size associated with this KV cache.
+        chunk_size: Effective logical tokens per LMCache chunk.
         last_seen: ``time.monotonic()`` of the most recent activity from
             this instance (register, PING, store, or retrieve). Drives reaping.
         has_liveness_signal: True once the instance has sent at least one
             PING. Selects the reap window (timeout vs registration grace).
             Latched only by PING, never by traffic.
         event_backend: Cached event backend selected for this context's device.
+        event_profile: Native identity contract retained until unregister, reap
+            or shutdown. None retains current event behavior.
     """
 
     cache_context: BaseCacheContext
     model_name: str
     world_size: int
+    chunk_size: int
     last_seen: float = 0.0
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
+    event_profile: KVEventProfile | None = None
 
 
 class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
@@ -235,7 +234,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     """
 
     module_name = "lmcache_driven_transfer"
-    _host_event_waiter: HostEventWaiter | None = None
 
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
@@ -243,14 +241,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         mode = build_ctx.mp_config.supported_transfer_mode
         if mode == "engine_driven":
             return None
-        module = cls(
+        return cls(
             build_ctx.engine_context,
             fd_socket_path=fd_channel_path(build_ctx.mp_config.port),
         )
-        module._host_event_waiter = create_host_event_waiter(
-            build_ctx.mp_config.rocm_host_event_wait
-        )
-        return module
 
     def __init__(self, ctx: MPCacheServerContext, fd_socket_path: str = "") -> None:
         self._ctx = ctx
@@ -371,17 +365,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             entry = self._cache_contexts.get(instance_id)
             if entry is not None:
                 entry.last_seen = now
-        if self._host_event_waiter is not None:
-            bound = current_run_entry()
-            if bound is not None and entry is not bound:
-                self._host_event_waiter.count("stale")
-                logger.warning(
-                    "Dropping a waiting transfer for GPU instance ID %d: its "
-                    "registration changed while it waited",
-                    instance_id,
-                )
-                return None
-        return entry
+            return entry
 
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.
@@ -503,18 +487,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 "kv_cache_layout": ctx.report_status(),
             }
 
-        status = {
+        return {
             "registered_gpu_ids": registered_gpu_ids,
             "cache_context_meta": cache_context_meta,
         }
-        if self._host_event_waiter is not None:
-            status["rocm_host_event_wait"] = self._host_event_waiter.stats()
-        return status
 
     def close(self) -> None:
         """Release GPU resources owned by this module."""
-        if self._host_event_waiter is not None:
-            self._host_event_waiter.stop()
         # Stop the drain thread before storage_manager.close() so any
         # in-flight completions reach a live storage manager.
         self._device_host_func_dispatcher.stop()
@@ -537,7 +516,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
-    ) -> None:
+        event_profile: KVEventProfile | None,
+        chunk_size: int | None = None,
+    ) -> KVEventProfile | None:
         """Register the KV cache tensors for a given GPU instance ID.
 
         Args:
@@ -552,7 +533,46 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 GPUCacheContext for GPU KV format detection.
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
+            event_profile: Optional native identity contract. All active
+                registrations for the same model/world must agree, including
+                whether a profile is present. This does not change event output.
+            chunk_size: Effective logical tokens per LMCache chunk, or
+                ``None`` to use the server default.
+
+        Returns:
+            The profile recorded for this registration, or None when absent.
+
+        Raises:
+            InvalidRequestError: If the profile conflicts with an active
+                registration, has invalid world/block geometry, or the engine
+                groups are not one full-attention block address space.
+            ValueError: If the chunk size is invalid, conflicts with an
+                existing model layout, or the instance is already registered
+                with different metadata.
+
+        Profile validation precedes context creation, layout registration and
+        liveness refresh. Rejection leaves existing registrations untouched.
         """
+        chunk_size = self._ctx.chunk_size if chunk_size is None else chunk_size
+        self._ctx.validate_chunk_size(chunk_size)
+        if event_profile is not None:
+            if world_size <= 0 or chunk_size % event_profile.block_size:
+                raise InvalidRequestError(
+                    "KV event profile requires a positive world size and "
+                    "a block size that divides the registered chunk size"
+                )
+            if not engine_group_infos or any(
+                group.engine_group_id != 0
+                or group.sw_size_tokens != -1
+                or group.recurrent_state
+                or group.extra_object_group_tag != 0
+                or group.tokens_per_block != event_profile.block_size
+                for group in engine_group_infos
+            ):
+                raise InvalidRequestError(
+                    "KV event profile requires one full-attention engine group "
+                    "with the declared block size"
+                )
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
@@ -560,13 +580,44 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # is SERIALIZED on the MQ main loop, so it is the sole inserter.
         with self._lock:
             existing = self._cache_contexts.get(instance_id)
+            for registered_id, entry in self._cache_contexts.items():
+                same_context = (entry.model_name, entry.world_size) == (
+                    model_name,
+                    world_size,
+                )
+                if same_context and entry.event_profile != event_profile:
+                    raise InvalidRequestError(
+                        f"KV event profile conflicts with registration {registered_id} "
+                        f"for model {model_name!r}, world size {world_size}"
+                    )
+            if existing is not None and (
+                event_profile is not None or existing.event_profile is not None
+            ):
+                if (existing.model_name, existing.world_size) != (
+                    model_name,
+                    world_size,
+                ):
+                    raise InvalidRequestError(
+                        "KV event registration instance context mismatch"
+                    )
             if existing is not None:
+                if (
+                    existing.model_name != model_name
+                    or existing.world_size != world_size
+                    or existing.chunk_size != chunk_size
+                ):
+                    raise ValueError(
+                        f"Instance {instance_id} is already registered with "
+                        f"model={existing.model_name!r}, "
+                        f"world_size={existing.world_size}, "
+                        f"chunk_size={existing.chunk_size}"
+                    )
                 existing.last_seen = now
                 logger.info(
                     "Instance %d already registered; refreshing liveness",
                     instance_id,
                 )
-                return
+                return existing.event_profile
 
         # Build the context and layout descriptor outside the lock.
         cache_context = self._create_cache_context(
@@ -575,22 +626,17 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             engine_type=engine_type,
             layout_hints=layout_hints or None,
             engine_group_infos=engine_group_infos,
+            chunk_size=chunk_size,
         )
         kv_groups_manager = cache_context.kv_layer_groups_manager
         num_object_groups = kv_groups_manager.num_object_groups
         event_backend = get_event_ipc_backend(cache_context.device)
         event_backend.check_event_support(cache_context.device)
-        if self._host_event_waiter is not None:
-            event_backend = self._host_event_waiter.wrap(event_backend)
-        layout_desc = get_layout_desc(
-            cache_context, self._ctx.chunk_size, object_group_id=0
-        )
+        layout_desc = get_layout_desc(cache_context, chunk_size, object_group_id=0)
         # One layout per object group, also in the single-group case: no
         # None special-casing downstream (group 0 maps to the merged layout).
         group_layout_descs = {
-            gid: get_layout_desc(
-                cache_context, self._ctx.chunk_size, object_group_id=gid
-            )
+            gid: get_layout_desc(cache_context, chunk_size, object_group_id=gid)
             for gid in range(num_object_groups)
         }
         group_unfull_chunk_layout_descs = {
@@ -598,28 +644,34 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             for gid in range(num_object_groups)
         }
         attn_desc = kv_groups_manager.get_attn_desc()
-        self._ctx.layout_desc_registry.register(
-            model_name,
-            world_size,
-            layout_desc,
-            self._ctx.chunk_size,
-            self._ctx.hash_algorithm_name,
-            attn_desc=attn_desc,
-            group_layout_descs=group_layout_descs,
-            group_unfull_chunk_layout_descs=group_unfull_chunk_layout_descs,
-            shard_replication_desc=_fold_shard_replication_desc(
-                kv_groups_manager.object_groups, engine_group_infos
-            ),
-        )
+        try:
+            self._ctx.layout_desc_registry.register(
+                model_name,
+                world_size,
+                layout_desc,
+                chunk_size,
+                self._ctx.hash_algorithm_name,
+                attn_desc=attn_desc,
+                group_layout_descs=group_layout_descs,
+                group_unfull_chunk_layout_descs=group_unfull_chunk_layout_descs,
+                shard_replication_desc=_fold_shard_replication_desc(
+                    kv_groups_manager.object_groups, engine_group_infos
+                ),
+            )
+        except ValueError:
+            cache_context.close()
+            raise
 
         with self._lock:
             self._cache_contexts[instance_id] = ContextEntry(
                 cache_context=cache_context,
                 model_name=model_name,
                 world_size=world_size,
+                chunk_size=chunk_size,
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
+                event_profile=event_profile,
             )
 
         logger.info(
@@ -627,6 +679,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             instance_id,
             cache_context.num_layers,
         )
+        return event_profile
 
     @request_handler()
     def unregister_kv_cache(self, instance_id: int) -> None:
@@ -664,20 +717,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
-        """Store the GPU KV cache blocks to CPU; see store_with_chunk_mask.
-
-        With the ROCm host event wait, a store whose producer event has not
-        completed yet returns a ``DeferredResponse`` for the same tuple.
-        """
-        waiter = self._host_event_waiter
-        if waiter is not None and not waiter.in_run():
-            return waiter.submit_after_event(
-                instance_id,
-                self.get_and_touch_context_entry(instance_id),
-                event_ipc_handle,
-                lambda: self.store(key, instance_id, gpu_block_ids, event_ipc_handle),
-                lambda: (b"", False),
-            )
+        """Store the GPU KV cache blocks to CPU; see store_with_chunk_mask."""
         handle, ok, _ = self.store_with_chunk_mask(
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
@@ -750,6 +790,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             return b"", False, []
         cache_context = entry.cache_context
         model_name = entry.model_name
+        chunk_size = entry.chunk_size
         event_backend = entry.event_backend
         if event_backend is None:
             raise RuntimeError("Registered cache context has no event backend")
@@ -759,8 +800,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             key, list(range(num_object_groups))
         )
         unfull_obj_keys = (
-            self._ctx.resolve_unfull_chunk_obj_keys(key, list(range(num_object_groups)))
-            if key.has_unfull_chunk(self._ctx.chunk_size)
+            self._ctx.resolve_unfull_chunk_obj_keys(
+                key, list(range(num_object_groups)), chunk_size
+            )
+            if key.has_unfull_chunk(chunk_size)
             else []
         )
         num_chunks = len(obj_keys_per_obj_group[0])
@@ -769,7 +812,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # ``blocks_per_chunk[i]`` is the number of blocks in one chunk for
         # group ``i``.
         blocks_per_chunk = [
-            cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
+            cache_context.calculate_num_blocks(chunk_size, group_idx)
             for group_idx in range(
                 cache_context.kv_layer_groups_manager.num_kernel_groups
             )
@@ -858,7 +901,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             if key.worker_id == 0 and self._ctx.event_bus.has_subscribers(
                 EventType.MP_TOKENS
             ):
-                self._publish_token_bindings(key, obj_keys_per_obj_group[0])
+                self._publish_token_bindings(key, obj_keys_per_obj_group[0], chunk_size)
 
             transfer_key = next_transfer_key(key.request_id)
             self._ctx.event_bus.publish_on_stream(
@@ -895,7 +938,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     ]
                     layout_desc = get_layout_desc(
                         cache_context,
-                        self._ctx.chunk_size,
+                        chunk_size,
                         object_group_id=obj_group_id,
                     )
                     reserved_dict = self._ctx.storage_manager.reserve_write(
@@ -929,7 +972,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
                 if unfull_obj_keys:
                     unfull_reserved = self._store_unfull_chunk_objects(
-                        cache_context, key, unfull_obj_keys, unfull_block_ids, l1_owners
+                        cache_context,
+                        key,
+                        unfull_obj_keys,
+                        unfull_block_ids,
+                        l1_owners,
+                        chunk_size,
                     )
                     all_dict.update(unfull_reserved)
                     total_bytes += sum(
@@ -967,13 +1015,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     if stored_count
                     else 0
                 )
-                num_tokens = stored_chunks * self._ctx.chunk_size
+                num_tokens = stored_chunks * chunk_size
                 if (
                     stored_count
                     and unfull_obj_keys
                     and all(k in all_dict for k in unfull_obj_keys)
                 ):
-                    num_tokens += key.end % self._ctx.chunk_size
+                    num_tokens += key.end % chunk_size
                 self._ctx.event_bus.publish_on_stream(
                     cache_context.cupy_stream,
                     Event(
@@ -996,8 +1044,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             logger.info(
                 "Stored %d of %d requested tokens in %.3f seconds",
                 num_tokens,
-                num_chunks * self._ctx.chunk_size
-                + (key.end % self._ctx.chunk_size if unfull_obj_keys else 0),
+                num_chunks * chunk_size
+                + (key.end % chunk_size if unfull_obj_keys else 0),
                 ed - st,
             )
 
@@ -1032,21 +1080,36 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         engine_type: EngineType,
         layout_hints: LayoutHints | None,
         engine_group_infos: Sequence[EngineGroupInfo],
+        chunk_size: int,
     ) -> BaseCacheContext:
         """Build the cache context for a newly registered instance.
 
         ``instance_id`` is the registering instance. The default ignores it;
         a subclass can use it to look up per-instance data that its worker
-        sent before registering.
+        sent before registering. Overrides using the base context transfer
+        implementation must pass ``object_group_transfer`` at construction.
+
+        Args:
+            kv_caches: Wrapped engine KV cache tensors.
+            instance_id: Registering worker instance identifier.
+            engine_type: Serving engine that owns the tensors.
+            layout_hints: Optional engine-provided layout metadata.
+            engine_group_infos: Engine-neutral KV group metadata.
+            chunk_size: Effective logical tokens per LMCache chunk.
+
+        Returns:
+            The platform cache context for this registration.
         """
         return create_cache_context(
             kv_caches,
-            self._ctx.chunk_size,
+            chunk_size,
             layout_hints=layout_hints,
             engine_group_infos=engine_group_infos,
             engine_type=engine_type,
             separate_object_groups=self._ctx.separate_object_groups,
             full_sw_kv=self._ctx.full_sw_kv,
+            object_group_transfer=transfer_kv_per_object_group,
+            buffer_registration=GDSBufferRegistration(),
         )
 
     @request_handler(
@@ -1080,9 +1143,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             A tuple where the first element is the IPC handle of the event
             that signals the completion of the retrieve operation, and the
             second element indicates whether the key was successfully retrieved.
-            The event handle is empty when no device work was submitted. With
-            the ROCm host event wait, a retrieve whose producer event has not
-            completed yet returns a ``DeferredResponse`` for the same tuple.
+            The event handle is empty when no device work was submitted.
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
@@ -1095,21 +1156,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             the unfull chunk only when the range has no full chunk (the
             engine's prefix cache already holds part of the unfull chunk).
         """
-        waiter = self._host_event_waiter
-        if waiter is not None and not waiter.in_run():
-            return waiter.submit_after_event(
-                instance_id,
-                self.get_and_touch_context_entry(instance_id),
-                event_ipc_handle,
-                lambda: self.retrieve(
-                    key,
-                    instance_id,
-                    gpu_block_ids,
-                    event_ipc_handle,
-                    skip_first_n_tokens,
-                ),
-                lambda: (b"", False),
-            )
         st = time.perf_counter()
 
         entry = self.get_and_touch_context_entry(instance_id)
@@ -1124,6 +1170,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             return b"", False
         cache_context = entry.cache_context
         model_name = entry.model_name
+        chunk_size = entry.chunk_size
         event_backend = entry.event_backend
         if event_backend is None:
             raise RuntimeError("Registered cache context has no event backend")
@@ -1133,8 +1180,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             key, list(range(num_object_groups))
         )
         unfull_obj_keys = (
-            self._ctx.resolve_unfull_chunk_obj_keys(key, list(range(num_object_groups)))
-            if key.has_unfull_chunk(self._ctx.chunk_size)
+            self._ctx.resolve_unfull_chunk_obj_keys(
+                key, list(range(num_object_groups)), chunk_size
+            )
+            if key.has_unfull_chunk(chunk_size)
             else []
         )
         num_chunks = len(obj_keys_per_obj_group[0])
@@ -1166,7 +1215,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         )
 
         blocks_per_chunk = [
-            cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
+            cache_context.calculate_num_blocks(chunk_size, group_idx)
             for group_idx in range(
                 cache_context.kv_layer_groups_manager.num_kernel_groups
             )
@@ -1301,7 +1350,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                             if group not in skipped_groups
                         ],
                         unfull_block_ids,
-                        max(0, skip_first_n_tokens - num_chunks * self._ctx.chunk_size),
+                        max(0, skip_first_n_tokens - num_chunks * chunk_size),
+                        chunk_size,
                     )
                     prefetched_keys.extend(unfull_retained_keys)
             except Exception:
@@ -1316,8 +1366,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         read_completion,
                     )
                 num_tokens = (
-                    num_chunks * self._ctx.chunk_size
-                    + (key.end % self._ctx.chunk_size if unfull_obj_keys else 0)
+                    num_chunks * chunk_size
+                    + (key.end % chunk_size if unfull_obj_keys else 0)
                     if len(prefetched_keys) == expected_retained
                     else 0
                 )
@@ -1352,7 +1402,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         )
 
     def _publish_token_bindings(
-        self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]
+        self,
+        key: IPCCacheServerKey,
+        obj_keys: list[ObjectKey],
+        chunk_size: int,
     ) -> None:
         """Publish one ``MP_TOKENS`` event for ``key``'s chunks.
 
@@ -1366,12 +1419,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         Args:
             key: The IPC key of the store being submitted.
             obj_keys: One ObjectKey per complete chunk, in chunk order.
+            chunk_size: Effective logical tokens per registered chunk.
         """
         # Complete chunks in [key.start, key.end) paired with the absolute
         # position of each chunk's first token. Prefix-chained chunk hashes
         # imply a position without revealing it, so it is reported here. A
         # trailing partial chunk has no stored KV to bind to.
-        chunk_size = self._ctx.chunk_size
         token_ids = unpack_token_ids(key.token_bytes)
         effective_len = min(len(token_ids), key.end)
         num_complete = effective_len - effective_len % chunk_size
@@ -1424,6 +1477,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         obj_keys: list[ObjectKey],
         block_ids: list[list[int]],
         l1_owners: dict[ObjectKey, int],
+        chunk_size: int,
     ) -> dict[ObjectKey, MemoryObj]:
         """Reserve and copy out one object per object group for an unfull chunk.
 
@@ -1440,6 +1494,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             block_ids: The unfull chunk's block IDs per kernel group.
             l1_owners: Transaction owners, captured before each copy for abort
                 after the stream drains. Uncaptured reservations retain write TTL.
+            chunk_size: Effective logical tokens per registered chunk.
 
         Returns:
             The reserved objects, keyed by object key.
@@ -1449,7 +1504,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         """
         manager = cache_context.kv_layer_groups_manager
         block_ids_gpu, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
-            cache_context, block_ids, key.end % self._ctx.chunk_size
+            cache_context, block_ids, key.end % chunk_size
         )
         null_groups = all_null_chunk_masks(
             block_ids,
@@ -1510,6 +1565,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         obj_group_ids: list[int],
         block_ids: list[list[int]],
         skip_first_n_tokens: int,
+        chunk_size: int,
     ) -> int:
         """Copy an unfull chunk's read-locked objects into the GPU blocks.
 
@@ -1525,6 +1581,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             block_ids: The unfull chunk's block IDs per kernel group.
             skip_first_n_tokens: Leading tokens of the unfull chunk not to
                 write: the engine's prefix cache holds them in shared blocks.
+            chunk_size: Effective logical tokens per registered chunk.
 
         Returns:
             The bytes copied.
@@ -1537,7 +1594,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         block_ids_gpu, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
             cache_context,
             block_ids,
-            key.end % self._ctx.chunk_size,
+            key.end % chunk_size,
             skip_first_n_tokens,
         )
         found_keys, memory_objs = self._ctx.storage_manager.unsafe_read(
