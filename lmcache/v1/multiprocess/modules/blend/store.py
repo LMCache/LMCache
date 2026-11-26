@@ -20,12 +20,15 @@ if TYPE_CHECKING:
     )
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_codec import TOKEN_STRIDE, unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.multiprocess.modules.blend.read_set import _classify_cb_read_groups
+from lmcache.v1.multiprocess.modules.blend.read_set import (
+    _classify_cb_read_groups,
+    _per_rank_read_groups,
+)
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 
@@ -86,20 +89,28 @@ class StoreMixin:
             session = self._ctx.session_manager.get(key.request_id)
             covered = session.extras.get(self.CACHED_CHUNKS_EXTRA) if session else None
             if covered:
-                cs = self._ctx.chunk_size
+                cs = self._ctx.default_chunk_size
                 extra["skip_chunks"] = [
                     i in covered for i in range(key.start // cs, key.end // cs)
                 ]
         # A blend reuses only the attention and aux groups, so check just those
-        # and skip the recurrent-state check. If the groups to check are
-        # unknown, check every group.
+        # and skip the recurrent-state check. Of those, check only the groups
+        # this worker writes alone: an object shared by several TP ranks is
+        # written by whichever of them reserves it first, so this worker's mask
+        # cannot vouch for it (a lookup still checks that it exists). If the
+        # groups to check are unknown, check every group.
         try:
             entry = self._transfer_module.get_and_touch_context_entry(instance_id)
             if entry is not None:
                 attn_desc = entry.cache_context.kv_layer_groups_manager.get_attn_desc()
-                extra["mask_object_groups"] = _classify_cb_read_groups(
-                    attn_desc.num_object_groups, attn_desc.group_kinds
-                ).blend_gids
+                extra["mask_object_groups"] = _per_rank_read_groups(
+                    _classify_cb_read_groups(
+                        attn_desc.num_object_groups, attn_desc.group_kinds
+                    ).blend_gids,
+                    self._ctx.layout_desc_registry.find_shard_replication_desc(
+                        key.model_name, key.world_size
+                    ),
+                )
         except Exception:
             logger.debug(
                 "CB fingerprint groups unresolved for instance %d", instance_id
@@ -108,6 +119,14 @@ class StoreMixin:
             key, instance_id, gpu_block_ids, event_ipc_handle, **extra
         )
         result = (handle, store_ok)
+        skip = extra.get("skip_chunks")
+        if skip:
+            # A skipped chunk was not stored by this request. The mask says so
+            # only when it checks some group; with every read group shared
+            # across ranks it checks none.
+            stored_mask = [
+                m and not (i < len(skip) and skip[i]) for i, m in enumerate(stored_mask)
+            ]
 
         # The matcher is engine-shared; only worker 0 registers.
         if key.worker_id not in (0, None):
@@ -143,7 +162,7 @@ class StoreMixin:
                 return stored_mask[i] if i < len(stored_mask) else False
 
             jobs: list[FpJob] = []
-            chunk_size = self._ctx.chunk_size
+            chunk_size = self._ctx.default_chunk_size
             run_start: int | None = None
             for i in range(len(chunk_hashes) + 1):
                 if i < len(chunk_hashes) and _stored(i):

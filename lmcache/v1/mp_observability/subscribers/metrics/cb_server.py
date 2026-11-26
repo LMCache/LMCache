@@ -13,7 +13,7 @@ from opentelemetry import metrics
 from opentelemetry.metrics import Histogram
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 

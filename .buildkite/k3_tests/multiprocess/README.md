@@ -30,12 +30,12 @@ pipeline.yml
 
 ```bash
 INFERENCE_ENGINE=vllm \
-LMCACHE_REQUEST_TRANSPORT=zmq \
+LMCACHE_REQUEST_TRANSPORT=grpc \
 .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
 ```
 
-The request transport can be `zmq` or `grpc`. The harness maps these values to
-the `tcp://` and `grpc://` connector addresses respectively.
+CI runs every workload with `grpc`, which uses `grpc://` connector addresses.
+The deprecated `zmq` still works locally and uses `tcp://`.
 
 ## vLLM sleep mode
 
@@ -86,8 +86,7 @@ Buildkite build can set `VERIFY_AND_PIN_SGLANG=true` to run the canary path:
 ```text
 official SGLang nightly index
   -> resolve newest nightly version and commit
-  -> run lm_eval with LMCache over ZMQ and gRPC
-  -> require both jobs to report identical metadata
+  -> run lm_eval with LMCache over gRPC
   -> update latest_tested_sglang.txt and tested_runtimes.jsonl
 ```
 
@@ -309,7 +308,7 @@ for each test:
       inference_engine:
         - example
       request_transport:
-        - zmq
+        - grpc
   env:
     INFERENCE_ENGINE: "{{matrix.inference_engine}}"
     LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -322,14 +321,10 @@ baseline, and large-model cases to request different resources.
 
 ## Validation
 
-At minimum, validate a new adapter with both transports and one common
-workload:
+At minimum, validate a new adapter with one common workload:
 
 ```bash
 bash -n .buildkite/k3_tests/multiprocess/scripts/engines/<engine>.sh
-
-INFERENCE_ENGINE=<engine> LMCACHE_REQUEST_TRANSPORT=zmq \
-    .buildkite/k3_tests/multiprocess/run.sh high_concurrency
 
 INFERENCE_ENGINE=<engine> LMCACHE_REQUEST_TRANSPORT=grpc \
     .buildkite/k3_tests/multiprocess/run.sh high_concurrency

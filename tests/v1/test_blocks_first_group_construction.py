@@ -11,13 +11,13 @@ step from its own views' stride(0).
 import torch
 
 # First Party
-from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import EngineType
+from lmcache.v1.common.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.common.utils import (
     get_group_data_ptrs,
     normalize_and_discover_per_layer_formats,
     resolve_block_stride_and_log_layout,
 )
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 import lmcache.lmcache_native as lmcache_native
 
 NB = 4

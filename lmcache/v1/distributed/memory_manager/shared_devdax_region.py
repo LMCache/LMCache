@@ -8,9 +8,10 @@ import os
 import torch
 
 # First Party
-from lmcache.utils import get_device_identity, get_size_bytes
+from lmcache.v1.common.utils import get_size_bytes
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
+from lmcache.v1.distributed.utils import get_device_identity
 from lmcache.v1.memory_allocators.devdax_memory_allocator import DevDaxMemoryAllocator
 from lmcache.v1.memory_management import (
     MemoryFormat,

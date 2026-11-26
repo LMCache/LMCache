@@ -1,0 +1,22 @@
+name: Weekly full build (XPU)
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-full-build-xpu
+  cancel-in-progress: false
+
+jobs:
+  weekly:
+    uses: ./.github/workflows/weekly_device_build.yml
+    with:
+      label: XPU
+      manifest: .buildkite/k3_tests/weekly/manifest-xpu.json
+      out_dir: weekly-full-build-xpu
+      artifact: weekly-full-build-xpu
+      timeout_minutes: 330
+    secrets: inherit

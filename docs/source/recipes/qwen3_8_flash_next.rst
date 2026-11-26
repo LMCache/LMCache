@@ -38,7 +38,7 @@ Validated models
       Like the other GDN hybrids, this model needs the same settings: the
       ``align`` Mamba cache mode, prefix caching, and object-group separation
       on the LMCache server (enabled by default). The chunk size is
-      negotiated from vLLM's *unified block size*, which vLLM logs at startup
+      resolved from vLLM's *unified block size*, which vLLM logs at startup
       as ``Setting attention block size to N tokens``:
 
       .. list-table::
@@ -52,7 +52,7 @@ Validated models
            - 400
            - 8
 
-      Start the LMCache MP server. The connector negotiates the configured
+      Start the LMCache MP server. The connector resolves the configured
       minimum up to ``N``; see :doc:`/mp/chunk_size_negotiation`:
 
       .. code-block:: bash

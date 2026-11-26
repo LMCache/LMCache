@@ -10,6 +10,14 @@ from typing import ClassVar as _ClassVar, Optional as _Optional
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
+class KVEventProfile(_message.Message):
+    __slots__ = ("profile_id", "block_size")
+    PROFILE_ID_FIELD_NUMBER: _ClassVar[int]
+    BLOCK_SIZE_FIELD_NUMBER: _ClassVar[int]
+    profile_id: str
+    block_size: int
+    def __init__(self, profile_id: _Optional[str] = ..., block_size: _Optional[int] = ...) -> None: ...
+
 class ObjectKeyIdentity(_message.Message):
     __slots__ = ("chunk_hash", "kv_rank", "model_name", "object_group_id", "cache_salt", "tags")
     class TagsEntry(_message.Message):
@@ -34,7 +42,7 @@ class ObjectKeyIdentity(_message.Message):
     def __init__(self, chunk_hash: _Optional[bytes] = ..., kv_rank: _Optional[int] = ..., model_name: _Optional[str] = ..., object_group_id: _Optional[int] = ..., cache_salt: _Optional[str] = ..., tags: _Optional[_Mapping[str, str]] = ...) -> None: ...
 
 class IpcCacheServerKey(_message.Message):
-    __slots__ = ("model_name", "world_size", "worker_id", "token_bytes", "start", "end", "request_id", "cache_salt", "encoded_request_configs")
+    __slots__ = ("model_name", "world_size", "worker_id", "token_bytes", "start", "end", "request_id", "cache_salt", "encoded_request_configs", "chunk_hashes")
     MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
     WORLD_SIZE_FIELD_NUMBER: _ClassVar[int]
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
@@ -44,6 +52,7 @@ class IpcCacheServerKey(_message.Message):
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     CACHE_SALT_FIELD_NUMBER: _ClassVar[int]
     ENCODED_REQUEST_CONFIGS_FIELD_NUMBER: _ClassVar[int]
+    CHUNK_HASHES_FIELD_NUMBER: _ClassVar[int]
     model_name: str
     world_size: int
     worker_id: int
@@ -53,7 +62,8 @@ class IpcCacheServerKey(_message.Message):
     request_id: str
     cache_salt: str
     encoded_request_configs: bytes
-    def __init__(self, model_name: _Optional[str] = ..., world_size: _Optional[int] = ..., worker_id: _Optional[int] = ..., token_bytes: _Optional[bytes] = ..., start: _Optional[int] = ..., end: _Optional[int] = ..., request_id: _Optional[str] = ..., cache_salt: _Optional[str] = ..., encoded_request_configs: _Optional[bytes] = ...) -> None: ...
+    chunk_hashes: bytes
+    def __init__(self, model_name: _Optional[str] = ..., world_size: _Optional[int] = ..., worker_id: _Optional[int] = ..., token_bytes: _Optional[bytes] = ..., start: _Optional[int] = ..., end: _Optional[int] = ..., request_id: _Optional[str] = ..., cache_salt: _Optional[str] = ..., encoded_request_configs: _Optional[bytes] = ..., chunk_hashes: _Optional[bytes] = ...) -> None: ...
 
 class EventIpcHandleResult(_message.Message):
     __slots__ = ("event_ipc_handle", "success")

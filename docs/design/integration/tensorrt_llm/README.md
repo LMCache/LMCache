@@ -4,9 +4,11 @@
 
 ```
 lmcache/integration/tensorrt_llm/
-├── __init__.py             # Optional-import surface
-├── tensorrt_adapter.py     # Compatibility exports for the lmcache preset
+├── __init__.py            # Optional-import surface
 └── tensorrt_mp_adapter.py  # Multi-process — engine in standalone server
+
+LMCache_inprocess/lmcache/integration/tensorrt_llm/
+└── tensorrt_adapter.py    # Compatibility exports for the lmcache preset
 
 LMCache_inprocess/lmcache/inprocess/integration/tensorrt_llm/
 ├── __init__.py
@@ -14,6 +16,11 @@ LMCache_inprocess/lmcache/inprocess/integration/tensorrt_llm/
 │                          # create_trtllm_metadata
 └── tensorrt_adapter.py    # In-process — engine in TRT-LLM process
 ```
+
+The core package initializer exports only the MP scheduler and worker.
+InProcess package-level exports belong to
+`lmcache.inprocess.integration.tensorrt_llm` in `LMCache_inprocess`; importing
+the core TensorRT package does not load the InProcess engine.
 
 Both adapters subclass TRT-LLM's `KvCacheConnectorScheduler` and
 `KvCacheConnectorWorker`. The TRT-LLM imports are *guarded at module
@@ -31,7 +38,8 @@ maps:
 | `lmcache-mp` | `lmcache.integration.tensorrt_llm.tensorrt_mp_adapter` | `LMCacheMPKvConnectorScheduler` | `LMCacheMPKvConnectorWorker` |
 
 The `lmcache` preset still uses the old module path in TensorRT-LLM's registry.
-That module re-exports the scheduler and worker from the canonical
+The external `lmcache_inprocess` distribution owns that compatibility module
+and re-exports the scheduler and worker from the canonical
 `lmcache.inprocess.integration.tensorrt_llm.tensorrt_adapter` module until
 upstream migrates its registry.
 
