@@ -2,9 +2,10 @@
 
 ## Background
 
-The LMCache multiprocess (MP) server currently uses one global chunk size.
-Initial negotiation may change that global value, which prevents one MP server
-from serving inference deployments that require different chunk sizes.
+Before multi-chunk-size support, the LMCache multiprocess (MP) server used one
+global chunk size. Initial server-side negotiation could change that value,
+which prevented one MP server from serving inference deployments that required
+different chunk sizes.
 
 `LayoutDescRegistry` already uses `(model_name, world_size)` to connect worker
 registration metadata with scheduler lookups. A worker computes its KV layout
@@ -24,17 +25,17 @@ parallelism, it can also own the metadata needed for multiple chunk sizes.
 - **Registration key**: The `(model_name, world_size)` pair that uniquely
   identifies shared registration metadata.
 
-## Existing Flow
+## Previous Flow
 
-The MP server does not create layouts at startup. A worker creates them when it
-registers its KV cache:
+The legacy MP server did not create layouts at startup. A worker created them
+when it registered its KV cache:
 
 ```text
 MP server starts
     |
     `-- ctx.chunk_size = configured server default
             |
-            `-- global negotiation may change ctx.chunk_size
+            `-- server-side negotiation could change ctx.chunk_size
                     |
 worker register_kv_cache()
     |
@@ -45,15 +46,15 @@ worker register_kv_cache()
             `-- store the computed layout
 ```
 
-`MemoryLayoutDesc` stores shapes and dtypes but does not explicitly store a
-chunk size. However, `get_layout_desc(cache_context, chunk_size, ...)` uses the
-chunk size to compute those shapes, so every layout already depends implicitly
+`MemoryLayoutDesc` stored shapes and dtypes but did not explicitly store a
+chunk size. However, `get_layout_desc(cache_context, chunk_size, ...)` used the
+chunk size to compute those shapes, so every layout already depended implicitly
 on the chunk size used to create it.
 
 Scheduler lookup and prefetch subsequently read layouts from the registry,
-while store, retrieve, and other data paths still use the global
-`ctx.chunk_size` and `ctx.token_hasher`. Adding fields to the registry is
-therefore insufficient by itself: the normal data paths must also select
+while store, retrieve, and other data paths still used the global
+`ctx.chunk_size` and `ctx.token_hasher`. Adding fields to the registry was
+therefore insufficient by itself: the normal data paths also needed to select
 metadata by registration key.
 
 ## Goals
