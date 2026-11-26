@@ -26,6 +26,58 @@ S3-compatible endpoint (MinIO, Ceph RGW, etc.).
   ``get_usage()``.  A value of ``0`` disables aggregate eviction
   (``usage_fraction == -1.0``).
 
+**Per-tenant buckets:**
+
+By default every object goes to the one bucket in ``s3_endpoint``, and a
+request's ``cache_salt`` only becomes part of the object name.  With
+``s3_bucket_mode: "per_cache_salt"``, each salted object goes to a bucket of
+its own instead, so tenants do not share bucket capacity, lifecycle, or
+bucket policy.  Unsalted objects stay in the ``s3_endpoint`` bucket.  This
+mode needs the virtual-hosted endpoint form
+(``s3://<bucket>.s3.<region>.amazonaws.com``), because the adapter selects the
+bucket through the ``Host`` header.
+
+- ``s3_bucket_mode`` (string, default ``"single"``): ``"single"`` or
+  ``"per_cache_salt"``.
+- ``s3_bucket_template`` (string, default ``"{base}-{salt}"``): Tenant
+  bucket name.  ``{base}`` is the ``s3_endpoint`` bucket; ``{salt}`` (required,
+  exactly once) becomes ``<readable>-<hash>``, where ``<hash>`` is 12 hex
+  digits of SHA-256 over the original ``cache_salt`` and ``<readable>`` is the
+  salt lowercased to ``[a-z0-9-]`` and truncated to fit S3's 63-character
+  limit.  The hash keeps salts that differ only in case or punctuation in
+  separate buckets.  The template is checked when the config is loaded.
+- ``s3_bucket_auto_create`` (bool, default ``true``): Create a missing tenant
+  bucket on its tenant's first store.  With ``false``, tenant buckets must be
+  created outside LMCache, and stores for a tenant without one fail.
+- ``s3_bucket_ttl_days`` (int, default ``30``): Expiration rule put on a
+  tenant bucket the adapter creates; ``0`` puts none.  It is never applied to
+  a bucket that already exists, so lifecycle rules managed elsewhere are left
+  alone.
+- ``s3_expected_bucket_owner`` (string, optional): 12-digit AWS account id.
+  Requests to tenant buckets then carry ``x-amz-expected-bucket-owner``, so S3
+  refuses them if the bucket name has passed to another account.
+
+How tenant buckets are used:
+
+- A tenant bucket is used only once the adapter knows this account owns it.
+  At startup it lists the account's buckets that match the template
+  (``ListBuckets``), so tenant buckets that already exist are listed and
+  served straight away after a restart.
+- For any other tenant bucket, the request is not sent: a store fails, and a
+  lookup or load is a miss.  A background worker then checks the bucket and,
+  only if the request was a store and ``s3_bucket_auto_create`` is on,
+  creates it.  Reads never create a bucket, and no request waits for bucket
+  calls.  The first store for a brand-new tenant is therefore dropped.
+- If a tenant bucket name is owned by another account
+  (``BucketAlreadyExists``), the adapter logs it once and never reads or
+  writes that bucket.
+- Checks that fail, or find a bucket missing, are retried no sooner than
+  30 seconds later.
+
+The credentials need ``s3:ListAllMyBuckets`` and, with auto-create on,
+``s3:CreateBucket`` and ``s3:PutLifecycleConfiguration``, in addition to the
+object permissions.
+
 **Object sizes:**
 
 A load succeeds only when the stored object is exactly the size of the
@@ -44,6 +96,9 @@ therefore miss on every load through this adapter.
 
     # Static credentials, HTTP/2 disabled
     --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2", "s3_prefer_http2": false, "aws_access_key_id": "AKIA...", "aws_secret_access_key": "..."}'
+
+    # One bucket per cache_salt, 7-day expiry on buckets the adapter creates
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://kv-cache.s3.us-west-2.amazonaws.com", "s3_region": "us-west-2", "s3_bucket_mode": "per_cache_salt", "s3_bucket_ttl_days": 7}'
 
     # Local MinIO over plain HTTP
     --l2-adapter '{"type": "s3", "s3_endpoint": "minio.local:9000", "s3_region": "us-east-1", "disable_tls": true, "aws_access_key_id": "minio", "aws_secret_access_key": "minio123"}'
