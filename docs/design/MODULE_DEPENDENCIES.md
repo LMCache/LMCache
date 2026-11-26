@@ -1,8 +1,9 @@
 # Module Dependencies
 
-LMCache code is split into six parts. Each part may import the parts its arrows
-lead to, directly or through other parts: integration may import common, since
-integration depends on client and client on common. The rules live in one file,
+LMCache code is split into seven parts. SDK and integration are separate entry
+points. Both explicitly depend on client, common, platform and transport, and
+neither may import the other. Each part may import the parts its arrows lead to,
+directly or through other parts. The rules live in one file,
 `tools/module_deps.yaml`, and `tools/check_module_deps.py` enforces them in
 pre-commit and CI.
 
@@ -17,7 +18,14 @@ flowchart BT
     client --> common
     client --> platform
     client --> transport
+    sdk --> client
+    sdk --> common
+    sdk --> platform
+    sdk --> transport
     integration --> client
+    integration --> common
+    integration --> platform
+    integration --> transport
 ```
 
 The dotted arrow means transport uses devices such as IPC wrappers on demand. The
@@ -25,9 +33,15 @@ check treats it like a solid arrow, and fails if this diagram and the rules file
 disagree.
 
 Imports within a part are always allowed. Server and client never import each
-other, and nothing imports integration. Server is every lmcache module that is
-not in another part. Modules with their own name outside the diagram, such as
-`lmcache.cli` and `lmcache.sdk`, are not server and are not checked.
+other, and no lower part imports SDK or integration. SDK and integration must not
+import server implementations, including `lmcache.v1.distributed`,
+`lmcache.v1.multiprocess`, `lmcache.v1.mp_coordinator` and
+`lmcache.v1.storage_backend`. Shared types and pure helpers belong in common;
+engine-specific capture and adapter code belongs in integration.
+
+Server is every lmcache module that is not in another part or explicitly outside
+the tree. `lmcache.cli` is outside the tree and is not checked. SDK is checked,
+including lazy and type-only imports.
 
 Which packages make up each part, and where the files the diagram does not draw
 belong, is in `tools/module_deps.yaml`.

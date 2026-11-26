@@ -18,14 +18,13 @@ import torch
 import zmq
 
 # First Party
-from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
 from lmcache.sdk.wrapper.ring_mapping import RingMapping, RingStateError
 from lmcache.sdk.wrapper.ring_transfer import (
     RingSDKTransferWrapper,
     SDKObjectLayout,
 )
 from lmcache.v1.client.transport.factory import RequestClientFactory
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import IPCCacheServerKey, LMCacheSDKCacheKind
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.transport.request_client import RequestClient
 
