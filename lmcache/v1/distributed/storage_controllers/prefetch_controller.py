@@ -16,8 +16,8 @@ releasing a request at any point is a walk over its maps.
 """
 
 # Standard
-from collections.abc import Callable
 from collections import Counter, defaultdict, deque
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
