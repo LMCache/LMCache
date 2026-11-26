@@ -4,6 +4,11 @@
 > through the paged-KV machinery. Runs inside vLLM (the producer), not the
 > consumer SDK.
 
+Implementation: `lmcache.integration.vllm.experimental.dispatcher`. The SDK maps
+the worker-owned ring through transport descriptors; it does not import the
+producer implementation. Allocation, IPC and synchronization behavior are
+unchanged.
+
 ## Goal
 
 Attention query (Q) tensors are transient. To persist them for later reuse

@@ -23,7 +23,10 @@ import pytest
 import torch
 
 # First Party
-from lmcache.sdk.qringbuffer import QRingBuffer, QRingBufferCapture
+from lmcache.integration.vllm.experimental.dispatcher import (
+    QRingBuffer,
+    QRingBufferCapture,
+)
 
 BLOCK_SIZE = 16
 HIDDEN_DIM = 8

@@ -19,11 +19,10 @@ import pytest
 import torch
 
 # First Party
-from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
+from lmcache.integration.vllm.experimental.dispatcher import QRingBufferAdapter
 from lmcache.sdk.context import LMCacheSDKContext
-from lmcache.sdk.qringbuffer import QRingBufferAdapter
 from lmcache.sdk.request import LMCacheRequestStream, LMCacheRequestStreamError
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import IPCCacheServerKey, LMCacheSDKCacheKind
 from lmcache.v1.common.token_codec import pack_token_ids, unpack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 

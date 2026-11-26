@@ -69,17 +69,34 @@ unnecessary import migration while the client build selects an exact allowlist.
 
 ## Dependency direction
 
-```text
-integration ----> client ----> common
-      |              |
-      |              +------> client/transport ----> transport ----> common
-      v                              |
-  platform <-------------------------+
-      ^                              |
-      +------------------------------ sdk
-
-existing server packages ----------> transport/common as shared contracts move
+```mermaid
+flowchart LR
+    integration --> client
+    integration --> common
+    integration --> platform
+    integration --> transport
+    sdk --> client
+    sdk --> common
+    sdk --> platform
+    sdk --> transport
+    client --> common
+    client --> platform
+    client --> transport
+    transport --> common
+    transport -.-> platform
+    server["existing server packages"] --> common
+    server --> platform
+    server --> transport
 ```
+
+SDK and integration are separate entry points and must not import each other.
+Both explicitly depend on client, common, platform and transport, never server
+implementations. Worker-side Q-ring capture lives in the vLLM integration's
+experimental dispatcher. The SDK maps the ring using transport descriptors;
+vLLM still owns its allocation and lifecycle. The shared `LMCacheSDKCacheKind`
+type lives in `common.custom_types`, and `cdiv` lives in `common.utils`.
+The [module dependency rules](../MODULE_DEPENDENCIES.md) enforce these boundaries
+without exceptions.
 
 `common` and `transport` must not import endpoint implementations. Client-side
 packages must not import server implementations, including through package
