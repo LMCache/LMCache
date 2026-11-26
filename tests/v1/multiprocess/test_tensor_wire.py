@@ -11,7 +11,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.client.transfer_context.tensor_wire import (
+from lmcache.v1.transport.tensor_wire import (
     TensorEnvelope,
     TensorFrame,
     decode_grouped_tensors,

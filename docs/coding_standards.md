@@ -108,6 +108,12 @@ A full docstring must include:
 ### 4.4 Class Design
 
 - **Minimize the public interface.** Follow the principle of minimal surface area -- only add a new public method or property when there is a concrete need.
+- When a project-owned class intentionally implements a project-owned base
+  interface or `Protocol`, prefer explicit inheritance (e.g.,
+  `class LocalStore(StorageInterface):`) to make that relationship clear. Do not
+  omit inheritance merely because a `Protocol` supports structural typing.
+  Omitting it requires a concrete, explainable benefit, such as adapting an
+  external type that cannot be modified.
 - **Class fields with internal state** must have:
   - A clear, documented meaning
   - A clear invariant (at any point in time, a developer should know what the value should be without running the code)
@@ -347,7 +353,7 @@ than adding Python execution machinery to cover unusual indirection.
 
 ### 7.4 Logging
 
-- Use the project's `init_logger(__name__)` from `lmcache.logging`, not bare `logging.getLogger()`.
+- Use the project's `init_logger(__name__)` from `lmcache.v1.common.logging`, not bare `logging.getLogger()`.
 - Operational logs (store/retrieve activity, background task progress) should be at `DEBUG` level, not `INFO`.
 - Log levels must be appropriate: do not use `WARNING` for conditions that are expected during normal concurrent operation (e.g., a key not found due to a benign race condition).
 - Use lazy `%`-formatting, not f-strings, in log calls so interpolation only runs when the record is emitted: `logger.info("instance %s", instance_id)`, not `logger.info(f"instance {instance_id}")`.

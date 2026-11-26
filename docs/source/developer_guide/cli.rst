@@ -32,7 +32,7 @@ Auto-Discovery Mechanism
 ------------------------
 
 The CLI uses a unified ``discover_subclasses()`` utility (defined in
-``lmcache/v1/utils/subclass_discovery.py``) to locate command classes at
+``lmcache/v1/common/subclass_discovery.py``) to locate command classes at
 every level.  Understanding the two discovery entry points is key to
 extending the CLI.
 
@@ -50,7 +50,7 @@ no concrete command wrapper modules.
 .. code-block:: python
 
    # Simplified from lmcache/cli/commands/__init__.py (runs per invocation)
-   from lmcache.v1.utils.subclass_discovery import discover_subclasses
+   from lmcache.v1.common.subclass_discovery import discover_subclasses
 
    commands = [
        cls()

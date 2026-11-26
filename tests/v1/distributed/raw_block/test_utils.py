@@ -5,6 +5,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypeVar
 import errno
@@ -130,6 +131,56 @@ def make_memory_obj(payload: bytes | bytearray | memoryview) -> TensorMemoryObj:
         dtype=torch.uint8,
         address=0,
         phy_size=len(data),
+        fmt=MemoryFormat.BINARY,
+        ref_count=1,
+    )
+    return TensorMemoryObj(raw_data, metadata, parent_allocator=None)
+
+
+def make_aligned_memory_obj(
+    payload: bytes | bytearray | memoryview,
+    *,
+    align: int = RAW_BLOCK_CI_BLOCK_ALIGN,
+    tail_fill: int = 0xA5,
+    span_bytes: int | None = None,
+    physical_size: int | None = None,
+) -> TensorMemoryObj:
+    """Wrap payload bytes the way the MP L1 allocator lays them out.
+
+    The object starts at an ``align``-aligned address and its tensor spans the
+    payload rounded up to ``align``, while ``byte_array`` exposes only the
+    payload. Bytes after the payload are pre-filled with ``tail_fill`` so tests
+    can see whether I/O touched them.
+
+    Args:
+        payload: Logical object contents.
+        align: Address and allocation alignment in bytes.
+        tail_fill: Byte value written after the payload.
+        span_bytes: Length of the object's tensor; defaults to the payload
+            rounded up to ``align``.
+        physical_size: Metadata ``phy_size``; defaults to ``span_bytes``.
+
+    Returns:
+        Tensor memory object whose logical size is ``len(payload)``.
+    """
+    data = bytes(payload)
+    transfer_bytes = (len(data) + align - 1) // align * align
+    if span_bytes is None:
+        span_bytes = transfer_bytes
+    if physical_size is None:
+        physical_size = span_bytes
+    # Keep a full transfer plus a guard addressable even if a bounds check
+    # regresses; expose only span_bytes through the object's tensor.
+    backing_bytes = max(span_bytes, physical_size, transfer_bytes) + 2 * align
+    backing = torch.full((backing_bytes,), tail_fill, dtype=torch.uint8)
+    offset = (-backing.data_ptr()) % align
+    raw_data = backing[offset : offset + span_bytes]
+    raw_data[: len(data)] = torch.frombuffer(bytearray(data), dtype=torch.uint8)
+    metadata = MemoryObjMetadata(
+        shape=torch.Size([len(data)]),
+        dtype=torch.uint8,
+        address=0,
+        phy_size=physical_size,
         fmt=MemoryFormat.BINARY,
         ref_count=1,
     )
@@ -372,3 +423,187 @@ def install_lmcache_native_fallback() -> None:
     fallback_module.__dict__["Bitmap"] = Bitmap
     fallback_module.__dict__["TTLLock"] = TTLLock
     sys.modules["lmcache.lmcache_native"] = fallback_module
+
+
+Buffer = bytes | bytearray | memoryview
+
+
+@dataclass
+class _BatchedWriteCall:
+    """Recorded arguments of one fake ``batched_write`` invocation."""
+
+    offsets: list[int]
+    buffer_byte_lens: list[int]
+    total_lens: list[int]
+    placement_ids: list[int | None]
+    payload_lens: list[int]
+
+
+@dataclass
+class _RecordingRawDevice:
+    """In-memory raw device that records io_uring batched submissions.
+
+    The fake mirrors the subset of the Rust raw-device interface that
+    ``RawBlockCore`` uses for both the io_uring and posix write/read paths.
+    Stored bytes are keyed by device offset so round-trip reads return what
+    was written.
+    """
+
+    size: int
+    store: dict[int, bytes] = field(default_factory=dict)
+    batched_write_calls: list[_BatchedWriteCall] = field(default_factory=list)
+    batched_read_buffer_lens: list[list[int]] = field(default_factory=list)
+    wait_iouring_count: int = 0
+    pwrite_count: int = 0
+    write_uring_count: int = 0
+    fail_batched_write: bool = False
+    fail_after_write_entries: int | None = None
+    fail_completion_entries: set[int] = field(default_factory=set)
+    batch_results: dict[int, list[bool]] = field(default_factory=dict)
+    next_batch_id: int = 0
+    terminal_error: str | None = None
+    # Fail one chunk of the next read without stopping the worker.
+    uecc_on_next_wait_batch: bool = False
+    last_read_offsets: list[int] = field(default_factory=list)
+    last_read_lens: list[int] = field(default_factory=list)
+
+    def worker_error(self) -> str | None:
+        """Return the terminal worker failure independently of per-I/O errors."""
+        return self.terminal_error
+
+    def size_bytes(self) -> int:
+        return self.size
+
+    def fixed_buffer_status(self) -> tuple[bool, int]:
+        """Return the unregistered state of this recording device."""
+        return False, 0
+
+    def _submit_batch(self, count: int) -> int:
+        """Register an accepted batch and its per-entry completion results.
+
+        Entry indices listed in ``fail_completion_entries`` complete with a
+        failure, which models the device accepting the submission and only
+        then reporting an error for individual I/Os.
+        """
+        self.next_batch_id += 1
+        self.batch_results[self.next_batch_id] = [
+            index not in self.fail_completion_entries for index in range(count)
+        ]
+        return self.next_batch_id
+
+    def batched_write(
+        self,
+        offsets: Sequence[int],
+        buffers: Sequence[Buffer],
+        total_lens: Sequence[int],
+        placement_ids: Sequence[int | None] | None = None,
+        payload_lens: Sequence[int] | None = None,
+    ) -> int:
+        resolved_payload_lens = (
+            [int(p) for p in payload_lens]
+            if payload_lens is not None
+            else [int(total) for total in total_lens]
+        )
+        self.batched_write_calls.append(
+            _BatchedWriteCall(
+                offsets=[int(off) for off in offsets],
+                buffer_byte_lens=[len(bytes(buf)) for buf in buffers],
+                total_lens=[int(total) for total in total_lens],
+                placement_ids=list(placement_ids or [None] * len(offsets)),
+                payload_lens=resolved_payload_lens,
+            )
+        )
+        if self.fail_batched_write:
+            raise RuntimeError("injected batched_write failure")
+        for i, (off, buf, total, payload) in enumerate(
+            zip(offsets, buffers, total_lens, resolved_payload_lens, strict=True)
+        ):
+            if (
+                self.fail_after_write_entries is not None
+                and i >= self.fail_after_write_entries
+            ):
+                raise RuntimeError("injected partial batched_write failure")
+            # Mirror the Rust bounce: store only the valid payload, zero-padded
+            # up to total so round-trip reads observe the padded transfer.
+            self.store[int(off)] = bytes(buf)[: int(payload)].ljust(int(total), b"\x00")
+        return self._submit_batch(len(offsets))
+
+    def wait_iouring(self, batch_id: int) -> tuple[list[bool], list[tuple[int, str]]]:
+        results, errors = self.wait_iouring_exceptions(batch_id)
+        return results, [(index, str(error)) for index, error in errors]
+
+    def wait_iouring_exceptions(
+        self, batch_id: int
+    ) -> tuple[list[bool], list[tuple[int, BaseException]]]:
+        self.wait_iouring_count += 1
+        results = self.batch_results.pop(batch_id)
+        errors: list[tuple[int, BaseException]] = [
+            (index, RuntimeError("injected completion failure"))
+            for index, succeeded in enumerate(results)
+            if not succeeded
+        ]
+        if self.uecc_on_next_wait_batch:
+            # Third Party
+            from lmcache_rust_raw_block_io import NvmeUnrecoveredReadError
+
+            self.uecc_on_next_wait_batch = False
+            chunk_index = len(results) // 2
+            results[chunk_index] = False
+            errors.append(
+                (
+                    chunk_index,
+                    NvmeUnrecoveredReadError(
+                        0x0281,
+                        f"offset={self.last_read_offsets[chunk_index]} "
+                        f"len={self.last_read_lens[chunk_index]} status=0x0281",
+                    ),
+                )
+            )
+        return results, errors
+
+    def batched_read(
+        self,
+        offsets: Sequence[int],
+        buffers: Sequence[Buffer],
+        total_lens: Sequence[int],
+    ) -> int:
+        self.batched_read_buffer_lens.append(
+            [len(memoryview(buf).cast("B")) for buf in buffers]
+        )
+        self.last_read_offsets = [int(off) for off in offsets]
+        self.last_read_lens = [int(total) for total in total_lens]
+        for off, buf, total in zip(offsets, buffers, total_lens, strict=True):
+            self._copy_into(int(off), buf, int(total))
+        return self._submit_batch(len(offsets))
+
+    def pwrite_from_buffer(
+        self, offset: int, buf: Buffer, payload_len: int, total_len: int
+    ) -> None:
+        self.pwrite_count += 1
+        self.store[int(offset)] = bytes(buf)[: int(total_len)]
+
+    def write_uring(
+        self,
+        offset: int,
+        buf: Buffer,
+        payload_len: int,
+        total_len: int,
+        placement_id: int | None = None,
+    ) -> None:
+        self.write_uring_count += 1
+        self.store[int(offset)] = bytes(buf)[: int(total_len)]
+
+    def pread_into(
+        self, offset: int, buf: Buffer, payload_len: int, total_len: int
+    ) -> None:
+        self._copy_into(int(offset), buf, int(total_len))
+
+    def close(self) -> None:
+        pass
+
+    def _copy_into(self, offset: int, buf: Buffer, total_len: int) -> None:
+        data = self.store.get(offset, b"")
+        view = memoryview(buf).cast("B")
+        n = min(len(data), total_len, len(view))
+        if n:
+            view[:n] = data[:n]

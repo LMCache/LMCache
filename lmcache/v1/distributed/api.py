@@ -12,12 +12,10 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, get_args
 import enum
 
-# Third Party
-import torch
-
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.api import MemoryLayoutDesc as MemoryLayoutDesc
 from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.utils.frozen_dict import freeze_dict
 
 if TYPE_CHECKING:
@@ -29,6 +27,9 @@ logger = init_logger(__name__)
 
 _OBJECT_KEY_HASH_ATTR = "_hash_value"
 """Instance attribute holding an ``ObjectKey``'s hash once computed."""
+
+CHUNK_SIZE_TAG = "chunk_size"
+"""Identity tag containing an object's effective full chunk size."""
 
 FetchingPolicy = Literal["prefix", "full", "whole_chunk"]
 """Which found objects a prefetch loads and reports.
@@ -52,6 +53,25 @@ group: serving a prefix needs every chunk of it present."""
 _VALID_FETCHING_POLICIES = frozenset(get_args(FetchingPolicy))
 
 
+def get_kv_worker_ids(world_size: int, tp_replicas: int, dcp_shards: int) -> list[int]:
+    """Return the worker IDs that key a group's distinct KV shards.
+
+    Args:
+        world_size: Number of workers in the KV world.
+        tp_replicas: Consecutive workers sharing the group; must be positive.
+        dcp_shards: Distinct token shards within each replicated group.
+
+    Returns:
+        The first worker holding each shard, in rank order. With no replication
+        (``tp_replicas == dcp_shards == 1``), every worker keys its own object.
+    """
+    return [
+        first + shard
+        for first in range(0, world_size, tp_replicas)
+        for shard in range(dcp_shards)
+    ]
+
+
 def _lookup_kv_ranks(
     ipc_key: "IPCCacheServerKey", tp_replicas: int, dcp_shards: int
 ) -> list[int]:
@@ -70,11 +90,7 @@ def _lookup_kv_ranks(
         # For look up request, we want to expand to all workers
         # TODO (ApostaC): include local world size/rank info
         # in the future once it's in IPCCacheServerKey
-        worker_ids = [
-            first + shard
-            for first in range(0, ipc_key.world_size, tp_replicas)
-            for shard in range(dcp_shards)
-        ]
+        worker_ids = get_kv_worker_ids(ipc_key.world_size, tp_replicas, dcp_shards)
     else:
         w = ipc_key.worker_id
         worker_ids = [w - w % tp_replicas + w % dcp_shards]
@@ -196,7 +212,8 @@ def get_request_tags(
         An immutable mapping with the prefix removed and names sorted.
 
     Raises:
-        ValueError: A matching tag name is empty or its value is not a string.
+        ValueError: A matching tag name is empty, reserved for internal use,
+            or its value is not a string.
     """
     tags: dict[str, str] = {}
     for name, value in (request_configs or {}).items():
@@ -204,9 +221,25 @@ def get_request_tags(
             continue
         if not isinstance(value, str):
             raise ValueError("tags require non-empty string names and string values")
-        tags[name.removeprefix("lmcache.tag.")] = value
+        tag_name = name.removeprefix("lmcache.tag.")
+        if tag_name == CHUNK_SIZE_TAG:
+            raise ValueError(
+                f"lmcache.tag.{CHUNK_SIZE_TAG} is reserved for internal use"
+            )
+        tags[tag_name] = value
     validate_identity_tags(tags)
     return freeze_dict(tags, sort_keys=True)
+
+
+def _get_object_identity_tags(
+    request_configs: Mapping[str, object] | None,
+    chunk_size: int | None,
+) -> Mapping[str, str]:
+    """Return request tags plus the internal unfull-chunk namespace."""
+    tags = get_request_tags(request_configs)
+    if chunk_size is None:
+        return tags
+    return freeze_dict({**tags, CHUNK_SIZE_TAG: str(chunk_size)}, sort_keys=True)
 
 
 @dataclass(frozen=True)
@@ -573,22 +606,6 @@ class KeyListPage:
 
 
 @dataclass(frozen=True)
-class MemoryLayoutDesc:
-    """
-    Describes the layout of a memory object
-    """
-
-    shapes: list[torch.Size]
-    dtypes: list[torch.dtype]
-
-    def __post_init__(self):
-        if len(self.shapes) != len(self.dtypes):
-            raise ValueError(
-                "MemoryLayoutDesc: shapes and dtype must have the same length"
-            )
-
-
-@dataclass(frozen=True)
 class ShardReplicationDesc:
     """Per object group, how one chunk's KV is spread over the kv ranks.
 
@@ -675,6 +692,20 @@ class PrefetchLockMode(enum.Enum):
     NO_LOCK = enum.auto()
 
 
+class PrefetchPriority(enum.Enum):
+    """The order in which waiting prefetch requests are admitted.
+
+    ``NORMAL`` -- waits in arrival order under the in-flight watermark.
+
+    ``HIGH`` -- for a later leg of an admitted lookup (e.g. the CacheBlend
+    sparse leg). No ``NORMAL`` request starts while a ``HIGH`` one waits, so
+    new lookups cannot take the budget an admitted lookup needs to finish.
+    """
+
+    NORMAL = enum.auto()
+    HIGH = enum.auto()
+
+
 @dataclass(frozen=True)
 class GroupedObjectKeys:
     """The object keys of one ``(object group, kv rank)`` row of a prefetch.
@@ -731,6 +762,7 @@ class PrefetchTaskSpec:
         allowed_l2_memory_tags: Memory tags of the L2 adapters to look up and
             load from. ``None`` allows every L2 adapter; an empty set allows
             none.
+        priority: See :class:`PrefetchPriority`.
 
     Note:
         Every key group holds the same number of keys (``group_size``). The
@@ -747,6 +779,7 @@ class PrefetchTaskSpec:
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK
     allowed_l1_memory_tags: frozenset[MemoryTags] | None = None
     allowed_l2_memory_tags: frozenset[MemoryTags] | None = None
+    priority: PrefetchPriority = PrefetchPriority.NORMAL
 
     def __post_init__(self) -> None:
         if not self.key_groups:
@@ -858,6 +891,7 @@ def ipc_key_to_object_keys(
     chunk_hashes: list[bytes],
     object_group_ids: list[int],
     shard_replication_desc: ShardReplicationDesc,
+    chunk_size: int | None = None,
 ) -> list[list[ObjectKey]]:
     """
     Convert a single IPCCacheServerKey and its chunk hashes to per-object-group
@@ -886,6 +920,8 @@ def ipc_key_to_object_keys(
         shard_replication_desc: How each object group is spread over the kv ranks
             (the registration's :class:`ShardReplicationDesc`;
             :data:`DEFAULT_SHARD_REPLICATION_DESC` stores every group per rank).
+        chunk_size: Effective full chunk size when ``chunk_hashes``
+            identify unfull chunks; adds it as an internal identity tag.
 
     Returns:
         list[list[ObjectKey]]: The i-th element is the list of ObjectKeys
@@ -895,7 +931,7 @@ def ipc_key_to_object_keys(
     extra_attributes = (
         ipc_key.request_configs if ipc_key.request_configs is not None else {}
     )
-    tags = get_request_tags(ipc_key.request_configs)
+    tags = _get_object_identity_tags(ipc_key.request_configs, chunk_size)
 
     return [
         [
@@ -926,6 +962,7 @@ def ipc_key_to_grouped_object_keys(
     group_layout_descs: dict[int, MemoryLayoutDesc],
     attn_desc: AttnWindowDesc,
     shard_replication_desc: ShardReplicationDesc,
+    chunk_size: int | None = None,
 ) -> list[GroupedObjectKeys]:
     """Expand an IPC key and its chunk hashes into prefetch key rows.
 
@@ -947,6 +984,8 @@ def ipc_key_to_grouped_object_keys(
             replicated group yields one row per token shard per
             ``tp_replicas`` ranks, with ``num_kv_readers`` the ranks sharing
             that shard.
+        chunk_size: Effective full chunk size when ``chunk_hashes``
+            identify unfull chunks; adds it as an internal identity tag.
 
     Returns:
         ``len(object_group_ids) * num_ranks`` rows, group-major / rank-minor.
@@ -962,7 +1001,7 @@ def ipc_key_to_grouped_object_keys(
         ``ipc_key.request_configs`` through ``extra_attributes`` when request
         configs are present.
     """
-    tags = get_request_tags(ipc_key.request_configs)
+    tags = _get_object_identity_tags(ipc_key.request_configs, chunk_size)
     extra_attributes = (
         ipc_key.request_configs if ipc_key.request_configs is not None else {}
     )

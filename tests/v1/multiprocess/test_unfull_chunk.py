@@ -7,6 +7,7 @@ bus are mocked.
 """
 
 # Standard
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import cast
 from unittest import mock
@@ -21,6 +22,7 @@ from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
+    CHUNK_SIZE_TAG,
     DEFAULT_SHARD_REPLICATION_DESC,
     MemoryLayoutDesc,
     ObjectKey,
@@ -34,6 +36,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess import object_group_transfer
 from lmcache.v1.multiprocess.engine_context import (
     LayoutDescRegistry,
@@ -101,6 +104,49 @@ def test_key_has_unfull_chunk_only_with_an_unaligned_end():
     assert not key(32).has_unfull_chunk(CHUNK_SIZE)
 
 
+def test_unfull_chunk_key_is_namespaced_by_registered_chunk_size():
+    ipc_key = _key(list(range(CHUNK_SIZE)), 0, CHUNK_SIZE, "writer")
+    chunk_hash = b"same-content-hash"
+
+    full_key = ipc_key_to_object_keys(
+        ipc_key,
+        [chunk_hash],
+        [0],
+        DEFAULT_SHARD_REPLICATION_DESC,
+    )[0][0]
+    unfull_16 = ipc_key_to_object_keys(
+        ipc_key,
+        [chunk_hash],
+        [0],
+        DEFAULT_SHARD_REPLICATION_DESC,
+        chunk_size=16,
+    )[0][0]
+    unfull_32 = ipc_key_to_object_keys(
+        ipc_key,
+        [chunk_hash],
+        [0],
+        DEFAULT_SHARD_REPLICATION_DESC,
+        chunk_size=32,
+    )[0][0]
+
+    assert not full_key.identity.tags
+    assert unfull_16.identity.tags[CHUNK_SIZE_TAG] == "16"
+    assert unfull_32.identity.tags[CHUNK_SIZE_TAG] == "32"
+    assert len({full_key, unfull_16, unfull_32}) == 3
+
+    pretagged_key = replace(
+        ipc_key, request_configs={"lmcache.tag.chunk_size": "configured"}
+    )
+    with pytest.raises(ValueError, match="chunk_size.*reserved"):
+        ipc_key_to_object_keys(
+            pretagged_key,
+            [chunk_hash],
+            [0],
+            DEFAULT_SHARD_REPLICATION_DESC,
+            chunk_size=16,
+        )
+
+
 def test_server_resolves_full_chunk_keys_and_the_tail_key_of_an_unaligned_key():
     """A STORE or RETRIEVE key ending inside a chunk resolves to the full
     chunks below its end, plus the tail's key on its own."""
@@ -109,7 +155,13 @@ def test_server_resolves_full_chunk_keys_and_the_tail_key_of_an_unaligned_key():
         mock.patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
     ):
         ctx = MPCacheServerContext(mock.MagicMock(), chunk_size=CHUNK_SIZE)
-    ctx.layout_desc_registry.register(MODEL, 1, LAYOUT)
+    ctx.layout_desc_registry.register(
+        MODEL,
+        1,
+        LAYOUT,
+        chunk_size=CHUNK_SIZE,
+        hash_algorithm=ctx.hash_algorithm_name,
+    )
     hasher = TokenHasher(chunk_size=CHUNK_SIZE)
     tokens = list(range(2 * CHUNK_SIZE + 5))
     key = IPCCacheServerKey(
@@ -123,7 +175,7 @@ def test_server_resolves_full_chunk_keys_and_the_tail_key_of_an_unaligned_key():
     )
 
     assert ctx.resolve_obj_keys(key, [0]) == [_chunk_keys(hasher, tokens, 2)]
-    assert ctx.resolve_unfull_chunk_obj_keys(key, [0]) == _unfull_keys(
+    assert ctx.resolve_unfull_chunk_obj_keys(key, [0], CHUNK_SIZE) == _unfull_keys(
         hasher, tokens, len(tokens)
     )
 
@@ -356,7 +408,14 @@ def test_unfull_chunk_with_a_lead_block_stages_only_if_it_fits() -> None:
 
 def test_registry_falls_back_to_full_layouts_for_unfull_chunks() -> None:
     registry = LayoutDescRegistry()
-    registry.register("m", 1, LAYOUT, group_layout_descs={0: LAYOUT})
+    registry.register(
+        "m",
+        1,
+        LAYOUT,
+        chunk_size=256,
+        hash_algorithm="blake3",
+        group_layout_descs={0: LAYOUT},
+    )
     assert registry.find_group_unfull_chunk_layout_descs("m", 1) == {0: LAYOUT}
 
     unfull = MemoryLayoutDesc(
@@ -366,6 +425,8 @@ def test_registry_falls_back_to_full_layouts_for_unfull_chunks() -> None:
         "m",
         1,
         LAYOUT,
+        chunk_size=256,
+        hash_algorithm="blake3",
         group_layout_descs={0: LAYOUT},
         group_unfull_chunk_layout_descs={0: unfull},
     )
@@ -402,6 +463,8 @@ def lookup_module(storage_manager):
     ctx.get_read_owners.return_value = None
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = LAYOUT
+    ctx.layout_desc_registry.get_chunk_size.return_value = CHUNK_SIZE
+    ctx.layout_desc_registry.get_token_hasher.return_value = hasher
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1]
     )
@@ -413,6 +476,57 @@ def lookup_module(storage_manager):
         0: LAYOUT
     }
     return LookupModule(ctx), storage_manager, hasher
+
+
+def test_reregister_with_smaller_chunk_does_not_hit_an_old_unfull_chunk() -> None:
+    """A tail stored under one chunk size cannot become a full-chunk hit
+    after the same model is re-registered with a smaller chunk size."""
+    config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=16 * 1024 * 1024,
+                use_lazy=False,
+            ),
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+        l2_adapter_config=L2AdaptersConfig(adapters=[]),
+    )
+    ctx = MPCacheServerContext(config, chunk_size=CHUNK_SIZE)
+    try:
+        larger_chunk_size = 2 * CHUNK_SIZE
+        larger_layout = MemoryLayoutDesc(
+            shapes=[torch.Size([larger_chunk_size, 1, 8])],
+            dtypes=[torch.uint8],
+        )
+        ctx.layout_desc_registry.register(
+            MODEL,
+            1,
+            larger_layout,
+            chunk_size=larger_chunk_size,
+            hash_algorithm=ctx.hash_algorithm_name,
+        )
+
+        tokens = list(range(CHUNK_SIZE))
+        store_key = replace(_key(tokens, 0, len(tokens), "store-32"), worker_id=0)
+        tail_keys = ctx.resolve_unfull_chunk_obj_keys(store_key, [0], larger_chunk_size)
+        reserved = ctx.storage_manager.reserve_write(tail_keys, larger_layout)
+        assert set(reserved) == set(tail_keys)
+        ctx.storage_manager.finish_write(tail_keys, l1_owners_of(reserved))
+
+        ctx.layout_desc_registry.unregister(MODEL, 1)
+        ctx.layout_desc_registry.register(
+            MODEL,
+            1,
+            LAYOUT,
+            chunk_size=CHUNK_SIZE,
+            hash_algorithm=ctx.hash_algorithm_name,
+        )
+
+        assert (
+            _lookup(LookupModule(ctx), tokens, len(tokens), request_id="lookup-16") == 0
+        )
+    finally:
+        ctx.close()
 
 
 def test_lookup_hits_the_unfull_chunk_and_free_deletes_a_temporary_one(
@@ -536,6 +650,41 @@ def test_identical_prompt_resuming_before_its_last_token_hits_its_tail(
     assert hit == tail_boundary
 
 
+@pytest.mark.parametrize(
+    ("lookup_end", "grid", "expected_hit"),
+    [
+        # The repeat of the prompt: its lookup stops at P - 1 and the grid
+        # rounds it down to the stored tail.
+        (CHUNK_SIZE - 6, 4, 8),
+        # A lookup ending exactly at the stored tail.
+        (8, 0, 8),
+    ],
+    ids=["grid", "exact"],
+)
+def test_prompt_shorter_than_one_chunk_hits_its_tail(
+    lookup_module, lookup_end, grid, expected_hit
+):
+    """A prompt with no full chunk has no full-chunk hash, yet the tail it
+    stored inside chunk 0 is found on a repeat (#6745)."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(CHUNK_SIZE - 5))
+    _write(storage_manager, _unfull_keys(hasher, tokens, 8), is_temporary=False)
+
+    assert _lookup(module, tokens, lookup_end, "r1", grid=grid) == expected_hit
+
+
+def test_aligned_lookup_of_a_short_prompt_ignores_its_tail(lookup_module):
+    """A connector that does not load unfull chunks floors a short prompt's
+    lookup to 0 tokens: nothing is probed or locked."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(CHUNK_SIZE - 5))
+    _write(storage_manager, _unfull_keys(hasher, tokens, 8), is_temporary=True)
+
+    assert _lookup(module, tokens, 0, "r1", grid=4) == 0
+    # Never locked, so still there for a lookup that asks for it.
+    assert _lookup(module, tokens, 8, "r2") == 8
+
+
 def test_next_round_hits_the_previous_rounds_tail(lookup_module):
     """Round 2 extends round 1's prompt: its full-chunk hit stops at round 1's
     last chunk boundary, and the tail stored there extends it."""
@@ -567,6 +716,88 @@ def test_free_releases_the_unfull_chunk_at_the_hit_boundary(lookup_module):
     module.free_lookup_locks(_key(tokens, 2 * CHUNK_SIZE, hit, "r1"), tp_size=1)
     module.free_lookup_locks(_key(tokens, 0, hit, "r2"), tp_size=1)
     assert _lookup(module, tokens, len(tokens), "r3", grid=4) == 2 * CHUNK_SIZE
+
+
+@pytest.mark.parametrize("store_tail", [True, False], ids=["tail_hit", "tail_miss"])
+def test_tail_hit_is_counted_in_the_lookup_event(lookup_module, store_tail):
+    """The unfull chunk's tokens join both sides of the hit rate: the
+    denominator whenever it is probed, the L1 hit only when it hits."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+    if store_tail:
+        _write(
+            storage_manager,
+            _unfull_keys(hasher, tokens, len(tokens)),
+            is_temporary=False,
+        )
+
+    hit = _lookup(module, tokens, len(tokens), "r1")
+
+    meta = _end_metadata(module, "r1")
+    assert hit == (len(tokens) if store_tail else 2 * CHUNK_SIZE)
+    assert meta["requested_tokens"] == len(tokens)
+    assert meta["hit_tokens"] == hit
+    assert meta["l1_hit_tokens"] == hit
+    assert meta["l2_hit_tokens"] == 0
+    assert meta["request_hit_tokens"] == hit
+    assert meta["hit_tokens"] <= meta["requested_tokens"]
+
+
+def test_tail_hit_after_a_partial_full_chunk_hit_is_counted(lookup_module):
+    """Round 2 hits round 1's chunk and its grid tail: only the tail's
+    tokens past the full-chunk hit are added, and the ratio stays below 1."""
+    module, storage_manager, hasher = lookup_module
+    round_2 = list(range(4 * CHUNK_SIZE))
+    round_1_tail = CHUNK_SIZE + 8
+    _write(storage_manager, _chunk_keys(hasher, round_2, 1), is_temporary=False)
+    _write(
+        storage_manager, _unfull_keys(hasher, round_2, round_1_tail), is_temporary=False
+    )
+
+    assert _lookup(module, round_2, len(round_2) - 1, "r1", grid=4) == round_1_tail
+
+    meta = _end_metadata(module, "r1")
+    assert meta["requested_tokens"] == len(round_2) - 1
+    assert meta["hit_tokens"] == round_1_tail
+    assert meta["l1_hit_tokens"] == round_1_tail
+    assert meta["l2_hit_tokens"] == 0
+    assert meta["hit_tokens"] <= meta["requested_tokens"]
+
+
+def test_tail_hit_past_an_engine_covered_prefix_is_counted(lookup_module):
+    """When the engine holds every full chunk, only the tail is looked up:
+    it is both the denominator and the hit, and the covered prefix is
+    reported apart."""
+    module, storage_manager, hasher = lookup_module
+    tokens = list(range(2 * CHUNK_SIZE + 5))
+    _write(storage_manager, _chunk_keys(hasher, tokens, 2), is_temporary=False)
+    _write(
+        storage_manager, _unfull_keys(hasher, tokens, len(tokens)), is_temporary=False
+    )
+
+    module.lookup(_key(tokens, 2 * CHUNK_SIZE, len(tokens), "r1"), tp_size=1)
+
+    assert module.wait_prefetch_status("r1", timeout=5.0) == len(tokens)
+    meta = _end_metadata(module, "r1")
+    assert meta["apc_covered_tokens"] == 2 * CHUNK_SIZE
+    assert meta["requested_tokens"] == 5
+    assert meta["hit_tokens"] == 5
+    assert meta["l1_hit_tokens"] == 5
+    assert meta["request_hit_tokens"] == len(tokens)
+
+
+def _end_metadata(module: LookupModule, request_id: str) -> dict:
+    """The metadata of ``request_id``'s ``MP_LOOKUP_PREFETCH_END`` event."""
+    publish = cast(mock.Mock, module._ctx.event_bus.publish)
+    for call in publish.call_args_list:
+        event = call.args[0]
+        if (
+            event.event_type is EventType.MP_LOOKUP_PREFETCH_END
+            and event.session_id == request_id
+        ):
+            return event.metadata
+    raise AssertionError(f"no MP_LOOKUP_PREFETCH_END event for {request_id}")
 
 
 def _key(
@@ -615,6 +846,7 @@ def _unfull_keys(
         [unfull_hash],
         [0],
         DEFAULT_SHARD_REPLICATION_DESC,
+        chunk_size=CHUNK_SIZE,
     )[0]
 
 

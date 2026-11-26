@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from lmcache.v1.distributed.config import EvictionConfig
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import MemoryResidency, MemorySegment, MemoryTags
 from lmcache.v1.distributed.serde import SerdeConfig
 

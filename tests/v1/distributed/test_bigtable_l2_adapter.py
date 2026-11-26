@@ -451,21 +451,6 @@ class TestBigtableL2Adapter:
         row_key_no_salt = encoder.encode_row_key(key_no_salt)
         assert row_key_no_salt == b"0102@my-model@0000000f@3@0102030405060708"
 
-        # Test with layerwise key
-        # Standard
-        from dataclasses import dataclass
-
-        @dataclass(frozen=True)
-        class LayerwiseObjectKey(ObjectKey):
-            layer_id: int = 0
-
-        key_layerwise = LayerwiseObjectKey(identity=key.identity, layer_id=5)
-        row_key_layerwise = encoder.encode_row_key(key_layerwise)
-        assert (
-            row_key_layerwise
-            == b"0102@my-model@0000000f@3@0102030405060708@user-salt@layer_5"
-        )
-
         # Test BigtablePayloadSharder
         sharder = BigtablePayloadSharder(num_layers=4, layer_group_size=2, kv_size=2)
         payload = b"K0K0K1K1K2K2K3K3V0V0V1V1V2V2V3V3"
@@ -501,7 +486,6 @@ class TestBigtableL2Adapter:
 
         adapter.close()
 
-    @pytest.mark.no_shared_allocator
     @pytest.mark.parametrize("layer_group_size", [0, 10])
     @pytest.mark.parametrize("include_valid_key", [False, True])
     def test_rejected_store_reports_failure(
@@ -549,7 +533,6 @@ class TestBigtableL2Adapter:
         finally:
             adapter.close()
 
-    @pytest.mark.no_shared_allocator
     def test_store_at_size_limit_succeeds(self) -> None:
         """An unsharded payload equal to the configured limit remains valid."""
         cfg = create_test_config()

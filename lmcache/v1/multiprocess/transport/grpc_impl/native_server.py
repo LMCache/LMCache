@@ -16,8 +16,8 @@ from google.protobuf.message import DecodeError, Message
 import grpc
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.security.api_key import APIKeyVerifier
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.security.api_key import APIKeyVerifier
 from lmcache.v1.mp_observability.otel_init import (
     grpc_metrics_enabled,
     register_metrics_source,
@@ -34,6 +34,7 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     GRPC_SERVER_OPTIONS,
     GrpcRequestHandler,
 )
+from lmcache.v1.transport.errors import InvalidRequestError
 from lmcache.v1.transport.futures import MessagingStream
 from lmcache.v1.transport.grpc.descriptors import (
     ServiceBinding,
@@ -364,9 +365,9 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
         """Decode, run and answer one call on a handler thread.
 
         Status codes follow the sync server: an undecodable request is
-        INTERNAL, NotImplementedError is UNIMPLEMENTED, a ValueError from a
-        streaming handler is INVALID_ARGUMENT, and any other exception is
-        UNKNOWN. A streaming method's stream is then sent by ``_forward``.
+        INTERNAL, NotImplementedError is UNIMPLEMENTED, InvalidRequestError
+        and a streaming handler's ValueError are INVALID_ARGUMENT, and other
+        exceptions are UNKNOWN. A stream is then sent by ``_forward``.
         """
         registered = method.registered
         front = self._front
@@ -395,7 +396,7 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
             front.fail(call_id, _UNIMPLEMENTED, str(exc))
             return
         except ValueError as exc:
-            if method.server_streaming:
+            if isinstance(exc, InvalidRequestError) or method.server_streaming:
                 front.fail(call_id, _INVALID_ARGUMENT, str(exc))
             else:
                 self._fail_application(registered, call_id, exc)
@@ -450,10 +451,10 @@ class GrpcNativeMultiprocessServer(GrpcMultiprocessServerBase):
                     break
             else:
                 front.stream_end(call_id)
-        except Exception as exc:
+        except Exception:
             if front.stream_open(call_id):
                 logger.exception("Error in streaming handler %s", registered.operation)
-                front.fail(call_id, _INTERNAL, str(exc))
+                front.stream_end(call_id)
         finally:
             self._close_stream(call_id)
             stream.close()

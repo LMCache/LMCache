@@ -6,8 +6,14 @@ from collections.abc import Sequence
 import threading
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.custom_types import BlockAllocationRecord
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.periodic_thread import (
+    PeriodicThread,
+    ThreadLevel,
+    ThreadRunSummary,
+    create_periodic_thread,
+)
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
@@ -17,12 +23,6 @@ from lmcache.v1.multiprocess.engine_module import (
     ModuleBuildContext,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.periodic_thread import (
-    PeriodicThread,
-    ThreadLevel,
-    ThreadRunSummary,
-    create_periodic_thread,
-)
 
 logger = init_logger(__name__)
 
@@ -164,29 +164,12 @@ class ManagementModule(DiscoverableModule):
 
     @request_handler()
     def get_chunk_size(self) -> int:
-        """Return the chunk size used for KV cache operations.
+        """Return the server minimum chunk size.
 
         Returns:
-            The chunk size.
+            The immutable server minimum chunk size.
         """
-        return self._ctx.finalize_chunk_size()
-
-    @request_handler()
-    def negotiate_chunk_size(self, required_chunk_alignment: int) -> int:
-        """Negotiate the server chunk size against model geometry.
-
-        Args:
-            required_chunk_alignment: The least common multiple of cacheable
-                engine group ``tokens_per_block`` values.
-
-        Returns:
-            The concrete server chunk size.
-
-        Raises:
-            ValueError: If the context cannot bind or validate the requested
-                geometry.
-        """
-        return self._ctx.negotiate_chunk_size(required_chunk_alignment)
+        return self._ctx.chunk_size
 
     @request_handler()
     def get_experimental(self) -> list[str]:

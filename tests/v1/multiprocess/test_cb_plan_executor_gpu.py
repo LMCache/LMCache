@@ -9,9 +9,10 @@ steps of slot-half reuse where every wave writes DIFFERENT data into the same
 slots — any event-ordering bug surfaces as a bit-exact mismatch against the
 sequential tensor-op reference, not as a flake.
 
-Parameterized over both paged layouts the executor serves: the fused-packed
+The stream-overlap cases exercise two paged layouts: the fused-packed
 HND format (K/V in the trailing 2*HS dim, kv_size 1) and the un-fused
-flash-attention format (separate K/V planes, kv_size 2).
+flash-attention format (separate K/V planes, kv_size 2). The scatter-only
+cases check FlashAttention, FlashInfer and MLA against logical tensor indexing.
 """
 
 # Standard
@@ -122,7 +123,9 @@ def _run_plan(
     slots,
 ):
     """Drive the production flat-table entry point with the planner's
-    double-buffer wave layout."""
+    double-buffer wave layout. A chunk repeating the previous one in the
+    same wave is a D2D row from the slot that staged it, as the planner
+    emits for repeated chunks."""
     chunk_bytes = case.kv_size * _NL * _SPC * case.hidden * _DTYPE.itemsize
     spec = cuda_ops.CBGroupSpec(
         paged_kv_ptrs=paged_ptrs.data_ptr(),
@@ -151,9 +154,15 @@ def _run_plan(
         base = (step_idx % 2) * wave
         for j in range(min(wave, n_chunks - w0)):
             ci, slot = w0 + j, base + j
-            staging.append(
-                (slots[slot].data_ptr(), host_chunks[ci].data_ptr(), chunk_bytes, 0)
-            )
+            if j == 0 or host_chunks[ci] is not host_chunks[ci - 1]:
+                head = slot
+                staging.append(
+                    (slots[slot].data_ptr(), host_chunks[ci].data_ptr(), chunk_bytes, 0)
+                )
+            else:
+                staging.append(
+                    (slots[slot].data_ptr(), slots[head].data_ptr(), chunk_bytes, -1)
+                )
             ropes.append((0, slot, old_sts[ci], cur_sts[ci]))
             scatters.append((0, slot, ci * _SPC, _SPC))
         step_offsets.append((len(staging), len(ropes), len(scatters)))
@@ -171,12 +180,15 @@ def _run_plan(
 
 @pytest.mark.parametrize("fmt_key", sorted(_CASES))
 @pytest.mark.parametrize("n_chunks,max_batch", [(12, 4), (96, 16), (44, 16)])
-def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch, fmt_key):
+@pytest.mark.parametrize("repeat", [1, 3])
+def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch, fmt_key, repeat):
     """Many steps of slot-half reuse, each wave carrying different data into
     the same slots: an ordering violation (staging overwriting a slot still
     being read, or kernels reading a half-staged slot) breaks bit-exactness.
     Covers full packs, partial tail packs, and deep reuse, on both the
-    fused-packed and un-fused split-K/V paged layouts."""
+    fused-packed and un-fused split-K/V paged layouts. With ``repeat`` > 1
+    each stored chunk fills ``repeat`` positions (D2D rows within a wave),
+    each re-RoPEd by its own shift."""
     case = _CASES[fmt_key]
     dev = torch.device(torch_device_type)
     torch.manual_seed(n_chunks)
@@ -191,10 +203,11 @@ def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch, fmt_key):
     ptrs_new = torch.tensor(
         [t.data_ptr() for t in paged_new], dtype=torch.long, device=dev
     )
-    host_chunks = [
+    stored = [
         torch.randn(case.kv_size, _NL, _SPC, case.hidden, dtype=_DTYPE).pin_memory()
         for _ in range(n_chunks)
     ]
+    host_chunks = [stored[i // repeat] for i in range(n_chunks)]
     slots = [
         torch.zeros(case.kv_size, _NL, _SPC, case.hidden, dtype=_DTYPE, device=dev)
         for _ in range(max_batch)
@@ -203,7 +216,7 @@ def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch, fmt_key):
     pos = torch.arange(0, n_chunks * _SPC, device=dev, dtype=torch.long)
     block_ids = torch.arange(_NB, device=dev, dtype=torch.long).flip(0)
     slot_mapping = block_ids[pos // _BS] * _BS + pos % _BS
-    old_sts = [i * _SPC + 512 for i in range(n_chunks)]
+    old_sts = [(i // repeat) * _SPC + 512 for i in range(n_chunks)]
     cur_sts = [i * _SPC for i in range(n_chunks)]
 
     _reference_scatter(
@@ -227,3 +240,95 @@ def test_overlap_slot_reuse_is_bit_exact(n_chunks, max_batch, fmt_key):
             f"layer {layer} mismatch "
             f"(fmt={fmt_key}, n_chunks={n_chunks}, max_batch={max_batch})"
         )
+
+
+@pytest.mark.parametrize(
+    "fmt,axes,head_size",
+    [
+        (lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS, (0, 1, 2, 3, 4), 16),
+        (lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS, (1, 0, 2, 3, 4), 16),
+        (lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS, (0, 1, 3, 2, 4), 16),
+        (lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS, (1, 0, 3, 2, 4), 16),
+        (lmcache_native.EngineKVFormat.NL_X_NB_BS_HS, (0, 1, 2, 3, 4), 576),
+        (lmcache_native.EngineKVFormat.NL_X_NB_BS_HS, (0, 1, 2, 3, 4), 66),
+    ],
+    ids=(
+        "flash-attn-nhd",
+        "flashinfer-nhd",
+        "flash-attn-hnd",
+        "flashinfer-hnd",
+        "mla-576",
+        "mla-66",
+    ),
+)
+def test_scatter_only_writes_mapped_tokens(
+    fmt: lmcache_native.EngineKVFormat, axes: tuple[int, ...], head_size: int
+) -> None:
+    """Scatter two chunks into permuted pages with a skipped slot and a short tail."""
+    device = torch.device(torch_device_type)
+    mla = fmt == lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
+    planes, heads = (1, 1) if mla else (2, 3)
+    layers, blocks, block_size, slot_tokens = 2, 5, 4, 4
+    positions = ([9, -1, 1, 18], [14, 4, 17])
+    mapping = torch.tensor(positions[0] + positions[1], device=device)
+    # Distinct 16-bit payloads make plane, layer, token and channel swaps observable.
+    chunks = (
+        torch.arange(
+            2 * planes * layers * slot_tokens * heads * head_size,
+            device=device,
+            dtype=torch.int16,
+        )
+        .view(_DTYPE)
+        .reshape(2, planes, layers, slot_tokens, heads, head_size)
+    )
+    expected = torch.full(
+        (planes, layers, blocks, block_size, heads, head_size),
+        -1,
+        dtype=_DTYPE,
+        device=device,
+    )
+    for chunk, slots in zip(chunks, positions, strict=True):
+        for token, slot in enumerate(slots):
+            if slot >= 0:
+                block, offset = divmod(slot, block_size)
+                expected[:, :, block, offset] = chunk[:, :, token]
+
+    # Express physical page layout with tensor dimensions independently of the kernel.
+    pages = [layer.permute(axes) for layer in expected.unbind(1)]
+    if mla:
+        pages = [layer.squeeze(0).squeeze(-2) for layer in pages]
+    actual = [torch.full(page.shape, -1, device=device, dtype=_DTYPE) for page in pages]
+    ptrs = torch.tensor([page.data_ptr() for page in actual], device=device)
+    spec = cuda_ops.CBGroupSpec(
+        paged_kv_ptrs=ptrs.data_ptr(),
+        temp_buffer_ptrs=[chunk.data_ptr() for chunk in chunks],
+        num_layers=layers,
+        slot_tokens=slot_tokens,
+        hidden_elems=heads * head_size,
+        element_size=chunks.element_size(),
+        engine_kv_format=fmt,
+        page_buffer_size=blocks * block_size,
+        block_size=block_size,
+        head_size=head_size,
+        slot_mapping_base=mapping.data_ptr(),
+        slot_mapping_capacity=mapping.numel(),
+        cos_sin_cache=0,
+        rot_dim=0,
+        rope_num_kv_heads=0,
+        rope_head_stride=0,
+        key_scalar_type=15,
+        is_neox=True,
+    )
+    empty = np.empty((0, 4), dtype=np.int64)
+    cuda_ops.execute_cb_retrieve_plan_flat(
+        mapping.device,
+        1 << 26,
+        [spec],
+        empty,
+        empty,
+        np.array([[0, 0, 0, 4], [0, 1, 4, 3]], dtype=np.int64),
+        np.array([[0, 0, 2]], dtype=np.int64),
+    )
+    torch_dev.synchronize()
+    for page, reference in zip(actual, pages, strict=True):
+        assert torch.equal(page.view(torch.int16), reference.view(torch.int16))

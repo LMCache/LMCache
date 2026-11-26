@@ -13,7 +13,7 @@ from lmcache.cli.commands.query._coordinator import (
     get_text,
     normalize_url,
 )
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 

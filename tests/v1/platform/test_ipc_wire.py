@@ -33,8 +33,6 @@ from lmcache.v1.transport.zmq.codec import (
     get_customized_encoder,
 )
 
-pytestmark = pytest.mark.no_shared_allocator
-
 METADATA = TensorMetadata("float32", (2, 3), (3, 1), 0, "device-uuid")
 DESCRIPTORS = [
     NpuIPCData(version=1, bare=True, planes=(NpuPlaneData((0, b"npu", 24), METADATA),)),
