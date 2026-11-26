@@ -420,6 +420,11 @@ class L2AdapterInterface(ABC):
         Accounting is held under ``_usage_lock``; listener callbacks fire
         outside the lock so a slow listener cannot stall further notifies.
         """
+        self._record_stored_bytes(keys, sizes)
+        self._publish_keys_stored(keys, sizes)
+
+    def _record_stored_bytes(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+        """Charge bytes to total usage and to each cache salt."""
         # Aggregate per-salt deltas before touching
         # ``_bytes_by_cache_salt`` — one dict read/write per unique
         # salt instead of one per key. This matters when the registry is
@@ -436,6 +441,9 @@ class L2AdapterInterface(ABC):
                 self._bytes_by_cache_salt[salt] = (
                     self._bytes_by_cache_salt.get(salt, 0) + d
                 )
+
+    def _publish_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+        """Publish store notifications after byte accounting has been updated."""
         for listener in self._listeners:
             listener.on_l2_keys_stored(keys, sizes)
         self._event_bus.publish(

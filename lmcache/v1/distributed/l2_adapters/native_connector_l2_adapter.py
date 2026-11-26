@@ -477,11 +477,10 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 continue
 
             # Collect listener notifications to fire after
-            # releasing the lock. Sizes are collected in parallel so
-            # ``_notify_keys_*`` can update the base class's byte
-            # accounting in one shot.
+            # releasing the lock. Collect sizes for batch byte accounting.
             keys_stored: list[ObjectKey] = []
             sizes_stored: list[int] = []
+            has_store_completion = False
             keys_accessed: list[ObjectKey] = []
             keys_deleted: list[ObjectKey] = []
             sizes_deleted: list[int] = []
@@ -536,7 +535,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                     keys_stored.append(key)
                                     sizes_stored.append(0)
                         self._completed_stores[task_id] = L2StoreResult(ok, task_bytes)
-                        self._store_efd.notify()
+                        has_store_completion = True
 
                     elif op_type == self._OP_LOOKUP:
                         bitmap = Bitmap(num_keys)
@@ -585,10 +584,16 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                         if evt is not None:
                             delete_done_events.append(evt)
 
+                if has_store_completion:
+                    # Publish usage before exposing completions to consumers.
+                    if keys_stored:
+                        self._record_stored_bytes(keys_stored, sizes_stored)
+                    self._store_efd.notify()
+
             # Fire listener notifications outside the lock so a slow
             # listener cannot stall further demux iterations.
             if keys_stored:
-                self._notify_keys_stored(keys_stored, sizes_stored)
+                self._publish_keys_stored(keys_stored, sizes_stored)
             if keys_accessed:
                 self._notify_keys_accessed(keys_accessed)
             if keys_deleted:

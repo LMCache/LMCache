@@ -1426,6 +1426,33 @@ class TestUsageTracking:
         assert usage.usage_fraction == pytest.approx(0.2)
         assert usage.total_bytes_used == 400
 
+    def test_store_notifier_signals_after_usage_is_updated(
+        self, adapter_with_capacity, monkeypatch
+    ):
+        adp = adapter_with_capacity
+        key = ObjectKey(
+            chunk_hash=ObjectKey.IntHash2Bytes(1),
+            model_name="test_model",
+            kv_rank=0,
+            cache_salt="tenant",
+        )
+        usage_at_notify = []
+        notifier = adp._store_efd
+        notify = notifier.notify
+
+        def observe_and_notify():
+            # Sample on the demux thread at the signal boundary so the result
+            # does not depend on how quickly the consumer thread wakes up.
+            usage_at_notify.append(adp.get_usage())
+            notify()
+
+        monkeypatch.setattr(notifier, "notify", observe_and_notify)
+        adp.submit_store_task([key], [create_memory_obj(size=100)])
+        assert wait_for_event_fd(adp.get_store_event_fd())
+        (usage,) = usage_at_notify
+        assert usage.total_bytes_used == 400
+        assert usage.bytes_by_cache_salt == {"tenant": 400}
+
     def test_get_usage_after_delete(self, adapter_with_capacity):
         adp = adapter_with_capacity
         store_fd = adp.get_store_event_fd()
