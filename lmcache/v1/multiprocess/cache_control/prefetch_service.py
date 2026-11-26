@@ -82,7 +82,9 @@ class PrefetchService:
         )
         registry = self._engine.context.layout_desc_registry
         try:
-            token_hasher = registry.get_token_hasher(model_name, world_size, cache_format)
+            token_hasher = registry.get_token_hasher(
+                model_name, world_size, cache_format
+            )
             key_groups, chunks = resolve_grouped_object_keys(
                 token_hasher,
                 model_name,

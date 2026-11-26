@@ -10,7 +10,7 @@ import blake3
 
 
 def get_kv_cache_format(vllm_config: VllmConfig) -> str:
-    """Fingerprint the configured KV precision, ignoring skip-layer order and duplicates.
+    """Fingerprint configured KV precision, ignoring skip-layer order and duplicates.
 
     Args:
         vllm_config: Initialized configuration shared by scheduler and worker.

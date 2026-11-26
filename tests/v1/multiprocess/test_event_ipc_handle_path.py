@@ -147,7 +147,7 @@ def test_worker_exports_events_through_platform_backend(
         1.0,
         lmcache_chunk_tokens=256,
     )
-    assert client.register_kv_cache.call_args.args[-1] == 256
+    assert client.register_kv_cache.call_args.args[-2:] == (256, "")
     unregister_future = context.unregister()
     stream = MagicMock(name="current_stream")
     monkeypatch.setattr(worker_transfer.torch_dev, "current_stream", lambda: stream)

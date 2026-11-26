@@ -135,7 +135,7 @@ def finish_lookup_read(
 
 
 class LayoutDescRegistry:
-    """Registry of layouts and hashing metadata keyed by model, world size and precision.
+    """Registry of layouts and hashing metadata by model, world size and precision.
 
     Modules write to this thread-safe registry when KV caches are registered.
     Consumers read the layout, chunk size, and token hasher from the same entry
@@ -308,7 +308,9 @@ class LayoutDescRegistry:
             ValueError: If the namespace is not registered.
         """
         with self._lock:
-            return self._registered_entry(model_name, world_size, cache_format).chunk_size
+            return self._registered_entry(
+                model_name, world_size, cache_format
+            ).chunk_size
 
     def get_token_hasher(
         self, model_name: str, world_size: int, cache_format: str = ""
@@ -327,7 +329,9 @@ class LayoutDescRegistry:
             ValueError: If the namespace is not registered.
         """
         with self._lock:
-            return self._registered_entry(model_name, world_size, cache_format).token_hasher
+            return self._registered_entry(
+                model_name, world_size, cache_format
+            ).token_hasher
 
     def find_group_layout_descs(
         self, model_name: str, world_size: int, cache_format: str = ""
@@ -409,7 +413,9 @@ class LayoutDescRegistry:
                 looking up its windows.
         """
         with self._lock:
-            return self._registered_entry(model_name, world_size, cache_format).attn_desc
+            return self._registered_entry(
+                model_name, world_size, cache_format
+            ).attn_desc
 
     def find_shard_replication_desc(
         self, model_name: str, world_size: int, cache_format: str = ""

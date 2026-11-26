@@ -381,12 +381,14 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     existing.model_name != payload.model_name
                     or existing.world_size != payload.world_size
                     or existing.chunk_size != payload.chunk_size
+                    or existing.cache_format != payload.cache_format
                 ):
                     raise ValueError(
                         f"Instance {payload.instance_id} is already registered "
                         f"with model={existing.model_name!r}, "
                         f"world_size={existing.world_size}, "
-                        f"chunk_size={existing.chunk_size}"
+                        f"chunk_size={existing.chunk_size}, "
+                        f"cache_format={existing.cache_format!r}"
                     )
                 existing.last_seen = now
                 logger.info(

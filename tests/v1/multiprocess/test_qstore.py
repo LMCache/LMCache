@@ -559,8 +559,8 @@ def _sdk_module(stub_device, monkeypatch, attn_desc: Any = None, formats=("",)):
     keys = {0: ["a0", "a1", "a2"]}
     ctx.resolve_obj_keys.side_effect = lambda key, groups: [keys[g] for g in groups]
     groups = MagicMock(num_object_groups=1)
-    groups.get_attn_desc.return_value = (
-        attn_desc or AttnWindowDesc(num_chunks_in_sw=[-1], group_kinds=("attention",))
+    groups.get_attn_desc.return_value = attn_desc or AttnWindowDesc(
+        num_chunks_in_sw=[-1], group_kinds=("attention",)
     )
     kv_module = MagicMock(name="kv_module")
     entries = {}
@@ -781,7 +781,9 @@ def test_sdk_store_writes_pieces_into_reserved_objects_and_commits(
     assert callbacks[-1] == ("finish_write", {"a0": 0, "a1": 0, "a2": 0})
 
 
-@pytest.mark.parametrize("formats", [("format-a", "format-b"), ("format-b", "format-a")])
+@pytest.mark.parametrize(
+    "formats", [("format-a", "format-b"), ("format-b", "format-a")]
+)
 def test_sdk_store_uses_the_requested_layout(stub_device, monkeypatch, formats) -> None:
     module, ctx, _, _ = _sdk_module(stub_device, monkeypatch, formats=formats)
     storage = ctx.storage_manager
