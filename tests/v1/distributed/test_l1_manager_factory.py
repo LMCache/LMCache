@@ -30,8 +30,6 @@ from lmcache.v1.distributed.l1_manager import (
 )
 import lmcache.v1.memory_management as memory_management
 
-pytestmark = pytest.mark.no_shared_allocator
-
 LOCAL = MemoryResidency.LOCAL
 
 

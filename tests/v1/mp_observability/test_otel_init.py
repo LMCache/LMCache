@@ -8,6 +8,7 @@ import os
 import sys
 
 # Third Party
+from prometheus_client.parser import text_string_to_metric_families
 import pytest
 
 # First Party
@@ -269,7 +270,10 @@ def test_init_observability_propagates_grpc_metrics_enabled(monkeypatch):
     assert mock_init.call_args.kwargs["enable_grpc_metrics"] is True
 
 
-def test_metrics_sources_are_exported_with_sdk_metrics(monkeypatch):
+def test_metrics_sources_are_exported_with_sdk_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Export native and SDK metrics regardless of exporter scope labels."""
     # Third Party
     from opentelemetry.exporter.prometheus import PrometheusMetricReader
     from opentelemetry.sdk.metrics import MeterProvider
@@ -319,6 +323,12 @@ def test_metrics_sources_are_exported_with_sdk_metrics(monkeypatch):
         unregister()
         provider.shutdown()
 
-    assert 'native_calls_total{kind="native"} 7.0' in text
+    assert any(
+        sample.name == "native_calls_total"
+        and sample.labels.get("kind") == "native"
+        and sample.value == 7
+        for family in text_string_to_metric_families(text)
+        for sample in family.samples
+    )
     assert "sdk_calls_total" in text
     assert otel_init._METRICS_SOURCES == [broken]

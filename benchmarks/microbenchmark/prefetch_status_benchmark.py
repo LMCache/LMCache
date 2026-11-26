@@ -163,7 +163,7 @@ def run_cell(
         end=len(tokens),
         request_id="seed",
     )
-    hashes = ctx.token_hasher.compute_packed_chunk_hashes(
+    hashes = ctx.default_token_hasher.compute_packed_chunk_hashes(
         seed_key.token_bytes, end=seed_key.end
     )
     obj_keys = ipc_key_to_object_keys(

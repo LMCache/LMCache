@@ -42,8 +42,6 @@ from lmcache.v1.distributed.storage_controllers.utils import (
 )
 from lmcache.v1.memory_management import MemoryObj, MemoryObjMetadata, TensorMemoryObj
 
-pytestmark = pytest.mark.no_shared_allocator
-
 LAYOUT = MemoryLayoutDesc(shapes=[torch.Size([1024])], dtypes=[torch.float32])
 
 

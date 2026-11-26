@@ -17,6 +17,7 @@ import time
 import zlib
 
 # Third Party
+import msgspec
 import torch
 
 # First Party
@@ -119,6 +120,17 @@ class _Entry:
     offset: int
     size: int
     meta: DiskCacheMetadata
+
+
+class _CheckpointEntry(msgspec.Struct, gc=False):
+    """A version-1 JSON record with only acyclic metadata fields."""
+
+    offset: int
+    size: int
+    shape: torch.Size | None
+    dtype: str | None
+    fmt: str | None
+    cached_positions: list[Any] | None
 
 
 @dataclass
@@ -1838,14 +1850,12 @@ class RawBlockCore:
                 "data_base_offset": self._data_base_offset,
                 "next_slot": self._next_slot,
                 "entries": {
-                    encoded_key: {
-                        "offset": entry.offset,
-                        "size": entry.meta.size,
-                        "shape": list(entry.meta.shape)
-                        if entry.meta.shape is not None
-                        else None,
-                        "dtype": self._checkpoint_dtype_name(entry.meta.dtype),
-                        "fmt": (
+                    encoded_key: _CheckpointEntry(
+                        offset=entry.offset,
+                        size=entry.meta.size,
+                        shape=entry.meta.shape,
+                        dtype=self._checkpoint_dtype_name(entry.meta.dtype),
+                        fmt=(
                             entry.meta.fmt.name
                             if entry.meta.fmt is not None
                             and hasattr(entry.meta.fmt, "name")
@@ -1853,13 +1863,13 @@ class RawBlockCore:
                             if entry.meta.fmt is not None
                             else None
                         ),
-                        "cached_positions": (
+                        cached_positions=(
                             entry.meta.cached_positions.tolist()
                             if entry.meta.cached_positions is not None
                             and hasattr(entry.meta.cached_positions, "tolist")
                             else None
                         ),
-                    }
+                    )
                     for encoded_key, entry in self._index.items()
                 },
             }
@@ -1877,7 +1887,7 @@ class RawBlockCore:
         """
         if dtype is None:
             return None
-        return TORCH_DTYPE_TO_STR_DTYPE.get(dtype, str(dtype))
+        return TORCH_DTYPE_TO_STR_DTYPE.get(dtype) or str(dtype)
 
     def _write_checkpoint(self, payload: bytes, dirty_total_snapshot: int) -> bool:
         """Write one checkpoint copy and advance persisted metadata counters."""
@@ -1961,9 +1971,7 @@ class RawBlockCore:
 
         snapshot_ts = time.monotonic()
         snapshot, dirty_total_snapshot = self._snapshot_state()
-        payload = json.dumps(snapshot, separators=(",", ":"), ensure_ascii=True).encode(
-            "utf-8"
-        )
+        payload = msgspec.json.encode(snapshot)
         written = self._write_checkpoint(payload, dirty_total_snapshot)
         if written:
             with self._lock:

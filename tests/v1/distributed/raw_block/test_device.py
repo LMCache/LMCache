@@ -564,7 +564,6 @@ finally:
 
 @pytest.mark.skipif(platform.system() != "Linux", reason="io_uring is Linux only")
 @pytest.mark.parametrize("cleanup", ["close", "drop", "exit"])
-@pytest.mark.no_shared_allocator
 def test_raw_block_device_iouring_cleanup_without_wait(
     tmp_path: Path, cleanup: str
 ) -> None:

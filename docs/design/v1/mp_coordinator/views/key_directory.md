@@ -209,13 +209,18 @@ and a chunk is stored once per group. Token-addressed operations resolve group
 `0`, then
 reach the rest without the coordinator knowing how many groups there are:
 
-- **Lookup and delete** act only on what is stored, so
-  `get_keys_across_object_groups` expands each resolved key to its stored
-  copies in other groups, through the chunk-hash index above. A chunk in
-  two groups is looked up and deleted in two.
-- **Pins** match regardless of group: the pin table clears
-  `object_group_id` on every entry and check. One pin covers the chunk in
-  every group, including groups it is not stored in yet.
+- **Lookup and delete** act only on what is stored, so they expand through
+  the chunk-hash index above. Lookup uses `get_keys_across_object_groups`,
+  which adds each resolved key's stored copies in other groups. Delete uses
+  `get_stored_keys_of_chunks`, which adds the stored copies in any group and
+  on any rank of the key's world size, because a key names its whole chunk
+  and a chunk missing one rank's share is unusable. A chunk in two groups is
+  looked up and deleted in two.
+- **Pins** match regardless of group and rank: the pin table stores each
+  chunk under its rank-0 key in group `0` and maps every entry and check to
+  that key. One pin covers the chunk in every group and on every rank of its
+  world size, including copies not stored yet, so neither eviction nor a
+  delete can take part of a pinned chunk.
 
 Blend matching also omits `object_group_id` from its fleet namespace. After a
 content match, the serving Blend instance expands the chunk into the object

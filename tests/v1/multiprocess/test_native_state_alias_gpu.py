@@ -43,7 +43,7 @@ from lmcache.v1.transport.request_client import RequestClient
 
 CHUNK = 16
 TIMEOUT = 30.0
-pytestmark = [pytest.mark.cuda, pytest.mark.no_shared_allocator]
+pytestmark = pytest.mark.cuda
 
 if not (torch_dev.is_available() and torch_device_type == "cuda"):
     pytest.skip("requires a CUDA or ROCm runtime", allow_module_level=True)

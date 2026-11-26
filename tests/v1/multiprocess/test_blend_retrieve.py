@@ -714,11 +714,11 @@ def _unretrieved_ctx(
     from lmcache.v1.multiprocess.session import SessionManager
 
     ctx = MagicMock()
-    ctx.chunk_size = _UNRETRIEVED_CHUNK
+    ctx.default_chunk_size = _UNRETRIEVED_CHUNK
     ctx.storage_manager = storage_manager
     ctx.event_bus.has_subscribers.return_value = False
     # Prefix leg: no full chunk hashes -> handle None -> 0 coverage.
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = []
+    ctx.default_token_hasher.compute_packed_chunk_hashes.return_value = []
     # One registered attention-only object group.
     ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
         DEFAULT_SHARD_REPLICATION_DESC

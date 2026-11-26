@@ -553,7 +553,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         Profile validation precedes context creation, layout registration and
         liveness refresh. Rejection leaves existing registrations untouched.
         """
-        chunk_size = self._ctx.chunk_size if chunk_size is None else chunk_size
+        chunk_size = self._ctx.default_chunk_size if chunk_size is None else chunk_size
         self._ctx.validate_chunk_size(chunk_size)
         if event_profile is not None:
             if world_size <= 0 or chunk_size % event_profile.block_size:
@@ -800,7 +800,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             key, list(range(num_object_groups))
         )
         unfull_obj_keys = (
-            self._ctx.resolve_unfull_chunk_obj_keys(key, list(range(num_object_groups)))
+            self._ctx.resolve_unfull_chunk_obj_keys(
+                key, list(range(num_object_groups)), chunk_size
+            )
             if key.has_unfull_chunk(chunk_size)
             else []
         )
@@ -1178,7 +1180,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             key, list(range(num_object_groups))
         )
         unfull_obj_keys = (
-            self._ctx.resolve_unfull_chunk_obj_keys(key, list(range(num_object_groups)))
+            self._ctx.resolve_unfull_chunk_obj_keys(
+                key, list(range(num_object_groups)), chunk_size
+            )
             if key.has_unfull_chunk(chunk_size)
             else []
         )

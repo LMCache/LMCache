@@ -22,8 +22,6 @@ from lmcache.v1.transport.zmq.codec import (
     get_customized_encoder,
 )
 
-pytestmark = pytest.mark.no_shared_allocator
-
 requires_npu = pytest.mark.skipif(
     not (hasattr(torch, "npu") and torch.npu.is_available()),
     reason="Ascend NPU hardware is required",
