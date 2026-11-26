@@ -14,8 +14,8 @@ import msgspec
 import zmq
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.errors import LMCacheTimeoutError
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.transfer_channel.api import (
     TransferChannelAddress,
     TransferChannelTransferResult,

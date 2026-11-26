@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol, cast
 from urllib.parse import urlparse
+import importlib.util
 import math
 import shlex
 import subprocess
@@ -19,7 +20,7 @@ import time
 import zmq
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 
@@ -27,6 +28,7 @@ _AUTOSTART_KEY = "lmcache.mp.autostart"
 _SERVER_ARGS_KEY = "lmcache.mp.autostart.server_args"
 _WAIT_TIMEOUT_KEY = "lmcache.mp.autostart.wait_timeout"
 
+_SERVER_PACKAGE = "lmcache.v1.multiprocess"
 _DEFAULT_WAIT_TIMEOUT = 90.0
 _LOCAL_HOSTS = {"localhost", "127.0.0.1"}
 # The URL scheme picks the server transport, so server_args cannot override it.
@@ -62,8 +64,8 @@ def _build_autostart_config_from_url(
 
     Args:
         extra_config: vLLM ``kv_connector_extra_config`` mapping.
-        server_url: ``tcp://`` (ZMQ) or ``grpc://`` URL used by the connector
-            to reach the MP server.
+        server_url: ``grpc://`` or ``tcp://`` (deprecated ZMQ) URL used by the
+            connector to reach the MP server. A bare ``host:port`` is gRPC.
 
     Returns:
         Parsed ``MPServerAutostartConfig``.
@@ -80,7 +82,7 @@ def _build_autostart_config_from_url(
         )
 
     try:
-        parsed = urlparse(server_url if "://" in server_url else f"tcp://{server_url}")
+        parsed = urlparse(server_url if "://" in server_url else f"grpc://{server_url}")
         if parsed.netloc.count(":") > 1:
             raise ValueError(
                 "IPv6 is not supported by MP auto-start; use localhost or 127.0.0.1"
@@ -248,8 +250,14 @@ class _RequestClient(Protocol):
 
 
 class _RequestClientFactory(Protocol):
-    def create(self, server_url: str, *, context: zmq.Context) -> _RequestClient:
-        """Create a transport client for the endpoint."""
+    def create(
+        self,
+        server_url: str,
+        *,
+        context: zmq.Context,
+        api_key: str | None = None,
+    ) -> _RequestClient:
+        """Create a transport client for the endpoint and credential."""
 
 
 @dataclass(frozen=True)
@@ -261,7 +269,7 @@ class MPServerAutostartConfig:
     port: int
     wait_timeout: float
     server_args: tuple[str, ...]
-    transport: str = "zmq"
+    transport: str = "grpc"
 
     @classmethod
     def from_extra_config(
@@ -269,17 +277,18 @@ class MPServerAutostartConfig:
         extra_config: object | None,
         server_host: str,
         server_port: int | str,
-        transport: str = "zmq",
+        transport: str = "grpc",
     ) -> "MPServerAutostartConfig":
         """Build auto-start configuration from vLLM connector extra config.
 
         Args:
             extra_config: vLLM ``kv_connector_extra_config`` mapping.
             server_host: Local IPv4 host (localhost or 127.0.0.1), optionally
-                prefixed with tcp://, from the resolved connector endpoint.
+                prefixed with grpc:// or tcp://, from the resolved connector
+                endpoint.
             server_port: Port from the connector's resolved server endpoint.
-            transport: Server transport for the connector's endpoint, ``zmq``
-                for ``tcp://`` or ``grpc`` for ``grpc://``.
+            transport: Server transport for the connector's endpoint, ``grpc``
+                for ``grpc://`` or ``zmq`` for ``tcp://``.
 
         Returns:
             Parsed ``MPServerAutostartConfig``.
@@ -327,20 +336,18 @@ class MPServerAutostartConfig:
         Returns:
             Command arguments suitable for ``subprocess.Popen``.
         """
-        transport_args = (
-            [] if self.transport == "zmq" else ["--transport", self.transport]
-        )
         return [
             sys.executable,
             "-m",
-            "lmcache.v1.multiprocess.http_server",
+            f"{_SERVER_PACKAGE}.http_server",
             "--host",
             self.host,
             "--port",
             str(self.port),
             "--http-host",
             self.host,
-            *transport_args,
+            "--transport",
+            self.transport,
             *self.server_args,
         ]
 
@@ -357,7 +364,12 @@ class MPServerLauncher:
         self.config = config
         self._process: subprocess.Popen[bytes] | None = None
 
-    def start(self, server_url: str, zmq_context: zmq.Context) -> None:
+    def start(
+        self,
+        server_url: str,
+        zmq_context: zmq.Context,
+        api_key: str | None = None,
+    ) -> None:
         """Start the MP server if it is not already reachable.
 
         Args:
@@ -368,18 +380,29 @@ class MPServerLauncher:
             None.
 
         Raises:
+            RuntimeError: If no server is reachable and this environment has no
+                server to start, as with only ``lmcache-client`` installed.
             ConnectionError: If the server process exits early or does not become
                 healthy before the configured timeout.
         """
         if not self.config.enabled:
             return
 
-        if is_mp_server_healthy(server_url, zmq_context):
+        if is_mp_server_healthy(server_url, zmq_context, api_key=api_key):
             logger.info(
                 "LMCache MP server is already healthy at %s; skipping auto-start",
                 server_url,
             )
             return
+
+        if importlib.util.find_spec(_SERVER_PACKAGE) is None:
+            raise RuntimeError(
+                f"No LMCache MP server is reachable at {server_url}, and "
+                "lmcache.mp.autostart cannot start one here: starting a server "
+                f"needs the full lmcache distribution, and {_SERVER_PACKAGE} is "
+                "not installed (lmcache-client has no server). Install lmcache, "
+                "or start the server separately and connect to it."
+            )
 
         command = self.config.command()
         logger.info("Auto-starting LMCache MP server with command: %s", command)
@@ -389,12 +412,18 @@ class MPServerLauncher:
                 server_url,
                 zmq_context,
                 require_owned_process=True,
+                api_key=api_key,
             )
         except Exception:
             self.shutdown()
             raise
 
-    def wait_until_healthy(self, server_url: str, zmq_context: zmq.Context) -> None:
+    def wait_until_healthy(
+        self,
+        server_url: str,
+        zmq_context: zmq.Context,
+        api_key: str | None = None,
+    ) -> None:
         """Wait for the MP server to become reachable.
 
         Args:
@@ -411,7 +440,7 @@ class MPServerLauncher:
         if not self.config.enabled:
             return
 
-        if is_mp_server_healthy(server_url, zmq_context):
+        if is_mp_server_healthy(server_url, zmq_context, api_key=api_key):
             logger.info("LMCache MP server is already healthy at %s", server_url)
             return
 
@@ -420,6 +449,7 @@ class MPServerLauncher:
             server_url,
             zmq_context,
             require_owned_process=False,
+            api_key=api_key,
         )
 
     def shutdown(self) -> None:
@@ -459,10 +489,11 @@ class MPServerLauncher:
         zmq_context: zmq.Context,
         *,
         require_owned_process: bool,
+        api_key: str | None = None,
     ) -> None:
         deadline = time.monotonic() + self.config.wait_timeout
         while time.monotonic() < deadline:
-            if is_mp_server_healthy(server_url, zmq_context):
+            if is_mp_server_healthy(server_url, zmq_context, api_key=api_key):
                 logger.info(
                     "LMCache MP server became healthy at %s",
                     server_url,
@@ -498,6 +529,7 @@ def is_mp_server_healthy(
     server_url: str,
     zmq_context: zmq.Context,
     timeout: float = _PING_TIMEOUT_SECONDS,
+    api_key: str | None = None,
 ) -> bool:
     """Return whether the MP server responds to a PING request.
 
@@ -505,6 +537,9 @@ def is_mp_server_healthy(
         server_url: URL of the LMCache MP server (``tcp://`` or ``grpc://``).
         zmq_context: ZMQ context passed to the client factory.
         timeout: Maximum seconds to wait for the PING response.
+        api_key: Key the probe presents. Without it the probe falls back to the
+            environment, which fails when the server takes its key from a file
+            the connector was given through ``lmcache.mp.api_key_file``.
 
     Returns:
         ``True`` if the server returns a successful PING response, otherwise
@@ -513,7 +548,7 @@ def is_mp_server_healthy(
     client: _RequestClient | None = None
     try:
         factory = _load_mp_health_dependencies()
-        client = factory.create(server_url, context=zmq_context)
+        client = factory.create(server_url, context=zmq_context, api_key=api_key)
         future = client.ping(None)
         return bool(future.result(timeout=timeout))
     except Exception:
@@ -532,6 +567,7 @@ def maybe_start_mp_server_from_url(
     extra_config: object | None,
     server_url: str,
     zmq_context: zmq.Context,
+    api_key: str | None = None,
 ) -> MPServerLauncher | None:
     """Start the connector's local LMCache MP server when auto-start is enabled.
 
@@ -539,6 +575,7 @@ def maybe_start_mp_server_from_url(
         extra_config: vLLM ``kv_connector_extra_config`` mapping.
         server_url: URL used by the connector to reach the MP server.
         zmq_context: ZMQ context used for health probing.
+        api_key: Credential the readiness probe presents.
 
     Returns:
         A launcher for the enabled auto-start configuration, or ``None`` when
@@ -548,6 +585,8 @@ def maybe_start_mp_server_from_url(
     Raises:
         ValueError: If an auto-start configuration value or server URL is
             invalid.
+        RuntimeError: If no server is reachable and this environment has no
+            server to start, as with only ``lmcache-client`` installed.
         ConnectionError: If auto-start is enabled and the server does not
             become reachable before the configured timeout.
     """
@@ -559,7 +598,7 @@ def maybe_start_mp_server_from_url(
         return None
 
     launcher = MPServerLauncher(config)
-    launcher.start(server_url=server_url, zmq_context=zmq_context)
+    launcher.start(server_url=server_url, zmq_context=zmq_context, api_key=api_key)
     return launcher
 
 
@@ -568,6 +607,7 @@ def wait_for_mp_server_from_url(
     extra_config: object | None,
     server_url: str,
     zmq_context: zmq.Context,
+    api_key: str | None = None,
 ) -> None:
     """Wait for the connector's local LMCache MP server when auto-start is enabled.
 
@@ -575,6 +615,7 @@ def wait_for_mp_server_from_url(
         extra_config: vLLM ``kv_connector_extra_config`` mapping.
         server_url: URL used by the connector to reach the MP server.
         zmq_context: ZMQ context used for health probing.
+        api_key: Credential the readiness probe presents.
 
     Returns:
         None.
@@ -595,4 +636,5 @@ def wait_for_mp_server_from_url(
     MPServerLauncher(config).wait_until_healthy(
         server_url=server_url,
         zmq_context=zmq_context,
+        api_key=api_key,
     )

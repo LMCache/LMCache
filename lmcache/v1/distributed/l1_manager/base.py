@@ -11,7 +11,7 @@ import weakref
 
 # First Party
 from lmcache.lmcache_native import TTLLock
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import (
     L1BackendType,
     MemoryLayoutDesc,
@@ -219,6 +219,9 @@ class BaseL1Manager(L1ManagerInterface):
         self._staging: dict[ObjectKey, dict[str, L1ObjectState]] = {}
         # Bytes held by staging objects (kept in sync with ``_staging``).
         self._staging_bytes: int = 0
+        # Objects a prefetch read-locked for a request that has not consumed
+        # them yet.
+        self._prefetch_locked: dict[ObjectKey, L1ObjectState] = {}
 
         self._memory_manager = memory_manager
 
@@ -430,6 +433,7 @@ class BaseL1Manager(L1ManagerInterface):
                     key,
                 )
                 ret[key] = L1Error.KEY_IN_WRONG_STATE
+                self._prefetch_locked.pop(key, None)
                 continue
 
             # TODO(perf): support a count argument in
@@ -437,6 +441,8 @@ class BaseL1Manager(L1ManagerInterface):
             # overhead (TTLLock is C++ std::atomic).
             for _ in range(total):
                 entry.read_lock.unlock()
+            if not entry.read_lock.is_locked():
+                self._prefetch_locked.pop(key, None)
             if entry.is_temporary and not entry.read_lock.is_locked():
                 need_to_free.append(entry.memory_obj)
                 need_to_free_keys.append(key)
@@ -790,6 +796,7 @@ class BaseL1Manager(L1ManagerInterface):
 
             need_to_free.append(entry.memory_obj)
             del self._objects[key]
+            self._prefetch_locked.pop(key, None)
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
 
@@ -886,6 +893,7 @@ class BaseL1Manager(L1ManagerInterface):
             all_meta = [self._object_meta(obj) for obj in all_memory_objs]
             self._memory_manager.free(all_memory_objs)
             self._objects.clear()
+            self._prefetch_locked.clear()
             for listener in self._registered_listeners:
                 listener.on_l1_keys_deleted_by_manager(all_keys)
             self._event_bus.publish(
@@ -923,6 +931,7 @@ class BaseL1Manager(L1ManagerInterface):
 
         for key in keys_to_clear:
             del self._objects[key]
+            self._prefetch_locked.pop(key, None)
 
         if keys_to_clear:
             self._free_and_report_deleted(keys_to_clear, objs_to_free)
@@ -997,6 +1006,45 @@ class BaseL1Manager(L1ManagerInterface):
         """
         return self._staging_bytes
 
+    @l1_mgr_synchronized
+    def track_prefetch_locked(self, keys: list[ObjectKey]) -> None:
+        """Track resident, read-locked objects a prefetch holds for a request.
+
+        The prefetch controller tracks the L1 hits it locks and the objects
+        it loads from L2 for a request that has not consumed them yet.
+
+        An object stays tracked while it is resident and read-locked: until
+        the last reader finishes, the read TTL expires, or it leaves L1. Each
+        object is counted once, however many requests lock it.
+
+        Args:
+            keys: Keys of the locked objects. Keys that are not resident or
+                not read-locked are skipped.
+        """
+        for key in keys:
+            entry = self._objects.get(key, None)
+            if entry is not None and entry.read_lock.is_locked():
+                self._prefetch_locked[key] = entry
+
+    @l1_mgr_synchronized
+    def get_prefetch_locked_bytes(self) -> int:
+        """Get the bytes prefetch holds read-locked for unconsumed requests.
+
+        Returns:
+            The total size in bytes of the objects tracked by
+            :meth:`track_prefetch_locked` that are still resident and
+            read-locked. Part of :meth:`get_memory_usage`'s used bytes, and
+            disjoint from :meth:`get_staging_memory_usage`.
+        """
+        self._prefetch_locked = {
+            key: entry
+            for key, entry in self._prefetch_locked.items()
+            if self._objects.get(key, None) is entry and entry.read_lock.is_locked()
+        }
+        return sum(
+            entry.memory_obj.get_size() for entry in self._prefetch_locked.values()
+        )
+
     def get_capacity_bytes(self) -> int:
         """Return the current declared L1 capacity in bytes.
 
@@ -1032,6 +1080,7 @@ class BaseL1Manager(L1ManagerInterface):
             self._objects.clear()
             self._staging.clear()
             self._staging_bytes = 0
+            self._prefetch_locked.clear()
 
         self._memory_manager.close()
         with BaseL1Manager._gauge_lock:

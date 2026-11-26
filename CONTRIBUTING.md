@@ -193,9 +193,9 @@ operator-only changes from everything else, so a docs-only PR still runs most of
 | Check | Runs on | Covers |
 |---|---|---|
 | **DCO** | every PR | every commit carries a `Signed-off-by` trailer |
-| **Code Quality** | every PR outside `operator/` | `pre-commit run --all-files` — ruff, ruff-format, isort, mypy, codespell, clang-format, and the repo's local hooks (SPDX headers, banned APIs) |
-| **Test** | PRs to `dev` and `release-**` outside `operator/` | CPU-only unit tests, `pytest -m "not (cuda or musa or xpu or npu or neuron)"`, on Python 3.11–3.14 |
-| **CPU device** | every PR outside `operator/` | server benchmarks and vLLM end-to-end tests on CPU, on `ubuntu-22.04` and `macos-latest` |
+| **Code Quality** | ready-for-review PRs outside `operator/` | `pre-commit run --all-files` — ruff, ruff-format, isort, mypy, codespell, clang-format, and the repo's local hooks (SPDX headers, banned APIs) |
+| **Test** | PRs to `dev` and `release-**` outside `operator/`: drafts on Python 3.12; ready-for-review PRs after **Code Quality** passes, on the selected Python versions (default 3.11–3.14) | CPU-only unit tests, `pytest -m "not (cuda or musa or xpu or npu or neuron)"` |
+| **CPU device** | ready-for-review PRs to `dev` and `release-**` outside `operator/`, after **Code Quality** passes, on the selected OSes (default both) | server benchmarks and vLLM end-to-end tests on CPU, on `ubuntu-22.04` and `macos-latest` |
 | **CodeQL** | PRs to `dev` | static analysis of the Python code and the Actions workflows |
 | **Operator CI** | PRs touching `operator/` | the Go operator's own build and test suite |
 | **actionlint** | PRs touching `.github/workflows/` | workflow-file linting |
@@ -205,8 +205,22 @@ GPU coverage does not run in GitHub Actions. It runs on Buildkite — unit tests
 runner plus the vLLM integration suite — and posts its own `buildkite/...` check, so read
 that one too rather than only the green Actions checks.
 
-All of this runs on draft PRs as well, so you can open a draft and let CI tell you what is
-broken before you ask anyone to look.
+GitHub Actions CI runs in two layers:
+
+1. **Draft.** Only **Test** runs, on Python 3.12, so you can iterate quickly. Each push
+   cancels the previous in-flight run.
+2. **Ready for review.** Before you click **Ready for review**, tick in the **CI scope**
+   checklist of the PR description the Python versions for **Test** (`py3.11`–`py3.14`)
+   and the OSes for **CPU device** (`ubuntu-22.04`, `macos-latest`). A group with nothing
+   ticked runs every entry. **Code Quality** runs first, and **Test** / **CPU device**
+   start only after it passes. Converting the PR back to draft cancels the in-flight runs,
+   Buildkite builds included. If **Test** fails, the remaining **CPU device** jobs are
+   cancelled (PRs from branches of this repository). Tick `rust` to run the Rust raw-block
+   tests even when no raw-block file changed.
+
+The 1-GPU unit tests (`buildkite/k3-unit-tests`) do not run on drafts. They start when you
+click **Ready for review** and on every later push, in parallel with the checks above. The
+other Buildkite pipelines keep their own label-based triggers.
 
 If a check fails, open its log from the **Checks** tab on the PR, reproduce and fix it
 locally, and push again. Every push re-runs the checks and cancels the previous in-flight
@@ -279,8 +293,6 @@ pytest -xvs tests/v1/test_kv_cache_groups.py::test_function_name
 ```
 
 Test dependencies: `uv pip install -r requirements/test.txt`
-
-Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
 
 ### Testing Practices
 

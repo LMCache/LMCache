@@ -709,7 +709,7 @@ def test_partial_deadline_keeps_affinity_and_drains_without_store(
         for index, config in enumerate(configs)
     ]
     stores = [
-        StoreController(manager, [adapter], [descriptor], DefaultStorePolicy())
+        StoreController(manager, [adapter], [descriptor], DefaultStorePolicy([manager]))
         for manager, adapter, descriptor in zip(
             managers, adapters, descriptors, strict=True
         )

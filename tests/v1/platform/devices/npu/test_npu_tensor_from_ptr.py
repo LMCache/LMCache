@@ -11,8 +11,6 @@ import torch
 # First Party
 from lmcache.v1.platform.devices.npu import device_ops
 
-pytestmark = pytest.mark.no_shared_allocator
-
 # ``npu`` only parses once torch_npu registers the device type, so these
 # CPU-runnable tests forward a stand-in device: ``tensor_from_ptr`` treats
 # the argument as opaque pass-through data.

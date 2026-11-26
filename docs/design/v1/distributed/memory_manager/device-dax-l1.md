@@ -72,7 +72,7 @@ with `offset` defaulting to 0. The offset exists so that several LMCache
 servers can share one CXL device by mapping disjoint ranges, and so that one
 pool can hold several ranges of the same device. The allocator validates that
 the offset is a non-negative multiple of `mmap.ALLOCATIONGRANULARITY`, then
-`lmcache.utils.check_dax_range` checks `[offset, offset + size)` against the
+`lmcache.v1.distributed.utils.check_dax_range` checks `[offset, offset + size)` against the
 device geometry: `st_size` for a regular file, or the sysfs `size` and `align`
 attributes of the character device (looked up under `/sys/dev/char` by
 `major:minor`). This check is mandatory: `fstat` reports size 0 for a
@@ -303,3 +303,25 @@ the last cached entry is deleted. It accepts real `/dev/dax` devices via
   (`add_device` / `remove_device`).
 - Runtime reconfigure maps and unmaps already-provisioned Device-DAX devices;
   it does not perform kernel-level CXL/DAX namespace reconfiguration.
+
+## Shared Region Mapping
+
+`SharedDevDaxRegion` (`memory_manager/shared_devdax_region.py`) is a standalone
+mapping with `view`, `owns_range` and `close`. It maps the orchestrator's region
+at the configured path/offset through `DevDaxMemoryAllocator.open_devdax_mapping`,
+requires GPU registration and returns parentless views of granted extents.
+Dropping a view frees nothing. The caller drains copies before closing the
+mapping. Unregistration ends view creation and GPU use. If exported tensors
+prevent unmapping, `close()` raises `BufferError` and keeps the mmap and file
+descriptor for retry after those tensors are released. It has no allocation,
+accounting or arena API; `DevDaxL1MemoryManager`
+remains the private allocator. The `shared` configuration is still rejected by
+`DevDaxL1Manager` until the coordination/serving follow-up.
+
+A CXL [Shadow L1](../l1_manager/l1-manager-types.md#shadow-l1) uses the tensorless
+`BorrowedMemoryObj` in `memory_management.py`: a borrowing adapter binds its
+lease and `read_into(region_id, offset)` operation, not a local tensor. A
+Device-DAX adapter would need to acquire the orchestrator lease, apply the
+region's acquire fence, and keep the mapping GPU-registered until reads finish.
+Its release callback must follow the nonblocking `Lease` contract. The shadow
+option alone supplies neither that adapter nor shared Device-DAX serving.

@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     )
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import MemoryResidency, MemorySegment, MemoryTags
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -64,9 +64,9 @@ class FSNativeL2AdapterConfig(L2AdapterConfigBase):
     - num_workers: C++ worker threads for I/O (default 4).
     - relative_tmp_dir: relative sub-dir for temp files.
     - use_odirect: bypass page cache via O_DIRECT.
-    - num_read_workers: threads dedicated to executing reads, and so the
+    - num_read_workers: threads that run lookups and reads, and so the
       maximum reads in flight (default 256).  0 keeps the legacy path,
-      where reads run on the worker threads and the depth against the
+      where both run on the worker threads and the read depth against the
       device therefore equals num_workers.
     - read_max_bytes_in_flight: bytes the connector may keep outstanding
       against the device.  0 selects 1536 MiB when num_read_workers is

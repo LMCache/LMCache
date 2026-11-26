@@ -26,7 +26,7 @@ import threading
 import numpy as np
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_hasher import (
     chunk_hash_windows_numba,
     rolling_hash_windows_numba,

@@ -33,9 +33,9 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             :sync: mp
 
             Start the LMCache server. ``--host`` / ``--port`` set the request
-            address vLLM connects to; ``--transport`` selects ZMQ (the default)
-            or gRPC. The defaults are spelled out here so the two commands
-            line up:
+            address vLLM connects to; ``--transport`` selects gRPC (the default)
+            or the deprecated ZMQ. The defaults are spelled out here so the two
+            commands line up:
 
             .. code-block:: bash
 
@@ -56,9 +56,9 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             ``lmcache.mp.port`` in ``kv_connector_extra_config``. The host may
             include a transport prefix: ``tcp://`` for ZMQ or ``grpc://`` for
             gRPC. A bare ``host``/``host:port`` is also accepted and is
-            normalized to ``tcp://`` automatically. See
-            :doc:`/mp/request_transport` for supported endpoint schemes and
-            transport-selection behavior:
+            normalized to ``grpc://`` automatically. ZMQ endpoints still work
+            but are deprecated. See :doc:`/mp/request_transport` for supported
+            endpoint schemes and transport-selection behavior:
 
             .. code-block:: bash
 
@@ -178,7 +178,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          EOF
 
       ``mp_host`` and ``mp_port`` identify the standalone LMCache request
-      server. A bare host uses the default ZMQ transport.
+      server. A bare host uses the default gRPC transport.
 
       Engine-driven transfer can be selected under ``extra_config`` with the
       same name as the vLLM connector:
@@ -211,8 +211,8 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
       typed inline transport, which serialises every chunk through the request
       channel and is much slower; see :ref:`mp-transfer-mode`.
 
-      To use gRPC instead of ZMQ, include the ``grpc://`` scheme in the
-      connector configuration:
+      gRPC is the default; the ``grpc://`` scheme is explicit for clarity and
+      for the case where a deployment still names ZMQ elsewhere:
 
       .. code-block:: bash
 
@@ -369,7 +369,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                    kv_cache_config=KvCacheConfig(enable_block_reuse=True),
                    kv_connector_config=KvCacheConnectorConfig(
                        connector="lmcache-mp",
-                       server_url="tcp://localhost:5555",
+                       server_url="grpc://localhost:5555",
                    ),
                )
 
@@ -384,18 +384,18 @@ More MP server options
 The vLLM MP example above runs ``lmcache server`` locally on the default
 ports. Common variations:
 
-**Custom port, remote host, or gRPC** -- by default the connector talks to
-``localhost:5555`` over ZMQ. To use a different port, a server on another
-host, or gRPC, pass ``lmcache.mp.host`` / ``lmcache.mp.port`` in
-``kv_connector_extra_config`` and select the matching server transport:
+**Custom port or remote host** -- by default the connector talks to
+``localhost:5555`` over gRPC. To use a different port or a server on another
+host, pass ``lmcache.mp.host`` / ``lmcache.mp.port`` in
+``kv_connector_extra_config``:
 
 .. code-block:: bash
 
    vllm serve Qwen/Qwen3-8B --kv-transfer-config \
-     '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://10.0.0.1", "lmcache.mp.port": 6555}}'
+     '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "grpc://10.0.0.1", "lmcache.mp.port": 6555}}'
 
-For gRPC, start the server with ``--transport grpc`` and use a
-``grpc://10.0.0.1`` connector host.
+A server started with the deprecated ``--transport zmq`` needs a
+``tcp://10.0.0.1`` connector host instead.
 
 **CPU-only (no GPU)** -- the server runs with a ``StubCPUDevice`` and shares
 KV tensors with vLLM over POSIX shared memory. Start ``lmcache server``

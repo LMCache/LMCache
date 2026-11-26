@@ -2,7 +2,6 @@
 """Non-GPU context abstractions and utilities for multiprocess transport.
 
 This module provides:
-- ``EngineDrivenContextMetadata``: layout metadata dataclass for non-CUDA workers.
 - ``EngineDrivenContext``: abstract base class with a two-phase prepare/commit
   interface for CPU-side KV data transfer. Concrete implementations each decide
   *how* data is serialised and transported.
@@ -19,7 +18,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING
 import inspect
@@ -30,11 +28,11 @@ import time
 import torch
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.utils import EngineType
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.api import MemoryLayoutDesc
+from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.transfer_context import EngineDrivenContextMetadata
 from lmcache.v1.common.utils import LayoutHints
-from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.platform import resolve_device_ops
 from lmcache.v1.platform.native_block_transfer import transfer_with_address_kernel
 from lmcache.v1.transport.request_client import RequestClient
@@ -67,30 +65,6 @@ def _detect_block_transfer_accepts_tensor(transfer_fn: Callable[..., None]) -> b
 
 
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class EngineDrivenContextMetadata:
-    """Non-GPU context layout metadata for non-CUDA workers.
-
-    Attributes:
-        layout_desc: Memory layout descriptor used to interpret chunk payloads
-            (group 0's layout for multi-group workers).
-        block_size: Number of tokens per paged block.
-        use_mla: Whether the worker KV format is MLA.
-        group_layouts: Per-LMCache-group layouts for multi-group (hybrid-KV)
-            workers, in protocol group order. ``None`` means single-group.
-        group_windows: Per-group trailing-chunk windows parallel to
-            ``group_layouts`` (``-1`` = full attention). A retrieve serves
-            only each group's in-window suffix. ``None`` means every group is
-            full attention.
-    """
-
-    layout_desc: MemoryLayoutDesc
-    block_size: int
-    use_mla: bool
-    group_layouts: "list[MemoryLayoutDesc] | None" = None
-    group_windows: "list[int] | None" = None
 
 
 class ContextClosedError(RuntimeError):
@@ -273,8 +247,13 @@ class EngineDrivenContext(ABC):
         )
 
     @abstractmethod
-    def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
-        """Commit retrieve. Inline: no-op. Shm: release read locks."""
+    def commit_retrieve(
+        self, key: IPCCacheServerKey, instance_id: int, failed: bool = False
+    ) -> bool:
+        """Commit retrieve. Inline: no-op. Shm: release read locks.
+
+        ``failed`` tells the server the worker did not get or apply the data.
+        """
         ...
 
     @abstractmethod
@@ -638,6 +617,9 @@ def scatter_cpu_to_paged_kv(
             a positive multiple of the physical slots per block.
     """
     # First Party
+    from lmcache.v1.common.attn_window import (
+        recalculate_blocks_to_skip,
+    )
     from lmcache.v1.common.utils import (
         get_block_size,
         get_device,
@@ -646,13 +628,6 @@ def scatter_cpu_to_paged_kv(
         make_page_buffer_shape_desc,
         normalize_kv_and_discover_format,
         resolve_block_stride_and_log_layout,
-    )
-
-    # Local like the rest: object_group_transfer pulls in the GPU connector and
-    # distributed stack (serde needs `cryptography`), which would otherwise load
-    # for every importer of transfer_context, e.g. the ATOM integration.
-    from lmcache.v1.multiprocess.object_group_transfer import (
-        recalculate_blocks_to_skip,
     )
 
     if not chunks:
