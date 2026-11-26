@@ -1549,3 +1549,34 @@ class TestSGLangRecovery:
             nprocs=2,
             join=True,
         )
+
+
+def _group(*dtypes: torch.dtype) -> SimpleNamespace:
+    return SimpleNamespace(
+        kv_tensors=[SimpleNamespace(dtype=dtype) for dtype in dtypes]
+    )
+
+
+def test_group_dtype_tag_lists_every_group() -> None:
+    """Two engines may agree on group 0 and differ later; keys must differ."""
+    # First Party
+    from lmcache.integration.sglang.unified_lmcache_mp_connector import (
+        _groups_kv_dtype_tag,
+    )
+
+    engine_a = _groups_kv_dtype_tag([_group(torch.float16), _group(torch.bfloat16)])
+    engine_b = _groups_kv_dtype_tag([_group(torch.float16), _group(torch.float32)])
+
+    assert engine_a == "f16;bf16"
+    assert engine_b == "f16;f32"
+    assert engine_a != engine_b
+
+
+def test_group_dtype_tag_sorts_within_a_group() -> None:
+    """Component order inside one group does not change the bytes."""
+    # First Party
+    from lmcache.integration.sglang.unified_lmcache_mp_connector import (
+        _groups_kv_dtype_tag,
+    )
+
+    assert _groups_kv_dtype_tag([_group(torch.float16, torch.bfloat16)]) == "bf16,f16"

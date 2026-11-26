@@ -66,6 +66,23 @@ class _ImmediateFuture:
         del value
 
 
+def _groups_kv_dtype_tag(groups: Sequence[Any]) -> str:
+    """Return a per-group dtype signature for the identity tag.
+
+    SGLang registers several component groups, and they can differ: an MLA
+    latent in fp8 next to a bf16 indexer, or a recurrent state in fp32. The
+    tag lists each group's dtypes in order, so two engines that agree on the
+    first group but differ later cannot share keys. Within one group the set
+    is sorted and de-duplicated because component order does not change the
+    bytes.
+    """
+    parts: list[str] = []
+    for group in groups:
+        codes = sorted({kv_dtype_tag_code(tensor.dtype) for tensor in group.kv_tensors})
+        parts.append(",".join(codes))
+    return ";".join(parts)
+
+
 class UnifiedLMCacheMPConnector:
     """Asynchronous device-IPC connector to a standalone LMCache server."""
 
@@ -282,8 +299,9 @@ class UnifiedLMCacheMPConnector:
         self._kv_caches = {f"kv_{i}": tensor for i, tensor in enumerate(kv_tensors)}
         # Part of the object identity: two engines can serve the same model
         # with different KV cache dtypes and the server cannot see which one
-        # sent a request.
-        self._kv_dtype_tag = kv_dtype_tag_code(kv_tensors[0].dtype)
+        # sent a request. Groups can differ from each other, so the tag keeps
+        # one entry per registered group instead of the first tensor's dtype.
+        self._kv_dtype_tag = _groups_kv_dtype_tag(wire_groups)
         self._kv_groups = tuple(wire_groups)
         (
             self._engine_group_info_specs,
