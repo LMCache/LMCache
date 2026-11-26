@@ -294,6 +294,7 @@ class TestCoordinatorCommandExecute:
             eviction_check_interval=None,
             eviction_ratio=None,
             trigger_watermark=None,
+            target_watermark=None,
             chunk_size=None,
             hash_algorithm=None,
             enable_blend_lookup=None,
