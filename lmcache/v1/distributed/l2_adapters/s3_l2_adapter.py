@@ -280,10 +280,13 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
       bucket) or ``"per_cache_salt"`` (route each ``cache_salt`` to its own
       physical bucket for multi-tenant isolation on a shared box).
     - s3_bucket_template (str): bucket-name format used in ``per_cache_salt``
-      mode; supports ``{salt}`` (sanitized cache_salt) and ``{base}`` (the
-      ``s3_endpoint``'s bucket name), e.g. ``"kv-cache-{salt}"`` or
-      ``"{base}-{salt}"``. Empty (default) → ``"{base}-{salt}"``. Unsalted KV
-      and ``"single"`` mode both use the ``s3_endpoint`` bucket unchanged.
+      mode; ``{base}`` is the ``s3_endpoint``'s bucket name and ``{salt}``
+      (required, once) becomes ``<readable>-<hash>``, where ``<hash>`` is 12
+      hex digits of SHA-256 over the original cache_salt and ``<readable>``
+      is its sanitized, truncated form (see ``s3_bucket_router``). E.g.
+      ``"kv-cache-{salt}"`` or ``"{base}-{salt}"``. Empty (default) →
+      ``"{base}-{salt}"``. Unsalted KV and ``"single"`` mode both use the
+      ``s3_endpoint`` bucket unchanged.
     """
 
     def __init__(
@@ -309,21 +312,21 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         self.aws_access_key_id = aws_access_key_id
         self.aws_secret_access_key = aws_secret_access_key
         self.max_capacity_gb = max_capacity_gb
-        # Multi-tenant per-cache_salt bucket isolation (opt-in; default
-        # reproduces exact single-bucket upstream behavior).
-        #   s3_bucket_mode: "single" (default) or "per_cache_salt".
-        #   s3_bucket_template: bucket-name format for per_cache_salt mode;
-        #     supports {salt} (sanitized cache_salt) and {base} (the
-        #     s3_endpoint's bucket name), e.g. "kv-cache-{salt}".
+        # Multi-tenant per-cache_salt bucket isolation (opt-in; the default
+        # reproduces the single-bucket behavior exactly).
         if s3_bucket_mode not in ("single", "per_cache_salt"):
             raise ValueError("s3_bucket_mode must be 'single' or 'per_cache_salt'")
         self.s3_bucket_mode = s3_bucket_mode
         self.s3_bucket_template = s3_bucket_template
-        # Fail fast on a malformed template (unknown placeholder / bad spec) at
-        # config time rather than on the first PUT in per_cache_salt mode.
+        # Fail fast on a template that can produce an illegal bucket name, at
+        # config time rather than on the first request in per_cache_salt mode.
         if s3_bucket_mode == "per_cache_salt":
+            template = s3_bucket_template or _bucket_router.DEFAULT_TEMPLATE
+            base_bucket = _bucket_router.bucket_of_host(
+                s3_endpoint.removeprefix("s3://")
+            )
             try:
-                (s3_bucket_template or "{base}-{salt}").format(salt="x", base="x")
+                _bucket_router.validate_template(template, base_bucket)
             except (KeyError, ValueError, IndexError) as e:
                 raise ValueError(
                     f"invalid s3_bucket_template {s3_bucket_template!r}: {e}"
@@ -440,12 +443,13 @@ class S3L2Adapter(L2AdapterInterface):
         self._enable_s3express = config.s3_enable_s3express
         # per-cache_salt bucket routing (multi-tenant isolation)
         self._bucket_mode = config.s3_bucket_mode
-        self._bucket_template = config.s3_bucket_template or "{base}-{salt}"
+        self._bucket_template = (
+            config.s3_bucket_template or _bucket_router.DEFAULT_TEMPLATE
+        )
         self._base_bucket = endpoint.split(".", 1)[0]
         self._host_suffix = endpoint.partition(".")[2]  # s3.<region>.amazonaws.com
-        self._seen_salts: set[str] = (
-            set()
-        )  # salts observed → buckets to list for eviction
+        # Tenant bucket names (not salts) observed → buckets to list.
+        self._tenant_buckets: set[str] = set()
         self._ensured_buckets: set[str] = (
             set()
         )  # tenant buckets provisioned this process
@@ -760,12 +764,9 @@ class S3L2Adapter(L2AdapterInterface):
             # paginating across them with a composite cursor
             # (bucket_index, in-bucket-token). Deletes the eviction controller
             # issues route back to the right bucket via _make_request.
-            hosts = _bucket_router.bucket_hosts(
-                self._endpoint,
-                self._seen_salts,
-                self._bucket_mode,
-                self._bucket_template,
-            )
+            with self._lock:
+                tenant_buckets = set(self._tenant_buckets)
+            hosts = _bucket_router.bucket_hosts(self._endpoint, tenant_buckets)
             idx, token = _bucket_router.decode_cursor(cursor)
             entries, next_token = [], None
             while idx < len(hosts):
@@ -884,12 +885,10 @@ class S3L2Adapter(L2AdapterInterface):
             template=self._bucket_template,
         )
         if host != self._endpoint:
-            # remember which tenant buckets we've written to, for per-bucket
-            # eviction/listing (mutated from request threads → hold the lock).
+            # remember which tenant buckets we've used, for per-bucket
+            # listing (mutated from request threads → hold the lock).
             with self._lock:
-                self._seen_salts.add(
-                    _bucket_router.sanitize_salt(_bucket_router.salt_of_key(key_str))
-                )
+                self._tenant_buckets.add(_bucket_router.bucket_of_host(host))
             if self._auto_create_bucket:
                 self._ensure_bucket(host)
         return host
