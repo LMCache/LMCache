@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 import argparse
 import asyncio
@@ -142,8 +142,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     Manage the lifecycle of the LMCache HTTP server.
 
-    On startup: Initialize the selected request server and cache engine.
-    On shutdown: Clean up request server and cache engine resources.
+    Initialize HTTP resources and the selected request server/cache engine.
+
+    A native runtime may supply ``app.state.externally_managed_cache_server``
+    as a ``(request_server, engine)`` tuple. In that case this lifespan borrows
+    those resources; the runtime closes them after HTTP shutdown completes.
     """
     # Startup
     logger.info(
@@ -153,14 +156,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     mp_config = _configs["mp"]
     coordinator_config = _configs.get("coordinator") or DEFAULT_COORDINATOR_CONFIG
 
-    result = run_cache_server(
-        mp_config=mp_config,
-        storage_manager_config=_configs["storage_manager"],
-        obs_config=_configs["observability"],
-        return_engine=True,
-        start_prometheus_http_server=False,
-        coordinator_config=coordinator_config,
-    )
+    external = getattr(app.state, "externally_managed_cache_server", None)
+    result = external
+    if result is None:
+        result = run_cache_server(
+            mp_config=mp_config,
+            storage_manager_config=_configs["storage_manager"],
+            obs_config=_configs["observability"],
+            return_engine=True,
+            start_prometheus_http_server=False,
+            coordinator_config=coordinator_config,
+        )
     assert result is not None, "run_cache_server returned None with return_engine=True"
     request_server, engine = result
 
@@ -257,10 +263,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     launcher = getattr(app.state, "plugin_launcher", None)
     if launcher is not None:
         launcher.stop_plugins()
-    get_event_bus().stop()
-    request_server.close()
-    engine.close()
-    shutdown_grpc_otel_metrics()
+    if external is None:
+        get_event_bus().stop()
+        request_server.close()
+        engine.close()
+        shutdown_grpc_otel_metrics()
     logger.info("LMCache HTTP server stopped")
 
 
@@ -278,16 +285,16 @@ registry.register_all_apis()
 register_error_handlers(app)
 
 
-def run_http_server(
+def create_http_server(
     http_config: HTTPFrontendConfig,
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
     obs_config: ObservabilityConfig,
     coordinator_config: CoordinatorConfig,
     http_authentication: HTTPAuthenticationConfig | None = None,
-) -> None:
+) -> uvicorn.Server:
     """
-    Run the LMCache HTTP server with an integrated MP request server.
+    Validate configuration and construct an unstarted HTTP server.
 
     Args:
         http_config: Configuration for the HTTP frontend
@@ -298,6 +305,10 @@ def run_http_server(
             (an empty URL disables registration)
         http_authentication: Bearer API keys accepted by the HTTP frontend.
             ``None`` leaves authentication disabled.
+
+    Returns:
+        An unstarted Uvicorn server using the configured FastAPI application.
+        No request server or cache engine has been created yet.
 
     Raises:
         ValueError: If P2P is enabled without a coordinator URL, or with an L1
@@ -360,10 +371,52 @@ def run_http_server(
         http_config.http_host,
         http_config.http_port,
     )
-    server.run()
+    return server
 
 
-def parse_args():
+def run_http_server(
+    http_config: HTTPFrontendConfig,
+    mp_config: MPServerConfig,
+    storage_manager_config: StorageManagerConfig,
+    obs_config: ObservabilityConfig,
+    coordinator_config: CoordinatorConfig,
+    http_authentication: HTTPAuthenticationConfig | None = None,
+) -> None:
+    """Construct and run the HTTP server with a Python-owned MP lifecycle.
+
+    Args:
+        http_config: HTTP listener settings.
+        mp_config: Request transport and engine settings.
+        storage_manager_config: Cache storage settings.
+        obs_config: Observability settings.
+        coordinator_config: Coordinator registration settings.
+        http_authentication: Accepted HTTP bearer API keys, or no authentication.
+
+    Raises:
+        ValueError: A configuration violates ``create_http_server`` validation.
+    """
+    create_http_server(
+        http_config,
+        mp_config,
+        storage_manager_config,
+        obs_config,
+        coordinator_config,
+        http_authentication,
+    ).run()
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse HTTP/MP server flags from explicit tokens or ``sys.argv``.
+
+    Args:
+        argv: Argument tokens after the executable, or ``None`` for sys.argv.
+
+    Returns:
+        The parsed server arguments.
+
+    Raises:
+        SystemExit: Help was requested or arguments are invalid.
+    """
     parser = argparse.ArgumentParser(
         description="LMCache HTTP Server with integrated MP Cache Server"
     )
@@ -373,7 +426,7 @@ def parse_args():
     add_storage_manager_args(parser)
     add_observability_args(parser)
     add_coordinator_args(parser)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
