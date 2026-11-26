@@ -29,7 +29,8 @@ jobs:
           components: rustfmt, clippy
       - name: Check and test the executable
         run: |
-          export PYO3_PYTHON="$(command -v python)"
+          PYO3_PYTHON="$(command -v python)"
+          export PYO3_PYTHON
           cargo fmt --manifest-path rust/server/Cargo.toml --check
           cargo clippy --locked --manifest-path rust/server/Cargo.toml --all-targets -- -D warnings
           cargo test --locked --manifest-path rust/server/Cargo.toml
