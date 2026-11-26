@@ -82,42 +82,26 @@ jobs:
     name: Weekly full build (CUDA)
     needs: prepare
     if: github.repository == 'LMCache/LMCache' && (github.event_name != 'workflow_dispatch' || inputs.device == 'all' || inputs.device == 'cuda')
-    permissions:
-      contents: write
     uses: ./.github/workflows/weekly_full_build_cuda.yml
-    with:
-      run_prepare: false
     secrets: inherit
 
   xpu:
     name: Weekly full build (XPU)
     needs: prepare
     if: github.repository == 'LMCache/LMCache' && (github.event_name != 'workflow_dispatch' || inputs.device == 'all' || inputs.device == 'xpu')
-    permissions:
-      contents: write
     uses: ./.github/workflows/weekly_full_build_xpu.yml
-    with:
-      run_prepare: false
     secrets: inherit
 
   amd:
     name: Weekly full build (AMD)
     needs: prepare
     if: github.repository == 'LMCache/LMCache' && (github.event_name != 'workflow_dispatch' || inputs.device == 'all' || inputs.device == 'amd')
-    permissions:
-      contents: write
     uses: ./.github/workflows/weekly_full_build_amd.yml
-    with:
-      run_prepare: false
     secrets: inherit
 
   rbln:
     name: Weekly full build (RBLN)
     needs: prepare
     if: github.repository == 'LMCache/LMCache' && (github.event_name != 'workflow_dispatch' || inputs.device == 'all' || inputs.device == 'rbln')
-    permissions:
-      contents: write
     uses: ./.github/workflows/weekly_full_build_rbln.yml
-    with:
-      run_prepare: false
     secrets: inherit

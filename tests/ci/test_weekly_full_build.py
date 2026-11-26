@@ -475,13 +475,13 @@ def test_weekly_orchestrator_and_device_workflows_are_consistent() -> None:
         assert rel_use in orch_uses, f"{wf_path.name} is not wired in orchestrator"
         wf = yaml.safe_load(wf_path.read_text(encoding="utf-8"))
         dev_triggers = wf.get("on") if "on" in wf else wf.get(True)
-        assert "workflow_call" in dev_triggers and "workflow_dispatch" in dev_triggers
+        assert (
+            "workflow_call" in dev_triggers and "workflow_dispatch" not in dev_triggers
+        )
 
         call = wf["jobs"]["weekly"]
         assert call["uses"] == "./.github/workflows/weekly_device_build.yml"
-        assert call.get("permissions") == {"contents": "write"}
         inputs = call["with"]
-        assert inputs["run_prepare"] == "${{ inputs.run_prepare != false }}"
         timeout = inputs["timeout_minutes"]
         assert isinstance(timeout, int) and 0 < timeout < runner_timeout
         manifest_path = (REPO / inputs["manifest"]).resolve()

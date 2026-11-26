@@ -8,7 +8,7 @@ commits.
 | | |
 |---|---|
 | Workflow | [`.github/workflows/weekly_full_build.yml`](../../../.github/workflows/weekly_full_build.yml) (orchestrator) -> [`weekly_full_build_{cuda,xpu,amd,rbln}.yml`](../../../.github/workflows/weekly_full_build_cuda.yml) -> [`weekly_device_build.yml`](../../../.github/workflows/weekly_device_build.yml) |
-| Schedule | Active: `Sunday 08:00 UTC` (`0 8 * * 0`), plus manual **Actions → Weekly full build → Run workflow** (or individual device workflows) from `dev` |
+| Schedule | Active: `Sunday 08:00 UTC` (`0 8 * * 0`), plus manual **Actions → Weekly full build → Run workflow** (`device`: `all` or a single device) from `dev` |
 | Gate | [`.github/scripts/weekly_full_build.py`](../../../.github/scripts/weekly_full_build.py) |
 | What must run | [`manifest.json`](manifest.json) (CUDA), [`manifest-xpu.json`](manifest-xpu.json) (XPU), [`manifest-amd.json`](manifest-amd.json) (AMD), [`manifest-rbln.json`](manifest-rbln.json) (RBLN) |
 | Results | The workflow run: its summary links every Buildkite build; per-device artifacts `weekly-full-build*-<n>` keep `report.json`, `summary.md` and failed-job logs for 90 days |

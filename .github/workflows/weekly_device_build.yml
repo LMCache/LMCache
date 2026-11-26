@@ -1,9 +1,8 @@
 name: Weekly full build (device runner)
 
 # Reusable runner shared by per-device weekly workflows
-# (weekly_full_build_<device>.yml). Called either by the weekly_full_build.yml
-# orchestrator (run_prepare=false, since the orchestrator prepares once) or
-# directly via workflow_dispatch on a single device workflow (run_prepare=true).
+# (weekly_full_build_<device>.yml), invoked by the weekly_full_build.yml
+# orchestrator after its prepare job fast-forwards ci-weekly-full.
 
 on:
   workflow_call:
@@ -28,61 +27,14 @@ on:
         description: Buildkite gate polling timeout in minutes
         required: true
         type: number
-      run_prepare:
-        description: Fast-forward ci-weekly-full before running (false when called by orchestrator)
-        required: false
-        default: true
-        type: boolean
 
 permissions:
   contents: read
 
 jobs:
-  prepare:
-    name: Prepare ci-weekly-full branch
-    if: github.repository == 'LMCache/LMCache' && inputs.run_prepare
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      contents: write
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
-        with:
-          egress-policy: audit
-
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          fetch-depth: 0
-
-      - name: Fast-forward ci-weekly-full to the tested commit
-        env:
-          SOURCE_COMMIT: ${{ github.sha }}
-          SOURCE_REF: ${{ github.ref }}
-        run: |
-          set -Eeuo pipefail
-          if [[ "${SOURCE_REF}" != "refs/heads/dev" ]]; then
-            echo "::error::Weekly full build must run from refs/heads/dev (got ${SOURCE_REF})." >&2
-            exit 1
-          fi
-          if git fetch --no-tags origin \
-              refs/heads/ci-weekly-full:refs/remotes/origin/ci-weekly-full; then
-            if ! git merge-base --is-ancestor \
-                refs/remotes/origin/ci-weekly-full "${SOURCE_COMMIT}"; then
-              echo "::error::ci-weekly-full cannot fast-forward to ${SOURCE_COMMIT}; run this workflow from dev." >&2
-              exit 1
-            fi
-          fi
-          git push origin "${SOURCE_COMMIT}:refs/heads/ci-weekly-full"
-          # If a pipeline still builds pushes to this branch, let that build
-          # exist before the weekly ones: created later, it could cancel them
-          # through "Cancel Intermediate Builds".
-          sleep 90
-
   full-build:
     name: Weekly full build (${{ inputs.label }})
-    needs: prepare
-    if: ${{ !cancelled() && github.repository == 'LMCache/LMCache' && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped') }}
+    if: github.repository == 'LMCache/LMCache'
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     permissions:
