@@ -3,132 +3,41 @@
 Unit tests for the S3L2Adapter startup size-seed (feature a) and the
 periodic LRU-index sidecar checkpoint/restore (feature b).
 
-These tests exercise the *pure* parts of the seeding path without any
-live AWS / awscrt dependency:
+These tests exercise the seeding path without S3:
 
 - ``LastModified`` parsing + ListObjectsV2 XML parsing with mtime,
 - oldest-first ordering from a parsed listing,
 - size-summing from a parsed listing,
 - sidecar serialize/deserialize roundtrip,
 - corrupt / partial / unknown-version sidecar -> treated as absent,
-- policy population in LRU order via a fake eviction-policy listener.
+- sidecar reconciliation against the live listing,
+- policy population in LRU order, against a fake listener and the real
+  ``LRUEvictionPolicy``.
 
-The heavy native dependencies (``awscrt``, ``torch``,
-``lmcache.native_storage_ops``) are stubbed in ``sys.modules`` so the
-real module-level seeding helpers import and run.
+The adapter is built with ``object.__new__`` so no S3 client is created;
+only the attributes the seeding code touches are populated.
 """
 
 # Standard
-from types import ModuleType
-import sys
+import asyncio
+import threading
 
-# ---------------------------------------------------------------------------
-# Stub heavy deps so the adapter module imports without awscrt / torch.
-# Only the attributes touched at import time need to exist.
-# ---------------------------------------------------------------------------
-
-
-def _install_stubs() -> None:
-    if "torch" not in sys.modules:
-        # A permissive torch stub: any ``torch.X`` attribute resolves to a
-        # generic sentinel object. This satisfies the many import-time
-        # default-arg lookups (``torch.dtype``, ``torch.float8_e4m3fn``,
-        # ``torch.Size``, ...) deep in the import chain without a real
-        # torch. None of the seeding logic under test touches a tensor.
-        class _Sentinel:
-            """Resolves any attribute to itself; callable; usable as a type."""
-
-            def is_available(self):
-                return False
-
-            def __getattr__(self, name):
-                return self
-
-            def __call__(self, *a, **k):
-                return self
-
-        _SENT = _Sentinel()
-
-        class _TorchStub(ModuleType):
-            def __getattr__(self, name):
-                # ``torch.dtype`` / ``torch.Size`` etc. are only used in
-                # annotations (not evaluated under ``from __future__``),
-                # so a permissive sentinel suffices everywhere.
-                if name in ("musa", "xpu", "hpu"):
-                    return _SENT  # has is_available() -> False
-                return _SENT
-
-        torch = _TorchStub("torch")
-        cuda = ModuleType("torch.cuda")
-        cuda.is_available = lambda: False  # type: ignore[attr-defined]
-        torch.cuda = cuda  # type: ignore[attr-defined]
-        sys.modules["torch.cuda"] = cuda
-        sys.modules["torch"] = torch
-
-    if "awscrt" not in sys.modules:
-        awscrt = ModuleType("awscrt")
-        for sub in ("auth", "io", "s3"):
-            mod = ModuleType(f"awscrt.{sub}")
-            setattr(awscrt, sub, mod)
-            sys.modules[f"awscrt.{sub}"] = mod
-        http = ModuleType("awscrt.http")
-        http.HttpHeaders = object  # type: ignore[attr-defined]
-        http.HttpRequest = object  # type: ignore[attr-defined]
-        sys.modules["awscrt.http"] = http
-        io_mod = sys.modules["awscrt.io"]
-        for name in (
-            "ClientTlsContext",
-            "TlsConnectionOptions",
-            "TlsContextOptions",
-        ):
-            setattr(io_mod, name, object)
-        sys.modules["awscrt"] = awscrt
-
-    if "requests" not in sys.modules:
-        sys.modules["requests"] = ModuleType("requests")
-
-    # Stub the heavy MemoryObj-bearing module so importing ``base`` (which
-    # only needs the *name* ``MemoryObj`` for annotations) doesn't drag in
-    # torch / vLLM. The seeding logic under test never instantiates one.
-    if "lmcache.v1.memory_management" not in sys.modules:
-        mm = ModuleType("lmcache.v1.memory_management")
-
-        class _MemoryObj:  # placeholder for type annotations only
-            pass
-
-        mm.MemoryObj = _MemoryObj  # type: ignore[attr-defined]
-        sys.modules["lmcache.v1.memory_management"] = mm
-
-    if "lmcache.native_storage_ops" not in sys.modules:
-        nso = ModuleType("lmcache.native_storage_ops")
-
-        class _Bitmap:
-            def __init__(self, n=0):
-                self._bits = [0] * n
-
-            def set(self, i):
-                self._bits[i] = 1
-
-            def test(self, i):
-                return bool(self._bits[i])
-
-        nso.Bitmap = _Bitmap  # type: ignore[attr-defined]
-        sys.modules["lmcache.native_storage_ops"] = nso
-
-
-_install_stubs()
+# Third Party
+import pytest
 
 # First Party
-# First Party  (imported after stubs are in place)
-from lmcache.v1.distributed.api import ObjectKey  # noqa: E402
-from lmcache.v1.distributed.l2_adapters import s3_l2_adapter as s3mod  # noqa: E402
-from lmcache.v1.mp_observability.event_bus import get_event_bus  # noqa: E402
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.eviction import L2EvictionPolicy
+from lmcache.v1.distributed.eviction_policy.lru import LRUEvictionPolicy
+from lmcache.v1.distributed.l2_adapters import s3_l2_adapter as s3mod
+from lmcache.v1.mp_observability.event_bus import get_event_bus
 
 _parse_s3_last_modified = s3mod._parse_s3_last_modified
 _parse_list_response_xml_with_mtime = s3mod._parse_list_response_xml_with_mtime
 _order_entries_by_last_modified = s3mod._order_entries_by_last_modified
 _serialize_lru_index = s3mod._serialize_lru_index
 _deserialize_lru_index = s3mod._deserialize_lru_index
+_reconcile_lru_index = s3mod._reconcile_lru_index
 _object_key_to_string = s3mod._object_key_to_string
 S3L2Adapter = s3mod.S3L2Adapter
 
@@ -172,8 +81,8 @@ class _FakePolicy:
 
     Records keys in insertion order (like ``LRUEvictionPolicy._order``)
     so a seed in LRU order can be asserted. ``on_keys_created`` reverses
-    within a batch, matching the real policy, so we can verify the
-    adapter's one-key-at-a-time notify preserves global order.
+    within a batch, matching the real policy, so we can verify that the
+    adapter's single reversed batch notify preserves global order.
     """
 
     def __init__(self):
@@ -214,13 +123,10 @@ class _FakeListener:
 
 
 def _bare_adapter(track_access_order: bool = False) -> S3L2Adapter:
-    """Construct an S3L2Adapter without running ``__init__`` (no awscrt).
+    """Construct an S3L2Adapter without running ``__init__`` (no S3 client).
 
     Only the attributes the seeding code paths touch are populated.
     """
-    # Standard
-    import threading
-
     adapter = object.__new__(S3L2Adapter)
     adapter._listeners = []
     adapter._backend_name = "test-s3"
@@ -465,24 +371,102 @@ def test_notify_stored_no_tracking_when_disabled():
     assert adapter._snapshot_lru_index() == []
 
 
+def test_seed_policy_in_order_with_real_lru_policy():
+    """The batch notify lands the oldest key first in the real policy."""
+    adapter = _bare_adapter()
+    lru = LRUEvictionPolicy()
+    adapter.register_listener(L2EvictionPolicy(lru))
+
+    ordered = [(_key("m", r), 10 * r) for r in (1, 2, 3, 4)]
+    assert adapter._seed_policy_in_order(ordered) == 4
+    assert [k.kv_rank for k in lru.get_eviction_candidates(4)] == [1, 2, 3, 4]
+
+
 # ---------------------------------------------------------------------------
-# Standalone runner (pytest not required in this environment)
+# Sidecar reconciliation + restore (feature b)
 # ---------------------------------------------------------------------------
 
 
-if __name__ == "__main__":
-    failures = 0
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            try:
-                fn()
-                print(f"PASS {name}")
-            except Exception as exc:  # noqa: BLE001
-                failures += 1
-                # Standard
-                import traceback
+def _entry(rank: int, size: int, lm: str) -> tuple[ObjectKey, int, float | None]:
+    return (_key("m", rank), size, _parse_s3_last_modified(lm))
 
-                print(f"FAIL {name}: {exc}")
-                traceback.print_exc()
-    print(f"\n{'ALL PASS' if failures == 0 else f'{failures} FAILED'}")
-    sys.exit(1 if failures else 0)
+
+def test_reconcile_drops_vanished_and_puts_new_keys_first():
+    live = [
+        _entry(1, 10, "2024-01-01T00:00:00Z"),
+        _entry(2, 20, "2024-01-01T00:00:00Z"),
+        _entry(3, 30, "2024-03-01T00:00:00Z"),  # not in sidecar, newer
+        _entry(4, 40, "2024-02-01T00:00:00Z"),  # not in sidecar, older
+    ]
+    index = [
+        (_object_key_to_string(_key("m", 2)), 999, 7),  # hot
+        (_object_key_to_string(_key("m", 9)), 5, 3),  # vanished from bucket
+        (_object_key_to_string(_key("m", 1)), 10, 4),
+    ]
+    final, n_sidecar, n_new = _reconcile_lru_index(index, live)
+    # new-since-checkpoint keys first (by LastModified), then sidecar
+    # rows by ascending tick; the vanished key is dropped.
+    assert [k.kv_rank for k, _sz in final] == [4, 3, 1, 2]
+    assert (n_sidecar, n_new) == (2, 2)
+    # sizes come from the live listing, not the stale sidecar row
+    assert dict((k.kv_rank, sz) for k, sz in final)[2] == 20
+
+
+@pytest.fixture
+def running_loop():
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    yield loop
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(timeout=5)
+    loop.close()
+
+
+def _restoring_adapter(loop, sidecar_body):
+    adapter = _bare_adapter(track_access_order=True)
+    adapter._loop = loop
+    adapter._config = s3mod.S3L2AdapterConfig(
+        s3_endpoint="s3://bucket", s3_region="us-east-1", s3_persist_lru_index=True
+    )
+
+    async def fake_get_raw(_name):
+        return sidecar_body
+
+    adapter._execute_get_raw = fake_get_raw  # type: ignore[method-assign]
+    return adapter
+
+
+def test_restore_tracks_objects_missing_from_sidecar(running_loop):
+    """Objects absent from the sidecar get access ticks on restore, so a
+    later read refreshes them and the next checkpoint keeps them."""
+    index = [(_object_key_to_string(_key("m", 1)), 10, 5)]
+    adapter = _restoring_adapter(running_loop, _serialize_lru_index(index))
+    lru = LRUEvictionPolicy()
+    adapter.register_listener(L2EvictionPolicy(lru))
+    live = [
+        _entry(1, 10, "2024-01-01T00:00:00Z"),
+        _entry(2, 20, "2024-02-01T00:00:00Z"),  # written after the checkpoint
+    ]
+
+    assert adapter._restore_from_sidecar(live) is True
+    # the new key is the first victim; the recorded key is warmer
+    assert [k.kv_rank for k in lru.get_eviction_candidates(2)] == [2, 1]
+    snap = adapter._snapshot_lru_index()
+    assert [name for name, _sz, _t in snap] == [
+        _object_key_to_string(_key("m", 2)),
+        _object_key_to_string(_key("m", 1)),
+    ]
+
+    # Reading the new key makes it the most recent in the next checkpoint.
+    adapter._notify_keys_accessed([_key("m", 2)])
+    snap = adapter._snapshot_lru_index()
+    assert snap[-1][0] == _object_key_to_string(_key("m", 2))
+
+
+def test_restore_without_sidecar_reports_absent(running_loop):
+    adapter = _restoring_adapter(running_loop, None)
+    assert (
+        adapter._restore_from_sidecar([_entry(1, 10, "2024-01-01T00:00:00Z")]) is False
+    )
+    assert adapter._snapshot_lru_index() == []
