@@ -13,13 +13,13 @@ import pytest
 import torch
 
 # First Party
-from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
 from lmcache.sdk.context import LMCacheSDKContext
 from lmcache.sdk.request import (
     LMCacheRequestStream,
     LMCacheRequestStreamError,
     TokenEvent,
 )
+from lmcache.v1.common.cache_kind import LMCacheSDKCacheKind
 
 CHUNK_SIZE = 4
 PROMPT = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]

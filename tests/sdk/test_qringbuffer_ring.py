@@ -13,7 +13,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.sdk.qringbuffer import (
+from lmcache.integration.vllm.experimental.qringbuffer import (
     QRingBuffer,
     QRingBufferAdapter,
     attention_layer_names_from_vllm,

@@ -2,7 +2,7 @@
 """Fan-out of connector/adapter lifecycle hooks to active experimental features.
 
 The connector and worker adapter know only this dispatcher; the dispatcher
-knows the features; each feature knows the SDK. Adding a tensor type never
+knows the worker-side tensor features. Adding a tensor type never
 touches the connector or the adapter -- see ``registry.py``.
 """
 
@@ -14,8 +14,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Collection
 
 # First Party
-from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
-from lmcache.sdk.qringbuffer import QRingBufferAdapter, QRingBufferCapture
+from lmcache.integration.vllm.experimental.qringbuffer import (
+    QRingBufferAdapter,
+    QRingBufferCapture,
+)
+from lmcache.v1.common.cache_kind import LMCacheSDKCacheKind
 from lmcache.v1.common.custom_types import TRANSFER_QUERY
 from lmcache.v1.common.logging import init_logger
 
@@ -167,7 +170,7 @@ class Dispatcher:
     """Holds the experimental features built into the server and connector, and
     fans out lifecycle hooks to all of them. The connector and adapter doesn't
     need to distinguish the types of intermediate tensors. Dispatcher holds the
-    TensorFeature which talks to the SDK.
+    TensorFeature which uses the client transfer context.
 
     Args:
         features: The active features, in fan-out order.
