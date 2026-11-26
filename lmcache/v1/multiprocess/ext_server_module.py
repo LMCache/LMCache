@@ -376,31 +376,15 @@ def register_grpc_services(
         if not hasattr(module, _GRPC_SERVICE_REGISTRAR) and hasattr(
             module, _ZMQ_SERVICE_REGISTRAR
         ):
-            logger.warning(
-                "%s implements %s but not %s, so its services are not "
-                "available on this gRPC server.",
-                type(module).__name__,
-                _ZMQ_SERVICE_REGISTRAR,
-                _GRPC_SERVICE_REGISTRAR,
+            raise ValueError(
+                f"{type(module).__name__} implements {_ZMQ_SERVICE_REGISTRAR} "
+                f"but not {_GRPC_SERVICE_REGISTRAR}: the ZMQ request transport "
+                "was removed, so the plugin must expose its services over "
+                "gRPC. See "
+                "https://docs.lmcache.ai/mp/request_transport.html"
+                "#mp-migrating-from-zmq"
             )
     _register_transport_services(modules, server, _GRPC_SERVICE_REGISTRAR)
-
-
-def register_zmq_services(
-    modules: Sequence[object],
-    server: Any,
-) -> None:
-    """Register out-of-tree ZMQ services exposed by server modules.
-
-    Args:
-        modules: Ordered server modules to inspect for a
-            ``register_zmq_services(server)`` method.
-        server: The concrete ``MessageQueueServer`` owned by the ZMQ transport.
-
-    Raises:
-        TypeError: If a module exposes a non-callable registrar attribute.
-    """
-    _register_transport_services(modules, server, _ZMQ_SERVICE_REGISTRAR)
 
 
 def iter_server_module_handlers(

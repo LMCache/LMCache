@@ -487,12 +487,11 @@ def _start_cache_server(
         InitializeL1Usage(event_bus, ctx.storage_manager)
 
         transport = mp_config.transport
-        if transport == "zmq":
-            logger.warning(
-                "The zmq request transport is deprecated and will be removed "
-                "in a future release. Start the server with --transport grpc "
-                "and point clients at grpc://host:port. See %s",
-                ZMQ_MIGRATION_DOC_URL,
+        if transport != "grpc":
+            raise ValueError(
+                f"unsupported request transport {transport!r}: the MP server "
+                "speaks gRPC only. Start it with --transport grpc and point "
+                f"clients at grpc://host:port. See {ZMQ_MIGRATION_DOC_URL}"
             )
         server: RequestServer = create_request_server(
             modules_for_service(components.modules, "worker"),

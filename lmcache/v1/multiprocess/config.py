@@ -36,12 +36,33 @@ class _DeprecatedStoreTrue(argparse.Action):
         setattr(namespace, self.dest, True)
 
 
+def _request_transport(value: str) -> str:
+    """Validate ``--transport``; ZMQ was removed from the server.
+
+    Kept as a named function so the message can point at the migration guide
+    instead of argparse's "invalid choice".
+    """
+    if value == "zmq":
+        raise argparse.ArgumentTypeError(
+            "--transport zmq was removed: the MP server speaks gRPC only. "
+            "Start it with --transport grpc and point clients at "
+            "grpc://host:port. See "
+            "https://docs.lmcache.ai/mp/request_transport.html"
+            "#mp-migrating-from-zmq"
+        )
+    if value != "grpc":
+        raise argparse.ArgumentTypeError(
+            f"unsupported transport {value!r}; the MP server speaks gRPC only"
+        )
+    return value
+
+
 @dataclass
 class MPServerConfig:
     """Configuration for the multiprocess cache server."""
 
-    transport: Literal["zmq", "grpc"] = "grpc"
-    """Request transport exposed by the cache server. ZMQ is deprecated."""
+    transport: Literal["grpc"] = "grpc"
+    """Request transport exposed by the cache server. ZMQ was removed."""
 
     host: str = "localhost"
     """Request server host."""
@@ -437,10 +458,10 @@ def add_mp_server_args(
     )
     mp_group.add_argument(
         "--transport",
-        choices=("zmq", "grpc"),
+        type=_request_transport,
         default="grpc",
-        help="Request transport exposed by the cache server. Default is grpc. "
-        "zmq is deprecated and will be removed in a future release.",
+        help="Request transport exposed by the cache server. Only grpc is "
+        "supported; zmq was removed in this release.",
     )
     mp_group.add_argument(
         "--host",

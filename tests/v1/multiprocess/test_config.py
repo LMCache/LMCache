@@ -156,8 +156,10 @@ def test_transport_defaults_to_grpc():
     assert MPServerConfig().transport == "grpc"
 
 
-def test_transport_flag_still_selects_zmq():
-    assert _parse_mp(["--transport", "zmq"]).transport == "zmq"
+def test_the_zmq_transport_is_rejected_with_a_migration_error():
+    """ZMQ was removed from the server; the error has to say what to use."""
+    with pytest.raises(SystemExit):
+        _parse_mp(["--transport", "zmq"])
 
 
 def test_null_block_id_defaults_to_zero():
