@@ -5,7 +5,7 @@ Stream admission itself (seq dedup, gap detection, incarnation
 comparison) is the gate's job -- see ``test_event_gate.py``."""
 
 # Standard
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 # Third Party
 import numpy as np
@@ -21,6 +21,11 @@ from lmcache.v1.mp_coordinator.api import (
     CacheEventType,
 )
 from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
+
+
+def replace_entry(key: ObjectKey, tags: dict[str, str]) -> ObjectKey:
+    """Return ``key`` with ``tags`` as its identity tags."""
+    return replace(key, identity=replace(key.identity, tags=tags))
 
 
 def _key(hash_byte: int) -> ObjectKey:
@@ -1068,3 +1073,27 @@ def test_expansion_drops_groups_once_their_copies_are_deleted():
     assert directory.get_keys_across_object_groups([_grouped_key(1, 0)]) == [
         _grouped_key(1, 0)
     ]
+
+
+def test_a_token_addressed_delete_without_tags_reaches_the_tagged_identity():
+    """A caller that never saw the engine's dtype still names the chunk."""
+    tagged = replace_entry(_key(1), {"kv_dtype": "bf16"})
+    directory = KeyDirectory()
+    directory.consume(_batch(keys=[tagged]))
+
+    stored = directory.get_stored_keys_of_chunks([_key(1)])
+
+    assert tagged in stored
+
+
+def test_a_token_addressed_delete_with_tags_stays_exact():
+    """Naming a different dtype must not reach another engine's copy."""
+    tagged = replace_entry(_key(1), {"kv_dtype": "bf16"})
+    directory = KeyDirectory()
+    directory.consume(_batch(keys=[tagged]))
+
+    stored = directory.get_stored_keys_of_chunks(
+        [replace_entry(_key(1), {"kv_dtype": "fp8_per_token_head"})]
+    )
+
+    assert tagged not in stored

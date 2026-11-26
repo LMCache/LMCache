@@ -24,7 +24,11 @@ import numpy as np
 
 # First Party
 from lmcache.v1.common.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey, Tier
+from lmcache.v1.distributed.api import (
+    ObjectKey,
+    ObjectKeyIdentity,
+    Tier,
+)
 from lmcache.v1.mp_coordinator.api import (
     UNKNOWN_TOKEN_OFFSET,
     BlendMatch,
@@ -159,6 +163,23 @@ class _KeyRecord:
     placements: list[Placement] = field(default_factory=list)
     last_access: float = 0.0
     access_count: int = 0
+
+
+def _identity_matches(
+    stored: "ObjectKeyIdentity",
+    expected: "ObjectKeyIdentity",
+    object_group_id: int,
+    kv_rank: int,
+) -> bool:
+    """Whether ``stored`` is ``expected`` seen from one group and rank.
+
+    ``expected.tags`` empty means the caller did not name any tags, so the tag
+    dimension is matched loosely; otherwise it is part of the comparison.
+    """
+    candidate = replace(stored, object_group_id=object_group_id, kv_rank=kv_rank)
+    if expected.tags:
+        return candidate == expected
+    return replace(candidate, tags={}) == expected
 
 
 @dataclass
@@ -396,16 +417,22 @@ class KeyDirectory(View):
         if chunk_binding is None:
             return []
         world_size = ObjectKey.WorldSizeFromKVRank(key.identity.kv_rank)
+        expected = key.identity
+        if not expected.tags:
+            # A caller that names the chunk without its tags (a token-addressed
+            # delete from a client that never saw the engine's dtype) still
+            # wants every stored identity of that chunk.
+            expected = replace(expected, tags={})
         return [
             stored_key
             for stored_key in chunk_binding.keys
             if ObjectKey.WorldSizeFromKVRank(stored_key.identity.kv_rank) == world_size
-            and replace(
+            and _identity_matches(
                 stored_key.identity,
-                object_group_id=key.identity.object_group_id,
-                kv_rank=key.identity.kv_rank,
+                expected,
+                key.identity.object_group_id,
+                key.identity.kv_rank,
             )
-            == key.identity
         ]
 
     def _get_stored_keys_in_other_groups(self, key: ObjectKey) -> list[ObjectKey]:
