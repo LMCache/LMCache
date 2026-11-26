@@ -162,8 +162,7 @@ def _skip_unless_gds_registrable(directory: Path) -> None:
             finally:
                 backend.close_driver()
     except (OSError, RuntimeError, ValueError) as exc:
-        # OSError: open/fallocate/nds; RuntimeError: cufile/hipfile/fiemap;
-        # ValueError: non-local block device (nds).
+        # OSError: open/fallocate/nds; RuntimeError: cufile/hipfile.
         pytest.skip(
             f"GDS driver cannot register files under {directory} ({exc}); "
             "point LMCACHE_GDS_TEST_DIR at a GDS-capable filesystem"
@@ -183,8 +182,8 @@ def gds_slab_dir(tmp_path: Path) -> Iterator[Path]:
     nvidia-fs cannot register, where cuFile either fails with error 5008 or,
     with compat mode enabled, silently falls back to POSIX IO, so a passing
     test would not have exercised the DMA path it claims to. On Ascend NPU
-    the same variable is required: NDS opens the block device behind the
-    file, so ``tmp_path`` on the OS disk would DMA that disk directly.
+    the same variable is required: the slab must sit on a local NVMe
+    filesystem, so ``tmp_path`` on the OS disk is not a valid target.
 
     On AMD ROCm ``tmp_path`` is used when the variable is unset: per
     :func:`_gds_available`, library loadability is a sufficient gate for

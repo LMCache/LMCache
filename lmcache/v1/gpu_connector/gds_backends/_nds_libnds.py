@@ -4,14 +4,13 @@
 This module wraps the C ABI of ``libnds.so`` (kernel ``nds_p2p`` on local NVMe):
 it defines the ``ctypes`` struct layouts and function signatures, pins NPU
 buffers via ``nds_register_mem``, manages one ``io_ctx`` per NPU stream, and
-executes stream-ordered ``read_async`` / ``write_async`` over physical
-block-device ranges by enqueuing ``nds_io_submit`` + ``nds_io_getevents`` onto
-the NPU stream via ``aclrtLaunchHostFunc``.
+executes stream-ordered ``read_async`` / ``write_async`` on the slab file by
+enqueuing ``nds_io_submit`` + ``nds_io_getevents`` onto the NPU stream via
+``aclrtLaunchHostFunc``.
 
-It is separated from ``nds.py`` to isolate low-level C driver bindings from
-LMCache's GDS backend logic: ``nds.py`` handles slab files, FIEMAP file-to-block
-extent translation, and ``Submission`` tracking, and delegates raw block-device
-DMA to this module through the ``NDSLibrary`` interface.
+It is separated from ``nds.py`` to isolate the C driver bindings from the
+GDS backend. ``nds.py`` owns the slab file and ``Submission`` tracking and
+passes the file descriptor and logical offset through to this module.
 
 Source: openEuler kernel ``tools/lib/nds``
 ([openEuler-26.09](https://gitcode.com/openeuler/kernel/tree/openEuler-26.09)).
@@ -22,8 +21,7 @@ User API: ``nds_api.h``; device node ``/dev/p2p_device`` (``drivers/nds``).
 from __future__ import annotations
 
 # Standard
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
 import ctypes
@@ -101,21 +99,11 @@ def _launch_npu_stream_host_callback(
         raise RuntimeError(f"aclrtLaunchHostFunc failed with error {err}")
 
 
-@dataclass(frozen=True)
-class _IoSegment:
-    """One block-device DMA segment. ``buf_offset`` is into the registered pin."""
-
-    device_offset: int
-    length: int
-    buf_offset: int
-
-
 _DEFAULT_NDS_LIBRARY_PATH = "/usr/local/lib/libnds.so"
 
 NDS_IO_OP_PREAD = 0
 NDS_IO_OP_PWRITE = 1
 NDS_IO_F_REGISTERED_MEM = 1 << 0
-NDS_API_VERSION = 1
 # One callback blocks in getevents, so a stream never has more than one
 # submission outstanding. The depth still leaves room for a future batch.
 _IO_CTX_DEPTH = 64
@@ -124,8 +112,10 @@ _IO_CTX_DEPTH = 64
 class _NdsInitParam(ctypes.Structure):
     _fields_ = [
         ("flags", ctypes.c_uint32),
-        ("reserved", ctypes.c_uint64 * 4),
+        ("reserved1", ctypes.c_uint32),
         ("version", ctypes.c_uint32),
+        ("reserved2", ctypes.c_uint32),
+        ("reserved3", ctypes.c_uint64 * 4),
     ]
 
 
@@ -134,6 +124,22 @@ class _NdsFsDesc(ctypes.Structure):
         ("fs_fd", ctypes.POINTER(ctypes.c_int32)),
         ("fs_fd_cnt", ctypes.c_uint32),
         ("reserved", ctypes.c_uint32),
+    ]
+
+
+class _NdsMemRange(ctypes.Structure):
+    _fields_ = [
+        ("addr", ctypes.c_uint64),
+        ("size", ctypes.c_uint64),
+    ]
+
+
+class _NdsMemDesc(ctypes.Structure):
+    _fields_ = [
+        ("ranges", ctypes.POINTER(_NdsMemRange)),
+        ("nr", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint64 * 4),
     ]
 
 
@@ -192,8 +198,8 @@ _LIBNDS_SYMBOLS: tuple[tuple[str, list[Any]], ...] = (
     ("nds_exit", []),
     ("nds_register_fs", [ctypes.POINTER(_NdsFsDesc)]),
     ("nds_unregister_fs", [ctypes.POINTER(_NdsFsDesc)]),
-    ("nds_register_mem", [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_int]),
-    ("nds_unregister_mem", [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_int]),
+    ("nds_register_mem", [ctypes.POINTER(_NdsMemDesc)]),
+    ("nds_unregister_mem", [ctypes.POINTER(_NdsMemDesc)]),
     (
         "nds_io_new_ctx",
         [
@@ -222,6 +228,12 @@ _LIBNDS_SYMBOLS: tuple[tuple[str, list[Any]], ...] = (
 def _posix_errno(ret: int, operation: str) -> None:
     if ret < 0:
         raise OSError(-ret, operation)
+
+
+def _mem_desc(addr: int, size: int) -> tuple[_NdsMemRange, _NdsMemDesc]:
+    """One-range descriptor. The range must stay alive for the ioctl."""
+    rng = _NdsMemRange(addr=addr, size=size)
+    return rng, _NdsMemDesc(ranges=ctypes.pointer(rng), nr=1, flags=0)
 
 
 class OpenEulerNDSLibrary:
@@ -256,10 +268,6 @@ class OpenEulerNDSLibrary:
         param = _NdsInitParam()
         ret = self._lib.nds_init(ctypes.byref(param))
         _posix_errno(ret, "nds_init")
-        if param.version != NDS_API_VERSION:
-            raise RuntimeError(
-                f"nds_init returned unexpected API version {param.version}"
-            )
         self._driver_open = True
 
     def driver_close(self) -> None:
@@ -314,86 +322,95 @@ class OpenEulerNDSLibrary:
         return fd
 
     def file_deregister(self, native_handle: int) -> None:
-        del native_handle
+        fd_arr = (ctypes.c_int32 * 1)(native_handle)
+        desc = _NdsFsDesc(fd_arr, 1, 0)
+        ret = self._lib.nds_unregister_fs(ctypes.byref(desc))
+        if ret == -2:  # ENOENT if the topology is already gone
+            return
+        _posix_errno(ret, "nds_unregister_fs")
 
     def register_memory(self, addr: int, size: int) -> None:
-        """Pin ``addr`` through the v1 ioctl.
-
-        ``devmm`` resolves every NPU virtual address in this process when
-        ``devid`` is 0, which is the identity that ioctl uses.
-        """
-        ret = self._lib.nds_register_mem(
-            ctypes.c_void_p(addr), ctypes.c_uint64(size), 0
-        )
+        """Pin one VA range through the per-fd memory table."""
+        _rng, desc = _mem_desc(addr, size)
+        ret = self._lib.nds_register_mem(ctypes.byref(desc))
         _posix_errno(ret, "nds_register_mem")
 
     def unregister_memory(self, addr: int, size: int) -> None:
-        ret = self._lib.nds_unregister_mem(
-            ctypes.c_void_p(addr), ctypes.c_uint64(size), 0
-        )
+        _rng, desc = _mem_desc(addr, size)
+        ret = self._lib.nds_unregister_mem(ctypes.byref(desc))
         if ret == -2:  # ENOENT if already gone
             return
         _posix_errno(ret, "nds_unregister_mem")
 
     def read_async(
         self,
-        dev_fd: int,
+        file_fd: int,
         ptr_base: int,
-        segments: Sequence[_IoSegment],
+        size: int,
+        file_offset: int,
+        buf_offset: int,
         result: ctypes.c_int64,
         raw_stream: int,
     ) -> None:
-        """Enqueue a stream-ordered block-device read across ``segments``."""
+        """Enqueue one stream-ordered read of the slab file."""
         self._submit_async(
-            dev_fd, ptr_base, segments, result, raw_stream, is_write=False
+            file_fd,
+            ptr_base,
+            size,
+            file_offset,
+            buf_offset,
+            result,
+            raw_stream,
+            is_write=False,
         )
 
     def write_async(
         self,
-        dev_fd: int,
+        file_fd: int,
         ptr_base: int,
-        segments: Sequence[_IoSegment],
+        size: int,
+        file_offset: int,
+        buf_offset: int,
         result: ctypes.c_int64,
         raw_stream: int,
     ) -> None:
-        """Enqueue a stream-ordered block-device write across ``segments``."""
+        """Enqueue one stream-ordered write of the slab file."""
         self._submit_async(
-            dev_fd, ptr_base, segments, result, raw_stream, is_write=True
+            file_fd,
+            ptr_base,
+            size,
+            file_offset,
+            buf_offset,
+            result,
+            raw_stream,
+            is_write=True,
         )
 
     def _submit_async(
         self,
-        dev_fd: int,
+        file_fd: int,
         ptr_base: int,
-        segments: Sequence[_IoSegment],
+        size: int,
+        file_offset: int,
+        buf_offset: int,
         result: ctypes.c_int64,
         raw_stream: int,
         *,
         is_write: bool,
     ) -> None:
-        op_name = "write" if is_write else "read"
-
         def host_work() -> None:
             try:
-                done_total = 0
                 ctx = self._stream_ctx(raw_stream)
-                for segment in segments:
-                    done = self._io(
-                        ctx,
-                        dev_fd,
-                        ptr_base,
-                        segment.length,
-                        segment.device_offset,
-                        segment.buf_offset,
-                        is_write,
-                    )
-                    if done != segment.length:
-                        raise RuntimeError(
-                            f"NDS {op_name} short I/O: "
-                            f"got {done} bytes, expected {segment.length}"
-                        )
-                    done_total += segment.length
-                result.value = done_total
+                done = self._io(
+                    ctx,
+                    file_fd,
+                    ptr_base,
+                    size,
+                    file_offset,
+                    buf_offset,
+                    is_write,
+                )
+                result.value = done
             except BaseException as exc:
                 result.value = _exception_to_submission_result(exc)
 
@@ -406,7 +423,7 @@ class OpenEulerNDSLibrary:
         ptr_base: int,
         size: int,
         file_offset: int,
-        ptr_offset: int,
+        buf_offset: int,
         is_write: bool,
     ) -> int:
         """Submit one op and block in ``nds_io_getevents`` on ``ctx``.
@@ -416,7 +433,7 @@ class OpenEulerNDSLibrary:
         """
         if size <= 0:
             raise ValueError("I/O size must be positive")
-        iov = _NdsIoVec(buf_addr=ptr_base + ptr_offset, buf_len=size, reserved=0)
+        iov = _NdsIoVec(buf_addr=ptr_base + buf_offset, buf_len=size, reserved=0)
         cb = _NdsIoCb()
         cb.opcode = NDS_IO_OP_PWRITE if is_write else NDS_IO_OP_PREAD
         cb.rw_flags = NDS_IO_F_REGISTERED_MEM  # buffer already pinned

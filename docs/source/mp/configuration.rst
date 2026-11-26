@@ -650,9 +650,8 @@ and no earlier backend is the default: a CUDA build claims cuFile, a ROCm
 build claims hipFile, and a MUSA build claims muFile. Like cuFile it uses a
 filesystem slab. ``--gds-l1-path`` names a directory on a local NVMe
 filesystem, ``--gds-l1-use-direct-io`` applies, and one slab per process
-lives at ``<path>/lmcache_gds_slab.bin``. LMCache resolves the block device
-that hosts that file and DMAs between NPU memory and the device's physical
-extents through openEuler ``libnds.so`` and the ``nds_p2p`` driver
+lives at ``<path>/lmcache_gds_slab.bin``. LMCache reads and writes that file
+through openEuler ``libnds.so`` and the ``nds_p2p`` driver
 (``/dev/p2p_device``). Reads and writes stay ordered with the NPU stream.
 ``libnds.so`` loads from ``/usr/local/lib/libnds.so``, or from
 ``NDS_LIBRARY_PATH`` when that variable is set.

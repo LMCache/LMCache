@@ -17,11 +17,7 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.gds_backends import _nds_libnds as nl
-from lmcache.v1.gpu_connector.gds_backends._nds_libnds import (
-    NDS_API_VERSION,
-    OpenEulerNDSLibrary,
-    _IoSegment,
-)
+from lmcache.v1.gpu_connector.gds_backends._nds_libnds import OpenEulerNDSLibrary
 
 
 class _FakeCDLL:
@@ -39,7 +35,7 @@ class _FakeCDLL:
         def _call(*args: Any) -> int:
             self.calls.setdefault(name, []).append(args)
             if name == "nds_init":
-                args[0]._obj.version = NDS_API_VERSION
+                args[0]._obj.version = 0x0001
                 return 0
             if name == "nds_io_new_ctx":
                 ctx_obj = nl._NdsIoCtx()
@@ -133,16 +129,12 @@ class TestContextLifecycle:
         with pytest.raises(RuntimeError, match="driver is not open"):
             closed_lib.register_stream(7)
 
-    def test_driver_open_rejects_unexpected_api_version(
+    def test_driver_open_raises_when_nds_init_rejects_the_uapi(
         self, fake_cdll: _FakeCDLL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def wrong_version(param_ref: Any) -> int:
-            param_ref._obj.version = NDS_API_VERSION + 1
-            return 0
-
-        monkeypatch.setattr(fake_cdll, "nds_init", wrong_version, raising=False)
+        monkeypatch.setattr(fake_cdll, "nds_init", lambda _param: -95, raising=False)
         instance = OpenEulerNDSLibrary(library_path="/fake/libnds.so")
-        with pytest.raises(RuntimeError, match="API version"):
+        with pytest.raises(OSError, match="nds_init"):
             instance.driver_open()
 
     def test_driver_close_destroys_remaining_contexts(
@@ -182,12 +174,16 @@ class TestRegistration:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         lib.register_memory(0x2000, 8192)
-        addr, size, devid = fake_cdll.calls["nds_register_mem"][0]
-        assert (addr.value, size.value, devid) == (0x2000, 8192, 0)
+        (desc_ref,) = fake_cdll.calls["nds_register_mem"][0]
+        desc = desc_ref._obj
+        assert (desc.nr, desc.flags) == (1, 0)
+        assert (desc.ranges.contents.addr, desc.ranges.contents.size) == (0x2000, 8192)
 
         lib.unregister_memory(0x2000, 8192)
-        addr, size, devid = fake_cdll.calls["nds_unregister_mem"][0]
-        assert (addr.value, size.value, devid) == (0x2000, 8192, 0)
+        (desc_ref,) = fake_cdll.calls["nds_unregister_mem"][0]
+        desc = desc_ref._obj
+        assert desc.nr == 1
+        assert (desc.ranges.contents.addr, desc.ranges.contents.size) == (0x2000, 8192)
 
         # ENOENT (-2) on unregister is ignored; other errors propagate.
         monkeypatch.setattr(
@@ -206,6 +202,29 @@ class TestRegistration:
         )
         with pytest.raises(OSError, match="nds_register_mem"):
             lib.register_memory(0x2000, 8192)
+
+    def test_file_deregister_calls_unregister_fs(
+        self,
+        lib: OpenEulerNDSLibrary,
+        fake_cdll: _FakeCDLL,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        lib.file_deregister(42)
+        (desc_ref,) = fake_cdll.calls["nds_unregister_fs"][0]
+        desc = desc_ref._obj
+        assert desc.fs_fd[0] == 42
+        assert desc.fs_fd_cnt == 1
+
+        monkeypatch.setattr(
+            fake_cdll, "nds_unregister_fs", lambda _desc: -2, raising=False
+        )
+        lib.file_deregister(42)
+
+        monkeypatch.setattr(
+            fake_cdll, "nds_unregister_fs", lambda _desc: -5, raising=False
+        )
+        with pytest.raises(OSError, match="nds_unregister_fs"):
+            lib.file_deregister(42)
 
 
 class TestBlockingIO:
@@ -293,9 +312,8 @@ class TestStreamOrderedAsyncIO:
         npu = _mock_current_stream(monkeypatch, stream_id=7, launch_fn=captured.append)
         lib.register_stream(7)
         result = ctypes.c_int64(0)
-        segments = [_IoSegment(device_offset=0x8000, length=4096, buf_offset=0)]
-        lib.read_async(3, 0x1000, segments, result, 7)
-        lib.read_async(3, 0x1000, segments, result, 7)
+        lib.read_async(3, 0x1000, 4096, 0x8000, 0, result, 7)
+        lib.read_async(3, 0x1000, 4096, 0x8000, 0, result, 7)
         assert npu.launched_streams == [7, 7]
         assert result.value == 0
         assert "nds_io_submit" not in fake_cdll.calls
@@ -312,7 +330,7 @@ class TestStreamOrderedAsyncIO:
     ) -> None:
         """A stream runs each callback after the work issued before it.
 
-        Stream 7 is issued as kernel, read, kernel, two-segment write, kernel,
+        Stream 7 is issued as kernel, read, kernel, write, kernel,
         then a read on stream 11, then another read and kernel on stream 7.
         Draining stream 11 first must not run any stream 7 callback.
         """
@@ -381,34 +399,21 @@ class TestStreamOrderedAsyncIO:
         marker(7, "kernel-a")
         issue(
             7,
-            lambda: lib.read_async(3, 0x1000, [_IoSegment(0x1000, 4096, 0)], read_a, 7),
+            lambda: lib.read_async(3, 0x1000, 4096, 0x1000, 0, read_a, 7),
         )
         marker(7, "kernel-b")
         issue(
             7,
-            lambda: lib.write_async(
-                4,
-                0x2000,
-                [
-                    _IoSegment(0x2000, 4096, 128),
-                    _IoSegment(0x3000, 8192, 4224),
-                ],
-                write_b,
-                7,
-            ),
+            lambda: lib.write_async(4, 0x2000, 12288, 0x2000, 128, write_b, 7),
         )
         marker(7, "kernel-c")
         issue(
             11,
-            lambda: lib.read_async(
-                5, 0x4000, [_IoSegment(0x4000, 4096, 0)], read_other, 11
-            ),
+            lambda: lib.read_async(5, 0x4000, 4096, 0x4000, 0, read_other, 11),
         )
         issue(
             7,
-            lambda: lib.read_async(
-                3, 0x5000, [_IoSegment(0x5000, 8192, 64)], read_c, 7
-            ),
+            lambda: lib.read_async(3, 0x5000, 8192, 0x5000, 64, read_c, 7),
         )
         marker(7, "kernel-d")
 
@@ -441,8 +446,7 @@ class TestStreamOrderedAsyncIO:
             "kernel-a",
             ("read", 3, 0x1000, 4096, 0x1000),
             "kernel-b",
-            ("write", 4, 0x2000, 4096, 0x2000 + 128),
-            ("write", 4, 0x3000, 8192, 0x2000 + 4224),
+            ("write", 4, 0x2000, 12288, 0x2000 + 128),
             "kernel-c",
             ("read", 3, 0x5000, 8192, 0x5000 + 64),
             "kernel-d",
@@ -460,7 +464,7 @@ class TestStreamOrderedAsyncIO:
         ("operation", "expected_opcode"),
         [("read", nl.NDS_IO_OP_PREAD), ("write", nl.NDS_IO_OP_PWRITE)],
     )
-    def test_async_methods_dispatch_every_segment_symmetrically(
+    def test_async_methods_submit_one_file_op(
         self,
         lib: OpenEulerNDSLibrary,
         fake_cdll: _FakeCDLL,
@@ -471,31 +475,23 @@ class TestStreamOrderedAsyncIO:
         _mock_current_stream(monkeypatch, stream_id=7, launch_fn=lambda cb: cb())
         lib.register_stream(7)
         result = ctypes.c_int64(0)
-        segments = [
-            _IoSegment(device_offset=0xA000, length=4096, buf_offset=128),
-            _IoSegment(device_offset=0xB000, length=8192, buf_offset=4224),
-        ]
         submit = lib.read_async if operation == "read" else lib.write_async
-        submit(9, 0x1000, segments, result, 7)
-        assert result.value == 12288
+        submit(9, 0x1000, 4096, 0xA000, 128, result, 7)
+        assert result.value == 4096
         submits = fake_cdll.calls["nds_io_submit"]
-        assert len(submits) == 2
-        cb0, cb1 = submits[0][2]._obj, submits[1][2]._obj
-        assert cb0.opcode == expected_opcode
-        assert (cb0.obj.u.fd, cb0.offset, cb0.iov.contents.buf_len) == (9, 0xA000, 4096)
-        assert cb0.iov.contents.buf_addr == 0x1000 + 128
-        assert cb1.opcode == expected_opcode
-        assert (cb1.obj.u.fd, cb1.offset, cb1.iov.contents.buf_len) == (9, 0xB000, 8192)
-        assert cb1.iov.contents.buf_addr == 0x1000 + 4224
+        assert len(submits) == 1
+        cb = submits[0][2]._obj
+        assert cb.opcode == expected_opcode
+        assert (cb.obj.u.fd, cb.offset, cb.iov.contents.buf_len) == (9, 0xA000, 4096)
+        assert cb.iov.contents.buf_addr == 0x1000 + 128
 
     def test_async_rejects_wrong_current_stream(
         self, lib: OpenEulerNDSLibrary, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _mock_current_stream(monkeypatch, stream_id=8, launch_fn=lambda cb: cb())
         result = ctypes.c_int64(0)
-        segments = [_IoSegment(device_offset=0, length=4096, buf_offset=0)]
         with pytest.raises(RuntimeError, match="current NPU stream"):
-            lib.read_async(3, 0x1000, segments, result, 7)
+            lib.read_async(3, 0x1000, 4096, 0, 0, result, 7)
 
     def test_async_requires_torch_stream_host_callback(
         self,
@@ -506,9 +502,8 @@ class TestStreamOrderedAsyncIO:
         _mock_current_stream(monkeypatch, stream_id=7, launch_fn=None)
         lib.register_stream(7)
         result = ctypes.c_int64(0)
-        segments = [_IoSegment(device_offset=0, length=4096, buf_offset=0)]
         with pytest.raises(RuntimeError, match="aclrtLaunchHostFunc"):
-            lib.read_async(3, 0x1000, segments, result, 7)
+            lib.read_async(3, 0x1000, 4096, 0, 0, result, 7)
         assert result.value == 0
         assert nl._pending_callbacks == {}
         assert "nds_io_submit" not in fake_cdll.calls
@@ -520,23 +515,25 @@ class TestStreamOrderedAsyncIO:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _mock_current_stream(monkeypatch, stream_id=7, launch_fn=lambda cb: cb())
-        segments = [_IoSegment(device_offset=0x8000, length=4096, buf_offset=0)]
-
         missing_ctx_result = ctypes.c_int64(0)
-        lib.read_async(3, 0x1000, segments, missing_ctx_result, 7)
+        lib.read_async(3, 0x1000, 4096, 0x8000, 0, missing_ctx_result, 7)
         assert missing_ctx_result.value == -1
 
         lib.register_stream(7)
         fake_cdll.completion_res = -5
         io_err_result = ctypes.c_int64(0)
-        lib.read_async(3, 0x1000, segments, io_err_result, 7)
+        lib.read_async(3, 0x1000, 4096, 0x8000, 0, io_err_result, 7)
         assert io_err_result.value == -5
 
 
 class TestStructLayout:
     """Guard the ``libnds`` ctypes structures against ``nds_api.h`` (LP64)."""
 
-    def test_io_vec_and_event_sizes(self) -> None:
+    def test_struct_layouts(self) -> None:
+        assert ctypes.sizeof(nl._NdsInitParam) == 48
+        assert nl._NdsInitParam.version.offset == 8
+        assert ctypes.sizeof(nl._NdsMemRange) == 16
+        assert ctypes.sizeof(nl._NdsMemDesc) == 48
         assert ctypes.sizeof(nl._NdsIoVec) == 16
         assert ctypes.sizeof(nl._NdsIoObj) == 16
         assert ctypes.sizeof(nl._NdsIoCb) == 72

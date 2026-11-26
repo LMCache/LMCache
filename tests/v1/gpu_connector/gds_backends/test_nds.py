@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""NDS backend tests without native libraries or raw block devices."""
+"""NDS backend tests without native libraries."""
 
 # Future
 from __future__ import annotations
 
 # Standard
 from collections.abc import Callable, Iterator
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 import ctypes
@@ -19,14 +18,7 @@ import torch
 # First Party
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.gpu_connector._gds_backends import available_backends, create_backend
-from lmcache.v1.gpu_connector.gds_backends import _nds_fiemap as fiemap_mod
 from lmcache.v1.gpu_connector.gds_backends import nds as na
-from lmcache.v1.gpu_connector.gds_backends._nds_fiemap import (
-    FIEMAP_EXTENT_UNWRITTEN,
-    FileExtent,
-    FileExtentMap,
-)
-from lmcache.v1.gpu_connector.gds_backends._nds_libnds import _IoSegment
 from lmcache.v1.gpu_connector.gds_backends.base import Submission
 from lmcache.v1.gpu_connector.gds_context import GDSContext
 
@@ -49,7 +41,7 @@ class _FakeNDSLibrary:
 
     def file_register(self, fd: int) -> int:
         self.calls.append(("file_register", fd))
-        return fd + 100
+        return fd
 
     def file_deregister(self, handle: int) -> None:
         self.calls.append(("file_deregister", handle))
@@ -71,33 +63,47 @@ class _FakeNDSLibrary:
 
     def read_async(
         self,
-        dev_fd: int,
+        file_fd: int,
         ptr_base: int,
-        segments: list[_IoSegment],
+        size: int,
+        file_offset: int,
+        buf_offset: int,
         result: ctypes.c_int64,
         raw_stream: int,
     ) -> None:
-        self.calls.append(("read_async", dev_fd, ptr_base, list(segments), raw_stream))
-        total = sum(seg.length for seg in segments)
+        self.calls.append(
+            ("read_async", file_fd, ptr_base, size, file_offset, buf_offset, raw_stream)
+        )
         if self.defer_io:
-            self.deferred_callbacks.append(lambda: setattr(result, "value", total))
+            self.deferred_callbacks.append(lambda: setattr(result, "value", size))
         else:
-            result.value = total
+            result.value = size
 
     def write_async(
         self,
-        dev_fd: int,
+        file_fd: int,
         ptr_base: int,
-        segments: list[_IoSegment],
+        size: int,
+        file_offset: int,
+        buf_offset: int,
         result: ctypes.c_int64,
         raw_stream: int,
     ) -> None:
-        self.calls.append(("write_async", dev_fd, ptr_base, list(segments), raw_stream))
-        total = sum(seg.length for seg in segments)
+        self.calls.append(
+            (
+                "write_async",
+                file_fd,
+                ptr_base,
+                size,
+                file_offset,
+                buf_offset,
+                raw_stream,
+            )
+        )
         if self.defer_io:
-            self.deferred_callbacks.append(lambda: setattr(result, "value", total))
+            self.deferred_callbacks.append(lambda: setattr(result, "value", size))
         else:
-            result.value = total
+            result.value = size
 
 
 class _AmbiguousTensorComparison:
@@ -161,29 +167,14 @@ def backend(fake_lib: _FakeNDSLibrary) -> Iterator[na.Backend]:
     value.close_driver()
 
 
-def _mock_slab_fs(
-    monkeypatch: pytest.MonkeyPatch,
-    extents: tuple[FileExtent, ...],
-    slab_size: int,
-) -> list[int]:
-    """Stub slab file creation, sysfs block resolution, and FIEMAP query."""
+def _mock_slab_fs(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Stub slab file creation. Returns the fds ``os.close`` was given."""
     closed_fds: list[int] = []
     next_fd = iter((10, 11, 12))
-
     monkeypatch.setattr(os, "makedirs", lambda *a, **kw: None)
     monkeypatch.setattr(os, "posix_fallocate", lambda *a: None, raising=False)
     monkeypatch.setattr(os, "open", lambda *_a, **_kw: next(next_fd))
     monkeypatch.setattr(os, "close", closed_fds.append)
-    monkeypatch.setattr(
-        na,
-        "_block_device_path_for_file",
-        lambda _path: "/dev/nvme0n1p2",
-    )
-    monkeypatch.setattr(
-        FileExtentMap,
-        "load",
-        classmethod(lambda cls, _fd, size: cls(extents, slab_size)),
-    )
     return closed_fds
 
 
@@ -339,49 +330,6 @@ class TestDriverLifecycle:
         assert fake_lib.calls.count(("driver_close",)) == 1
 
 
-class TestBlockDeviceAndExtentMap:
-    def test_block_device_path_resolves_device_number_through_sysfs(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        device = os.makedev(259, 2)
-        monkeypatch.setattr(
-            na.os,
-            "stat",
-            lambda _path: SimpleNamespace(st_dev=device),
-        )
-
-        def resolve(path_self: Path, *, strict: bool = False) -> Path:
-            assert str(path_self) == "/sys/dev/block/259:2"
-            assert strict
-            return Path("/sys/devices/pci0000:00/nvme0n1/nvme0n1p2")
-
-        monkeypatch.setattr(na.Path, "resolve", resolve)
-        monkeypatch.setattr(
-            na.Path,
-            "exists",
-            lambda path_self: str(path_self) == "/dev/nvme0n1p2",
-        )
-        assert na._block_device_path_for_file("/slab/cache") == "/dev/nvme0n1p2"
-
-    def test_file_extent_map_accepts_unwritten_and_looks_up_with_bisect(self) -> None:
-        e0 = FileExtent(logical=0, physical=0x10000, length=4096, flags=0)
-        e1 = FileExtent(
-            logical=4096,
-            physical=0x20000,
-            length=8192,
-            flags=FIEMAP_EXTENT_UNWRITTEN,
-        )
-        emap = FileExtentMap((e0, e1), 12288)
-        assert emap.extent_at(0) == e0
-        assert emap.extent_at(4095) == e0
-        assert emap.extent_at(4096) == e1
-        assert emap.extent_at(12287) == e1
-        with pytest.raises(RuntimeError, match="not covered by FIEMAP"):
-            emap.extent_at(-1)
-        with pytest.raises(RuntimeError, match="not covered by FIEMAP"):
-            emap.extent_at(12288)
-
-
 class TestSlabAndHandleLifecycle:
     def test_open_handle_closes_fd_on_register_failure(
         self,
@@ -400,43 +348,42 @@ class TestSlabAndHandleLifecycle:
             backend.open_handle(42, "/tmp/slab")
         assert closed == [42]
 
-    def test_open_slab_closes_file_handle_when_block_device_attach_fails(
+    def test_open_slab_closes_file_when_register_fails(
         self,
         backend: na.Backend,
+        fake_lib: _FakeNDSLibrary,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        closed_fds = _mock_slab_fs(
-            monkeypatch,
-            (FileExtent(logical=0, physical=0xA000, length=4096, flags=0),),
-            4096,
+        closed_fds = _mock_slab_fs(monkeypatch)
+        monkeypatch.setattr(
+            fake_lib,
+            "file_register",
+            lambda _fd: (_ for _ in ()).throw(RuntimeError("register")),
         )
-
-        def open_fail(path: str, _flags: int, *_args: object) -> int:
-            if path == "/dev/nvme0n1p2":
-                raise OSError(13, "Permission denied")
-            return 11
-
-        monkeypatch.setattr(os, "open", open_fail)
-        with pytest.raises(OSError, match="Permission denied"):
+        with pytest.raises(RuntimeError, match="register"):
             backend.open_slab("/slabs", 4096, direct_io=False)
-        # Initial fallocate fd (11) and registered slab file fd (11) both closed.
-        assert len(closed_fds) == 2
+        # fallocate fd, then the reopened slab fd after registration fails.
+        assert closed_fds == [10, 11]
 
-    def test_handle_close_is_idempotent(
+    def test_handle_close_deregisters_before_closing_the_fd(
         self,
         backend: na.Backend,
+        fake_lib: _FakeNDSLibrary,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        closed_fds = _mock_slab_fs(
-            monkeypatch,
-            (FileExtent(logical=0, physical=0xA000, length=4096, flags=0),),
-            4096,
-        )
+        closed_fds = _mock_slab_fs(monkeypatch)
         handle = backend.open_slab("/slabs", 4096, direct_io=False)
         closed_fds.clear()
         handle.close()
         handle.close()
-        assert closed_fds == [12, 11]
+        assert ("file_deregister", 11) in fake_lib.calls
+        assert fake_lib.calls.count(("file_deregister", 11)) == 1
+        assert closed_fds == [11]
+        deregister_at = fake_lib.calls.index(("file_deregister", 11))
+        assert all(
+            call[0] != "file_deregister" or i == deregister_at
+            for i, call in enumerate(fake_lib.calls)
+        )
 
 
 class TestBufferAndStreamRegistration:
@@ -444,6 +391,19 @@ class TestBufferAndStreamRegistration:
         cpu = torch.empty(4096, dtype=torch.uint8)
         with pytest.raises(ValueError, match="NPU"):
             backend.register_buffer(cpu)
+
+    def test_register_buffer_rejects_empty(self, backend: na.Backend) -> None:
+        with pytest.raises(ValueError, match="empty"):
+            backend.register_buffer(_fake_npu_tensor(nbytes=0))
+
+    def test_register_buffer_pins_the_whole_region_once(
+        self, backend: na.Backend, fake_lib: _FakeNDSLibrary
+    ) -> None:
+        region = 16 * 1024 * 1024
+        buf = _fake_npu_tensor(ptr=0x100000, nbytes=region * 2)
+        backend.register_buffer(buf)
+        assert ("register_memory", 0x100000, region * 2) in fake_lib.calls
+        assert fake_lib.calls.count(("register_memory", 0x100000, region * 2)) == 1
 
     def test_register_buffer_non_monotonic_addresses_io_and_deregister(
         self,
@@ -459,11 +419,7 @@ class TestBufferAndStreamRegistration:
         assert ("register_memory", 0x200000, 8192) in fake_lib.calls
         assert ("register_memory", 0x100000, 4096) in fake_lib.calls
 
-        _mock_slab_fs(
-            monkeypatch,
-            (FileExtent(logical=0, physical=0xA000, length=8192, flags=0),),
-            8192,
-        )
+        _mock_slab_fs(monkeypatch)
         handle = backend.open_slab("/slabs", 8192, direct_io=False)
         backend.register_stream(7)
 
@@ -490,11 +446,7 @@ class TestBufferAndStreamRegistration:
         backend: na.Backend,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _mock_slab_fs(
-            monkeypatch,
-            (FileExtent(logical=0, physical=0xA000, length=4096, flags=0),),
-            4096,
-        )
+        _mock_slab_fs(monkeypatch)
         handle = backend.open_slab("/slabs", 4096, direct_io=False)
         backend.register_stream(7)
         buf = _fake_npu_tensor(ptr=0x100000, nbytes=4096)
@@ -503,24 +455,18 @@ class TestBufferAndStreamRegistration:
             backend.register_buffer(buf)
         assert handle.read_async(0x100000, 4096, 0, 0, 7).bytes_done == 4096
 
-    def test_register_buffer_unregisters_pinned_regions_on_failure(
+    def test_failed_registration_leaves_the_buffer_unregistered(
         self,
         backend: na.Backend,
         fake_lib: _FakeNDSLibrary,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        region_size = 16 * 1024 * 1024
-        fake_lib.fail_on_register_mem_call = 2
-        buf = _fake_npu_tensor(ptr=0x100000, nbytes=region_size * 2)
+        fake_lib.fail_on_register_mem_call = 1
+        buf = _fake_npu_tensor(ptr=0x100000, nbytes=4096)
         with pytest.raises(OSError, match="pin failed"):
             backend.register_buffer(buf)
-        assert ("unregister_memory", 0x100000, region_size) in fake_lib.calls
-        # Rolled-back region must not remain registered for subsequent I/O.
-        _mock_slab_fs(
-            monkeypatch,
-            (FileExtent(logical=0, physical=0xA000, length=4096, flags=0),),
-            4096,
-        )
+        assert not any(call[0] == "unregister_memory" for call in fake_lib.calls)
+        _mock_slab_fs(monkeypatch)
         handle = backend.open_slab("/slabs", 4096, direct_io=False)
         backend.register_stream(7)
         with pytest.raises(RuntimeError, match="not registered"):
@@ -550,52 +496,45 @@ class TestBufferAndStreamRegistration:
 
 class TestNDSHandleIO:
     def _open_test_slab(
-        self,
-        backend: na.Backend,
-        monkeypatch: pytest.MonkeyPatch,
-        extents: tuple[FileExtent, ...],
-        slab_size: int,
+        self, backend: na.Backend, monkeypatch: pytest.MonkeyPatch, slab_size: int
     ) -> na.NDSHandle:
-        _mock_slab_fs(monkeypatch, extents, slab_size)
+        _mock_slab_fs(monkeypatch)
         slab = backend.open_slab("/slabs", slab_size, direct_io=False)
         assert isinstance(slab, na.NDSHandle)
         return slab
 
     @pytest.mark.parametrize("operation", ["read", "write"])
-    def test_io_requires_attached_block_device(
-        self, backend: na.Backend, operation: str
+    def test_io_requires_an_open_slab_file(
+        self,
+        backend: na.Backend,
+        operation: str,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        monkeypatch.setattr(os, "close", lambda _fd: None)
         backend.register_stream(7)
         backend.register_buffer(_fake_npu_tensor())
         handle = backend.open_handle(5, "/slab")
+        handle.close()
         submit = handle.read_async if operation == "read" else handle.write_async
-        with pytest.raises(RuntimeError, match="block device is not open"):
+        with pytest.raises(RuntimeError, match="not open"):
             submit(0x100000, 4096, 0, 0, 7)
 
     @pytest.mark.parametrize("operation", ["read", "write"])
-    def test_io_splits_multi_extent_segments_symmetrically(
+    def test_io_submits_the_slab_fd_and_logical_offset(
         self,
         backend: na.Backend,
         fake_lib: _FakeNDSLibrary,
         monkeypatch: pytest.MonkeyPatch,
         operation: str,
     ) -> None:
-        handle = self._open_test_slab(
-            backend,
-            monkeypatch,
-            (
-                FileExtent(logical=0, physical=0xA000, length=4096, flags=0),
-                FileExtent(logical=4096, physical=0xB000, length=4096, flags=0),
-            ),
-            8192,
-        )
+        handle = self._open_test_slab(backend, monkeypatch, 16384)
         backend.register_stream(7)
         backend.register_buffer(_fake_npu_tensor(ptr=0x100000, nbytes=16384))
         submit = handle.read_async if operation == "read" else handle.write_async
         sub = submit(
             buf_base=0x100000,
             size=8192,
-            file_offset=0,
+            file_offset=4096,
             buf_offset=4096,
             raw_stream=7,
         )
@@ -603,34 +542,13 @@ class TestNDSHandleIO:
         assert sub.bytes_done == 8192
         assert fake_lib.calls[-1] == (
             f"{operation}_async",
-            112,
+            11,
             0x100000,
-            [
-                _IoSegment(0xA000, 4096, 4096),
-                _IoSegment(0xB000, 4096, 8192),
-            ],
+            8192,
+            4096,
+            4096,
             7,
         )
-
-    @pytest.mark.parametrize("operation", ["read", "write"])
-    def test_segments_use_buffer_offset_not_file_offset(
-        self,
-        backend: na.Backend,
-        fake_lib: _FakeNDSLibrary,
-        monkeypatch: pytest.MonkeyPatch,
-        operation: str,
-    ) -> None:
-        handle = self._open_test_slab(
-            backend,
-            monkeypatch,
-            (FileExtent(logical=0, physical=0xA000, length=16384, flags=0),),
-            16384,
-        )
-        backend.register_stream(7)
-        backend.register_buffer(_fake_npu_tensor(ptr=0x100000, nbytes=8192))
-        submit = handle.read_async if operation == "read" else handle.write_async
-        submit(0x100000, 4096, 8192, 0, 7)
-        assert fake_lib.calls[-1][3] == [_IoSegment(0xA000 + 8192, 4096, 0)]
 
     def test_async_io_defers_completion_until_callback(
         self,
@@ -639,12 +557,7 @@ class TestNDSHandleIO:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         fake_lib.defer_io = True
-        handle = self._open_test_slab(
-            backend,
-            monkeypatch,
-            (FileExtent(logical=0, physical=0xA000, length=4096, flags=0),),
-            4096,
-        )
+        handle = self._open_test_slab(backend, monkeypatch, 4096)
         backend.register_stream(7)
         backend.register_buffer(_fake_npu_tensor(ptr=0x100000, nbytes=4096))
         sub = handle.read_async(0x100000, 4096, 0, 0, 7)
@@ -657,12 +570,7 @@ class TestNDSHandleIO:
         backend: na.Backend,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        handle = self._open_test_slab(
-            backend,
-            monkeypatch,
-            (FileExtent(logical=0, physical=0xA000, length=8192, flags=0),),
-            8192,
-        )
+        handle = self._open_test_slab(backend, monkeypatch, 8192)
         backend.register_stream(7)
         backend.register_buffer(_fake_npu_tensor(ptr=0x100000, nbytes=8192))
         with pytest.raises(ValueError, match="4096"):
@@ -671,17 +579,3 @@ class TestNDSHandleIO:
             handle.read_async(0x100000, 4096, 8192, 0, 7)
         with pytest.raises(RuntimeError, match="not registered"):
             handle.read_async(0x999000, 4096, 0, 0, 7)
-
-
-class TestStructLayout:
-    """Guard the FIEMAP ctypes structures against ``<linux/fiemap.h>``."""
-
-    def test_fiemap_extent_layout(self) -> None:
-        assert ctypes.sizeof(fiemap_mod._FiemapExtent) == 56
-        assert fiemap_mod._FiemapExtent.fe_logical.offset == 0
-        assert fiemap_mod._FiemapExtent.fe_physical.offset == 8
-        assert fiemap_mod._FiemapExtent.fe_length.offset == 16
-        assert fiemap_mod._FiemapExtent.fe_flags.offset == 40
-
-    def test_fiemap_header_layout(self) -> None:
-        assert fiemap_mod._Fiemap.fm_extents.offset == 32
