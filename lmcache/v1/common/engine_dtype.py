@@ -15,6 +15,14 @@ from typing import Any
 #: object name, so the value stays short.
 KV_DTYPE_TAG_NAME = "lmcache.tag.kv_dtype"
 
+#: Engine-declared modes whose own names do not fit an object name. With a
+#: 105-character model path and a 64-character salt, ``int8_per_token_head``
+#: reached the 255-byte NAME_MAX exactly, so the tag has to be shorter.
+_ENGINE_DTYPE_CODES = {
+    "fp8_per_token_head": "f8pth",
+    "int8_per_token_head": "i8pth",
+}
+
 _MODEL_DTYPE_CODES = {
     "bfloat16": "bf16",
     "float16": "f16",
@@ -31,11 +39,15 @@ _MODEL_DTYPE_CODES = {
 def kv_dtype_tag_code(dtype: Any) -> str:
     """Return the tag value for a torch dtype, dtype name, or engine string.
 
-    A torch dtype or its name becomes the short code used in object names; an
-    engine's declared KV cache dtype (``fp8_per_token_head`` and friends) is
-    kept verbatim, because those modes share a page size but not a layout.
+    A torch dtype or its name becomes the short code used in object names. The
+    per-token-head modes have their own short codes: they share a page size but
+    not a layout, and their full names overflow the object-name limit next to a
+    long model path and salt. Any other engine string is kept verbatim so two
+    unknown modes cannot collide.
     """
     if dtype is None:
         return ""
     name = str(dtype).removeprefix("torch.")
-    return _MODEL_DTYPE_CODES.get(name, name.lower() if name.isupper() else name)
+    if name in _MODEL_DTYPE_CODES:
+        return _MODEL_DTYPE_CODES[name]
+    return _ENGINE_DTYPE_CODES.get(name, name.lower() if name.isupper() else name)

@@ -171,7 +171,7 @@ def _kv_dtype_tag(vllm_config: "VllmConfig") -> str:
     cache_config = getattr(vllm_config, "cache_config", None)
     cache_dtype = getattr(cache_config, "cache_dtype", None)
     if cache_dtype not in (None, "", "auto"):
-        return str(cache_dtype).lower()
+        return kv_dtype_tag_code(cache_dtype)
     model_dtype = getattr(getattr(vllm_config, "model_config", None), "dtype", None)
     return kv_dtype_tag_code(model_dtype)
 

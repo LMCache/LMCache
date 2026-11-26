@@ -60,12 +60,10 @@ def test_auto_uses_the_model_dtype():
 
 
 @requires_vllm
-def test_an_explicit_cache_dtype_is_kept_verbatim():
-    """Per-token-head modes share a page size but not a layout."""
-    assert _dtype_tag(_config(cache_dtype="fp8_per_token_head")) == "fp8_per_token_head"
-    assert (
-        _dtype_tag(_config(cache_dtype="int8_per_token_head")) == "int8_per_token_head"
-    )
+def test_an_explicit_cache_dtype_gets_its_identity_code():
+    """The per-token-head modes need distinct codes that still fit a name."""
+    assert _dtype_tag(_config(cache_dtype="fp8_per_token_head")) == "f8pth"
+    assert _dtype_tag(_config(cache_dtype="int8_per_token_head")) == "i8pth"
     assert _dtype_tag(_config(cache_dtype="fp8_e4m3")) == "fp8_e4m3"
 
 
@@ -91,7 +89,7 @@ def test_an_empty_dtype_leaves_the_request_alone():
 @requires_vllm
 def test_a_conflicting_caller_tag_is_overridden():
     """The serving engine's dtype wins over one the caller invented."""
-    configs = _apply("bf16", {_TAG_KEY: "fp8_per_token_head"})
+    configs = _apply("bf16", {_TAG_KEY: "f8pth"})
     assert configs == {_TAG_KEY: "bf16"}
 
 
