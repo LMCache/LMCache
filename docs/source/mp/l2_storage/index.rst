@@ -201,7 +201,7 @@ L1 Eviction
 
 L1 eviction runs a single background thread that monitors overall L1
 memory usage. When usage exceeds ``trigger_watermark``, the eviction
-policy evicts a fraction of the least-recently-used keys.
+policy evicts a fraction of the keys selected by the configured policy.
 
 **CLI flags:**
 
@@ -214,8 +214,11 @@ policy evicts a fraction of the least-recently-used keys.
      - Description
    * - ``--eviction-policy``
      - *(required)*
-     - Policy name: ``LRU``, ``ARC``, ``IsolatedLRU``, or ``noop``. ``ARC``
+     - Policy name: ``LRU``, ``ARC``, ``IsolatedLRU``, ``SIEVE``, or ``noop``.
+       ``ARC``
        balances recent and frequent keys using key-only ghost history.
+       ``SIEVE`` grants touched keys a second chance without moving them in
+       the insertion-order queue.
        ``IsolatedLRU``
        maintains one LRU list per ``cache_salt`` and relies on per-salt
        quotas registered via the ``/quota`` HTTP endpoints; see
@@ -259,7 +262,8 @@ drops by ``eviction_ratio``.
      - Description
    * - ``eviction_policy``
      - *(required)*
-     - Policy name: ``"LRU"``, ``"ARC"``, ``"IsolatedLRU"``, or ``"noop"``.
+     - Policy name: ``"LRU"``, ``"ARC"``, ``"IsolatedLRU"``, ``"SIEVE"``, or
+       ``"noop"``.
    * - ``trigger_watermark``
      - ``0.8``
      - Adapter usage fraction [0, 1] above which eviction is triggered.

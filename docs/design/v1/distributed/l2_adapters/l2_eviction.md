@@ -73,7 +73,7 @@ JSON spec passed to `--l2-adapter`:
 
 | Field               | Type    | Default | Description                                                     |
 |---------------------|---------|---------|-----------------------------------------------------------------|
-| `eviction_policy`   | string  | —       | Policy name: `"LRU"`, `"ARC"`, `"IsolatedLRU"`, or `"noop"`. Required. |
+| `eviction_policy`   | string  | —       | Policy name: `"LRU"`, `"ARC"`, `"IsolatedLRU"`, `"SIEVE"`, or `"noop"`. Required. |
 | `trigger_watermark` | float   | `0.8`   | Usage fraction [0, 1] above which eviction is triggered.        |
 | `eviction_ratio`    | float   | `0.2`   | Fraction of **used** capacity to evict each cycle.              |
 
@@ -158,6 +158,7 @@ EvictionPolicy (abstract)
   ├─ LRUEvictionPolicy   — evicts least-recently-used keys
   ├─ ARCEvictionPolicy   — balances recent and frequently accessed keys
   ├─ IsolatedLRUEvictionPolicy — maintains one LRU list per cache salt
+  ├─ SieveEvictionPolicy — gives touched keys a second chance in FIFO order
   └─ NoOpEvictionPolicy  — never evicts
 ```
 
@@ -178,6 +179,16 @@ break a tie at the adaptive boundary. MP eviction runs later in an independent
 pressure loop, so there is no corresponding `x`. The MP policy follows the
 request-independent threshold used by vLLM's CPU-offload ARC variant: select
 from `T1` when `len(T1) >= int(p)`, otherwise select from `T2`.
+
+`SieveEvictionPolicy` keeps resident keys in FIFO insertion order. A touch sets
+one visited bit without moving the key. During eviction, a persistent hand
+walks from the oldest key toward newer keys, clears visited bits to grant second
+chances, and selects unvisited keys. This makes SIEVE resistant to one-time
+scans while avoiding LRU queue mutation on every hit. LMCache retains its
+policy-wide lock because policy callbacks and eviction selection can arrive
+from different controller threads; SIEVE reduces work inside the touch path but
+does not make that path lock-free. The algorithm follows the
+[NSDI 2024 SIEVE paper](https://www.usenix.org/conference/nsdi24/presentation/zhang-yazhuo).
 
 ## Adapter Implementation Guide
 
@@ -288,9 +299,9 @@ for each L2AdapterEvictionState:
 ## Relationship to L1 Eviction
 
 L1 and L2 eviction share the same policy classes (`LRUEvictionPolicy`,
-`ARCEvictionPolicy`, `IsolatedLRUEvictionPolicy`, `NoOpEvictionPolicy`) and the
-same listener-bridge pattern (composition over multi-inheritance). They differ
-in how they are wired:
+`ARCEvictionPolicy`, `IsolatedLRUEvictionPolicy`, `SieveEvictionPolicy`,
+`NoOpEvictionPolicy`) and the same listener-bridge pattern (composition over
+multi-inheritance). They differ in how they are wired:
 
 | Aspect              | L1                                   | L2                                    |
 |---------------------|--------------------------------------|---------------------------------------|
