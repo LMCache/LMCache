@@ -35,23 +35,17 @@ Run via the module or the `lmcache` CLI. Start the server first.
 
 ### HIXL on Ascend
 
-For HIXL with ACL Host memory, use the thin benchmark entry point from a
-compatible LMCache-Ascend installation:
+HIXL requires a compatible, HIXL-enabled LMCache-Ascend installation.
+Use the regular benchmark entry point on both server and client with
+`--transfer-channel-type hixl --shm-name ""`, and omit `--use-lazy`:
 
 ```bash
-LMCACHE_ASCEND_MP_HOST_MEMORY_ALLOCATOR=aclrt_malloc_host python -m lmcache_ascend.v1.mp_transfer_channel_benchmark --help
+python -m lmcache.tools.transfer_channel_benchmark --help
 ```
 
-Use the same server/client arguments below with `--transfer-channel-type hixl`.
-Configure a distinct `LMCACHE_HIXL_ENGINE_ID` for each process and select its
-logical NPU with `LMCACHE_HIXL_DEVICE_ID` (default `0`). The entry point disables
-the benchmark's named SHM when the ACL allocator is selected, then delegates
-transfers, `--op read` / `--op write`, verification and cleanup to this tool.
-Do not pass `--use-lazy` with this allocator.
-
-See the [P2P user guide](../../../docs/source/mp/p2p.rst) and
-[LMCache-Ascend MP documentation](https://github.com/LMCache/LMCache-Ascend/tree/main/docs/mp_mode)
-for backend prerequisites and deployment. The examples below use NIXL.
+See [P2P KV Cache Sharing on Ascend](../../../docs/source/platform/devices/npu/p2p.rst)
+for the required environment, memory configuration, and HIXL / Mooncake TE commands.
+The examples below use NIXL.
 
 ### `python -m`
 
@@ -125,6 +119,7 @@ so restart the server between a write run and a verified read run.
 | `--seed` | client | RNG seed for the transferred subset. |
 | `--verify` | client | Verify transferred bytes: reads in the client's buffer, writes in the server's buffer. |
 | `--use-lazy` | both | Use the lazy L1 allocator (experimental for registration). |
+| `--shm-name` | both | Non-lazy L1 shared-memory name. Omit to keep the L1 default (`lmcache_l1_pool_<pid>`); pass `""` to disable SHM or a nonempty name to select a segment. |
 | `--server-timeout` | server | Seconds to serve catalog requests before exiting. |
 
 ## Notes
@@ -133,6 +128,8 @@ so restart the server between a write run and a verified read run.
   handshake) so remote page-index math lines up.
 - With the default (non-lazy) allocator the whole `--buffer-size` is allocated up
   front and may be CUDA-pinned; keep it within available host memory.
+- If using explicit SHM names, choose a different name for each process on
+  the same host. `--shm-name` does not affect the lazy allocator.
 - Requires a working transfer channel runtime (for `nixl`, a UCX backend).
 
 ## Performance: NUMA placement

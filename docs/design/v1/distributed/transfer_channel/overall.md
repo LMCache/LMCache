@@ -215,22 +215,40 @@ points:
 `impl/hixl_impl.py` registers the `hixl` factory. Selecting it loads the native
 HIXL bindings and ACL context helpers from a compatible LMCache-Ascend
 installation; factory discovery alone does not load those dependencies.
+Notable points:
 
-The Context uses one logical NPU and registers the exact base and size of one
-fixed, contiguous ACL Host L1 allocation. It owns the Engine, registration
-handle and peer connections, while the allocator owns the underlying bytes.
-READ and WRITE use byte offsets within that region. Region selection must
-remain `None`; explicit region IDs are rejected and the extra-region methods
-retain the base class's `NotImplementedError` behavior. Direct NPU device
-memory transfers are outside this implementation's scope.
+- **One engine per context.** The context selects one logical NPU and registers
+  the exact base and size supplied in `L1MemoryDesc`, which must describe a
+  fixed, contiguous ACL Host allocation. It owns the Engine, registration
+  handle and peer connections; the allocator owns the underlying bytes.
+- **Handshake and connection reuse.** A ZMQ `REQ`/`REP` exchange carries peer
+  identity, Engine ID and L1 memory range in `InitReq`/`InitResp`. The receiving
+  server registers a reverse Client before replying. The context reuses
+  connections with matching metadata and rejects conflicting peer metadata.
+- **Byte-addressed transfers.** READ and WRITE share one asynchronous submission
+  path. It validates local and remote ranges and matching sizes, then adds
+  each byte offset to its buffer's base address to build native descriptors.
+  There is no page-index conversion.
+- **Task polling.** Client task IDs map to native request handles. `WAITING`
+  retains the task; `COMPLETED` and `FAILED` consume it and return a uniform
+  success or failure mask for the batch. A native query `HixlError` consumes
+  the task and propagates, while an ACL context entry failure before the native
+  query retains it for retry.
+- **ACL context and concurrency.** Native calls use a borrowed ACL context on
+  the calling thread. Each Client serializes native submission, polling and
+  close with its task lock. The Context's Engine lock protects connection
+  management and cleanup; submission and polling do not take that lock.
+- **Cleanup and ownership.** Normal Context shutdown stops the handshake
+  Server and closes registered Clients before disconnecting peers,
+  deregistering L1 and finalizing the Engine. Waiting for a current API call
+  does not drain asynchronous transfers. Callers must stop local transfers
+  and remote access before closing, and keep L1, the borrowed ACL context and
+  the caller-owned runtime alive through cleanup. The channel neither frees
+  L1 nor resets the device.
 
-Each Client serializes submission, polling and close with its task lock.
-Context shutdown stops the handshake Server and closes registered Clients
-before disconnecting peers, deregistering L1 and finalizing the Engine.
-Waiting for a current API call does not drain asynchronous transfers: callers
-must stop local transfers and remote access before closing, and keep L1 and
-the borrowed ACL runtime alive through cleanup. The channel neither frees L1
-nor resets the device.
+**Scope.** HIXL supports transfers through the registered L1 Host buffer only.
+Additional local memory regions and direct NPU device memory transfers are
+not supported.
 
 Backend selection and allocation requirements are described in
 [the P2P user guide](../../../../source/mp/p2p.rst).

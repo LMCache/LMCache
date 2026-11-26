@@ -157,6 +157,9 @@ when starting each server. For example:
 Replace ``mlx5_0`` with the RDMA device available on the node. Both variables
 must be set for RDMA; when they are omitted, Mooncake Transfer Engine uses TCP.
 
+For Ascend device RoCE, use ``MC_TE_PROTOCOL=ascend`` and the configuration in
+:doc:`/platform/devices/npu/p2p` instead of this host-RDMA example.
+
 HIXL on Ascend
 ~~~~~~~~~~~~~~
 
@@ -187,9 +190,8 @@ Stop local transfers and remote access before shutdown. Extra registered
 regions and direct NPU device memory transfers are not supported by this
 backend.
 
-See the `LMCache-Ascend MP documentation
-<https://github.com/LMCache/LMCache-Ascend/tree/main/docs/mp_mode>`_ for
-Ascend installation and deployment instructions.
+See :doc:`/platform/devices/npu/p2p` for Ascend prerequisites, HIXL and
+Mooncake TE startup commands, transfer benchmarks, and remote-hit checks.
 
 Running a multi-node deployment
 -------------------------------
