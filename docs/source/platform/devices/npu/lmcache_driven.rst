@@ -199,7 +199,7 @@ Wait for readiness before starting vLLM:
 
 .. code-block:: text
 
-   LMCache INFO: LMCache zmq cache server is running on localhost:5555
+   LMCache INFO: LMCache grpc cache server is running on localhost:5555
    INFO:     Uvicorn running on http://127.0.0.1:8080
 
 Notes:
@@ -207,7 +207,7 @@ Notes:
 * The server's transfer mode defaults to ``lmcache_driven``, so
   ``--supported-transfer-mode`` is not needed here (unlike
   :doc:`engine_driven`, which must set it).
-* The server binds the ZMQ endpoint on ``localhost:5555`` by default
+* The server binds the gRPC endpoint on ``localhost:5555`` by default
   (``--host`` / ``--port`` to change) and an HTTP health/ops endpoint on port
   ``8080`` on the same host; make sure both are free.
 * Size ``--l1-size-gb`` so that the whole working set (number of distinct

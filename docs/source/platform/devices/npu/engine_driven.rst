@@ -193,7 +193,7 @@ Wait for readiness before starting vLLM:
 .. code-block:: text
 
    LMCache INFO: Checking if shm capacity is larger than L1 request
-   LMCache INFO: LMCache zmq cache server is running on localhost:5555
+   LMCache INFO: LMCache grpc cache server is running on localhost:5555
    INFO:     Uvicorn running on http://127.0.0.1:8080
 
 Notes:
