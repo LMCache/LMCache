@@ -41,13 +41,10 @@ from lmcache.v1.multiprocess.http_apis.l1_reconfigure_api import router
 from lmcache.v1.multiprocess.http_reconfigure import ReconfigureInstanceMiddleware
 from tests.v1.distributed.test_dax_l2_adapter import create_object_key
 
-pytestmark = [
-    pytest.mark.no_shared_allocator,
-    pytest.mark.skipif(
-        os.environ.get("RUN_DEVDAX_L1_INTEGRATION") != "1",
-        reason="set RUN_DEVDAX_L1_INTEGRATION=1",
-    ),
-]
+pytestmark = pytest.mark.skipif(
+    os.environ.get("RUN_DEVDAX_L1_INTEGRATION") != "1",
+    reason="set RUN_DEVDAX_L1_INTEGRATION=1",
+)
 SLOT_BYTES = 4096
 
 

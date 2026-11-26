@@ -62,7 +62,6 @@ root = Path(".")
 #      are not ready yet.
 #   4. As tests become ready, shrink blocklist until XPU jobs run the full set.
 allowlist = {
-  "tests/benchmarks/test_*.py",
   "tests/test_*.py",
   "tests/cli/**/test_*.py",
   "tests/v1/**/test_*.py",

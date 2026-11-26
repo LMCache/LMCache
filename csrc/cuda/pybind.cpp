@@ -61,8 +61,6 @@ PYBIND11_MODULE(cuda_ops, m) {
       py::arg("lmc_key_value_cache"), py::arg("vllm_key_value_cache"),
       py::arg("slot_mapping"), py::arg("direction"),
       py::arg("engine_kv_format"), py::arg("token_major") = false);
-  m.def("load_and_reshape_flash", &load_and_reshape_flash);
-  m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
   m.def(
       "lmcache_memcpy_async",
       [](uintptr_t dest, uintptr_t src, size_t nbytes, int direction,

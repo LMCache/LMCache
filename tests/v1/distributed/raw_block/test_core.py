@@ -520,7 +520,6 @@ def _available_slots(status: Mapping[str, int]) -> int:
     return status["free_slot_count"] + (status["max_slots"] - status["next_slot"])
 
 
-@pytest.mark.no_shared_allocator
 def test_raw_block_core_rejects_work_after_terminal_worker_failure(
     tmp_path: Path,
 ) -> None:
@@ -564,7 +563,6 @@ def test_raw_block_core_rejects_work_after_terminal_worker_failure(
     assert core.report_status()["is_healthy"] is False
 
 
-@pytest.mark.no_shared_allocator
 @requires_rust_raw_block_io
 def test_raw_block_core_uecc_quarantines_only_the_failed_payload_slot(
     tmp_path: Path,
@@ -621,7 +619,6 @@ def test_raw_block_core_uecc_quarantines_only_the_failed_payload_slot(
         core.close()
 
 
-@pytest.mark.no_shared_allocator
 @requires_rust_raw_block_io
 @pytest.mark.parametrize(
     "typed", [False, True], ids=["message-only-wheel", "typed-wheel"]
@@ -664,7 +661,6 @@ def test_uecc_text_alone_does_not_quarantine(
         core.close()
 
 
-@pytest.mark.no_shared_allocator
 @requires_rust_raw_block_io
 def test_uecc_after_slot_reuse_removes_current_owner(tmp_path: Path) -> None:
     fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
@@ -726,7 +722,6 @@ def test_uecc_after_slot_reuse_removes_current_owner(tmp_path: Path) -> None:
         reopened.close()
 
 
-@pytest.mark.no_shared_allocator
 def test_raw_block_core_request_error_does_not_mark_worker_failed(
     tmp_path: Path,
 ) -> None:
