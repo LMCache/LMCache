@@ -250,6 +250,48 @@ when several L1s are configured.
 | Active sessions | `active_sessions` | `active_sessions` |
 | Uptime | `uptime` | `uptime_seconds` **(new — see Server-Side Changes)**, formatted as `Xh Ym Zs` |
 
+#### Cache hits from `/metrics`
+
+`/status` has no hit counts, but the server's lookup metrics subscriber
+(`lmcache/v1/mp_observability/subscribers/metrics/lookup.py`) already exports
+them as Prometheus counters on `GET /metrics`, on the same HTTP port. The CLI
+reads that page and adds a `cache_hits` section, so answering "is LMCache
+hitting?" needs no new server field and no second source of truth
+([#6871](https://github.com/LMCache/LMCache/issues/6871)).
+
+```text
+-------- Cache hits (since server start) ---------
+Lookup requested (tokens):                    1024
+Lookup hits (tokens):                          768
+Lookup hit rate (%):                         75.00
+L1 hits (tokens):                              512
+L2 hits (tokens):                              256
+Request hit rate (%):                        77.70
+```
+
+| Display label | Machine key (`cache_hits.*`) | Source counter on `/metrics` |
+|---|---|---|
+| Lookup requested (tokens) | `lookup_requested_tokens` | `lmcache_mp_lookup_requested_tokens_total` |
+| Lookup hits (tokens) | `lookup_hit_tokens` | `lmcache_mp_lookup_hit_tokens_total` |
+| Lookup hit rate (%) | `lookup_hit_rate` | hits / requested × 100, one decimal |
+| L1 hits (tokens) | `l1_hit_tokens` | `lmcache_mp_lookup_hit_l1_tokens_total` |
+| L2 hits (tokens) | `l2_hit_tokens` | `lmcache_mp_lookup_hit_l2_tokens_total` |
+| Request hit rate (%) | `request_hit_rate` | `lmcache_mp_lookup_request_hit_tokens_total` / `lmcache_mp_lookup_prompt_tokens_total` × 100 |
+
+- **Aggregation.** Each counter is summed across its `model_name` and
+  `cache_salt` series, so the section describes the whole server.
+- **Two rates.** The lookup rate counts only chunk-aligned tokens, which is what
+  LMCache can serve. The request rate divides by the whole prompt and includes
+  the engine's own prefix-cache hits, so it is the closer match to the prefill
+  work the user actually skipped.
+- **"Since server start".** The counters are cumulative OpenTelemetry
+  instruments and `POST /metrics/reset` is a no-op, so the section label states
+  the window rather than implying a recent rate.
+- **Degradation.** Hit data is informational. If `/metrics` is unreachable or
+  unparsable, or a counter is absent (metrics disabled, older server), the
+  affected rows are `N/A` and `describe` still succeeds. A rate is `N/A` when
+  its denominator is 0, i.e. before the first lookup.
+
 ### 4. HTTP client: stdlib `urllib`
 
 No new dependencies. Uses `urllib.request` following the same pattern as the
@@ -262,6 +304,7 @@ existing `lmcache/tools/mp_status_viewer/__main__.py`.
 | Connection refused / timeout | Print error to stderr, exit 1 |
 | HTTP 503 (engine not initialized) | Print "Server unhealthy: engine not initialized", exit 1 |
 | Missing fields in response | Display as `N/A` (Metrics default for `None` values) |
+| `/metrics` unreachable, unparsable, or missing a hit counter | Affected `cache_hits` rows are `N/A`; exit code unchanged |
 
 ---
 
