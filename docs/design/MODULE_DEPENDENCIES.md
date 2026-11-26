@@ -1,6 +1,6 @@
 # Module Dependencies
 
-LMCache code is split into six parts. Each part may import the parts its arrows
+LMCache code is split into seven parts. Each part may import the parts its arrows
 lead to, directly or through other parts: integration may import common, since
 integration depends on client and client on common. The rules live in one file,
 `tools/module_deps.yaml`, and `tools/check_module_deps.py` enforces them in
@@ -17,17 +17,19 @@ flowchart BT
     client --> common
     client --> platform
     client --> transport
+    sdk --> client
     integration --> client
+    integration --> sdk
 ```
 
 The dotted arrow means transport uses devices such as IPC wrappers on demand. The
 check treats it like a solid arrow, and fails if this diagram and the rules file
-disagree.
+disagree. It also fails if the arrows, or the exceptions below, form a cycle.
 
 Imports within a part are always allowed. Server and client never import each
-other, and nothing imports integration. Server is every lmcache module that is
-not in another part. Modules with their own name outside the diagram, such as
-`lmcache.cli` and `lmcache.sdk`, are not server and are not checked.
+other, sdk never imports server, and nothing imports integration. Server is
+every lmcache module that is not in another part. `lmcache.cli` is outside the
+diagram, is not server and is not checked.
 
 Which packages make up each part, and where the files the diagram does not draw
 belong, is in `tools/module_deps.yaml`.

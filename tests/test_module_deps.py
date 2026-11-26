@@ -49,7 +49,11 @@ _SOURCES = {
         "__import__('lmcache.v1', fromlist=['client'])\n"
         "lmcache.v1.client.c.run()\n"
     ),
-    "lmcache/sdk/__init__.py": "from lmcache.v1.client import c\n",
+    "lmcache/cli/__init__.py": "from lmcache.v1.gpu_connector import gds_context\n",
+    "lmcache/sdk/__init__.py": (
+        "from lmcache.v1.common import a\n"
+        "from lmcache.v1.gpu_connector import gds_context\n"
+    ),
     "lmcache/integration/__init__.py": "",
     "lmcache/integration/i.py": (
         "from lmcache.v1.client import c\n"
@@ -68,7 +72,7 @@ def test_check_reports_imports_outside_the_tree(tmp_path: Path) -> None:
         _deps.load_rules(_REPO / _deps.RULES),
         exceptions=[
             ("integration", "lmcache.v1.gpu_connector"),
-            ("lmcache.sdk", "client"),
+            ("lmcache.cli", "server"),
         ],
     )
 
@@ -82,8 +86,23 @@ def test_check_reports_imports_outside_the_tree(tmp_path: Path) -> None:
         "(lmcache.v1.platform.p -> lmcache.v1.gpu_connector.gds_context)",
         "server -> client (lmcache.newmod -> lmcache.v1.client)",
         "server -> client (lmcache.newmod -> lmcache.v1.client.c)",
+        "sdk -> server (lmcache.sdk -> lmcache.v1.gpu_connector.gds_context)",
     }
-    assert unused == ["lmcache.sdk -> client"]
+    assert unused == ["lmcache.cli -> server"]
+
+
+def test_cycles_through_arrows_or_exceptions_are_reported() -> None:
+    rules = _deps.load_rules(_REPO / _deps.RULES)
+    assert _deps.cycles(rules) == []
+
+    allowed = {**rules.allowed, "common": ["sdk"]}
+    assert _deps.cycles(replace(rules, allowed=allowed)) != []
+
+    exceptions = [("lmcache.v1.client", "integration")]
+    assert _deps.cycles(replace(rules, exceptions=exceptions)) == [
+        f"{_deps.RULES}: {part} can import itself through other parts"
+        for part in ("client", "sdk", "integration")
+    ]
 
 
 def test_repo_follows_the_rules() -> None:

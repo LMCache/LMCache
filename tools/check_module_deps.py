@@ -4,8 +4,8 @@
 The rules file is the only source of the dependency tree; this script reads it
 and reports every import between parts that no chain of ``allowed`` arrows
 permits and no ``exceptions`` line covers. It also fails on an exception that
-matches nothing, and when docs/design/MODULE_DEPENDENCIES.md disagrees with
-``allowed``.
+matches nothing, on arrows or exceptions that form a cycle, and when
+docs/design/MODULE_DEPENDENCIES.md disagrees with ``allowed``.
 
 Import statements count wherever they are, including ``TYPE_CHECKING`` blocks
 and function bodies, as do attribute chains such as ``lmcache.v1.client.x``.
@@ -341,6 +341,32 @@ def check(root: Path, rules: Rules) -> tuple[list[str], list[str]]:
     return violations, unused
 
 
+def cycles(rules: Rules) -> list[str]:
+    """Find parts that can import themselves through other parts.
+
+    Follows the ``allowed`` arrows and the ``exceptions`` lines, so an exception
+    that lets two parts import each other counts too.
+
+    Args:
+        rules: The parsed rules.
+
+    Returns:
+        One message per part on a cycle.
+    """
+    arrows = {part: list(targets) for part, targets in rules.allowed.items()}
+    for importer, target in rules.exceptions:
+        source = importer if importer in rules.allowed else part_of(importer, rules)
+        dest = target if target in rules.allowed else part_of(target, rules)
+        if source is not None and dest is not None and source != dest:
+            arrows[source].append(dest)
+    reach = _reachable(arrows)
+    return [
+        f"{RULES}: {part} can import itself through other parts"
+        for part in arrows
+        if part in reach[part]
+    ]
+
+
 def doc_mismatches(root: Path, rules: Rules) -> list[str]:
     """Compare the diagram in ``DOC`` with ``rules.allowed``.
 
@@ -366,13 +392,13 @@ def doc_mismatches(root: Path, rules: Rules) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Return nonzero for violations, unused exceptions or doc drift."""
+    """Return nonzero for violations, unused exceptions, cycles or doc drift."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
     args = parser.parse_args(argv)
     rules = load_rules(args.root / RULES)
     violations, unused = check(args.root, rules)
-    problems = violations + doc_mismatches(args.root, rules)
+    problems = violations + cycles(rules) + doc_mismatches(args.root, rules)
     problems += [
         f"{RULES}: exception '{line}' matches nothing; delete it" for line in unused
     ]
