@@ -11,8 +11,8 @@ import pytest
 import zmq
 
 # First Party
-from lmcache.security.api_key import APIKeyVerifier
 from lmcache.v1.client.transport.zmq_impl.mq_client import MessageQueueClient
+from lmcache.v1.common.security.api_key import APIKeyVerifier
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueServer
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream

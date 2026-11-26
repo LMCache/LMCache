@@ -51,8 +51,8 @@ Available Commands
    * - Command
      - Description
    * - :doc:`server`
-     - Launch the LMCache MP server (ZMQ or gRPC + HTTP). Requires the full
-       install.
+     - Launch the LMCache MP server (gRPC or the deprecated ZMQ, plus HTTP).
+       Requires the full install.
    * - :doc:`coordinator`
      - Launch the LMCache MP coordinator (HTTP instance registry).
    * - :doc:`describe`

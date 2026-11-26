@@ -30,12 +30,52 @@ pipeline.yml
 
 ```bash
 INFERENCE_ENGINE=vllm \
-LMCACHE_REQUEST_TRANSPORT=zmq \
+LMCACHE_REQUEST_TRANSPORT=grpc \
 .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
 ```
 
-The request transport can be `zmq` or `grpc`. The harness maps these values to
-the `tcp://` and `grpc://` connector addresses respectively.
+CI runs every workload with `grpc`, which uses `grpc://` connector addresses.
+The deprecated `zmq` still works locally and uses `tcp://`.
+
+## vLLM sleep mode
+
+`sleep_mode` covers vLLM's sleep and wake-up on the extensible KV cache, which
+vLLM enables by default for an LMCache-driven deployment. The LMCache server
+imports that KV cache, so sleep frees the memory only if the connector
+unregisters it first, and wake-up has to register the newly committed memory
+([design](../../../docs/design/integration/vllm/mp_sleep_mode.md)).
+
+```text
+run-single-test.sh sleep_mode
+  -> VLLM_ENABLE_SLEEP_MODE=1: the vLLM adapter adds --enable-sleep-mode
+  -> workloads/vllm/sleep-mode.sh -> sleep_mode.py
+     -> cache_config_info reports the extensible KV cache as enabled
+     -> prompt: stored to LMCache, then served from LMCache
+     -> /sleep?level=1&reset_connector=false, /wake_up
+        -> prompt: served from LMCache, same output
+     -> /sleep?level=1&reset_connector=true, /wake_up
+        -> prompt: miss, stored again, then served from LMCache, same output
+```
+
+During each sleep the LMCache server's `/status` must list no registered KV
+cache and GPU memory in use must fall to at most 25% of its level before
+sleep. After each wake-up one KV cache must be registered and GPU memory in
+use must stay within 110% of that level. The script runs every check and
+writes the outcomes to `ci_results_<build>/sleep_mode/checks.json`.
+
+CI runs the workload in LMCache-driven transfer, where the registration is
+`registered_gpu_ids` in `/status`. It also runs in engine-driven transfer,
+with the settings of the `lm_eval_engine_driven` step:
+
+```bash
+LMCACHE_MP_TRANSFER_MODE=engine_driven L1_USE_LAZY=false \
+    .buildkite/k3_tests/multiprocess/scripts/run-single-test.sh sleep_mode
+```
+
+There the server imports no GPU memory and the registration is its
+shared-memory staging context (`registered_non_cuda_instance_ids`), so
+connector hooks that do nothing fail only the two checks that the
+registration is gone during sleep.
 
 ## SGLang nightly validation
 
@@ -46,8 +86,7 @@ Buildkite build can set `VERIFY_AND_PIN_SGLANG=true` to run the canary path:
 ```text
 official SGLang nightly index
   -> resolve newest nightly version and commit
-  -> run lm_eval with LMCache over ZMQ and gRPC
-  -> require both jobs to report identical metadata
+  -> run lm_eval with LMCache over gRPC
   -> update latest_tested_sglang.txt and tested_runtimes.jsonl
 ```
 
@@ -269,7 +308,7 @@ for each test:
       inference_engine:
         - example
       request_transport:
-        - zmq
+        - grpc
   env:
     INFERENCE_ENGINE: "{{matrix.inference_engine}}"
     LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -282,14 +321,10 @@ baseline, and large-model cases to request different resources.
 
 ## Validation
 
-At minimum, validate a new adapter with both transports and one common
-workload:
+At minimum, validate a new adapter with one common workload:
 
 ```bash
 bash -n .buildkite/k3_tests/multiprocess/scripts/engines/<engine>.sh
-
-INFERENCE_ENGINE=<engine> LMCACHE_REQUEST_TRANSPORT=zmq \
-    .buildkite/k3_tests/multiprocess/run.sh high_concurrency
 
 INFERENCE_ENGINE=<engine> LMCACHE_REQUEST_TRANSPORT=grpc \
     .buildkite/k3_tests/multiprocess/run.sh high_concurrency

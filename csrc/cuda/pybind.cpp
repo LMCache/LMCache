@@ -278,7 +278,7 @@ PYBIND11_MODULE(cuda_ops, m) {
   // The whole plan arrives as four int64 numpy tables and is unpacked into
   // CBRetrieveStep vectors in C++ (microseconds), replacing ~5 pybind object
   // constructions per chunk on the Python side. Tables:
-  //   staging  [n_staging, 4]: dest, src, nbytes, host_offset
+  //   staging  [n_staging, 4]: dest, src, nbytes, host_offset (-1 = D2D)
   //   ropes    [n_ropes,  4]: group_idx, slot_idx, old_st, cur_st
   //   scatters [n_scatter,4]: group_idx, slot_idx, slot_mapping_offset, n_tok
   //   step_offsets [n_steps, 3]: end index into each table (exclusive,

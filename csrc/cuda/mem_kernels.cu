@@ -248,26 +248,28 @@ page_buffer_offset(const int k_or_v, const int token_idx,
 
   // vllm cross layer
   if constexpr (format == EngineKVFormat::NB_NL_TWO_BS_NH_HS) {
-    return k_or_v * page_buffer_size * scalars_per_token +
-           token_idx * scalars_per_token + scalar_offset;
+    return static_cast<int64_t>(k_or_v) * page_buffer_size * scalars_per_token +
+           static_cast<int64_t>(token_idx) * scalars_per_token + scalar_offset;
   }
   // vllm flash attention (NHD)
   else if constexpr (format == EngineKVFormat::NL_X_TWO_NB_BS_NH_HS) {
-    return k_or_v * page_buffer_size * scalars_per_token +
-           token_idx * scalars_per_token + scalar_offset;
+    return static_cast<int64_t>(k_or_v) * page_buffer_size * scalars_per_token +
+           static_cast<int64_t>(token_idx) * scalars_per_token + scalar_offset;
   }
   // vllm flash infer (NHD)
   else if constexpr (format == EngineKVFormat::NL_X_NB_TWO_BS_NH_HS) {
     const int block_idx = token_idx / block_size;
     const int block_offset = token_idx % block_size;
-    return block_idx * 2 * block_size * scalars_per_token +
-           k_or_v * block_size * scalars_per_token +
-           block_offset * scalars_per_token + scalar_offset;
+    return static_cast<int64_t>(block_idx) * 2 * block_size *
+               scalars_per_token +
+           static_cast<int64_t>(k_or_v) * block_size * scalars_per_token +
+           static_cast<int64_t>(block_offset) * scalars_per_token +
+           scalar_offset;
   }
   // MLA formats: vLLM (NL_X_NB_BS_HS) and SGLang (NL_X_NBBS_ONE_HS)
   else if constexpr (format == EngineKVFormat::NL_X_NB_BS_HS ||
                      format == EngineKVFormat::NL_X_NBBS_ONE_HS) {
-    return token_idx * scalars_per_token + scalar_offset;
+    return static_cast<int64_t>(token_idx) * scalars_per_token + scalar_offset;
   }
   // vllm flash attention (HND) — physical: [2, NB, NH, BS, HS]
   else if constexpr (format == EngineKVFormat::NL_X_TWO_NB_NH_BS_HS) {
@@ -276,10 +278,11 @@ page_buffer_offset(const int k_or_v, const int token_idx,
     const int head_idx = scalar_offset / head_size;
     const int head_offset = scalar_offset % head_size;
     const int num_heads = scalars_per_token / head_size;
-    return k_or_v * page_buffer_size * scalars_per_token +
-           block_idx * num_heads * block_size * head_size +
-           head_idx * block_size * head_size + block_offset * head_size +
-           head_offset;
+    return static_cast<int64_t>(k_or_v) * page_buffer_size * scalars_per_token +
+           static_cast<int64_t>(block_idx) * num_heads * block_size *
+               head_size +
+           static_cast<int64_t>(head_idx) * block_size * head_size +
+           static_cast<int64_t>(block_offset) * head_size + head_offset;
   }
   // vllm flash infer (HND) — physical: [NB, 2, NH, BS, HS]
   else if constexpr (format == EngineKVFormat::NL_X_NB_TWO_NH_BS_HS) {
@@ -288,10 +291,11 @@ page_buffer_offset(const int k_or_v, const int token_idx,
     const int head_idx = scalar_offset / head_size;
     const int head_offset = scalar_offset % head_size;
     const int num_heads = scalars_per_token / head_size;
-    return block_idx * 2 * num_heads * block_size * head_size +
-           k_or_v * num_heads * block_size * head_size +
-           head_idx * block_size * head_size + block_offset * head_size +
-           head_offset;
+    return static_cast<int64_t>(block_idx) * 2 * num_heads * block_size *
+               head_size +
+           static_cast<int64_t>(k_or_v) * num_heads * block_size * head_size +
+           static_cast<int64_t>(head_idx) * block_size * head_size +
+           static_cast<int64_t>(block_offset) * head_size + head_offset;
   } else if constexpr (format == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS ||
                        format == EngineKVFormat::NL_X_NB_NH_BS_CS) {
     const int hs2 = 2 * head_size;  // packed K+V width per head (xword units)
@@ -305,8 +309,9 @@ page_buffer_offset(const int k_or_v, const int token_idx,
         block_stride_xwords > 0
             ? block_stride_xwords
             : static_cast<int64_t>(num_heads) * block_size * hs2;
-    return block_idx * block_step + head_idx * block_size * hs2 +
-           block_offset * hs2 + head_offset;
+    return block_idx * block_step +
+           static_cast<int64_t>(head_idx) * block_size * hs2 +
+           static_cast<int64_t>(block_offset) * hs2 + head_offset;
   } else if constexpr (format == EngineKVFormat::NL_X_NB_BS_NH_TWO_HS ||
                        format == EngineKVFormat::NL_X_NB_BS_NH_CS) {
     const int block_idx = token_idx / block_size;
@@ -339,9 +344,10 @@ __device__ __forceinline__ int64_t
 key_value_offset(const int k_or_v, const int layer_idx, const int token_idx,
                  const int scalar_offset, const int scalars_per_token,
                  const int num_tokens, const int num_layers) {
-  return k_or_v * num_layers * num_tokens * scalars_per_token +
-         layer_idx * num_tokens * scalars_per_token +
-         token_idx * scalars_per_token + scalar_offset;
+  return static_cast<int64_t>(k_or_v) * num_layers * num_tokens *
+             scalars_per_token +
+         static_cast<int64_t>(layer_idx) * num_tokens * scalars_per_token +
+         static_cast<int64_t>(token_idx) * scalars_per_token + scalar_offset;
 }
 
 // One chunk of a fused transfer. The whole pack travels by value in the
