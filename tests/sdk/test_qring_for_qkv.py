@@ -358,8 +358,8 @@ def _connect(world_size: int = 1, mutate=lambda groups: None, **kernel_group):
     """Connect a bare KV context as /status would: object layouts from
     qstore's report, the kernel group from the registration's layout."""
     # First Party
-    from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
     from lmcache.sdk.context import LMCacheSDKContext
+    from lmcache.v1.common.cache_kind import LMCacheSDKCacheKind
 
     ctx = object.__new__(LMCacheSDKContext)
     ctx._kind = LMCacheSDKCacheKind.KV
