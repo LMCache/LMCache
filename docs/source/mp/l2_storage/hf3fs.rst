@@ -128,9 +128,9 @@ store. A key that is not in the cache costs one 3FS metadata call, and is added
 to the cache if its file exists. This keeps chunks written by other LMCache
 instances that share the same ``base_paths`` visible after startup.
 
-A key deleted by another instance stays in the cache until this instance
-restarts, so a lookup can report it as present and the load of that key then
-fails.
+A key deleted by another instance stays in the cache until this instance loads
+it, deletes it, or restarts. Until then a lookup can report it as present; the
+first load drops the key and fails, so that chunk is recomputed.
 
 - **Trade-offs**
    - **Enable** for workloads with many concurrent lookups of stored keys

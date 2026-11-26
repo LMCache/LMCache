@@ -4,6 +4,7 @@
 # Standard
 from collections.abc import Callable, Iterator
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 import argparse
 import gc
@@ -52,12 +53,14 @@ from lmcache.v1.mp_observability.trace import is_tracing_enabled
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.server import run_cache_server
 from lmcache.v1.platform import current_device_spec, synchronize_device
+from tests.v1.distributed.test_store_policy import make_descriptor
 from tests.v1.distributed.utils import single_row_spec
 import lmcache.v1.memory_management as memory_management
 
 PolicyFactory = Callable[[str], StorePolicy | PrefetchPolicy]
+store_factory = partial(create_store_policy, l1_managers=[])
 FACTORIES: list[tuple[PolicyFactory, str]] = [
-    (create_store_policy, "ExternalStore"),
+    (store_factory, "ExternalStore"),
     (create_prefetch_policy, "ExternalPrefetch"),
 ]
 
@@ -141,14 +144,14 @@ def test_external_package_loads_without_registration(
     ) == before
     if isinstance(policy, StorePolicy):
         assert policy.select_store_targets([], []) == {}
-        assert policy.select_l1_deletions([]) == []
+        assert policy.select_l1_deletions([], make_descriptor(0)) == []
 
 
 @pytest.mark.parametrize(
     "factory, selection, expected_type",
     [
-        (create_store_policy, "default", DefaultStorePolicy),
-        (create_store_policy, "skip_l1", BufferOnlyStorePolicy),
+        (store_factory, "default", DefaultStorePolicy),
+        (store_factory, "skip_l1", BufferOnlyStorePolicy),
         (create_prefetch_policy, "default", DefaultPrefetchPolicy),
         (create_prefetch_policy, "retain", RetainPrefetchPolicy),
     ],
@@ -204,9 +207,9 @@ def test_wrong_type_rejected(
 @pytest.mark.parametrize(
     "factory, invalid_class",
     [
-        (create_store_policy, "StorePolicy"),
+        (store_factory, "StorePolicy"),
         (create_prefetch_policy, "PrefetchPolicy"),
-        (create_store_policy, "ExternalPrefetch"),
+        (store_factory, "ExternalPrefetch"),
         (create_prefetch_policy, "ExternalStore"),
     ],
 )
@@ -219,7 +222,7 @@ def test_abstract_and_other_policy_types_rejected(
 
 @pytest.mark.parametrize(
     "factory, broken_class",
-    [(create_store_policy, "BrokenStore"), (create_prefetch_policy, "BrokenPrefetch")],
+    [(store_factory, "BrokenStore"), (create_prefetch_policy, "BrokenPrefetch")],
 )
 def test_constructor_error_is_not_silently_replaced(
     external_package: str, factory: PolicyFactory, broken_class: str
@@ -246,7 +249,7 @@ def test_cli_preserves_external_selections_through_config(
         ]
     )
     config = parse_args_to_config(args)
-    assert type(create_store_policy(config.store_policy)).__name__ == "ExternalStore"
+    assert type(store_factory(config.store_policy)).__name__ == "ExternalStore"
     assert (
         type(create_prefetch_policy(config.prefetch_policy)).__name__
         == "ExternalPrefetch"
@@ -271,9 +274,9 @@ def test_documented_server_command_loads_example_policies() -> None:
             ]
         )
     )
-    store = create_store_policy(config.store_policy)
+    store = store_factory(config.store_policy)
     assert store.select_store_targets([], []) == {}
-    assert store.select_l1_deletions([]) == []
+    assert store.select_l1_deletions([], make_descriptor(0)) == []
     assert isinstance(
         create_prefetch_policy(config.prefetch_policy), RetainPrefetchPolicy
     )

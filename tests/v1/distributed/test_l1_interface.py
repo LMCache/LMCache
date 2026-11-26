@@ -16,8 +16,6 @@ from lmcache.v1.distributed.internal_api import L1ManagerInterface, L1ManagerLis
 from lmcache.v1.distributed.l1_manager import DevDaxL1Manager, DramL1Manager
 import lmcache.v1.memory_management as memory_management
 
-pytestmark = pytest.mark.no_shared_allocator
-
 ALIGN = 4096
 CAPACITY = 32 * ALIGN
 LAYOUT = MemoryLayoutDesc([torch.Size([1024])], [torch.float32])  # 4 KiB
@@ -146,3 +144,59 @@ def test_medium_specific_calls_are_not_part_of_the_interface() -> None:
     ):
         assert not hasattr(L1ManagerInterface, name)
         assert hasattr(DevDaxL1Manager, name) or name == "memory_region_count"
+
+
+def test_resident_key_needs_allow_resident_to_stage(l1: L1ManagerInterface) -> None:
+    """A resident key is not writable by default. With ``allow_resident`` it
+    is staged, and admission keeps the resident object, read-locks it, and
+    frees the redundant staging buffer."""
+    l1.reserve_write([key(5)], [False], LAYOUT, tag="a")
+    assert l1.finish_write([key(5)], tag="a") == {key(5): L1Error.SUCCESS}
+    resident = l1.reserve_read([key(5)])[key(5)][1]
+    l1.finish_read([key(5)])
+
+    assert l1.reserve_write([key(5)], [False], LAYOUT, tag="b")[key(5)][0] is (
+        L1Error.KEY_NOT_WRITABLE
+    )
+    staged = l1.reserve_write([key(5)], [False], LAYOUT, tag="b", allow_resident=True)
+    assert staged[key(5)][0] is L1Error.SUCCESS
+    assert staged[key(5)][1] is not resident
+    assert l1.get_staging_memory_usage() > 0
+
+    admitted = l1.finish_write_and_reserve_read([key(5)], tag="b")
+    assert admitted[key(5)] == (L1Error.SUCCESS, resident)
+    assert l1.get_staging_memory_usage() == 0
+    assert l1.is_key_evictable(key(5)) is False
+    l1.finish_read([key(5)])
+    assert l1.is_key_evictable(key(5)) is True
+
+
+def test_prefetch_locked_bytes_follow_the_read_lock(l1: L1ManagerInterface) -> None:
+    keys = [key(1), key(2), key(3)]
+    staged = l1.reserve_write(keys, [False] * 3, LAYOUT, tag="pf")
+    _error, staged_obj = staged[key(1)]
+    assert staged_obj is not None
+    size = staged_obj.get_size()
+    l1.finish_write_and_reserve_read(keys[:2], tag="pf")
+    l1.finish_write(keys[2:], tag="pf")  # resident but not read-locked
+    l1.track_prefetch_locked(keys + [key(4)])  # key(4) is not resident
+    l1.track_prefetch_locked([key(1)])  # charged once
+    assert l1.get_prefetch_locked_bytes() == 2 * size
+
+    l1.finish_read([key(1)])
+    assert l1.get_prefetch_locked_bytes() == size
+    l1.delete([key(2)], force=True)
+    assert l1.get_prefetch_locked_bytes() == 0
+
+
+def test_prefetch_locked_ends_with_the_prefetch_read(l1: L1ManagerInterface) -> None:
+    """Once the prefetch's reader is done, a later lock on the same object by
+    another reader (e.g. a store to L2) is not counted as prefetch-locked."""
+    l1.reserve_write([key(5)], [False], LAYOUT, tag="pf")
+    l1.finish_write_and_reserve_read([key(5)], tag="pf")
+    l1.track_prefetch_locked([key(5)])
+    l1.finish_read([key(5)])
+
+    assert l1.reserve_read([key(5)])[key(5)][0] is L1Error.SUCCESS
+    assert l1.get_prefetch_locked_bytes() == 0
+    l1.finish_read([key(5)])

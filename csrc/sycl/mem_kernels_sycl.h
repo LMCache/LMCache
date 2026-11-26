@@ -54,18 +54,6 @@ void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
                           size_t host_buffer_offset,
                           size_t host_buffer_alignments);
 
-// deprecated / unused except in unit tests
-void load_and_reshape_flash(torch::Tensor& key_value, torch::Tensor& key_cache,
-                            torch::Tensor& value_cache,
-                            torch::Tensor& slot_mapping, const int layer_idx);
-
-// deprecated / unused except in unit tests
-void reshape_and_cache_back_flash(torch::Tensor& key_value,
-                                  torch::Tensor& key_cache,
-                                  torch::Tensor& value_cache,
-                                  torch::Tensor& slot_mapping,
-                                  const int layer_idx);
-
 // SYCL/XPU pinned (USM host) allocation. Same name/signature as the CUDA
 // alloc_pinned_ptr (csrc/cuda/mem_alloc.cpp) so lmcache._get_backend()
 // overrides it by name; `flags` is accepted for signature parity and ignored on

@@ -1,0 +1,82 @@
+# Packaging for the lmcache-client wheel (#6315), the counterpart of
+# pyproject_cli.toml. .github/scripts/build_client_wheel.sh exports HEAD into
+# a temporary directory and builds there with this file as pyproject.toml,
+# leaving the checkout and the full lmcache build untouched.
+
+[build-system]
+# Same as pyproject.toml; sync_torch_version.yml updates the torch pin in both.
+requires = [
+    "ninja",
+    "packaging>=24.2",
+    "setuptools>=77.0.3,<81.0.0",
+    "setuptools_scm>=8",
+    "grpcio==1.78.0",
+    "grpcio-tools==1.78.0",
+    "torch==2.14.0",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lmcache-client"
+authors = [{name = "LMCache Team", email = "lmcacheteam@gmail.com"}]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = "README.md"
+description = "LMCache client for inference workers: engine integrations, SDK and client transport."
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+requires-python = ">=3.10,<3.15"
+dynamic = ["dependencies", "version"]
+
+[project.urls]
+homepage = "https://docs.lmcache.ai"
+source = "https://github.com/LMCache/LMCache"
+issues = "https://github.com/LMCache/LMCache/issues"
+
+[tool.setuptools_scm]
+# The build directory has no .git; the build script passes the version.
+version_file = "lmcache/_version.py"
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements/client.txt"] }
+
+[tool.setuptools]
+# Single modules, for packages that also hold modules the wheel leaves out.
+# A package's __init__.py ships with any of its modules.
+py-modules = [
+    # Roots of the packages found below.
+    "lmcache.__init__",
+    "lmcache._version",
+    "lmcache.v1.__init__",
+]
+
+[tool.setuptools.packages.find]
+# Packages shipped whole: the client-owned boundary packages, the platform
+# vertical, the SDK and the engine integrations.
+where = [""]
+include = [
+    "lmcache.integration*",
+    "lmcache.sdk*",
+    "lmcache.v1.client*",
+    "lmcache.v1.common*",
+    "lmcache.v1.platform*",
+    "lmcache.v1.transport*",
+]
+
+[tool.setuptools.package-data]
+"*" = ["*.pyi", "*.proto"]

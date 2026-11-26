@@ -18,7 +18,7 @@ LMCACHE_PID=""
 VLLM_PID=""
 LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
 LMCACHE_REQUEST_PORT="${LMCACHE_REQUEST_PORT:-${LMCACHE_ZMQ_PORT:-5555}}"
-LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
+LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-grpc}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 LMCACHE_L1_SIZE_GB="${LMCACHE_L1_SIZE_GB:-1}"
 LMCACHE_EVICTION_POLICY="${LMCACHE_EVICTION_POLICY:-LRU}"
@@ -376,9 +376,9 @@ start_vllm() {
   local kv_cache_bytes
   kv_cache_bytes="$(python3 -c "print(int(${VLLM_CPU_KVCACHE_SPACE} * 1024 * 1024 * 1024))")"
   # Tell LMCacheMPConnector where the lmcache server actually listens.
-  # Without this it falls back to tcp://localhost:5555 and dies with
-  # "Cannot reach the LMCache MP server" whenever the selected request
-  # transport or port differs from that legacy default.
+  # Without this it falls back to the connector's default endpoint and dies
+  # with "Cannot reach the LMCache MP server" whenever the selected request
+  # transport or port differs from that default.
   local kv_transfer_config
   kv_transfer_config="$(python3 -c "
 import json
@@ -389,6 +389,8 @@ print(json.dumps({
     'kv_connector_extra_config': {
         'lmcache.mp.host': '${LMCACHE_REQUEST_SCHEME}://localhost',
         'lmcache.mp.port': int('${LMCACHE_REQUEST_PORT}'),
+        # CPU tensors use shared memory, not CUDA driver-mapped allocations.
+        'lmcache.mp.use_vmm_api': False,
     },
 }))")"
   # Optional flags — appended only when set, so unrelated callers stay
@@ -407,7 +409,7 @@ print(json.dumps({
   fi
   echo "vLLM model: ${VLLM_MODEL_ID}"
   echo "vLLM extra args: ${extra_serve_args[*]:-<none>}"
-  vllm serve "${VLLM_MODEL_ID}" \
+  PYTHONFAULTHANDLER=1 vllm serve "${VLLM_MODEL_ID}" \
     --port "${VLLM_PORT}" \
     --dtype bfloat16 \
     --disable-hybrid-kv-cache-manager \
@@ -449,6 +451,11 @@ on_error() {
   echo "❌ CPU install validation failed (exit code: ${exit_code})"
   set +e
   print_failure_logs
+  if [[ "${RUNNER_OS:-}" == "Linux" && -n "${VLLM_PID:-}" ]]; then
+    # A worker killed by the kernel cannot write its own traceback.
+    sudo -n journalctl -k -b --since "@${CPU_VALIDATION_STARTED_AT}" --no-pager \
+      --grep='Out of memory|oom-kill|Killed process|segfault|invalid opcode|general protection' || true
+  fi
   cleanup_processes
   upload_artifacts
   cleanup_workspace || echo "❌ Workspace cleanup failed"
@@ -456,6 +463,7 @@ on_error() {
   exit "$exit_code"
 }
 
+CPU_VALIDATION_STARTED_AT=$(date +%s)
 trap on_error ERR
 
 if [ "${SKIP_INSTALL}" = "1" ]; then
@@ -588,7 +596,9 @@ else
   fi
 fi
 
-lmcache server "${LMCACHE_ARGS[@]}" \
+# LMCACHE_SERVER_VENV: the server's own venv with the full wheel, while vLLM
+# runs the lmcache-client wheel (install_lmcache_cpu.sh).
+"${LMCACHE_SERVER_VENV:+${LMCACHE_SERVER_VENV}/bin/}lmcache" server "${LMCACHE_ARGS[@]}" \
   >"${LMCACHE_LOG}" 2>&1 &
 LMCACHE_PID=$!
 echo "LMCache server started (PID=${LMCACHE_PID})"
@@ -687,6 +697,18 @@ if ! echo "${completion_response}" | grep -q "${VLLM_MODEL_ID}"; then
   false
 fi
 echo "✅ E2E request validation passed"
+
+if [ -n "${LMCACHE_SERVER_VENV:-}" ]; then
+  # Nothing but vLLM uses its environment, and the checkout has no built
+  # lmcache_native, so this proves vLLM imported lmcache from the client wheel.
+  client_native="$(cd /tmp && python3 -I -c 'import importlib.metadata as md
+print(md.distribution("lmcache-client").locate_file("lmcache/lmcache_native"))')"
+  if ! grep -qsF "${client_native}" /proc/[0-9]*/maps; then
+    echo "❌ No process loaded ${client_native}*.so from the lmcache-client wheel"
+    false
+  fi
+  echo "✅ vLLM runs lmcache from the lmcache-client wheel (${client_native%/*})"
+fi
 
 # Verify transport mode (logged after vLLM connects to LMCache server)
 echo "[Phase 2 / Step 5.5] Verifying transport mode: expecting '${EXPECTED_TRANSPORT}'"

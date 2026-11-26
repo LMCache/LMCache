@@ -19,8 +19,9 @@ Only an explicitly selected external class is imported. Installing a package
 does not enable it, and built-in defaults stay unchanged.
 
 The external class subclasses `StorePolicy` or `PrefetchPolicy`, respectively,
-implements its abstract methods and has a no-argument constructor, matching
-the existing registry factory contract. Import, attribute and constructor
+implements its abstract methods and has a no-argument constructor. Registered
+store policies receive the storage manager's L1 managers. External store policies
+are instantiated without those handles. Import, attribute and constructor
 errors are startup errors. Malformed paths, non-class objects, wrong base
 classes and abstract classes are rejected with a diagnostic naming the
 selection. The framework does not catch these errors and silently select a
@@ -38,7 +39,9 @@ not a sandbox for untrusted code.
 
 The existing controllers continue to own execution, buffers and locks.
 Store selection happens after L1 writes, so refusing an L2 target cannot
-avoid the preceding GPU-to-L1 copy. Prefetch selection happens after adapter
+avoid the preceding GPU-to-L1 copy. After a successful L2 store, the controller
+passes the stored keys and their adapter descriptor to `select_l1_deletions`.
+Prefetch selection happens after adapter
 lookups and locks; it cannot reduce lookup fan-out. Plugins follow the
 existing policy contracts and must not perform blocking I/O in callbacks.
 

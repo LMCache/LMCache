@@ -15,11 +15,9 @@ from lmcache.v1.client.transfer_context.base import (
     scatter_cpu_to_paged_kv,
 )
 from lmcache.v1.common.kv_format.types import LayoutHints
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.devices.mlu import MluDeviceSpec
 from lmcache.v1.platform.devices.mlu.device_ops import MluDeviceOps
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
-
-pytestmark = pytest.mark.no_shared_allocator
 
 FORMATS = [
     EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,

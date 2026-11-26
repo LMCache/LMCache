@@ -117,6 +117,25 @@ class CpuShmIPCData(IPCData, tag="cpu_shm"):
             raise ValueError("IPC view exceeds CPU shared-memory segment")
 
 
+class GcuIPCData(IPCData, tag="gcu"):
+    """PyTorch shared GCU storage descriptor."""
+
+    handle: tuple[
+        int,
+        bytes | None,
+        NonNegative,
+        NonNegative,
+        bytes | None,
+        NonNegative,
+        bytes | None,
+        bool,
+    ]
+
+    def __post_init__(self) -> None:
+        if self.metadata.byte_span() > self.handle[2]:
+            raise ValueError("IPC view exceeds GCU storage")
+
+
 class MusaIPCData(IPCData, tag="musa"):
     """MUSA handle restricted to MessagePack primitive values."""
 
@@ -185,6 +204,7 @@ WireIPCData: TypeAlias = (
     | VmmCudaIPCData
     | VmmRocmIPCData
     | CpuShmIPCData
+    | GcuIPCData
     | MusaIPCData
     | NpuIPCData
 )
@@ -196,6 +216,7 @@ WRAPPER_TYPES: dict[type[msgspec.Struct], tuple[str, str]] = {
     VmmCudaIPCData: ("cuda.ipc_wrapper", "VmmCudaIPCWrapper"),
     VmmRocmIPCData: ("rocm.ipc_wrapper", "VmmRocmIPCWrapper"),
     CpuShmIPCData: ("cpu.shm", "CpuShmTensorWrapper"),
+    GcuIPCData: ("gcu.ipc_wrapper", "GcuIPCWrapper"),
     MusaIPCData: ("musa.ipc_wrapper", "MusaIPCWrapper"),
     NpuIPCData: ("npu.ipc_wrapper", "NpuIPCWrapper"),
 }

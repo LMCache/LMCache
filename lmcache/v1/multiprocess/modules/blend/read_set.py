@@ -91,6 +91,31 @@ def _classify_cb_read_groups(
     )
 
 
+def _per_rank_read_groups(
+    gids: tuple[int, ...], shard_replication_desc: ShardReplicationDesc
+) -> tuple[int, ...]:
+    """The groups in ``gids`` whose objects each belong to one worker.
+
+    A group replicated across tensor-parallel ranks (an MLA latent cache, for
+    example) is stored once per token shard, keyed by the first rank holding
+    that shard, and written by whichever of the ranks sharing it reserves the
+    key first; the others find it reserved and skip it. One worker's store
+    result therefore cannot tell whether such an object was committed. A
+    group stored per rank, or split into one token shard per rank under
+    decode context parallelism, is written by its own worker only.
+
+    Args:
+        gids: Object group ids.
+        shard_replication_desc: How each object group is spread over the kv
+            ranks.
+
+    Returns:
+        The ids in ``gids`` with one kv reader per object
+        (:meth:`ShardReplicationDesc.num_kv_readers` is 1), in order.
+    """
+    return tuple(g for g in gids if shard_replication_desc.num_kv_readers(g) == 1)
+
+
 def _cb_chunk_major_object_keys(
     key: IPCCacheServerKey,
     chunk_hashes: list[bytes],

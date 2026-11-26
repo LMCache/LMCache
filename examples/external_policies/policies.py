@@ -24,7 +24,9 @@ class KeepL1Only(StorePolicy):
         """Return no L2 targets; GPU-to-L1 stores have already happened."""
         return {}
 
-    def select_l1_deletions(self, keys: list[ObjectKey]) -> list[ObjectKey]:
+    def select_l1_deletions(
+        self, keys: list[ObjectKey], adapter: L2AdapterDescriptor
+    ) -> list[ObjectKey]:
         """Keep L1 copies; ordinary capacity eviction remains in effect."""
         return []
 

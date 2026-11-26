@@ -17,7 +17,7 @@ def load_external_policy(selection: str, policy_type: type[PolicyT]) -> PolicyT:
         policy_type: Required policy base class.
 
     Returns:
-        A concrete policy constructed without arguments, like registry policies.
+        A concrete policy constructed without arguments.
 
     Raises:
         ValueError: The path is malformed or does not name a concrete subclass.

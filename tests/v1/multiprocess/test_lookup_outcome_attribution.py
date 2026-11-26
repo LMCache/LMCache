@@ -97,7 +97,8 @@ def _end_metadata(
 
     Args:
         chunk_hashes: Chunk hashes the token hasher reports; empty triggers the
-            ``empty_chunk_hashes`` early exit.
+            ``empty_chunk_hashes`` early exit (the key's ``end`` is 0, so it
+            asks for no unfull chunk).
         windows: Per-object-group window sizes (``-1`` is full attention);
             defaults to one full-attention group.
         world_size: kv_rank shards per chunk.
@@ -144,7 +145,10 @@ def _end_metadata(
         if group_layouts_found
         else {}
     )
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    token_hasher = MagicMock()
+    token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    ctx.layout_desc_registry.get_chunk_size.return_value = CHUNK_SIZE
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     ctx.storage_manager.submit_prefetch_task.return_value = PrefetchHandle(
         prefetch_request_id=0,
         external_request_id="req-1",

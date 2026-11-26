@@ -16,11 +16,11 @@ import time
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.logging import init_logger
 from lmcache.usage_telemetry.l1_usage import InitializeL1Usage
 from lmcache.usage_telemetry.l2_usage import InitializeL2ConnectorUsage
 from lmcache.usage_telemetry.mp import InitializeMPUsageContext
 from lmcache.usage_telemetry.mp_continuous import InitializeMPContinuousUsage
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
@@ -72,6 +72,7 @@ from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.ipc_policy import set_isolated_ipc
+from lmcache.v1.transport.zmq import ZMQ_MIGRATION_DOC_URL
 
 if TYPE_CHECKING:
     # First Party
@@ -447,6 +448,8 @@ def _start_cache_server(
         # stock hybrid clients.
         is_blend = mp_config.engine_type == "blend"
 
+        # TODO(chunxiaozheng): Support multiple chunk sizes in CacheBlend and
+        # Coordinator, then remove this compatibility guard.
         ctx = MPCacheServerContext(
             storage_manager_config=storage_manager_config,
             chunk_size=mp_config.chunk_size,
@@ -455,6 +458,7 @@ def _start_cache_server(
             separate_object_groups=mp_config.separate_object_groups,
             full_sw_kv=is_blend,
             session_ttl_seconds=mp_config.session_ttl_seconds,
+            requires_global_chunk_size=is_blend or bool(coordinator_config.url),
         )
 
         components = _build_server_components(ctx, mp_config, coordinator_config)
@@ -496,6 +500,13 @@ def _start_cache_server(
         InitializeL1Usage(event_bus, ctx.storage_manager)
 
         transport = mp_config.transport
+        if transport == "zmq":
+            logger.warning(
+                "The zmq request transport is deprecated and will be removed "
+                "in a future release. Start the server with --transport grpc "
+                "and point clients at grpc://host:port. See %s",
+                ZMQ_MIGRATION_DOC_URL,
+            )
         server: RequestServer = create_request_server(
             modules_for_service(components.modules, "worker"),
             mp_config,

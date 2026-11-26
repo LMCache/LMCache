@@ -13,7 +13,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.sdk.qringbuffer import (
+from lmcache.integration.vllm.experimental.qringbuffer import (
     QRingBuffer,
     QRingBufferAdapter,
     attention_layer_names_from_vllm,
@@ -157,10 +157,9 @@ def test_get_tensor_prefers_the_first_matching_name() -> None:
 
 
 def _attention_spec() -> object:
-    """Registers a fake attention spec for testing
-    attention_layer_names_from_vllm()."""
+    """Build an attention spec for layer selection across vLLM versions."""
     kv_iface = pytest.importorskip("vllm.v1.kv_cache_interface")
-    return kv_iface.FullAttentionSpec(
+    return kv_iface.AttentionSpec(
         block_size=16, num_kv_heads=8, head_size=64, dtype=torch.bfloat16
     )
 
