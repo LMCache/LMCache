@@ -29,6 +29,28 @@ def _load_module() -> ModuleType:
 
 guard = _load_module()
 
+_TEST_POLICY = guard.Policy(
+    minimum_deprecated_line_fraction=0.5,
+    minimum_deprecated_file_fraction=0.5,
+    minimum_deprecated_changed_lines=10,
+    allow_changes_label="allow-deprecated-changes",
+    test_paths=("tests",),
+    test_suffixes=("_test.go",),
+    modules=(
+        guard.DeprecatedModule("Kubernetes operator", ("operator",), "Use DaemonSet."),
+        guard.DeprecatedModule(
+            "ZMQ request transport",
+            ("lmcache/v1/client/transport/zmq_impl",),
+            "Use the gRPC request transport.",
+        ),
+    ),
+)
+
+
+def test_repository_policy_loads() -> None:
+    """Validate the configured policy independently of classification examples."""
+    guard.load_policy(_CONFIG)
+
 
 def _file(
     filename: str,
@@ -46,7 +68,7 @@ def _file(
 
 def test_majority_deprecated_changes_close_the_pull_request() -> None:
     """Reaching a configured deprecated-change threshold closes the PR."""
-    policy = guard.load_policy(_CONFIG)
+    policy = _TEST_POLICY
 
     decision = guard.classify_changes(
         policy,
@@ -96,7 +118,7 @@ def test_minor_or_removed_deprecated_changes_remain_open(
     files: list[object], should_comment: bool
 ) -> None:
     """Small deprecated changes and complete removals do not close the PR."""
-    decision = guard.classify_changes(guard.load_policy(_CONFIG), files)
+    decision = guard.classify_changes(_TEST_POLICY, files)
 
     assert not decision.should_close
     assert decision.should_comment is should_comment
@@ -107,7 +129,7 @@ def test_minor_or_removed_deprecated_changes_remain_open(
 
 def test_test_files_do_not_affect_the_deprecated_code_ratio() -> None:
     """Test additions affect neither side of the production-code ratio."""
-    policy = guard.load_policy(_CONFIG)
+    policy = _TEST_POLICY
 
     decision = guard.classify_changes(
         policy,
@@ -134,19 +156,19 @@ def test_test_files_do_not_affect_the_deprecated_code_ratio() -> None:
 
 def test_deprecated_file_fraction_can_close_the_pull_request() -> None:
     """Many small deprecated files trigger the file-count threshold."""
-    policy = guard.load_policy(_CONFIG)
+    policy = _TEST_POLICY
 
     decision = guard.classify_changes(
         policy,
         [
-            _file("operator/controllers/a.go", 1),
-            _file("operator/controllers/b.go", 1),
-            _file("operator/controllers/c.go", 1),
+            _file("operator/controllers/a.go", 4),
+            _file("operator/controllers/b.go", 4),
+            _file("operator/controllers/c.go", 4),
             _file("lmcache/v1/cache_engine.py", 100),
         ],
     )
 
-    assert decision.deprecated_line_fraction == pytest.approx(3 / 103)
+    assert decision.deprecated_line_fraction == pytest.approx(12 / 112)
     assert decision.deprecated_file_fraction == 0.75
     assert decision.should_close
     assert "changed files dimension" in guard.render_comment(decision)
@@ -154,7 +176,7 @@ def test_deprecated_file_fraction_can_close_the_pull_request() -> None:
 
 def test_comment_names_the_module_and_replacement() -> None:
     """The automatic reply tells contributors why the PR was closed."""
-    policy = guard.load_policy(_CONFIG)
+    policy = _TEST_POLICY
     decision = guard.classify_changes(
         policy,
         [_file("lmcache/v1/client/transport/zmq_impl/mq_client.py", 12)],
@@ -173,7 +195,7 @@ def test_comment_names_the_module_and_replacement() -> None:
 
 def test_allow_changes_label_keeps_the_pull_request_open() -> None:
     """The configured label keeps an otherwise rejected PR open."""
-    policy = guard.load_policy(_CONFIG)
+    policy = _TEST_POLICY
 
     decision = guard.classify_changes(
         policy,
@@ -184,3 +206,97 @@ def test_allow_changes_label_keeps_the_pull_request_open() -> None:
     assert decision.allow_changes_applied
     assert decision.should_comment
     assert not decision.should_close
+
+
+@pytest.mark.parametrize(
+    ("additions", "deletions", "author", "should_comment"),
+    [
+        (1, 0, "contributor", True),
+        (40, 0, "dependabot[bot]", True),
+        (0, 40, "contributor", False),
+    ],
+)
+def test_small_changes_dependency_updates_and_cleanup_remain_open(
+    additions: int, deletions: int, author: str, should_comment: bool
+) -> None:
+    decision = guard.classify_changes(
+        _TEST_POLICY,
+        [_file("operator/go.mod", additions, deletions)],
+        author=author,
+    )
+
+    assert not decision.should_close
+    assert decision.should_comment is should_comment
+    if should_comment:
+        assert "pull request remains open" in guard.render_comment(decision)
+    else:
+        assert decision.total_lines == decision.total_files == 0
+
+
+@pytest.mark.parametrize(
+    ("maintained_deletions", "expected_ratios"),
+    [(None, (0.5, 1 / 3)), (40, (0.2, 0.5))],
+)
+def test_one_ratio_at_threshold_is_enough(
+    maintained_deletions: int | None, expected_ratios: tuple[float, float]
+) -> None:
+    files = [_file("operator/controller.go", 10)]
+    if maintained_deletions is None:
+        files.extend([_file("lmcache/a.py", 5), _file("lmcache/b.py", 5)])
+    else:
+        files.append(_file("lmcache/old.py", 0, maintained_deletions, "removed"))
+
+    decision = guard.classify_changes(_TEST_POLICY, files)
+
+    assert (decision.deprecated_line_fraction, decision.deprecated_file_fraction) == (
+        pytest.approx(expected_ratios)
+    )
+    assert decision.should_close
+
+
+def test_similarly_named_directory_is_not_deprecated() -> None:
+    decision = guard.classify_changes(
+        _TEST_POLICY, [_file("operator_utils/helper.go", 20)]
+    )
+
+    assert decision.total_files == 1
+    assert decision.deprecated_files == 0
+    assert not decision.should_comment
+    assert not decision.should_close
+
+
+@pytest.mark.parametrize("changed_lines", [0, 20])
+def test_rename_out_of_deprecated_module(changed_lines: int) -> None:
+    """An edited move out counts only toward the overall change totals."""
+    moved = guard.ChangedFile(
+        filename="lmcache/controller.go",
+        previous_filename="operator/controller.go",
+        status="renamed",
+        additions=changed_lines,
+        deletions=0,
+    )
+
+    decision = guard.classify_changes(_TEST_POLICY, [moved])
+
+    assert decision.total_files == int(changed_lines > 0)
+    assert decision.total_lines == changed_lines
+    assert decision.deprecated_files == decision.deprecated_lines == 0
+    assert not decision.should_close
+    assert not decision.should_comment
+
+
+@pytest.mark.parametrize("old_path", ["lmcache/controller.go", "operator/old.go"])
+def test_edited_rename_to_deprecated_path_counts(old_path: str) -> None:
+    moved = guard.ChangedFile(
+        filename="operator/controller.go",
+        previous_filename=old_path,
+        status="renamed",
+        additions=20,
+        deletions=0,
+    )
+
+    decision = guard.classify_changes(_TEST_POLICY, [moved])
+
+    assert decision.deprecated_files == decision.total_files == 1
+    assert decision.deprecated_lines == decision.total_lines == 20
+    assert decision.should_close

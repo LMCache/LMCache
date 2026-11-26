@@ -1,5 +1,6 @@
-# A pull request is closed when either fraction reaches its threshold. Tests
-# and fully removed deprecated files are excluded from both dimensions.
+# Auto-close requires the absolute line minimum and either ratio threshold.
+# Tests, deletion-only changes, and pure renames of deprecated files are excluded.
+minimum_deprecated_changed_lines = 200
 minimum_deprecated_line_fraction = 0.5
 minimum_deprecated_file_fraction = 0.5
 # Maintainers can apply this repository label to approve an exceptional change.

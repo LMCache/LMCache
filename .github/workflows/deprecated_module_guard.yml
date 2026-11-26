@@ -19,6 +19,7 @@ permissions:
 
 jobs:
   guard:
+    if: github.event.pull_request.state == 'open'
     name: Check deprecated modules
     runs-on: ubuntu-24.04
     steps:
@@ -31,7 +32,6 @@ jobs:
       - name: Checkout trusted guard policy
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
           sparse-checkout: |
             .github/deprecated-modules.toml
             .github/scripts/deprecated_pr_guard.py
@@ -47,11 +47,13 @@ jobs:
           set -euo pipefail
           gh api --paginate --slurp \
             "repos/${REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
-            | jq '[.[][] | {filename, status, additions, deletions}]' \
+            | jq '[.[][] | {filename, previous_filename, status, additions, deletions}]' \
             > "${RUNNER_TEMP}/changed-files.json"
 
       - name: Classify changes
         id: classify
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
           jq '[.pull_request.labels[].name]' "${GITHUB_EVENT_PATH}" \
@@ -60,6 +62,7 @@ jobs:
             --config .github/deprecated-modules.toml \
             --files "${RUNNER_TEMP}/changed-files.json" \
             --labels "${RUNNER_TEMP}/pr-labels.json" \
+            --author "${PR_AUTHOR}" \
             --decision "${RUNNER_TEMP}/decision.json" \
             --comment "${RUNNER_TEMP}/comment.md"
           should_close=$(jq -r '.should_close' "${RUNNER_TEMP}/decision.json")
@@ -82,7 +85,8 @@ jobs:
             gh api --paginate --slurp \
               "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" \
               | jq -r --arg marker "${marker}" \
-                '[.[][] | select(.body | contains($marker)) | .id][0] // empty'
+                '[.[][] | select(.user.login == "github-actions[bot]"
+                  and (.body | contains($marker))) | .id][0] // empty'
           )
 
           if [[ "${SHOULD_COMMENT}" == "true" ]]; then

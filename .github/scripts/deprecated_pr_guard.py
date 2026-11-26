@@ -35,6 +35,7 @@ class Policy:
 
     minimum_deprecated_line_fraction: float
     minimum_deprecated_file_fraction: float
+    minimum_deprecated_changed_lines: int
     allow_changes_label: str
     test_paths: tuple[str, ...]
     test_suffixes: tuple[str, ...]
@@ -49,6 +50,7 @@ class ChangedFile:
     status: str
     additions: int
     deletions: int
+    previous_filename: str | None = None
 
     @property
     def changed_lines(self) -> int:
@@ -81,6 +83,8 @@ class Decision:
     minimum_deprecated_file_fraction: float
     allow_changes_label: str
     allow_changes_applied: bool
+    is_dependabot: bool
+    minimum_deprecated_changed_lines: int
     matches: tuple[ModuleMatch, ...]
 
     def to_dict(self) -> dict[str, object]:
@@ -150,6 +154,9 @@ def load_policy(path: Path) -> Policy:
         raw.get("minimum_deprecated_file_fraction"),
         "minimum_deprecated_file_fraction",
     )
+    minimum_lines = raw.get("minimum_deprecated_changed_lines")
+    if type(minimum_lines) is not int or minimum_lines < 1:
+        raise ValueError("minimum_deprecated_changed_lines must be a positive integer")
     allow_changes_label = _nonempty_string(
         raw.get("allow_changes_label"), "allow_changes_label"
     )
@@ -170,6 +177,7 @@ def load_policy(path: Path) -> Policy:
     return Policy(
         minimum_deprecated_line_fraction=line_fraction,
         minimum_deprecated_file_fraction=file_fraction,
+        minimum_deprecated_changed_lines=minimum_lines,
         allow_changes_label=allow_changes_label,
         test_paths=test_paths,
         test_suffixes=test_suffixes,
@@ -205,19 +213,24 @@ def classify_changes(
     policy: Policy,
     files: Sequence[ChangedFile],
     labels: Sequence[str] = (),
+    *,
+    author: str = "",
 ) -> Decision:
     """Classify a pull request from GitHub's changed-file metadata.
 
     Files outside configured test paths and suffixes contribute to the line
     and file totals. Deprecated files contribute to both deprecated counts,
-    unless their status is ``removed``; complete removal affects neither side
-    of either ratio.
+    except for whole-file removals, deletion-only modifications, and pure
+    renames involving a deprecated path. A rename with edits is classified
+    by its destination path.
 
     Args:
         policy: Deprecated modules and closing threshold.
         files: Changed files returned by GitHub's pull-request files API.
         labels: Current pull-request label names. The configured allow-changes
             label prevents automatic closure.
+        author: GitHub login of the pull-request author. Dependabot PRs
+            receive warnings without automatic closure.
 
     Returns:
         A decision with aggregate line and file counts plus per-module details.
@@ -239,6 +252,22 @@ def classify_changes(
             for module in policy.modules
             if _belongs_to(changed_file.filename, module)
         ]
+        previous_filename = changed_file.previous_filename
+        if (
+            changed_file.status == "renamed"
+            and changed_file.changed_lines == 0
+            and (
+                matching
+                or (
+                    previous_filename is not None
+                    and any(
+                        _belongs_to(previous_filename, module)
+                        for module in policy.modules
+                    )
+                )
+            )
+        ):
+            continue
         if len(matching) > 1:
             names = ", ".join(module.name for module in matching)
             raise ValueError(
@@ -247,7 +276,14 @@ def classify_changes(
             )
         # Removing deprecated code is cleanup, not continued development. It
         # affects neither side of either ratio.
-        if changed_file.status == "removed" and matching:
+        if matching and (
+            changed_file.status == "removed"
+            or (
+                changed_file.status == "modified"
+                and changed_file.additions == 0
+                and changed_file.deletions > 0
+            )
+        ):
             continue
 
         total_lines += changed_file.changed_lines
@@ -276,8 +312,15 @@ def classify_changes(
         line_fraction >= policy.minimum_deprecated_line_fraction
         or file_fraction >= policy.minimum_deprecated_file_fraction
     )
+    is_dependabot = author == "dependabot[bot]"
     return Decision(
-        should_close=bool(matches) and exceeds_threshold and not allow_changes_applied,
+        should_close=(
+            bool(matches)
+            and exceeds_threshold
+            and deprecated_lines >= policy.minimum_deprecated_changed_lines
+            and not allow_changes_applied
+            and not is_dependabot
+        ),
         should_comment=bool(matches),
         deprecated_lines=deprecated_lines,
         total_lines=total_lines,
@@ -289,6 +332,8 @@ def classify_changes(
         minimum_deprecated_file_fraction=policy.minimum_deprecated_file_fraction,
         allow_changes_label=policy.allow_changes_label,
         allow_changes_applied=allow_changes_applied,
+        is_dependabot=is_dependabot,
+        minimum_deprecated_changed_lines=policy.minimum_deprecated_changed_lines,
         matches=matches,
     )
 
@@ -329,6 +374,13 @@ def render_comment(decision: Decision) -> str:
             f"The {exceeded} dimension meets its configured threshold, so the "
             "pull request was automatically closed."
         )
+    elif decision.is_dependabot:
+        outcome = "The pull request remains open because Dependabot updates are exempt."
+    elif decision.deprecated_lines < decision.minimum_deprecated_changed_lines:
+        outcome = (
+            "The pull request remains open because it changes fewer than "
+            f"{decision.minimum_deprecated_changed_lines} deprecated lines."
+        )
     elif decision.allow_changes_applied and exceeded_dimensions:
         outcome = (
             f"The {exceeded} dimension meets its configured threshold, but the "
@@ -354,10 +406,10 @@ These modules receive only necessary bug fixes and removal work; please avoid
 adding new features to them. {outcome}
 
 The deprecated-module registry is maintained in
-`.github/deprecated-modules.toml`. Complete removal of deprecated files is
-exempt from this guard. For an exceptional change, a maintainer can apply the
+`.github/deprecated-modules.toml`. For an exceptional change, a maintainer can apply the
 `{decision.allow_changes_label}` label and reopen the pull request.
-Test files and fully removed deprecated files are excluded from both ratios.
+Test files, deletion-only changes, and pure renames of deprecated files are
+excluded from both ratios.
 """
 
 
@@ -372,7 +424,12 @@ def _changed_file(value: object, index: int) -> ChangedFile:
         raise ValueError(f"files[{index}].additions must be a non-negative integer")
     if not isinstance(deletions, int) or isinstance(deletions, bool) or deletions < 0:
         raise ValueError(f"files[{index}].deletions must be a non-negative integer")
-    return ChangedFile(filename, status, additions, deletions)
+    previous_filename = value.get("previous_filename")
+    if previous_filename is not None:
+        previous_filename = _nonempty_string(
+            previous_filename, f"files[{index}].previous_filename"
+        )
+    return ChangedFile(filename, status, additions, deletions, previous_filename)
 
 
 def _load_changed_files(path: Path) -> tuple[ChangedFile, ...]:
@@ -395,6 +452,7 @@ def main() -> None:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--files", required=True, type=Path)
     parser.add_argument("--labels", required=True, type=Path)
+    parser.add_argument("--author", default="")
     parser.add_argument("--decision", required=True, type=Path)
     parser.add_argument("--comment", required=True, type=Path)
     args = parser.parse_args()
@@ -403,6 +461,7 @@ def main() -> None:
         load_policy(args.config),
         _load_changed_files(args.files),
         _load_labels(args.labels),
+        author=args.author,
     )
     args.decision.write_text(json.dumps(decision.to_dict(), indent=2) + "\n")
     args.comment.write_text(render_comment(decision) if decision.should_comment else "")
