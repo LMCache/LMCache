@@ -1,4 +1,4 @@
-0.34.1rc1.dev135+g57906d3cc
-short_sha=57906d3cc
-full_sha=57906d3cc08e8dd9c73a92958ea53fbc6c5f8576
-archive_index_url=https://wheels.vllm.ai/57906d3cc08e8dd9c73a92958ea53fbc6c5f8576/cu132
+0.34.0
+short_sha=
+full_sha=
+archive_index_url=
