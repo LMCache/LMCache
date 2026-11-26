@@ -481,6 +481,7 @@ def test_weekly_orchestrator_and_device_workflows_are_consistent() -> None:
         assert call["uses"] == "./.github/workflows/weekly_device_build.yml"
         assert call.get("permissions") == {"contents": "write"}
         inputs = call["with"]
+        assert inputs["run_prepare"] == "${{ inputs.run_prepare != false }}"
         timeout = inputs["timeout_minutes"]
         assert isinstance(timeout, int) and 0 < timeout < runner_timeout
         manifest_path = (REPO / inputs["manifest"]).resolve()

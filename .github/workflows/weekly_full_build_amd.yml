@@ -28,5 +28,5 @@ jobs:
       out_dir: weekly-full-build-amd
       artifact: weekly-full-build-amd
       timeout_minutes: 345
-      run_prepare: ${{ inputs.run_prepare }}
+      run_prepare: ${{ inputs.run_prepare != false }}
     secrets: inherit

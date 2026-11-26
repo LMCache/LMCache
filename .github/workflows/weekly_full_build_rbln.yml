@@ -28,5 +28,5 @@ jobs:
       out_dir: weekly-full-build-rbln
       artifact: weekly-full-build-rbln
       timeout_minutes: 330
-      run_prepare: ${{ inputs.run_prepare }}
+      run_prepare: ${{ inputs.run_prepare != false }}
     secrets: inherit
