@@ -100,7 +100,6 @@ def main():
                 ],
                 stdout=log,
                 stderr=subprocess.STDOUT,
-                env={**os.environ, "LMCACHE_DEVICE_BACKEND": "cpu"},
                 start_new_session=True,
             )
         servers.append(server)
