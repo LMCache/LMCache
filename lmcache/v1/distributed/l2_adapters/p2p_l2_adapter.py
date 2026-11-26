@@ -462,10 +462,10 @@ class PeerL2AdapterBase(L2AdapterInterface):
         before it is released and construction fails.
 
         Region access that is shared per peer (for example a transfer-channel
-        client keyed by the peer's URL) must not be re-acquired for the same
-        peer while an adapter whose close failed still holds it: that
-        adapter's later successful close would release the shared access
-        under the new adapter.
+        client keyed by the peer's URL) must be counted per user: a peer can
+        be re-added while an adapter whose close failed still holds the
+        access, and that adapter's later successful close must not release
+        it under the new adapter.
         """
 
     @abstractmethod
