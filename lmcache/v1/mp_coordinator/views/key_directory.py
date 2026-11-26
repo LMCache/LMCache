@@ -165,10 +165,9 @@ class _KeyRecord:
     access_count: int = 0
 
 
-#: The only tag a token-addressed delete may ignore. ``get_request_tags``
+#: The one tag a token-addressed delete may ignore. ``get_request_tags``
 #: strips the ``lmcache.tag.`` prefix, so this is the identity-side name; the
-#: caller cannot know the engine's KV dtype, but revision and blend namespaces
-#: still name a different object and must keep matching.
+#: caller cannot know the engine's KV dtype unless it names one.
 _LOOSELY_MATCHED_TAG = "kv_dtype"
 
 
@@ -180,19 +179,19 @@ def _identity_matches(
 ) -> bool:
     """Whether ``stored`` is ``expected`` seen from one group and rank.
 
-    ``expected.tags`` empty means the caller did not name any tags; only the
-    KV dtype is then ignored, so an untagged delete cannot reach another
-    revision's copy of the same chunk. With tags, the comparison is exact.
+    ``kv_dtype`` is ignored when the caller omits it, so a token-addressed
+    delete that knows only the revision still reaches both dtype copies.
+    Every other tag, and a ``kv_dtype`` the caller does name, must match
+    exactly.
     """
     candidate = replace(stored, object_group_id=object_group_id, kv_rank=kv_rank)
-    if expected.tags:
-        return candidate == expected
-    candidate_tags = {
-        name: value
-        for name, value in candidate.tags.items()
-        if name != _LOOSELY_MATCHED_TAG
-    }
-    return replace(candidate, tags=candidate_tags) == expected
+    expected_tags = dict(expected.tags)
+    candidate_tags = dict(candidate.tags)
+    if _LOOSELY_MATCHED_TAG not in expected_tags:
+        candidate_tags.pop(_LOOSELY_MATCHED_TAG, None)
+    return replace(candidate, tags=candidate_tags) == replace(
+        expected, tags=expected_tags
+    )
 
 
 @dataclass

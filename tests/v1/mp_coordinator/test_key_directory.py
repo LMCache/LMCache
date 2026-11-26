@@ -1136,3 +1136,20 @@ def test_an_untagged_delete_does_not_cross_revisions():
 
     assert bf16 in stored
     assert bf16_revision not in stored
+
+
+def test_a_revision_only_delete_reaches_both_dtype_copies():
+    """The dtype is optional, not required, for a delete that names a revision."""
+    bf16 = replace_entry(_key(1), {"kv_dtype": "bf16", "revision": "abc"})
+    fp8 = replace_entry(_key(1), {"kv_dtype": "fp8_per_token_head", "revision": "abc"})
+    other = replace_entry(_key(1), {"kv_dtype": "bf16", "revision": "xyz"})
+    directory = KeyDirectory()
+    directory.consume(_batch(keys=[bf16, fp8, other]))
+
+    stored = directory.get_stored_keys_of_chunks(
+        [replace_entry(_key(1), {"revision": "abc"})]
+    )
+
+    assert bf16 in stored
+    assert fp8 in stored
+    assert other not in stored
