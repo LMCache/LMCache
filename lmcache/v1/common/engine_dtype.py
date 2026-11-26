@@ -50,4 +50,4 @@ def kv_dtype_tag_code(dtype: Any) -> str:
     name = str(dtype).removeprefix("torch.")
     if name in _MODEL_DTYPE_CODES:
         return _MODEL_DTYPE_CODES[name]
-    return _ENGINE_DTYPE_CODES.get(name, name.lower() if name.isupper() else name)
+    return _ENGINE_DTYPE_CODES.get(name, name)

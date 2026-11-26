@@ -32,30 +32,38 @@ def test_the_per_token_head_modes_get_distinct_short_codes(declared: str, code: 
     assert kv_dtype_tag_code(declared) == code
 
 
-@pytest.mark.parametrize("declared", ["fp8_e4m3", "custom_dtype"])
+@pytest.mark.parametrize("declared", ["fp8_e4m3", "custom_dtype", "CUSTOM_DTYPE"])
 def test_an_unknown_engine_dtype_is_kept_verbatim(declared: str):
-    """Two unknown modes must not collide, so their names survive."""
+    """Unknown modes must not collide, so their exact spelling survives."""
     assert kv_dtype_tag_code(declared) == declared
 
 
-@pytest.mark.parametrize("declared", ["fp8_per_token_head", "int8_per_token_head"])
-def test_the_worst_case_filename_fits_name_max(declared: str):
-    """A 105-character model path, a 64-character salt and the tag must fit."""
+def test_unknown_modes_differ_by_case():
+    """Lowercasing would merge two modes the engine treats as different."""
+    assert kv_dtype_tag_code("CUSTOM_DTYPE") != kv_dtype_tag_code("custom_dtype")
 
+
+@pytest.mark.parametrize("declared", ["fp8_per_token_head", "int8_per_token_head"])
+def test_a_real_key_with_a_pinned_revision_fits_name_max(declared: str):
+    """A 32-byte hash, a 64-byte salt and a revision tag must still fit."""
     # First Party
     from lmcache.v1.distributed.api import ObjectKey, ObjectKeyIdentity
     from lmcache.v1.distributed.key_codec import encode_fs_filename
 
     key = ObjectKey(
         identity=ObjectKeyIdentity(
-            chunk_hash=b"1234",
+            chunk_hash=bytes(range(32)),
             kv_rank=1,
-            model_name="models--Qwen--Qwen3-1.7B/snapshots/" + "a" * 70,
+            # 40 characters: long enough to matter, short enough that the
+            # legacy name format still fits with a real hash.
+            model_name="models--Qwen--Qwen3-1.7B/snapshots/" + "a" * 5,
             cache_salt="s" * 64,
-            tags={"kv_dtype": kv_dtype_tag_code(declared)},
+            tags={"kv_dtype": kv_dtype_tag_code(declared), "revision": "abc123"},
         )
     )
-    assert len(encode_fs_filename(key).encode()) < 255
+
+    name = encode_fs_filename(key).encode()
+    assert len(name) < 255
 
 
 def test_nothing_to_report_is_empty():
