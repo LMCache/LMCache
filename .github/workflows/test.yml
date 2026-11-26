@@ -80,6 +80,7 @@ jobs:
           filters: |
             lmcache:
               - '**.py'
+              - '.github/deprecated-modules.toml'
               - 'pyproject.toml'
               - 'requirements/**.txt'
               - '.github/workflows/test.yml'

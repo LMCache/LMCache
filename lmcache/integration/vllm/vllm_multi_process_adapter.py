@@ -31,7 +31,6 @@ from lmcache.v1.client.kv_event_subscriber import (
     KVEventStreamClosed,
     MPKVEventSubscriber,
 )
-from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import TransferContext, create_transfer_context
 from lmcache.v1.common.custom_types import (
@@ -59,6 +58,7 @@ from lmcache.v1.common.utils import (
 )
 from lmcache.v1.platform.fd_channel import fd_channel_path_for_url
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
+from lmcache.v1.transport.errors import REQUEST_FAILURES
 from lmcache.v1.transport.futures import MessagingFuture
 from lmcache.v1.transport.request_client import RequestClient
 
@@ -2136,7 +2136,11 @@ class LMCacheMPWorkerAdapter:
             IDs that have not been returned before.
         """
         if self.dispatcher is not None:
-            dispatch(self.dispatcher, "reclaim")
+            dispatch(
+                self.dispatcher,
+                "reclaim",
+                finished_req_ids=finished_req_ids_from_engine,
+            )
 
         # If unhealthy, drain all pending futures immediately
         if not self.is_healthy:
@@ -2435,6 +2439,9 @@ class LMCacheMPWorkerAdapter:
         """
         if not need_flush_before_forward:
             return
+        # Preempted requests restart from scratch, so drop their query tables.
+        if self.dispatcher is not None:
+            dispatch(self.dispatcher, "handle_preemptions")
         transfer_ctx = self.transfer_ctx
         if not self.is_healthy or transfer_ctx is None:
             return
