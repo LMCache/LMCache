@@ -188,7 +188,7 @@ def _coord_engine(chunk_size: int = 4):
     """A BlendModule mock with the coordinator-leg methods bound."""
 
     eng = MagicMock(spec=BlendModule)
-    eng._ctx = SimpleNamespace(chunk_size=chunk_size)
+    eng._ctx = SimpleNamespace(default_chunk_size=chunk_size)
     # _event_bus is an instance attr (set in __init__), so spec= omits it;
     # _poll_coordinator_match publishes CB_COORDINATOR_MATCH_END through it.
     eng._event_bus = MagicMock()

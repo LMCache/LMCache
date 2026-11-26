@@ -245,11 +245,11 @@ def _lookup(
     ctx = SimpleNamespace(
         get_read_owners=lambda request_id: None,
         storage_manager=storage,
-        token_hasher=hasher,
+        default_token_hasher=hasher,
         layout_desc_registry=registry,
         session_manager=SessionManager(hasher, cleanup_interval=None),
         event_bus=MagicMock(),
-        chunk_size=CHUNK,
+        default_chunk_size=CHUNK,
     )
     ctx.event_bus.has_subscribers.return_value = False
     module = LookupModule(cast(MPCacheServerContext, ctx))
