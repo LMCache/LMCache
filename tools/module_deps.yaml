@@ -11,8 +11,7 @@ parts:
   platform: [lmcache.v1.platform, lmcache.cuda_ops, lmcache.musa_ops, lmcache.xpu_ops]
   transport: [lmcache.v1.transport]
   client: [lmcache.v1.client]
-  # qringbuffer is vLLM-only code used by the vLLM connector.
-  integration: [lmcache.integration, lmcache.sdk.qringbuffer]
+  integration: [lmcache.integration]
   sdk: [lmcache.sdk]
 
 # Single modules, placed without their submodules.
@@ -36,4 +35,6 @@ allowed:
 
 # Imports that break the tree today, as "<part or package> -> <part or package>".
 # Delete a line once nothing matches it; the check fails on a stale line.
-exceptions: []
+exceptions:
+  - lmcache.sdk.qringbuffer -> integration
+

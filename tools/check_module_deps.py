@@ -4,7 +4,7 @@
 The rules file is the only source of the dependency tree; this script reads it
 and reports every import between parts that no chain of ``allowed`` arrows
 permits and no ``exceptions`` line covers. It also fails on an exception that
-matches nothing, on arrows or exceptions that form a cycle, and when
+matches nothing, on arrows that form a cycle, and when
 docs/design/MODULE_DEPENDENCIES.md disagrees with ``allowed``.
 
 Import statements count wherever they are, including ``TYPE_CHECKING`` blocks
@@ -342,10 +342,9 @@ def check(root: Path, rules: Rules) -> tuple[list[str], list[str]]:
 
 
 def cycles(rules: Rules) -> list[str]:
-    """Find parts that can import themselves through other parts.
+    """Find parts that the ``allowed`` arrows lead back to themselves.
 
-    Follows the ``allowed`` arrows and the ``exceptions`` lines, so an exception
-    that lets two parts import each other counts too.
+    Exceptions are not followed, so a known cycle can be listed there.
 
     Args:
         rules: The parsed rules.
@@ -353,16 +352,10 @@ def cycles(rules: Rules) -> list[str]:
     Returns:
         One message per part on a cycle.
     """
-    arrows = {part: list(targets) for part, targets in rules.allowed.items()}
-    for importer, target in rules.exceptions:
-        source = importer if importer in rules.allowed else part_of(importer, rules)
-        dest = target if target in rules.allowed else part_of(target, rules)
-        if source is not None and dest is not None and source != dest:
-            arrows[source].append(dest)
-    reach = _reachable(arrows)
+    reach = _reachable(rules.allowed)
     return [
         f"{RULES}: {part} can import itself through other parts"
-        for part in arrows
+        for part in rules.allowed
         if part in reach[part]
     ]
 

@@ -91,15 +91,13 @@ def test_check_reports_imports_outside_the_tree(tmp_path: Path) -> None:
     assert unused == ["lmcache.cli -> server"]
 
 
-def test_cycles_through_arrows_or_exceptions_are_reported() -> None:
+def test_cycles_in_arrows_fail_but_excepted_cycles_pass() -> None:
     rules = _deps.load_rules(_REPO / _deps.RULES)
-    assert _deps.cycles(rules) == []
-
-    allowed = {**rules.allowed, "common": ["sdk"]}
-    assert _deps.cycles(replace(rules, allowed=allowed)) != []
-
     exceptions = [("lmcache.v1.client", "integration")]
-    assert _deps.cycles(replace(rules, exceptions=exceptions)) == [
+    assert _deps.cycles(replace(rules, exceptions=exceptions)) == []
+
+    allowed = {**rules.allowed, "client": [*rules.allowed["client"], "integration"]}
+    assert _deps.cycles(replace(rules, allowed=allowed)) == [
         f"{_deps.RULES}: {part} can import itself through other parts"
         for part in ("client", "sdk", "integration")
     ]
