@@ -18,7 +18,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 # First Party
-from lmcache import utils
+from lmcache.v1.common import utils
 
 router = APIRouter()
 

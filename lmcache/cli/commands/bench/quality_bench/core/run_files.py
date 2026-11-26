@@ -37,7 +37,7 @@ from lmcache.cli.commands.bench.quality_bench.core.blend_counters import (
 from lmcache.cli.commands.bench.quality_bench.core.config import ArmRole
 from lmcache.cli.commands.bench.quality_bench.core.plan import QualityPlan
 from lmcache.cli.commands.bench.quality_bench.core.runner import ArmAnswer, ArmRun
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 
@@ -130,7 +130,7 @@ def lmcache_version() -> str:
     """Return the installed lmcache version, with its commit when known.
 
     Read from the build-generated ``lmcache._version`` rather than
-    ``lmcache.utils``, which imports torch (absent from ``lmcache-cli``).
+    ``lmcache.v1.distributed.utils``, which imports torch (absent from ``lmcache-cli``).
     """
     try:
         # First Party

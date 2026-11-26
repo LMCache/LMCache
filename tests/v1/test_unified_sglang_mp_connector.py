@@ -27,7 +27,7 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
 from lmcache.integration.sglang.unified_lmcache_mp_connector import (
     UnifiedLMCacheMPConnector,
 )
-from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.kv_format import detect_format
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.distributed.api import (
@@ -169,6 +169,10 @@ def _run_staggered_recovery(rank: int, rendezvous: str, parallel_axis: str) -> N
             suffix = _submit_store(connector, 24)
             assert (suffix.start, suffix.end) == (16, 24)
             assert connector.complete_store(suffix)
+
+        # Keep both ranks alive until every collective and connector close has
+        # completed before either tears down Gloo.
+        dist.barrier()
     finally:
         dist.destroy_process_group()
 

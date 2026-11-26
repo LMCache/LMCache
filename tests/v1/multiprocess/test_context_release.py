@@ -19,7 +19,7 @@ import pytest
 import zmq
 
 # First Party
-from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
@@ -97,6 +97,7 @@ def _register(
         engine_type=EngineType.VLLM,
         layout_hints={},
         engine_group_infos=[],
+        event_profile=None,
     )
 
 
@@ -251,7 +252,7 @@ def test_blocked_release_does_not_stall_the_message_loop(
 
     def register(client: Any, instance_id: int) -> None:
         future = client.register_kv_cache(
-            instance_id, [], "m", 1, EngineType.VLLM, {}, []
+            instance_id, [], "m", 1, EngineType.VLLM, {}, [], None
         )
         assert future.result(timeout=_PROMPT_S) is None
 
@@ -306,7 +307,7 @@ def _quarantined_module(contexts: _Contexts) -> LMCacheDrivenTransferModule:
     ctx.chunk_size = 256
     module = LMCacheDrivenTransferModule(ctx, release_stuck_timeout_s=0.2)
     contexts.devices[1] = _dev(0)
-    module.register_kv_cache(1, _kv(0), "m", 1, EngineType.VLLM, {}, [])
+    module.register_kv_cache(1, _kv(0), "m", 1, EngineType.VLLM, {}, [], None)
     _block(contexts, 1)
     module.unregister_kv_cache(1)
     deadline = time.monotonic() + _PROMPT_S
@@ -335,18 +336,18 @@ def test_register_on_a_quarantined_device_fails_before_importing(contexts) -> No
     module = _quarantined_module(contexts)
     try:
         with pytest.raises(RuntimeError, match="quarantined"):
-            module.register_kv_cache(2, _kv(0), "m", 1, EngineType.VLLM, {}, [])
+            module.register_kv_cache(2, _kv(0), "m", 1, EngineType.VLLM, {}, [], None)
         assert 2 not in contexts.by_instance
         assert 2 not in module.context_entries_snapshot()
 
         # Another device still registers.
         contexts.devices[3] = _dev(1)
-        module.register_kv_cache(3, _kv(1), "m", 1, EngineType.VLLM, {}, [])
+        module.register_kv_cache(3, _kv(1), "m", 1, EngineType.VLLM, {}, [], None)
         assert 3 in module.context_entries_snapshot()
     finally:
         contexts.blocked[1].set()
     assert module.wait_for_releases(timeout=_PROMPT_S)
-    module.register_kv_cache(2, _kv(0), "m", 1, EngineType.VLLM, {}, [])
+    module.register_kv_cache(2, _kv(0), "m", 1, EngineType.VLLM, {}, [], None)
     assert 2 in module.context_entries_snapshot()
     module.close()
 

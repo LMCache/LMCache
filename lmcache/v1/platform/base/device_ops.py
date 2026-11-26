@@ -18,9 +18,10 @@ if TYPE_CHECKING:
     import torch
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.platform import ops_types, torch_ops
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.common import ops_types
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
+from lmcache.v1.platform import torch_ops
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)

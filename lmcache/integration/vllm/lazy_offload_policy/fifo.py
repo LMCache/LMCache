@@ -13,7 +13,7 @@ from lmcache.integration.vllm.lazy_offload_policy.base import (
     OffloadPolicy,
     PendingStoreItem,
 )
-from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.common.logging import init_logger as lmcache_init_logger
 
 if TYPE_CHECKING:
     # First Party
