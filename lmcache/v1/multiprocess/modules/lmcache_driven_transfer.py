@@ -800,7 +800,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             key, list(range(num_object_groups))
         )
         unfull_obj_keys = (
-            self._ctx.resolve_unfull_chunk_obj_keys(key, list(range(num_object_groups)))
+            self._ctx.resolve_unfull_chunk_obj_keys(
+                key, list(range(num_object_groups)), chunk_size
+            )
             if key.has_unfull_chunk(chunk_size)
             else []
         )
@@ -1178,7 +1180,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             key, list(range(num_object_groups))
         )
         unfull_obj_keys = (
-            self._ctx.resolve_unfull_chunk_obj_keys(key, list(range(num_object_groups)))
+            self._ctx.resolve_unfull_chunk_obj_keys(
+                key, list(range(num_object_groups)), chunk_size
+            )
             if key.has_unfull_chunk(chunk_size)
             else []
         )
