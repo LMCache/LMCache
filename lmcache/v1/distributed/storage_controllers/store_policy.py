@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.storage_controllers.policy_loader import (
-    load_external_policy,
+    resolve_external_policy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 
@@ -129,10 +129,10 @@ def create_store_policy(
     """
     if name not in _STORE_POLICY_REGISTRY:
         if ":" in name:
-            return load_external_policy(
+            return resolve_external_policy(
                 name,
                 StorePolicy,  # type: ignore[type-abstract]
-            )
+            )()
         known = ", ".join(sorted(_STORE_POLICY_REGISTRY)) or "(none)"
         raise ValueError(
             f"Unknown store policy {name!r}. Known: {known}, or 'package.module:Class'"

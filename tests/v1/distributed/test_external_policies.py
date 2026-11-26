@@ -57,6 +57,7 @@ from lmcache.v1.multiprocess.server import run_cache_server
 from lmcache.v1.platform import current_device_spec, synchronize_device
 from tests.v1.distributed.test_store_policy import make_descriptor
 from tests.v1.distributed.utils import single_row_spec
+import lmcache.v1.distributed.storage_controllers.prefetch_policy as prefetch_policy
 import lmcache.v1.memory_management as memory_management
 
 PolicyFactory = Callable[[str], StorePolicy | PrefetchPolicy]
@@ -79,7 +80,7 @@ def external_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterato
                 DefaultStorePolicy, StorePolicy,
             )
             from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
-                RetainPrefetchPolicy, PrefetchPolicy,
+                RetainPrefetchPolicy, PrefetchPlan, PrefetchPolicy,
             )
 
             class ExternalStore(DefaultStorePolicy):
@@ -105,7 +106,7 @@ def external_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterato
 
             class MissingRetention(PrefetchPolicy):
                 def plan_load(self, *args, **kwargs):
-                    raise NotImplementedError
+                    return PrefetchPlan({}, {})
 
             class BrokenStore(DefaultStorePolicy):
                 def __init__(self):
@@ -217,7 +218,6 @@ def test_wrong_type_rejected(
     [
         (store_factory, "StorePolicy"),
         (create_prefetch_policy, "PrefetchPolicy"),
-        (create_prefetch_policy, "MissingRetention"),
         (store_factory, "ExternalPrefetch"),
         (create_prefetch_policy, "ExternalStore"),
     ],
@@ -227,6 +227,19 @@ def test_abstract_and_other_policy_types_rejected(
 ) -> None:
     with pytest.raises(ValueError, match="concrete"):
         factory(f"{external_package}:{invalid_class}")
+
+
+def test_external_prefetch_requires_retention_without_changing_registry(
+    external_package: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy_cls = importlib.import_module(external_package).MissingRetention
+    monkeypatch.setitem(
+        prefetch_policy._PREFETCH_POLICY_REGISTRY, "no_l2_loads", policy_cls
+    )
+
+    assert type(create_prefetch_policy("no_l2_loads")) is policy_cls
+    with pytest.raises(ValueError, match="must implement plan_l1_retention"):
+        create_prefetch_policy(f"{external_package}:MissingRetention")
 
 
 @pytest.mark.parametrize(

@@ -30,7 +30,7 @@ from lmcache.v1.distributed.bitmap_ops.fold import (
     fold_unfold_grouped,
 )
 from lmcache.v1.distributed.storage_controllers.policy_loader import (
-    load_external_policy,
+    resolve_external_policy,
 )
 from lmcache.v1.distributed.storage_controllers.utils import (
     Bitmap2D,
@@ -168,7 +168,6 @@ class PrefetchPolicy(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
     def plan_l1_retention(
         self,
         keys: list[ObjectKey],
@@ -396,10 +395,14 @@ def create_prefetch_policy(name: str) -> PrefetchPolicy:
     """
     if name not in _PREFETCH_POLICY_REGISTRY:
         if ":" in name:
-            return load_external_policy(
+            policy_cls = resolve_external_policy(
                 name,
                 PrefetchPolicy,  # type: ignore[type-abstract]
             )
+            retention = policy_cls.plan_l1_retention
+            if retention is PrefetchPolicy.plan_l1_retention or not callable(retention):
+                raise ValueError(f"Policy {name!r} must implement plan_l1_retention")
+            return policy_cls()
         known = ", ".join(sorted(_PREFETCH_POLICY_REGISTRY)) or "(none)"
         raise ValueError(
             f"Unknown prefetch policy {name!r}. Known: {known}, "

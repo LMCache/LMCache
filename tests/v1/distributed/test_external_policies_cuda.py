@@ -3,6 +3,7 @@
 
 # Standard
 from pathlib import Path
+from unittest.mock import patch
 import argparse
 import importlib
 import json
@@ -18,6 +19,7 @@ from lmcache.v1.distributed.config import (
     add_storage_manager_args,
     parse_args_to_config,
 )
+from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import FSL2Adapter
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.platform import current_device_spec, synchronize_device
 from tests.v1.distributed.test_external_policies import (
@@ -28,8 +30,15 @@ from tests.v1.distributed.utils import single_row_spec
 pytestmark = [pytest.mark.cuda, pytest.mark.no_shared_allocator]
 
 
+@patch.object(
+    FSL2Adapter,
+    "submit_store_task",
+    autospec=True,
+    side_effect=FSL2Adapter.submit_store_task,
+)
 @pytest.mark.parametrize("store_class", ["ExternalStore", "ExternalStoreAll"])
 def test_external_selector_cuda_fs_round_trip(
+    submit_store_task,
     external_package: str,  # noqa: F811 - shared pytest fixture imported above
     tmp_path: Path,
     store_class: str,
@@ -89,8 +98,6 @@ def test_external_selector_cuda_fs_round_trip(
                 if deleted != (1, 0):
                     time.sleep(0.01)
             assert deleted == (1, 0), "L1 copy stayed locked after completed store"
-        else:
-            assert list(cache_path.glob("*.data")) == []
 
         handle = manager.submit_prefetch_task(single_row_spec([key], layout))
         deadline = time.monotonic() + 15
@@ -115,3 +122,10 @@ def test_external_selector_cuda_fs_round_trip(
         assert manager.report_status()["is_healthy"]
     finally:
         manager.close()
+
+    # Closing joins the store controller, so its selection has reached
+    # the adapter boundary before we check for a submission.
+    if store_class == "ExternalStoreAll":
+        submit_store_task.assert_called_once()
+    else:
+        submit_store_task.assert_not_called()

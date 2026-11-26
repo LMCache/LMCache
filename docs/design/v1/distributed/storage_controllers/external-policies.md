@@ -19,7 +19,8 @@ Only an explicitly selected external class is imported. Installing a package
 does not enable it, and built-in defaults stay unchanged.
 
 The external class subclasses `StorePolicy` or `PrefetchPolicy`, respectively,
-implements its abstract methods and has a no-argument constructor. Registered
+implements its callbacks and has a no-argument constructor. A prefetch class
+must provide both `plan_load` and `plan_l1_retention`. Registered
 store policies receive the storage manager's L1 managers. External store policies
 are instantiated without those handles. Import, attribute and constructor
 errors are startup errors. Malformed paths, non-class objects, wrong base
