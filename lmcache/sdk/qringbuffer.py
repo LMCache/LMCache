@@ -18,8 +18,7 @@ from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.logging import init_logger as lmcache_init_logger
 from lmcache.v1.common.token_codec import TOKEN_STRIDE
-from lmcache.v1.common.utils import get_device
-from lmcache.v1.distributed.utils import cdiv
+from lmcache.v1.common.utils import cdiv, get_device
 from lmcache.v1.transport.errors import REQUEST_FAILURES
 
 if TYPE_CHECKING:

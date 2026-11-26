@@ -11,7 +11,7 @@ parts:
   platform: [lmcache.v1.platform, lmcache.cuda_ops, lmcache.musa_ops, lmcache.xpu_ops]
   transport: [lmcache.v1.transport]
   client: [lmcache.v1.client]
-  integration: [lmcache.integration]
+  integration: [lmcache.integration, lmcache.sdk]
 
 # Single modules, placed without their submodules.
 modules:
@@ -19,7 +19,7 @@ modules:
   lmcache.v1: common    # runs before every part under lmcache.v1
 
 # Not part of the tree: not checked, and any part may use them.
-outside: [lmcache.cli, lmcache.sdk]
+outside: [lmcache.cli]
 
 # The diagram's arrows. A part may import every part its arrows lead to,
 # directly or through other parts. Imports within a part are always allowed.

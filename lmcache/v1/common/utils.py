@@ -873,6 +873,22 @@ def _get_head_size_view(
     return k.view(nb * bs, nh * hs), v.view(nb * bs, nh * hs)
 
 
+def cdiv(a: int, b: int) -> int:
+    """Return the ceiling of integer division of ``a`` by ``b``.
+
+    Args:
+        a: Integer dividend.
+        b: Nonzero integer divisor.
+
+    Returns:
+        The quotient rounded toward positive infinity.
+
+    Raises:
+        ZeroDivisionError: If ``b`` is zero.
+    """
+    return -(a // -b)
+
+
 def round_down(x: int, y: int) -> int:
     """Round down x to the nearest multiple of y."""
     return (x // y) * y

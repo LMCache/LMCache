@@ -15,11 +15,10 @@ import torch
 # First Party
 from lmcache.utils import EngineType as LegacyEngineType
 from lmcache.v1.common.custom_types import EngineType
-from lmcache.v1.common.utils import get_version, round_down, round_up
+from lmcache.v1.common.utils import cdiv, get_version, round_down, round_up
 from lmcache.v1.distributed.utils import (
     DaxDeviceGeometry,
     _append_range_or_elements,
-    cdiv,
     check_dax_range,
     compress_slot_mapping,
     convert_tokens_to_list,

@@ -1,13 +1,16 @@
 # Module Dependencies
 
-LMCache code is split into six parts. Each part may import the parts its arrows
-lead to, directly or through other parts: integration may import common, since
-integration depends on client and client on common. The rules live in one file,
+LMCache code is split into six parts. The integration part includes both
+`lmcache.integration` and the public client API, `lmcache.sdk`. Each part may
+import the parts its arrows lead to, directly or through other parts: integration
+may import common, since integration depends on client and client on common.
+The rules live in one file,
 `tools/module_deps.yaml`, and `tools/check_module_deps.py` enforces them in
 pre-commit and CI.
 
 ```mermaid
 flowchart BT
+    integration["integration / SDK"]
     platform --> common
     transport --> common
     transport -.-> platform
@@ -24,10 +27,17 @@ The dotted arrow means transport uses devices such as IPC wrappers on demand. Th
 check treats it like a solid arrow, and fails if this diagram and the rules file
 disagree.
 
-Imports within a part are always allowed. Server and client never import each
-other, and nothing imports integration. Server is every lmcache module that is
-not in another part. Modules with their own name outside the diagram, such as
-`lmcache.cli` and `lmcache.sdk`, are not server and are not checked.
+Imports within a part are always allowed, including the existing Q-ring calls
+between SDK and vLLM integration code. SDK may import client, common, transport
+and platform through the arrows above, but must not import server implementations.
+Server and client never import each other, and no lower part imports integration
+or SDK.
+
+Server is every lmcache module that is not in another part or explicitly outside
+the tree. This includes `lmcache.v1.distributed`, `lmcache.v1.multiprocess`,
+`lmcache.v1.mp_coordinator`, `lmcache.v1.storage_backend` and the in-process engine
+implementation. `lmcache.cli` is outside the tree and is not checked; SDK is
+checked, including its lazy and type-only imports.
 
 Which packages make up each part, and where the files the diagram does not draw
 belong, is in `tools/module_deps.yaml`.
