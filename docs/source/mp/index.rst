@@ -8,6 +8,7 @@ Overview
    multi_l1
    memory_pooling
    chunk_size_negotiation
+   rust_entrypoint
 
 LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
 vLLM instances reach through a configurable ZMQ or gRPC request transport.

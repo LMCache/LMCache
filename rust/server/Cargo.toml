@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "lmcache-server"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[dependencies]
+pyo3-ffi = "0.24"
+
+[build-dependencies]
+pyo3-build-config = { version = "0.24", features = ["resolve-config"] }
+
+[dev-dependencies]
+tempfile = "3"

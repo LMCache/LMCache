@@ -1,0 +1,35 @@
+name: Rust server entry point
+
+on:
+  pull_request:
+    paths:
+      - 'rust/server/**'
+      - '.github/workflows/rust_server.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  entrypoint:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ['3.12', '3.13']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check and test the executable
+        run: |
+          export PYO3_PYTHON="$(command -v python)"
+          cargo fmt --manifest-path rust/server/Cargo.toml --check
+          cargo clippy --locked --manifest-path rust/server/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path rust/server/Cargo.toml
