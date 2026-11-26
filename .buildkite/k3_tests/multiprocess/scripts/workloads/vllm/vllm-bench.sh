@@ -26,12 +26,140 @@ EXPECTED_TOTAL_INPUT_TOKENS=$((NUM_PROMPTS * RANDOM_INPUT_LEN))
 EXPECTED_COMPLETED=$NUM_PROMPTS
 MAX_SLOWDOWN_PERCENT="${MAX_SLOWDOWN_PERCENT:-5}"
 
-# Reproducible seed
-RANDOM_SEED="${RANDOM_SEED:-$(date +%s)}"
+# Stable default seed for reproducible benchmarks across retries.
+# Can be overridden via explicit RANDOM_SEED environment variable.
+DEFAULT_RANDOM_SEED=42
+RANDOM_SEED="${RANDOM_SEED:-$DEFAULT_RANDOM_SEED}"
 
 # Output directory
 VLLM_BENCH_DIR="$RESULTS_DIR/vllm_bench"
 CACHE_HIT_DIR="$VLLM_BENCH_DIR/cache_hit_validation"
+
+MANIFEST_SAVED=0
+CURRENT_VERDICT="UNKNOWN"
+VERIFIED_LMCACHE_TP="null"
+VERIFIED_BASELINE_TP="null"
+VERIFIED_SLOWDOWN_PCT="null"
+
+save_comparison_manifest() {
+    local verdict="$1"
+    local lmcache_tp="${2:-null}"
+    local baseline_tp="${3:-null}"
+    local slowdown="${4:-null}"
+
+    CURRENT_VERDICT="$verdict"
+
+    local manifest_file="$VLLM_BENCH_DIR/manifest.json"
+    local attempt="${BUILDKITE_RETRY_COUNT:-0}"
+    local attempt_dir="$VLLM_BENCH_DIR/attempt_${attempt}"
+
+    mkdir -p "$VLLM_BENCH_DIR" "$attempt_dir"
+
+    local checkout_sha
+    checkout_sha="$(git rev-parse HEAD 2>/dev/null || echo "unknown")"
+
+    local vllm_ver
+    vllm_ver="$(python3 -c "import vllm; print(vllm.__version__)" 2>/dev/null || echo "unknown")"
+
+    local torch_ver
+    torch_ver="$(python3 -c "import torch; print(torch.__version__)" 2>/dev/null || echo "unknown")"
+
+    local timestamp
+    timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ")"
+
+    MANIFEST_VERDICT="$verdict" \
+    MANIFEST_LMCACHE_TP="$lmcache_tp" \
+    MANIFEST_BASELINE_TP="$baseline_tp" \
+    MANIFEST_SLOWDOWN="$slowdown" \
+    MANIFEST_CHECKOUT_SHA="$checkout_sha" \
+    MANIFEST_VLLM_VER="$vllm_ver" \
+    MANIFEST_TORCH_VER="$torch_ver" \
+    MANIFEST_TIMESTAMP="$timestamp" \
+    MANIFEST_ATTEMPT="$attempt" \
+    MANIFEST_FILE="$manifest_file" \
+    RANDOM_SEED="$RANDOM_SEED" \
+    MODEL="$MODEL" \
+    NUM_PROMPTS="$NUM_PROMPTS" \
+    RANDOM_INPUT_LEN="$RANDOM_INPUT_LEN" \
+    RANDOM_OUTPUT_LEN="$RANDOM_OUTPUT_LEN" \
+    MAX_SLOWDOWN_PERCENT="$MAX_SLOWDOWN_PERCENT" \
+    BUILD_ID="$BUILD_ID" \
+    python3 - <<'PY'
+import json
+import os
+
+def parse_num(val):
+    if val is None or val == "" or val == "null":
+        return None
+    try:
+        return float(val)
+    except ValueError:
+        return None
+
+seed_raw = os.environ.get("RANDOM_SEED", "")
+attempt_raw = os.environ.get("MANIFEST_ATTEMPT", "0")
+
+manifest = {
+    "verdict": os.environ.get("MANIFEST_VERDICT", "UNKNOWN"),
+    "effective_seed": int(seed_raw) if seed_raw.isdigit() else seed_raw,
+    "model": os.environ.get("MODEL", ""),
+    "num_prompts": int(os.environ.get("NUM_PROMPTS", "0")),
+    "random_input_len": int(os.environ.get("RANDOM_INPUT_LEN", "0")),
+    "random_output_len": int(os.environ.get("RANDOM_OUTPUT_LEN", "0")),
+    "checkout_sha": os.environ.get("MANIFEST_CHECKOUT_SHA", "unknown"),
+    "vllm_version": os.environ.get("MANIFEST_VLLM_VER", "unknown"),
+    "torch_version": os.environ.get("MANIFEST_TORCH_VER", "unknown"),
+    "lmcache_throughput": parse_num(os.environ.get("MANIFEST_LMCACHE_TP")),
+    "baseline_throughput": parse_num(os.environ.get("MANIFEST_BASELINE_TP")),
+    "slowdown_percent": parse_num(os.environ.get("MANIFEST_SLOWDOWN")),
+    "max_slowdown_percent": float(os.environ.get("MAX_SLOWDOWN_PERCENT", "5")),
+    "attempt": int(attempt_raw) if attempt_raw.isdigit() else attempt_raw,
+    "build_id": os.environ.get("BUILD_ID", ""),
+    "timestamp": os.environ.get("MANIFEST_TIMESTAMP", ""),
+}
+
+with open(os.environ["MANIFEST_FILE"], "w") as f:
+    json.dump(manifest, f, indent=2)
+PY
+
+    MANIFEST_SAVED=1
+
+    echo "============================================"
+    echo "=== Benchmark Comparison Manifest ==="
+    echo "============================================"
+    if [ -f "$manifest_file" ]; then
+        cat "$manifest_file"
+    fi
+    echo ""
+
+    # Preserve attempt-specific copy
+    if [ -f "$manifest_file" ]; then
+        cp "$manifest_file" "$attempt_dir/manifest.json"
+    fi
+    if [ -f "$VLLM_BENCH_DIR/baseline.json" ]; then
+        cp "$VLLM_BENCH_DIR/baseline.json" "$attempt_dir/baseline.json"
+    fi
+    if [ -f "$VLLM_BENCH_DIR/lmcache.json" ]; then
+        cp "$VLLM_BENCH_DIR/lmcache.json" "$attempt_dir/lmcache.json"
+    fi
+
+    # Copy to log files in /tmp so cleanup.sh copies them and Buildkite collects them as artifacts
+    local manifest_log="/tmp/build_${BUILD_ID}_attempt_${attempt}_vllm_bench_manifest.log"
+    cp "$manifest_file" "$manifest_log" 2>/dev/null || true
+    cp "$manifest_file" "/tmp/build_${BUILD_ID}_vllm_bench_manifest.log" 2>/dev/null || true
+
+    if command -v buildkite-agent >/dev/null 2>&1; then
+        buildkite-agent artifact upload "$manifest_file" 2>/dev/null || true
+    fi
+}
+
+on_exit() {
+    local rc=$?
+    if [ "$rc" -ne 0 ] && [ "${CURRENT_VERDICT:-}" != "FAIL" ]; then
+        save_comparison_manifest "FAIL" "${VERIFIED_LMCACHE_TP:-null}" "${VERIFIED_BASELINE_TP:-null}" "${VERIFIED_SLOWDOWN_PCT:-null}"
+    fi
+}
+trap on_exit EXIT
 
 # A repeated long prompt is used after the random benchmark to validate that
 # the LMCache-backed vLLM path performs a real retrieve on a warm request.
@@ -97,10 +225,12 @@ verify_results() {
 
     if [ ! -f "$lmcache_result" ]; then
         echo "LMCache result file not found: $lmcache_result"
+        save_comparison_manifest "FAIL" "${VERIFIED_LMCACHE_TP:-null}" "${VERIFIED_BASELINE_TP:-null}" "${VERIFIED_SLOWDOWN_PCT:-null}"
         return 1
     fi
     if [ ! -f "$baseline_result" ]; then
         echo "Baseline result file not found: $baseline_result"
+        save_comparison_manifest "FAIL" "${VERIFIED_LMCACHE_TP:-null}" "${VERIFIED_BASELINE_TP:-null}" "${VERIFIED_SLOWDOWN_PCT:-null}"
         return 1
     fi
 
@@ -219,6 +349,14 @@ else:
     fi
 
     echo ""
+    VERIFIED_LMCACHE_TP="$lmcache_throughput"
+    VERIFIED_BASELINE_TP="$baseline_throughput"
+    VERIFIED_SLOWDOWN_PCT="$slowdown_pct"
+    if [ "$failed" -ne 0 ]; then
+        save_comparison_manifest "FAIL" "$VERIFIED_LMCACHE_TP" "$VERIFIED_BASELINE_TP" "$VERIFIED_SLOWDOWN_PCT"
+    fi
+
+
     return "$failed"
 }
 
@@ -228,6 +366,7 @@ verify_single_instance_result() {
     echo "=== LMCache Benchmark Result ==="
     if [ ! -f "$lmcache_result" ]; then
         echo "LMCache result file not found: $lmcache_result"
+        save_comparison_manifest "FAIL" "${VERIFIED_LMCACHE_TP:-null}" "${VERIFIED_BASELINE_TP:-null}" "${VERIFIED_SLOWDOWN_PCT:-null}"
         return 1
     fi
 
@@ -240,17 +379,28 @@ verify_single_instance_result() {
     echo "  completed: $lmcache_completed"
     echo "  total_token_throughput: $lmcache_throughput"
 
+    VERIFIED_LMCACHE_TP="$lmcache_throughput"
+    VERIFIED_BASELINE_TP="null"
+    VERIFIED_SLOWDOWN_PCT="null"
     if [ "$lmcache_completed" -ne "$EXPECTED_COMPLETED" ] 2>/dev/null; then
         echo "LMCache completed: $lmcache_completed (expected: $EXPECTED_COMPLETED) FAIL"
+        save_comparison_manifest "FAIL" "$lmcache_throughput" "null" "null"
         return 1
     fi
     echo "LMCache completed: $lmcache_completed (expected: $EXPECTED_COMPLETED) PASS"
+
+    return 0
 }
 
 warmup_server() {
     local port="$1"
     local description="$2"
-    local num_warmup="${3:-3}"
+    local num_warmup="${NUM_WARMUP:-${3:-3}}"
+
+    if [ "$num_warmup" -le 0 ] 2>/dev/null; then
+        echo "=== Skipping warmup for $description (port $port, num_warmup=$num_warmup) ==="
+        return 0
+    fi
 
     echo "=== Warming up $description (port $port) ==="
     # Send a few chat completion requests to warm up the tokenizer,
@@ -482,10 +632,13 @@ if [ "${LMCACHE_MP_LAZY_OFFLOAD:-false}" = "true" ]; then
 else
     if ! verify_cache_hit_replay; then
         echo "Cache-hit replay validation failed"
+        save_comparison_manifest "FAIL" "${VERIFIED_LMCACHE_TP:-null}" "${VERIFIED_BASELINE_TP:-null}" "${VERIFIED_SLOWDOWN_PCT:-null}"
         exit 1
     fi
 fi
 
 echo "============================================"
+save_comparison_manifest "PASS" "${VERIFIED_LMCACHE_TP:-null}" "${VERIFIED_BASELINE_TP:-null}" "${VERIFIED_SLOWDOWN_PCT:-null}"
+
 echo "=== vLLM Bench test completed ==="
 echo "============================================"
