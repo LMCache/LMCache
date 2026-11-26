@@ -1,0 +1,32 @@
+name: Weekly full build (RBLN)
+
+on:
+  workflow_call:
+    inputs:
+      run_prepare:
+        description: Fast-forward ci-weekly-full before running
+        required: false
+        default: true
+        type: boolean
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-full-build-rbln
+  cancel-in-progress: false
+
+jobs:
+  weekly:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/weekly_device_build.yml
+    with:
+      label: RBLN
+      manifest: .buildkite/k3_tests/weekly/manifest-rbln.json
+      out_dir: weekly-full-build-rbln
+      artifact: weekly-full-build-rbln
+      timeout_minutes: 330
+      run_prepare: ${{ inputs.run_prepare }}
+    secrets: inherit

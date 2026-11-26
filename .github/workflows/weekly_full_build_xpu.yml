@@ -1,0 +1,32 @@
+name: Weekly full build (XPU)
+
+on:
+  workflow_call:
+    inputs:
+      run_prepare:
+        description: Fast-forward ci-weekly-full before running
+        required: false
+        default: true
+        type: boolean
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-full-build-xpu
+  cancel-in-progress: false
+
+jobs:
+  weekly:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/weekly_device_build.yml
+    with:
+      label: XPU
+      manifest: .buildkite/k3_tests/weekly/manifest-xpu.json
+      out_dir: weekly-full-build-xpu
+      artifact: weekly-full-build-xpu
+      timeout_minutes: 330
+      run_prepare: ${{ inputs.run_prepare }}
+    secrets: inherit

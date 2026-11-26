@@ -1,0 +1,32 @@
+name: Weekly full build (AMD)
+
+on:
+  workflow_call:
+    inputs:
+      run_prepare:
+        description: Fast-forward ci-weekly-full before running
+        required: false
+        default: true
+        type: boolean
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-full-build-amd
+  cancel-in-progress: false
+
+jobs:
+  weekly:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/weekly_device_build.yml
+    with:
+      label: AMD
+      manifest: .buildkite/k3_tests/weekly/manifest-amd.json
+      out_dir: weekly-full-build-amd
+      artifact: weekly-full-build-amd
+      timeout_minutes: 345
+      run_prepare: ${{ inputs.run_prepare }}
+    secrets: inherit
