@@ -63,7 +63,7 @@ _CPP_PARITY_CASES = [
         id="qwen-path-64-char-salt",
     ),
     pytest.param(
-        "models--Qwen--Qwen3-1.7B/snapshots/" + "a" * 60,
+        "models--Qwen--Qwen3-1.7B/snapshots/" + "a" * 70,
         "s" * 64,
         {"kv_dtype": "bf16,f8e4m3"},
         id="long-path-max-salt-mixed-precision",
@@ -236,7 +236,10 @@ def test_tag_token_stays_within_its_budget(tags: dict[str, str], limit: int) -> 
 def test_a_realistic_path_stays_under_name_max(tags: dict[str, str]) -> None:
     """A 105-character model path plus a 64-character salt must still fit."""
     key = _key(
-        "models--Qwen--Qwen3-1.7B/snapshots/" + "a" * 60, salt="s" * 64, tags=tags
+        "models--Qwen--Qwen3-1.7B/snapshots/" + "a" * 70, salt="s" * 64, tags=tags
     )
+    # Pin the shape the docstring claims: the prefix is 35 characters, and a
+    # silent shortening would quietly stop testing the boundary.
+    assert len(key.model_name) == 105
 
     assert len(encode_fs_filename(key).encode()) <= 255
