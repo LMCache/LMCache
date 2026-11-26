@@ -1089,6 +1089,15 @@ class S3L2Adapter(L2AdapterInterface):
                     raise _BucketUnavailable(bucket)
             try:
                 mgmt_s3 = self._mgmt_client()
+                # Already ours? (us-east-1 answers create_bucket with 200 for a
+                # bucket the caller owns, so create alone can't tell a new
+                # bucket from an existing one.) An existing bucket is used
+                # as-is: its lifecycle rules are never touched.
+                if bucket in _list_owned_buckets(mgmt_s3, bucket, self._region):
+                    with self._lock:
+                        self._ensured_buckets.add(bucket)
+                    return
+                created = False
                 try:
                     # us-east-1 is the S3 default region and rejects an explicit
                     # LocationConstraint; every other region requires it.
@@ -1101,6 +1110,7 @@ class S3L2Adapter(L2AdapterInterface):
                                 "LocationConstraint": self._region
                             },
                         )
+                    created = True
                     logger.info("Auto-provisioned tenant KV bucket %s", bucket)
                 except Exception as e:
                     code = _aws_error_code(e)
@@ -1116,20 +1126,8 @@ class S3L2Adapter(L2AdapterInterface):
                         raise _BucketUnavailable(bucket) from None
                     if code != "BucketAlreadyOwnedByYou":
                         raise
-                mgmt_s3.put_bucket_lifecycle_configuration(
-                    Bucket=bucket,
-                    LifecycleConfiguration={
-                        "Rules": [
-                            {
-                                "ID": "kv-cache-ttl",
-                                "Filter": {"Prefix": ""},
-                                "Status": "Enabled",
-                                "Expiration": {"Days": self._bucket_ttl_days},
-                            }
-                        ]
-                    },
-                    **self._expected_owner_kwargs(),
-                )
+                if created:
+                    self._set_bucket_ttl(mgmt_s3, bucket)
                 # Only mark provisioned after success, so a failed create isn't
                 # cached as "done" (a later write would then 404 forever).
                 with self._lock:
@@ -1141,6 +1139,37 @@ class S3L2Adapter(L2AdapterInterface):
                     "Failed to auto-provision tenant bucket %s", bucket, exc_info=True
                 )
                 raise _BucketUnavailable(bucket) from e
+
+    def _set_bucket_ttl(self, mgmt_s3: Any, bucket: str) -> None:
+        """Give a bucket this process just created its expiration rule.
+
+        ``put_bucket_lifecycle_configuration`` replaces every rule on the
+        bucket, which is why it is only ever called for a new, empty
+        bucket. A failure leaves the bucket usable without a TTL.
+        """
+        try:
+            mgmt_s3.put_bucket_lifecycle_configuration(
+                Bucket=bucket,
+                LifecycleConfiguration={
+                    "Rules": [
+                        {
+                            "ID": "kv-cache-ttl",
+                            "Filter": {"Prefix": ""},
+                            "Status": "Enabled",
+                            "Expiration": {"Days": self._bucket_ttl_days},
+                        }
+                    ]
+                },
+                **self._expected_owner_kwargs(),
+            )
+        except Exception:
+            logger.warning(
+                "Created tenant bucket %s but could not set its %d-day "
+                "expiration rule; objects there will not expire",
+                bucket,
+                self._bucket_ttl_days,
+                exc_info=True,
+            )
 
     def _expected_owner_kwargs(self) -> dict[str, str]:
         owner = self._config.s3_expected_bucket_owner
