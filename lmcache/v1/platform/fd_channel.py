@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 import errno
 import os
 import socket
+import struct
 import sys
 import threading
 
@@ -39,6 +40,16 @@ logger = init_logger(__name__)
 _FD_CHANNEL_DIR = "/dev/shm"
 _EXPORT_ID_BYTES = 16
 _ACK = b"\x01"
+
+
+def _check_retention_peer(sock: socket.socket) -> None:
+    """Keep experimental allocation handles within the participating UID."""
+    if os.environ.get("LMCACHE_ZC_RUN_ID"):
+        creds = sock.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+        )
+        if struct.unpack("3i", creds)[1] != os.geteuid():
+            raise PermissionError("Retention FD peer UID differs from effective UID")
 
 
 def _remove_stale_socket(path: str) -> None:
@@ -95,7 +106,7 @@ class FdChannelServer:
             # Workers may run as other users (e.g. in other MP containers).
             # Connecting only lets a peer deliver fds, which the server hands
             # out solely by the export ids its registrations carry.
-            os.chmod(path, 0o666)
+            os.chmod(path, 0o600 if os.environ.get("LMCACHE_ZC_RUN_ID") else 0o666)
             self._listener.listen()
         except OSError:
             self._listener.close()
@@ -195,6 +206,7 @@ class FdChannelServer:
         """Store each delivered fd until the connection closes, then close
         the ones never claimed."""
         try:
+            _check_retention_peer(conn)
             while self._receive_one(conn):
                 pass
         except OSError:
@@ -273,6 +285,7 @@ class FdChannelClient:
         self._sock.settimeout(timeout)
         try:
             self._sock.connect(path)
+            _check_retention_peer(self._sock)
         except OSError as exc:
             self._sock.close()
             raise ConnectionError(

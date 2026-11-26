@@ -4,6 +4,7 @@
 # Standard
 from dataclasses import dataclass, replace
 from functools import partial
+import os
 import threading
 import time
 
@@ -40,6 +41,8 @@ from lmcache.v1.multiprocess.kv_load_policy import (
     create_kv_load_policy,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess import retained_retrieve
+from lmcache.v1.multiprocess.retained_views import encode_key
 from lmcache.v1.multiprocess.session import Session
 
 logger = init_logger(__name__)
@@ -168,6 +171,7 @@ class _PrefetchJob:
     # The lookup key, for the unfull-chunk stage that runs once the hit is
     # known; None on early exits, which never probe an unfull chunk.
     unfull_chunk_lookup_key: IPCCacheServerKey | None = None
+    retained_count: int | None = None
 
 
 class LookupModule(DiscoverableModule):
@@ -208,6 +212,8 @@ class LookupModule(DiscoverableModule):
         self._prefetch_jobs: dict[str, _PrefetchJob] = {}
         self._prefetch_job_lock = threading.Lock()
         self._setup_metrics()
+        if os.getenv("LMCACHE_ZC_DIR"):
+            ctx.session_manager.destroy_listeners.append(self._release_retained_session)
 
     @property
     def context(self) -> MPCacheServerContext:
@@ -224,9 +230,15 @@ class LookupModule(DiscoverableModule):
             "active_prefetch_jobs": self._active_prefetch_count(),
         }
 
+    def _release_retained_session(self, session) -> None:
+        self._ctx.storage_manager.retained_reads.cancel(id(session))
+
     def close(self) -> None:
-        """Release resources owned by this module (no-op)."""
-        pass
+        if os.getenv("LMCACHE_ZC_DIR"):
+            listeners = self._ctx.session_manager.destroy_listeners
+            if self._release_retained_session in listeners:
+                listeners.remove(self._release_retained_session)
+            self._ctx.storage_manager.retained_reads.close()
 
     # -----------------------------------------------------------------
     # Handlers
@@ -413,6 +425,7 @@ class LookupModule(DiscoverableModule):
 
         # Prefetch only [start, end); status offsets hits back to absolute.
         suffix_hashes = chunk_hashes[start_chunk:]
+        store = retained_retrieve.selected_store(self._ctx, key.cache_salt)
         if not suffix_hashes:
             # Every full chunk is engine-covered, or there is none: nothing to
             # lock or prefetch. The empty job still reports the covered prefix
@@ -425,7 +438,7 @@ class LookupModule(DiscoverableModule):
                 attn_desc=attn_desc,
                 start_chunk=start_chunk,
                 engine_covered_chunks=start_chunk,
-                probe_unfull_chunk=True,
+                probe_unfull_chunk=store is None,
             )
             return
 
@@ -471,13 +484,42 @@ class LookupModule(DiscoverableModule):
                 shard_replication_desc,
             ),
         )
-        handle = self._ctx.storage_manager.submit_prefetch_task(
-            spec,
-            external_request_id=key.request_id,
-        )
+        retained_count = None
+        if store is None:
+            handle = self._ctx.storage_manager.submit_prefetch_task(
+                spec, external_request_id=key.request_id
+            )
+        else:
+            if (
+                len(spec.key_groups) != 1
+                or key.world_size != 1
+                or chunk_size != 256
+                or spec.key_groups[0].num_kv_readers != 1
+                or spec.key_groups[0].sliding_window_size != -1
+            ):
+                self._register_empty_prefetch_job(
+                    key, early_exit_reason="unsupported_retained_layout"
+                )
+                return
+            keys = spec.key_groups[0].keys
+            retained_count = self._ctx.storage_manager.retained_reads.reserve_prefix(
+                store, id(session), keys
+            )
+            retained_retrieve.record(
+                "lookup",
+                request=key.request_id,
+                keys=[encode_key(k) for k in keys[:retained_count]],
+                native_tokens=int(
+                    (key.request_configs or {}).get(
+                        "lmcache.hint.engine_computed_tokens", 0
+                    )
+                ),
+            )
+            handle = PrefetchHandle(-1, key.request_id, len(keys), time.monotonic())
         self._register_prefetch_job(
             _PrefetchJob(
                 handle=handle,
+                retained_count=retained_count,
                 row_windows=tuple(row.sliding_window_size for row in spec.key_groups),
                 request_id=key.request_id,
                 requested_tokens=probed_tokens,
@@ -494,7 +536,7 @@ class LookupModule(DiscoverableModule):
                 ),
                 model_name=model_name,
                 cache_salt=key.cache_salt,
-                unfull_chunk_lookup_key=key,
+                unfull_chunk_lookup_key=key if store is None else None,
             )
         )
 
@@ -691,6 +733,9 @@ class LookupModule(DiscoverableModule):
         if not obj_keys:
             return
 
+        if retained_retrieve.selected_store(self._ctx, key.cache_salt) is not None:
+            self._ctx.storage_manager.retained_reads.cancel(id(session), obj_keys)
+            return
         finish_lookup_read(
             self._ctx, key, obj_keys, self._ctx.get_read_owners(key.request_id)
         )
@@ -725,6 +770,13 @@ class LookupModule(DiscoverableModule):
             )
             return
 
+        if (
+            retained_retrieve.selected_store(
+                self._ctx, session.lookup_ipc_key.cache_salt
+            )
+            is not None
+        ):
+            return
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0)]
         obj_keys = self._all_object_keys(session.lookup_ipc_key, chunk_hashes)
         # unified touch of all keys, which include retrieved and stored keys
@@ -859,7 +911,9 @@ class LookupModule(DiscoverableModule):
         result = self._ctx.storage_manager.query_prefetch_status(job.handle)
         if result is None:
             return None
-        if job.row_windows:
+        if job.retained_count is not None:
+            found_count, l1_found_count = job.retained_count, 0
+        elif job.row_windows:
             found_count, _retain = fold_unfold_grouped(
                 result.hit_cells, job.row_windows
             )
@@ -874,7 +928,7 @@ class LookupModule(DiscoverableModule):
         # The fold covers only the looked-up sub-range: the tier split is
         # attributed on it, so the covered prefix never counts as an L1 hit.
         l1_chunks = min(l1_found_count, found_count)
-        l2_chunks = found_count - l1_chunks
+        l2_chunks = found_count - l1_chunks if job.retained_count is None else 0
         # The engine resolves the hit in absolute chunks; shift it back.
         found_count += job.start_chunk
 
@@ -910,7 +964,9 @@ class LookupModule(DiscoverableModule):
             else 0
         )
         l1_hit_tokens = l1_chunks * chunk_size + unfull_hit_tokens
-        hit_tokens = (l1_chunks + l2_chunks) * chunk_size + unfull_hit_tokens
+        hit_tokens = (
+            l1_chunks + l2_chunks + (job.retained_count or 0)
+        ) * chunk_size + unfull_hit_tokens
         # Prefix served by either cache: both ranges start at 0 and overlap in
         # the sub-chunk gap below the lookup start, so take the longer, not the sum.
         request_hit_tokens = max(job.engine_hit_tokens, covered_tokens + hit_tokens)
@@ -927,6 +983,7 @@ class LookupModule(DiscoverableModule):
                     "hit_tokens": hit_tokens,
                     "l1_hit_tokens": l1_hit_tokens,
                     "l2_hit_tokens": l2_chunks * chunk_size,
+                    "retained_hit_tokens": (job.retained_count or 0) * chunk_size,
                     # Request-level view: the whole prompt as denominator and
                     # what the engine plus LMCache served as numerator.
                     "prompt_tokens": job.prompt_tokens,

@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from logging import DEBUG
 from typing import Any
+import os
 
 # Third Party
 import torch
@@ -130,8 +131,11 @@ def kv_wrapper_fds_delivered(
             )
         channel = FdChannelClient(fd_channel_path, timeout)
         try:
-            for _, (export_id, fd) in exported:
+            observe = bool(os.environ.get("LMCACHE_ZC_RUN_ID"))
+            for wrapper, (export_id, fd) in exported:
                 channel.send(export_id, fd)
+                if observe and (callback := getattr(wrapper, "on_fd_delivered", None)):
+                    callback(fd)
         except BaseException:
             channel.close()
             raise

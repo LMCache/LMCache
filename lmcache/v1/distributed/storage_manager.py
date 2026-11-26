@@ -55,6 +55,7 @@ from lmcache.v1.distributed.l2_adapters.reconfiguration import (
 )
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
 from lmcache.v1.distributed.quota_manager import QuotaManager
+from lmcache.v1.distributed.retained_read_locks import RetainedReadLocks
 from lmcache.v1.distributed.serde import create_serde_processor
 from lmcache.v1.distributed.storage_controllers import (
     L1EvictionController,
@@ -205,6 +206,7 @@ class StorageManager:
             # reference. No explicit cleanup on close — the registry is
             # just a dict protected by a lock and has no OS resources.
             self._quota_manager = QuotaManager()
+            self.retained_reads = RetainedReadLocks()
 
             # Unified L2 eviction controller for all adapters with eviction
             # config. Aggregate-usage policies (``LRU``, ``noop``) need
@@ -1298,6 +1300,7 @@ class StorageManager:
         may still access L1 buffers.
         The periodic event notifier shuts down after the adapters close.
         """
+        self.retained_reads.close()
         self._prefetch_controller.stop()
         for controller in self._store_controllers.values():
             controller.stop()

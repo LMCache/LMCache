@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from collections.abc import Iterable
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 import math
+import os
 import sys
 import time
 
@@ -812,6 +814,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config, n_servers
         )
 
+        self._spark_zc_pins: dict[int, int] = {}
         self.dispatcher = None
 
         self._dcp_size = parallel_strategy.dcp_size
@@ -1017,6 +1020,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         assert self._connector_metadata is not None
         return self._connector_metadata
 
+    def get_mem_pool_context(self):
+        if os.environ.get("LMCACHE_ZC_ALLOCATOR_SO"):
+            from lmcache.v1.platform.devices.cuda.retention_allocator import (
+                get_mem_pool_context,
+            )
+
+            return get_mem_pool_context()
+        return None
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
         Initialize with the KV caches. Useful for pre-registering the
@@ -1195,15 +1207,21 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 dispatch(self.dispatcher, "wait_for_save", event=None)
             return
 
-        event = self.worker_adapter.create_recorded_event()
-
-        self.worker_adapter.batched_submit_store_requests(
-            request_ids,
-            ops,
-            event,
-            cache_salts=cache_salts,
-            request_configs_list=request_configs_list,
+        scope = (
+            torch.cuda.nvtx.range("spark_zc/worker_store_batch")
+            if os.environ.get("LMCACHE_ZC_WORKER_DIR")
+            else nullcontext()
         )
+        with scope:
+            event = self.worker_adapter.create_recorded_event()
+
+            self.worker_adapter.batched_submit_store_requests(
+                request_ids,
+                ops,
+                event,
+                cache_salts=cache_salts,
+                request_configs_list=request_configs_list,
+            )
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "wait_for_save", event=event)
 
@@ -1730,6 +1748,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 metadata.add_request_metadata(store_metadata)
             for request_id in actions.sessions_to_end:
                 self.scheduler_adapter.end_session(request_id)
+
+        if os.environ.get("LMCACHE_ZC_PIN_TARGET") == "1":
+            from lmcache.integration.vllm.spark_zc_worker import pin_target
+
+            for item in metadata.requests:
+                if item.direction == "STORE":
+                    pin_target(self, item)
 
         if len(metadata) > 0:
             logger.debug("Final connector metadata: %s", metadata)
