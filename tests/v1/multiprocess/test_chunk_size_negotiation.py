@@ -28,6 +28,29 @@ def _context(chunk_size: int = 256) -> MPCacheServerContext:
     return MPCacheServerContext(_storage_manager_config(), chunk_size=chunk_size)
 
 
+@pytest.mark.parametrize("requires_global_chunk_size", [False, True])
+def test_chunk_size_validation_enforces_global_mode(
+    requires_global_chunk_size: bool,
+) -> None:
+    """CacheBlend and Coordinator reject model-specific chunk sizes."""
+    with (
+        patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
+        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
+    ):
+        ctx = MPCacheServerContext(
+            _storage_manager_config(),
+            chunk_size=256,
+            requires_global_chunk_size=requires_global_chunk_size,
+        )
+
+        ctx.validate_chunk_size(256)
+        if requires_global_chunk_size:
+            with pytest.raises(ValueError, match="requires one global chunk size"):
+                ctx.validate_chunk_size(512)
+        else:
+            ctx.validate_chunk_size(512)
+
+
 def test_chunk_size_negotiation_raises_configured_minimum_to_alignment() -> None:
     with (
         patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
