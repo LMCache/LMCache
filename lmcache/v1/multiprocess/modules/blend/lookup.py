@@ -385,7 +385,7 @@ class LookupMixin:
         # Group 0 may be recurrent, so use the first attention group.
         layout_desc = layouts[read.attn_gids[0]]
 
-        chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
+        chunk_hashes = self._ctx.default_token_hasher.compute_packed_chunk_hashes(
             key.token_bytes
         )
         if not chunk_hashes:
@@ -401,7 +401,7 @@ class LookupMixin:
                         "request_id": rid,
                         "chunk_hashes": chunk_hashes,
                         "model_name": model_name,
-                        "chunk_size": self._ctx.chunk_size,
+                        "chunk_size": self._ctx.default_chunk_size,
                         "seq_len": key.num_tokens,
                         "dtypes": [str(d) for d in layout_desc.dtypes],
                         "shapes": [list(s) for s in layout_desc.shapes],
@@ -507,7 +507,7 @@ class LookupMixin:
             ends the request here (no retrieve will follow).
         """
         rid = key.request_id
-        chunk_size = self._ctx.chunk_size
+        chunk_size = self._ctx.default_chunk_size
 
         with self._cb_jobs_lock:
             job = self._cb_jobs.get(rid)
@@ -719,7 +719,7 @@ class LookupMixin:
         # so the connector tags them ``prefix`` (pure load, no recompute).
         segmented_tail: list[CBMatchResult] = []
         if segmented and job.retained_chunks:
-            chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
+            chunk_hashes = self._ctx.default_token_hasher.compute_packed_chunk_hashes(
                 key.token_bytes
             )
             for i in job.retained_chunks:
@@ -795,7 +795,7 @@ class LookupMixin:
             return False
         try:
             tokens = unpack_token_ids(key.token_bytes)
-            if len(tokens) < self._ctx.chunk_size:
+            if len(tokens) < self._ctx.default_chunk_size:
                 return False
             coordinator.submit_match(
                 key.request_id,
@@ -868,7 +868,7 @@ class LookupMixin:
         Returns:
             One :class:`CBMatchResult` per matched chunk (request order).
         """
-        chunk_size = self._ctx.chunk_size
+        chunk_size = self._ctx.default_chunk_size
         return [
             CBMatchResult(
                 old_st=m.old_st,

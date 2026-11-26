@@ -281,9 +281,9 @@ def test_sparse_state_selects_latest_joint_endpoint(
     ]
     assert len(state_keys) == (len(endpoints) if expected else 0)
     if expected:
-        expected_hash = module.context.token_hasher.compute_chunk_hashes(list(TOKENS))[
-            expected - 1
-        ]
+        expected_hash = module.context.default_token_hasher.compute_chunk_hashes(
+            list(TOKENS)
+        )[expected - 1]
         assert {k.chunk_hash for k in state_keys} == {expected_hash}
     module.free_lookup_locks(key, tp_size=len(endpoints))
     assert not +storage.locked

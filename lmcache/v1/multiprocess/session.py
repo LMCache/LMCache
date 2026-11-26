@@ -264,7 +264,7 @@ class SessionManager:
         ttl: float = DEFAULT_SESSION_TTL,
         cleanup_interval: float | None = DEFAULT_CLEANUP_INTERVAL,
     ) -> None:
-        self._hasher = hasher
+        self._default_hasher = hasher
         self._ttl = ttl
         self._sessions: dict[str, Session] = {}
         self._lock = threading.Lock()
@@ -286,7 +286,7 @@ class SessionManager:
         Args:
             request_id: Unique request identifier.
             hasher: Token hasher for a newly created session. Defaults to the
-                manager's legacy single-size hasher.
+                manager's default hasher.
 
         Returns:
             The Session for this request_id.
@@ -294,7 +294,7 @@ class SessionManager:
         with self._lock:
             if request_id not in self._sessions:
                 self._sessions[request_id] = Session(
-                    request_id=request_id, hasher=hasher or self._hasher
+                    request_id=request_id, hasher=hasher or self._default_hasher
                 )
                 logger.debug("Created session for request_id=%s", request_id)
             return self._sessions[request_id]

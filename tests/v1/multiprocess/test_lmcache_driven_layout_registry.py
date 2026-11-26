@@ -99,7 +99,7 @@ def test_lmcache_registration_uses_effective_chunk_size_until_last_instance(
         dtypes=[torch.float32],
     )
     ctx = MagicMock()
-    ctx.chunk_size = 256
+    ctx.default_chunk_size = 256
     ctx.hash_algorithm_name = "blake3"
     ctx.layout_desc_registry = LayoutDescRegistry()
 
