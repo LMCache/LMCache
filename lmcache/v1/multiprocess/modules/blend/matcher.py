@@ -8,8 +8,8 @@ import threading
 import numpy as np
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.custom_types import CBMatchResult
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_hasher import (
     chunk_hash_windows_numba,
     rolling_hash_windows_numba,
@@ -163,9 +163,9 @@ class BlendTokenRangeMatcher:
         full poly-hash verify that rejects bucket collisions. Thread-safe.
 
         Returns:
-            One result per unique reused chunk (cur_st = first query
-            position, old_st = stored position); empty if the query is
-            shorter than one chunk or nothing matched.
+            One result per non-overlapping occurrence of each reused chunk
+            (old_st = stored position); empty if the query is shorter than
+            one chunk or nothing matched.
         """
         if len(token_ids) < self.chunk_size:
             return []
@@ -183,12 +183,12 @@ class BlendTokenRangeMatcher:
             cids_at_pos = self._table_id[rolling & self._mask]
             hit_positions = np.nonzero(cids_at_pos >= 0)[0]
 
-            seen_cids: set[int] = set()
+            next_free: dict[int, int] = {}  # cid -> end of its last match
             results: list[CBMatchResult] = []
             for pos in hit_positions:
                 pos = int(pos)
                 cid = int(cids_at_pos[pos])
-                if cid in seen_cids:
+                if pos < next_free.get(cid, 0):
                     continue
                 if int(rolling[pos]) != self._chunk_poly_hash[cid]:
                     continue  # bucket-only collision
@@ -198,7 +198,7 @@ class BlendTokenRangeMatcher:
                 old_st = self._token_hash_to_start.get(th)
                 if old_st is None:
                     continue
-                seen_cids.add(cid)
+                next_free[cid] = pos + self.chunk_size
                 results.append(
                     CBMatchResult(
                         old_st=old_st,

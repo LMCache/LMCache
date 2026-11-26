@@ -68,8 +68,10 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Default
      - Description
    * - ``--transport``
-     - ``zmq``
-     - Request transport exposed by the server. Choices: ``zmq`` or ``grpc``.
+     - ``grpc``
+     - Request transport exposed by the server. Choices: ``grpc`` or ``zmq``.
+       ``zmq`` is deprecated and will be removed in a future release; see
+       :ref:`mp-migrating-from-zmq`.
    * - ``--instance-id``
      - *(unset, default UUID v4)*
      - Stable identity of this MP server. Used as the coordinator
@@ -111,8 +113,10 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - ``32``
      - gRPC request-dispatch threads. Used only with ``--transport grpc``.
    * - ``--grpc-server-mode``
-     - ``sync``
-     - gRPC server implementation: ``sync``, ``aio`` or ``native``.
+     - ``auto``
+     - gRPC server implementation: ``auto``, ``sync``, ``aio`` or ``native``.
+       ``auto`` picks ``native`` when ``pygrpc-native`` is installed and
+       ``aio`` otherwise.
        ``aio`` receives requests on one event loop and hands only the
        handlers to worker threads. ``native`` does the HTTP/2 and gRPC
        framing in Rust, outside the GIL; it needs the ``pygrpc-native``
@@ -121,8 +125,8 @@ Source: ``lmcache/v1/multiprocess/config.py``
        All three serve the same clients over TCP.
        In ``native`` mode the native front reports the call count and
        duration metrics itself (pygrpc-native 0.3.0 or later), under the
-       same names, but not the message size ones. Used only with
-       ``--transport grpc``.
+       same names, but not the message size ones. Used with
+       ``--transport grpc`` and by the P2P listener.
    * - ``--hash-algorithm``
      - ``blake3``
      - Hash algorithm for token-based operations.
@@ -208,15 +212,24 @@ Source: ``lmcache/v1/multiprocess/config.py``
        withdraw announced CPU placements and stop reporting them; successful
        worker stores do not synthesize events. Caching continues unchanged.
        Publication while idle requires vLLM to call ``take_events()`` while idle.
+       A chunk is announced whether its L1 copy was stored by this engine or
+       loaded by one of its lookups from L2 or a P2P peer. A temporary
+       prefetch copy (``--l2-prefetch-policy skip_l1``, which
+       ``--enable-p2p-write`` selects) is removed again when its reader
+       finishes.
        Events still carry LMCache chunk hashes and chunk size; native engine
        block identities are separate work.
+       Must be ``0`` for clients that send chunk hashes instead of tokens;
+       see :ref:`mp-client-chunk-hashes`.
        With the channel enabled, Stored requires a committed L1 copy of every
-       registered object group on every KV rank. Evicting one of several copies
-       of an object does not remove its CPU placement; losing the final copy
-       of a required object does. Duplicate commits are suppressed while the
+       distinct shard of each registered object group, as determined by its
+       TP replication and DCP sharding, within the same salt and identity tags.
+       Evicting one of several copies of an object does not remove its CPU
+       placement; losing the final copy of a required object does.
+       Duplicate commits are suppressed while the
        Stored record remains in the replay log. A later commit refreshes an
        aged-out record. EventBus loss clears the ownership projection and
-       requires fresh commits from all ranks.
+       requires fresh commits for every required object.
    * - ``--worker-reap-timeout-seconds``
      - ``120.0``
      - Silence budget (seconds) after which a worker that has sent at
@@ -301,6 +314,47 @@ Observability group.
      - ``100``
      - Max number of log files to keep.  Oldest files are deleted
        when this limit is exceeded.
+
+.. _mp-client-chunk-hashes:
+
+Client-Computed Chunk Hashes
+----------------------------
+
+Source: ``lmcache/v1/client/chunk_hashes.py``
+
+By default every lookup, lock release, store and retrieve key carries the
+request's whole token prefix, and the server decodes it and hashes it chunk
+by chunk. A client may instead send the hashes itself
+(``IPCCacheServerKey.chunk_hashes``): the rolling hash of every complete
+chunk in ``[0, end)``, computed with the server's own ``TokenHasher`` so the
+keys are byte-identical. The server then neither decodes nor hashes tokens.
+The ATOM adapters send them when built with ``client_chunk_hashes=True``;
+other clients keep sending tokens. This key form has these requirements:
+
+- **blake3 only.** Client hashes are blake3. A server started with another
+  ``--hash-algorithm`` rejects such keys.
+- **No unfull chunk.** The hashes cover complete chunks only, so such a key
+  never stores or loads the unfull chunk at an unaligned ``end``; its ``end``
+  is floored to a chunk boundary as before unfull chunks existed. The key must
+  carry exactly ``end // chunk_size`` hashes at the registration's chunk size;
+  the server rejects any other count.
+- **Upgrade the server first.** An older server does not know the field and
+  sees an empty token prefix: lookups report no hit and stores and retrieves
+  fail. Turn the client option on only after every server it talks to runs a
+  version that supports it.
+- **KV events and coordinator reporting must be off.** Both bind every stored
+  chunk to its token ids, which these keys do not have, and the KV-event
+  channel is on by default (``--kv-event-log-size 32768``). While either is
+  enabled, the server rejects these keys with an error naming the flags. Start
+  the server with ``--kv-event-log-size 0`` (or ``--disable-observability``),
+  without ``--coordinator-event-reporting``, and without
+  ``--trace-level events``.
+
+Example:
+
+.. code-block:: bash
+
+   lmcache server        --hash-algorithm blake3        --kv-event-log-size 0
 
 HTTP Frontend
 -------------
@@ -711,6 +765,10 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--eviction-ratio``
      - ``0.2``
      - Fraction of allocated memory to evict when triggered (0.0--1.0).
+       It also sets when stores to L2 wait: new ones wait once in-flight ones
+       reach ``trigger_watermark * (1 - eviction_ratio)`` of L1, so locked data
+       cannot fill L1 and block new KV and prefetches. At ``1.0`` this is 0, so
+       they go out one batch at a time.
 
 L2 Policies
 -----------
@@ -869,9 +927,9 @@ vLLM Client Configuration
 
 On the vLLM side, specify the LMCache server host and port via the
 ``kv_connector_extra_config`` parameter. The URL scheme selects the request
-transport: use ``tcp://`` for ZMQ or ``grpc://`` for gRPC, matching the
-server's ``--transport`` setting. A bare host is accepted and normalized to
-``tcp://`` for backward compatibility:
+transport: use ``grpc://`` for gRPC (the default) or ``tcp://`` for ZMQ,
+matching the server's ``--transport`` setting. A bare host is accepted and
+normalized to ``grpc://``; ``tcp://`` keeps working until ZMQ is removed:
 
 .. code-block:: bash
 
@@ -894,7 +952,7 @@ data parallelism (``dp_size > 1``) are rejected with a clear error.
     vllm serve Qwen/Qwen3-14B \
         --tensor-parallel-size 4 \
         --kv-transfer-config \
-        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.server_urls": "tcp://host1:6667,tcp://host2:6667"}}'
+        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.server_urls": "grpc://host1:6667,grpc://host2:6667"}}'
 
 LoRA adapters
 ~~~~~~~~~~~~~
@@ -1052,24 +1110,32 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
      - *(unset)*
      - Multi-server deployment: list (or comma-separated string) of
        ``<transport>://<host>:<port>`` URLs, e.g.
-       ``"tcp://host1:6667,tcp://host2:6667"``. The transport prefix
+       ``"grpc://host1:6667,grpc://host2:6667"``. The transport prefix
        may be omitted -- bare ``host:port`` entries such as
-       ``"host1:6667,host2:6667"`` are normalized to ``tcp://`` by the
+       ``"host1:6667,host2:6667"`` are normalized to ``grpc://`` by the
        connector. When set, takes precedence over ``lmcache.mp.host`` /
        ``lmcache.mp.port``; the vLLM world size must be divisible by the
        number of servers, and each worker connects to its
        locally-assigned server.
    * - ``lmcache.mp.host``
-     - ``tcp://localhost``
+     - ``grpc://localhost``
      - Single-server deployment: request transport and host of the LMCache MP
-       server. Use ``tcp://`` for ZMQ or ``grpc://`` for gRPC. A bare
-       ``localhost`` / ``127.0.0.1`` is normalized to ``tcp://`` by the
+       server. Use ``grpc://`` for gRPC (default) or ``tcp://`` for ZMQ. A
+       bare ``localhost`` / ``127.0.0.1`` is normalized to ``grpc://`` by the
        connector. Ignored when ``lmcache.mp.server_urls`` is set.
    * - ``lmcache.mp.port``
      - ``5555``
      - Single-server deployment: port of the LMCache MP server. Must
        match the server's ``--port``. Ignored when
        ``lmcache.mp.server_urls`` is set.
+   * - ``lmcache.mp.api_key_file``
+     - *(unset)*
+     - File holding the API key this engine sends to the LMCache server. Use it
+       when the server requires a key and the engine should not hold the fleet
+       key: the inbound key set this server accepts is a different trust domain
+       from the key a caller presents. The file must hold exactly one non-empty
+       line. When unset, the request clients keep their ``LMCACHE_API_KEY`` /
+       ``LMCACHE_API_KEY_FILE`` fallback.
    * - ``lmcache.mp.mq_timeout``
      - ``300.0``
      - Timeout (seconds) for blocking message-queue requests, including
@@ -1098,10 +1164,11 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
      - Whether vLLM worker 0 should start a local ``lmcache server`` process
        before workers connect to it. Other local workers wait for the server to
        become reachable. Only ``localhost`` and ``127.0.0.1`` are supported.
-       The URL scheme picks the server transport: ``tcp://`` starts a ZMQ
-       server and ``grpc://`` starts a gRPC server.
+       The URL scheme picks the server transport: ``grpc://`` or a host
+       without a scheme starts a gRPC server, and ``tcp://`` starts a
+       deprecated ZMQ server.
        IPv6 endpoints, including ``::1``, raise ``ValueError`` before startup
-       because the MP ZMQ transport does not enable IPv6 sockets.
+       for either transport.
        Auto-start supports exactly one server endpoint; configuring
        multiple ``lmcache.mp.server_urls`` raises ``ValueError`` during
        connector initialization.
@@ -1304,6 +1371,48 @@ Full Example
         --metrics-sample-rate 0.01 \
         --enable-tracing \
         --otlp-endpoint http://localhost:4317
+
+KV-event registration
+---------------------
+
+``register_kv_cache`` takes a required final ``event_profile`` argument and
+returns the profile recorded for the registration. Every current integration
+passes ``None``; caching and router-visible events are unchanged. There is no
+configuration knob for enabling a native profile in this PR.
+
+``KVEventProfile(profile_id, block_size)`` is an immutable contract with a
+nonempty opaque identity and a positive engine event block size. Before any
+context, layout or liveness state changes, the server validates:
+
+* positive world size and a block size that divides the server chunk size;
+* one full-attention engine block address space with the declared block size;
+* agreement across active registrations for the same model and world size,
+  including whether a profile is present;
+* no model/world change for an existing instance when a profile is involved.
+
+A rejection raises ``MPRequestError`` with the server's reason. Its code is
+``INVALID_ARGUMENT`` on gRPC and ``invalid_argument`` on ZMQ; ZMQ details also
+include the operation name. Transport failures keep their existing behavior:
+gRPC raises ``MPServerUnavailableError``, while a ZMQ wait can expire with
+``LMCacheTimeoutError``.
+
+With ``None``, gRPC's optional request field is absent and the response is
+empty, preserving both byte strings. ZMQ registration always includes one
+additional payload frame, so behavior is identical but request bytes are not.
+Its ``None`` success reply still contains no payload frame. QStore's request
+and response bytes are unchanged.
+
+* An older gRPC worker can register with a newer server: absence means ``None``.
+* A newer gRPC worker can register with an older server, but its returned
+  profile is absent. A future profile sender must compare the returned value.
+* An older ZMQ worker receives an explicit payload-count rejection from a
+  newer server. A newer worker calling an older server times out because that
+  server cannot answer the longer request. Upgrade ZMQ deployments together.
+
+There is no handshake or fallback. Profiles live until unregister, reap or
+shutdown. STORE bindings, the first integration sending and checking a
+profile, and native event records remain later steps of
+`issue #5932 <https://github.com/LMCache/LMCache/issues/5932>`_.
 
 Anonymous Usage Statistics
 --------------------------

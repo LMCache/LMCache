@@ -97,6 +97,7 @@ def _register(
         engine_type=EngineType.VLLM,
         layout_hints={},
         engine_group_infos=[],
+        event_profile=None,
     )
 
 
@@ -251,7 +252,7 @@ def test_blocked_release_does_not_stall_the_message_loop(
 
     def register(client: Any, instance_id: int) -> None:
         future = client.register_kv_cache(
-            instance_id, [], "m", 1, EngineType.VLLM, {}, []
+            instance_id, [], "m", 1, EngineType.VLLM, {}, [], None
         )
         assert future.result(timeout=_PROMPT_S) is None
 

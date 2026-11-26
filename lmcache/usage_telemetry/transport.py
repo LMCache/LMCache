@@ -14,13 +14,13 @@ import torch
 
 # First Party
 from lmcache.connections import global_http_connection
-from lmcache.logging import init_logger
 from lmcache.usage_telemetry.identity import UsageIdentity
 from lmcache.usage_telemetry.messages import (
     USAGE_SCHEMA_VERSION,
     DeploymentMode,
     UsageMessage,
 )
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 

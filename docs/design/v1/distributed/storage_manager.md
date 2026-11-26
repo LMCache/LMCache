@@ -73,7 +73,7 @@ row 3  g1 r1  [ key ]   [ key ]   [ key ]                       sliding_window_s
 | blend prefix leg (`modules/blend/lookup.py`) | the leg's read groups (attention + recurrent) x ranks | `"prefix"`, `LOCK` |
 | blend sparse leg | the blend read groups (attention + aux) x ranks over the de-duplicated matched chunk hashes | `"whole_chunk"`, `LOCK` |
 | P2P receiver (`modules/p2p_controller.py`) | **one row per object group** holding the peer's keys in request order, ranks mixed. The peer only asks "are these resident"; it carries no chunk layout. If the groups receive different numbers of keys, or a group has no layout, the lookup logs an error and reports every key as a miss. | `"full"`, `LOCK`, `allowed_l1_memory_tags={(DRAM, LOCAL)}`, `allowed_l2_memory_tags=frozenset()` |
-| warm prefetch (`warm_prefetch.py`, `cache_control/key_resolver.py`) | every registered object group x every kv rank, via `ipc_key_to_grouped_object_keys` -- the same rows as engine lookup | `"full"`, `NO_LOCK` |
+| warm prefetch (`warm_prefetch.py`, `cache_control/key_resolver.py`) | every registered object group x every kv rank, via `ipc_key_to_grouped_object_keys` -- the same rows as engine lookup; chunks named by key (`resolve_grouped_chunk_keys`) get the same rows with no sliding window, since they need not be a contiguous prefix | `"full"`, `NO_LOCK` |
 
 ### Fold
 
@@ -152,10 +152,12 @@ path keeps the same dict in its pending-write table. Existing staging and
 stream ordering retain allocations. The owner tag is neither a lifetime pin
 nor a write generation and adds no stale-callback or crash-recovery guarantee.
 
-The owners are built inside the store's failure boundary before success is
-recorded. Invalid ownership skips admission and reports `MP_STORE_END` with
-zero stored objects. As with copy failures, staging reservations retain their
-write-TTL behavior because queued device writes can still reference the buffers.
+The LMCache-driven store captures owners after each reservation, inside its
+failure boundary. A copy or ownership failure skips admission and reports
+`MP_STORE_END` with zero stored objects. The stream queues `abort_write` for
+reservations whose owners were captured, releasing them only after queued GPU
+writes drain. If `l1_owners_of` raises, reservations without captured owners
+retain their write-TTL lifetime; they cannot be safely routed for an abort.
 
 `prepare_read_completion` and `finish_read_by_owner` (typed with
 `L1WriteCompletion`) are the read-side pair from before this design. They

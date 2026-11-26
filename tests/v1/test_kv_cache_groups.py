@@ -269,7 +269,7 @@ def test_common_group_view_and_attn_window_load_no_endpoint_modules():
             "lmcache.integration",
             "lmcache.v1.client",
             "lmcache.v1.distributed",
-            "lmcache.v1.kv_layer_groups",
+            "lmcache.v1.common.kv_layer_groups",
             "lmcache.v1.multiprocess",
         )
         loaded = sorted(name for name in sys.modules if name.startswith(endpoints))

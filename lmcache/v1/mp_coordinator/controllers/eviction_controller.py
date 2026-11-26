@@ -20,8 +20,8 @@ import httpx
 import msgspec
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import EncodedObjectKey, Tier
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.distributed.api import EncodedObjectKey, ObjectKey, Tier
 from lmcache.v1.distributed.eviction import EvictionPolicy
 from lmcache.v1.distributed.eviction_policy.isolated_lru import (
     IsolatedLRUEvictionPolicy,
@@ -49,7 +49,6 @@ if TYPE_CHECKING:
     from fastapi import APIRouter
 
     # First Party
-    from lmcache.v1.distributed.api import ObjectKey
     from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
     from lmcache.v1.mp_coordinator.discovery import Registry
     from lmcache.v1.mp_coordinator.views.base import View
@@ -172,19 +171,21 @@ class FleetEvictionController(Controller):
         self._policy.on_keys_removed([key])
 
     def pin(self, keys: list[ObjectKey]) -> None:
-        """Increment each key's pin count, excluding it from eviction.
+        """Increment the pin count of each chunk ``keys`` name, excluding it
+        from eviction.
 
-        A pin covers the key's chunk in every object group (see
-        :func:`_pinned_chunk_key`).
+        A pin covers the key's chunk in every object group and on every rank
+        of its world size (see :func:`_pinned_chunk_key`). Each chunk counts
+        once per call, however many of its keys the call names: a tokens-form
+        pin names a chunk once per rank, and one unpin must release it.
         """
-        for key in keys:
-            chunk_key = _pinned_chunk_key(key)
+        for chunk_key in dict.fromkeys(map(_pinned_chunk_key, keys)):
             self._pin_counts[chunk_key] = self._pin_counts.get(chunk_key, 0) + 1
 
     def unpin(self, keys: list[ObjectKey]) -> None:
-        """Decrement each key's pin count, floored at 0."""
-        for key in keys:
-            chunk_key = _pinned_chunk_key(key)
+        """Decrement the pin count of each chunk ``keys`` name, once per call,
+        floored at 0."""
+        for chunk_key in dict.fromkeys(map(_pinned_chunk_key, keys)):
             count = self._pin_counts.get(chunk_key, 0)
             if count <= 1:
                 self._pin_counts.pop(chunk_key, None)
@@ -267,17 +268,26 @@ class FleetEvictionController(Controller):
         The document is the coordinator's own, so values are taken as
         written.
 
+        A document saved while pins were per group or per rank can hold
+        several entries for one chunk. Entries for different groups were
+        separate pin calls, so their counts add up; entries for different
+        ranks were written by the same calls (one key per rank), so they
+        load as the largest of their counts, not the sum.
+
         Args:
             state: A :meth:`capture` value, as decoded from the
                 metadata document — see there for the shape; non-positive
                 counts are dropped.
         """
         entries = cast("list[Mapping[str, object]]", state["entries"])
-        pin_counts: dict[ObjectKey, int] = {}
+        counts_per_group: dict[tuple[ObjectKey, int], int] = {}
         for key, count in (_decode_pin(entry) for entry in entries):
             if count > 0:
-                chunk_key = _pinned_chunk_key(key)
-                pin_counts[chunk_key] = pin_counts.get(chunk_key, 0) + count
+                group = (_pinned_chunk_key(key), key.object_group_id)
+                counts_per_group[group] = max(counts_per_group.get(group, 0), count)
+        pin_counts: dict[ObjectKey, int] = {}
+        for (chunk_key, _), count in counts_per_group.items():
+            pin_counts[chunk_key] = pin_counts.get(chunk_key, 0) + count
         self._pin_counts = pin_counts
 
     def filter_unpinned(self, keys: list[ObjectKey]) -> list[ObjectKey]:
@@ -506,13 +516,20 @@ def _decode_pin(entry: Mapping[str, object]) -> tuple[ObjectKey, int]:
 
 
 def _pinned_chunk_key(key: ObjectKey) -> ObjectKey:
-    """Return ``key`` without its object group, as the pin table stores it.
+    """Return the key the pin table stores for ``key``'s chunk: its rank-0
+    key in object group 0.
 
-    A pin is on a chunk, which ``--separate-object-groups`` stores once per
-    object group; dropping the group makes one pin cover them all.
+    A pin is on a chunk, which is stored once per rank and, with
+    ``--separate-object-groups``, once per object group; one pin must cover
+    them all, or eviction could take one share and leave the pinned chunk
+    unusable. Keys of one world size are the same chunk, as the directory
+    treats them for a delete; another world size is a different parallel
+    setup's object and keeps its own pins.
     """
-    return (
-        replace(key, identity=replace(key.identity, object_group_id=0))
-        if key.object_group_id
-        else key
+    world_size = ObjectKey.WorldSizeFromKVRank(key.kv_rank)
+    kv_rank = ObjectKey.ComputeKVRank(world_size, 0, world_size, 0)
+    if key.object_group_id == 0 and key.kv_rank == kv_rank:
+        return key
+    return replace(
+        key, identity=replace(key.identity, object_group_id=0, kv_rank=kv_rank)
     )
