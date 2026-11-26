@@ -4,7 +4,7 @@
 > through the paged-KV machinery. Runs inside vLLM (the producer), not the
 > consumer SDK.
 
-Implementation: `lmcache.integration.vllm.experimental.dispatcher`. The SDK maps
+Implementation: `lmcache.integration.vllm.experimental.qringbuffer`. The SDK maps
 the worker-owned ring through transport descriptors; it does not import the
 producer implementation. Allocation, IPC and synchronization behavior are
 unchanged.

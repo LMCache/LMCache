@@ -2,7 +2,7 @@
 """Open the Q ring owned by vLLM process, for the SDK's transfers.
 
 vLLM's worker captures each step's query rows into a paged Q ring
-(``lmcache.integration.vllm.experimental.dispatcher.QRingBuffer``) and stores full
+(``lmcache.integration.vllm.experimental.qringbuffer.QRingBuffer``) and stores full
 chunks to L1. The SDK borrows the ring's **free blocks**: the server copies cached
 L1 objects into them.
 This module opens the ring through its own IPC handles, which the server forwards
