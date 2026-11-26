@@ -630,7 +630,7 @@ class TestPrefetchEndpoint:
         )
         assert resp.status_code == 202, resp.text
         assert resp.json()["chunks"] == 1
-        assert ("m", 2) in ctx.layout_desc_registry.lookup_calls
+        assert ("m", 2, "") in ctx.layout_desc_registry.lookup_calls
         assert {
             key.chunk_hash for key in ctx.storage_manager.submit_calls[0]["keys"]
         } == {(1).to_bytes(4, "big")}
