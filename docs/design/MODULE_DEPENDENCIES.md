@@ -30,7 +30,7 @@ flowchart BT
 
 The dotted arrow means transport uses devices such as IPC wrappers on demand. The
 check treats it like a solid arrow, and fails if this diagram and the rules file
-disagree.
+disagree. It also fails if the arrows form a cycle.
 
 Imports within a part are always allowed. Server and client never import each
 other, and no lower part imports SDK or integration. SDK and integration must not

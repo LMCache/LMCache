@@ -99,7 +99,7 @@ def test_cycles_in_arrows_fail_but_excepted_cycles_pass() -> None:
     allowed = {**rules.allowed, "client": [*rules.allowed["client"], "integration"]}
     assert _deps.cycles(replace(rules, allowed=allowed)) == [
         f"{_deps.RULES}: {part} can import itself through other parts"
-        for part in ("client", "sdk", "integration")
+        for part in ("client", "integration")
     ]
 
 
