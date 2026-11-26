@@ -446,7 +446,7 @@ XpuPlaneQuantResult quantize_plane_xpu(sycl::queue& queue,
   return {dst_cpu, scale_data};
 }
 
-class KvwParseScaleBlobKernel;
+class GhaParseScaleBlobKernel;
 
 // Inverse of format_scale_blob_xpu: scatters every (idx, scale, zp) entry of
 // the per-layer blob into dense per-chunk arrays (layer-major), the same result
@@ -461,7 +461,7 @@ sycl::event parse_scale_blob_xpu(sycl::queue& queue, const uint8_t* d_blob,
   const int64_t seg_bytes =
       static_cast<int64_t>(sizeof(uint32_t)) + chunks_per_layer * kEntryBytes;
   return queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for<KvwParseScaleBlobKernel>(
+    cgh.parallel_for<GhaParseScaleBlobKernel>(
         sycl::nd_range<1>(global, static_cast<size_t>(kWg)),
         [=](sycl::nd_item<1> item) {
           const int64_t i = static_cast<int64_t>(item.get_global_id(0));
@@ -492,19 +492,19 @@ size_t validate_scale_blob_per_layer(const char* blob, size_t blob_size,
   for (int64_t l = 0; l < num_layers; ++l) {
     if (offset + sizeof(uint32_t) > blob_size) {
       throw std::invalid_argument(
-          "kvweave scale blob too short for per-layer split.");
+          "gha scale blob too short for per-layer split.");
     }
     uint32_t count = 0;
     std::memcpy(&count, blob + offset, sizeof(uint32_t));
     if (static_cast<int64_t>(count) != chunks_per_layer) {
       throw std::invalid_argument(
-          "kvweave scale blob chunk count does not match expected layout.");
+          "gha scale blob chunk count does not match expected layout.");
     }
     const size_t segment_bytes =
         sizeof(uint32_t) + static_cast<size_t>(count) * entry_size;
     if (offset + segment_bytes > blob_size) {
       throw std::invalid_argument(
-          "kvweave scale blob truncated within a layer segment.");
+          "gha scale blob truncated within a layer segment.");
     }
     offset += segment_bytes;
   }
@@ -568,7 +568,7 @@ torch::Tensor dequantize_plane_xpu(sycl::queue& queue,
 }
 
 // ---------------------------------------------------------------------------
-// Public API: kvweave_serialize_chunk_state / kvweave_dequantize_chunk_state
+// Public API: gha_serialize_chunk_state / gha_dequantize_chunk_state
 // ---------------------------------------------------------------------------
 // Single-tensor fused multi-layer entry points; same name, argument order and
 // wire framing as the CPU module.
@@ -627,7 +627,7 @@ StatePayload quantize_state_payload(
   p.header = std::string(header_bytes);
   if (p.plane.scale_data.size() > UINT32_MAX) {
     throw std::runtime_error(
-        "kvweave scale blob exceeds uint32 length framing limit");
+        "gha scale blob exceeds uint32 length framing limit");
   }
   p.q_bytes =
       static_cast<size_t>(p.plane.q_data_cpu.numel()) * ((qbit <= 8) ? 1 : 2);
@@ -696,7 +696,7 @@ DevicePayloadLayout plan_device_payload(const sycl_quantization_args& args,
   return lay;
 }
 
-class KvwFormatScaleBlobKernel;
+class GhaFormatScaleBlobKernel;
 
 // The current torch XPU stream's queue is in-order, so none of the
 // launches/copies below take explicit event dependencies: passing one makes the
@@ -715,7 +715,7 @@ sycl::event format_scale_blob_xpu(sycl::queue& queue, const float* d_scales,
   const int64_t seg_bytes =
       static_cast<int64_t>(sizeof(uint32_t)) + chunks_per_layer * kEntryBytes;
   return queue.submit([&](sycl::handler& cgh) {
-    cgh.parallel_for<KvwFormatScaleBlobKernel>(
+    cgh.parallel_for<GhaFormatScaleBlobKernel>(
         sycl::nd_range<1>(global, static_cast<size_t>(kWg)),
         [=](sycl::nd_item<1> item) {
           const int64_t i = static_cast<int64_t>(item.get_global_id(0));
@@ -816,7 +816,7 @@ bool try_serialize_device_assembled(sycl::queue& queue,
   return true;
 }
 
-pybind11::bytes kvweave_serialize_chunk_state_xpu(
+pybind11::bytes gha_serialize_chunk_state_xpu(
     torch::Tensor src, pybind11::bytes header_bytes, int64_t scale_id, int qbit,
     int blocks_num, int block_size, int head_num, int head_dim,
     int64_t num_layers, bool rh, bool asym, const std::string& scaling_method,
@@ -834,11 +834,11 @@ pybind11::bytes kvweave_serialize_chunk_state_xpu(
   return result;
 }
 
-// Same wire format as kvweave_serialize_chunk_state_xpu, but written straight
+// Same wire format as gha_serialize_chunk_state_xpu, but written straight
 // into a caller-owned contiguous uint8 CPU tensor (e.g. LMCache's SHM slot)
 // instead of being returned as bytes, so the caller needs no further copy.
 // Returns the number of payload bytes written; throws if dst is too small.
-int64_t kvweave_serialize_chunk_state_into_xpu(
+int64_t gha_serialize_chunk_state_into_xpu(
     torch::Tensor src, torch::Tensor dst, pybind11::bytes header_bytes,
     int64_t scale_id, int qbit, int blocks_num, int block_size, int head_num,
     int head_dim, int64_t num_layers, bool rh, bool asym,
@@ -863,11 +863,11 @@ int64_t kvweave_serialize_chunk_state_into_xpu(
   return static_cast<int64_t>(p.total);
 }
 
-// XPU analog of the CPU module's kvweave_serialize_fused_chunk_direct:
+// XPU analog of the CPU module's gha_serialize_fused_chunk_direct:
 // quantizes fused [layers, tokens, head_num*head_dim] attention per (layer,
 // head) with the kernel reading the fused layout in place. Payload bytes match
-// kvweave_serialize_chunk_state (this module) on the head-split tensor.
-pybind11::object kvweave_serialize_fused_chunk_direct_xpu(
+// gha_serialize_chunk_state (this module) on the head-split tensor.
+pybind11::object gha_serialize_fused_chunk_direct_xpu(
     torch::Tensor src, pybind11::bytes header_bytes, int qbit, int64_t head_num,
     int64_t head_dim, bool rh, bool asym, const std::string& scaling_method,
     c10::optional<torch::Tensor> signs_opt,
@@ -972,7 +972,7 @@ pybind11::object kvweave_serialize_fused_chunk_direct_xpu(
   p.header = std::string(header_bytes);
   if (p.plane.scale_data.size() > UINT32_MAX) {
     throw std::runtime_error(
-        "kvweave scale blob exceeds uint32 length framing limit");
+        "gha scale blob exceeds uint32 length framing limit");
   }
   p.q_bytes = static_cast<size_t>(p.plane.q_data_cpu.numel());
   p.total = p.header.size() + 4u + p.plane.scale_data.size() + p.q_bytes;
@@ -1000,10 +1000,10 @@ pybind11::object kvweave_serialize_fused_chunk_direct_xpu(
   return std::move(result);
 }
 
-// XPU analog of the CPU module's kvweave_dequantize_fused_chunk_direct: the
+// XPU analog of the CPU module's gha_dequantize_fused_chunk_direct: the
 // dequantize kernel writes the fused [layers, tokens, head_num*head_dim]
 // layout directly (no split plane + device permute), then one D2H into dst.
-void kvweave_dequantize_fused_chunk_direct_xpu(
+void gha_dequantize_fused_chunk_direct_xpu(
     torch::Tensor q_data, pybind11::bytes scale_bytes, torch::Tensor dst,
     int64_t layers, int64_t tokens, int64_t head_num, int64_t head_dim,
     int qbit, bool rh, bool asym, const std::string& scaling_method,
@@ -1155,7 +1155,7 @@ torch::Tensor dequantize_state_on_device(
                               numel, output_dtype);
 }
 
-torch::Tensor kvweave_dequantize_chunk_state_xpu(
+torch::Tensor gha_dequantize_chunk_state_xpu(
     torch::Tensor q_data, pybind11::bytes scale_bytes, int64_t num_layers,
     int64_t chunk_tokens, int64_t h_merged, int qbit, int blocks_num,
     int block_size, int head_num, int head_dim, bool rh, bool asym,
@@ -1172,7 +1172,7 @@ torch::Tensor kvweave_dequantize_chunk_state_xpu(
       .contiguous();
 }
 
-// Like kvweave_dequantize_chunk_state, but DMAs the result straight into the
+// Like gha_dequantize_chunk_state, but DMAs the result straight into the
 // caller-owned contiguous CPU tensor `dst` (e.g. LMCache's decode scratch)
 // instead of returning a fresh tensor the caller must copy/merge from.
 //
@@ -1180,9 +1180,9 @@ torch::Tensor kvweave_dequantize_chunk_state_xpu(
 // [num_layers = layers*merge_head_num, chunk_tokens, h_merged = head_dim] and
 // folds them back to [layers, chunk_tokens, merge_head_num*head_dim] on the
 // device before the D2H, so dst is written in its final layout (replaces the
-// CPU-side kvweave_merge_fused_heads step). dst must hold exactly
+// CPU-side gha_merge_fused_heads step). dst must hold exactly
 // num_layers*chunk_tokens*h_merged elements of output_dtype.
-void kvweave_dequantize_chunk_state_into_xpu(
+void gha_dequantize_chunk_state_into_xpu(
     torch::Tensor q_data, pybind11::bytes scale_bytes, torch::Tensor dst,
     int64_t num_layers, int64_t chunk_tokens, int64_t h_merged, int qbit,
     int blocks_num, int block_size, int head_num, int head_dim, bool rh,
@@ -1225,13 +1225,13 @@ void kvweave_dequantize_chunk_state_into_xpu(
 }
 
 // ---------------------------------------------------------------------------
-// Public API: kvweave_serialize_chunk / kvweave_dequantize_chunk /
-// kvweave_dequantize_chunk_into_4d
+// Public API: gha_serialize_chunk / gha_dequantize_chunk /
+// gha_dequantize_chunk_into_4d
 // ---------------------------------------------------------------------------
 // Fused K/V (two-plane) entry points mirroring the CPU wrapper's *_chunk_py
 // functions. K and V run back-to-back on the same in-order queue, with no host
 // wait in between.
-pybind11::bytes kvweave_serialize_chunk_xpu(
+pybind11::bytes gha_serialize_chunk_xpu(
     torch::Tensor src, pybind11::bytes header_bytes, int64_t scale_id_k,
     int64_t scale_id_v, int qbit, int blocks_num, int block_size, int head_num,
     int head_dim, int64_t num_layers, bool rh, bool asym,
@@ -1269,7 +1269,7 @@ pybind11::bytes kvweave_serialize_chunk_xpu(
   if (plane_k.scale_data.size() > UINT32_MAX ||
       plane_v.scale_data.size() > UINT32_MAX) {
     throw std::runtime_error(
-        "kvweave scale blob exceeds uint32 length framing limit");
+        "gha scale blob exceeds uint32 length framing limit");
   }
   uint32_t k_len = static_cast<uint32_t>(plane_k.scale_data.size());
   uint32_t v_len = static_cast<uint32_t>(plane_v.scale_data.size());
@@ -1303,7 +1303,7 @@ pybind11::bytes kvweave_serialize_chunk_xpu(
   return result;
 }
 
-torch::Tensor kvweave_dequantize_chunk_xpu(
+torch::Tensor gha_dequantize_chunk_xpu(
     torch::Tensor q_data, pybind11::bytes k_scale_bytes,
     pybind11::bytes v_scale_bytes, int64_t num_layers, int64_t chunk_tokens,
     int64_t h_merged, int qbit, int blocks_num, int block_size, int head_num,
@@ -1358,7 +1358,7 @@ torch::Tensor kvweave_dequantize_chunk_xpu(
   return result.to(torch::kCPU).contiguous();
 }
 
-void kvweave_dequantize_chunk_into_4d_xpu(
+void gha_dequantize_chunk_into_4d_xpu(
     torch::Tensor q_data, pybind11::bytes k_scale_bytes,
     pybind11::bytes v_scale_bytes, torch::Tensor dst, int64_t num_layers,
     int64_t chunk_tokens, int64_t h_merged, int qbit, int blocks_num,
@@ -1430,16 +1430,16 @@ void kvweave_dequantize_chunk_into_4d_xpu(
 // ---------------------------------------------------------------------------
 // Module registration
 // ---------------------------------------------------------------------------
-PYBIND11_MODULE(kvweave_quant_xpu, m) {
-  m.doc() = "KVWeave XPU quantization kernels (SYCL/DPC++)";
-  // kvweave_serialize_fused_chunk_direct accepts an XPU-resident src and
+PYBIND11_MODULE(gha_quant_xpu, m) {
+  m.doc() = "GHA XPU quantization kernels (SYCL/DPC++)";
+  // gha_serialize_fused_chunk_direct accepts an XPU-resident src and
   // quantizes it in place (callers probe this before passing device tensors).
   m.attr("FUSED_DIRECT_ACCEPTS_XPU_SRC") = true;
 
-  m.def("kvweave_serialize_chunk_state", &kvweave_serialize_chunk_state_xpu,
+  m.def("gha_serialize_chunk_state", &gha_serialize_chunk_state_xpu,
         "Quantize a single tensor (no K/V split) and pack a complete payload, "
         "on XPU. Single-tensor analog of a fused K/V serialize; mirrors the "
-        "CPU module's kvweave_serialize_chunk_state signature so callers can "
+        "CPU module's gha_serialize_chunk_state signature so callers can "
         "select the native module without branching. Accepts/returns CPU "
         "tensors/bytes, transferring to/from XPU internally.",
         pybind11::arg("src"), pybind11::arg("header_bytes"),
@@ -1452,9 +1452,9 @@ PYBIND11_MODULE(kvweave_quant_xpu, m) {
         pybind11::arg("signs") = c10::nullopt,
         pybind11::arg("perm") = c10::nullopt, pybind11::arg("num_threads") = 0);
 
-  m.def("kvweave_serialize_chunk_state_into",
-        &kvweave_serialize_chunk_state_into_xpu,
-        "Like kvweave_serialize_chunk_state, but writes the payload directly "
+  m.def("gha_serialize_chunk_state_into",
+        &gha_serialize_chunk_state_into_xpu,
+        "Like gha_serialize_chunk_state, but writes the payload directly "
         "into the caller-provided contiguous uint8 CPU tensor `dst` and "
         "returns the number of bytes written (raises if dst is too small).",
         pybind11::arg("src"), pybind11::arg("dst"),
@@ -1468,11 +1468,11 @@ PYBIND11_MODULE(kvweave_quant_xpu, m) {
         pybind11::arg("signs") = c10::nullopt,
         pybind11::arg("perm") = c10::nullopt, pybind11::arg("num_threads") = 0);
 
-  m.def("kvweave_serialize_fused_chunk_direct",
-        &kvweave_serialize_fused_chunk_direct_xpu,
+  m.def("gha_serialize_fused_chunk_direct",
+        &gha_serialize_fused_chunk_direct_xpu,
         "Quantize fused [layers, tokens, head_num*head_dim] attention per "
         "(layer, head) on XPU, reading the fused layout in place (no head "
-        "split). Same payload as kvweave_serialize_chunk_state on the split "
+        "split). Same payload as gha_serialize_chunk_state on the split "
         "tensor with num_layers=layers*head_num. Supports per_channel/"
         "per_token. Returns bytes, or the written length when `out` "
         "(contiguous uint8 CPU tensor) is given. Mirrors the CPU module's "
@@ -1487,9 +1487,9 @@ PYBIND11_MODULE(kvweave_quant_xpu, m) {
         pybind11::arg("out") = c10::nullopt);
 
   m.def(
-      "kvweave_dequantize_fused_chunk_direct",
-      &kvweave_dequantize_fused_chunk_direct_xpu,
-      "Inverse of kvweave_serialize_fused_chunk_direct on XPU: dequantize the "
+      "gha_dequantize_fused_chunk_direct",
+      &gha_dequantize_fused_chunk_direct_xpu,
+      "Inverse of gha_serialize_fused_chunk_direct on XPU: dequantize the "
       "per-(layer, head) q planes + scale blob straight into the contiguous "
       "fused CPU dst [layers, tokens, head_num*head_dim] (no split plane, no "
       "device head merge). Supports per_channel/per_token. Mirrors the CPU "
@@ -1503,9 +1503,9 @@ PYBIND11_MODULE(kvweave_quant_xpu, m) {
       pybind11::arg("signs") = c10::nullopt,
       pybind11::arg("perm") = c10::nullopt, pybind11::arg("num_threads") = 0);
 
-  m.def("kvweave_dequantize_chunk_state", &kvweave_dequantize_chunk_state_xpu,
+  m.def("gha_dequantize_chunk_state", &gha_dequantize_chunk_state_xpu,
         "Dequantize a single-tensor (no K/V split) quant payload, on XPU. "
-        "Mirrors the CPU module's kvweave_dequantize_chunk_state signature.",
+        "Mirrors the CPU module's gha_dequantize_chunk_state signature.",
         pybind11::arg("q_data"), pybind11::arg("scale_bytes"),
         pybind11::arg("num_layers"), pybind11::arg("chunk_tokens"),
         pybind11::arg("h_merged"), pybind11::arg("qbit"),
@@ -1516,9 +1516,9 @@ PYBIND11_MODULE(kvweave_quant_xpu, m) {
         pybind11::arg("output_dtype"), pybind11::arg("signs") = c10::nullopt,
         pybind11::arg("perm") = c10::nullopt, pybind11::arg("num_threads") = 0);
 
-  m.def("kvweave_dequantize_chunk_state_into",
-        &kvweave_dequantize_chunk_state_into_xpu,
-        "Like kvweave_dequantize_chunk_state, but writes the result into the "
+  m.def("gha_dequantize_chunk_state_into",
+        &gha_dequantize_chunk_state_into_xpu,
+        "Like gha_dequantize_chunk_state, but writes the result into the "
         "caller-provided contiguous CPU tensor `dst` (exactly num_layers*"
         "chunk_tokens*h_merged elements of output_dtype). merge_head_num > 1 "
         "folds per-head planes back to [layers, tokens, heads*head_dim] on the "
@@ -1535,9 +1535,9 @@ PYBIND11_MODULE(kvweave_quant_xpu, m) {
         pybind11::arg("perm") = c10::nullopt,
         pybind11::arg("merge_head_num") = 0, pybind11::arg("num_threads") = 0);
 
-  m.def("kvweave_serialize_chunk", &kvweave_serialize_chunk_xpu,
+  m.def("gha_serialize_chunk", &gha_serialize_chunk_xpu,
         "Quantize a fused K/V tensor and pack a complete payload, on XPU. "
-        "Mirrors the CPU module's kvweave_serialize_chunk signature so "
+        "Mirrors the CPU module's gha_serialize_chunk signature so "
         "callers can select the native module without branching. Accepts/"
         "returns CPU tensors/bytes, transferring to/from XPU internally.",
         pybind11::arg("src"), pybind11::arg("header_bytes"),
@@ -1551,9 +1551,9 @@ PYBIND11_MODULE(kvweave_quant_xpu, m) {
         pybind11::arg("signs") = c10::nullopt,
         pybind11::arg("perm") = c10::nullopt, pybind11::arg("num_threads") = 0);
 
-  m.def("kvweave_dequantize_chunk", &kvweave_dequantize_chunk_xpu,
+  m.def("gha_dequantize_chunk", &gha_dequantize_chunk_xpu,
         "Dequantize a fused K/V quant payload, on XPU. Mirrors the CPU "
-        "module's kvweave_dequantize_chunk signature.",
+        "module's gha_dequantize_chunk signature.",
         pybind11::arg("q_data"), pybind11::arg("k_scale_bytes"),
         pybind11::arg("v_scale_bytes"), pybind11::arg("num_layers"),
         pybind11::arg("chunk_tokens"), pybind11::arg("h_merged"),
@@ -1565,11 +1565,11 @@ PYBIND11_MODULE(kvweave_quant_xpu, m) {
         pybind11::arg("output_dtype"), pybind11::arg("signs") = c10::nullopt,
         pybind11::arg("perm") = c10::nullopt, pybind11::arg("num_threads") = 0);
 
-  m.def("kvweave_dequantize_chunk_into_4d",
-        &kvweave_dequantize_chunk_into_4d_xpu,
+  m.def("gha_dequantize_chunk_into_4d",
+        &gha_dequantize_chunk_into_4d_xpu,
         "Dequantize a fused K/V quant payload directly into a caller-provided "
         "[2, num_layers, chunk_tokens, h_merged] CPU tensor, on XPU. Mirrors "
-        "the CPU module's kvweave_dequantize_chunk_into_4d signature "
+        "the CPU module's gha_dequantize_chunk_into_4d signature "
         "(layer_num_threads is accepted but ignored -- XPU has no OMP "
         "layer-thread-sweep concept).",
         pybind11::arg("q_data"), pybind11::arg("k_scale_bytes"),

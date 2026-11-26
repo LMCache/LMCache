@@ -17,7 +17,7 @@ or controllers — it just defines:
 - A factory / registration mechanism so adapters can reference a serde
   by name (`{"type": "fp8", ...}` in JSON config).
 - Built-in serdes: **fp8 quantization**, plus TurboQuant, AES-GCM and
-  KVWeave (see their own docs).
+  GHA (see their own docs).
 
 How the async interface is actually plugged into the L2 path lives in
 [`docs/design/v1/distributed/l2_adapters/serde_wrapper.md`][wrapper-doc]
@@ -40,7 +40,7 @@ lmcache/v1/distributed/serde/
   multi.py            # MultiSerializer / MultiDeserializer (tuple-shaped
                       # extension; see "Multi-output extension" below)
   utils.py            # serialized_layout_desc, make_temp_key
-  kvweave/            # KVWeave 4/8-bit quantization (see kvweave.md)
+  gha/            # GHA 4/8-bit quantization (see gha.md)
 ```
 
 ## Two-Layer Interface
@@ -105,7 +105,7 @@ classes and register a factory.
 - Must only depend on `layout_desc` (shapes + dtypes), not on the data:
   the buffer is allocated before serializing.
 - A serde whose output size depends on which object group a key belongs
-  to (e.g. KVWeave) overrides `estimate_serialized_size_for_key(layout,
+  to (e.g. GHA) overrides `estimate_serialized_size_for_key(layout,
   key)`; the wrapper sizes every temp buffer through it. The default
   ignores the key.
 

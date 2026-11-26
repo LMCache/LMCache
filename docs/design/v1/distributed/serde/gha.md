@@ -1,8 +1,8 @@
-# `lmcache.v1.distributed.serde.kvweave` — KVWeave Serde Backend
+# `lmcache.v1.distributed.serde.gha` — GHA Serde Backend
 
 ## Scope
 
-KVWeave is a 4/8-bit KV quantization codec with native CPU and XPU kernels.
+GHA is a 4/8-bit KV quantization codec with native CPU and XPU kernels.
 This serde applies it on the **L1 → L2 path**: L1 keeps full-precision KV, the
 store controller hands a chunk to a serde-wrapped L2 adapter, the serde
 quantizes it while serializing, and the load path dequantizes it back into the
@@ -18,7 +18,7 @@ not touch `StorageManager` or the L2 adapter APIs.
 
 ```json
 {"type": "fs", "base_path": "/cache",
- "serde": {"type": "kvweave", "qbit": 4, "device": "xpu"}}
+ "serde": {"type": "gha", "qbit": 4, "device": "xpu"}}
 ```
 
 | Key | Default | Meaning |
@@ -79,7 +79,7 @@ fused K/V. Declare such groups explicitly, e.g.
 ## Size contract
 
 The temp buffer is allocated **before** serializing, so the size must be known
-from the layout alone. KVWeave's payload size depends only on shape, `qbit` and
+from the layout alone. GHA's payload size depends only on shape, `qbit` and
 the scaling (`per_tensor`) — not on the data, `rh` or `asym` — so `estimate_serialized_size`
 is an exact formula, not a margin:
 
@@ -95,7 +95,7 @@ between groups that share a shape, the wrapper sizes each temp buffer through
 
 ## Decision per chunk
 
-`kvweave_l2._PlanResolver` decides once per `(group spec, part shape, dtype)` and
+`gha_l2._PlanResolver` decides once per `(group spec, part shape, dtype)` and
 caches the result. A chunk is copied through (never quantized) when its group is
 MLA/unclassified, its rank does not match the declared layout, the
 dtype is unsupported (a uint8 fp8 cache needs the fused layout and
@@ -103,7 +103,7 @@ dtype is unsupported (a uint8 fp8 cache needs the fused layout and
 needs a power-of-two transform length; a shape that cannot satisfy it is encoded
 without RH (the header records the choice, and the size is unchanged).
 
-Payloads carry a magic number, so decoding a buffer that is not a KVWeave payload
+Payloads carry a magic number, so decoding a buffer that is not a GHA payload
 fails the deserialize task instead of returning garbage. The group
 configuration must be the same on store and load: a pass-through chunk has no
 header to check. That includes `device`: for 4-bit per_channel (fused) chunks
@@ -114,19 +114,19 @@ are not interchangeable.
 ## Module layout
 
 ```
-serde/kvweave/
-  kvweave_config.py   # AttentionPlaneLayout, KVWeaveCodecConfig
-  kvweave_serde.py    # KVWeaveCodec: the native-kernel attention codec
-  kvweave_l2.py       # per-group routing, Serializer/Deserializer, factory registration
-csrc/sycl/kvweave/
+serde/gha/
+  gha_config.py   # AttentionPlaneLayout, GHACodecConfig
+  gha_serde.py    # GHACodec: the native-kernel attention codec
+  gha_l2.py       # per-group routing, Serializer/Deserializer, factory registration
+csrc/sycl/gha/
   cpu/                # CPU fallback native kernels/bindings
   xpu/                # SYCL/XPU native kernels/bindings
 ```
 
-KVWeave is Intel-only. The native modules are built only by the SYCL (Intel
-XPU) build profile, and only when ``BUILD_KVWEAVE=1`` is set at install time
-(e.g. ``BUILD_KVWEAVE=1 pip install -e .`` with oneAPI's ``icpx`` on ``PATH``):
-``lmcache.kvweave_quant`` for the x86-64 host CPU (AVX2) and
-``lmcache.kvweave_quant_xpu``. Other platforms never build them, and the
-``kvweave`` serde raises an error when it is configured without them; the rest
+GHA is Intel-only. The native modules are built only by the SYCL (Intel
+XPU) build profile, and only when ``BUILD_GHA=1`` is set at install time
+(e.g. ``BUILD_GHA=1 pip install -e .`` with oneAPI's ``icpx`` on ``PATH``):
+``lmcache.gha_quant`` for the x86-64 host CPU (AVX2) and
+``lmcache.gha_quant_xpu``. Other platforms never build them, and the
+``gha`` serde raises an error when it is configured without them; the rest
 of LMCache is unaffected.

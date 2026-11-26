@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""KVWeave attention codec for LMCache L2 quantization."""
+"""GHA attention codec for LMCache L2 quantization."""
 
 # Future
 from __future__ import annotations
@@ -16,22 +16,22 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.distributed.serde.kvweave.kvweave_config import (
+from lmcache.v1.distributed.serde.gha.gha_config import (
     AttentionPlaneLayout,
-    KVWeaveCodecConfig,
+    GHACodecConfig,
 )
 
 try:
     # First Party
-    import lmcache.kvweave_quant as kvweave_quant
+    import lmcache.gha_quant as gha_quant
 except ImportError:  # pragma: no cover
-    kvweave_quant = None
+    gha_quant = None
 
 try:
     # First Party
-    import lmcache.kvweave_quant_xpu as kvweave_quant_xpu
+    import lmcache.gha_quant_xpu as gha_quant_xpu
 except ImportError:  # pragma: no cover
-    kvweave_quant_xpu = None
+    gha_quant_xpu = None
 
 logger = init_logger(__name__)
 
@@ -52,27 +52,27 @@ def _resolve_native(device: str):
     """Return the native quantization module for ``device`` ('cpu' or 'xpu').
 
     Single canonical native-module resolver used everywhere in this file --
-    both modules expose identical kvweave_serialize_chunk*/
-    kvweave_dequantize_chunk* signatures (the XPU ones added a native
+    both modules expose identical gha_serialize_chunk*/
+    gha_dequantize_chunk* signatures (the XPU ones added a native
     ``num_layers`` axis and fused K/V entry points in the SYCL kernels,
     mirroring the CPU wrapper's fused chunk entry points -- see
-    quant_sycl.cpp / kvweave_quant_xpu_wrapper.cpp), so every call site here
+    quant_sycl.cpp / gha_quant_xpu_wrapper.cpp), so every call site here
     just picks a module and calls the same function name/arguments
     regardless of device.
     """
     if device == "xpu":
-        if kvweave_quant_xpu is None:
+        if gha_quant_xpu is None:
             raise RuntimeError(
-                "KVWeave native XPU quantization extension is unavailable; "
-                "KVWeave is only built for Intel (SYCL) with BUILD_KVWEAVE=1"
+                "GHA native XPU quantization extension is unavailable; "
+                "GHA is only built for Intel (SYCL) with BUILD_GHA=1"
             )
-        return kvweave_quant_xpu
-    if kvweave_quant is None:
+        return gha_quant_xpu
+    if gha_quant is None:
         raise RuntimeError(
-            "KVWeave native quantization extension is unavailable; "
-            "KVWeave is only built for Intel (SYCL, x86-64) with BUILD_KVWEAVE=1"
+            "GHA native quantization extension is unavailable; "
+            "GHA is only built for Intel (SYCL, x86-64) with BUILD_GHA=1"
         )
-    return kvweave_quant
+    return gha_quant
 
 
 @dataclass
@@ -85,12 +85,12 @@ class _KVShape:
     original_ndim: int
 
 
-class _KVWeaveCodec:
-    """Self-describing attention KVWeave codec."""
+class _GHACodec:
+    """Self-describing attention GHA codec."""
 
     def __init__(self, kwargs: dict[str, Any] | None = None):
         kwargs = kwargs or {}
-        config = KVWeaveCodecConfig(
+        config = GHACodecConfig(
             qbit=int(kwargs.get("qbit", 4)),
             scaling_method=str(kwargs.get("scaling_method", "per_channel")),
             rh=bool(kwargs.get("rh", True)),
@@ -162,7 +162,7 @@ class _KVWeaveCodec:
     def _payload_u8(tensor: torch.Tensor) -> torch.Tensor:
         payload = tensor.detach()
         if payload.dtype != torch.uint8:
-            raise ValueError("KVWeave payload tensor must have dtype torch.uint8")
+            raise ValueError("GHA payload tensor must have dtype torch.uint8")
         if payload.device.type != "cpu":
             payload = payload.cpu()
         if not payload.is_contiguous():
@@ -183,7 +183,7 @@ class _KVWeaveCodec:
             return payload[offset:]
         if dtype == torch.int16:
             if offset % 2:
-                raise ValueError("KVWeave int16 q_data is not 2-byte aligned")
+                raise ValueError("GHA int16 q_data is not 2-byte aligned")
             return payload[offset:].view(torch.int16)
         if dtype in {
             torch.float16,
@@ -200,7 +200,7 @@ class _KVWeaveCodec:
                     bytearray(tail.contiguous().numpy().tobytes()), dtype=dtype
                 )
             return tail.view(dtype)
-        raise ValueError(f"unsupported KVWeave payload view dtype: {dtype}")
+        raise ValueError(f"unsupported GHA payload view dtype: {dtype}")
 
     def estimate_serialized_size(
         self, layout_desc: MemoryLayoutDesc, scaling_method: Optional[str] = None
@@ -235,7 +235,7 @@ class _KVWeaveCodec:
         """
         if len(shape) != 3:
             raise ValueError(
-                f"KVWeave fused-K/V estimate expects [L, T, H], got {shape}"
+                f"GHA fused-K/V estimate expects [L, T, H], got {shape}"
             )
         layers, tokens, hidden = (int(dim) for dim in shape)
         method = method or self.scaling_method
@@ -252,7 +252,7 @@ class _KVWeaveCodec:
             header
             + scales * 12
             + 4 * native_layers
-            + KVWeaveCodecConfig.quantized_bytes(elements, self.qbit)
+            + GHACodecConfig.quantized_bytes(elements, self.qbit)
         )
 
     def _estimate_shape(
@@ -272,7 +272,7 @@ class _KVWeaveCodec:
         else:
             return 64 + dtype.itemsize * int(torch.tensor(shape).prod().item())
         if kv_size != 2:
-            raise ValueError(f"KVWeave expects K/V dimension 2, got {shape}")
+            raise ValueError(f"GHA expects K/V dimension 2, got {shape}")
         method = method or self.scaling_method
         elements = int(layers) * int(tokens) * int(hidden)
         scales = self._scale_count(tokens, hidden, layers, method)
@@ -280,7 +280,7 @@ class _KVWeaveCodec:
         return (
             header
             + 2 * (4 + scales * 12 + 4 * int(layers))
-            + 2 * KVWeaveCodecConfig.quantized_bytes(elements, self.qbit)
+            + 2 * GHACodecConfig.quantized_bytes(elements, self.qbit)
         )
 
     def serialize_tensor(
@@ -299,7 +299,7 @@ class _KVWeaveCodec:
         method = scaling_method or self.scaling_method
         if shape.hidden_dim <= 0:
             raise ValueError(
-                "KVWeave attention quantization needs a non-empty hidden axis"
+                "GHA attention quantization needs a non-empty hidden axis"
             )
         rh, asym, precond = (
             (False, False, False)
@@ -307,12 +307,12 @@ class _KVWeaveCodec:
             else (self.rh, self.asym, self.precond)
         )
         header = self._quant_header(shape, work.dtype, method, rh, asym, precond)
-        ids = KVWeaveCodecConfig.next_scale_ids(2)
+        ids = GHACodecConfig.next_scale_ids(2)
         signs, perm = self._attention_precond(
             method, rh, precond, shape.chunk_tokens, shape.hidden_dim
         )
         out_kwargs = {"out": out} if out is not None else {}
-        payload = self.native.kvweave_serialize_chunk(
+        payload = self.native.gha_serialize_chunk(
             shape.tensor4d,
             header,
             ids[0],
@@ -334,7 +334,7 @@ class _KVWeaveCodec:
         payload_bytes = payload if isinstance(payload, int) else len(payload)
         raw_bytes = work.numel() * work.element_size()
         logger.debug(
-            "KVWeave quantize store shape=%s dtype=%s qbit=%d scaling=%s "
+            "GHA quantize store shape=%s dtype=%s qbit=%d scaling=%s "
             "raw_bytes=%d payload_bytes=%d ratio=%.4f",
             tuple(work.shape),
             work.dtype,
@@ -372,7 +372,7 @@ class _KVWeaveCodec:
             num_threads=self.num_threads,
         )
         if dst.dim() == 4 and dst.device.type == "cpu":
-            self.native.kvweave_dequantize_chunk_into_4d(
+            self.native.gha_dequantize_chunk_into_4d(
                 q,
                 parsed["k_scales"],
                 parsed["v_scales"],
@@ -383,7 +383,7 @@ class _KVWeaveCodec:
                 **kwargs,
             )
             return
-        restored = self.native.kvweave_dequantize_chunk(
+        restored = self.native.gha_dequantize_chunk(
             q,
             parsed["k_scales"],
             parsed["v_scales"],
@@ -446,12 +446,12 @@ class _KVWeaveCodec:
 
         Returns the payload as ``bytes``. If ``out`` (a contiguous ``uint8``
         CPU tensor) is given and the native module can write in place (the
-        direct CPU kernel, or ``kvweave_serialize_chunk_state_into`` on XPU),
+        direct CPU kernel, or ``gha_serialize_chunk_state_into`` on XPU),
         the payload is written straight into ``out`` and its length returned.
         """
         if tensor.dim() != 3:
             raise ValueError(
-                f"KVWeave fused-K/V tensor expects [L, T, H], got {tuple(tensor.shape)}"
+                f"GHA fused-K/V tensor expects [L, T, H], got {tuple(tensor.shape)}"
             )
         work = self._kv_view(tensor.detach().to("cpu").contiguous())
         shape = tuple(int(dim) for dim in work.shape)
@@ -464,7 +464,7 @@ class _KVWeaveCodec:
             work.dtype, shape, method, per_head_scales
         )
         if self.fused_quant_uses_direct(hidden, method):
-            result = self.native.kvweave_serialize_fused_chunk_direct(
+            result = self.native.gha_serialize_fused_chunk_direct(
                 work,
                 header,
                 self.qbit,
@@ -500,19 +500,19 @@ class _KVWeaveCodec:
         )
         if out is not None and self.device == "xpu":
             return int(
-                self.native.kvweave_serialize_chunk_state_into(
+                self.native.gha_serialize_chunk_state_into(
                     native_src.view(-1),
                     out.view(-1),
                     header,
-                    KVWeaveCodecConfig.next_scale_id(),
+                    GHACodecConfig.next_scale_id(),
                     **native_kwargs,
                 )
             )
         return bytes(
-            self.native.kvweave_serialize_chunk_state(
+            self.native.gha_serialize_chunk_state(
                 native_src.view(-1),
                 header,
-                KVWeaveCodecConfig.next_scale_id(),
+                GHACodecConfig.next_scale_id(),
                 **native_kwargs,
             )
         )
@@ -528,8 +528,8 @@ class _KVWeaveCodec:
         layers, tokens, hidden = map(int, source.shape)
         if hidden != head_num * head_dim:
             raise ValueError("fused hidden size does not match head layout")
-        if kvweave_quant is not None:
-            return kvweave_quant.kvweave_split_fused_heads(
+        if gha_quant is not None:
+            return gha_quant.gha_split_fused_heads(
                 source.contiguous(), head_num, head_dim, num_threads, None
             )
         return (
@@ -569,7 +569,7 @@ class _KVWeaveCodec:
             and dst.is_contiguous()
             and self.supports_fused_direct_dequant()
         ):
-            self.native.kvweave_dequantize_fused_chunk_direct(
+            self.native.gha_dequantize_fused_chunk_direct(
                 q,
                 parsed["scales"],
                 dst,
@@ -602,7 +602,7 @@ class _KVWeaveCodec:
         )
         if self.device == "xpu" and dst.device.type == "cpu" and dst.is_contiguous():
             # XPU module: DMA straight into dst, head merge done on the device.
-            self.native.kvweave_dequantize_chunk_state_into(
+            self.native.gha_dequantize_chunk_state_into(
                 q,
                 parsed["scales"],
                 dst.view(-1),
@@ -613,7 +613,7 @@ class _KVWeaveCodec:
                 **native_kwargs,
             )
             return
-        restored = self.native.kvweave_dequantize_chunk_state(
+        restored = self.native.gha_dequantize_chunk_state(
             q,
             parsed["scales"],
             native_layers,
@@ -622,8 +622,8 @@ class _KVWeaveCodec:
             **native_kwargs,
         )
         if parsed["per_head_scales"]:
-            if kvweave_quant is not None:
-                kvweave_quant.kvweave_merge_fused_heads(
+            if gha_quant is not None:
+                gha_quant.gha_merge_fused_heads(
                     restored,
                     layers,
                     parsed["head_num"],
@@ -646,7 +646,7 @@ class _KVWeaveCodec:
         raw = self._payload_buffer(payload)
         magic = bytes(raw[:4])
         if magic != self._config.MAGIC_QUANT_FUSED:
-            raise ValueError(f"invalid KVWeave fused payload magic: {magic!r}")
+            raise ValueError(f"invalid GHA fused payload magic: {magic!r}")
         offset = 4
         qbit, dtype_code, flags, scaling_code, ndim = struct.unpack_from(
             ">BBBBB", raw, offset
@@ -655,7 +655,7 @@ class _KVWeaveCodec:
         shape = tuple(struct.unpack_from(">" + "i" * ndim, raw, offset))
         offset += 4 * ndim
         if len(shape) != 3:
-            raise ValueError(f"KVWeave fused payload expects 3-D shape, got {shape}")
+            raise ValueError(f"GHA fused payload expects 3-D shape, got {shape}")
         (scale_len,) = struct.unpack_from(">I", raw, offset)
         offset += 4
         scales = bytes(raw[offset : offset + scale_len])
@@ -702,7 +702,7 @@ class _KVWeaveCodec:
         if tensor.dim() == 3:
             tokens, kv_size, hidden = map(int, tensor.shape)
             if kv_size != 2:
-                raise ValueError("KVWeave expects [T, 2, H]")
+                raise ValueError("GHA expects [T, 2, H]")
             return _KVShape(
                 tensor.permute(1, 0, 2).unsqueeze(1).contiguous(),
                 tuple(tensor.shape),
@@ -714,9 +714,9 @@ class _KVWeaveCodec:
         if tensor.dim() == 4:
             kv_size, layers, tokens, hidden = map(int, tensor.shape)
             if kv_size != 2:
-                raise ValueError("KVWeave expects [2, L, T, H]")
+                raise ValueError("GHA expects [2, L, T, H]")
             return _KVShape(tensor, tuple(tensor.shape), layers, tokens, hidden, 4)
-        raise ValueError(f"unsupported KVWeave tensor shape: {tuple(tensor.shape)}")
+        raise ValueError(f"unsupported GHA tensor shape: {tuple(tensor.shape)}")
 
     def _quant_header(
         self,
@@ -747,7 +747,7 @@ class _KVWeaveCodec:
         magic = bytes(raw[:4])
         offset = 4
         if magic != self._config.MAGIC_QUANT:
-            raise ValueError(f"invalid KVWeave payload magic: {magic!r}")
+            raise ValueError(f"invalid GHA payload magic: {magic!r}")
         qbit, rh, asym, precond, ndim, _, scaling_code, dtype_code = struct.unpack_from(
             ">BBBBBBBB", raw, offset
         )
@@ -924,4 +924,4 @@ class _KVWeaveCodec:
         return destination
 
 
-KVWeaveCodec = _KVWeaveCodec
+GHACodec = _GHACodec

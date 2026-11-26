@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # First Party
-from lmcache.v1.distributed.serde import (  # noqa: F401  (registers "kvweave")
-    kvweave as _kvweave,
+from lmcache.v1.distributed.serde import (  # noqa: F401  (registers "gha")
+    gha as _gha,
 )
 from lmcache.v1.distributed.serde.aesgcm import (
     AesGcmDeserializer,

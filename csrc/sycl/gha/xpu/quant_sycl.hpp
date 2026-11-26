@@ -20,7 +20,7 @@
 // format maximum stays representable. Layouts match torch.float8_e4m3fn and
 // torch.float8_e5m2.
 // ---------------------------------------------------------------------------
-namespace kvweave_fp8 {
+namespace gha_fp8 {
 
 template <int EB, int MB, int BIAS, uint8_t MAX_BITS, bool HAS_INF>
 inline float decode(uint8_t b) {
@@ -74,16 +74,16 @@ inline uint8_t encode(float f) {
   return static_cast<uint8_t>(sign | bits);
 }
 
-}  // namespace kvweave_fp8
+}  // namespace gha_fp8
 
 // torch.float8_e4m3fn: 1 sign, 4 exponent (bias 7), 3 mantissa, no inf, max
 // 448.
 struct fp8_e4m3_t {
   uint8_t bits;
   fp8_e4m3_t() = default;
-  explicit fp8_e4m3_t(float f) : bits(kvweave_fp8::encode<4, 3, 7, 0x7E>(f)) {}
+  explicit fp8_e4m3_t(float f) : bits(gha_fp8::encode<4, 3, 7, 0x7E>(f)) {}
   explicit operator float() const {
-    return kvweave_fp8::decode<4, 3, 7, 0x7E, false>(bits);
+    return gha_fp8::decode<4, 3, 7, 0x7E, false>(bits);
   }
 };
 
@@ -92,9 +92,9 @@ struct fp8_e4m3_t {
 struct fp8_e5m2_t {
   uint8_t bits;
   fp8_e5m2_t() = default;
-  explicit fp8_e5m2_t(float f) : bits(kvweave_fp8::encode<5, 2, 15, 0x7B>(f)) {}
+  explicit fp8_e5m2_t(float f) : bits(gha_fp8::encode<5, 2, 15, 0x7B>(f)) {}
   explicit operator float() const {
-    return kvweave_fp8::decode<5, 2, 15, 0x7B, true>(bits);
+    return gha_fp8::decode<5, 2, 15, 0x7B, true>(bits);
   }
 };
 static_assert(sizeof(fp8_e4m3_t) == 1 && sizeof(fp8_e5m2_t) == 1,

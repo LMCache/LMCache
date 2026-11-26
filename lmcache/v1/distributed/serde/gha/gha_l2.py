@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""KVWeave L2 serde: quantize L1 chunks while they are written to L2.
+"""GHA L2 serde: quantize L1 chunks while they are written to L2.
 
 The L1 pool keeps full-precision KV. When the store controller moves a chunk
 to an L2 adapter wrapped by :class:`SerdeL2AdapterWrapper`, this serde encodes
-it with the KVWeave codec (4/8-bit, on CPU or XPU); the load path decodes it
+it with the GHA codec (4/8-bit, on CPU or XPU); the load path decodes it
 back into the L1 destination chunk. Because only L2 is lossy, the double-lossy
 guard of L1 quantization does not apply.
 
 What a chunk *is* depends on the object group it belongs to, so every key is
-routed through a per-group :class:`KVWeaveGroupSpec`:
+routed through a per-group :class:`GHAGroupSpec`:
 
 * ``attention`` + ``split_kv``: ``[2, L, T, H]``, K and V as separate planes.
 * ``attention`` + ``fused_kv``: ``[L, T, H]``, K and V packed on the last axis.
@@ -29,7 +29,7 @@ chunks are quantized per token and fused chunks per channel; with
 Example::
 
     {"type": "fs", "base_path": "/cache",
-     "serde": {"type": "kvweave", "qbit": 4, "device": "xpu"}}
+     "serde": {"type": "gha", "qbit": 4, "device": "xpu"}}
 """
 
 # Future
@@ -53,16 +53,16 @@ from lmcache.v1.distributed.serde.base import (
     Serializer,
 )
 from lmcache.v1.distributed.serde.factory import register_serde_factory
-from lmcache.v1.distributed.serde.kvweave.kvweave_config import (
+from lmcache.v1.distributed.serde.gha.gha_config import (
     AttentionPlaneLayout,
-    KVWeaveCodecConfig,
+    GHACodecConfig,
 )
-from lmcache.v1.distributed.serde.kvweave.kvweave_serde import KVWeaveCodec
+from lmcache.v1.distributed.serde.gha.gha_serde import GHACodec
 from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
 
-_SUPPORTED_DTYPES = frozenset(KVWeaveCodecConfig.DTYPE_TO_CODE) | {torch.uint8}
+_SUPPORTED_DTYPES = frozenset(GHACodecConfig.DTYPE_TO_CODE) | {torch.uint8}
 
 # Length prefix of each part of a multi-part chunk (int32).
 _FRAME_BYTES = 4
@@ -91,7 +91,7 @@ _CONFIG_KEYS = frozenset(
 
 
 @dataclass(frozen=True)
-class KVWeaveGroupSpec:
+class GHAGroupSpec:
     """What the codec needs to know about one object group.
 
     Attributes:
@@ -104,7 +104,7 @@ class KVWeaveGroupSpec:
     attention_plane_layout: AttentionPlaneLayout = AttentionPlaneLayout.UNKNOWN
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "KVWeaveGroupSpec":
+    def from_dict(cls, raw: Mapping[str, Any]) -> "GHAGroupSpec":
         """Build a spec from a JSON-config dict.
 
         Keys: ``cache_category`` and ``attention_plane_layout``.
@@ -115,7 +115,7 @@ class KVWeaveGroupSpec:
         unknown = set(raw) - {"cache_category", "attention_plane_layout"}
         if unknown:
             raise ValueError(
-                f"kvweave serde: unsupported group keys {sorted(unknown)}; a group "
+                f"gha serde: unsupported group keys {sorted(unknown)}; a group "
                 "takes only cache_category and attention_plane_layout"
             )
         return cls(
@@ -137,8 +137,8 @@ class _Plan:
 
     mode: str  # "raw" | "split" | "fused"
     size: int  # exact upper bound of the serialized bytes
-    codec: KVWeaveCodec | None = None
-    spec: KVWeaveGroupSpec | None = None
+    codec: GHACodec | None = None
+    spec: GHAGroupSpec | None = None
 
 
 def _raw_nbytes(shape: Sequence[int], dtype: torch.dtype) -> int:
@@ -152,7 +152,7 @@ def _transform_length_ok(length: int) -> bool:
     return length > 0 and not length & (length - 1)
 
 
-def _plane_layout(mode: str, spec: KVWeaveGroupSpec) -> AttentionPlaneLayout | None:
+def _plane_layout(mode: str, spec: GHAGroupSpec) -> AttentionPlaneLayout | None:
     return spec.attention_plane_layout if mode in ("split", "fused") else None
 
 
@@ -184,9 +184,9 @@ class _PlanResolver:
         self._codec_kwargs = self._build_codec_kwargs(kwargs)
         # Static groups from the JSON config: ``object_group_id -> spec`` or
         # ``-> [spec per part]``.
-        self._static: dict[int, tuple[KVWeaveGroupSpec, ...]] = {
+        self._static: dict[int, tuple[GHAGroupSpec, ...]] = {
             int(group_id): tuple(
-                KVWeaveGroupSpec.from_dict(part)
+                GHAGroupSpec.from_dict(part)
                 for part in (raw if isinstance(raw, list) else [raw])
             )
             for group_id, raw in dict(kwargs.get("groups", {})).items()
@@ -196,9 +196,9 @@ class _PlanResolver:
         default_raw = dict(kwargs.get("default_group", {}))
         default_raw.setdefault("cache_category", "attention")
         default_raw.setdefault("attention_plane_layout", "auto")
-        self._default_spec = KVWeaveGroupSpec.from_dict(default_raw)
+        self._default_spec = GHAGroupSpec.from_dict(default_raw)
         self._per_tensor = bool(kwargs.get("per_tensor", False))
-        self._codecs: dict[tuple[str, bool], KVWeaveCodec] = {}
+        self._codecs: dict[tuple[str, bool], GHACodec] = {}
         self._plans: dict[tuple, _Plan] = {}
         self._lock = threading.Lock()
         self._warned: set[tuple] = set()
@@ -208,18 +208,18 @@ class _PlanResolver:
         unknown = set(kwargs) - _CONFIG_KEYS
         if unknown:
             raise ValueError(
-                f"kvweave serde: unknown config keys {sorted(unknown)}; "
+                f"gha serde: unknown config keys {sorted(unknown)}; "
                 f"supported keys are {sorted(_CONFIG_KEYS)}"
             )
         qbit = int(kwargs.get("qbit", 4))
         if qbit not in (4, 8):
-            raise ValueError(f"kvweave serde: qbit={qbit} is not one of [4, 8]")
+            raise ValueError(f"gha serde: qbit={qbit} is not one of [4, 8]")
         fp8 = kwargs.get("kv_fp8_dtype")
         if isinstance(fp8, str):
             fp8 = getattr(torch, fp8, None)
             if fp8 not in (torch.float8_e4m3fn, torch.float8_e5m2):
                 raise ValueError(
-                    f"kvweave serde: kv_fp8_dtype={kwargs['kv_fp8_dtype']!r} "
+                    f"gha serde: kv_fp8_dtype={kwargs['kv_fp8_dtype']!r} "
                     "is not float8_e4m3fn / float8_e5m2"
                 )
         return dict(
@@ -242,20 +242,20 @@ class _PlanResolver:
             return "per_tensor"
         return "per_token" if mode == "split" else "per_channel"
 
-    def _codec(self, mode: str, rh: bool) -> KVWeaveCodec:
+    def _codec(self, mode: str, rh: bool) -> GHACodec:
         ident = (mode, rh)
         with self._lock:
             codec = self._codecs.get(ident)
             if codec is None:
                 kwargs = dict(self._codec_kwargs)
                 kwargs.update(scaling_method=self._scaling_method(mode), rh=rh)
-                codec = KVWeaveCodec(kwargs)
+                codec = GHACodec(kwargs)
                 self._codecs[ident] = codec
             return codec
 
     # ----- resolution -----
 
-    def spec_for(self, key: ObjectKey | None, part: int) -> KVWeaveGroupSpec:
+    def spec_for(self, key: ObjectKey | None, part: int) -> GHAGroupSpec:
         """The spec of part ``part`` of ``key``'s object group.
 
         Falls back to the serde-level default when the group is unknown.
@@ -290,7 +290,7 @@ class _PlanResolver:
         if ident not in self._warned:
             self._warned.add(ident)
             logger.info(
-                "kvweave serde: copying shape=%s dtype=%s through unquantized (%s)",
+                "gha serde: copying shape=%s dtype=%s through unquantized (%s)",
                 shape,
                 dtype,
                 why,
@@ -298,7 +298,7 @@ class _PlanResolver:
         return _Plan(mode="raw", size=_raw_nbytes(shape, dtype))
 
     def _build_plan(
-        self, spec: KVWeaveGroupSpec, shape: tuple[int, ...], dtype: torch.dtype
+        self, spec: GHAGroupSpec, shape: tuple[int, ...], dtype: torch.dtype
     ) -> _Plan:
         if dtype not in _SUPPORTED_DTYPES:
             return self._raw(shape, dtype, f"unsupported dtype {dtype}")
@@ -307,7 +307,7 @@ class _PlanResolver:
         return self._raw(shape, dtype, f"category {spec.cache_category}")
 
     def _build_attention_plan(
-        self, spec: KVWeaveGroupSpec, shape: tuple[int, ...], dtype: torch.dtype
+        self, spec: GHAGroupSpec, shape: tuple[int, ...], dtype: torch.dtype
     ) -> _Plan:
         layout = spec.attention_plane_layout
         if layout == AttentionPlaneLayout.AUTO:
@@ -354,12 +354,12 @@ class _PlanResolver:
 
     def _probe_rh(
         self,
-        codec: KVWeaveCodec,
-        spec: KVWeaveGroupSpec,
+        codec: GHACodec,
+        spec: GHAGroupSpec,
         mode: str,
         shape: tuple[int, ...],
         dtype: torch.dtype,
-    ) -> KVWeaveCodec:
+    ) -> GHACodec:
         """Return a codec whose RH setting this chunk shape can actually run.
 
         The native RH kernel needs a power-of-two transform length, which
@@ -380,7 +380,7 @@ class _PlanResolver:
             if "power of 2" not in str(exc):
                 raise
         logger.info(
-            "kvweave serde: shape %s cannot run RH (transform length is not a "
+            "gha serde: shape %s cannot run RH (transform length is not a "
             "power of 2); using no-RH codec for it",
             shape,
         )
@@ -395,18 +395,18 @@ class _PlanResolver:
 def _flat_u8(obj: MemoryObj) -> torch.Tensor:
     tensor = obj.tensor
     if tensor is None:
-        raise ValueError("kvweave serde requires MemoryObjs that hold a tensor")
+        raise ValueError("gha serde requires MemoryObjs that hold a tensor")
     return tensor.view(torch.uint8).view(-1)
 
 
 def _part_tensor(obj: MemoryObj, part: int) -> torch.Tensor:
     tensor = obj.get_tensor(part)
     if tensor is None:
-        raise ValueError("kvweave serde requires MemoryObjs that hold a tensor")
+        raise ValueError("gha serde requires MemoryObjs that hold a tensor")
     return tensor
 
 
-class KVWeaveSerializer(Serializer):
+class GHASerializer(Serializer):
     """Quantize an L1 chunk into the L2 byte buffer (see module docstring).
 
     A chunk with several parts (one tensor per kernel group) is stored as
@@ -459,12 +459,12 @@ class KVWeaveSerializer(Serializer):
         written = encode_chunk_into_with_plan(plan, raw_cpu, out[: plan.size])
         if written > plan.size:
             raise RuntimeError(
-                f"kvweave payload ({written} B) exceeds its estimate ({plan.size} B)"
+                f"gha payload ({written} B) exceeds its estimate ({plan.size} B)"
             )
         return int(written)
 
 
-class KVWeaveDeserializer(Deserializer):
+class GHADeserializer(Deserializer):
     """Decode an L2 byte buffer back into the L1 chunk."""
 
     def __init__(self, resolver: _PlanResolver) -> None:
@@ -506,13 +506,13 @@ class KVWeaveDeserializer(Deserializer):
         )
 
 
-def _create_kvweave_serde(kwargs: dict[str, object]) -> SerdeProcessor:
+def _create_gha_serde(kwargs: dict[str, object]) -> SerdeProcessor:
     resolver = _PlanResolver(kwargs)
     return AsyncSerdeProcessor(
-        KVWeaveSerializer(resolver),
-        KVWeaveDeserializer(resolver),
+        GHASerializer(resolver),
+        GHADeserializer(resolver),
         max_workers=int(kwargs.get("max_workers", 1)),  # type: ignore[call-overload]
     )
 
 
-register_serde_factory("kvweave", _create_kvweave_serde)
+register_serde_factory("gha", _create_gha_serde)

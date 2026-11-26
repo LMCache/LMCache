@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Kernel-level tests for the KVWeave native modules (Intel only).
+"""Kernel-level tests for the GHA native modules (Intel only).
 
-These drive ``lmcache.kvweave_quant`` (CPU) and ``lmcache.kvweave_quant_xpu``
-(XPU) directly, through the entry points the ``kvweave`` serde calls, so a
+These drive ``lmcache.gha_quant`` (CPU) and ``lmcache.gha_quant_xpu``
+(XPU) directly, through the entry points the ``gha`` serde calls, so a
 kernel regression is reported against the kernel rather than through the
-serde. Adapted from the native-layer tests of the standalone KVWeave project.
+serde. Adapted from the native-layer tests of the standalone GHA project.
 
 Payload layouts produced by the native modules:
 
-* ``kvweave_serialize_chunk``: ``header | BE32 len | K scales | BE32 len |
+* ``gha_serialize_chunk``: ``header | BE32 len | K scales | BE32 len |
   V scales | q_K | q_V``.
-* ``kvweave_serialize_chunk_state`` / ``kvweave_serialize_fused_chunk_direct``:
+* ``gha_serialize_chunk_state`` / ``gha_serialize_fused_chunk_direct``:
   ``header | BE32 len | scales | q``.
 """
 
@@ -24,23 +24,23 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 
-kvweave_quant = pytest.importorskip("lmcache.kvweave_quant")
+gha_quant = pytest.importorskip("lmcache.gha_quant")
 
 try:
     # First Party
-    import lmcache.kvweave_quant_xpu as kvweave_quant_xpu
+    import lmcache.gha_quant_xpu as gha_quant_xpu
 except ImportError:
-    kvweave_quant_xpu = None
+    gha_quant_xpu = None
 
 _HAS_XPU = (
-    kvweave_quant_xpu is not None
+    gha_quant_xpu is not None
     and torch_device_type == "xpu"
     and torch_dev.is_available()
 )
 _DEVICES = ["cpu"] + (["xpu"] if _HAS_XPU else [])
 requires_xpu = pytest.mark.skipif(not _HAS_XPU, reason="requires an Intel XPU")
 
-_HEADER = b"KVWT"
+_HEADER = b"GHAT"
 _LAYERS, _TOKENS, _HIDDEN = 3, 64, 256
 
 # Mean absolute error bounds for unit-variance inputs.
@@ -48,7 +48,7 @@ _MEAN_ERR = {(4, False): 0.15, (8, False): 0.02, (4, True): 0.5, (8, True): 0.05
 
 
 def _native(device: str):
-    return kvweave_quant if device == "cpu" else kvweave_quant_xpu
+    return gha_quant if device == "cpu" else gha_quant_xpu
 
 
 def _precond(n: int, seed: int = 42) -> tuple[torch.Tensor, torch.Tensor]:
@@ -102,7 +102,7 @@ def _parse_unit_scales(blob: bytes, units: int, nchunks: int) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
-# Split K/V chunks: kvweave_serialize_chunk / kvweave_dequantize_chunk
+# Split K/V chunks: gha_serialize_chunk / gha_dequantize_chunk
 # ---------------------------------------------------------------------------
 
 
@@ -127,7 +127,7 @@ def _chunk_kwargs(qbit, scaling, rh, asym, signs, perm, tokens=_TOKENS):
 def _encode_chunk(native, x, qbit, scaling, rh, asym, signs, perm):
     tokens = x.shape[2]
     return bytes(
-        native.kvweave_serialize_chunk(
+        native.gha_serialize_chunk(
             x,
             _HEADER,
             1,
@@ -141,7 +141,7 @@ def _encode_chunk(native, x, qbit, scaling, rh, asym, signs, perm):
 def _decode_chunk(native, payload, shape, dtype, qbit, scaling, rh, asym, signs, perm):
     k_blob, v_blob, q_raw = _split_chunk_payload(payload)
     _, layers, tokens, hidden = shape
-    return native.kvweave_dequantize_chunk(
+    return native.gha_dequantize_chunk(
         _q(q_raw),
         k_blob,
         v_blob,
@@ -187,7 +187,7 @@ def test_split_chunk_round_trip(device, qbit, scaling, rh, precond, asym, dtype)
 @pytest.mark.parametrize("device", _DEVICES)
 def test_split_chunk_is_deterministic_and_into_4d_matches(device):
     """Same input -> same bytes; ``into_4d`` writes exactly what
-    ``kvweave_dequantize_chunk`` returns."""
+    ``gha_dequantize_chunk`` returns."""
     native = _native(device)
     x = _data((2, _LAYERS, _TOKENS, _HIDDEN))
     signs, perm = _precond(_HIDDEN)
@@ -198,7 +198,7 @@ def test_split_chunk_is_deterministic_and_into_4d_matches(device):
     expected = _decode_chunk(native, payload, x.shape, x.dtype, *args)
     k_blob, v_blob, q_raw = _split_chunk_payload(payload)
     dst = torch.full_like(x, 7.0)
-    native.kvweave_dequantize_chunk_into_4d(
+    native.gha_dequantize_chunk_into_4d(
         _q(q_raw),
         k_blob,
         v_blob,
@@ -213,15 +213,15 @@ def test_split_chunk_is_deterministic_and_into_4d_matches(device):
 
 
 def test_cpu_split_chunk_out_matches_bytes():
-    """CPU ``kvweave_serialize_chunk(out=...)`` writes exactly the bytes the
+    """CPU ``gha_serialize_chunk(out=...)`` writes exactly the bytes the
     bytes-returning call produces, nothing past them, and rejects an undersized
     or mistyped buffer."""
     x = _data((2, _LAYERS, _TOKENS, _HIDDEN))
     signs, perm = _precond(_HIDDEN)
     kwargs = _chunk_kwargs(4, "per_token", True, True, signs, perm)
-    expected = _encode_chunk(kvweave_quant, x, 4, "per_token", True, True, signs, perm)
+    expected = _encode_chunk(gha_quant, x, 4, "per_token", True, True, signs, perm)
     out = torch.full((len(expected) + 55,), 0xAB, dtype=torch.uint8)
-    n = kvweave_quant.kvweave_serialize_chunk(
+    n = gha_quant.gha_serialize_chunk(
         x, _HEADER, 1, 2, num_layers=_LAYERS, out=out, **kwargs
     )
     assert n == len(expected)
@@ -232,7 +232,7 @@ def test_cpu_split_chunk_out_matches_bytes():
         torch.empty(n, dtype=torch.int8),
     ):
         with pytest.raises((ValueError, RuntimeError)):
-            kvweave_quant.kvweave_serialize_chunk(
+            gha_quant.gha_serialize_chunk(
                 x, _HEADER, 1, 2, num_layers=_LAYERS, out=bad, **kwargs
             )
 
@@ -281,7 +281,7 @@ def test_mismatched_preconditioner_is_rejected(device):
                 native, payload, x.shape, x.dtype, 4, "per_token", True, True, s, p
             )
         with pytest.raises((ValueError, RuntimeError)):
-            native.kvweave_serialize_chunk_state(
+            native.gha_serialize_chunk_state(
                 x[0],
                 _HEADER,
                 3,
@@ -294,13 +294,13 @@ def test_mismatched_preconditioner_is_rejected(device):
     wrong_rows = _chunk_kwargs(4, "per_token", True, True, signs, perm)
     wrong_rows["block_size"] = 4 * _TOKENS
     with pytest.raises((ValueError, RuntimeError)):
-        native.kvweave_serialize_chunk(
+        native.gha_serialize_chunk(
             x, _HEADER, 1, 2, num_layers=_LAYERS, **wrong_rows
         )
 
 
 # ---------------------------------------------------------------------------
-# Fused K/V chunks: kvweave_serialize_fused_chunk_direct (per_channel)
+# Fused K/V chunks: gha_serialize_fused_chunk_direct (per_channel)
 # ---------------------------------------------------------------------------
 
 _HEAD_NUM, _HEAD_DIM = 2, 128  # fused [L, T, 2 * 128]: the serde's two halves
@@ -338,7 +338,7 @@ def _state_kwargs(qbit, scaling, rh, asym, signs, perm):
 
 
 def _direct(native, x, qbit, rh, asym, signs, perm, scaling="per_channel", out=None):
-    return native.kvweave_serialize_fused_chunk_direct(
+    return native.gha_serialize_fused_chunk_direct(
         x,
         _HEADER,
         qbit,
@@ -355,7 +355,7 @@ def _direct(native, x, qbit, rh, asym, signs, perm, scaling="per_channel", out=N
 
 
 def _direct_dequant(native, q, blob, dst, qbit, rh, asym, signs, perm, scaling):
-    native.kvweave_dequantize_fused_chunk_direct(
+    native.gha_dequantize_fused_chunk_direct(
         q,
         blob,
         dst,
@@ -393,7 +393,7 @@ def test_fused_direct_matches_split_heads(device, dtype, qbit, rh, precond, asym
 
     direct = bytes(_direct(native, x, qbit, rh, asym, signs, perm))
     ref = bytes(
-        native.kvweave_serialize_chunk_state(
+        native.gha_serialize_chunk_state(
             _split_heads(x).view(-1), _HEADER, 4, num_layers=units, **kwargs
         )
     )
@@ -409,7 +409,7 @@ def test_fused_direct_matches_split_heads(device, dtype, qbit, rh, precond, asym
     assert (_q(d_q) != _q(r_q)).float().mean().item() < 1e-2
 
     expected = _merge_heads(
-        native.kvweave_dequantize_chunk_state(
+        native.gha_dequantize_chunk_state(
             _q(d_q), d_blob, units, _TOKENS, _HEAD_DIM, output_dtype=dtype, **kwargs
         )
     )
@@ -507,12 +507,12 @@ def test_state_per_tensor_round_trip(device, qbit):
     x = _data((_LAYERS, _TOKENS, _HEAD_NUM * _HEAD_DIM))
     kwargs = _state_kwargs(qbit, "per_tensor", False, True, None, None)
     payload = bytes(
-        native.kvweave_serialize_chunk_state(
+        native.gha_serialize_chunk_state(
             x, _HEADER, 5, num_layers=_LAYERS, **kwargs
         )
     )
     blob, q_raw = _split_state_payload(payload)
-    out = native.kvweave_dequantize_chunk_state(
+    out = native.gha_dequantize_chunk_state(
         _q(q_raw),
         blob,
         _LAYERS,
@@ -535,25 +535,25 @@ def test_xpu_state_into_variants_match_the_tensor_api(merge_head_num):
     kwargs = _state_kwargs(4, "per_channel", False, True, None, None)
     planes = _LAYERS * _HEAD_NUM
     expected = bytes(
-        kvweave_quant_xpu.kvweave_serialize_chunk_state(
+        gha_quant_xpu.gha_serialize_chunk_state(
             x, _HEADER, 6, num_layers=planes, **kwargs
         )
     )
     dst = torch.full((len(expected) + 33,), 0xAB, dtype=torch.uint8)
-    n = kvweave_quant_xpu.kvweave_serialize_chunk_state_into(
+    n = gha_quant_xpu.gha_serialize_chunk_state_into(
         x, dst, _HEADER, 6, num_layers=planes, **kwargs
     )
     assert n == len(expected) and bytes(dst[:n].numpy()) == expected
     assert bool((dst[n:] == 0xAB).all())
 
     blob, q_raw = _split_state_payload(expected)
-    ref = kvweave_quant_xpu.kvweave_dequantize_chunk_state(
+    ref = gha_quant_xpu.gha_dequantize_chunk_state(
         _q(q_raw), blob, planes, _TOKENS, _HEAD_DIM, output_dtype=x.dtype, **kwargs
     )
     if merge_head_num:
         ref = _merge_heads(ref)
     out = torch.full(ref.shape, 7.0, dtype=x.dtype)
-    kvweave_quant_xpu.kvweave_dequantize_chunk_state_into(
+    gha_quant_xpu.gha_dequantize_chunk_state_into(
         _q(q_raw),
         blob,
         out.view(-1),
@@ -575,9 +575,9 @@ def test_xpu_state_into_variants_match_the_tensor_api(merge_head_num):
 def test_split_and_merge_fused_heads_are_inverse():
     """The CPU head reorder used around the fused codec round-trips exactly."""
     x = _data((_LAYERS, _TOKENS, _HEAD_NUM * _HEAD_DIM))
-    split = kvweave_quant.kvweave_split_fused_heads(x, _HEAD_NUM, _HEAD_DIM)
+    split = gha_quant.gha_split_fused_heads(x, _HEAD_NUM, _HEAD_DIM)
     assert torch.equal(split.view_as(_split_heads(x)), _split_heads(x))
-    merged = kvweave_quant.kvweave_merge_fused_heads(
+    merged = gha_quant.gha_merge_fused_heads(
         split, _LAYERS, _HEAD_NUM, _HEAD_DIM
     )
     assert torch.equal(merged.view_as(x), x)

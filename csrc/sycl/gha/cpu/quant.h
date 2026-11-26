@@ -29,7 +29,7 @@
 // input). Layouts match torch.float8_e4m3fn and torch.float8_e5m2, and the
 // results match the XPU kernels.
 // ---------------------------------------------------------------------------
-namespace kvweave_fp8 {
+namespace gha_fp8 {
 
 template <int EB, int MB, int BIAS, bool HAS_INF>
 inline float decode_scalar(uint8_t b) {
@@ -89,38 +89,38 @@ inline const float* decode_table() {
   return table.data();
 }
 
-}  // namespace kvweave_fp8
+}  // namespace gha_fp8
 
 // torch.float8_e4m3fn: 1 sign, 4 exponent (bias 7), 3 mantissa, no inf, max
 // 448.
-struct kvweave_fp8_e4m3 {
+struct gha_fp8_e4m3 {
   uint8_t bits;
-  kvweave_fp8_e4m3() = default;
-  explicit kvweave_fp8_e4m3(float f)
-      : bits(kvweave_fp8::encode_scalar<4, 3, 7, 0x7E, false>(f)) {}
+  gha_fp8_e4m3() = default;
+  explicit gha_fp8_e4m3(float f)
+      : bits(gha_fp8::encode_scalar<4, 3, 7, 0x7E, false>(f)) {}
   explicit operator float() const {
-    return kvweave_fp8::decode_table<4, 3, 7, false>()[bits];
+    return gha_fp8::decode_table<4, 3, 7, false>()[bits];
   }
 };
 
 // torch.float8_e5m2: 1 sign, 5 exponent (bias 15), 2 mantissa, IEEE-like, max
 // 57344.
-struct kvweave_fp8_e5m2 {
+struct gha_fp8_e5m2 {
   uint8_t bits;
-  kvweave_fp8_e5m2() = default;
-  explicit kvweave_fp8_e5m2(float f)
-      : bits(kvweave_fp8::encode_scalar<5, 2, 15, 0x7B, true>(f)) {}
+  gha_fp8_e5m2() = default;
+  explicit gha_fp8_e5m2(float f)
+      : bits(gha_fp8::encode_scalar<5, 2, 15, 0x7B, true>(f)) {}
   explicit operator float() const {
-    return kvweave_fp8::decode_table<5, 2, 15, true>()[bits];
+    return gha_fp8::decode_table<5, 2, 15, true>()[bits];
   }
 };
-static_assert(sizeof(kvweave_fp8_e4m3) == 1 && sizeof(kvweave_fp8_e5m2) == 1,
+static_assert(sizeof(gha_fp8_e4m3) == 1 && sizeof(gha_fp8_e5m2) == 1,
               "fp8 types must be one byte");
 
 // The hand-vectorized paths below exist only for these element types; every
 // other type (the fp8 wrappers) takes the scalar loops.
 template <typename T>
-inline constexpr bool kvweave_has_simd_convert_v =
+inline constexpr bool gha_has_simd_convert_v =
     std::is_same_v<T, float> || std::is_same_v<T, _Float16> ||
     std::is_same_v<T, __bf16>;
 
@@ -1431,9 +1431,9 @@ inline void scale_and_zeropoint(float min_val, float max_val, bool asym,
 // normalization pass did: forbid FMA contraction / reassociation where it is
 // combined with other arithmetic (icpx defaults to a fast fp-model).
 #if defined(__clang__)
-  #define KVWEAVE_STRICT_FP _Pragma("clang fp contract(off) reassociate(off)")
+  #define GHA_STRICT_FP _Pragma("clang fp contract(off) reassociate(off)")
 #else
-  #define KVWEAVE_STRICT_FP
+  #define GHA_STRICT_FP
 #endif
 
 // Unnormalized Walsh-Hadamard transform along the row axis of a row-major
@@ -1574,7 +1574,7 @@ void per_channel_block(const kvtype* unit_src, int64_t row_stride, int64_t c0,
     }
   }
   if (p.rh) {
-    KVWEAVE_STRICT_FP
+    GHA_STRICT_FP
     for (int64_t c = 0; c < cb; ++c) {
       min_vals[c] *= norm;
       max_vals[c] *= norm;
@@ -1594,7 +1594,7 @@ void per_channel_block(const kvtype* unit_src, int64_t row_stride, int64_t c0,
   for (int64_t t = 0; t < tokens; ++t) {
     const float* row = buf + t * cb;
     if (p.rh) {
-      KVWEAVE_STRICT_FP
+      GHA_STRICT_FP
       for (int64_t c = 0; c < cb; ++c) {
         const float v = row[c] * norm;
         qrow[c] = static_cast<int8_t>(
@@ -1710,7 +1710,7 @@ void dequant_per_channel_block(const int8_t* unit_q, kvtype* unit_dst,
     const float* row = buf + t * cb;
     kvtype* out = unit_dst + dst_t * row_stride + c0;
     if (p.rh) {
-      KVWEAVE_STRICT_FP
+      GHA_STRICT_FP
       for (int64_t c = 0; c < cb; ++c) {
         out[c] = static_cast<kvtype>((row[c] * norm) * s);
       }

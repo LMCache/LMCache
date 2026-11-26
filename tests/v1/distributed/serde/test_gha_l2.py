@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Tests for the ``kvweave`` L2 serde.
+Tests for the ``gha`` L2 serde.
 
 The serde is driven only through its public surface: the factory-built
 ``SerdeProcessor`` (submit / query / size estimate) and, end to end, the
 ``StorageManager`` L1 -> L2 -> L1 path. Per-group facts come from the serde's
 static ``groups`` kwarg.
 
-The native kvweave extension is required; CPU is always exercised and XPU is
+The native gha extension is required; CPU is always exercised and XPU is
 added when an XPU device is present.
 """
 
@@ -28,13 +28,13 @@ from lmcache.v1.distributed.serde import (
     get_registered_serde_types,
 )
 
-pytest.importorskip("lmcache.kvweave_quant")
+pytest.importorskip("lmcache.gha_quant")
 
 _DEVICES = ["cpu"] + (
     ["xpu"] if torch_device_type == "xpu" and torch_dev.is_available() else []
 )
 
-_MODEL = "kvweave-test-model"
+_MODEL = "gha-test-model"
 _HEADS, _HEAD_DIM = 4, 64
 _HIDDEN = _HEADS * _HEAD_DIM
 
@@ -109,11 +109,11 @@ _UNKNOWN = {"cache_category": "unknown"}
 def _processor(device: str, **extra):
     kwargs = dict(qbit=4, device=device, num_threads=2)
     kwargs.update(extra)
-    return create_serde_processor(SerdeConfig(type="kvweave", kwargs=kwargs))
+    return create_serde_processor(SerdeConfig(type="gha", kwargs=kwargs))
 
 
-def test_kvweave_is_registered() -> None:
-    assert "kvweave" in get_registered_serde_types()
+def test_gha_is_registered() -> None:
+    assert "gha" in get_registered_serde_types()
 
 
 @pytest.mark.parametrize("device", _DEVICES)
@@ -190,7 +190,7 @@ def test_unconfigured_group_layout_is_read_from_the_shape(device, shape) -> None
     """With no ``groups``, [2,L,T,H] is quantized as split K/V and [L,T,H] as
     fused K/V; the size estimate stays exact."""
     processor = create_serde_processor(
-        SerdeConfig(type="kvweave", kwargs={"device": device, "num_threads": 2})
+        SerdeConfig(type="gha", kwargs={"device": device, "num_threads": 2})
     )
     try:
         torch.manual_seed(5)
@@ -206,7 +206,7 @@ def test_unconfigured_group_layout_is_read_from_the_shape(device, shape) -> None
 def test_unconfigured_group_with_other_shapes_passes_through() -> None:
     """A chunk that is neither [2,L,T,H] nor [L,T,H] is never mis-quantized."""
     processor = create_serde_processor(
-        SerdeConfig(type="kvweave", kwargs={"device": "cpu"})
+        SerdeConfig(type="gha", kwargs={"device": "cpu"})
     )
     try:
         x = torch.randn(3, 4, 128, 64).half()  # rank 4 but not a K/V pair
@@ -251,7 +251,7 @@ def test_estimate_depends_on_the_objects_group() -> None:
 
 
 def test_corrupt_payload_fails_instead_of_returning_garbage() -> None:
-    """A buffer that is not a kvweave payload makes the deserialize task fail."""
+    """A buffer that is not a gha payload makes the deserialize task fail."""
     processor = _processor("cpu", groups={0: [_SPLIT]})
     try:
         x = torch.randn(2, 4, 128, _HIDDEN).half()
@@ -284,13 +284,13 @@ def test_per_tensor_uses_one_scale_per_plane() -> None:
 
 def test_invalid_config_is_rejected() -> None:
     with pytest.raises(ValueError, match="qbit"):
-        create_serde_processor(SerdeConfig(type="kvweave", kwargs={"qbit": 3}))
+        create_serde_processor(SerdeConfig(type="gha", kwargs={"qbit": 3}))
     with pytest.raises(ValueError, match="unknown config keys"):
-        create_serde_processor(SerdeConfig(type="kvweave", kwargs={"head_dim": 64}))
+        create_serde_processor(SerdeConfig(type="gha", kwargs={"head_dim": 64}))
     with pytest.raises(ValueError, match="unsupported group keys"):
         create_serde_processor(
             SerdeConfig(
-                type="kvweave",
+                type="gha",
                 kwargs={"groups": {0: [{**_SPLIT, "head_dim": 64}]}},
             )
         )

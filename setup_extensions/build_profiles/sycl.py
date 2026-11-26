@@ -2,9 +2,9 @@
 """SYCL / Intel XPU GPU backend profile.
 
 Builds ``lmcache.xpu_ops`` using the DPC++ compiler (icpx). With
-``BUILD_KVWEAVE=1`` it also builds the optional KVWeave quantization kernels
-(``lmcache.kvweave_quant`` for the host CPU and ``lmcache.kvweave_quant_xpu``);
-KVWeave is only built on this (Intel) platform.
+``BUILD_GHA=1`` it also builds the optional GHA quantization kernels
+(``lmcache.gha_quant`` for the host CPU and ``lmcache.gha_quant_xpu``);
+GHA is only built on this (Intel) platform.
 Requires Intel oneAPI environment to be sourced before building.
 """
 
@@ -31,13 +31,13 @@ from setup_extensions.build_profiles import BuildProfile
 _NO_INTEL_LIB = "-no-intel-lib"
 
 
-def is_kvweave_enabled() -> bool:
-    """Return True when the optional KVWeave kernels should be built.
+def is_gha_enabled() -> bool:
+    """Return True when the optional GHA kernels should be built.
 
-    Controlled by ``BUILD_KVWEAVE`` (default off). Only the SYCL (Intel)
-    profile consults it; other platforms never build KVWeave.
+    Controlled by ``BUILD_GHA`` (default off). Only the SYCL (Intel)
+    profile consults it; other platforms never build GHA.
     """
-    return os.environ.get("BUILD_KVWEAVE", "0") == "1"
+    return os.environ.get("BUILD_GHA", "0") == "1"
 
 
 class SyclProfile(BuildProfile):
@@ -106,15 +106,15 @@ class SyclProfile(BuildProfile):
                 extra_link_args=["-fsycl", _NO_INTEL_LIB],
             ),
         ]
-        if is_kvweave_enabled():
-            ext_modules.extend(self._kvweave_extensions(include_dirs, library_dirs))
+        if is_gha_enabled():
+            ext_modules.extend(self._gha_extensions(include_dirs, library_dirs))
         cmdclass = {"build_ext": cpp_extension.BuildExtension}
         return ext_modules, cmdclass
 
-    def _kvweave_extensions(
+    def _gha_extensions(
         self, include_dirs: list[str], library_dirs: list[str]
     ) -> list["Extension"]:
-        """KVWeave CPU (x86-64 AVX2) and XPU quantization kernels."""
+        """GHA CPU (x86-64 AVX2) and XPU quantization kernels."""
         # Third Party
         from torch.utils import cpp_extension
 
@@ -122,12 +122,12 @@ class SyclProfile(BuildProfile):
         if platform.machine().lower() in {"x86_64", "amd64"}:
             ext_modules.append(
                 cpp_extension.CppExtension(
-                    "lmcache.kvweave_quant",
+                    "lmcache.gha_quant",
                     sources=[
-                        "csrc/sycl/kvweave/cpu/kvweave_quant_wrapper.cpp",
-                        "csrc/sycl/kvweave/cpu/quant.cpp",
+                        "csrc/sycl/gha/cpu/gha_quant_wrapper.cpp",
+                        "csrc/sycl/gha/cpu/quant.cpp",
                     ],
-                    include_dirs=["csrc/sycl/kvweave/cpu"],
+                    include_dirs=["csrc/sycl/gha/cpu"],
                     extra_compile_args={
                         "cxx": [
                             *self.default_cxx_flags(),
@@ -145,15 +145,15 @@ class SyclProfile(BuildProfile):
             )
         else:
             print(
-                "[KVWeave] WARNING: the KVWeave CPU kernels need x86-64; "
-                "skipping lmcache.kvweave_quant"
+                "[GHA] WARNING: the GHA CPU kernels need x86-64; "
+                "skipping lmcache.gha_quant"
             )
         ext_modules.append(
             cpp_extension.CppExtension(
-                "lmcache.kvweave_quant_xpu",
+                "lmcache.gha_quant_xpu",
                 sources=[
-                    "csrc/sycl/kvweave/xpu/kvweave_quant_xpu_wrapper.cpp",
-                    "csrc/sycl/kvweave/xpu/quant_sycl.cpp",
+                    "csrc/sycl/gha/xpu/gha_quant_xpu_wrapper.cpp",
+                    "csrc/sycl/gha/xpu/quant_sycl.cpp",
                 ],
                 include_dirs=include_dirs,
                 library_dirs=library_dirs,
@@ -166,7 +166,7 @@ class SyclProfile(BuildProfile):
                         "-fsycl",
                         "-fno-sycl-id-queries-fit-in-int",
                         "-fp-model=precise",
-                        "-DKVWEAVE_XPU=1",
+                        "-DGHA_XPU=1",
                         _NO_INTEL_LIB,
                     ],
                 },

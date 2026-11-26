@@ -624,7 +624,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         """
         temp_keys = [make_temp_key(k) for k in keys]
         # Size each temp buffer for its own key: a per-group serde (e.g.
-        # kvweave) produces a different upper bound per object group, and one
+        # gha) produces a different upper bound per object group, and one
         # bucket may mix groups. Keys sharing a size share one reserve_write
         # call, so a group-agnostic serde still issues exactly one call.
         buckets: dict[int, tuple[MemoryLayoutDesc, list[ObjectKey]]] = {}

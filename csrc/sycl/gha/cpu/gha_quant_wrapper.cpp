@@ -171,9 +171,9 @@ void dispatch_quantization_kernel(torch::Tensor& src, torch::Tensor& dst,
     } else if (src_type == torch::kBFloat16) {
       run_quantize_kernel<__bf16, int8_t>(src, dst, scale_id, args);
     } else if (src_type == torch::kFloat8_e4m3fn) {
-      run_quantize_kernel<kvweave_fp8_e4m3, int8_t>(src, dst, scale_id, args);
+      run_quantize_kernel<gha_fp8_e4m3, int8_t>(src, dst, scale_id, args);
     } else if (src_type == torch::kFloat8_e5m2) {
-      run_quantize_kernel<kvweave_fp8_e5m2, int8_t>(src, dst, scale_id, args);
+      run_quantize_kernel<gha_fp8_e5m2, int8_t>(src, dst, scale_id, args);
     } else {
       throw std::invalid_argument(
           "Unsupported src dtype for quantization (int8 destination).");
@@ -186,9 +186,9 @@ void dispatch_quantization_kernel(torch::Tensor& src, torch::Tensor& dst,
     } else if (src_type == torch::kBFloat16) {
       run_quantize_kernel<__bf16, int16_t>(src, dst, scale_id, args);
     } else if (src_type == torch::kFloat8_e4m3fn) {
-      run_quantize_kernel<kvweave_fp8_e4m3, int16_t>(src, dst, scale_id, args);
+      run_quantize_kernel<gha_fp8_e4m3, int16_t>(src, dst, scale_id, args);
     } else if (src_type == torch::kFloat8_e5m2) {
-      run_quantize_kernel<kvweave_fp8_e5m2, int16_t>(src, dst, scale_id, args);
+      run_quantize_kernel<gha_fp8_e5m2, int16_t>(src, dst, scale_id, args);
     } else {
       throw std::invalid_argument(
           "Unsupported src dtype for quantization (int16 destination).");
@@ -212,9 +212,9 @@ void dispatch_dequantization(torch::Tensor& src, torch::Tensor& dst,
     } else if (dst_type == torch::kBFloat16) {
       run_dequantize<__bf16, int8_t>(src, dst, scale_id, args);
     } else if (dst_type == torch::kFloat8_e4m3fn) {
-      run_dequantize<kvweave_fp8_e4m3, int8_t>(src, dst, scale_id, args);
+      run_dequantize<gha_fp8_e4m3, int8_t>(src, dst, scale_id, args);
     } else if (dst_type == torch::kFloat8_e5m2) {
-      run_dequantize<kvweave_fp8_e5m2, int8_t>(src, dst, scale_id, args);
+      run_dequantize<gha_fp8_e5m2, int8_t>(src, dst, scale_id, args);
     } else {
       throw std::invalid_argument(
           "Unsupported destination dtype for int8 source.");
@@ -227,9 +227,9 @@ void dispatch_dequantization(torch::Tensor& src, torch::Tensor& dst,
     } else if (dst_type == torch::kBFloat16) {
       run_dequantize<__bf16, int16_t>(src, dst, scale_id, args);
     } else if (dst_type == torch::kFloat8_e4m3fn) {
-      run_dequantize<kvweave_fp8_e4m3, int16_t>(src, dst, scale_id, args);
+      run_dequantize<gha_fp8_e4m3, int16_t>(src, dst, scale_id, args);
     } else if (dst_type == torch::kFloat8_e5m2) {
-      run_dequantize<kvweave_fp8_e5m2, int16_t>(src, dst, scale_id, args);
+      run_dequantize<gha_fp8_e5m2, int16_t>(src, dst, scale_id, args);
     } else {
       throw std::invalid_argument(
           "Unsupported destination dtype for int16 source.");
@@ -253,9 +253,9 @@ void dispatch_dequantization_kernel(torch::Tensor& src, torch::Tensor& dst,
     } else if (dst_type == torch::kBFloat16) {
       run_dequantize_kernel<__bf16, int8_t>(src, dst, scale_id, args);
     } else if (dst_type == torch::kFloat8_e4m3fn) {
-      run_dequantize_kernel<kvweave_fp8_e4m3, int8_t>(src, dst, scale_id, args);
+      run_dequantize_kernel<gha_fp8_e4m3, int8_t>(src, dst, scale_id, args);
     } else if (dst_type == torch::kFloat8_e5m2) {
-      run_dequantize_kernel<kvweave_fp8_e5m2, int8_t>(src, dst, scale_id, args);
+      run_dequantize_kernel<gha_fp8_e5m2, int8_t>(src, dst, scale_id, args);
     } else {
       throw std::invalid_argument(
           "Unsupported destination dtype for int8 source.");
@@ -268,10 +268,10 @@ void dispatch_dequantization_kernel(torch::Tensor& src, torch::Tensor& dst,
     } else if (dst_type == torch::kBFloat16) {
       run_dequantize_kernel<__bf16, int16_t>(src, dst, scale_id, args);
     } else if (dst_type == torch::kFloat8_e4m3fn) {
-      run_dequantize_kernel<kvweave_fp8_e4m3, int16_t>(src, dst, scale_id,
+      run_dequantize_kernel<gha_fp8_e4m3, int16_t>(src, dst, scale_id,
                                                        args);
     } else if (dst_type == torch::kFloat8_e5m2) {
-      run_dequantize_kernel<kvweave_fp8_e5m2, int16_t>(src, dst, scale_id,
+      run_dequantize_kernel<gha_fp8_e5m2, int16_t>(src, dst, scale_id,
                                                        args);
     } else {
       throw std::invalid_argument(
@@ -516,7 +516,7 @@ static bool use_per_layer_quantization(int64_t num_layers,
 // -----------------------------------------------------------------------
 
 // Fused dequantization of a layerwise K/V chunk.
-torch::Tensor kvweave_dequantize_chunk_py(
+torch::Tensor gha_dequantize_chunk_py(
     torch::Tensor q_data, pybind11::bytes k_scale_bytes,
     pybind11::bytes v_scale_bytes, int64_t num_layers, int64_t chunk_tokens,
     int64_t h_merged, int qbit, int blocks_num, int block_size, int head_num,
@@ -668,7 +668,7 @@ torch::Tensor kvweave_dequantize_chunk_py(
   return result;
 }
 
-void kvweave_dequantize_chunk_into_4d_py(
+void gha_dequantize_chunk_into_4d_py(
     torch::Tensor q_data, pybind11::bytes k_scale_bytes,
     pybind11::bytes v_scale_bytes, torch::Tensor dst, int64_t num_layers,
     int64_t chunk_tokens, int64_t h_merged, int qbit, int blocks_num,
@@ -836,21 +836,21 @@ void kvweave_dequantize_chunk_into_4d_py(
   dequantize_one_half_releasing_gil(q_v, out_v, scale_id_v, v_scales, args);
 }
 
-// Quantize K+V and pack the KVW2 payload in C++. The GIL is released for each
+// Quantize K+V and pack the GHA2 payload in C++. The GIL is released for each
 // kernel.
 //
 // Arguments:
 //   src          : [2, L, T, H*D] contiguous CPU tensor (fp16/bf16/fp32)
-//   header_bytes : KVW2 header bytes (magic + metadata + precond + shape),
+//   header_bytes : GHA2 header bytes (magic + metadata + precond + shape),
 //                  built once in Python and reused across calls.
 //   scale_id_k   : scale ID for K quantization (unique per call)
 //   scale_id_v   : scale ID for V quantization (unique per call)
 //   qbit, blocks_num, block_size, head_num, head_dim, rh, asym, scaling_method,
 //   signs, perm, num_threads : quantization parameters.
 //
-// Returns: complete KVW2 payload bytes (header + scale_section + q_data),
+// Returns: complete GHA2 payload bytes (header + scale_section + q_data),
 //          ready for direct disk write.
-pybind11::object kvweave_serialize_chunk_py(
+pybind11::object gha_serialize_chunk_py(
     torch::Tensor src, pybind11::bytes header_bytes, int64_t scale_id_k,
     int64_t scale_id_v, int qbit, int blocks_num, int block_size, int head_num,
     int head_dim, int64_t num_layers, bool rh, bool asym,
@@ -895,7 +895,7 @@ pybind11::object kvweave_serialize_chunk_py(
                               (sizeof(uint32_t) + 2 * sizeof(float)));
   if (blob_len > UINT32_MAX) {
     throw std::runtime_error(
-        "kvweave scale blob exceeds uint32 length framing limit");
+        "gha scale blob exceeds uint32 length framing limit");
   }
   const size_t item_bytes = (qbit <= 8) ? 1 : 2;
   const int64_t q_half_numel = quantized_numel_for_qbit(half_numel, qbit);
@@ -1036,7 +1036,7 @@ pybind11::object kvweave_serialize_chunk_py(
 
   if (k_scale_data.size() != blob_len || v_scale_data.size() != blob_len) {
     throw std::runtime_error(
-        "kvweave scale blob size does not match its layout");
+        "gha scale blob size does not match its layout");
   }
   auto put_be32 = [](uint8_t* at, uint32_t v) {
     at[0] = static_cast<uint8_t>((v >> 24) & 0xFF);
@@ -1056,8 +1056,8 @@ pybind11::object kvweave_serialize_chunk_py(
   return result;
 }
 
-// Single-tensor variant of kvweave_serialize_chunk_py (no K/V split).
-pybind11::bytes kvweave_serialize_chunk_state_py(
+// Single-tensor variant of gha_serialize_chunk_py (no K/V split).
+pybind11::bytes gha_serialize_chunk_state_py(
     torch::Tensor src, pybind11::bytes header_bytes, int64_t scale_id, int qbit,
     int blocks_num, int block_size, int head_num, int head_dim,
     int64_t num_layers, bool rh, bool asym, const std::string& scaling_method,
@@ -1099,7 +1099,7 @@ pybind11::bytes kvweave_serialize_chunk_state_py(
   std::string hdr_str(header_bytes);
   if (scale_data.size() > UINT32_MAX) {
     throw std::runtime_error(
-        "kvweave scale blob exceeds uint32 length framing limit");
+        "gha scale blob exceeds uint32 length framing limit");
   }
   uint32_t scale_len = static_cast<uint32_t>(scale_data.size());
   size_t item_bytes = (qbit <= 8) ? 1 : 2;
@@ -1128,8 +1128,8 @@ pybind11::bytes kvweave_serialize_chunk_state_py(
   return pybind11::bytes(out);
 }
 
-// Single-tensor variant of kvweave_dequantize_chunk_py.
-torch::Tensor kvweave_dequantize_chunk_state_py(
+// Single-tensor variant of gha_dequantize_chunk_py.
+torch::Tensor gha_dequantize_chunk_state_py(
     torch::Tensor q_data, pybind11::bytes scale_bytes, int64_t num_layers,
     int64_t chunk_tokens, int64_t h_merged, int qbit, int blocks_num,
     int block_size, int head_num, int head_dim, bool rh, bool asym,
@@ -1185,7 +1185,7 @@ torch::Tensor kvweave_dequantize_chunk_state_py(
 }
 
 // Reorder [layers, tokens, H*D] into [layers*H, tokens, D] (OpenMP).
-torch::Tensor kvweave_split_fused_heads_py(
+torch::Tensor gha_split_fused_heads_py(
     torch::Tensor src, int64_t head_num, int64_t head_dim, int num_threads = 0,
     c10::optional<torch::Tensor> out_opt = c10::nullopt) {
   ensure_cpu_tensor(src, "src");
@@ -1228,7 +1228,7 @@ torch::Tensor kvweave_split_fused_heads_py(
 
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::kHalf, at::kBFloat16, src_contig.scalar_type(),
-      "kvweave_split_fused_heads", [&] {
+      "gha_split_fused_heads", [&] {
         Py_BEGIN_ALLOW_THREADS split_fused_attention_heads_native<scalar_t>(
             src_contig.data_ptr<scalar_t>(), dst.data_ptr<scalar_t>(), layers,
             tokens, head_num, head_dim, num_threads);
@@ -1237,10 +1237,10 @@ torch::Tensor kvweave_split_fused_heads_py(
   return dst;
 }
 
-// Inverse of kvweave_split_fused_heads_py: merges
+// Inverse of gha_split_fused_heads_py: merges
 // [layers*head_num, tokens, head_dim] back into [layers, tokens,
 // head_num*head_dim].
-torch::Tensor kvweave_merge_fused_heads_py(
+torch::Tensor gha_merge_fused_heads_py(
     torch::Tensor src, int64_t layers, int64_t head_num, int64_t head_dim,
     int num_threads = 0, c10::optional<torch::Tensor> out_opt = c10::nullopt) {
   ensure_cpu_tensor(src, "src");
@@ -1282,7 +1282,7 @@ torch::Tensor kvweave_merge_fused_heads_py(
 
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::kHalf, at::kBFloat16, src_contig.scalar_type(),
-      "kvweave_merge_fused_heads", [&] {
+      "gha_merge_fused_heads", [&] {
         Py_BEGIN_ALLOW_THREADS merge_fused_attention_heads_native<scalar_t>(
             src_contig.data_ptr<scalar_t>(), dst.data_ptr<scalar_t>(), layers,
             tokens, head_num, head_dim, num_threads);
@@ -1292,10 +1292,10 @@ torch::Tensor kvweave_merge_fused_heads_py(
 }
 
 // Quantizes fused [layers, tokens, head_num*head_dim] attention without a head
-// split. Payload bytes match kvweave_serialize_chunk_state run on the split
+// split. Payload bytes match gha_serialize_chunk_state run on the split
 // [layers*head_num, tokens, head_dim] tensor (scale entries are emitted in
 // index order).
-pybind11::object kvweave_serialize_fused_chunk_direct_py(
+pybind11::object gha_serialize_fused_chunk_direct_py(
     torch::Tensor src, pybind11::bytes header_bytes, int qbit, int64_t head_num,
     int64_t head_dim, bool rh, bool asym, const std::string& scaling_method,
     c10::optional<torch::Tensor> signs_opt,
@@ -1385,7 +1385,7 @@ pybind11::object kvweave_serialize_fused_chunk_direct_py(
       (sizeof(uint32_t) + static_cast<size_t>(nchunks) * entry_size);
   if (scale_len > UINT32_MAX) {
     throw std::runtime_error(
-        "kvweave scale blob exceeds uint32 length framing limit");
+        "gha scale blob exceeds uint32 length framing limit");
   }
   std::string hdr_str(header_bytes);
   const size_t q_bytes = static_cast<size_t>(units * unit_q_bytes);
@@ -1435,13 +1435,13 @@ pybind11::object kvweave_serialize_fused_chunk_direct_py(
                                   scales.data(), zps.data(), params);
   }
   else if (dtype == torch::kFloat8_e4m3fn) {
-    quantize_fused_direct<kvweave_fp8_e4m3>(
-        static_cast<const kvweave_fp8_e4m3*>(src_ptr), q_dst, scales.data(),
+    quantize_fused_direct<gha_fp8_e4m3>(
+        static_cast<const gha_fp8_e4m3*>(src_ptr), q_dst, scales.data(),
         zps.data(), params);
   }
   else if (dtype == torch::kFloat8_e5m2) {
-    quantize_fused_direct<kvweave_fp8_e5m2>(
-        static_cast<const kvweave_fp8_e5m2*>(src_ptr), q_dst, scales.data(),
+    quantize_fused_direct<gha_fp8_e5m2>(
+        static_cast<const gha_fp8_e5m2*>(src_ptr), q_dst, scales.data(),
         zps.data(), params);
   }
   else {
@@ -1469,10 +1469,10 @@ pybind11::object kvweave_serialize_fused_chunk_direct_py(
   return result;
 }
 
-// Inverse of kvweave_serialize_fused_chunk_direct: dequantizes per-(layer,
+// Inverse of gha_serialize_fused_chunk_direct: dequantizes per-(layer,
 // head) unit planes and writes them straight into fused dst [layers, tokens,
 // head_num*head_dim], skipping the split-plane temporary and head merge.
-void kvweave_dequantize_fused_chunk_direct_py(
+void gha_dequantize_fused_chunk_direct_py(
     torch::Tensor q_data, pybind11::bytes scale_bytes, torch::Tensor dst,
     int64_t layers, int64_t tokens, int64_t head_num, int64_t head_dim,
     int qbit, bool rh, bool asym, const std::string& scaling_method,
@@ -1607,13 +1607,13 @@ void kvweave_dequantize_fused_chunk_direct_py(
                                     scales.data(), zps.data(), params);
   }
   else if (dtype == torch::kFloat8_e4m3fn) {
-    dequantize_fused_direct<kvweave_fp8_e4m3>(
-        q_ptr, static_cast<kvweave_fp8_e4m3*>(dst_ptr), scales.data(),
+    dequantize_fused_direct<gha_fp8_e4m3>(
+        q_ptr, static_cast<gha_fp8_e4m3*>(dst_ptr), scales.data(),
         zps.data(), params);
   }
   else if (dtype == torch::kFloat8_e5m2) {
-    dequantize_fused_direct<kvweave_fp8_e5m2>(
-        q_ptr, static_cast<kvweave_fp8_e5m2*>(dst_ptr), scales.data(),
+    dequantize_fused_direct<gha_fp8_e5m2>(
+        q_ptr, static_cast<gha_fp8_e5m2*>(dst_ptr), scales.data(),
         zps.data(), params);
   }
   else {
@@ -1623,10 +1623,10 @@ void kvweave_dequantize_fused_chunk_direct_py(
   Py_END_ALLOW_THREADS
 }
 
-PYBIND11_MODULE(kvweave_quant, m) {
-  m.doc() = "PyBind11 bindings for kvweave quantization utilities";
+PYBIND11_MODULE(gha_quant, m) {
+  m.doc() = "PyBind11 bindings for gha quantization utilities";
 
-  m.def("kvweave_dequantize_chunk", &kvweave_dequantize_chunk_py,
+  m.def("gha_dequantize_chunk", &gha_dequantize_chunk_py,
         pybind11::arg("q_data"), pybind11::arg("k_scale_bytes"),
         pybind11::arg("v_scale_bytes"), pybind11::arg("num_layers"),
         pybind11::arg("chunk_tokens"), pybind11::arg("h_merged"),
@@ -1646,7 +1646,7 @@ reduces Python overhead and intermediate copies while preserving the same math.
 )doc");
 
   m.def(
-      "kvweave_dequantize_chunk_into_4d", &kvweave_dequantize_chunk_into_4d_py,
+      "gha_dequantize_chunk_into_4d", &gha_dequantize_chunk_into_4d_py,
       pybind11::arg("q_data"), pybind11::arg("k_scale_bytes"),
       pybind11::arg("v_scale_bytes"), pybind11::arg("dst"),
       pybind11::arg("num_layers"), pybind11::arg("chunk_tokens"),
@@ -1662,7 +1662,7 @@ reduces Python overhead and intermediate copies while preserving the same math.
       R"doc(Dequantize K+V quant payloads directly into contiguous [2, L, T, H] dst.
 
 This path writes each half into its final destination layout and avoids the
-    extra allocate-and-copy step used by kvweave_dequantize_chunk().
+    extra allocate-and-copy step used by gha_dequantize_chunk().
 
     For multi-layer per_token/per_channel/per_tensor payloads, `layer_num_threads`
     can be used to parallelize the per-layer loop experimentally instead of relying
@@ -1670,7 +1670,7 @@ This path writes each half into its final destination layout and avoids the
 )doc");
 
   // All-in-one serialize (quantize + pack header+scales+qdata in C++).
-  m.def("kvweave_serialize_chunk", &kvweave_serialize_chunk_py,
+  m.def("gha_serialize_chunk", &gha_serialize_chunk_py,
         pybind11::arg("src"), pybind11::arg("header_bytes"),
         pybind11::arg("scale_id_k"), pybind11::arg("scale_id_v"),
         pybind11::arg("qbit"), pybind11::arg("blocks_num"),
@@ -1683,7 +1683,7 @@ This path writes each half into its final destination layout and avoids the
         pybind11::arg("perm") = c10::optional<torch::Tensor>(),
         pybind11::arg("num_threads") = 0,
         pybind11::arg("out") = c10::optional<torch::Tensor>(),
-        R"doc(Quantize K+V and pack complete KVW2 payload in C++.
+        R"doc(Quantize K+V and pack complete GHA2 payload in C++.
 
 Eliminates Python GIL-held buffer copies (bytearray() + tobytes()).
 The GIL is released for each quantization kernel, allowing 8 workers
@@ -1691,7 +1691,7 @@ to run their quant kernels in parallel.
 
 Arguments:
     src (torch.Tensor): [2, L, T, H*D] contiguous CPU tensor (fp16/bf16/fp32).
-    header_bytes (bytes): Pre-built KVW2 header (magic+metadata+precond+shape).
+    header_bytes (bytes): Pre-built GHA2 header (magic+metadata+precond+shape).
     scale_id_k, scale_id_v (int): Unique scale IDs for K and V halves.
     qbit, blocks_num, block_size: Layout metadata.
     num_layers (int): Number of layers packed in the tensor. When > 1 with
@@ -1705,13 +1705,13 @@ Arguments:
     signs, perm (torch.Tensor, optional): Preconditioning tensors.
     num_threads (int): OpenMP threads. 0 = omp_get_max_threads().
 
-Returns: bytes — complete KVW2 payload (header + scales + q_data); with
+Returns: bytes — complete GHA2 payload (header + scales + q_data); with
          ``out`` (contiguous uint8, large enough) the payload is written
          there instead and its length is returned.
 )doc");
 
   m.def(
-      "kvweave_serialize_chunk_state", &kvweave_serialize_chunk_state_py,
+      "gha_serialize_chunk_state", &gha_serialize_chunk_state_py,
       pybind11::arg("src"), pybind11::arg("header_bytes"),
       pybind11::arg("scale_id"), pybind11::arg("qbit"),
       pybind11::arg("blocks_num"), pybind11::arg("block_size"),
@@ -1724,7 +1724,7 @@ Returns: bytes — complete KVW2 payload (header + scales + q_data); with
       pybind11::arg("num_threads") = 0,
       R"doc(Quantize a single tensor (no K/V split) and pack a complete payload in C++.
 
-Single-tensor analog of kvweave_serialize_chunk, for payloads with no real
+Single-tensor analog of gha_serialize_chunk, for payloads with no real
 K/V split (e.g. fused-K/V attention chunks).
 
 Arguments:
@@ -1750,7 +1750,7 @@ Returns: bytes — complete payload (header + scale_section + q_data).
 )doc");
 
   m.def(
-      "kvweave_dequantize_chunk_state", &kvweave_dequantize_chunk_state_py,
+      "gha_dequantize_chunk_state", &gha_dequantize_chunk_state_py,
       pybind11::arg("q_data"), pybind11::arg("scale_bytes"),
       pybind11::arg("num_layers"), pybind11::arg("chunk_tokens"),
       pybind11::arg("h_merged"), pybind11::arg("qbit"),
@@ -1764,34 +1764,34 @@ Returns: bytes — complete payload (header + scale_section + q_data).
       pybind11::arg("num_threads") = 0,
       R"doc(Dequantize a single-tensor (no K/V split) quant payload in one call.
 
-Single-tensor analog of kvweave_dequantize_chunk, for payloads with no real
+Single-tensor analog of gha_dequantize_chunk, for payloads with no real
 K/V split (e.g. fused-K/V attention chunks). Returns shape
 [num_layers, chunk_tokens, h_merged].
 )doc");
 
-  m.def("kvweave_split_fused_heads", &kvweave_split_fused_heads_py,
+  m.def("gha_split_fused_heads", &gha_split_fused_heads_py,
         pybind11::arg("src"), pybind11::arg("head_num"),
         pybind11::arg("head_dim"), pybind11::arg("num_threads") = 0,
         pybind11::arg("out") = c10::optional<torch::Tensor>(),
         R"doc(Reorder [layers, tokens, head_num*head_dim] into
 [layers*head_num, tokens, head_dim] via a native OpenMP-parallel copy --
-an alternative to _KVWeaveCodec.split_fused_attention_heads's ATen
+an alternative to _GHACodec.split_fused_attention_heads's ATen
 permute()/reshape()/copy_() for the same reorder. Pass `out` to write
 directly into a pre-allocated buffer instead of allocating a fresh tensor.
 )doc");
 
-  m.def("kvweave_merge_fused_heads", &kvweave_merge_fused_heads_py,
+  m.def("gha_merge_fused_heads", &gha_merge_fused_heads_py,
         pybind11::arg("src"), pybind11::arg("layers"),
         pybind11::arg("head_num"), pybind11::arg("head_dim"),
         pybind11::arg("num_threads") = 0,
         pybind11::arg("out") = c10::optional<torch::Tensor>(),
-        R"doc(Inverse of kvweave_split_fused_heads: merges
+        R"doc(Inverse of gha_split_fused_heads: merges
 [layers*head_num, tokens, head_dim] back into [layers, tokens, head_num*head_dim].
 Pass `out` to write directly into a pre-allocated buffer.
 )doc");
 
-  m.def("kvweave_serialize_fused_chunk_direct",
-        &kvweave_serialize_fused_chunk_direct_py, pybind11::arg("src"),
+  m.def("gha_serialize_fused_chunk_direct",
+        &gha_serialize_fused_chunk_direct_py, pybind11::arg("src"),
         pybind11::arg("header_bytes"), pybind11::arg("qbit"),
         pybind11::arg("head_num"), pybind11::arg("head_dim"),
         pybind11::arg("rh") = false, pybind11::arg("asym") = false,
@@ -1802,14 +1802,14 @@ Pass `out` to write directly into a pre-allocated buffer.
         pybind11::arg("out") = c10::optional<torch::Tensor>(),
         R"doc(Quantize fused [layers, tokens, head_num*head_dim] attention per
 (layer, head) without a separate head-split copy. Produces the same payload as
-kvweave_serialize_chunk_state on the split tensor with num_layers=layers*head_num.
+gha_serialize_chunk_state on the split tensor with num_layers=layers*head_num.
 Supports per_channel only. Returns bytes, or the written length when `out`
 (contiguous uint8 tensor) is given.
 )doc");
 
   m.def(
-      "kvweave_dequantize_fused_chunk_direct",
-      &kvweave_dequantize_fused_chunk_direct_py, pybind11::arg("q_data"),
+      "gha_dequantize_fused_chunk_direct",
+      &gha_dequantize_fused_chunk_direct_py, pybind11::arg("q_data"),
       pybind11::arg("scale_bytes"), pybind11::arg("dst"),
       pybind11::arg("layers"), pybind11::arg("tokens"),
       pybind11::arg("head_num"), pybind11::arg("head_dim"),
@@ -1819,7 +1819,7 @@ Supports per_channel only. Returns bytes, or the written length when `out`
       pybind11::arg("signs") = c10::optional<torch::Tensor>(),
       pybind11::arg("perm") = c10::optional<torch::Tensor>(),
       pybind11::arg("num_threads") = 0,
-      R"doc(Inverse of kvweave_serialize_fused_chunk_direct: dequantize the per-(layer,
+      R"doc(Inverse of gha_serialize_fused_chunk_direct: dequantize the per-(layer,
 head) q planes + scale blob and write straight into the contiguous fused dst
 [layers, tokens, head_num*head_dim] (no split temporary, no head merge).
 Supports per_channel only.

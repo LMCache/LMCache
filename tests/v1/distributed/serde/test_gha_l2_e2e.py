@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-End-to-end test of the ``kvweave`` L2 serde through ``StorageManager``.
+End-to-end test of the ``gha`` L2 serde through ``StorageManager``.
 
 Chunks of two object groups with different shapes are written to L1 in the same
 batch; the store controller hands them to one serde-wrapped L2 adapter, so the
@@ -33,7 +33,7 @@ from tests.v1.distributed.serde.test_serde_e2e import (
     wait_for_condition,
 )
 
-pytest.importorskip("lmcache.kvweave_quant")
+pytest.importorskip("lmcache.gha_quant")
 if not torch_dev.is_available():
     pytest.skip(
         f"Requires available {torch_device_type} runtime", allow_module_level=True
@@ -87,7 +87,7 @@ def _prefetch(sm: StorageManager, keys, layout, group: int) -> int:
 def test_mixed_groups_round_trip_through_l2() -> None:
     adapter = MockL2AdapterConfig(max_size_gb=0.1, mock_bandwidth_gb=10.0)
     adapter.serde_config = SerdeConfig(
-        type="kvweave",
+        type="gha",
         kwargs={
             "qbit": 4,
             "device": "cpu",

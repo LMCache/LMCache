@@ -70,10 +70,10 @@ serde factory.
      - ``key_provider`` (default ``hkdf``), ``master_key_path`` (required
        for ``hkdf``), ``aes_bits`` (``128`` default, or ``256``),
        ``max_workers`` (thread pool size, default 1)
-   * - ``kvweave``
+   * - ``gha``
      - Intel only. 4/8-bit quantization of attention KV with native CPU /
        XPU kernels; MLA and unrecognized groups are stored unchanged.
-     - See `KVWeave serde (Intel)`_.
+     - See `GHA serde (Intel)`_.
 
 
 TurboQuant serde
@@ -121,22 +121,22 @@ Supported presets:
      - 3-bit value quantization
 
 
-KVWeave serde (Intel)
+GHA serde (Intel)
 ---------------------
 
-KVWeave quantizes attention K/V to 4 or 8 bits on the way to L2 and restores
+GHA quantizes attention K/V to 4 or 8 bits on the way to L2 and restores
 it on load, with native kernels for Intel CPUs and Intel XPUs. It is
 **Intel-only** and not built by default: build LMCache with the SYCL (Intel
-XPU) backend and ``BUILD_KVWEAVE=1``:
+XPU) backend and ``BUILD_GHA=1``:
 
 .. code-block:: bash
 
     # oneAPI's icpx must be on PATH (SYCL build profile)
-    BUILD_KVWEAVE=1 pip install -e . --no-build-isolation
+    BUILD_GHA=1 pip install -e . --no-build-isolation
 
-This builds ``lmcache.kvweave_quant`` (x86-64 host CPU, AVX2 required) and
-``lmcache.kvweave_quant_xpu``. On any other platform the modules are not
-built and configuring ``"type": "kvweave"`` raises an error.
+This builds ``lmcache.gha_quant`` (x86-64 host CPU, AVX2 required) and
+``lmcache.gha_quant_xpu``. On any other platform the modules are not
+built and configuring ``"type": "gha"`` raises an error.
 
 .. code-block:: bash
 
@@ -146,7 +146,7 @@ built and configuring ``"type": "kvweave"`` raises an error.
         --l2-adapter '{
             "type": "fs",
             "base_path": "/data/lmcache/l2",
-            "serde": {"type": "kvweave", "qbit": 4, "device": "xpu"}
+            "serde": {"type": "gha", "qbit": 4, "device": "xpu"}
         }'
 
 No model geometry (head count / head size) is needed. The scaling depends on
@@ -166,7 +166,7 @@ how the engine lays out K/V:
      - one scale per plane
      - one scale per plane
 
-.. list-table:: KVWeave config fields
+.. list-table:: GHA config fields
    :header-rows: 1
    :widths: 25 20 55
 

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Configuration and preconditioner support for the KVWeave L2 serde.
+"""Configuration and preconditioner support for the GHA L2 serde.
 
 Everything here is resolved from the serde's JSON kwargs (the ``"serde"`` dict
 of an L2 adapter spec); nothing reads environment variables or a model
@@ -53,8 +53,8 @@ class AttentionPlaneLayout(Enum):
 
 
 @dataclass
-class KVWeaveCodecConfig:
-    """Typed settings shared by the KVWeave codec and preconditioner."""
+class GHACodecConfig:
+    """Typed settings shared by the GHA codec and preconditioner."""
 
     qbit: int = 4
     scaling_method: str = "per_channel"
@@ -63,8 +63,8 @@ class KVWeaveCodecConfig:
     precond: bool = False
     num_threads: int = 8
     precond_seed: int = 42
-    MAGIC_QUANT: ClassVar[bytes] = b"KVW3"
-    MAGIC_QUANT_FUSED: ClassVar[bytes] = b"KVW4"
+    MAGIC_QUANT: ClassVar[bytes] = b"GHA3"
+    MAGIC_QUANT_FUSED: ClassVar[bytes] = b"GHA4"
     DTYPE_TO_CODE: ClassVar[dict[torch.dtype, int]] = {
         torch.float16: 0,
         torch.bfloat16: 1,
@@ -95,7 +95,7 @@ class KVWeaveCodecConfig:
 
     @classmethod
     def next_scale_id(cls) -> int:
-        """Allocate a process-wide scale id for native KVWeave state."""
+        """Allocate a process-wide scale id for native GHA state."""
         return next(cls.SCALE_IDS) & 0xFFFFFFFF
 
     @classmethod
