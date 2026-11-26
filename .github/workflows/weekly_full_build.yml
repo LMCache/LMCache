@@ -3,7 +3,8 @@ name: Weekly full build
 # Orchestrates the weekly CUDA, Intel XPU, AMD ROCm, and RBLN suites from a
 # single schedule and produces one combined workflow run. Each device suite
 # lives in its own workflow file (weekly_full_build_<device>.yml) so it can
-# also be dispatched or maintained independently.
+# be maintained independently, while manual and scheduled runs always go
+# through this orchestrator.
 #
 # Sunday 08:00 UTC is the quietest window of the k8s CUDA GPU queue in the
 # 30-day PR CI baseline (2026-10-17 to 2026-11-15): 0.6 of 16 GPUs busy on
