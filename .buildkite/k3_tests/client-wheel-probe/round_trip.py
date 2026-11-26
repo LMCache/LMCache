@@ -90,6 +90,8 @@ def main():
                     str(server_http),
                     "--l1-size-gb",
                     "1",
+                    "--eviction-policy",
+                    "LRU",
                     "--max-workers",
                     "2",
                     "--supported-transfer-mode",
