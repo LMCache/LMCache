@@ -646,6 +646,22 @@ class TestConfig:
         with pytest.raises(ValueError):
             S3L2AdapterConfig.from_dict(d)
 
+    def test_per_salt_needs_a_virtual_hosted_endpoint(self):
+        """A bucket-only endpoint would silently put every tenant in one
+        bucket, so it is refused."""
+        with pytest.raises(ValueError, match="virtual-hosted"):
+            S3L2AdapterConfig.from_dict(
+                {
+                    "s3_endpoint": "s3://my-bucket",
+                    "s3_region": "us-east-1",
+                    "s3_bucket_mode": "per_cache_salt",
+                }
+            )
+        # Single mode keeps accepting it.
+        S3L2AdapterConfig.from_dict(
+            {"s3_endpoint": "s3://my-bucket", "s3_region": "us-east-1"}
+        )
+
     def test_help_lists_new_fields(self):
         text = S3L2AdapterConfig.help()
         for field in (

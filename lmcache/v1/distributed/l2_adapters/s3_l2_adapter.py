@@ -406,9 +406,16 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         # config time rather than on the first request in per_cache_salt mode.
         if s3_bucket_mode == "per_cache_salt":
             template = s3_bucket_template or _bucket_router.DEFAULT_TEMPLATE
-            base_bucket = _bucket_router.bucket_of_host(
-                s3_endpoint.removeprefix("s3://")
-            )
+            host = s3_endpoint.removeprefix("s3://")
+            if "." not in host:
+                # Without a host suffix there is nowhere to route a tenant
+                # bucket, and every key would silently share the base bucket.
+                raise ValueError(
+                    "s3_bucket_mode 'per_cache_salt' needs a virtual-hosted "
+                    "s3_endpoint ('s3://<bucket>.s3.<region>.amazonaws.com'), "
+                    f"got {s3_endpoint!r}"
+                )
+            base_bucket = _bucket_router.bucket_of_host(host)
             try:
                 _bucket_router.validate_template(template, base_bucket)
             except (KeyError, ValueError, IndexError) as e:
