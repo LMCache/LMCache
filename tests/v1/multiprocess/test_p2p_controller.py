@@ -4,7 +4,7 @@ Tests for P2PController lookup jobs, locks, discovery and adapter lifecycle.
 """
 
 # Standard
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # Third Party
 import httpx
@@ -599,6 +599,45 @@ def test_reconcile_removes_peer_after_grace():
 
     ctx.storage_manager.delete_l2_adapter.assert_called_once_with(7)
     assert controller.report_status()["p2p_peers"] == []
+
+
+def test_reconcile_retries_a_removal_the_storage_manager_refused():
+    """An adapter can refuse to close while it is still in use; the
+    controller keeps retrying the removal on later cycles until it succeeds,
+    without re-adding the peer."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+    ctx.storage_manager.delete_l2_adapter.side_effect = [
+        RuntimeError("still in use"),
+        RuntimeError("still in use"),
+        None,
+    ]
+
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+    for _ in range(_MAX_MISSES + 1):
+        controller._apply_state(_P2PState.REGISTERED, {})
+    assert ctx.storage_manager.delete_l2_adapter.call_count == 1
+    assert controller.report_status()["p2p_peers"] == []
+
+    controller._apply_state(_P2PState.REGISTERED, {})
+    controller._apply_state(_P2PState.REGISTERED, {})
+    controller._apply_state(_P2PState.REGISTERED, {})
+    assert ctx.storage_manager.delete_l2_adapter.call_count == 3
+    assert ctx.storage_manager.add_l2_adapter.call_count == 1
+
+
+def test_close_keeps_the_transfer_channel_under_an_unremoved_adapter():
+    """An adapter that refuses removal may still be reading; closing the
+    channel would release its transfers under it."""
+    controller, ctx = _make_controller()
+    controller._p2p_config = P2PConfig(advertise_url="me:1")
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+    ctx.storage_manager.delete_l2_adapter.side_effect = RuntimeError("reading")
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+
+    with patch.object(p2p_controller, "delete_transfer_channel_context") as delete:
+        controller.close()
+    delete.assert_not_called()
 
 
 def test_reconcile_readds_on_url_change():

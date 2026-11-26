@@ -5,6 +5,7 @@ from __future__ import annotations
 # Standard
 from typing import TYPE_CHECKING
 import threading
+import weakref
 
 # First Party
 from lmcache.v1.common.transfer_channel.api import (
@@ -36,6 +37,8 @@ __all__ = [
     "initialize_transfer_channel_context",
     "get_transfer_channel_context",
     "delete_transfer_channel_context",
+    "acquire_transfer_channel_client",
+    "release_transfer_channel_client",
 ]
 
 _context: TransferChannelContext | None = None
@@ -104,3 +107,57 @@ def delete_transfer_channel_context() -> None:
         if _context is not None:
             _context.close()
             _context = None
+
+
+# Peer clients shared by several adapters of the same peer (a removal can be
+# deferred while a re-added adapter already uses the client): users per peer
+# url of each context, guarded by ``_clients_lock``. A separate lock, as
+# acquiring may connect to the peer.
+_client_users: "weakref.WeakKeyDictionary[TransferChannelContext, dict[str, int]]" = (
+    weakref.WeakKeyDictionary()
+)
+_clients_lock = threading.Lock()
+
+
+def acquire_transfer_channel_client(
+    context: TransferChannelContext, peer_advertise_url: str
+) -> TransferChannelClient:
+    """Get the client for a peer and count the caller as one of its users.
+
+    Every call must be paired with :func:`release_transfer_channel_client`.
+
+    Args:
+        context: The transfer channel context.
+        peer_advertise_url: The peer's ``host:port``.
+
+    Returns:
+        The context's client for the peer.
+    """
+    with _clients_lock:
+        client = context.get_transfer_channel_client(peer_advertise_url)
+        users = _client_users.setdefault(context, {})
+        users[peer_advertise_url] = users.get(peer_advertise_url, 0) + 1
+    return client
+
+
+def release_transfer_channel_client(
+    context: TransferChannelContext, peer_advertise_url: str
+) -> None:
+    """Drop one user of a peer's client; the last one removes the client.
+
+    Releasing a peer with no users does nothing.
+
+    Args:
+        context: The transfer channel context.
+        peer_advertise_url: The peer's ``host:port``.
+    """
+    with _clients_lock:
+        users = _client_users.get(context, {})
+        count = users.get(peer_advertise_url, 0)
+        if count == 0:
+            return
+        if count > 1:
+            users[peer_advertise_url] = count - 1
+            return
+        del users[peer_advertise_url]
+        context.remove_transfer_channel_client(peer_advertise_url)

@@ -58,7 +58,11 @@ from lmcache.v1.distributed.l2_adapters.config import (
 )
 from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_factory
 from lmcache.v1.distributed.p2p import P2PClient
-from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
+from lmcache.v1.distributed.transfer_channel import (
+    acquire_transfer_channel_client,
+    get_transfer_channel_context,
+    release_transfer_channel_client,
+)
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
 from lmcache.v1.transport.errors import REQUEST_FAILURES
@@ -625,20 +629,22 @@ class P2PL2Adapter(PeerL2AdapterBase):
         """Get or create the transfer-channel client for the configured peer.
 
         The client performs the handshake that imports the peer's registered
-        region, or reuses one the peer's own connection already created.
+        region, or reuses one the peer's own connection already created. It
+        is shared with any other adapter of the same peer.
         """
         self._tc_context = get_transfer_channel_context()
-        self._tc_client = self._tc_context.get_transfer_channel_client(
-            self._config.peer_transfer_channel_server_url
+        self._tc_client = acquire_transfer_channel_client(
+            self._tc_context, self._config.peer_transfer_channel_server_url
         )
 
     def _unregister_peer_region(self) -> None:
-        """Drop the peer's transfer-channel client through the context.
+        """Release this adapter's use of the peer's transfer-channel client;
+        the last user removes it.
 
         Called by ``close`` after controllers stop submissions and drain reads.
         """
-        self._tc_context.remove_transfer_channel_client(
-            self._config.peer_transfer_channel_server_url
+        release_transfer_channel_client(
+            self._tc_context, self._config.peer_transfer_channel_server_url
         )
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:

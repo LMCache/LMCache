@@ -215,6 +215,8 @@ class P2PController(DiscoverableModule):
         self._orch_lock = threading.Lock()
         self._state = _P2PState.UNREGISTERED
         self._adapters: dict[str, _PeerAdapter] = {}
+        # Adapter id -> peer id of removals the storage manager refused so far.
+        self._pending_removals: dict[int, str] = {}
 
         self._instances_url = ""
         self._http_client: httpx.Client | None = None
@@ -295,13 +297,23 @@ class P2PController(DiscoverableModule):
 
         for peer_id in list(self._adapters.keys()):
             self._remove_adapter(peer_id)
+        self._retry_pending_removals()
 
         if self._http_client is not None:
             self._http_client.close()
             self._http_client = None
 
         if self._p2p_config.enabled:
-            delete_transfer_channel_context()
+            if self._pending_removals:
+                # Those adapters may still be reading; closing the channel
+                # would release their transfers under them.
+                logger.warning(
+                    "%d P2P adapter(s) could not be removed; leaving the "
+                    "transfer channel open",
+                    len(self._pending_removals),
+                )
+            else:
+                delete_transfer_channel_context()
 
     # -----------------------------------------------------------------
     # RPC Handlers
@@ -723,6 +735,7 @@ class P2PController(DiscoverableModule):
         """
         added = 0
         removed = 0
+        self._retry_pending_removals()
         for peer_id, inst in upstream.items():
             current = self._adapters.get(peer_id)
             if current is None:
@@ -807,6 +820,9 @@ class P2PController(DiscoverableModule):
     def _remove_adapter(self, peer_id: str) -> None:
         """Drain and remove the peer L2 adapter for ``peer_id``.
 
+        A refused removal (an adapter that is still in use) is retried on
+        every later cycle.
+
         Args:
             peer_id: Instance id of the peer whose adapter to remove.
         """
@@ -818,8 +834,24 @@ class P2PController(DiscoverableModule):
             self._ctx.storage_manager.delete_l2_adapter(adapter.adapter_id)
         except Exception:
             logger.exception("Failed to remove P2P adapter for peer %s", peer_id)
+            self._pending_removals[adapter.adapter_id] = peer_id
             return
         logger.debug("Removed P2P adapter for peer %s", peer_id)
+
+    def _retry_pending_removals(self) -> None:
+        """Retry every removal a previous cycle could not complete."""
+        for adapter_id, peer_id in list(self._pending_removals.items()):
+            try:
+                self._ctx.storage_manager.delete_l2_adapter(adapter_id)
+            except Exception as exc:
+                # The first refusal was logged with its traceback; a retry
+                # every cycle would repeat it.
+                logger.warning(
+                    "P2P adapter for peer %s still cannot be removed: %s", peer_id, exc
+                )
+                continue
+            del self._pending_removals[adapter_id]
+            logger.debug("Removed P2P adapter for peer %s", peer_id)
 
     def _active_job_count(self) -> int:
         """Return the number of active P2P lookup jobs (thread-safe)."""

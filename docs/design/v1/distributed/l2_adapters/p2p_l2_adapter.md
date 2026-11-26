@@ -315,10 +315,14 @@ touches and the capacity topology, but still counts as the owner of any
 device range it maps. Calling `delete_l2_adapter` again skips the drain and
 retries the close.
 
-The P2P controller logs a failed removal and does not retry;
+The P2P controller retries a failed removal on every later cycle, and at
+shutdown leaves the transfer channel open while one is still pending.
 `StorageManager.close()` closes every registered adapter again at shutdown;
 if any of them fails, it leaves the L1 managers open, because that adapter
 may still access L1 buffers.
-Region access shared per peer, such as a transfer-channel client keyed by the
-peer's URL, must not be re-acquired for that peer while a close-failed
-adapter still holds it.
+
+A peer may be re-added while the removal of its previous adapter is still
+pending, so both adapters use the same transfer-channel client. The client
+is therefore counted per user (`acquire_transfer_channel_client` /
+`release_transfer_channel_client`): the pending adapter's eventual close
+releases one use, and only the last release removes the client.
