@@ -16,6 +16,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import quote as url_quote
 from urllib.parse import urlencode
@@ -23,6 +24,7 @@ import asyncio
 import bisect
 import ctypes
 import threading
+import time
 import xml.etree.ElementTree as ET
 
 # Local
@@ -239,6 +241,11 @@ class MemoryViewStream:
 
     def __len__(self):
         return len(self.mv)
+
+
+#: Seconds before a tenant bucket that could not be verified or created is
+#: tried again.
+_BUCKET_RETRY_SECONDS = 30.0
 
 
 class _BucketUnavailable(RuntimeError):
@@ -549,7 +556,14 @@ class S3L2Adapter(L2AdapterInterface):
         self._ensured_buckets: set[str] = (
             set()
         )  # tenant buckets provisioned this process
-        self._bucket_creation_lock = threading.Lock()  # serialize provisioning
+        # Bucket checks and creation run here, never on the event loop or in a
+        # request: bucket name → whether the queued check may create it.
+        self._bucket_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="s3-l2-buckets"
+        )
+        self._pending_buckets: dict[str, bool] = {}
+        # (bucket, may_create) → monotonic time before which not to retry.
+        self._bucket_retry_at: dict[tuple[str, bool], float] = {}
         # lazy boto3 client for bucket create/lifecycle (control plane)
         self._mgmt_s3: Optional[Any] = None
         # Auto-provision a tenant bucket on first use (+ TTL). Disable to require
@@ -964,6 +978,7 @@ class S3L2Adapter(L2AdapterInterface):
                 pass
             self._loop.call_soon_threadsafe(self._loop.stop)
 
+        self._bucket_executor.shutdown(wait=False, cancel_futures=True)
         self._loop_thread.join(timeout=5)
         try:
             self._loop.close()
@@ -994,26 +1009,49 @@ class S3L2Adapter(L2AdapterInterface):
 
     # ---- Multi-tenant per-cache_salt bucket routing (PR feature) ----------
     # Pure routing logic lives in s3_bucket_router (dependency-free + unit-tested).
-    def _endpoint_for_key(self, key_str: str) -> str:
+    def _endpoint_for_key(self, key_str: str, *, write: bool = False) -> str:
+        """Host for ``key_str``; raise ``_BucketUnavailable`` if not usable now.
+
+        A tenant bucket is used only once this process knows the account
+        owns it (found at startup, or verified/created by
+        :meth:`_resolve_bucket`). For any other tenant bucket the request is
+        not sent: a store fails and a lookup, load or delete is a miss, and
+        resolution is started in the background, so the request never waits
+        on bucket calls and the event loop is never blocked by them. Only a
+        store (``write=True``) may lead to the bucket being created; a read
+        only checks whether it exists.
+        """
         host = _bucket_router.resolve_bucket_host(
             key_str,
             base_endpoint=self._endpoint,
             mode=self._bucket_mode,
             template=self._bucket_template,
         )
-        if host != self._endpoint:
-            bucket = _bucket_router.bucket_of_host(host)
-            with self._lock:
-                foreign = bucket in self._foreign_buckets
-            if foreign:
+        if host == self._endpoint:
+            return host
+        bucket = _bucket_router.bucket_of_host(host)
+        create = write and self._auto_create_bucket
+        with self._lock:
+            if bucket in self._ensured_buckets:
+                return host
+            if bucket in self._foreign_buckets:
                 raise _BucketUnavailable(bucket)
-            if self._auto_create_bucket:
-                self._ensure_bucket(host)
-            # remember which tenant buckets we've used, for per-bucket
-            # listing (mutated from request threads → hold the lock).
-            with self._lock:
-                self._tenant_buckets.add(bucket)
-        return host
+            pending = self._pending_buckets.get(bucket)
+            retry_at = self._bucket_retry_at.get((bucket, create), 0.0)
+            schedule = (
+                not self._closed
+                and (pending is None or (create and not pending))
+                and time.monotonic() >= retry_at
+            )
+            if schedule:
+                self._pending_buckets[bucket] = create
+        if schedule:
+            try:
+                self._bucket_executor.submit(self._resolve_bucket, bucket, create)
+            except RuntimeError:  # closed concurrently
+                with self._lock:
+                    self._pending_buckets.pop(bucket, None)
+        raise _BucketUnavailable(bucket)
 
     def _tenant_headers(self, host: str) -> list[tuple[str, str]]:
         """Extra headers for a request to ``host``.
@@ -1079,91 +1117,89 @@ class S3L2Adapter(L2AdapterInterface):
         logger.info("S3L2Adapter found %d existing tenant bucket(s)", len(found))
         return True
 
-    def _ensure_bucket(self, host: str) -> None:
-        """Provision a tenant bucket (idempotent, once per process) + a TTL
-        lifecycle, so per_cache_salt routing works without a separate
-        onboarding step. Control-plane only — uses boto3 (not the CRT data
-        client).
+    def _resolve_bucket(self, bucket: str, create: bool) -> None:
+        """Find out whether ``bucket`` can be used, creating it if allowed.
 
-        Only a bucket this account owns is ever used. ``create_bucket``
-        succeeding (including the ``200`` us-east-1 returns for a bucket the
-        caller already owns) or failing with ``BucketAlreadyOwnedByYou``
-        proves ownership. ``BucketAlreadyExists`` means another account owns
-        the name: the bucket is fenced off for the life of the process and
-        every request routed to it fails without touching it. Any other
-        failure is not cached, and the request that needed the bucket fails.
+        Runs on the bucket worker thread, one bucket at a time. Outcomes:
 
-        Raises:
-            _BucketUnavailable: the bucket is not usable by this request.
-
-        Thread-safe: the bucket is only recorded in ``_ensured_buckets`` after
-        a successful create+lifecycle, and provisioning is serialized by
-        ``_bucket_creation_lock`` so concurrent writers to a new tenant don't
-        race (a fast-path check avoids taking the lock once provisioned)."""
-        bucket = _bucket_router.bucket_of_host(host)
-        with self._lock:
-            if bucket in self._ensured_buckets:
+        - owned by this account (``ListBuckets`` lists it) → usable, as-is;
+          its lifecycle rules are never touched;
+        - absent and ``create`` → ``create_bucket``. Success, or
+          ``BucketAlreadyOwnedByYou`` from a concurrent creator, makes it
+          usable; only a bucket this call created gets the TTL rule.
+          ``BucketAlreadyExists`` means another account owns the name: the
+          bucket is fenced off for the life of the process, logged once;
+        - absent and not ``create``, or any failure → retried no sooner than
+          ``_BUCKET_RETRY_SECONDS`` later by a request of the same kind.
+        """
+        try:
+            mgmt_s3 = self._mgmt_client()
+            # Ownership check first: us-east-1 answers create_bucket with 200
+            # for a bucket the caller already owns, so create alone can't tell
+            # a new bucket from an existing one.
+            if bucket in _list_owned_buckets(mgmt_s3, bucket, self._region):
+                self._mark_bucket_usable(bucket)
                 return
-        with self._bucket_creation_lock:
-            with (
-                self._lock
-            ):  # re-check: another thread may have finished while we waited
-                if bucket in self._ensured_buckets:
-                    return
-                if bucket in self._foreign_buckets:
-                    raise _BucketUnavailable(bucket)
+            if not create:
+                self._retry_bucket_later(bucket, create)
+                return
+            created = False
             try:
-                mgmt_s3 = self._mgmt_client()
-                # Already ours? (us-east-1 answers create_bucket with 200 for a
-                # bucket the caller owns, so create alone can't tell a new
-                # bucket from an existing one.) An existing bucket is used
-                # as-is: its lifecycle rules are never touched.
-                if bucket in _list_owned_buckets(mgmt_s3, bucket, self._region):
-                    with self._lock:
-                        self._ensured_buckets.add(bucket)
-                    return
-                created = False
-                try:
-                    # us-east-1 is the S3 default region and rejects an explicit
-                    # LocationConstraint; every other region requires it.
-                    if self._region == "us-east-1":
-                        mgmt_s3.create_bucket(Bucket=bucket)
-                    else:
-                        mgmt_s3.create_bucket(
-                            Bucket=bucket,
-                            CreateBucketConfiguration={
-                                "LocationConstraint": self._region
-                            },
-                        )
-                    created = True
-                    logger.info("Auto-provisioned tenant KV bucket %s", bucket)
-                except Exception as e:
-                    code = _aws_error_code(e)
-                    if code == "BucketAlreadyExists":
-                        with self._lock:
-                            self._foreign_buckets.add(bucket)
-                        logger.error(
-                            "Tenant bucket name %s is owned by another AWS "
-                            "account; KV for its tenant will not be stored or "
-                            "read until the bucket template changes",
-                            bucket,
-                        )
-                        raise _BucketUnavailable(bucket) from None
-                    if code != "BucketAlreadyOwnedByYou":
-                        raise
-                if created and self._bucket_ttl_days > 0:
-                    self._set_bucket_ttl(mgmt_s3, bucket)
-                # Only mark provisioned after success, so a failed create isn't
-                # cached as "done" (a later write would then 404 forever).
-                with self._lock:
-                    self._ensured_buckets.add(bucket)
-            except _BucketUnavailable:
-                raise
+                # us-east-1 is the S3 default region and rejects an explicit
+                # LocationConstraint; every other region requires it.
+                if self._region == "us-east-1":
+                    mgmt_s3.create_bucket(Bucket=bucket)
+                else:
+                    mgmt_s3.create_bucket(
+                        Bucket=bucket,
+                        CreateBucketConfiguration={"LocationConstraint": self._region},
+                    )
+                created = True
+                logger.info("Auto-provisioned tenant KV bucket %s", bucket)
             except Exception as e:
-                logger.warning(
-                    "Failed to auto-provision tenant bucket %s", bucket, exc_info=True
-                )
-                raise _BucketUnavailable(bucket) from e
+                code = _aws_error_code(e)
+                if code == "BucketAlreadyExists":
+                    with self._lock:
+                        self._foreign_buckets.add(bucket)
+                    logger.error(
+                        "Tenant bucket name %s is owned by another AWS account; "
+                        "KV for its tenant will not be stored or read until the "
+                        "bucket template changes",
+                        bucket,
+                    )
+                    return
+                if code != "BucketAlreadyOwnedByYou":
+                    raise
+            if created and self._bucket_ttl_days > 0:
+                self._set_bucket_ttl(mgmt_s3, bucket)
+            self._mark_bucket_usable(bucket)
+        except Exception:
+            logger.warning(
+                "S3L2Adapter could not %s tenant bucket %s; retrying in %.0f s",
+                "provision" if create else "verify",
+                bucket,
+                _BUCKET_RETRY_SECONDS,
+                exc_info=True,
+            )
+            self._retry_bucket_later(bucket, create)
+        finally:
+            with self._lock:
+                # A store may have queued a create behind this check; leave
+                # the marker to that run.
+                if self._pending_buckets.get(bucket) == create:
+                    del self._pending_buckets[bucket]
+
+    def _mark_bucket_usable(self, bucket: str) -> None:
+        with self._lock:
+            self._ensured_buckets.add(bucket)
+            self._tenant_buckets.add(bucket)
+
+    def _retry_bucket_later(self, bucket: str, create: bool) -> None:
+        retry_at = time.monotonic() + _BUCKET_RETRY_SECONDS
+        with self._lock:
+            self._bucket_retry_at[(bucket, create)] = retry_at
+            if create:  # a failed create also says nothing new to a read
+                self._bucket_retry_at[(bucket, False)] = retry_at
 
     def _set_bucket_ttl(self, mgmt_s3: Any, bucket: str) -> None:
         """Give a bucket this process just created its expiration rule.
@@ -1201,10 +1237,16 @@ class S3L2Adapter(L2AdapterInterface):
         return {"ExpectedBucketOwner": owner} if owner else {}
 
     def _make_request(
-        self, method: str, key_str: str, *, body_stream=None, extra_headers=None
+        self,
+        method: str,
+        key_str: str,
+        *,
+        write: bool = False,
+        body_stream=None,
+        extra_headers=None,
     ):
         headers = HttpHeaders()
-        host = self._endpoint_for_key(key_str)
+        host = self._endpoint_for_key(key_str, write=write)
         headers.add("Host", host)
         for k, v in self._tenant_headers(host):
             headers.add(k, v)
@@ -1294,6 +1336,7 @@ class S3L2Adapter(L2AdapterInterface):
         req = self._make_request(
             "PUT",
             key_str,
+            write=True,
             body_stream=stream,
             extra_headers=[
                 ("Content-Length", str(total_len)),
