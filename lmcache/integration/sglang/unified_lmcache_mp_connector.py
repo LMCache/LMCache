@@ -29,6 +29,10 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
     SGLangKVComponentGroup,
 )
 from lmcache.v1.client.heartbeat import HeartbeatThread
+from lmcache.v1.common.engine_dtype import (
+    KV_DTYPE_TAG_NAME,
+    kv_dtype_tag_code,
+)
 
 if TYPE_CHECKING:
     # First Party
@@ -276,6 +280,10 @@ class UnifiedLMCacheMPConnector:
         self.device = kv_tensors[0].device
         self.instance_id = uuid.uuid4().int & ((1 << 63) - 1)
         self._kv_caches = {f"kv_{i}": tensor for i, tensor in enumerate(kv_tensors)}
+        # Part of the object identity: two engines can serve the same model
+        # with different KV cache dtypes and the server cannot see which one
+        # sent a request.
+        self._kv_dtype_tag = kv_dtype_tag_code(kv_tensors[0].dtype)
         self._kv_groups = tuple(wire_groups)
         (
             self._engine_group_info_specs,
@@ -636,6 +644,12 @@ class UnifiedLMCacheMPConnector:
         # First Party
         from lmcache.v1.common.custom_types import IPCCacheServerKey
 
+        dtype_tag = getattr(self, "_kv_dtype_tag", "")
+        if dtype_tag:
+            request_configs = {
+                **(request_configs or {}),
+                KV_DTYPE_TAG_NAME: dtype_tag,
+            }
         return IPCCacheServerKey.from_token_ids(
             model_name=self.model_name,
             world_size=self.kv_world_size,

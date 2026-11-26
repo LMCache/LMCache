@@ -94,6 +94,10 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.v1.client.worker_transfer import LMCacheDrivenTransferContext
 from lmcache.v1.common.banner import print_banner_once
+from lmcache.v1.common.engine_dtype import (
+    KV_DTYPE_TAG_NAME,
+    kv_dtype_tag_code,
+)
 from lmcache.v1.common.logging import init_logger as lmcache_init_logger
 from lmcache.v1.common.utils import CacheRemoveEvent
 
@@ -152,21 +156,7 @@ _DCP_LAYOUT_NAMESPACE = "##lmcache-dcp-layout-v1-"
 # See ``get_request_tags`` in ``lmcache.v1.distributed.api``.
 _REVISION_TAG_KEY = "lmcache.tag.revision"
 
-_KV_DTYPE_TAG_KEY = "lmcache.tag.kv_dtype"
-
-# Short names for the dtypes an engine reports when it does not override the
-# KV cache dtype; the tag is part of the object name, so it stays compact.
-_MODEL_DTYPE_CODES = {
-    "bfloat16": "bf16",
-    "float16": "f16",
-    "float32": "f32",
-    "float64": "f64",
-    "float8_e4m3fn": "f8e4m3",
-    "float8_e4m3fnuz": "f8e4m3uz",
-    "float8_e5m2": "f8e5m2",
-    "float8_e5m2fnuz": "f8e5m2uz",
-    "int8": "i8",
-}
+_KV_DTYPE_TAG_KEY = KV_DTYPE_TAG_NAME
 
 
 def _kv_dtype_tag(vllm_config: "VllmConfig") -> str:
@@ -183,10 +173,7 @@ def _kv_dtype_tag(vllm_config: "VllmConfig") -> str:
     if cache_dtype not in (None, "", "auto"):
         return str(cache_dtype).lower()
     model_dtype = getattr(getattr(vllm_config, "model_config", None), "dtype", None)
-    if model_dtype is None:
-        return ""
-    name = str(model_dtype).removeprefix("torch.")
-    return _MODEL_DTYPE_CODES.get(name, name)
+    return kv_dtype_tag_code(model_dtype)
 
 
 _MAX_LCM_EXPANSION_FACTOR = 4

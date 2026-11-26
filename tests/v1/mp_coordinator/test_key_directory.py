@@ -1097,3 +1097,29 @@ def test_a_token_addressed_delete_with_tags_stays_exact():
     )
 
     assert tagged not in stored
+
+
+def test_an_untagged_delete_reaches_every_dtype_variant_of_the_chunk():
+    """Deleting a chunk by tokens removes both engines' copies."""
+    bf16 = replace_entry(_key(1), {"kv_dtype": "bf16"})
+    fp8 = replace_entry(_key(1), {"kv_dtype": "fp8_per_token_head"})
+    directory = KeyDirectory()
+    directory.consume(_batch(keys=[bf16, fp8]))
+
+    stored = directory.get_stored_keys_of_chunks([_key(1)])
+
+    assert bf16 in stored
+    assert fp8 in stored
+
+
+def test_a_tagged_delete_reaches_only_that_dtype():
+    """A delete that names bf16 must leave the fp8 copy alone."""
+    bf16 = replace_entry(_key(1), {"kv_dtype": "bf16"})
+    fp8 = replace_entry(_key(1), {"kv_dtype": "fp8_per_token_head"})
+    directory = KeyDirectory()
+    directory.consume(_batch(keys=[bf16, fp8]))
+
+    stored = directory.get_stored_keys_of_chunks([bf16])
+
+    assert bf16 in stored
+    assert fp8 not in stored
