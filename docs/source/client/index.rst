@@ -202,6 +202,12 @@ library itself remains an optional dependency: installing LMCache does not pull
 a specific inference engine, so install the engine you use and configure the
 connector as described in :doc:`../mp/index`.
 
+The vLLM connector's ``lmcache.mp.autostart`` starts a local server from the
+worker, so it needs the full ``lmcache`` distribution. With ``lmcache-client``,
+start the server separately from a full installation; auto-start then finds it
+running and uses it, and if no server answers, worker 0 raises
+``RuntimeError`` instead of starting one (see :doc:`../mp/configuration`).
+
 A minimal client/server request
 -------------------------------
 
