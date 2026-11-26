@@ -36,9 +36,8 @@ forces it:
 
 .. code-block:: bash
 
+   pip install -r requirements/build.txt
    BUILD_WITH_RBLN=1 pip install -e . --no-build-isolation
-
-Use an environment with the repository's build dependencies installed.
 
 Running vLLM-RBLN with LMCache
 ------------------------------

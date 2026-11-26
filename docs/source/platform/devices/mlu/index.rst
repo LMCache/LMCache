@@ -15,9 +15,9 @@ Install a matching Cambricon driver, Neuware runtime, PyTorch, and
 ``torch_mlu`` distribution first. Build LMCache's common C++ extensions
 against that PyTorch installation, without GPU-specific extensions::
 
+    pip install -r requirements/build.txt
     NO_GPU_EXT=1 pip install -e . --no-build-isolation
 
-Use an environment with the repository's build dependencies installed.
 Do not replace the vendor's PyTorch version as part of this installation.
 
 Set these variables before starting the serving engine::
