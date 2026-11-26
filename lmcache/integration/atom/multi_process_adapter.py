@@ -116,6 +116,7 @@ class AtomMPTransferSpec:
     start: int = 0
     end: int = 0
     chunk_hashes: bytes | None = None
+    cache_salt: str = ""
 
 
 class AtomMPSchedulerAdapter:
@@ -868,6 +869,7 @@ class AtomMPWorkerAdapter:
                 start=spec.start,
                 end=spec.end,
                 request_id=request_id,
+                cache_salt=spec.cache_salt,
             )
         if self._hash_cache is not None:
             return IPCCacheServerKey.from_chunk_hashes(
@@ -880,6 +882,7 @@ class AtomMPWorkerAdapter:
                 start=spec.start,
                 end=spec.end,
                 request_id=request_id,
+                cache_salt=spec.cache_salt,
             )
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
@@ -889,4 +892,5 @@ class AtomMPWorkerAdapter:
             start=spec.start,
             end=spec.end,
             request_id=request_id,
+            cache_salt=spec.cache_salt,
         )

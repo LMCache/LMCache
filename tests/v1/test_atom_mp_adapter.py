@@ -1083,3 +1083,21 @@ def test_atom_worker_rejects_mismatched_or_unexpected_caller_hashes(
             _FakeEvent(),
         )
     plain_context.submit_store.assert_not_called()
+
+
+def test_the_spec_salt_reaches_the_key(worker_with_transfer_context):
+    """ATOM's chunk hashes cover tokens only; the salt is a separate identity."""
+    worker, _transfer_context, caches = worker_with_transfer_context
+    worker.register_kv_caches(caches, engine_group_infos=_atom_groups())
+
+    key = worker._create_key(
+        "request-1",
+        AtomMPTransferSpec(
+            token_ids=list(range(256)),
+            block_ids=[[0, 1, 2, 3]],
+            end=256,
+            cache_salt="tenant-a",
+        ),
+    )
+
+    assert key.cache_salt == "tenant-a"

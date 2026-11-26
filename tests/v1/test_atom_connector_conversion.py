@@ -323,6 +323,15 @@ class TestTransferSpec:
         with pytest.raises(ValueError, match="names no block-id list"):
             transfer_spec_from_atom(self._request(block_ids=[]))
 
+    def test_the_salt_reaches_the_spec(self):
+        spec = transfer_spec_from_atom(self._request(cache_salt="tenant-a"))
+
+        assert spec.cache_salt == "tenant-a"
+
+    def test_a_salt_with_a_separator_is_rejected(self):
+        with pytest.raises(ValueError, match="cache_salt must not contain"):
+            transfer_spec_from_atom(self._request(cache_salt="a@b"))
+
     def test_start_past_end_is_rejected(self):
         with pytest.raises(ValueError, match="is past its end"):
             transfer_spec_from_atom(self._request(start=8, end=4))

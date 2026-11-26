@@ -22,6 +22,7 @@ from typing import Any
 from .multi_process_adapter import AtomMPTransferSpec
 
 _CHUNK_HASH_BYTES = 32
+_SALT_FORBIDDEN = "@/\\\x00"
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class AtomTransferRequest:
     block_ids: Sequence[int] | Sequence[Sequence[int]]
     start: int = 0
     end: int = 0
+    cache_salt: str = ""
 
 
 def _field(request: Any, name: str) -> Any:
@@ -95,6 +97,19 @@ def _block_id_lists(request: Any, *, num_engine_groups: int | None) -> list[list
     return groups
 
 
+def _cache_salt(request: Any) -> str:
+    """Read and validate the tenant salt a request carries.
+
+    The salt is not part of the chunk hashes: LMCache hashes cover the tokens,
+    and the salt is a separate identity field, so the converter has to forward
+    it or two tenants share objects.
+    """
+    salt = str(_optional_field(request, "cache_salt", "") or "")
+    if any(char in salt for char in _SALT_FORBIDDEN):
+        raise ValueError(f"ATOM cache_salt must not contain any of {_SALT_FORBIDDEN!r}")
+    return salt
+
+
 def transfer_spec_from_atom(
     request: Any,
     *,
@@ -121,7 +136,7 @@ def transfer_spec_from_atom(
 
     Raises:
         ValueError: If the hash blob is not a whole number of chunk hashes, the
-            token range is invalid, the block-id lists do not match the
+            token range or salt is invalid, the block-id lists do not match the
             engine group count, or a non-empty range names no blocks.
     """
     hashes = _field(request, "hashes")
@@ -170,6 +185,7 @@ def transfer_spec_from_atom(
         block_ids=block_ids,
         start=start,
         end=end,
+        cache_salt=_cache_salt(request),
         chunk_hashes=b"".join(chunk_hashes),
     )
 
