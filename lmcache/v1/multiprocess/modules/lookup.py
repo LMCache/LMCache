@@ -819,7 +819,9 @@ class LookupModule(DiscoverableModule):
                 request_id=key.request_id,
                 requested_tokens=requested_tokens,
                 chunk_size=(
-                    chunk_size if chunk_size is not None else self._ctx.chunk_size
+                    chunk_size
+                    if chunk_size is not None
+                    else self._ctx.default_chunk_size
                 ),
                 num_object_groups=num_object_groups,
                 attn_desc=attn_desc,
