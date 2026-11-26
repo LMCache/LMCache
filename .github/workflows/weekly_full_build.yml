@@ -1,10 +1,9 @@
 name: Weekly full build
 
-# Runs the full CUDA and Intel XPU suites as a weekly regression checkpoint
-# while per-PR CI gets narrower: CUDA (k3-unit-tests, k3-multiprocess-test +
-# DSV4 TP=4, k3-blend-test) and Intel XPU (unit-tests-xpu, xpu-mp-test).
-# A run passes only when every required job ran and passed
-# (.buildkite/k3_tests/weekly/manifest.json, manifest-xpu.json, README.md).
+# Runs the full CUDA, Intel XPU, AMD ROCm, and RBLN suites as a weekly
+# regression checkpoint while per-PR CI gets narrower. A run passes only when
+# every required job ran and passed (.buildkite/k3_tests/weekly/manifest*.json,
+# README.md next to them).
 #
 # Sunday 08:00 UTC is the quietest window of the k8s CUDA GPU queue in the
 # 30-day PR CI baseline (2026-10-17 to 2026-11-15): 0.6 of 16 GPUs busy on
@@ -25,6 +24,8 @@ on:
           - all
           - cuda
           - xpu
+          - amd
+          - rbln
 
 permissions:
   contents: read
@@ -42,6 +43,8 @@ jobs:
     permissions:
       # Moves the CI-owned ci-weekly-full branch to the tested commit.
       contents: write
+    outputs:
+      matrix: ${{ steps.select-devices.outputs.matrix }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
@@ -51,6 +54,56 @@ jobs:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           fetch-depth: 0
+
+      - name: Select device matrix
+        id: select-devices
+        env:
+          SELECTED_DEVICE: ${{ github.event_name == 'workflow_dispatch' && inputs.device || 'all' }}
+        run: |
+          python3 - <<'PY' >> "${GITHUB_OUTPUT}"
+          import json
+          import os
+
+          selected = os.environ["SELECTED_DEVICE"]
+          all_devices = [
+              {
+                  "device": "cuda",
+                  "label": "CUDA",
+                  "manifest": ".buildkite/k3_tests/weekly/manifest.json",
+                  "out_dir": "weekly-full-build",
+                  "artifact": "weekly-full-build",
+                  "timeout_minutes": 330,
+              },
+              {
+                  "device": "xpu",
+                  "label": "XPU",
+                  "manifest": ".buildkite/k3_tests/weekly/manifest-xpu.json",
+                  "out_dir": "weekly-full-build-xpu",
+                  "artifact": "weekly-full-build-xpu",
+                  "timeout_minutes": 330,
+              },
+              {
+                  "device": "amd",
+                  "label": "AMD",
+                  "manifest": ".buildkite/k3_tests/weekly/manifest-amd.json",
+                  "out_dir": "weekly-full-build-amd",
+                  "artifact": "weekly-full-build-amd",
+                  "timeout_minutes": 345,
+              },
+              {
+                  "device": "rbln",
+                  "label": "RBLN",
+                  "manifest": ".buildkite/k3_tests/weekly/manifest-rbln.json",
+                  "out_dir": "weekly-full-build-rbln",
+                  "artifact": "weekly-full-build-rbln",
+                  "timeout_minutes": 330,
+              },
+          ]
+          include = [
+              d for d in all_devices if selected == "all" or d["device"] == selected
+          ]
+          print(f"matrix={json.dumps({'include': include}, separators=(',', ':'))}")
+          PY
 
       # Builds run on their own branch: dev cancels intermediate builds, so a
       # weekly build on dev would be cancelled by the next merge.
@@ -79,14 +132,14 @@ jobs:
           sleep 90
 
   full-build:
-    name: Weekly full build (CUDA)
+    name: Weekly full build (${{ matrix.label }})
     needs: prepare
-    if: >-
-      github.repository == 'LMCache/LMCache' &&
-      (github.event_name != 'workflow_dispatch' ||
-       inputs.device == 'all' || inputs.device == 'cuda')
+    if: github.repository == 'LMCache/LMCache'
     runs-on: ubuntu-24.04
-    timeout-minutes: 350
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
@@ -95,59 +148,22 @@ jobs:
 
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
 
-      - name: Run and check the full build on Buildkite
+      - name: Run and check the ${{ matrix.label }} full build on Buildkite
         env:
           BUILDKITE_API_TOKEN: ${{ secrets.BUILD_KITE_API_TOKEN }}
           SOURCE_COMMIT: ${{ github.sha }}
         run: |
           python3 .github/scripts/weekly_full_build.py \
-            --manifest .buildkite/k3_tests/weekly/manifest.json \
+            --manifest "${{ matrix.manifest }}" \
             --commit "${SOURCE_COMMIT}" \
-            --out-dir weekly-full-build \
-            --timeout-minutes 330
+            --out-dir "${{ matrix.out_dir }}" \
+            --timeout-minutes "${{ matrix.timeout_minutes }}"
 
       - name: Keep the report and failed-job logs
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: weekly-full-build-${{ github.run_number }}
-          path: weekly-full-build/
-          if-no-files-found: warn
-          retention-days: 90
-
-  full-build-xpu:
-    name: Weekly full build (XPU)
-    needs: prepare
-    if: >-
-      github.repository == 'LMCache/LMCache' &&
-      (github.event_name != 'workflow_dispatch' ||
-       inputs.device == 'all' || inputs.device == 'xpu')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 350
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
-        with:
-          egress-policy: audit
-
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-
-      - name: Run and check the XPU full build on Buildkite
-        env:
-          BUILDKITE_API_TOKEN: ${{ secrets.BUILD_KITE_API_TOKEN }}
-          SOURCE_COMMIT: ${{ github.sha }}
-        run: |
-          python3 .github/scripts/weekly_full_build.py \
-            --manifest .buildkite/k3_tests/weekly/manifest-xpu.json \
-            --commit "${SOURCE_COMMIT}" \
-            --out-dir weekly-full-build-xpu \
-            --timeout-minutes 330
-
-      - name: Keep the report and failed-job logs
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: weekly-full-build-xpu-${{ github.run_number }}
-          path: weekly-full-build-xpu/
+          name: ${{ matrix.artifact }}-${{ github.run_number }}
+          path: ${{ matrix.out_dir }}/
           if-no-files-found: warn
           retention-days: 90
