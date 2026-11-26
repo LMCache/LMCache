@@ -391,8 +391,10 @@ def test_p2p_adapter_end_to_end(load_timeout_s: float) -> None:
                 f"page {i} did not receive the peer's bytes"
             )
 
-        # Unlock after the read has stopped accessing both buffers.
+        # Unlock after the read finishes and verify cached addresses are cleared.
         adapter.submit_unlock(keys)
+        for key in keys:
+            assert key not in adapter._remote_addresses
 
 
 def test_p2p_store_end_to_end() -> None:
