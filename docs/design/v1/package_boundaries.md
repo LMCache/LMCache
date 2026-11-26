@@ -92,9 +92,9 @@ flowchart LR
 SDK and integration are separate entry points and must not import each other.
 Both explicitly depend on client, common, platform and transport, never server
 implementations. Worker-side Q-ring capture lives in the vLLM integration's
-experimental dispatcher. The SDK maps the ring using transport descriptors;
+experimental Q-ring module. The SDK maps the ring using transport descriptors;
 vLLM still owns its allocation and lifecycle. The shared `LMCacheSDKCacheKind`
-type lives in `common.custom_types`, and `cdiv` lives in `common.utils`.
+type lives in `common.cache_kind`, and `cdiv` lives in `common.utils`.
 The [module dependency rules](../MODULE_DEPENDENCIES.md) enforce these boundaries
 without exceptions.
 

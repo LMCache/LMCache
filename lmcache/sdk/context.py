@@ -24,7 +24,8 @@ from lmcache.sdk.wrapper.ring_transfer import (
     SDKObjectLayout,
 )
 from lmcache.v1.client.transport.factory import RequestClientFactory
-from lmcache.v1.common.custom_types import IPCCacheServerKey, LMCacheSDKCacheKind
+from lmcache.v1.common.cache_kind import LMCacheSDKCacheKind
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.transport.request_client import RequestClient
 

@@ -19,7 +19,7 @@ from lmcache.sdk.request import (
     LMCacheRequestStreamError,
     TokenEvent,
 )
-from lmcache.v1.common.custom_types import LMCacheSDKCacheKind
+from lmcache.v1.common.cache_kind import LMCacheSDKCacheKind
 
 CHUNK_SIZE = 4
 PROMPT = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]

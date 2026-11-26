@@ -359,7 +359,7 @@ def _connect(world_size: int = 1, mutate=lambda groups: None, **kernel_group):
     qstore's report, the kernel group from the registration's layout."""
     # First Party
     from lmcache.sdk.context import LMCacheSDKContext
-    from lmcache.v1.common.custom_types import LMCacheSDKCacheKind
+    from lmcache.v1.common.cache_kind import LMCacheSDKCacheKind
 
     ctx = object.__new__(LMCacheSDKContext)
     ctx._kind = LMCacheSDKCacheKind.KV

@@ -23,7 +23,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.integration.vllm.experimental.dispatcher import (
+from lmcache.integration.vllm.experimental.qringbuffer import (
     QRingBuffer,
     QRingBufferCapture,
 )

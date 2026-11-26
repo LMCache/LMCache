@@ -4,7 +4,7 @@
 
 Kept apart from ``lmcache_mp_metadata`` because the query path is a separable
 feature: its producer (the connector's per-step capture window), its buffer
-(``lmcache.integration.vllm.experimental.dispatcher``) and its server module
+(``lmcache.integration.vllm.experimental.qringbuffer``) and its server module
 (``qstore``) all live in their own modules, and this dataclass is consumed only by
 those.
 """
