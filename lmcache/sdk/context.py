@@ -131,6 +131,7 @@ class LMCacheSDKContext:
         # the L1 object layouts the server stores them with.
         self._engine_meta_conf: dict[str, Any] = {}
         self._object_layouts: list[dict[str, Any]] = []
+        self._cache_format: str = ""
         # L1 read-lock TTL in seconds, from /status (the server default if absent).
         self._read_ttl = 300
         try:
@@ -782,9 +783,15 @@ class LMCacheSDKContext:
         Returns:
             IPCCacheServerKey: The constructed key.
         """
-        request_format = (request_configs or {}).get("lmcache.tag.kv_format", "")
-        if request_format != self._cache_format:
-            raise LMCacheSDKError("Request KV format does not match the SDK layout")
+        configs: dict[str, object] | None = request_configs
+        if configs is not None and "lmcache.tag.kv_format" in configs:
+            if configs["lmcache.tag.kv_format"] != self._cache_format:
+                raise LMCacheSDKError("Request KV format does not match the SDK layout")
+        elif self._cache_format:
+            configs = {
+                **(request_configs or {}),
+                "lmcache.tag.kv_format": self._cache_format,
+            }
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._world_size,
@@ -794,5 +801,5 @@ class LMCacheSDKContext:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
-            request_configs=request_configs,
+            request_configs=configs,
         )

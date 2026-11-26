@@ -404,14 +404,91 @@ def test_sdk_rejects_ambiguous_layout_before_mapping_ring() -> None:
         _connect(formats=("format-a", "format-b"))
 
 
-def test_sdk_rejects_request_tag_that_differs_from_connected_layout() -> None:
+def test_sdk_adds_selected_layout_format_tag_when_omitted() -> None:
+    ctx = _connect(formats=("format-a",))
+    ctx.instance_id = 1
+    ctx._pending_lookups = set()
+    ctx._finished_lookups = {}
+    ctx._read_ttl = 300
+    server = ctx._req_client
+    seen_keys: list[IPCCacheServerKey] = []
+
+    def _lookup(key: IPCCacheServerKey, _world_size: int):
+        seen_keys.append(key)
+        return _done(None)
+
+    server.lookup = _lookup  # type: ignore[attr-defined]
+    server.query_prefetch_status = lambda _req_id: _done(CHUNK)  # type: ignore[attr-defined]
+    server.end_session = lambda _req_id: _done(None)  # type: ignore[attr-defined]
+
+    orig_store = server.sdk_store
+    orig_retrieve = server.sdk_retrieve
+
+    def _sdk_store(key, *args):
+        seen_keys.append(key)
+        return orig_store(key, *args)
+
+    def _sdk_retrieve(key, *args):
+        seen_keys.append(key)
+        return orig_retrieve(key, *args)
+
+    server.sdk_store = _sdk_store  # type: ignore[method-assign]
+    server.sdk_retrieve = _sdk_retrieve  # type: ignore[method-assign]
+
+    kv = _kv(CHUNK)
+    assert ctx.store(kv, range(CHUNK))
+    got = ctx.retrieve(range(CHUNK))
+    assert got is not None and torch.equal(got[0], kv)
+    assert seen_keys
+    assert all(
+        (key.request_configs or {}).get("lmcache.tag.kv_format") == "format-a"
+        for key in seen_keys
+    )
+
+    caller_configs: dict[str, object] = {"lmcache.tag.tenant": "t1"}
+    key = ctx._create_key(
+        list(range(CHUNK)), 0, CHUNK, "req", request_configs=caller_configs
+    )
+    assert key.request_configs == {
+        "lmcache.tag.tenant": "t1",
+        "lmcache.tag.kv_format": "format-a",
+    }
+    assert caller_configs == {"lmcache.tag.tenant": "t1"}
+
+    explicit_match = ctx._create_key(
+        list(range(CHUNK)),
+        0,
+        CHUNK,
+        "req",
+        request_configs={"lmcache.tag.kv_format": "format-a"},
+    )
+    assert explicit_match.request_configs == {"lmcache.tag.kv_format": "format-a"}
+
+    untagged = _connect(formats=(None,))
+    untagged_key = untagged._create_key(list(range(CHUNK)), 0, CHUNK, "req")
+    assert not untagged_key.request_configs
+
+
+@pytest.mark.parametrize(
+    ("formats", "tag_value"),
+    [
+        (("format-a",), "b"),
+        (("format-a",), ""),
+        ((None,), "format-a"),
+    ],
+)
+def test_sdk_rejects_request_tag_that_differs_from_connected_layout(
+    formats, tag_value: str
+) -> None:
     # First Party
     from lmcache.sdk.context import LMCacheSDKError
 
-    ctx = _connect(formats=("format-a",))
+    ctx = _connect(formats=formats)
     with pytest.raises(LMCacheSDKError, match="does not match"):
         ctx.store(
-            _kv(CHUNK), range(CHUNK), request_configs={"lmcache.tag.kv_format": "b"}
+            _kv(CHUNK),
+            range(CHUNK),
+            request_configs={"lmcache.tag.kv_format": tag_value},
         )
 
 
