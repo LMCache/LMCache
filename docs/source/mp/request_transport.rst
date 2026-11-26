@@ -55,7 +55,7 @@ After changing a schema, regenerate and validate all bindings with:
 .. code-block:: bash
 
    pip install -r requirements/proto.txt
-   python -m lmcache.v1.transport.grpc._proto_gen._generate
+   python lmcache/v1/transport/grpc/_proto_gen/_generate.py
 
 For a single vLLM connector, set the scheme in ``lmcache.mp.host`` and keep the
 port in ``lmcache.mp.port``. A gRPC configuration is:

@@ -9,5 +9,5 @@ package build. The schema imports the existing P2P key and layout types;
 regenerate both packages in dependency order with::
 
     pip install -r requirements/proto.txt
-    python -m lmcache.v1.transport.grpc._proto_gen._generate
+    python lmcache/v1/transport/grpc/_proto_gen/_generate.py
 """

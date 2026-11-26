@@ -8,6 +8,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 import abc
 import argparse
+import importlib
+import pkgutil
 import sys
 
 # First Party
@@ -58,6 +60,39 @@ def nonnegative_int(value: str) -> int:
     if count < 0:
         raise argparse.ArgumentTypeError("must be a non-negative integer")
     return count
+
+
+_GENERATED_GRPC_PACKAGES = (
+    "lmcache.v1.transport.grpc._proto_gen",
+    "lmcache.v1.memory_orchestrator._proto_gen",
+)
+
+
+def missing_grpc_bindings_hint() -> str | None:
+    """Return how to produce the generated gRPC bindings, or ``None``.
+
+    An editable ``pip install -e .`` runs the generator from ``build_py``, but
+    setuptools downgrades a failing custom ``build_py`` to a warning, so a
+    missing ``grpcio-tools`` leaves a package that imports without the
+    bindings and the commands that need them fail with an import error that
+    hides the cause.
+
+    Returns:
+        The remedy, or ``None`` when both generated packages hold ``*_pb2``
+        modules.
+    """
+    for package in _GENERATED_GRPC_PACKAGES:
+        search_path = importlib.import_module(package).__path__
+        if not any(m.name.endswith("_pb2") for m in pkgutil.iter_modules(search_path)):
+            return (
+                "This installation is missing LMCache's generated gRPC "
+                "bindings. From the repository root, regenerate them with:\n"
+                "  pip install -r requirements/proto.txt\n"
+                "  python lmcache/v1/transport/grpc/_proto_gen/_generate.py\n"
+                "or install the built package, which includes them: "
+                "pip install lmcache"
+            )
+    return None
 
 
 def _route_head(tokens: Sequence[str]) -> tuple[str | None, list[str]]:

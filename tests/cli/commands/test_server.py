@@ -14,8 +14,11 @@ import sys
 import pytest
 
 # First Party
+from lmcache.cli.commands import server
 from lmcache.cli.commands.server import ServerCommand
 from lmcache.v1.multiprocess.config import parse_args_to_p2p_config
+from lmcache.v1.transport.grpc import _proto_gen
+from tests.import_utils import lmcache_subprocess_env
 import lmcache
 
 
@@ -206,6 +209,26 @@ class TestServerCommandArguments:
         assert args.http_host == "127.0.0.1"
         assert args.http_port == 8080
 
+    def test_ungenerated_bindings_are_reported_at_registration(
+        self, tmp_path: Path
+    ) -> None:
+        """A build that skipped the gRPC generator names it, not the CLI package.
+
+        The generator output is hidden by pointing its package at an empty
+        directory. LMCache loggers do not propagate, so the warning is read
+        from the module logger rather than ``caplog``.
+        """
+        with (
+            patch.dict(sys.modules, {"lmcache.v1.distributed.config": None}),
+            patch.object(_proto_gen, "__path__", [str(tmp_path)]),
+            patch.object(server.logger, "warning") as mock_warning,
+        ):
+            ServerCommand().add_arguments(argparse.ArgumentParser())
+
+        logged = " ".join(map(str, mock_warning.call_args.args))
+        assert "_generate.py" in logged
+        assert "lightweight" not in logged
+
 
 class TestServerCommandExecute:
     def test_func_bound_to_execute(self, cmd, parser):
@@ -244,3 +267,88 @@ class TestServerCommandExecute:
             assert "storage_manager_config" in kwargs
             assert "obs_config" in kwargs
             assert "http_authentication" in kwargs
+
+    def test_execute_explains_ungenerated_bindings(
+        self,
+        parser: argparse.ArgumentParser,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A build that skipped the gRPC generator points at the generator."""
+        args = parser.parse_args(["server"])
+        with (
+            patch.dict(sys.modules, {"lmcache.v1.distributed.config": None}),
+            patch.object(_proto_gen, "__path__", [str(tmp_path)]),
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            ServerCommand().execute(args)
+
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "_generate.py" in err
+        assert "requirements/proto.txt" in err
+        assert "CUDA extensions" not in err
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("lmcache.v1.transport.grpc._proto_gen.p2p_service_pb2")
+        is None,
+        reason="Requires the generated gRPC bindings",
+    )
+    def test_execute_reports_the_import_error_when_bindings_exist(
+        self,
+        parser: argparse.ArgumentParser,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A complete install shows the failing import, not a fix-it hint."""
+        args = parser.parse_args(["server"])
+        with (
+            patch.dict(sys.modules, {"lmcache.v1.distributed.config": None}),
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            ServerCommand().execute(args)
+
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "lmcache.v1.distributed.config" in err
+        assert "pip install lmcache" in err
+        assert "_generate.py" not in err
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("lmcache.lmcache_native") is None,
+        reason="Fresh CLI process requires the native extension",
+    )
+    def test_cli_names_the_generator_when_bindings_are_missing(
+        self, tmp_path: Path
+    ) -> None:
+        """``lmcache server`` through the real entry point names the generator.
+
+        The generated files are hidden by pointing both ``_proto_gen``
+        packages at an empty directory before the CLI runs.
+        """
+        empty = tmp_path / "no_bindings"
+        empty.mkdir()
+        script = (
+            "import lmcache.v1.transport.grpc._proto_gen as transport\n"
+            "import lmcache.v1.memory_orchestrator._proto_gen as orchestrator\n"
+            f"transport.__path__ = [{str(empty)!r}]\n"
+            f"orchestrator.__path__ = [{str(empty)!r}]\n"
+            "from lmcache.cli.main import main\n"
+            "main(['server'])\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=tmp_path,
+            env={
+                **lmcache_subprocess_env(),
+                "LMCACHE_TRACK_USAGE": "false",
+                "LMCACHE_DISABLE_BANNER": "1",
+            },
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        assert result.returncode == 1, result.stderr
+        assert "_generate.py" in result.stderr
+        assert "requirements/proto.txt" in result.stderr
+        assert "CUDA extensions" not in result.stderr
