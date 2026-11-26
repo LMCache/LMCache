@@ -55,7 +55,7 @@ def _infer_kv_dtype(
     1. ``shape_desc.dtype`` — authoritative when set; correctly distinguishes
        float16 vs bfloat16 which share ``element_size == 2``).
     2. ``paged_buffer_ptrs_tensor`` — if it is a non-pointer tensor or a list
-       of tensors (including nested SGLang MHA lists), the dtype of the first
+       of tensors (including nested K/V lists), the dtype of the first
        tensor is used.
     3. ``lmcache_objects_ptrs`` — if it is a list of tensors, the dtype of the
        first chunk tensor is used.
@@ -109,7 +109,7 @@ def _normalize_paged_layers(
 
     Returns:
         - Single ``torch.Tensor`` for cross-layer formats.
-        - ``list[list[torch.Tensor]]`` (2 x NL) for SGLang MHA formats.
+        - ``list[list[torch.Tensor]]`` (2 x NL) for K/V-list formats.
         - ``list[(torch.Tensor, torch.Tensor)]`` (NL ``(K, V)`` pairs) for the
           per-layer tuple format (``NL_X_TWO_X_NB_BS_NH_HS``).
         - ``list[torch.Tensor]`` (per-layer) for all other formats.
@@ -181,16 +181,14 @@ def _normalize_paged_layers(
             # Flat list [K_L0, ..., K_LN-1, V_L0, ..., V_LN-1]
             if all(isinstance(t, torch.Tensor) for t in paged_buffer_ptrs_tensor):
                 if len(paged_buffer_ptrs_tensor) % 2 != 0:
-                    raise ValueError(
-                        "Flat SGLang MHA list must have even length (2*NL)"
-                    )
+                    raise ValueError("Flat K/V list must have even length (2*NL)")
                 half = len(paged_buffer_ptrs_tensor) // 2
                 return [
                     paged_buffer_ptrs_tensor[:half],
                     paged_buffer_ptrs_tensor[half:],
                 ]
         raise TypeError(
-            "SGLang MHA formats require a list[list[torch.Tensor]], a flat "
+            "K/V-list formats require a list[list[torch.Tensor]], a flat "
             "list[torch.Tensor] (2*NL entries), or a 1-D pointer tensor; "
             "got: " + type(paged_buffer_ptrs_tensor).__name__
         )
@@ -388,7 +386,7 @@ def multi_layer_block_kv_transfer(
             skip_prefix_n_blocks,
         )
     elif format_spec.is_kv_list:
-        _transfer_sglang_mha(
+        _transfer_kv_list(
             normalized,
             object_tensors,
             block_ids,
@@ -604,7 +602,7 @@ def _transfer_cross_layer(
                     paged_tensor[:, layer_idx, kv].index_copy_(0, eff_idx, src_blocks)
 
 
-def _transfer_sglang_mha(
+def _transfer_kv_list(
     paged_tensors: list[list[torch.Tensor]],
     object_tensors: list[torch.Tensor],
     block_ids: torch.Tensor | list[int],
@@ -615,9 +613,7 @@ def _transfer_sglang_mha(
     is_d2h: bool,
     skip_prefix_n_blocks: int,
 ) -> None:
-    """Handle SGLang MHA formats: 2*NL tensors (list[list[Tensor]])."""
-    # TWO_X_NL_X_NBBS_NH_HS: each tensor [NB*BS, NH, HS]
-    # TWO_X_NL_X_NB_BS_NH_HS: each tensor [NB, BS, NH, HS]
+    """Handle formats with separate K/V lists of per-layer tensors."""
     is_flat = format_spec.is_pbs_fused
     num_layers = len(paged_tensors[0])
 

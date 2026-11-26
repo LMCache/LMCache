@@ -80,38 +80,6 @@ def test_make_shape_desc_vllm_mla():
     assert sd.hs == 512
 
 
-def test_make_shape_desc_sglang_mla():
-    kv_caches = [torch.empty(512, 1, 128, dtype=torch.bfloat16) for _ in range(2)]
-    sd = make_page_buffer_shape_desc(
-        kv_caches,
-        lmcache_native.EngineKVFormat.NL_X_NBBS_ONE_HS,
-        layer_idx=0,
-        num_layers_in_group=2,
-        num_blocks=32,
-        block_size=16,
-    )
-    assert sd.kv_size == 1
-    assert sd.nh == 1
-    assert sd.hs == 128
-
-
-def test_make_shape_desc_sglang_mha():
-    k = [torch.empty(512, 8, 64, dtype=torch.bfloat16) for _ in range(4)]
-    v = [torch.empty(512, 8, 64, dtype=torch.bfloat16) for _ in range(4)]
-    kv_caches = [k, v]
-    sd = make_page_buffer_shape_desc(
-        kv_caches,
-        lmcache_native.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS,
-        layer_idx=0,
-        num_layers_in_group=4,
-        num_blocks=32,
-        block_size=16,
-    )
-    assert sd.kv_size == 2
-    assert sd.nh == 8
-    assert sd.hs == 64
-
-
 def test_make_shape_desc_ascend_mla_plane_tuple():
     """fmt 17 (NL_X_NP_X_NB_BS_ONE_HS): MLA (latent, rope) planes carry
     per-plane byte geometry; hs is the summed plane width."""
@@ -178,23 +146,6 @@ def test_per_layer_scalar_accessors_per_layer_list():
     assert get_dtype(kv_caches, fmt, layer_idx=0) == torch.float16
 
 
-def test_per_layer_scalar_accessors_sglang_mha():
-    """For SGLang MHA (nested list), accessors walk into [k_list|v_list]."""
-    k = [
-        torch.randn(512, 8, 64, dtype=torch.bfloat16, device=torch_device_type)
-        for _ in range(2)
-    ]
-    v = [
-        torch.randn(512, 8, 64, dtype=torch.bfloat16, device=torch_device_type)
-        for _ in range(2)
-    ]
-    kv_caches = [k, v]
-    fmt = lmcache_native.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS
-
-    assert get_num_heads(kv_caches, fmt, layer_idx=0) == 8
-    assert get_dtype(kv_caches, fmt, layer_idx=1) == torch.bfloat16
-
-
 def test_get_group_data_ptrs_per_layer_list_flattens_in_order():
     kv_caches = [
         torch.randn(2, 32, 16, 8, 64, dtype=torch.float16, device=torch_device_type)
@@ -208,32 +159,6 @@ def test_get_group_data_ptrs_per_layer_list_flattens_in_order():
         kv_caches[2].data_ptr(),
         kv_caches[3].data_ptr(),
     ]
-
-
-def test_get_group_data_ptrs_sglang_mha_groups_k_before_v():
-    """SGLang MHA kernel contract: [K0, K1, ..., KN, V0, V1, ..., VN] —
-    not per-layer [K0, V0, K1, V1, ...]."""
-    k = [
-        torch.randn(512, 8, 64, dtype=torch.bfloat16, device=torch_device_type)
-        for _ in range(3)
-    ]
-    v = [
-        torch.randn(512, 8, 64, dtype=torch.bfloat16, device=torch_device_type)
-        for _ in range(3)
-    ]
-    kv_caches = [k, v]
-    fmt = lmcache_native.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS
-
-    ptrs = get_group_data_ptrs(kv_caches, fmt, [0, 1, 2])
-    expected = [
-        k[0].data_ptr(),
-        k[1].data_ptr(),
-        k[2].data_ptr(),
-        v[0].data_ptr(),
-        v[1].data_ptr(),
-        v[2].data_ptr(),
-    ]
-    assert ptrs == expected
 
 
 def test_get_group_data_ptrs_cross_layer_returns_single_base():

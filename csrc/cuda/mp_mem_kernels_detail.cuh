@@ -81,15 +81,6 @@ __device__ inline size_t calculate_engine_global_offset(
     // MLA: L tensors [NB, BS, HS]; blocked-scale shares the block base,
     // only its within-block layout differs (handled in the transfer body).
     return engine_block_idx * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS) {
-    // SGLang MHA (in-process): 2L tensors [NBBS, NH, HS]
-    return engine_block_idx * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS) {
-    // SGLang MHA (MP daemon): 2L tensors [NB, BS, NH, HS]
-    return engine_block_idx * scalars_per_block;
-  } else if constexpr (format == EngineKVFormat::NL_X_NBBS_ONE_HS) {
-    // SGLang MLA: L tensors [NBBS, 1, HS]
-    return engine_block_idx * scalars_per_block;
   } else if constexpr (format == EngineKVFormat::NL_X_NB_NH_BS_TWO_HS) {
     // Fused-K/V HND: L tensors [NB, NH, BS, 2*HS], handled like
     // NL_X_TWO_NB_NH_BS_HS but with an empty K/V axis: the desc carries
@@ -245,16 +236,6 @@ __device__ void multi_layer_block_transfer_single_block(
   if constexpr (format == EngineKVFormat::NB_NL_TWO_BS_NH_HS ||
                 format == EngineKVFormat::NB_NL_TWO_NH_BS_HS) {
     paged_buffer_layer_ptr = (ScalarType*)paged_buffer_ptrs[0];
-  } else if constexpr (format == EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS) {
-    // SGLang MHA (in-process): ptrs[0..NL-1] = K per layer, ptrs[NL..2NL-1] = V
-    // per layer
-    paged_buffer_layer_ptr =
-        (ScalarType*)paged_buffer_ptrs[k_or_v * shape_desc.nl + layer_idx];
-  } else if constexpr (format == EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS) {
-    // SGLang MHA (MP daemon): ptrs[0..NL-1] = K per layer, ptrs[NL..2NL-1] = V
-    // per layer
-    paged_buffer_layer_ptr =
-        (ScalarType*)paged_buffer_ptrs[k_or_v * shape_desc.nl + layer_idx];
   } else {
     paged_buffer_layer_ptr = (ScalarType*)paged_buffer_ptrs[layer_idx];
   }
@@ -340,59 +321,50 @@ __global__ void multi_layer_block_transfer_kernel(
                                    skip_prefix_n_blocks);                \
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-#define DISPATCH_FORMAT(DIRECTION)                                      \
-  switch (engine_kv_format) {                                           \
-    case EngineKVFormat::NB_NL_TWO_BS_NH_HS:                            \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NB_NL_TWO_BS_NH_HS);     \
-      break;                                                            \
-    case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_TWO_NB_BS_NH_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_TWO_NB_NH_BS_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_TWO_BS_NH_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_TWO_NH_BS_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_BS_HS:                                 \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_HS);          \
-      break;                                                            \
-    case EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS:                         \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS);  \
-      break;                                                            \
-    case EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS:                        \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS); \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NBBS_ONE_HS:                              \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NBBS_ONE_HS);       \
-      break;                                                            \
-    case EngineKVFormat::NB_NL_TWO_NH_BS_HS:                            \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NB_NL_TWO_NH_BS_HS);     \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_NH_BS_TWO_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_TWO_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:                          \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_TWO_HS);   \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_NH_BS_CS:                              \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_CS);       \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_BS_NH_CS:                              \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_CS);       \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_BS_NH_HS:                              \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_HS);       \
-      break;                                                            \
-    case EngineKVFormat::NL_X_NB_BSV_BSS:                               \
-      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BSV_BSS);        \
-      break;                                                            \
-    default:                                                            \
-      TORCH_CHECK(false, "Unsupported EngineKVFormat: ",                \
-                  static_cast<int>(engine_kv_format));                  \
+#define DISPATCH_FORMAT(DIRECTION)                                    \
+  switch (engine_kv_format) {                                         \
+    case EngineKVFormat::NB_NL_TWO_BS_NH_HS:                          \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NB_NL_TWO_BS_NH_HS);   \
+      break;                                                          \
+    case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:                        \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_TWO_NB_BS_NH_HS); \
+      break;                                                          \
+    case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:                        \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_TWO_NB_NH_BS_HS); \
+      break;                                                          \
+    case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:                        \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_TWO_BS_NH_HS); \
+      break;                                                          \
+    case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:                        \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_TWO_NH_BS_HS); \
+      break;                                                          \
+    case EngineKVFormat::NL_X_NB_BS_HS:                               \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_HS);        \
+      break;                                                          \
+    case EngineKVFormat::NB_NL_TWO_NH_BS_HS:                          \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NB_NL_TWO_NH_BS_HS);   \
+      break;                                                          \
+    case EngineKVFormat::NL_X_NB_NH_BS_TWO_HS:                        \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_TWO_HS); \
+      break;                                                          \
+    case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:                        \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_TWO_HS); \
+      break;                                                          \
+    case EngineKVFormat::NL_X_NB_NH_BS_CS:                            \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_NH_BS_CS);     \
+      break;                                                          \
+    case EngineKVFormat::NL_X_NB_BS_NH_CS:                            \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_CS);     \
+      break;                                                          \
+    case EngineKVFormat::NL_X_NB_BS_NH_HS:                            \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BS_NH_HS);     \
+      break;                                                          \
+    case EngineKVFormat::NL_X_NB_BSV_BSS:                             \
+      LAUNCH_KERNEL(DIRECTION, EngineKVFormat::NL_X_NB_BSV_BSS);      \
+      break;                                                          \
+    default:                                                          \
+      TORCH_CHECK(false, "Unsupported EngineKVFormat: ",              \
+                  static_cast<int>(engine_kv_format));                \
   }
 
 /**

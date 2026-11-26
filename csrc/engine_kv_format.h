@@ -59,18 +59,6 @@ enum class EngineKVFormat : int {
   - SGLang MLA via MP daemon
   */
 
-  TWO_X_NL_X_NBBS_NH_HS = 4,
-  /*
-  used by:
-  - SGLang MHA (flash attention and flash infer)
-  */
-
-  NL_X_NBBS_ONE_HS = 5,
-  /*
-  used by:
-  - SGLang MLA
-  */
-
   NL_X_TWO_NB_NH_BS_HS = 6,
   /*
   used by:
@@ -90,13 +78,6 @@ enum class EngineKVFormat : int {
   used by:
   - TRT-LLM cross-layer (HND layout)
   physical shape: [num_blocks, num_layers, 2, num_heads, block_size, head_size]
-  */
-
-  TWO_X_NL_X_NB_BS_NH_HS = 9,
-  /*
-  used by:
-  - SGLang MHA via the MP daemon path
-  physical shape per layer: [num_blocks, block_size, num_heads, head_size]
   */
 
   NL_X_NB_NH_BS_TWO_HS = 10,
@@ -241,14 +222,6 @@ LMC_KV_FORMAT_HD constexpr FormatFacts format_facts(EngineKVFormat f) {
       facts.is_layer_list = true;
       facts.is_mla = true;
       break;
-    case EngineKVFormat::TWO_X_NL_X_NBBS_NH_HS:
-      facts.is_kv_list = true;
-      break;
-    case EngineKVFormat::NL_X_NBBS_ONE_HS:
-      facts.is_layer_list = true;
-      facts.is_mla = true;
-      facts.is_pbs_fused = true;
-      break;
     case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:
       facts.is_layer_list = true;
       facts.is_hnd = true;
@@ -261,9 +234,6 @@ LMC_KV_FORMAT_HD constexpr FormatFacts format_facts(EngineKVFormat f) {
     case EngineKVFormat::NB_NL_TWO_NH_BS_HS:
       facts.is_cross_layer = true;
       facts.is_hnd = true;
-      break;
-    case EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS:
-      facts.is_kv_list = true;
       break;
     case EngineKVFormat::NL_X_NB_NH_BS_TWO_HS:
       facts.is_layer_list = true;
@@ -324,7 +294,7 @@ LMC_KV_FORMAT_HD constexpr bool is_kv_list(EngineKVFormat f) {
   return format_facts(f).is_kv_list;
 }
 
-// The outermost dimension indexes the list of layers
+// The outermost dimension indexes the list of layers.
 LMC_KV_FORMAT_HD constexpr bool is_layer_list(EngineKVFormat f) {
   return format_facts(f).is_layer_list;
 }

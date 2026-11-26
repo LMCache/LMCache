@@ -167,7 +167,6 @@ def test_block_transfer_rejects_addresses(raw_paged: bool) -> None:
     "fmt",
     [
         EngineKVFormat.NL_X_NB_BSV_BSS,
-        EngineKVFormat.NL_X_NBBS_ONE_HS,
         EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS,
         EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS,
         EngineKVFormat.NL_X_NB_NH_BS_CS,
@@ -179,8 +178,6 @@ def test_block_transfer_rejects_addresses(raw_paged: bool) -> None:
         EngineKVFormat.NL_X_NB_TWO_NH_ONE_BS_HS,
         EngineKVFormat.NB_NL_TWO_BS_NH_HS,
         EngineKVFormat.NB_NL_TWO_NH_BS_HS,
-        EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS,
-        EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS,
         EngineKVFormat.NL_X_NB_BS_NH_HS,
     ],
     ids=lambda fmt: fmt.name,

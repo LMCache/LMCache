@@ -532,8 +532,8 @@ def _pick_layout_probe_tensor(
     #   tensor packing all layers along dim-1; indexing dim-0
     #   (= NB) would yield a per-block slice, so return the whole
     #   tensor (its ``stride(0)`` is the authoritative per-NB step).
-    # - SGL MHA: outer list is K/V (length 2), inner list is
-    #   per-layer; K & V share shape/stride by construction.
+    # - K/V-list formats: outer list is K/V (length 2), inner list is
+    #   per-layer; K and V share shape/stride by construction.
     # - Other formats: ``kv_caches`` is already a per-layer list.
     if lmcache_native.is_cross_layer(engine_kv_format):
         if not isinstance(kv_caches, torch.Tensor):

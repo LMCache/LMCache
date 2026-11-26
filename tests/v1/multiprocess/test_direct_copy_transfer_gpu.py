@@ -107,12 +107,6 @@ def _paged_tensors(g: _Geometry, device: torch.device) -> list[torch.Tensor]:
                 for _ in range(nl)
             ]
         return [rnd([nb, bs, hs]) for _ in range(nl)]
-    if g.fmt == Fmt.NL_X_NBBS_ONE_HS:
-        return [rnd([nb * bs, 1, hs]) for _ in range(nl)]
-    if g.fmt in (Fmt.TWO_X_NL_X_NBBS_NH_HS,):
-        return [rnd([nb * bs, nh, hs]) for _ in range(2 * nl)]
-    if g.fmt in (Fmt.TWO_X_NL_X_NB_BS_NH_HS,):
-        return [rnd([nb, bs, nh, hs]) for _ in range(2 * nl)]
     if g.fmt in (
         Fmt.NL_X_NB_BS_NH_TWO_HS,
         Fmt.NL_X_NB_BS_NH_CS,
@@ -159,13 +153,6 @@ _GEOMETRIES = {
     "mla": _Geometry(Fmt.NL_X_NB_BS_HS, nl=3, kv_size=1, nh=1, hs=64, bs=8),
     "mla_padded": _Geometry(
         Fmt.NL_X_NB_BS_HS, nl=3, kv_size=1, nh=1, hs=64, bs=8, block_stride_elems=8 * 96
-    ),
-    "sglang_mla": _Geometry(Fmt.NL_X_NBBS_ONE_HS, nl=3, kv_size=1, nh=1, hs=64, bs=8),
-    "sglang_mha": _Geometry(
-        Fmt.TWO_X_NL_X_NBBS_NH_HS, nl=3, kv_size=2, nh=2, hs=16, bs=8
-    ),
-    "sglang_mha_mp": _Geometry(
-        Fmt.TWO_X_NL_X_NB_BS_NH_HS, nl=3, kv_size=2, nh=2, hs=16, bs=8
     ),
     "fused_nhd": _Geometry(
         Fmt.NL_X_NB_BS_NH_TWO_HS, nl=3, kv_size=1, nh=2, hs=32, bs=8
@@ -592,9 +579,6 @@ def test_format_eligibility_table(nh: int) -> None:
         Fmt.NL_X_TWO_NB_BS_NH_HS,
         Fmt.NL_X_NB_TWO_BS_NH_HS,
         Fmt.NL_X_NB_BS_HS,
-        Fmt.TWO_X_NL_X_NBBS_NH_HS,
-        Fmt.NL_X_NBBS_ONE_HS,
-        Fmt.TWO_X_NL_X_NB_BS_NH_HS,
         Fmt.NL_X_NB_BS_NH_TWO_HS,
         Fmt.NL_X_NB_BS_NH_CS,
         Fmt.NL_X_NB_BS_NH_HS,

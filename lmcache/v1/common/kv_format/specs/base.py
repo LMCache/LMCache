@@ -27,7 +27,8 @@ from lmcache.v1.common.kv_format.types import DiscoverableKVCache
 import lmcache.lmcache_native as lmcache_native
 
 # A format's enum name *is* its shape: ``_``-joined tokens, with ``X`` marking a
-# list level. ``TWO_X_NL_X_NBBS_NH_HS`` reads as ``2 x NL x [PBS, NH, HS]``.
+# list level. ``NL_X_TWO_X_NB_BS_NH_HS`` reads as
+# ``NL x 2 x [NB, BS, NH, HS]``.
 # describe_shape and concrete_shape both render from it, so they can never drift.
 _LABELS = {
     "ONE": "1",

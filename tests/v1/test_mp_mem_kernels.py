@@ -53,8 +53,6 @@ FMT_NORMAL = lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
 FMT_CROSS_LAYER = lmcache_native.EngineKVFormat.NB_NL_TWO_BS_NH_HS
 FMT_FLASH_INFER = lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
 FMT_MLA = lmcache_native.EngineKVFormat.NL_X_NB_BS_HS
-FMT_SGLANG_MHA = lmcache_native.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS
-FMT_SGLANG_MLA = lmcache_native.EngineKVFormat.NL_X_NBBS_ONE_HS
 FMT_NORMAL_HND = lmcache_native.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS
 FMT_FLASH_INFER_HND = lmcache_native.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS
 FMT_VLLM_FUSED_HND = lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
@@ -73,8 +71,6 @@ FORMAT_PARAMS = [
     (FMT_CROSS_LAYER, 4, 8, 128, False),
     (FMT_FLASH_INFER, 4, 8, 128, False),
     (FMT_MLA, 4, 1, 576, True),
-    (FMT_SGLANG_MHA, 4, 8, 128, False),
-    (FMT_SGLANG_MLA, 4, 1, 576, True),
     (FMT_NORMAL_HND, 4, 8, 128, False),
     (FMT_FLASH_INFER_HND, 4, 8, 128, False),
     (FMT_VLLM_FUSED_HND, 4, 8, 256, True),
@@ -95,7 +91,6 @@ def create_vllm_tensors(
     dtype: torch.dtype,
     device: torch.device,
 ) -> list[torch.Tensor]:
-    nbbs = nb * bs
     if engine_kv_format == FMT_NORMAL:
         shape = [2, nb, bs, nh, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
@@ -124,12 +119,6 @@ def create_vllm_tensors(
     elif engine_kv_format == FMT_MLA:
         shape = [nb, bs, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
-    elif engine_kv_format == FMT_SGLANG_MHA:
-        shape = [nbbs, nh, hs]
-        return [_create_random_tensor(shape, dtype, device) for _ in range(2 * nl)]
-    elif engine_kv_format == FMT_SGLANG_MLA:
-        shape = [nbbs, 1, hs]
-        return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
     raise ValueError(f"Unknown format: {engine_kv_format}")
 
 
@@ -143,7 +132,6 @@ def create_zero_vllm_tensors(
     dtype: torch.dtype,
     device: torch.device,
 ) -> list[torch.Tensor]:
-    nbbs = nb * bs
     if engine_kv_format == FMT_NORMAL:
         shape = [2, nb, bs, nh, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
@@ -171,12 +159,6 @@ def create_zero_vllm_tensors(
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
     elif engine_kv_format == FMT_MLA:
         shape = [nb, bs, hs]
-        return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
-    elif engine_kv_format == FMT_SGLANG_MHA:
-        shape = [nbbs, nh, hs]
-        return [_create_zero_tensor(shape, dtype, device) for _ in range(2 * nl)]
-    elif engine_kv_format == FMT_SGLANG_MLA:
-        shape = [nbbs, 1, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
     raise ValueError(f"Unknown format: {engine_kv_format}")
 
@@ -235,14 +217,6 @@ def get_block_data(
             results.append(vllm_tensors[layer_idx][block_idx, :, :, :].clone())
         elif engine_kv_format == FMT_MLA:
             results.append(vllm_tensors[layer_idx][block_idx, :, :].clone())
-        elif engine_kv_format == FMT_SGLANG_MHA:
-            ts, ed = block_idx * bs, (block_idx + 1) * bs
-            k = vllm_tensors[layer_idx][ts:ed, :, :].clone()
-            v = vllm_tensors[nl + layer_idx][ts:ed, :, :].clone()
-            results.append(torch.stack([k, v], dim=0))
-        elif engine_kv_format == FMT_SGLANG_MLA:
-            ts, ed = block_idx * bs, (block_idx + 1) * bs
-            results.append(vllm_tensors[layer_idx][ts:ed, 0, :].clone())
     return results
 
 
@@ -315,8 +289,6 @@ TOTAL_BLOCKS = NUM_MEMORY_OBJECTS * BLOCKS_PER_OBJECT  # 64
         "cross_layer",
         "flash_infer",
         "mla",
-        "sglang_mha",
-        "sglang_mla",
         "normal_hnd",
         "flash_infer_hnd",
         "vllm_fused_hnd",
@@ -425,8 +397,6 @@ def test_block_transfer_roundtrip(
         "cross_layer",
         "flash_infer",
         "mla",
-        "sglang_mha",
-        "sglang_mla",
         "normal_hnd",
         "flash_infer_hnd",
         "vllm_fused_hnd",

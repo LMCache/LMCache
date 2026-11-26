@@ -25,8 +25,6 @@ F = lmcache_native.EngineKVFormat
 EXPECTED = {
     F.NB_NL_TWO_BS_NH_HS: (True, False, False, False, False),
     F.NB_NL_TWO_NH_BS_HS: (True, False, False, False, False),
-    F.TWO_X_NL_X_NBBS_NH_HS: (False, True, False, False, False),
-    F.TWO_X_NL_X_NB_BS_NH_HS: (False, True, False, False, False),
     F.NL_X_TWO_NB_BS_NH_HS: (False, False, True, False, False),
     F.NL_X_NB_TWO_BS_NH_HS: (False, False, True, False, False),
     F.NL_X_TWO_NB_NH_BS_HS: (False, False, True, False, False),
@@ -38,13 +36,10 @@ EXPECTED = {
     F.NL_X_NB_NH_BS_CS: (False, False, True, False, False),
     F.NL_X_NB_BS_NH_CS: (False, False, True, False, False),
     F.NL_X_NB_BS_HS: (False, False, True, True, False),
-    F.NL_X_NBBS_ONE_HS: (False, False, True, True, False),
     F.NL_X_NB_BSV_BSS: (False, False, True, True, False),
     F.NL_X_TWO_X_NB_BS_NH_HS: (False, False, True, False, True),
     F.NL_X_NB_BS_NH_HS: (False, False, True, False, False),
     F.NB_NL_TWO_NH_BS_HS: (True, False, False, False, False),
-    F.TWO_X_NL_X_NBBS_NH_HS: (False, True, False, False, False),
-    F.TWO_X_NL_X_NB_BS_NH_HS: (False, True, False, False, False),
     F.NL_X_TWO_NB_BS_NH_HS: (False, False, True, False, False),
     F.NL_X_NB_TWO_BS_NH_HS: (False, False, True, False, False),
     F.NL_X_TWO_NB_NH_BS_HS: (False, False, True, False, False),
@@ -55,7 +50,6 @@ EXPECTED = {
     F.NL_X_NB_NH_BS_CS: (False, False, True, False, False),
     F.NL_X_NB_BS_NH_CS: (False, False, True, False, False),
     F.NL_X_NB_BS_HS: (False, False, True, True, False),
-    F.NL_X_NBBS_ONE_HS: (False, False, True, True, False),
     F.NL_X_NB_BSV_BSS: (False, False, True, True, False),
     F.NL_X_NP_X_NB_BS_ONE_HS: (False, False, True, True, True),
 }
@@ -65,8 +59,6 @@ EXPECTED = {
 EXPECTED_SPEC_FACTS = {
     F.NB_NL_TWO_BS_NH_HS: (False, False, False, False),
     F.NB_NL_TWO_NH_BS_HS: (True, False, False, False),
-    F.TWO_X_NL_X_NBBS_NH_HS: (False, False, False, True),
-    F.TWO_X_NL_X_NB_BS_NH_HS: (False, False, False, False),
     F.NL_X_TWO_NB_BS_NH_HS: (False, False, True, False),
     F.NL_X_NB_TWO_BS_NH_HS: (False, False, False, False),
     F.NL_X_TWO_NB_NH_BS_HS: (True, False, True, False),
@@ -78,7 +70,6 @@ EXPECTED_SPEC_FACTS = {
     F.NL_X_NB_NH_BS_CS: (True, True, False, False),
     F.NL_X_NB_BS_NH_CS: (False, True, False, False),
     F.NL_X_NB_BS_HS: (False, False, False, False),
-    F.NL_X_NBBS_ONE_HS: (False, False, False, True),
     F.NL_X_NB_BSV_BSS: (False, False, False, False),
     F.NL_X_TWO_X_NB_BS_NH_HS: (False, False, False, False),
     F.NL_X_NP_X_NB_BS_ONE_HS: (False, False, False, False),
@@ -89,7 +80,6 @@ EXPECTED_SPEC_FACTS = {
 @pytest.mark.parametrize(
     ("engine_kv_format", "expected_shape"),
     [
-        (F.NL_X_NBBS_ONE_HS, (6, 1, 7)),
         (F.NL_X_NB_BS_HS, (2, 3, 7)),
         (F.NL_X_NB_NH_BS_CS, (2, 5, 3, 7)),
         (F.NL_X_NB_BS_NH_CS, (2, 3, 5, 7)),
@@ -112,7 +102,6 @@ def test_paged_layer_shape_from_format_spec(
     "engine_kv_format",
     [
         F.NB_NL_TWO_BS_NH_HS,
-        F.TWO_X_NL_X_NB_BS_NH_HS,
         F.NL_X_TWO_X_NB_BS_NH_HS,
     ],
 )
@@ -129,7 +118,6 @@ def test_paged_layer_shape_rejects_non_single_layer_tensor_formats(
     [
         (F.NL_X_NB_BS_HS, (2, 3, 7)),
         (F.NL_X_TWO_NB_BS_NH_HS, (2, 2, 3, 5, 7)),
-        (F.TWO_X_NL_X_NB_BS_NH_HS, (2, 3, 5, 7)),
     ],
 )
 def test_paged_pointer_shape_uses_format_geometry(
@@ -147,9 +135,9 @@ def test_paged_pointer_shape_uses_format_geometry(
     ("engine_kv_format", "kv_size", "expected_shape"),
     [
         (F.NL_X_NB_BS_HS, 1, (2, 12, 40)),
-        (F.TWO_X_NL_X_NB_BS_NH_HS, 2, (2, 2, 12, 40)),
+        (F.NL_X_TWO_NB_BS_NH_HS, 2, (2, 2, 12, 40)),
         (F.NL_X_NB_BS_HS, 0, (2, 12, 40)),
-        (F.TWO_X_NL_X_NB_BS_NH_HS, 0, (2, 2, 12, 40)),
+        (F.NL_X_TWO_NB_BS_NH_HS, 0, (2, 2, 12, 40)),
     ],
 )
 def test_staging_shape_uses_kv_axis_geometry(
