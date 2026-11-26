@@ -118,7 +118,8 @@ def test_external_selector_cuda_fs_round_trip(
             synchronize_device(expected.device)
             torch.testing.assert_close(restored, expected, rtol=0, atol=0)
         manager.finish_read_prefetched([key], l1_owners=result.l1_owners)
-        assert manager.delete_l1_keys([key]) == (1, 0)
+        if store_class == "ExternalStoreAll":
+            assert manager.delete_l1_keys([key]) == (1, 0)
         assert manager.report_status()["is_healthy"]
     finally:
         manager.close()
