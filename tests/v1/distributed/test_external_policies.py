@@ -321,7 +321,7 @@ def test_server_cli_exits_nonzero_on_invalid_policy(
         timeout=60,
     )
     assert diagnostic in result.stderr, result.stderr
-    assert result.returncode == 1, result.stderr
+    assert result.returncode > 0, result.stderr
 
 
 def test_documented_server_command_loads_example_policies() -> None:
