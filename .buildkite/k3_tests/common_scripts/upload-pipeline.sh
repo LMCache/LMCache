@@ -33,6 +33,20 @@ if [[ "${BUILDKITE_BRANCH:-}" == "ci-weekly-full" && "${CI_WEEKLY_FULL:-0}" != "
     exit 0
 fi
 
+# Temporary dedicated jobs for the #6972 wheel experiment.
+if [[ "${BUILDKITE_BRANCH:-}" == "test/client-wheel-6972-platforms" ||
+    "${BUILDKITE_BRANCH:-}" == */test/client-wheel-6972-platforms ]]; then
+    case "${PIPELINE_FILE}" in
+        */multiprocess/smoke-pipeline.yml) backend=cuda ;;
+        */amd/pipeline.yml) backend=rocm ;;
+        */musa/pipeline.yml) backend=musa ;;
+        *) exit 0 ;;
+    esac
+    python3 "${SCRIPT_DIR}/../client-wheel-probe/pipeline.py" "$backend" | \
+        buildkite-agent pipeline upload
+    exit 0
+fi
+
 case "${PIPELINE_FILE}" in
     *k3_tests/multiprocess/pipeline.yml|*k3_tests/multiprocess/smoke-pipeline.yml)
         expensive_pipeline_name="multiprocess"
