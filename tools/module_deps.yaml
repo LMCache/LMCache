@@ -30,7 +30,7 @@ allowed:
   transport: [common, platform]
   server: [common, platform, transport]
   client: [common, platform, transport]
-  sdk: [client]
+  sdk: [client, common, platform, transport]
   integration: [client, sdk]
 
 # Imports that break the tree today, as "<part or package> -> <part or package>".

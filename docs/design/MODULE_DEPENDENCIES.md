@@ -2,8 +2,8 @@
 
 LMCache code is split into seven parts. The public API, `lmcache.sdk`, is separate
 from inference-engine adapters in `lmcache.integration`. Each part may import the
-parts its arrows lead to, directly or through other parts: SDK may import common,
-since SDK depends on client and client on common. The rules live in one file,
+parts its arrows lead to, directly or through other parts. SDK explicitly lists
+client, common, platform and transport as allowed dependencies. The rules live in
 `tools/module_deps.yaml`, and `tools/check_module_deps.py` enforces them in
 pre-commit and CI.
 
@@ -19,6 +19,9 @@ flowchart BT
     client --> platform
     client --> transport
     sdk --> client
+    sdk --> common
+    sdk --> platform
+    sdk --> transport
     integration --> client
     integration --> sdk
 ```

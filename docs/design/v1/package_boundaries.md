@@ -69,20 +69,27 @@ unnecessary import migration while the client build selects an exact allowlist.
 
 ## Dependency direction
 
-```text
-integration ----> client ----> common
-      |              |
-      |              +------> client/transport ----> transport ----> common
-      v                              |
-  platform <-------------------------+
-      ^                              |
-      +------------------------------ sdk
-
-existing server packages ----------> transport/common as shared contracts move
+```mermaid
+flowchart LR
+    integration --> sdk
+    integration --> client
+    sdk --> client
+    sdk --> common
+    sdk --> platform
+    sdk --> transport
+    client --> common
+    client --> platform
+    client --> transport
+    transport --> common
+    transport -.-> platform
+    server["existing server packages"] --> common
+    server --> platform
+    server --> transport
 ```
 
-The SDK depends on `client`, `common`, `transport` and `platform`, never server
-implementations such as `distributed`, `multiprocess`, `mp_coordinator` or
+The SDK explicitly permits dependencies on `client`, `common`, `platform` and
+`transport`, never server implementations such as `distributed`, `multiprocess`,
+`mp_coordinator` or
 `storage_backend`. Shared pure helpers such as `cdiv` belong in
 `lmcache.v1.common.utils`; callers use that canonical path directly.
 The [module dependency rules](../MODULE_DEPENDENCIES.md) check SDK as its own part,
