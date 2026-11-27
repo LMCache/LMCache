@@ -1274,3 +1274,53 @@ class TestBufferOnlyMode:
 
         ctrl.stop()
         adapter.close()
+
+
+class TestStoreControllerStoreBatching:
+    """Byte-capped store batching: a large same-shape group is stored as
+    several sequential store tasks instead of one task read-pinning the
+    whole group."""
+
+    def test_large_group_is_split_into_byte_capped_batches(
+        self, l1_manager, monkeypatch
+    ):
+        """A group larger than the batch cap is stored as multiple
+        byte-capped store tasks, each drained before the next batch's pages
+        are reserved."""
+        import lmcache.v1.distributed.storage_controllers.store_controller as sc
+
+        # Cap below a single object's size: every batch holds exactly one
+        # object, so the 10-key group must split into 10 sequential tasks.
+        monkeypatch.setattr(sc, "_L2_STORE_BATCH_BYTES", 1)
+
+        bus = init_event_bus(EventBusConfig(enabled=True))
+        submissions: list[Event] = []
+        bus.subscribe(EventType.L2_STORE_SUBMITTED, submissions.append)
+        bus.start()
+
+        adapter = make_adapter()
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([l1_manager]),
+        )
+        ctrl.start()
+
+        keys = [make_object_key(i) for i in range(10)]
+        write_keys_to_l1(l1_manager, keys, make_layout())
+
+        assert wait_for_condition(
+            lambda: all(adapter.debug_has_key(k) for k in keys), timeout=10.0
+        )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 0
+            and ctrl.report_status()["queued_keys_count"] == 0
+        )
+        counts = [e.metadata["key_count"] for e in submissions]
+        assert counts == [1] * 10
+
+        ctrl.stop()
+        adapter.close()
+        bus.stop()
+        init_event_bus(EventBusConfig(enabled=False))
