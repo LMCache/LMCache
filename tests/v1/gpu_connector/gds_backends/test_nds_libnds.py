@@ -530,42 +530,6 @@ class TestStreamOrderedAsyncIO:
         with pytest.raises(RuntimeError, match="current NPU stream"):
             lib.submit_async(3, 0x1000, 4096, 0, 0, result, 7, is_write=False)
 
-    def test_async_accepts_stream_on_another_device(
-        self, lib: OpenEulerNDSLibrary, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """current_stream() is device 0; the transfer stream is current on device 1."""
-
-        def current_stream(index: int | None = None) -> SimpleNamespace:
-            return SimpleNamespace(npu_stream=7 if index == 1 else 1)
-
-        monkeypatch.setattr(nl, "_aclrt_launch_host_func", lambda: lambda *_a: 0)
-        monkeypatch.setattr(
-            torch,
-            "npu",
-            SimpleNamespace(
-                is_available=lambda: True,
-                device_count=lambda: 2,
-                current_stream=current_stream,
-            ),
-            raising=False,
-        )
-        nl._pending_callbacks.clear()
-        lib.register_stream(7)
-        try:
-            lib.submit_async(
-                3,
-                0x1000,
-                4096,
-                0,
-                0,
-                ctypes.c_int64(0),
-                7,
-                is_write=False,
-            )
-            assert len(nl._pending_callbacks) == 1
-        finally:
-            nl._pending_callbacks.clear()
-
     def test_async_requires_torch_stream_host_callback(
         self,
         lib: OpenEulerNDSLibrary,

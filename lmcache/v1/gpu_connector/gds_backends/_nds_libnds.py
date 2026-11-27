@@ -65,9 +65,8 @@ def _host_trampoline(callback_id: int) -> None:
     _pending_callbacks.pop(callback_id)()
 
 
-def _npu_stream_handle(npu: Any, index: int | None) -> int | None:
-    stream = npu.current_stream() if index is None else npu.current_stream(index)
-    handle = getattr(stream, "npu_stream", None)
+def _npu_stream_handle(npu: Any) -> int | None:
+    handle = getattr(npu.current_stream(), "npu_stream", None)
     return handle if isinstance(handle, int) else None
 
 
@@ -88,27 +87,14 @@ def _launch_npu_stream_host_callback(
         raise RuntimeError("NDS stream-ordered I/O requires torch.npu")
     # Reading npu_stream calls NPUStream::stream(), which drains the torch
     # task queue. Launch on this pointer, not one saved at register_stream.
-    # current_stream() is the thread's active device; a transfer on another
-    # NPU drains that device before accepting its stream.
-    handle = _npu_stream_handle(npu, None)
+    # The caller already set this thread's device; it has one context.
+    handle = _npu_stream_handle(npu)
     if handle != raw_stream:
-        matched = False
-        device_count = getattr(npu, "device_count", lambda: 0)()
-        for index in range(device_count):
-            try:
-                candidate = _npu_stream_handle(npu, index)
-            except TypeError:
-                candidate = None
-            if candidate == raw_stream:
-                handle = candidate
-                matched = True
-                break
-        if not matched:
-            current = handle if isinstance(handle, int) else 0
-            raise RuntimeError(
-                "NDS I/O must run on the current NPU stream "
-                f"(registered 0x{raw_stream:x}, current 0x{current:x})"
-            )
+        current = handle if isinstance(handle, int) else 0
+        raise RuntimeError(
+            "NDS I/O must run on the current NPU stream "
+            f"(registered 0x{raw_stream:x}, current 0x{current:x})"
+        )
     callback_id = _allocate_callback_id()
     _pending_callbacks[callback_id] = callback
     err = int(
