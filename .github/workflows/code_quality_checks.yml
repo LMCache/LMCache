@@ -205,25 +205,6 @@ jobs:
           disable-sudo-and-containers: true
           egress-policy: audit
 
-      - name: Checkout fast-fail script
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          sparse-checkout: .buildkite/scripts/fast_fail_cancel.py
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-
-      - name: Cancel sibling CI runs
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          BUILDKITE_API_TOKEN: ${{ secrets.BUILD_KITE_API_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          python3 .buildkite/scripts/fast_fail_cancel.py \
-            --commit "${{ github.event.pull_request.head.sha }}" \
-            --pr-number "${PR_NUMBER}" \
-            --current-run-id "${{ github.run_id }}" \
-            --reason "Fast-fail: CPU unit tests failed"
-
       - name: Cancel this run
         env:
           GH_TOKEN: ${{ github.token }}

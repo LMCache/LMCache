@@ -20,7 +20,7 @@ class TestFastFailCancel(unittest.TestCase):
         self.org = "lmcache"
 
     @patch("fast_fail_cancel._http_request")
-    def test_cancel_github_actions_dry_run_skips_non_pr_and_self(self, mock_http):
+    def test_cancel_github_actions_dry_run_filters_pr_event_and_self(self, mock_http):
         mock_http.side_effect = [
             (
                 200,
@@ -31,6 +31,7 @@ class TestFastFailCancel(unittest.TestCase):
                             "name": "Code Quality",
                             "event": "pull_request",
                             "head_branch": "feature-1",
+                            "pull_requests": [{"number": 12}],
                             "status": "in_progress",
                             "html_url": "https://github.com/run/1001",
                         },
@@ -39,6 +40,7 @@ class TestFastFailCancel(unittest.TestCase):
                             "name": "Aerospike integration",
                             "event": "pull_request",
                             "head_branch": "feature-1",
+                            "pull_requests": [{"number": 12}],
                             "status": "in_progress",
                             "html_url": "https://github.com/run/1002",
                         },
@@ -49,6 +51,15 @@ class TestFastFailCancel(unittest.TestCase):
                             "head_branch": "dev",
                             "status": "in_progress",
                             "html_url": "https://github.com/run/1003",
+                        },
+                        {
+                            "id": 1004,
+                            "name": "CodeQL Advanced",
+                            "event": "pull_request",
+                            "head_branch": "feature-1",
+                            "pull_requests": [{"number": 99}],
+                            "status": "in_progress",
+                            "html_url": "https://github.com/run/1004",
                         },
                     ]
                 },
@@ -61,6 +72,7 @@ class TestFastFailCancel(unittest.TestCase):
             repo=self.repo,
             token="fake_gh_token",
             current_run_id="1001",
+            pr_number="12",
             dry_run=True,
         )
 
@@ -108,7 +120,7 @@ class TestFastFailCancel(unittest.TestCase):
         self.assertIn("1002/cancel", post_calls[0][0][0])
 
     @patch("fast_fail_cancel._http_request")
-    def test_cancel_buildkite_builds_filters_pr_self_and_non_pr(self, mock_http):
+    def test_cancel_buildkite_builds_includes_failing_and_filters_pr(self, mock_http):
         mock_http.return_value = (
             200,
             [
@@ -126,7 +138,7 @@ class TestFastFailCancel(unittest.TestCase):
                     "number": 102,
                     "pipeline": {"slug": "k3-multiprocess-smoke"},
                     "branch": "feature-1",
-                    "state": "running",
+                    "state": "failing",
                     "pull_request": {"id": "12"},
                     "web_url": "https://buildkite.com/102",
                 },
@@ -144,7 +156,7 @@ class TestFastFailCancel(unittest.TestCase):
                     "number": 104,
                     "pipeline": {"slug": "k3-multiprocess-smoke"},
                     "branch": "feature-other",
-                    "state": "running",
+                    "state": "creating",
                     "pull_request": {"id": "99"},
                     "web_url": "https://buildkite.com/104",
                 },

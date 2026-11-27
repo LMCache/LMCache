@@ -3,8 +3,8 @@
 """Fast-Fail & Cancel: stop sibling CI runs on first required-check failure.
 
 Supports bidirectional cancellation using only the Python standard library:
-- Cancels sibling GitHub Actions workflow runs for the same commit (PR events only).
-- Cancels sibling Buildkite builds for the same commit (and PR number when known).
+- Cancels sibling GitHub Actions workflow runs for the same commit (PR events).
+- Cancels sibling Buildkite builds for the same commit (and PR number when set).
 """
 
 # Standard
@@ -18,6 +18,7 @@ import urllib.error
 import urllib.request
 
 PROTECTED_BRANCHES = {"dev", "main", "master"}
+CANCELLABLE_BK_STATES = {"running", "scheduled", "failing", "creating"}
 
 
 def get_token_buildkite(explicit_token: Optional[str]) -> Optional[str]:
@@ -42,6 +43,13 @@ def _normalize_pr_number(raw: Optional[str]) -> Optional[str]:
     if not val or val.lower() in {"false", "0", "none", "null"}:
         return None
     return val
+
+
+def _emit_warning(msg: str) -> None:
+    """Print warning and emit GitHub Actions ::warning:: annotation when in GHA."""
+    print(f"  [WARN] {msg}")
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::warning::{msg}")
 
 
 def _http_request(
@@ -94,6 +102,7 @@ def cancel_github_actions(
     repo: str,
     token: str,
     current_run_id: Optional[str],
+    pr_number: Optional[str] = None,
     dry_run: bool = False,
     reason: str = "",
 ) -> List[Dict[str, Any]]:
@@ -104,6 +113,7 @@ def cancel_github_actions(
     )
     cancelled: List[Dict[str, Any]] = []
     runs: List[Dict[str, Any]] = []
+    norm_pr = _normalize_pr_number(pr_number)
 
     for status in ("in_progress", "queued"):
         url = (
@@ -111,6 +121,11 @@ def cancel_github_actions(
             f"?head_sha={commit_sha}&status={status}&per_page=100"
         )
         status_code, resp = _http_request(url, token=token, auth_header_prefix="token ")
+        if status_code in (401, 403):
+            _emit_warning(
+                f"GitHub token unauthorized (HTTP {status_code}) listing {status} runs."
+            )
+            continue
         if status_code != 200 or not isinstance(resp, dict):
             print(
                 f"  [WARN] Failed to list GHA {status} runs "
@@ -137,8 +152,20 @@ def cancel_github_actions(
             )
             continue
 
+        run_prs = run.get("pull_requests") or []
+        if norm_pr and run_prs:
+            pr_nums = {
+                str(p.get("number")) for p in run_prs if p.get("number") is not None
+            }
+            if pr_nums and norm_pr not in pr_nums:
+                print(
+                    f"  -> Skipping run {run_id_str} for PR(s) {sorted(pr_nums)} "
+                    f"(expected PR #{norm_pr})"
+                )
+                continue
+
         branch = run.get("head_branch")
-        if branch in PROTECTED_BRANCHES and not run.get("pull_requests"):
+        if branch in PROTECTED_BRANCHES and not run_prs:
             print(f"  -> Skipping protected branch {branch}: run {run_id_str}")
             continue
 
@@ -170,6 +197,11 @@ def cancel_github_actions(
                     f"  [CANCELLED] GHA run {run_id_str}: {run.get('name')} ({reason})"
                 )
                 cancelled.append(run_info)
+            elif c_status in (401, 403):
+                _emit_warning(
+                    f"GitHub token lacks permission to cancel run {run_id_str} "
+                    f"(HTTP {c_status}): {c_resp}"
+                )
             else:
                 print(
                     f"  [WARN] Failed to cancel GHA run {run_id_str} "
@@ -201,13 +233,18 @@ def cancel_buildkite_builds(
         f"?commit={commit_sha}&per_page=100"
     )
     status_code, resp = _http_request(url, token=token)
+    if status_code in (401, 403):
+        _emit_warning(
+            f"Buildkite token unauthorized (HTTP {status_code}) listing builds."
+        )
+        return cancelled
     if status_code != 200 or not isinstance(resp, list):
         print(f"  [WARN] Failed to list Buildkite builds (HTTP {status_code}): {resp}")
         return cancelled
 
     for build in resp:
         state = build.get("state")
-        if state not in ("running", "scheduled"):
+        if state not in CANCELLABLE_BK_STATES:
             continue
 
         build_id = str(build.get("id"))
@@ -262,6 +299,11 @@ def cancel_buildkite_builds(
                     f"({pipeline}) ({reason})"
                 )
                 cancelled.append(build_info)
+            elif c_status in (401, 403):
+                _emit_warning(
+                    f"Buildkite token lacks permission to cancel #{build_num} "
+                    f"(HTTP {c_status}): {c_resp}"
+                )
             else:
                 print(
                     f"  [WARN] Failed to cancel Buildkite build #{build_num} "
@@ -283,7 +325,7 @@ def main() -> int:
     parser.add_argument(
         "--pr-number",
         default=os.environ.get("BUILDKITE_PULL_REQUEST") or os.environ.get("PR_NUMBER"),
-        help="Pull request number to scope Buildkite cancellation",
+        help="Pull request number to scope GHA and Buildkite cancellation",
     )
     parser.add_argument(
         "--repo",
@@ -358,15 +400,13 @@ def main() -> int:
                 repo=args.repo,
                 token=gh_token,
                 current_run_id=args.current_run_id,
+                pr_number=args.pr_number,
                 dry_run=args.dry_run,
                 reason=args.reason,
             )
             total_gha_cancelled = len(gha_cancelled)
         else:
-            print(
-                "\n[Fast-Fail] Skipping GitHub Actions cancellation "
-                "(no GITHUB_TOKEN available)."
-            )
+            _emit_warning("Skipping GHA cancellation (no GITHUB_TOKEN available).")
 
     if not args.no_cancel_bk:
         if bk_token:
@@ -381,9 +421,8 @@ def main() -> int:
             )
             total_bk_cancelled = len(bk_cancelled)
         else:
-            print(
-                "\n[Fast-Fail] Skipping Buildkite cancellation "
-                "(no BUILDKITE_API_TOKEN available)."
+            _emit_warning(
+                "Skipping Buildkite cancellation (no BUILDKITE_API_TOKEN available)."
             )
 
     print("\n=== Fast-Fail Summary ===")

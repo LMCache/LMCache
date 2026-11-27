@@ -51,7 +51,8 @@ steps:
     command: |
       set -euo pipefail
       outcome="$(buildkite-agent step get outcome --step unit_tests || echo unknown)"
-      if [[ "${outcome}" != "passed" ]]; then
+      echo "unit_tests outcome=${outcome}"
+      if [[ "${outcome}" == "hard_failed" ]]; then
         python3 .buildkite/scripts/fast_fail_cancel.py \
           --reason "Fast-fail: Buildkite k3-unit-tests (${outcome})"
       fi
@@ -68,3 +69,9 @@ steps:
                       secretKeyRef:
                         name: buildkite-git-creds
                         key: GITHUB_TOKEN
+                  - name: BUILDKITE_API_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: buildkite-api-token
+                        key: BUILDKITE_API_TOKEN
+                        optional: true
