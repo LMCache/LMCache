@@ -349,9 +349,14 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
       ``"{base}-{salt}"``. Unsalted KV and ``"single"`` mode both use the
       ``s3_endpoint`` bucket unchanged.
     - s3_bucket_auto_create (bool): in ``per_cache_salt`` mode, create a
-      missing tenant bucket on the first store for its tenant (default
-      ``True``). With ``False``, tenant buckets must be created out of band;
-      a missing one makes stores for that tenant fail.
+      missing tenant bucket on the first store for its tenant. Default
+      ``True``, except in us-east-1, where it defaults to ``False`` and
+      ``True`` is refused: there ``CreateBucket`` answers 200 for a bucket
+      the caller already owns (one created out of band after the ownership
+      check, say) and can reset its ACL, and the TTL write would replace its
+      lifecycle rules, so tenant buckets must be pre-created. With ``False``,
+      a missing tenant bucket makes stores for that tenant fail and reads
+      miss.
     - s3_bucket_ttl_days (int): expiration rule, in days, put on a tenant
       bucket the adapter creates (default ``30``; ``0`` = no rule). Never
       applied to a bucket that already exists.
@@ -375,7 +380,7 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         s3_bucket_mode: str = "single",
         s3_bucket_template: str = "",
         s3_expected_bucket_owner: Optional[str] = None,
-        s3_bucket_auto_create: bool = True,
+        s3_bucket_auto_create: Optional[bool] = None,
         s3_bucket_ttl_days: int = 30,
     ):
         self.s3_endpoint = s3_endpoint
@@ -400,8 +405,10 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         self.s3_expected_bucket_owner = s3_expected_bucket_owner
         if s3_bucket_ttl_days < 0:
             raise ValueError("s3_bucket_ttl_days must be >= 0")
-        self.s3_bucket_auto_create = s3_bucket_auto_create
         self.s3_bucket_ttl_days = s3_bucket_ttl_days
+        #: True when tenant buckets live in us-east-1 (per_cache_salt only).
+        self.s3_bucket_us_east_1 = False
+        auto_create = s3_bucket_auto_create
         # Fail fast on a template that can produce an illegal bucket name, at
         # config time rather than on the first request in per_cache_salt mode.
         if s3_bucket_mode == "per_cache_salt":
@@ -424,12 +431,26 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
                     f"{parsed.effective_region!r} but s3_region is {s3_region!r}"
                 )
             base_bucket = parsed.bucket
+            self.s3_bucket_us_east_1 = region == "us-east-1"
+            if self.s3_bucket_us_east_1:
+                if auto_create:
+                    raise ValueError(
+                        "s3_bucket_auto_create cannot be true in us-east-1: "
+                        "CreateBucket there succeeds for a bucket this account "
+                        "already owns and can reset its ACL, and the TTL write "
+                        "would replace its lifecycle rules. Pre-create the tenant "
+                        "buckets and leave s3_bucket_auto_create unset or false."
+                    )
+                auto_create = False
             try:
                 _bucket_router.validate_template(template, base_bucket)
             except (KeyError, ValueError, IndexError) as e:
                 raise ValueError(
                     f"invalid s3_bucket_template {s3_bucket_template!r}: {e}"
                 ) from e
+        self.s3_bucket_auto_create: bool = (
+            True if auto_create is None else bool(auto_create)
+        )
 
     @classmethod
     def from_dict(cls, d: dict) -> "S3L2AdapterConfig":
@@ -481,7 +502,11 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             s3_bucket_mode=d.get("s3_bucket_mode", "single"),
             s3_bucket_template=(_opt_str("s3_bucket_template") or ""),
             s3_expected_bucket_owner=_opt_str("s3_expected_bucket_owner") or None,
-            s3_bucket_auto_create=_bool("s3_bucket_auto_create", True),
+            s3_bucket_auto_create=(
+                None
+                if d.get("s3_bucket_auto_create") is None
+                else _bool("s3_bucket_auto_create", None)
+            ),
             s3_bucket_ttl_days=ttl_days,
         )
         cfg.eviction_config = cls._parse_eviction_config(d)
@@ -506,7 +531,8 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             "- s3_bucket_template (str): per_cache_salt bucket name, with "
             "{salt} once and optional {base} (default '{base}-{salt}')\n"
             "- s3_bucket_auto_create (bool): create a missing tenant bucket on "
-            "its first store (default true)\n"
+            "its first store (default true; in us-east-1 it defaults to false and "
+            "true is refused, so tenant buckets must be pre-created)\n"
             "- s3_bucket_ttl_days (int): expiration rule for tenant buckets the "
             "adapter creates (default 30, 0 = none)\n"
             "- s3_expected_bucket_owner (str): 12-digit account id sent as "
@@ -577,6 +603,8 @@ class S3L2Adapter(L2AdapterInterface):
             max_workers=1, thread_name_prefix="s3-l2-buckets"
         )
         self._pending_buckets: dict[str, bool] = {}
+        # Missing tenant buckets already reported (auto-create off).
+        self._missing_logged: set[str] = set()
         # (bucket, may_create) → monotonic time before which not to retry.
         self._bucket_retry_at: dict[tuple[str, bool], float] = {}
         # lazy boto3 client for bucket create/lifecycle (control plane)
@@ -1139,36 +1167,38 @@ class S3L2Adapter(L2AdapterInterface):
 
         - owned by this account (``ListBuckets`` lists it) → usable, as-is;
           its lifecycle rules are never touched;
-        - absent and ``create`` → ``create_bucket``. Success, or
+        - absent and ``create`` (never in us-east-1) → ``create_bucket``.
+          Success, or
           ``BucketAlreadyOwnedByYou`` from a concurrent creator, makes it
           usable; only a bucket this call created gets the TTL rule.
           ``BucketAlreadyExists`` means another account owns the name: the
           bucket is fenced off for the life of the process, logged once;
         - absent and not ``create``, or any failure → retried no sooner than
-          ``_BUCKET_RETRY_SECONDS`` later by a request of the same kind.
+          ``_BUCKET_RETRY_SECONDS`` later by a request of the same kind. With
+          auto-create off, a missing bucket is logged once.
         """
         try:
             mgmt_s3 = self._mgmt_client()
-            # Ownership check first: us-east-1 answers create_bucket with 200
-            # for a bucket the caller already owns, so create alone can't tell
-            # a new bucket from an existing one.
+            # Ownership check first: an owned bucket is used as-is and never
+            # re-created, so its ACL and lifecycle rules are left alone.
             if bucket in _list_owned_buckets(mgmt_s3, bucket, self._region):
                 self._mark_bucket_usable(bucket)
                 return
-            if not create:
+            # Never create in us-east-1 (config refuses it there too).
+            may_create = create and not self._config.s3_bucket_us_east_1
+            if not may_create:
+                if not self._auto_create_bucket:
+                    self._log_missing_bucket_once(bucket)
                 self._retry_bucket_later(bucket, create)
                 return
             created = False
             try:
-                # us-east-1 is the S3 default region and rejects an explicit
-                # LocationConstraint; every other region requires it.
-                if self._region == "us-east-1":
-                    mgmt_s3.create_bucket(Bucket=bucket)
-                else:
-                    mgmt_s3.create_bucket(
-                        Bucket=bucket,
-                        CreateBucketConfiguration={"LocationConstraint": self._region},
-                    )
+                # Never reached in us-east-1, where CreateBucket would also
+                # succeed for an existing bucket we own (see may_create).
+                mgmt_s3.create_bucket(
+                    Bucket=bucket,
+                    CreateBucketConfiguration={"LocationConstraint": self._region},
+                )
                 created = True
                 logger.info("Auto-provisioned tenant KV bucket %s", bucket)
             except Exception as e:
@@ -1203,6 +1233,18 @@ class S3L2Adapter(L2AdapterInterface):
                 # the marker to that run.
                 if self._pending_buckets.get(bucket) == create:
                     del self._pending_buckets[bucket]
+
+    def _log_missing_bucket_once(self, bucket: str) -> None:
+        with self._lock:
+            if bucket in self._missing_logged:
+                return
+            self._missing_logged.add(bucket)
+        logger.warning(
+            "Tenant bucket %s does not exist and s3_bucket_auto_create is off%s; "
+            "stores for its tenant fail and reads miss until it is created",
+            bucket,
+            " (required in us-east-1)" if self._config.s3_bucket_us_east_1 else "",
+        )
 
     def _mark_bucket_usable(self, bucket: str) -> None:
         with self._lock:

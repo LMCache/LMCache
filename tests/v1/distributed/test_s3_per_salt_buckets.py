@@ -72,6 +72,7 @@ class _World:
         self.foreign: set[str] = set()  # names owned by another account
         self.lifecycle: dict[str, Any] = {}
         self.created: list[str] = []
+        self.create_calls: list[str] = []  # every CreateBucket attempt
         self.requests: list[tuple[str, str, dict[str, str]]] = []  # method, bucket
         self.lifecycle_kwargs: list[dict] = []
 
@@ -120,6 +121,7 @@ class _FakeMgmt:
 
     def create_bucket(self, Bucket: str, CreateBucketConfiguration=None):
         with self.world.lock:
+            self.world.create_calls.append(Bucket)
             if Bucket in self.world.foreign:
                 raise _ClientError("BucketAlreadyExists")
             if Bucket in self.world.objects:
@@ -258,7 +260,7 @@ def fake_s3(monkeypatch):
 # =============================================================================
 
 
-def make_adapter(region: str = "us-east-1", **overrides) -> S3L2Adapter:
+def make_adapter(region: str = "us-west-2", **overrides) -> S3L2Adapter:
     config = S3L2AdapterConfig(
         s3_endpoint=f"s3://{endpoint(region)}",
         s3_region=region,
@@ -536,14 +538,14 @@ class TestLifecycle:
         rules = WORLD.lifecycle[bucket_for("t")]["Rules"]
         assert rules[0]["Expiration"] == {"Days": 7}
 
-    def test_existing_bucket_keeps_its_rules_in_us_east_1(self, adapters):
+    def test_existing_bucket_keeps_its_rules(self, adapters):
         a = adapters()
-        # Created out of band after startup, so not discovered; create_bucket
-        # would answer 200 here (us-east-1), so ownership must be checked first.
+        # Created out of band after startup, so not discovered: the ownership
+        # check finds it and it is used without CreateBucket or a TTL write.
         WORLD.add_bucket(bucket_for("t"))
         WORLD.lifecycle[bucket_for("t")] = {"Rules": ["managed elsewhere"]}
         store_for_new_tenant(a, [key(1, "t")])
-        assert WORLD.created == []
+        assert WORLD.create_calls == []
         assert WORLD.lifecycle[bucket_for("t")] == {"Rules": ["managed elsewhere"]}
 
     def test_ttl_zero_sets_no_rule(self, adapters):
@@ -551,6 +553,115 @@ class TestLifecycle:
         store_for_new_tenant(a, [key(1, "t")])
         assert WORLD.created == [bucket_for("t")]
         assert WORLD.lifecycle == {}
+
+
+# =============================================================================
+# us-east-1: tenant buckets must be pre-created
+# =============================================================================
+
+
+def _capture_warnings():
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler(logging.WARNING)
+    handler.emit = records.append  # type: ignore[method-assign]
+    s3mod.logger.addHandler(handler)
+    return records, handler
+
+
+US_EAST_1_ENDPOINTS = [
+    ("s3://test-bucket.s3.us-east-1.amazonaws.com", "us-east-1"),
+    ("s3://test-bucket.s3.amazonaws.com", "us-east-1"),  # legacy global
+    ("s3://test-bucket.s3-external-1.amazonaws.com", "us-east-1"),
+    ("s3://test-bucket.s3.amazonaws.com", ""),  # empty region → us-east-1
+]
+
+
+class TestUsEast1:
+    @pytest.mark.parametrize("ep, region", US_EAST_1_ENDPOINTS)
+    def test_auto_create_defaults_off(self, ep, region):
+        cfg = S3L2AdapterConfig(
+            s3_endpoint=ep, s3_region=region, s3_bucket_mode="per_cache_salt"
+        )
+        assert cfg.s3_bucket_us_east_1 is True
+        assert cfg.s3_bucket_auto_create is False
+
+    @pytest.mark.parametrize("ep, region", US_EAST_1_ENDPOINTS)
+    def test_explicit_auto_create_is_refused(self, ep, region):
+        with pytest.raises(ValueError, match="Pre-create"):
+            S3L2AdapterConfig(
+                s3_endpoint=ep,
+                s3_region=region,
+                s3_bucket_mode="per_cache_salt",
+                s3_bucket_auto_create=True,
+            )
+
+    def test_from_dict_refuses_explicit_true(self):
+        d = {
+            "s3_endpoint": endpoint("us-east-1"),
+            "s3_region": "us-east-1",
+            "s3_bucket_mode": "per_cache_salt",
+        }
+        assert S3L2AdapterConfig.from_dict(d).s3_bucket_auto_create is False
+        assert (
+            S3L2AdapterConfig.from_dict(
+                {**d, "s3_bucket_auto_create": False}
+            ).s3_bucket_auto_create
+            is False
+        )
+        with pytest.raises(ValueError, match="us-east-1"):
+            S3L2AdapterConfig.from_dict({**d, "s3_bucket_auto_create": True})
+
+    def test_other_regions_and_single_mode_default_on(self):
+        per_salt = S3L2AdapterConfig(
+            s3_endpoint=f"s3://{endpoint('us-west-2')}",
+            s3_region="us-west-2",
+            s3_bucket_mode="per_cache_salt",
+        )
+        single = S3L2AdapterConfig(
+            s3_endpoint=f"s3://{endpoint('us-east-1')}", s3_region="us-east-1"
+        )
+        assert per_salt.s3_bucket_auto_create is True
+        assert single.s3_bucket_auto_create is True
+        assert single.s3_bucket_us_east_1 is False
+
+    def test_missing_bucket_fails_stores_misses_reads_logs_once(self, adapters):
+        a = adapters(region="us-east-1")
+        k = key(1, "t")
+        records, handler = _capture_warnings()
+        try:
+            for _ in range(3):
+                assert store(a, [k]) is False
+                assert wait_until(lambda: settled(a))
+                assert lookup(a, [k]) == [False]
+                assert load(a, [k]) == [False]
+                assert wait_until(lambda: settled(a))
+                a._bucket_retry_at.clear()  # skip the retry delay
+        finally:
+            s3mod.logger.removeHandler(handler)
+        assert WORLD.create_calls == []
+        assert WORLD.lifecycle_kwargs == []
+        assert WORLD.requests_to(bucket_for("t")) == []
+        missing = [r for r in records if "does not exist" in r.msg]
+        assert len(missing) == 1
+        assert "us-east-1" in missing[0].getMessage()
+
+    def test_pre_created_bucket_is_used_untouched(self, adapters):
+        WORLD.add_bucket(bucket_for("t"))
+        WORLD.lifecycle[bucket_for("t")] = {"Rules": ["managed elsewhere"]}
+        a = adapters(region="us-east-1")  # found by the startup scan
+        assert store(a, [key(1, "t")]) is True
+        assert lookup(a, [key(1, "t")]) == [True]
+        assert WORLD.create_calls == []
+        assert WORLD.lifecycle[bucket_for("t")] == {"Rules": ["managed elsewhere"]}
+
+    def test_bucket_pre_created_after_startup_is_picked_up(self, adapters):
+        a = adapters(region="us-east-1")
+        assert store(a, [key(1, "t")]) is False
+        assert wait_until(lambda: settled(a))
+        WORLD.add_bucket(bucket_for("t"))
+        a._bucket_retry_at.clear()
+        store_for_new_tenant(a, [key(1, "t")])
+        assert WORLD.create_calls == []
 
 
 # =============================================================================

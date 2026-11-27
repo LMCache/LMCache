@@ -53,9 +53,16 @@ ports, paths and non-AWS hosts are refused.
   specs, conversions, attribute or index access and positional fields are
   refused, since they could cut the hash off.  The template is checked when
   the config is loaded.
-- ``s3_bucket_auto_create`` (bool, default ``true``): Create a missing tenant
-  bucket on its tenant's first store.  With ``false``, tenant buckets must be
-  created outside LMCache, and stores for a tenant without one fail.
+- ``s3_bucket_auto_create`` (bool, default ``true``; ``false`` in us-east-1):
+  Create a missing tenant bucket on its tenant's first store.  With ``false``,
+  tenant buckets must be created outside LMCache; for a tenant without one,
+  stores fail, reads miss, and the missing bucket is logged once.  In
+  us-east-1 (including the regionless ``s3.amazonaws.com`` endpoints) setting
+  it to ``true`` is an error: there ``CreateBucket`` also succeeds for a bucket
+  the account already owns, for example one created out of band after the
+  adapter checked, and can reset its ACL, and the TTL write would replace its
+  lifecycle rules.  Pre-create tenant buckets in us-east-1, for example with
+  the names ``tenant_bucket_name`` in ``s3_bucket_router`` produces.
 - ``s3_bucket_ttl_days`` (int, default ``30``): Expiration rule put on a
   tenant bucket the adapter creates; ``0`` puts none.  It is never applied to
   a bucket that already exists, so lifecycle rules managed elsewhere are left
@@ -74,7 +81,9 @@ How tenant buckets are used:
   lookup or load is a miss.  A background worker then checks the bucket and,
   only if the request was a store and ``s3_bucket_auto_create`` is on,
   creates it.  Reads never create a bucket, and no request waits for bucket
-  calls.  The first store for a brand-new tenant is therefore dropped.
+  calls.  The first store for a brand-new tenant is therefore dropped.  A
+  bucket the account already owns is never re-created, and its ACL and
+  lifecycle rules are left alone.
 - If a tenant bucket name is owned by another account
   (``BucketAlreadyExists``), the adapter logs it once and never reads or
   writes that bucket.
