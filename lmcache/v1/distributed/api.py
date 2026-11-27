@@ -780,6 +780,7 @@ class PrefetchTaskSpec:
     allowed_l1_memory_tags: frozenset[MemoryTags] | None = None
     allowed_l2_memory_tags: frozenset[MemoryTags] | None = None
     priority: PrefetchPriority = PrefetchPriority.NORMAL
+    read_owner: str = ""
 
     def __post_init__(self) -> None:
         if not self.key_groups:

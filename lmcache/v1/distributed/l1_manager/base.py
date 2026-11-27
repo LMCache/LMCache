@@ -4,9 +4,10 @@
 # Standard
 from abc import abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import count
 import threading
+import time
 import weakref
 
 # First Party
@@ -75,6 +76,15 @@ def validate_read_locks(read_locks: int) -> int:
     return read_locks
 
 
+@dataclass
+class _ReadLease:
+    """Owner-scoped TTL read reservation for a single lookup attempt."""
+
+    remaining: int
+    expires_at: float
+    consumers: set[int] = field(default_factory=set)
+
+
 # Internal classes and helper functions
 @dataclass
 class L1ObjectState:
@@ -89,7 +99,7 @@ class L1ObjectState:
     """ The writer's reservation; held while the object is staged. """
 
     read_lock: TTLLock
-    """ The read lock with TTL for the object. """
+    """ The legacy anonymous read lock with TTL for the object. """
 
     is_temporary: bool
     """ Whether the object is temporary (need to be deleted after read). """
@@ -101,6 +111,24 @@ class L1ObjectState:
     ``_pop_staging``, so a buffer whose logical size is narrowed in
     between (``MemoryObj.set_used_size`` after serialization) does not
     leave phantom staging bytes behind. """
+
+    read_leases: dict[str, _ReadLease] = field(default_factory=dict)
+    """ Named lookup reservations keyed by ``read_owner``. """
+
+    max_lease_expiry: float = 0.0
+    """ Highest ``expires_at`` across ``read_leases`` for lock-free O(1) checks. """
+
+    active_reads: int = 0
+    """ Untimed in-flight read handles pinning this object against eviction. """
+
+    def is_read_locked(self, now: float | None = None) -> bool:
+        """Return True if any active read, legacy lock, or live lease holds this key."""
+        if self.active_reads > 0 or self.read_lock.is_locked():
+            return True
+        if self.max_lease_expiry <= 0.0:
+            return False
+        ts = time.monotonic() if now is None else now
+        return self.max_lease_expiry > ts
 
 
 def l1_mgr_synchronized(func):
@@ -222,6 +250,10 @@ class BaseL1Manager(L1ManagerInterface):
         # Objects a prefetch read-locked for a request that has not consumed
         # them yet.
         self._prefetch_locked: dict[ObjectKey, L1ObjectState] = {}
+        # Untimed active-read handles: handle_id -> (key, entry).
+        self._active_reads: dict[int, tuple[ObjectKey, L1ObjectState]] = {}
+        self._active_read_ids = count(1)
+        self._closing: bool = False
 
         self._memory_manager = memory_manager
 
@@ -295,34 +327,66 @@ class BaseL1Manager(L1ManagerInterface):
         with self._lock:
             self._registered_listeners.append(listener)
 
+    @staticmethod
+    def _sync_lease_expiry(entry: L1ObjectState) -> None:
+        """Recompute ``entry.max_lease_expiry`` after mutating ``entry.read_leases``."""
+        entry.max_lease_expiry = max(
+            (lease.expires_at for lease in entry.read_leases.values()),
+            default=0.0,
+        )
+
+    def _reserve_lease_locked(
+        self,
+        entry: L1ObjectState,
+        read_owner: str,
+        total: int,
+        now: float,
+    ) -> None:
+        """Add ``total`` named read shares for ``read_owner`` and prune expired ones."""
+        if entry.read_leases:
+            expired = [
+                owner
+                for owner, lease in entry.read_leases.items()
+                if lease.expires_at <= now
+            ]
+            for owner in expired:
+                del entry.read_leases[owner]
+        expires_at = now + self._read_ttl_seconds
+        existing = entry.read_leases.get(read_owner)
+        if existing is not None:
+            existing.remaining += total
+            existing.expires_at = max(existing.expires_at, expires_at)
+        else:
+            entry.read_leases[read_owner] = _ReadLease(
+                remaining=total, expires_at=expires_at
+            )
+        self._sync_lease_expiry(entry)
+
+    def _release_lease_locked(
+        self, entry: L1ObjectState, read_owner: str, now: float
+    ) -> bool:
+        """Release all unclaimed named shares for ``read_owner``.
+
+        Returns True iff ``read_owner`` held a live (unexpired) lease.
+        """
+        lease = entry.read_leases.pop(read_owner, None)
+        if lease is None:
+            return False
+        self._sync_lease_expiry(entry)
+        return lease.expires_at > now and lease.remaining > 0
+
     @l1_mgr_synchronized
     def reserve_read(
         self,
         keys: list[ObjectKey],
         read_locks: int = 1,
+        read_owner: str = "",
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Reserve read access for the given keys.
-
-        Args:
-            keys: The list of object keys to reserve
-                read access for.
-            read_locks: Total read locks acquired per key --
-                one per worker that consumes a read lock
-                for the same key (e.g. MLA models with
-                TP > 1).
-
-        Returns:
-            A dictionary mapping each object key to a tuple
-            of (L1Error, Optional[MemoryObj]).
-
-        Errors:
-            KEY_NOT_EXIST: The key does not exist.
-
-        Note:
-            Staging objects are never readable; a key that is only
-            being written is reported as ``KEY_NOT_EXIST``.
-        """
+        """Reserve read access for the given keys."""
         total = validate_read_locks(read_locks)
+        if self._closing:
+            return {key: (L1Error.KEY_NOT_READABLE, None) for key in keys}
+        now = time.monotonic() if read_owner else 0.0
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
         for key in keys:
@@ -331,11 +395,14 @@ class BaseL1Manager(L1ManagerInterface):
                 ret[key] = (L1Error.KEY_NOT_EXIST, None)
                 continue
 
-            # TODO(perf): support a count argument in
-            # TTLLock.lock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.lock()
+            if read_owner:
+                self._reserve_lease_locked(entry, read_owner, total, now)
+            else:
+                # TODO(perf): support a count argument in
+                # TTLLock.lock() to avoid Python for-loop
+                # overhead (TTLLock is C++ std::atomic).
+                for _ in range(total):
+                    entry.read_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
 
@@ -347,23 +414,8 @@ class BaseL1Manager(L1ManagerInterface):
         self,
         keys: list[ObjectKey],
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Unsafe read the read-locked objects without adding new read locks.
-
-        This method does not acquire read locks. Therefore, the caller need
-        to make sure the `unsafe_read` is called between `reserve_read` and
-        `finish_read` calls.
-
-        Args:
-            keys: The list of object keys to read.
-
-        Returns:
-            A dictionary mapping each object key to a tuple of
-            (L1Error, Optional[MemoryObj]).
-
-        Errors:
-            KEY_NOT_EXIST: The key does not exist.
-            KEY_NOT_READABLE: The key is not readable (in this case, not read-locked).
-        """
+        """Unsafe read the read-locked objects without adding new read locks."""
+        now = time.monotonic()
         ret: dict[ObjectKey, L1OperationResult] = {}
 
         for key in keys:
@@ -372,7 +424,7 @@ class BaseL1Manager(L1ManagerInterface):
                 ret[key] = (L1Error.KEY_NOT_EXIST, None)
                 continue
 
-            if not entry.read_lock.is_locked():
+            if not entry.is_read_locked(now):
                 ret[key] = (L1Error.KEY_NOT_READABLE, None)
                 continue
 
@@ -381,35 +433,127 @@ class BaseL1Manager(L1ManagerInterface):
         return ret
 
     @l1_mgr_synchronized
+    def acquire_read(
+        self,
+        keys: list[ObjectKey],
+        read_owner: str,
+        consumer_id: int | None = None,
+    ) -> tuple[dict[ObjectKey, L1OperationResult], list[int]]:
+        """Atomically promote ``read_owner``'s named leases into untimed active reads.
+
+        All-or-nothing across ``keys``: if any key is missing, invalid, or lacks
+        an unclaimed live lease for ``read_owner``, no leases are consumed and
+        no active-read handles are created.
+        """
+        unique_keys = list(dict.fromkeys(keys))
+        if self._closing or not read_owner:
+            return {k: (L1Error.KEY_NOT_READABLE, None) for k in unique_keys}, []
+
+        now = time.monotonic()
+        ret: dict[ObjectKey, L1OperationResult] = {}
+        staged: list[tuple[ObjectKey, L1ObjectState, _ReadLease]] = []
+        all_ok = True
+        for key in unique_keys:
+            entry = self._objects.get(key, None)
+            if entry is None:
+                ret[key] = (L1Error.KEY_NOT_EXIST, None)
+                all_ok = False
+                continue
+            if not entry.memory_obj.is_valid():
+                ret[key] = (L1Error.KEY_NOT_READABLE, None)
+                all_ok = False
+                continue
+            lease = entry.read_leases.get(read_owner)
+            if (
+                lease is None
+                or lease.expires_at <= now
+                or lease.remaining <= 0
+                or (consumer_id is not None and consumer_id in lease.consumers)
+            ):
+                ret[key] = (L1Error.KEY_NOT_READABLE, None)
+                all_ok = False
+                continue
+            ret[key] = (L1Error.SUCCESS, entry.memory_obj)
+            staged.append((key, entry, lease))
+
+        if not all_ok:
+            return ret, []
+
+        handles: list[int] = []
+        for key, entry, lease in staged:
+            lease.remaining -= 1
+            if consumer_id is not None:
+                lease.consumers.add(consumer_id)
+            if lease.remaining <= 0:
+                entry.read_leases.pop(read_owner, None)
+                self._sync_lease_expiry(entry)
+            entry.active_reads += 1
+            hid = next(self._active_read_ids)
+            self._active_reads[hid] = (key, entry)
+            handles.append(hid)
+        return ret, handles
+
+    @l1_mgr_synchronized
+    def finish_active_reads(self, handles: list[int]) -> None:
+        """Release untimed active-read handles returned by :meth:`acquire_read`."""
+        if not handles:
+            return
+        now = time.monotonic()
+        need_to_free: list[MemoryObj] = []
+        need_to_free_keys: list[ObjectKey] = []
+        finished_keys: list[ObjectKey] = []
+
+        for hid in handles:
+            record = self._active_reads.pop(hid, None)
+            if record is None:
+                continue
+            key, entry = record
+            if entry.active_reads > 0:
+                entry.active_reads -= 1
+            finished_keys.append(key)
+            if not entry.is_read_locked(now):
+                if self._prefetch_locked.get(key) is entry:
+                    self._prefetch_locked.pop(key, None)
+                if entry.is_temporary and self._objects.get(key) is entry:
+                    need_to_free.append(entry.memory_obj)
+                    need_to_free_keys.append(key)
+                    del self._objects[key]
+
+        if not finished_keys:
+            return
+        freed_meta = [self._object_meta(obj) for obj in need_to_free]
+        self._memory_manager.free(need_to_free)
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_read_finished(finished_keys)
+            listener.on_l1_keys_deleted_by_manager(need_to_free_keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_READ_FINISHED,
+                metadata={"l1_tag": self._config.tag, "keys": finished_keys},
+            )
+        )
+        if need_to_free_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_KEYS_EVICTED,
+                    metadata={
+                        "l1_tag": self._config.tag,
+                        "keys": need_to_free_keys,
+                        "meta": freed_meta,
+                    },
+                )
+            )
+
+    @l1_mgr_synchronized
     def finish_read(
         self,
         keys: list[ObjectKey],
         read_locks: int = 1,
+        read_owner: str = "",
     ) -> dict[ObjectKey, L1Error]:
-        """Finish read access for the given keys.
-
-        Will delete the object if it is temporary and read
-        count reaches zero.
-
-        Args:
-            keys: The list of object keys to finish read
-                access for.
-            read_locks: Read locks to release per key.  A caller
-                releasing only its own read lock passes 1 (the
-                default); the reservation owner releasing the
-                whole reservation passes the ``reserve_read``
-                total.
-
-        Returns:
-            A dictionary mapping each object key to an
-            L1Error.
-
-        Errors:
-            KEY_NOT_EXIST: The key does not exist.
-            KEY_IN_WRONG_STATE: The key is not read-locked, which
-                means the reader may read inconsistent data.
-        """
+        """Finish read access for the given keys."""
         total = validate_read_locks(read_locks)
+        now = time.monotonic()
         need_to_free: list[MemoryObj] = []
         need_to_free_keys: list[ObjectKey] = []
         ret: dict[ObjectKey, L1Error] = {}
@@ -418,32 +562,43 @@ class BaseL1Manager(L1ManagerInterface):
         for key in keys:
             entry = self._objects.get(key, None)
             if entry is None:
-                logger.warning(
-                    "L1Manager: finish read on non-existing key %s, "
-                    "potential inconsistent data might be read",
-                    key,
-                )
+                if not read_owner:
+                    logger.warning(
+                        "L1Manager: finish read on non-existing key %s, "
+                        "potential inconsistent data might be read",
+                        key,
+                    )
                 ret[key] = L1Error.KEY_NOT_EXIST
                 continue
 
-            if not entry.read_lock.is_locked():
-                logger.warning(
-                    "L1Manager: finish read on non-read-locked key %s, "
-                    "potential inconsistent data might be read",
-                    key,
-                )
-                ret[key] = L1Error.KEY_IN_WRONG_STATE
-                self._prefetch_locked.pop(key, None)
-                continue
+            if read_owner:
+                released = self._release_lease_locked(entry, read_owner, now)
+                if not released:
+                    ret[key] = L1Error.KEY_IN_WRONG_STATE
+                    if not entry.is_read_locked(now):
+                        self._prefetch_locked.pop(key, None)
+                    continue
+            else:
+                if not entry.read_lock.is_locked():
+                    logger.warning(
+                        "L1Manager: finish read on non-read-locked key %s, "
+                        "potential inconsistent data might be read",
+                        key,
+                    )
+                    ret[key] = L1Error.KEY_IN_WRONG_STATE
+                    if not entry.is_read_locked(now):
+                        self._prefetch_locked.pop(key, None)
+                    continue
 
-            # TODO(perf): support a count argument in
-            # TTLLock.unlock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.unlock()
-            if not entry.read_lock.is_locked():
+                # TODO(perf): support a count argument in
+                # TTLLock.unlock() to avoid Python for-loop
+                # overhead (TTLLock is C++ std::atomic).
+                for _ in range(total):
+                    entry.read_lock.unlock()
+
+            if not entry.is_read_locked(now):
                 self._prefetch_locked.pop(key, None)
-            if entry.is_temporary and not entry.read_lock.is_locked():
+            if entry.is_temporary and not entry.is_read_locked(now):
                 need_to_free.append(entry.memory_obj)
                 need_to_free_keys.append(key)
                 del self._objects[key]
@@ -680,38 +835,11 @@ class BaseL1Manager(L1ManagerInterface):
         keys: list[ObjectKey],
         read_locks: int = 1,
         tag: str = "",
+        read_owner: str = "",
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Atomically finish write and acquire read lock for the given keys.
-
-        This is used by the prefetch controller after successfully loading
-        data from L2 into write-reserved L1 buffers. It transitions the
-        object from write-locked to read-locked in a single atomic step,
-        preventing a race window where eviction could interfere.
-
-        Args:
-            keys: Keys to transition from write-locked to read-locked.
-            read_locks: Total read locks acquired per key -- one per TP
-                worker that consumes a read lock for the same key
-                (e.g. MLA models with TP > 1).
-            tag: The writer's tag passed to ``reserve_write``.
-
-        Returns:
-            A dictionary mapping each object key to a tuple of
-            (L1Error, Optional[MemoryObj]); the memory object is the one that
-            is now resident and read-locked.
-
-        Errors:
-            KEY_NOT_EXIST: ``tag`` stages nothing for the key.
-            KEY_IN_WRONG_STATE: The staging object is not write-locked (its
-                reservation expired).
-
-        Note:
-            Admission follows :meth:`finish_write`. If the key became
-            resident before admission, the staging object is discarded and
-            the read locks are taken on the resident object, so the caller
-            always holds the object that readers see.
-        """
+        """Atomically finish write and acquire read lock for the given keys."""
         total = validate_read_locks(read_locks)
+        now = time.monotonic() if read_owner else 0.0
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
         successful_keys_meta: list[L1ObjectMeta] = []
@@ -738,8 +866,11 @@ class BaseL1Manager(L1ManagerInterface):
                 discarded.append(entry.memory_obj)
                 resident_keys.append(key)
                 entry = resident
-            for _ in range(total):
-                entry.read_lock.lock()
+            if read_owner:
+                self._reserve_lease_locked(entry, read_owner, total, now)
+            else:
+                for _ in range(total):
+                    entry.read_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
 
         self._memory_manager.free(discarded)
@@ -807,7 +938,16 @@ class BaseL1Manager(L1ManagerInterface):
                 gone_keys.append(key)
                 continue
 
-            locked = entry.read_lock.is_locked()
+            if entry.active_reads > 0:
+                logger.warning(
+                    "L1Manager: refusing to delete key %s with %d active read(s)",
+                    key,
+                    entry.active_reads,
+                )
+                ret[key] = L1Error.KEY_IS_LOCKED
+                continue
+
+            locked = entry.is_read_locked()
             if locked and not force:
                 ret[key] = L1Error.KEY_IS_LOCKED
                 continue
@@ -899,6 +1039,14 @@ class BaseL1Manager(L1ManagerInterface):
                 lock expired, keeping read-locked objects and live staging
                 objects intact.
         """
+        if force and self._active_reads:
+            logger.warning(
+                "L1Manager: force-clear downgraded to safe clear because %d "
+                "active read(s) are still in flight.",
+                len(self._active_reads),
+            )
+            force = False
+
         if force:
             staging_count = sum(len(per_tag) for per_tag in self._staging.values())
             logger.warning(
@@ -942,8 +1090,9 @@ class BaseL1Manager(L1ManagerInterface):
         objs_to_free: list[MemoryObj] = []
         locked_count = 0
 
+        now = time.monotonic()
         for key, entry in list(self._objects.items()):
-            if entry.read_lock.is_locked():
+            if entry.is_read_locked(now):
                 locked_count += 1
                 continue
             keys_to_clear.append(key)
@@ -990,7 +1139,7 @@ class BaseL1Manager(L1ManagerInterface):
             or a staging object whose write lock expired; False otherwise.
         """
         entry = self._objects.get(key, None)
-        if entry is not None and not entry.read_lock.is_locked():
+        if entry is not None and not entry.is_read_locked():
             return True
         per_tag = self._staging.get(key, None)
         if per_tag is None:
@@ -1041,9 +1190,10 @@ class BaseL1Manager(L1ManagerInterface):
             keys: Keys of the locked objects. Keys that are not resident or
                 not read-locked are skipped.
         """
+        now = time.monotonic()
         for key in keys:
             entry = self._objects.get(key, None)
-            if entry is not None and entry.read_lock.is_locked():
+            if entry is not None and entry.is_read_locked(now):
                 self._prefetch_locked[key] = entry
 
     @l1_mgr_synchronized
@@ -1056,10 +1206,11 @@ class BaseL1Manager(L1ManagerInterface):
             read-locked. Part of :meth:`get_memory_usage`'s used bytes, and
             disjoint from :meth:`get_staging_memory_usage`.
         """
+        now = time.monotonic()
         self._prefetch_locked = {
             key: entry
             for key, entry in self._prefetch_locked.items()
-            if self._objects.get(key, None) is entry and entry.read_lock.is_locked()
+            if self._objects.get(key, None) is entry and entry.is_read_locked(now)
         }
         return sum(
             entry.memory_obj.get_size() for entry in self._prefetch_locked.values()
@@ -1090,8 +1241,19 @@ class BaseL1Manager(L1ManagerInterface):
         """Return this manager's backend and lifetime configuration."""
         return self._config
 
+    def _begin_close(self) -> None:
+        """Latch closing state and refuse teardown while active reads remain."""
+        with self._lock:
+            if self._active_reads:
+                raise RuntimeError(
+                    f"Cannot close L1Manager '{self._config.tag}': "
+                    f"{len(self._active_reads)} active read(s) still in flight"
+                )
+            self._closing = True
+
     def close(self) -> None:
         """Free every object, close the memory manager and drop the gauge target."""
+        self._begin_close()
         with self._lock:
             all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
             for per_tag in self._staging.values():
@@ -1115,10 +1277,11 @@ class BaseL1Manager(L1ManagerInterface):
         ``staging_object_count`` / ``staging_bytes`` report the staging
         subset and ``write_locked_count`` the live reservations among them.
         """
+        now = time.monotonic()
         read_locked = 0
         temporary = 0
         for entry in self._objects.values():
-            if entry.read_lock.is_locked():
+            if entry.is_read_locked(now):
                 read_locked += 1
             if entry.is_temporary:
                 temporary += 1
@@ -1173,8 +1336,9 @@ class BaseL1Manager(L1ManagerInterface):
         mem_check_result = self._memory_manager.memcheck()
 
         # Log the locked objects for debugging
+        now = time.monotonic()
         num_read_locked = sum(
-            1 for entry in self._objects.values() if entry.read_lock.is_locked()
+            1 for entry in self._objects.values() if entry.is_read_locked(now)
         )
         num_staging = sum(len(per_tag) for per_tag in self._staging.values())
 

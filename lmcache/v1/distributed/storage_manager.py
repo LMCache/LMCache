@@ -7,6 +7,7 @@ Distributed multi-tier storage manager for MP mode
 from collections import Counter, defaultdict
 from collections.abc import Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
+from dataclasses import dataclass
 from typing import Any, Iterator, Optional, cast
 import threading
 import time
@@ -125,6 +126,18 @@ def _validate_write_targets(
     placed = [key for group in targets.values() for key in group]
     if Counter(placed) != Counter(keys):
         raise ValueError("The write policy must place every key exactly once")
+
+
+@dataclass(frozen=True)
+class ActiveReadCompletion:
+    """Opaque token tracking untimed L1 active-read handles for one retrieve."""
+
+    handles_by_l1: tuple[tuple[int, tuple[int, ...]], ...] = ()
+
+    @property
+    def is_empty(self) -> bool:
+        """Return True if no L1 active-read handles are held."""
+        return not self.handles_by_l1
 
 
 class StorageManager:
@@ -533,12 +546,79 @@ class StorageManager:
                     {"keys": keys},
                 )
 
-    @enable_tracing(redact=("l1_owners",))
+    def acquire_read(
+        self,
+        keys: list[ObjectKey],
+        read_owner: str,
+        consumer_id: int | None = None,
+        l1_owners: Mapping[ObjectKey, int] | None = None,
+    ) -> tuple[list[MemoryObj] | None, ActiveReadCompletion | None]:
+        """Atomically promote ``read_owner``'s named leases into untimed active reads.
+
+        Returns ``(objs, completion)`` ordered to match ``keys`` when every key
+        succeeds, or ``(None, None)`` (with any partial acquisitions rolled
+        back) if any key is missing, unowned, expired, or already claimed by
+        ``consumer_id``.
+        """
+        if not keys:
+            return [], ActiveReadCompletion()
+        if not read_owner:
+            return None, None
+
+        groups: dict[int, list[ObjectKey]] = defaultdict(list)
+        if l1_owners is not None:
+            for key in keys:
+                owner = l1_owners.get(key)
+                if owner is None or owner not in self._l1_managers_by_id:
+                    return None, None
+                groups[owner].append(key)
+        elif len(self._l1_managers) == 1:
+            groups[self._l1_managers[0].l1_manager_id] = list(keys)
+        else:
+            return None, None
+
+        acquired_objs: dict[ObjectKey, MemoryObj] = {}
+        acquired_handles: list[tuple[int, tuple[int, ...]]] = []
+        complete = False
+        try:
+            for owner, group in groups.items():
+                res, handles = self._l1_managers_by_id[owner].acquire_read(
+                    group, read_owner=read_owner, consumer_id=consumer_id
+                )
+                if handles:
+                    acquired_handles.append((owner, tuple(handles)))
+                if any(
+                    err != L1Error.SUCCESS or obj is None for err, obj in res.values()
+                ):
+                    return None, None
+                for key, (_err, obj) in res.items():
+                    assert obj is not None
+                    acquired_objs[key] = obj
+            complete = True
+            return (
+                [acquired_objs[k] for k in keys],
+                ActiveReadCompletion(tuple(acquired_handles)),
+            )
+        finally:
+            if not complete and acquired_handles:
+                self.finish_active_reads(ActiveReadCompletion(tuple(acquired_handles)))
+
+    def finish_active_reads(self, completion: ActiveReadCompletion | None) -> None:
+        """Release all untimed L1 active-read handles carried by ``completion``."""
+        if completion is None or completion.is_empty:
+            return
+        for owner, handles in completion.handles_by_l1:
+            mgr = self._l1_managers_by_id.get(owner)
+            if mgr is not None and handles:
+                mgr.finish_active_reads(list(handles))
+
+    @enable_tracing(redact=("l1_owners", "read_owner"))
     def finish_read_prefetched(
         self,
         keys: list[ObjectKey],
         read_locks: int = 1,
         l1_owners: dict[ObjectKey, int] | None = None,
+        read_owner: str = "",
     ) -> None:
         """Finish reading prefetched objects.
 
@@ -546,8 +626,15 @@ class StorageManager:
             keys: Object keys that have been read.
             read_locks: Read locks to release per key (the whole
                 reservation when releasing a lookup's locks).
+            l1_owners: Optional per-key L1 owner map from prefetch.
+            read_owner: Named reservation owner; empty string uses legacy locks.
         """
-        finish_result = self._finish_read_objects(keys, read_locks, l1_owners)
+        if read_owner:
+            finish_result = self._finish_read_objects(
+                keys, read_locks, l1_owners, read_owner=read_owner
+            )
+        else:
+            finish_result = self._finish_read_objects(keys, read_locks, l1_owners)
         successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
         failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
         self._event_bus.publish(
@@ -1543,10 +1630,37 @@ class StorageManager:
         return results
 
     def _finish_read_objects(
-        self, keys: list[ObjectKey], count: int, owners: dict[ObjectKey, int] | None
+        self,
+        keys: list[ObjectKey],
+        count: int,
+        owners: dict[ObjectKey, int] | None,
+        read_owner: str = "",
     ) -> dict[ObjectKey, L1Error]:
         """Release ``count`` read locks per key on the L1 that holds it."""
         results: dict[ObjectKey, L1Error] = {key: L1Error.KEY_NOT_EXIST for key in keys}
+        if read_owner:
+            if owners is not None:
+                groups: dict[int, list[ObjectKey]] = defaultdict(list)
+                for key in keys:
+                    owner = owners.get(key)
+                    if owner is not None and owner in self._l1_managers_by_id:
+                        groups[owner].append(key)
+                for owner, group in groups.items():
+                    results.update(
+                        self._l1_managers_by_id[owner].finish_read(
+                            group, read_locks=count, read_owner=read_owner
+                        )
+                    )
+                return results
+            for manager in self._l1_managers:
+                mgr_res = manager.finish_read(
+                    keys, read_locks=count, read_owner=read_owner
+                )
+                for k, err in mgr_res.items():
+                    if results.get(k) != L1Error.SUCCESS:
+                        results[k] = err
+            return results
+
         for owner, group in self._read_groups(keys, owners).items():
             results.update(
                 self._l1_managers_by_id[owner].finish_read(group, read_locks=count)
