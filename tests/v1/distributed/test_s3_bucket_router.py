@@ -173,6 +173,36 @@ def test_dotted_bucket_error_says_why():
         r.parse_virtual_hosted_endpoint("my.bucket.s3.us-west-2.amazonaws.com")
 
 
+@pytest.mark.parametrize(
+    "template",
+    [
+        "{base}-{salt:.12}",  # truncates the token, hash included
+        "{base}-{salt:.3}",
+        "{base}-{salt:>40}",
+        "{base:.2}-{salt}",
+        "{base}-{salt!r}",
+        "{base!s}-{salt}",
+        "{base.upper}-{salt}",
+        "{base[0]}-{salt}",
+        "{salt[0]}",
+        "{}-{salt}",
+        "{0}-{salt}",
+        "{base}-{salt:{base}}",  # nested spec
+        "{base}-{salt",  # unbalanced
+    ],
+)
+def test_templates_allow_only_plain_placeholders(template):
+    with pytest.raises(ValueError):
+        r.validate_template(template, "kv-cache")
+
+
+def test_truncating_spec_would_have_merged_salts():
+    """Why specs are refused: a precision can cut the hash off the token."""
+    a = "{base}-{salt:.8}".format(base="kv", salt="tenant-a-17a3e3a826dd")
+    b = "{base}-{salt:.8}".format(base="kv", salt="tenant-a-ff209423ad07")
+    assert a == b == "kv-tenant-a"
+
+
 @pytest.mark.parametrize("template", ["{base}.{salt}", "kv.{salt}", "{salt}.x"])
 def test_templates_with_dots_are_rejected(template):
     with pytest.raises(ValueError, match="dotted"):

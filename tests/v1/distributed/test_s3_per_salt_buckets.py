@@ -633,6 +633,8 @@ class TestConfig:
             ("s3_expected_bucket_owner", "12345"),
             ("s3_bucket_template", "{tenant}"),
             ("s3_bucket_template", "x" * 60 + "{salt}"),
+            ("s3_bucket_template", "{base}-{salt:.12}"),
+            ("s3_bucket_template", "{base}-{salt!r}"),
             ("s3_bucket_mode", "per_tenant"),
         ],
     )

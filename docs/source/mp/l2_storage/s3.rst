@@ -49,7 +49,10 @@ ports, paths and non-AWS hosts are refused.
   digits of SHA-256 over the original ``cache_salt`` and ``<readable>`` is the
   salt lowercased to ``[a-z0-9-]`` and truncated to fit S3's 63-character
   limit.  The hash keeps salts that differ only in case or punctuation in
-  separate buckets.  The template is checked when the config is loaded.
+  separate buckets.  Only plain ``{base}`` and ``{salt}`` are allowed: format
+  specs, conversions, attribute or index access and positional fields are
+  refused, since they could cut the hash off.  The template is checked when
+  the config is loaded.
 - ``s3_bucket_auto_create`` (bool, default ``true``): Create a missing tenant
   bucket on its tenant's first store.  With ``false``, tenant buckets must be
   created outside LMCache, and stores for a tenant without one fail.

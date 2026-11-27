@@ -153,14 +153,36 @@ def is_valid_bucket_name(name: str) -> bool:
 def validate_template(template: str, base_bucket: str) -> None:
     """Check that ``template`` yields legal names for every salt.
 
+    Only plain ``{base}`` and ``{salt}`` are allowed: a format spec
+    (``{salt:.12}``), conversion (``{salt!r}``), attribute or index access
+    (``{base.x}``, ``{base[0]}``) or positional field (``{}``, ``{0}``) could
+    reshape or cut the salt token, including its hash, so distinct salts
+    could share a bucket.
+
     Raises:
-        ValueError: unknown or repeated placeholders, no ``{salt}``, no room
-            for the salt hash within 63 characters, or an illegal name.
+        ValueError: any placeholder other than plain ``{base}``/``{salt}``,
+            ``{salt}`` not exactly once, no room for the salt hash within 63
+            characters, or an illegal or dotted name.
     """
-    fields = [f for _, f, _, _ in Formatter().parse(template) if f is not None]
-    unknown = set(fields) - _TEMPLATE_FIELDS
-    if unknown:
-        raise ValueError(f"unknown placeholder(s) {sorted(unknown)}")
+    try:
+        parsed = list(Formatter().parse(template))
+    except ValueError as e:  # unbalanced braces
+        raise ValueError(f"malformed template: {e}") from None
+    fields: list[str] = []
+    for _, field, spec, conversion in parsed:
+        if field is None:
+            continue
+        if spec or conversion:
+            raise ValueError(
+                f"placeholder {{{field}}} has a format spec or conversion; only "
+                "plain {base} and {salt} are allowed"
+            )
+        if field not in _TEMPLATE_FIELDS:
+            raise ValueError(
+                f"placeholder {{{field}}} is not allowed; only plain {{base}} "
+                "and {salt} are"
+            )
+        fields.append(field)
     if fields.count("salt") != 1:
         raise ValueError("must contain {salt} exactly once")
     fixed = len(template.format(base=base_bucket, salt=""))
