@@ -17,8 +17,8 @@ ones defined in ``lazy_offload_policy.base``:
 - **Pin**: the reference this class takes on a GPU block so that vLLM cannot
   recycle it while the worker is still reading it. The receipt releases it.
 - **Orphaned**: said of a batch whose generation ended before its receipt
-  arrived. Its pins are still released, but its failure is not charged to
-  the generation now holding the id.
+  arrived. Its pins are still released, but its failure is not retried: its
+  operations belong to a generation that no longer exists.
 - **Token ledger**: the one token-id list a request's buffered operations
   share. The tracker hands out a fresh copy of the whole sequence with every
   operation, which deferral would otherwise retain once per operation.
@@ -35,6 +35,7 @@ from lmcache.integration.vllm.lazy_offload_policy.base import (
     ConfigValue,
     DrainSignals,
     OffloadPolicy,
+    PendingStoreItem,
 )
 from lmcache.integration.vllm.lazy_offload_state import LazyOffloadRequestRegistry
 from lmcache.integration.vllm.lmcache_mp_metadata import (
@@ -49,6 +50,11 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
+
+# Failed stores in a row after which a request's stores are given up: a
+# failure that outlasts the retries would otherwise be retried forever and
+# keep the request's session open.
+MAX_STORE_ATTEMPTS = 3
 
 
 class StoreCompletionTracker(Protocol):
@@ -206,6 +212,8 @@ class LazyOffloadManager:
         self._requests = LazyOffloadRequestRegistry()
         # One token ledger per request whose operations are buffered.
         self._token_ledgers: dict[str, bytearray] = {}
+        # Request id -> its store batches that failed in a row.
+        self._failed_store_attempts: dict[str, int] = {}
 
     def bind_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """Bind the scheduler's GPU block pool and build the policy.
@@ -289,8 +297,10 @@ class LazyOffloadManager:
     ) -> LazyOffloadActions:
         """Apply failed stores and fully aggregated completion receipts.
 
-        Failures go first, so dropping a finished request's held-back suffix
-        can make it releasable by the accompanying receipt. Stale receipts in
+        A failure only marks the in-flight batch: other workers may still be
+        reading its blocks. Once every worker has reported, a failed batch
+        that is not orphaned goes back to the policy to be retried; unpinned,
+        its blocks join the free-queue tail. Stale receipts in
         ``completed_store_counts`` are filtered here.
 
         Args:
@@ -302,22 +312,14 @@ class LazyOffloadManager:
 
         Returns:
             Sessions made releasable by completed batches.
+
+        Raises:
+            ValueError: If no GPU block pool has been bound.
         """
         pool = self._require_block_pool()
         for request_id in failed_request_ids:
-            if not self._requests.has_in_flight(request_id):
-                continue
-            if self._requests.in_flight_is_orphaned(request_id):
-                # A reset or id reuse detached the batch: it still owns its
-                # pins, but cannot break the current prefix chain.
-                continue
-            dropped = self._require_policy().mark_store_failed(request_id)
-            logger.warning(
-                "Store failed for request %s; dropped %d held-back store "
-                "op(s) that would lack their stored prefix",
-                request_id,
-                dropped,
-            )
+            if self._requests.has_in_flight(request_id):
+                self._requests.fail_in_flight(request_id)
         actions = LazyOffloadActions()
         for request_id, count in completed_store_counts.items():
             if not self._requests.has_in_flight(request_id):
@@ -333,6 +335,12 @@ class LazyOffloadManager:
                 continue
             batch = self._requests.complete_batch(request_id)
             pool.free_blocks([pool.blocks[block_id] for block_id in batch.block_ids])
+            if not batch.failed:
+                self._failed_store_attempts.pop(request_id, None)
+            elif not batch.orphaned:
+                # The data is still on the GPU; a reset or id reuse would
+                # have detached the batch from the generation it belongs to.
+                self._retry_or_give_up(batch.operations)
             if not self._require_policy().has_pending_request(
                 request_id
             ) and self._requests.can_end_session(request_id):
@@ -370,6 +378,7 @@ class LazyOffloadManager:
         """
         self._requests.reset(request_id)
         self._token_ledgers.pop(request_id, None)
+        self._failed_store_attempts.pop(request_id, None)
         dropped = self._require_policy().drop_request(request_id)
         if dropped:
             logger.info(
@@ -400,6 +409,7 @@ class LazyOffloadManager:
             return LazyOffloadActions()
         self._require_policy().discard_for_reuse(request_id)
         self._token_ledgers.pop(request_id, None)
+        self._failed_store_attempts.pop(request_id, None)
         if predecessor_in_flight:
             return LazyOffloadActions()
         logger.info(
@@ -475,7 +485,7 @@ class LazyOffloadManager:
                     f"request {item.request_id!r} emitted while a store batch "
                     "is still in flight"
                 )
-            valid_metas: list[LMCacheMPRequestMetadata] = []
+            valid = PendingStoreItem(request_id=item.request_id)
             valid_block_ids: list[int] = []
             for metadata, old_block_hashes in item.metadatas:
                 gpu_block_ids = list(old_block_hashes)
@@ -496,12 +506,14 @@ class LazyOffloadManager:
                     )
                     pool.free_blocks(blocks)
                     break
-                valid_metas.append(metadata)
+                valid.metadatas.append((metadata, old_block_hashes))
                 valid_block_ids.extend(gpu_block_ids)
-            if not valid_metas:
+            if not valid.metadatas:
                 continue
-            actions.stores_to_submit.append(_coalesce_store_metadata(valid_metas))
-            self._requests.register_batch(item.request_id, valid_block_ids)
+            actions.stores_to_submit.append(
+                _coalesce_store_metadata([meta for meta, _ in valid.metadatas])
+            )
+            self._requests.register_batch(item.request_id, valid_block_ids, valid)
         for request_id in drain.emptied_request_ids:
             if self._requests.can_end_session(request_id):
                 actions.sessions_to_end.append(request_id)
@@ -539,12 +551,46 @@ class LazyOffloadManager:
             ledger += tokens[len(ledger) :]
         return replace(metadata, op=replace(metadata.op, token_bytes=ledger))
 
+    def _retry_or_give_up(self, item: PendingStoreItem) -> None:
+        """Buffer a failed batch again, or give up its request's stores.
+
+        After ``MAX_STORE_ATTEMPTS`` failed batches in a row, the batch and
+        the request's buffered operations are dropped
+        (``OffloadPolicy.mark_store_failed``).
+
+        Args:
+            item: The failed batch's operations, not orphaned.
+        """
+        request_id = item.request_id
+        policy = self._require_policy()
+        attempts = self._failed_store_attempts.pop(request_id, 0) + 1
+        # Requeued first even when given up, so the policy's ledger counts
+        # the batch among the dropped operations.
+        policy.requeue_failed(item)
+        if attempts < MAX_STORE_ATTEMPTS:
+            self._failed_store_attempts[request_id] = attempts
+            logger.warning(
+                "Store failed for request %s; retrying its %d store op(s)",
+                request_id,
+                len(item.metadatas),
+            )
+            return
+        dropped = policy.mark_store_failed(request_id)
+        logger.warning(
+            "Store failed for request %s %d times in a row; dropped its %d "
+            "store op(s) and stopped storing the request",
+            request_id,
+            attempts,
+            dropped,
+        )
+
     def _release_session(self, request_id: str) -> None:
         """Clear policy and registry state for a settled request.
 
         Args:
             request_id: The request whose session the caller is ending.
         """
+        self._failed_store_attempts.pop(request_id, None)
         self._require_policy().release_request(request_id)
         self._requests.session_ended(request_id)
         self._token_ledgers.pop(request_id, None)

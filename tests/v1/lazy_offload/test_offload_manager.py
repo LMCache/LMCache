@@ -21,6 +21,7 @@ from lmcache.integration.vllm import (  # noqa: E402
     lazy_offload_manager as manager_module,
 )
 from lmcache.integration.vllm.lazy_offload_manager import (  # noqa: E402
+    MAX_STORE_ATTEMPTS,
     LazyOffloadActions,
     LazyOffloadManager,
 )
@@ -211,6 +212,18 @@ def _report_store_failed(harness: _Harness, request_id: str, count: int = 1) -> 
     _apply_actions(harness, actions)
 
 
+def _fail_for_good(harness: _Harness, request_id: str) -> None:
+    """Fail the request's in-flight batch until the manager gives it up.
+
+    A failed batch is buffered again and resubmitted by the next drain, so
+    every failure but the last is followed by a drain that re-emits it.
+    """
+    for attempt in range(1, MAX_STORE_ATTEMPTS + 1):
+        _report_store_failed(harness, request_id)
+        if attempt < MAX_STORE_ATTEMPTS:
+            assert len(_drain(harness)) == 1, "failed batch was not retried"
+
+
 def _arrive_new_request(harness: _Harness, request_id: str) -> None:
     """Deliver the manager lifecycle event for a newly observed request id."""
     _apply_actions(harness, harness.manager.on_request_arrived(request_id))
@@ -304,6 +317,9 @@ class _RoguePolicy(OffloadPolicy):
 
     def release_request(self, request_id: str) -> None:
         """Keep no per-request state, so there is nothing to release."""
+
+    def requeue_failed(self, item: PendingStoreItem) -> None:
+        """Buffer nothing: the items to emit are fixed at construction."""
 
     def mark_store_failed(self, request_id: str) -> int:
         """Drop nothing on failure."""
@@ -856,12 +872,15 @@ class TestFullLifecycle:
 
 
 class TestFailedStoreReceipts:
-    """A failed store unpins, breaks the prefix chain, and ends the session."""
+    """A store that fails for good unpins, breaks the prefix chain, and ends the
+    session. Each failure before the last is retried; ``_fail_for_good`` drives
+    the request through every attempt.
+    """
 
     def test_failed_store_receipt_unpins_and_drops_held_back_ops(self) -> None:
-        """A failure receipt still unpins the batch's blocks, but the request's held-
-        back ops must be dropped: without the failed prefix they would be stored
-        unreachable.
+        """The final failure receipt still unpins the batch's blocks, but the
+        request's held-back ops must be dropped: without the failed prefix they would
+        be stored unreachable.
         """
         harness = _make_manager_harness()
         _admit_op(harness, "req", [[1, 2]], 0, 32)
@@ -870,7 +889,7 @@ class TestFailedStoreReceipts:
         drained = _drain(harness)
         assert len(drained) == 1  # first op in flight, second held back
 
-        _report_store_failed(harness, "req")
+        _fail_for_good(harness, "req")
 
         # Unpinned regardless of the failure.
         assert harness.pool.blocks[1].ref_cnt == 0
@@ -888,32 +907,31 @@ class TestFailedStoreReceipts:
         harness.pool.make_free([1, 2])
         assert len(_drain(harness)) == 1
 
-        _report_store_failed(harness, "req")
+        _fail_for_good(harness, "req")
 
         assert harness.pool.blocks[1].ref_cnt == 0
         assert harness.ended_sessions == ["req"]
 
     def test_failed_store_blacklists_later_ops_of_the_same_generation(self) -> None:
-        """A non-orphaned failure breaks the request's prefix chain: operations admitted
-        after the failure are rejected, since without the failed prefix they would be
-        stored unreachable.
+        """A non-orphaned store that fails for good breaks the request's prefix chain:
+        operations admitted after it are rejected, since without the failed prefix
+        they would be stored unreachable.
         """
         harness = _make_manager_harness()
         _admit_op(harness, "req", [[1, 2]], 0, 32)
         harness.pool.make_free([1, 2])
         assert len(_drain(harness)) == 1
 
-        _report_store_failed(harness, "req")
+        _fail_for_good(harness, "req")
 
         _admit_op(harness, "req", [[3, 4]], 32, 64)
         harness.pool.make_free([3, 4])
         assert len(_drain(harness)) == 0, "op stored without its failed prefix"
 
     def test_failed_receipt_of_a_finished_request_ends_its_session(self) -> None:
-        """One call carrying both the failure and its receipt must end the session:
-        ``on_store_results`` applies failures first so that dropping the finished
-        request's held-back suffix makes it releasable by the receipt that arrives with
-        it.
+        """One call carrying both the final failure and its receipt must end the
+        session: giving the stores up drops the finished request's held-back suffix,
+        so the receipt that arrives with it leaves nothing buffered or in flight.
         """
         harness = _make_manager_harness()
         _admit_op(harness, "req", [[1, 2]], 0, 32)
@@ -924,7 +942,7 @@ class TestFailedStoreReceipts:
         _finish_request(harness, "req")
         assert harness.ended_sessions == []
 
-        _report_store_failed(harness, "req")
+        _fail_for_good(harness, "req")
 
         assert harness.ended_sessions == ["req"]
 

@@ -126,6 +126,7 @@ def pending_ops(queue: EvictionAwareStoreQueue) -> int:
     ledger = counters(queue)
     return (
         ledger.admitted
+        + ledger.requeued
         - ledger.emitted
         - ledger.dropped_evicted
         - ledger.dropped_on_request_drop
