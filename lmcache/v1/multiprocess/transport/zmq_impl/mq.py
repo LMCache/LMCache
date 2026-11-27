@@ -384,8 +384,14 @@ class MessageQueueServer(RequestServer):
                 self.socket.send_multipart(
                     _error_response_frames(identity, b_request_uid, operation, exc)
                 )
-            except Exception:
+            except Exception as exc:
+                # Reply like the BLOCKING path does: without a reply the
+                # client cannot tell a failed request from a slow one and
+                # waits for its own timeout.
                 logger.exception("Error handling operation %s", operation)
+                self.socket.send_multipart(
+                    _error_response_frames(identity, b_request_uid, operation, exc)
+                )
         else:
             message = (
                 f"Operation {operation!r} is not enabled on this server. "

@@ -46,6 +46,7 @@ from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
 from lmcache.v1.multiprocess.modules.kv_events import KVEventModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
+    ContextReleaser,
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
@@ -133,6 +134,7 @@ def _bare_gpu_module() -> LMCacheDrivenTransferModule:
     module._ctx = MagicMock(name="ctx")
     module._cache_contexts = {}
     module._lock = threading.Lock()
+    module._releaser = ContextReleaser(module._release_entries)
     return module
 
 

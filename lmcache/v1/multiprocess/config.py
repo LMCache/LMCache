@@ -155,6 +155,13 @@ class MPServerConfig:
     engine adapter's heartbeat interval so a few missed pings never reap a live
     worker."""
 
+    release_stuck_timeout_seconds: float = 120.0
+    """Seconds a KV cache context release (stream drain and IPC unmap) may run
+    before its device is quarantined: REGISTER on it is refused and
+    /healthcheck reports unhealthy until the release finishes, because only a
+    server restart reclaims memory held behind a stream that never drains.
+    0 disables quarantine."""
+
     session_ttl_seconds: float = 600.0
     """Seconds a request session may stay idle before it is reaped. A session
     carries the lookup state ``free_lookup_locks`` needs, so it must outlive
@@ -195,8 +202,8 @@ class MPServerConfig:
         Raises:
             ValueError: If the chunk size is not positive, a timeout is
                 non-finite, the reap timeout is negative or a non-zero value
-                below the 30 s floor, or the registration grace is below the
-                reap timeout.
+                below the 30 s floor, the registration grace is below the
+                reap timeout, or the release stuck timeout is negative.
         """
         reap = self.worker_reap_timeout_seconds
         grace = self.worker_registration_grace_seconds
@@ -205,6 +212,12 @@ class MPServerConfig:
         if self.grpc_server_workers < 1:
             raise ValueError(
                 f"grpc server workers must be >= 1; got {self.grpc_server_workers}"
+            )
+        stuck = self.release_stuck_timeout_seconds
+        if not math.isfinite(stuck) or stuck < 0:
+            raise ValueError(
+                "release stuck timeout must be 0 (disabled) or a positive "
+                f"number of seconds; got {stuck}"
             )
         if not math.isfinite(reap) or reap < 0 or (reap != 0 and reap < 30.0):
             raise ValueError(
@@ -602,6 +615,15 @@ def add_mp_server_args(
         "engine adapter's heartbeat interval. Default is 120.",
     )
     mp_group.add_argument(
+        "--release-stuck-timeout-seconds",
+        type=float,
+        default=120.0,
+        help="Seconds a KV cache context release may run before its device is "
+        "quarantined: REGISTER on that device is refused and /healthcheck "
+        "reports unhealthy, so the orchestrator restarts the server to reclaim "
+        "the memory. 0 disables quarantine. Default is 120.",
+    )
+    mp_group.add_argument(
         "--session-ttl-seconds",
         type=float,
         default=600.0,
@@ -730,6 +752,7 @@ def parse_args_to_mp_server_config(
         script_allowed_imports=args.script_allowed_imports or [],
         run_script_api_enabled=args.run_script_api_enabled,
         worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
+        release_stuck_timeout_seconds=args.release_stuck_timeout_seconds,
         session_ttl_seconds=args.session_ttl_seconds,
         kv_load_policy=args.kv_load_policy,
         worker_registration_grace_seconds=args.worker_registration_grace_seconds,

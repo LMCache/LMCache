@@ -69,6 +69,7 @@ def _register(
     """
     cache_context = MagicMock(name=f"cache_context-{instance_id}")
     cache_context.num_layers = 1
+    cache_context.device = "cuda:0"
     event_backend = MagicMock(name=f"event_backend-{instance_id}")
     monkeypatch.setattr(gpu_mod, "create_cache_context", lambda *a, **kw: cache_context)
     monkeypatch.setattr(
@@ -106,6 +107,7 @@ def test_unregister_reclaims_ipc_memory(monkeypatch) -> None:
     ctx = _register(module, monkeypatch, 7)
 
     module.unregister_kv_cache(7)
+    assert module.wait_for_releases(timeout=5)
 
     ctx.close.assert_called_once()
     assert dev.calls == ["empty_cache", "ipc_collect"]
@@ -140,6 +142,7 @@ def test_unregister_entry_refs_dead_before_ipc_collect(monkeypatch) -> None:
     monkeypatch.setattr(gpu_mod, "torch_dev", dev)
 
     module.unregister_kv_cache(1)
+    assert module.wait_for_releases(timeout=5)
 
     assert seen == {"entry_alive": False}
 
@@ -155,6 +158,7 @@ def test_reaper_reclaims_once_per_batch(monkeypatch) -> None:
     ctx_fresh = _register(module, monkeypatch, 3, model="c")
 
     reaped = module.reap_stale_instances(reap_timeout_s=60.0, registration_grace_s=60.0)
+    assert module.wait_for_releases(timeout=5)
 
     assert sorted(reaped) == [1, 2]
     ctx_a.close.assert_called_once()
@@ -193,6 +197,7 @@ def test_reaper_entry_refs_dead_before_ipc_collect(monkeypatch) -> None:
     monkeypatch.setattr(gpu_mod, "torch_dev", dev)
 
     module.reap_stale_instances(reap_timeout_s=60.0, registration_grace_s=60.0)
+    assert module.wait_for_releases(timeout=5)
 
     assert seen == {"entry_alive": False}
 
@@ -206,6 +211,7 @@ def test_reclaim_degrades_without_ipc_collect(monkeypatch) -> None:
     _register(module, monkeypatch, 9)
 
     module.unregister_kv_cache(9)
+    assert module.wait_for_releases(timeout=5)
 
     assert dev.calls == ["empty_cache"]
 
