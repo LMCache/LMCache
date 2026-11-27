@@ -26,13 +26,6 @@ class Backend(FileGDSBackend):
     name = "nds"
     _driver = SharedDriver()
 
-    def __init__(self) -> None:
-        super().__init__()
-        # Logical NPU ranges. Kernel pins are 2 MiB-aligned covers of these;
-        # adjacent GDS slices share one pin when rounding down would overlap.
-        self._regions: dict[int, int] = {}
-        self._pins: list[tuple[int, int]] = []
-
     @classmethod
     def is_default(cls) -> bool:
         npu = getattr(torch, "npu", None)
@@ -71,59 +64,17 @@ class Backend(FileGDSBackend):
         if nbytes <= 0:
             raise ValueError("register_buffer: tensor is empty")
         base = view.data_ptr()
-        if base in self._regions:
-            raise ValueError(f"NDS buffer base 0x{base:x} is already registered")
+        if base % _NDS_PAGE:
+            raise ValueError(
+                f"register_buffer: address 0x{base:x} is not {_NDS_PAGE}-byte aligned"
+            )
         self._ensure_driver_open()
-        self._regions[base] = nbytes
-        try:
-            self._sync_pins()
-        except BaseException:
-            del self._regions[base]
-            try:
-                self._sync_pins()
-            except Exception:
-                pass
-            raise
+        self._library().register_memory(base, nbytes)
 
     def deregister_buffer(self, buf: torch.Tensor) -> None:
         """Reverse :meth:`register_buffer` for ``buf``."""
-        base = buf.view(torch.uint8).data_ptr()
-        if self._regions.pop(base, None) is not None:
-            self._sync_pins()
-
-    def _merged_pin_spans(self) -> list[tuple[int, int]]:
-        """2 MiB-aligned covers of the logical regions, overlap merged."""
-        spans = [
-            (base & ~(_NDS_PAGE - 1), base + nbytes)
-            for base, nbytes in self._regions.items()
-        ]
-        spans.sort()
-        merged: list[tuple[int, int]] = []
-        for start, end in spans:
-            if merged and start < merged[-1][1]:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-            else:
-                merged.append((start, end))
-        return [(start, end - start) for start, end in merged]
-
-    def _sync_pins(self) -> None:
-        """Make the kernel pins match :meth:`_merged_pin_spans`.
-
-        Drop stale pins before adding new ones so a grown cover does not
-        overlap the range it replaces (the driver rejects that with EEXIST).
-        """
-        desired = self._merged_pin_spans()
-        desired_set = set(desired)
-        library = self._library()
-        for addr, size in list(self._pins):
-            if (addr, size) not in desired_set:
-                library.unregister_memory(addr, size)
-                self._pins.remove((addr, size))
-        pinned = set(self._pins)
-        for addr, size in desired:
-            if (addr, size) not in pinned:
-                library.register_memory(addr, size)
-                self._pins.append((addr, size))
+        view = buf.view(torch.uint8)
+        self._library().unregister_memory(view.data_ptr(), view.numel())
 
     def register_stream(self, raw_stream: int) -> None:
         self._ensure_driver_open()
@@ -144,13 +95,7 @@ class Backend(FileGDSBackend):
         self._library().driver_open()
 
     def _close_driver(self) -> None:
-        try:
-            self._library().driver_close()
-        finally:
-            # nds_exit drops every kernel pin. Forget them or the next open
-            # would treat the old spans as already registered.
-            self._regions.clear()
-            self._pins.clear()
+        self._library().driver_close()
 
 
 class NDSHandle(FDGDSHandle):

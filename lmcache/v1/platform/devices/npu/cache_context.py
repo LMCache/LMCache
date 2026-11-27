@@ -36,6 +36,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# CANN hal_kernel_p2p_get_pages rejects a VA that does not start on a 2 MiB
+# boundary. GDS slices this buffer at 16 MiB, so each slice stays aligned.
+_NPU_P2P_ALIGN = 2 * 1024 * 1024
+
 
 class _NpuHostCallbackStream:
     """Adapter for stream-ordered callback call sites.
@@ -93,11 +97,14 @@ class _TempNpuBuffer:
         self._lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
         self._max_batch_size = max_batch_size
 
-        self._temp_buffer = torch.empty(
-            self._get_size_for_single_batch() * max_batch_size,
+        total_bytes = self._get_size_for_single_batch() * max_batch_size
+        raw = torch.empty(
+            total_bytes + _NPU_P2P_ALIGN,
             dtype=torch.uint8,
             device=device,
         )
+        pad = (-raw.data_ptr()) % _NPU_P2P_ALIGN
+        self._temp_buffer = raw[pad : pad + total_bytes]
         self._offset_map_kernel_group_only: dict[tuple[int, int], tuple[int, int]] = {}
         self._offset_map_object_group_only: dict[tuple[int, int], tuple[int, int]] = {}
 

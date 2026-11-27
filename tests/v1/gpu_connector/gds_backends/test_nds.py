@@ -124,7 +124,7 @@ class _FakeNpuView:
 
 
 def _fake_npu_tensor(
-    ptr: int = 0x100000, nbytes: int = 8192, device_index: int = 0
+    ptr: int = 0x200000, nbytes: int = 8192, device_index: int = 0
 ) -> Any:
     return _FakeNpuView(ptr=ptr, nbytes=nbytes, device_index=device_index)
 
@@ -377,63 +377,64 @@ class TestBufferAndStreamRegistration:
         self, backend: na.Backend, fake_lib: _FakeNDSLibrary
     ) -> None:
         region = 16 * 1024 * 1024
-        buf = _fake_npu_tensor(ptr=0x100000, nbytes=region * 2)
+        base = 0x200000
+        buf = _fake_npu_tensor(ptr=base, nbytes=region * 2)
         backend.register_buffer(buf)
-        # 0x100000 is not 2 MiB aligned, so the pin starts at the previous boundary.
-        assert ("register_memory", 0, 0x100000 + region * 2) in fake_lib.calls
-        assert fake_lib.calls.count(("register_memory", 0, 0x100000 + region * 2)) == 1
+        assert ("register_memory", base, region * 2) in fake_lib.calls
+        assert fake_lib.calls.count(("register_memory", base, region * 2)) == 1
 
-    def test_misaligned_gds_slices_share_one_pin(
+    def test_register_buffer_rejects_unaligned_address(
         self, backend: na.Backend, fake_lib: _FakeNDSLibrary
     ) -> None:
-        """16 MiB slices of one misaligned buffer must not overlap in the driver."""
+        with pytest.raises(ValueError, match="aligned"):
+            backend.register_buffer(_fake_npu_tensor(ptr=0x100000, nbytes=4096))
+        assert not any(call[0] == "register_memory" for call in fake_lib.calls)
+
+    def test_adjacent_aligned_slices_pin_independently(
+        self, backend: na.Backend, fake_lib: _FakeNDSLibrary
+    ) -> None:
+        """16 MiB GDS slices of an aligned buffer are separate pins."""
         slice_bytes = 16 * 1024 * 1024
-        base = 0x108000
+        base = 0x200000
         first = _fake_npu_tensor(ptr=base, nbytes=slice_bytes)
         second = _fake_npu_tensor(ptr=base + slice_bytes, nbytes=slice_bytes)
         backend.register_buffer(first)
         backend.register_buffer(second)
-        assert fake_lib.calls == [
-            ("driver_open",),
-            ("register_memory", 0, base + slice_bytes),
-            ("unregister_memory", 0, base + slice_bytes),
-            ("register_memory", 0, base + 2 * slice_bytes),
-        ]
+        assert ("register_memory", base, slice_bytes) in fake_lib.calls
+        assert ("register_memory", base + slice_bytes, slice_bytes) in fake_lib.calls
+        assert not any(call[0] == "unregister_memory" for call in fake_lib.calls)
         fake_lib.calls.clear()
         backend.deregister_buffer(second)
-        assert fake_lib.calls == [
-            ("unregister_memory", 0, base + 2 * slice_bytes),
-            ("register_memory", 0, base + slice_bytes),
-        ]
-        fake_lib.calls.clear()
         backend.deregister_buffer(first)
-        assert fake_lib.calls == [("unregister_memory", 0, base + slice_bytes)]
+        assert fake_lib.calls == [
+            ("unregister_memory", base + slice_bytes, slice_bytes),
+            ("unregister_memory", base, slice_bytes),
+        ]
 
-    def test_failed_second_slice_restores_the_shared_pin(
+    def test_failed_second_registration_leaves_the_first_pin(
         self, backend: na.Backend, fake_lib: _FakeNDSLibrary
     ) -> None:
         fake_lib.fail_on_register_mem_call = 2
         slice_bytes = 16 * 1024 * 1024
-        base = 0x108000
+        base = 0x200000
         first = _fake_npu_tensor(ptr=base, nbytes=slice_bytes)
         second = _fake_npu_tensor(ptr=base + slice_bytes, nbytes=slice_bytes)
         backend.register_buffer(first)
         with pytest.raises(OSError, match="pin failed"):
             backend.register_buffer(second)
-        assert list(backend._regions) == [base]
-        assert fake_lib.calls[-1] == ("register_memory", 0, base + slice_bytes)
+        assert ("unregister_memory", base, slice_bytes) not in fake_lib.calls
+        backend.deregister_buffer(first)
+        assert ("unregister_memory", base, slice_bytes) in fake_lib.calls
 
-    def test_close_driver_forgets_pins_so_reopen_registers_again(
+    def test_reregister_after_driver_close(
         self, backend: na.Backend, fake_lib: _FakeNDSLibrary
     ) -> None:
-        buf = _fake_npu_tensor(ptr=0x100000, nbytes=4096)
+        buf = _fake_npu_tensor(ptr=0x200000, nbytes=4096)
         backend.register_buffer(buf)
         backend.close_driver()
-        assert backend._regions == {}
-        assert backend._pins == []
         fake_lib.calls.clear()
         backend.register_buffer(buf)
-        assert ("register_memory", 0, 0x100000 + 4096) in fake_lib.calls
+        assert ("register_memory", 0x200000, 4096) in fake_lib.calls
 
     def test_register_buffer_non_monotonic_addresses_io_and_deregister(
         self,
@@ -441,53 +442,41 @@ class TestBufferAndStreamRegistration:
         fake_lib: _FakeNDSLibrary,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        b_high = _fake_npu_tensor(ptr=0x200000, nbytes=8192, device_index=1)
-        b_low = _fake_npu_tensor(ptr=0x100000, nbytes=4096, device_index=0)
+        b_high = _fake_npu_tensor(ptr=0x400000, nbytes=8192, device_index=1)
+        b_low = _fake_npu_tensor(ptr=0x200000, nbytes=4096, device_index=0)
         backend.register_buffer(b_high)
         backend.register_buffer(b_low)
         assert fake_lib.calls.count(("driver_open",)) == 1
-        assert ("register_memory", 0x200000, 8192) in fake_lib.calls
-        assert ("register_memory", 0, 0x101000) in fake_lib.calls
+        assert ("register_memory", 0x400000, 8192) in fake_lib.calls
+        assert ("register_memory", 0x200000, 4096) in fake_lib.calls
 
         _mock_slab_fs(monkeypatch)
         handle = backend.open_slab("/slabs", 8192, direct_io=False)
         backend.register_stream(7)
 
-        assert handle.read_async(0x200000, 4096, 0, 4096, 7).bytes_done == 4096
-        assert handle.write_async(0x100000, 4096, 0, 0, 7).bytes_done == 4096
+        assert handle.read_async(0x400000, 4096, 0, 4096, 7).bytes_done == 4096
+        assert handle.write_async(0x200000, 4096, 0, 0, 7).bytes_done == 4096
 
         fake_lib.calls.clear()
         backend.deregister_buffer(b_low)
-        assert fake_lib.calls == [("unregister_memory", 0, 0x101000)]
-        assert handle.read_async(0x200000, 4096, 0, 4096, 7).bytes_done == 4096
+        assert fake_lib.calls == [("unregister_memory", 0x200000, 4096)]
+        assert handle.read_async(0x400000, 4096, 0, 4096, 7).bytes_done == 4096
 
         fake_lib.calls.clear()
         backend.deregister_buffer(b_high)
-        assert fake_lib.calls == [("unregister_memory", 0x200000, 8192)]
-
-    def test_register_buffer_rejects_duplicate_base_without_corrupting_existing(
-        self,
-        backend: na.Backend,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _mock_slab_fs(monkeypatch)
-        handle = backend.open_slab("/slabs", 4096, direct_io=False)
-        backend.register_stream(7)
-        buf = _fake_npu_tensor(ptr=0x100000, nbytes=4096)
-        backend.register_buffer(buf)
-        with pytest.raises(ValueError, match="already registered"):
-            backend.register_buffer(buf)
-        assert handle.read_async(0x100000, 4096, 0, 0, 7).bytes_done == 4096
+        assert fake_lib.calls == [("unregister_memory", 0x400000, 8192)]
 
     def test_failed_registration_leaves_the_buffer_unregistered(
         self, backend: na.Backend, fake_lib: _FakeNDSLibrary
     ) -> None:
         fake_lib.fail_on_register_mem_call = 1
-        buf = _fake_npu_tensor(ptr=0x100000, nbytes=4096)
+        buf = _fake_npu_tensor(ptr=0x200000, nbytes=4096)
         with pytest.raises(OSError, match="pin failed"):
             backend.register_buffer(buf)
         assert not any(call[0] == "unregister_memory" for call in fake_lib.calls)
-        assert 0x100000 not in backend._regions
+        fake_lib.fail_on_register_mem_call = None
+        backend.register_buffer(buf)
+        assert ("register_memory", 0x200000, 4096) in fake_lib.calls
 
     def test_stream_registration_forwards_and_surfaces_errors(
         self,
@@ -534,7 +523,7 @@ class TestNDSHandleIO:
         handle.close()
         submit = handle.read_async if operation == "read" else handle.write_async
         with pytest.raises(RuntimeError, match="not open"):
-            submit(0x100000, 4096, 0, 0, 7)
+            submit(0x200000, 4096, 0, 0, 7)
 
     @pytest.mark.parametrize("operation", ["read", "write"])
     def test_io_submits_the_slab_fd_and_logical_offset(
@@ -546,10 +535,10 @@ class TestNDSHandleIO:
     ) -> None:
         handle = self._open_test_slab(backend, monkeypatch, 16384)
         backend.register_stream(7)
-        backend.register_buffer(_fake_npu_tensor(ptr=0x100000, nbytes=16384))
+        backend.register_buffer(_fake_npu_tensor(ptr=0x200000, nbytes=16384))
         submit = handle.read_async if operation == "read" else handle.write_async
         sub = submit(
-            buf_base=0x100000,
+            buf_base=0x200000,
             size=8192,
             file_offset=4096,
             buf_offset=4096,
@@ -560,7 +549,7 @@ class TestNDSHandleIO:
         assert fake_lib.calls[-1] == (
             f"{operation}_async",
             11,
-            0x100000,
+            0x200000,
             8192,
             4096,
             4096,
@@ -576,8 +565,8 @@ class TestNDSHandleIO:
         fake_lib.defer_io = True
         handle = self._open_test_slab(backend, monkeypatch, 4096)
         backend.register_stream(7)
-        backend.register_buffer(_fake_npu_tensor(ptr=0x100000, nbytes=4096))
-        sub = handle.read_async(0x100000, 4096, 0, 0, 7)
+        backend.register_buffer(_fake_npu_tensor(ptr=0x200000, nbytes=4096))
+        sub = handle.read_async(0x200000, 4096, 0, 0, 7)
         assert sub.bytes_done == 0
         fake_lib.deferred_callbacks[0]()
         assert sub.bytes_done == 4096

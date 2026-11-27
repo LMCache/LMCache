@@ -148,6 +148,8 @@ class TestTempNpuBuffer:
             shape, dtype = buf.get_kernel_group_shape_dtype(num_tokens, 0)
             assert shape == _expected_kernel_group_shape(manager, num_tokens, 0)
             assert dtype == kg.dtype
+        assert buf.buffer.data_ptr() % (2 * 1024 * 1024) == 0
+        assert buf.buffer.is_contiguous()
         view = buf.get_temp_kernel_group_buffer(0, 0)
         chunk_shape, _ = buf.get_kernel_group_shape_dtype(CHUNK, 0)
         assert view.shape == chunk_shape
@@ -306,6 +308,7 @@ def test_temp_buffer_allocates_on_device() -> None:
         device=device,
         max_batch_size=4,
     )
+    assert buffer.buffer.data_ptr() % (2 * 1024 * 1024) == 0
     view = buffer.get_temp_kernel_group_buffer(0, 0)
     assert view.device.type == "npu"
     view.fill_(1.0)

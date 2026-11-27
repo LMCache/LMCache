@@ -429,6 +429,19 @@ def test_ugds_context_roundtrip():
         ctx.close()
 
 
+def _gds_staging_buffer(nbytes: int) -> torch.Tensor:
+    """Byte buffer the active backend can register.
+
+    NDS rejects a VA that is not 2 MiB aligned. cuFile and hipFile do not.
+    """
+    if torch_device_type != "npu":
+        return torch.empty(nbytes, dtype=torch.uint8, device=torch_device_type)
+    align = 2 * 1024 * 1024
+    raw = torch.empty(nbytes + align, dtype=torch.uint8, device=torch_device_type)
+    pad = (-raw.data_ptr()) % align
+    return raw[pad : pad + nbytes]
+
+
 @requires_gds
 def test_gds_two_stream_write_read(gds_slab_dir: Path):
     """Verify independent chunk writes and reads on two GPU streams."""
@@ -441,7 +454,7 @@ def test_gds_two_stream_write_read(gds_slab_dir: Path):
     def register_and_write(stream, pattern):
         """Register a buffer on ``stream`` and write ``pattern`` to a chunk."""
         with torch_dev.stream(stream):
-            buf = torch.empty(chunk_bytes, dtype=torch.uint8, device=torch_device_type)
+            buf = _gds_staging_buffer(chunk_bytes)
             ctx.register_gpu_buffer(buf)
             err, objs = mgr.allocate(
                 MemoryLayoutDesc(
@@ -492,7 +505,7 @@ def test_gds_write_read_roundtrip(gds_slab_dir: Path):
     ctx.initialize(cfg)
     try:
         chunk_bytes = 8 << 20
-        buf = torch.empty(chunk_bytes, dtype=torch.uint8, device=torch_device_type)
+        buf = _gds_staging_buffer(chunk_bytes)
         ctx.register_gpu_buffer(buf)
 
         mgr = GDSL1MemoryManager(cfg)
@@ -531,7 +544,7 @@ def test_gds_chunk_larger_than_region_roundtrip(gds_slab_dir: Path):
     ctx.initialize(cfg)
     try:
         chunk_bytes = 24 << 20  # > 16 MiB -> two registered regions / two DMAs
-        buf = torch.empty(chunk_bytes, dtype=torch.uint8, device=torch_device_type)
+        buf = _gds_staging_buffer(chunk_bytes)
         ctx.register_gpu_buffer(buf)
 
         mgr = GDSL1MemoryManager(cfg)
