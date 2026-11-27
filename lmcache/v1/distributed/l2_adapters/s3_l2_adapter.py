@@ -24,6 +24,8 @@ import asyncio
 import ctypes
 import json
 import threading
+import time
+import uuid
 import xml.etree.ElementTree as ET
 
 if TYPE_CHECKING:
@@ -189,6 +191,7 @@ _LRU_INDEX_SCHEMA_VERSION = 1
 
 def _serialize_lru_index(
     entries: list[tuple[str, int, int]],
+    writer: Optional[tuple[float, str]] = None,
 ) -> bytes:
     """Serialize an LRU index to a compact JSON sidecar payload.
 
@@ -196,13 +199,45 @@ def _serialize_lru_index(
     LRU order (oldest access first). The payload is intentionally small:
     a flat list of 3-tuples plus a schema version, so a 100k-object
     index stays in the low single-digit MBs.
+
+    ``writer`` is ``(started_at, writer_id)`` of the adapter writing it;
+    see :func:`_lru_index_writer`. Readers that predate the field ignore
+    it, so it does not change the schema version.
     """
-    payload = {
+    payload: dict = {
         "version": _LRU_INDEX_SCHEMA_VERSION,
         # Flat triples keep the JSON ~3x smaller than a list of dicts.
         "entries": [[name, size, tick] for (name, size, tick) in entries],
     }
+    if writer is not None:
+        payload["writer"] = {"started_at": writer[0], "id": writer[1]}
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+
+def _lru_index_writer(body: Optional[bytes]) -> Optional[tuple[float, str]]:
+    """Return ``(started_at, writer_id)`` of the adapter that wrote a sidecar.
+
+    ``None`` when the body is missing, unparsable, or carries no writer
+    (a sidecar written before the field existed). Tuples compare by start
+    time, then id, which gives every pair of writers a fixed order.
+    """
+    if body is None:
+        return None
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    writer = payload.get("writer") if isinstance(payload, dict) else None
+    if not isinstance(writer, dict):
+        return None
+    started_at, writer_id = writer.get("started_at"), writer.get("id")
+    if (
+        not isinstance(started_at, (int, float))
+        or isinstance(started_at, bool)
+        or not isinstance(writer_id, str)
+    ):
+        return None
+    return float(started_at), writer_id
 
 
 def _deserialize_lru_index(
@@ -402,7 +437,10 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
       LRU access order, and restore from it on startup (reconciled
       against the live bucket listing) for higher eviction fidelity than
       the ``LastModified`` proxy alone. Default ``False``. Implies the
-      startup seed behavior when restoring.
+      startup seed behavior when restoring. The sidecar has one writer per
+      bucket: enable this on one adapter per bucket. When adapters overlap
+      (e.g. during a rolling restart), the one that started last keeps
+      writing and older ones stop checkpointing, with a WARNING.
     - s3_lru_index_checkpoint_interval_s (int): seconds between sidecar
       checkpoints when ``s3_persist_lru_index`` is on. Default 300.
     """
@@ -504,7 +542,9 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             "- s3_seed_usage_on_start (bool): scan bucket on startup and "
             "seed usage + eviction LRU index (default false)\n"
             "- s3_persist_lru_index (bool): checkpoint/restore a sidecar LRU "
-            "index for cross-restart access-order fidelity (default false)\n"
+            "index for cross-restart access-order fidelity (default false). "
+            "One writer per bucket: when adapters overlap, the newest one "
+            "keeps writing and older ones stop\n"
             "- s3_lru_index_checkpoint_interval_s (int): sidecar checkpoint "
             "interval in seconds (default 300)\n"
             "- eviction (dict): optional, see L2AdapterConfigBase"
@@ -650,6 +690,12 @@ class S3L2Adapter(L2AdapterInterface):
         # we never checkpoint an empty index over a good one.
         self._checkpoint_stop = threading.Event()
         self._checkpoint_thread: Optional[threading.Thread] = None
+        # The sidecar has one writer per bucket. Every checkpoint records
+        # who wrote it; an adapter that finds a newer writer's sidecar (one
+        # that started later, e.g. its replacement during a rolling restart)
+        # stops checkpointing instead of overwriting newer access history.
+        self._lru_writer: tuple[float, str] = (time.time(), uuid.uuid4().hex)
+        self._lru_checkpoint_yielded = False
 
         logger.info(
             "Initialized S3L2Adapter (endpoint=%s region=%s "
@@ -1842,11 +1888,13 @@ class S3L2Adapter(L2AdapterInterface):
         ``close()`` passes a short one so a slow/unresponsive S3 can't
         block shutdown past the container's termination grace period.
         """
+        if self._lru_checkpoint_yielded or self._newer_lru_writer_present(timeout):
+            return False
         snapshot = self._snapshot_lru_index()
         if not snapshot:
             return False
         try:
-            body = _serialize_lru_index(snapshot)
+            body = _serialize_lru_index(snapshot, writer=self._lru_writer)
         except Exception:
             logger.exception("S3L2Adapter failed to serialize LRU index")
             return False
@@ -1866,6 +1914,37 @@ class S3L2Adapter(L2AdapterInterface):
                 len(body),
             )
         return ok
+
+    def _newer_lru_writer_present(self, timeout: float) -> bool:
+        """Check whether a newer adapter now owns the sidecar.
+
+        Reads the current sidecar's writer. If it is another adapter that
+        started after this one, this adapter stops checkpointing for the
+        rest of the process (logged once) so it never replaces newer access
+        history, including in the final checkpoint at ``close()``. A sidecar
+        that is missing, unreadable, or has no writer does not block the
+        checkpoint. Two adapters that both pass this check in the same
+        interval each write once; the older one stops at its next check.
+        """
+        fut = asyncio.run_coroutine_threadsafe(
+            self._execute_get_raw(LRU_INDEX_OBJECT_NAME),
+            self._loop,
+        )
+        try:
+            current = _lru_index_writer(fut.result(timeout=timeout))
+        except Exception as exc:
+            logger.debug("S3L2Adapter sidecar writer check failed: %s", exc)
+            return False
+        if current is None or current <= self._lru_writer:
+            return False
+        self._lru_checkpoint_yielded = True
+        logger.warning(
+            "S3L2Adapter: the LRU sidecar in this bucket is now written by a "
+            "newer adapter (writer %s); this adapter stops checkpointing it. "
+            "Only one adapter per bucket should run with s3_persist_lru_index.",
+            current[1],
+        )
+        return True
 
     def _maybe_start_checkpoint_thread(self) -> None:
         """Launch the periodic sidecar checkpoint thread (once)."""

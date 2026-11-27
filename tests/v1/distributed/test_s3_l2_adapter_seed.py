@@ -470,3 +470,110 @@ def test_restore_without_sidecar_reports_absent(running_loop):
         adapter._restore_from_sidecar([_entry(1, 10, "2024-01-01T00:00:00Z")]) is False
     )
     assert adapter._snapshot_lru_index() == []
+
+
+# ---------------------------------------------------------------------------
+# One sidecar writer per bucket
+# ---------------------------------------------------------------------------
+
+_lru_index_writer = s3mod._lru_index_writer
+_SIDECAR = s3mod.LRU_INDEX_OBJECT_NAME
+
+
+def test_sidecar_records_its_writer_and_old_readers_ignore_it():
+    entries = [("a", 1, 1)]
+    body = _serialize_lru_index(entries, writer=(100.5, "w1"))
+    assert _lru_index_writer(body) == (100.5, "w1")
+    assert _deserialize_lru_index(body) == entries
+    # Written before the field existed, or unreadable: no writer.
+    assert _lru_index_writer(_serialize_lru_index(entries)) is None
+    assert _lru_index_writer(b"{not json") is None
+    assert _lru_index_writer(None) is None
+
+
+def _checkpointing_adapter(loop, bucket: dict, started_at: float, writer_id: str):
+    """Bare adapter whose sidecar GET/PUT go to ``bucket``, a shared dict."""
+    adapter = _bare_adapter(track_access_order=True)
+    adapter._loop = loop
+    adapter._config = s3mod.S3L2AdapterConfig(
+        s3_endpoint="s3://bucket", s3_region="us-east-1", s3_persist_lru_index=True
+    )
+    adapter._lru_writer = (started_at, writer_id)
+    adapter._lru_checkpoint_yielded = False
+    adapter.puts = 0  # type: ignore[attr-defined]
+
+    async def get_raw(name):
+        return bucket.get(name)
+
+    async def put_raw(name, body):
+        bucket[name] = body
+        adapter.puts += 1
+        return True
+
+    adapter._execute_get_raw = get_raw  # type: ignore[method-assign]
+    adapter._execute_put_raw = put_raw  # type: ignore[method-assign]
+    return adapter
+
+
+def _accessed(adapter, rank: int) -> None:
+    adapter._notify_keys_stored([_key("m", rank)], [10])
+
+
+def test_checkpoint_writes_when_sidecar_is_absent_or_older(running_loop):
+    bucket: dict = {}
+    adapter = _checkpointing_adapter(running_loop, bucket, 200.0, "new")
+    _accessed(adapter, 1)
+    assert adapter._checkpoint_lru_index() is True
+    assert _lru_index_writer(bucket[_SIDECAR]) == (200.0, "new")
+
+    bucket[_SIDECAR] = _serialize_lru_index([("x", 1, 1)], writer=(100.0, "old"))
+    assert adapter._checkpoint_lru_index() is True
+    assert _lru_index_writer(bucket[_SIDECAR]) == (200.0, "new")
+
+
+def test_rolling_restart_old_adapter_does_not_overwrite_its_replacement(
+    running_loop, caplog
+):
+    """The old adapter keeps running after its replacement takes over the
+    sidecar; neither its periodic nor its final checkpoint may replace the
+    replacement's newer access history."""
+    bucket: dict = {}
+    old = _checkpointing_adapter(running_loop, bucket, 100.0, "old")
+    _accessed(old, 1)
+    assert old._checkpoint_lru_index() is True
+
+    new = _checkpointing_adapter(running_loop, bucket, 200.0, "new")
+    assert new._restore_from_sidecar([_entry(1, 10, "2024-01-01T00:00:00Z")])
+    _accessed(new, 2)
+    assert new._checkpoint_lru_index() is True
+    newer_body = bucket[_SIDECAR]
+
+    _accessed(old, 3)
+    with caplog.at_level("WARNING"):
+        assert old._checkpoint_lru_index() is False
+        assert old._checkpoint_lru_index(timeout=5.0) is False  # close()
+    assert bucket[_SIDECAR] == newer_body
+    assert old.puts == 1
+    assert sum("newer adapter" in r.getMessage() for r in caplog.records) == 1
+
+    # The replacement keeps writing.
+    _accessed(new, 4)
+    assert new._checkpoint_lru_index() is True
+    assert _lru_index_writer(bucket[_SIDECAR]) == (200.0, "new")
+
+
+def test_adapters_that_start_together_converge_to_one_writer(running_loop):
+    """Same start time: the id breaks the tie, so exactly one keeps writing."""
+    bucket: dict = {}
+    a = _checkpointing_adapter(running_loop, bucket, 100.0, "a")
+    b = _checkpointing_adapter(running_loop, bucket, 100.0, "b")
+    for adapter in (a, b):
+        _accessed(adapter, 1)
+    # Both write once before either has seen the other.
+    assert a._checkpoint_lru_index() is True
+    assert b._checkpoint_lru_index() is True
+    for _ in range(3):
+        a._checkpoint_lru_index()
+        b._checkpoint_lru_index()
+    assert a._lru_checkpoint_yielded and not b._lru_checkpoint_yielded
+    assert _lru_index_writer(bucket[_SIDECAR]) == (100.0, "b")
