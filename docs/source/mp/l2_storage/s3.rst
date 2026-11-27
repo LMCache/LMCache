@@ -3,13 +3,18 @@ S3
 
 An L2 adapter that stores KV cache objects as S3 objects using the AWS
 Common Runtime (CRT).  Works with AWS S3, S3 Express One Zone, and any
-S3-compatible endpoint (MinIO, Ceph RGW, etc.).
+S3-compatible endpoint (for example, Backblaze B2, Ceph RGW, Cloudflare R2,
+or MinIO) that accepts virtual-hosted style requests.
 
 **Required fields:**
 
-- ``s3_endpoint``: Bucket URL -- either ``"s3://<bucket>"`` or the bare host form
-  (used for non-AWS endpoints).
-- ``s3_region``: AWS region string (e.g. ``"us-west-2"``).
+- ``s3_endpoint``: Virtual-hosted bucket host -- either
+  ``"s3://<bucket>.<host>"`` or the bare ``"<bucket>.<host>"`` form (e.g.
+  ``"s3://my-bucket.s3.us-west-2.amazonaws.com"``).  The value is sent as the
+  ``Host`` header of every request, so it must include the bucket name;
+  path-style addressing (bucket in the URL path) is not supported.
+- ``s3_region``: Region used for SigV4 signing (e.g. ``"us-west-2"``).  For
+  an S3-compatible service, use the region of its endpoint.
 
 **Optional fields:**
 
@@ -40,10 +45,14 @@ therefore miss on every load through this adapter.
 .. code-block:: bash
 
     # AWS S3 with default credentials
-    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2"}'
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket.s3.us-west-2.amazonaws.com", "s3_region": "us-west-2"}'
 
     # Static credentials, HTTP/2 disabled
-    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2", "s3_prefer_http2": false, "aws_access_key_id": "AKIA...", "aws_secret_access_key": "..."}'
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket.s3.us-west-2.amazonaws.com", "s3_region": "us-west-2", "s3_prefer_http2": false, "aws_access_key_id": "AKIA...", "aws_secret_access_key": "..."}'
 
-    # Local MinIO over plain HTTP
-    --l2-adapter '{"type": "s3", "s3_endpoint": "minio.local:9000", "s3_region": "us-east-1", "disable_tls": true, "aws_access_key_id": "minio", "aws_secret_access_key": "minio123"}'
+    # S3-compatible service over HTTPS (placeholder endpoint and region)
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket.s3.example-region.example.com", "s3_region": "example-region", "aws_access_key_id": "<access-key-id>", "aws_secret_access_key": "<secret-access-key>"}'
+
+    # Local MinIO over plain HTTP (MinIO must serve virtual-hosted requests,
+    # i.e. MINIO_DOMAIN is set and <bucket>.minio.local resolves to it)
+    --l2-adapter '{"type": "s3", "s3_endpoint": "my-bucket.minio.local:9000", "s3_region": "us-east-1", "disable_tls": true, "aws_access_key_id": "minio", "aws_secret_access_key": "minio123"}'
