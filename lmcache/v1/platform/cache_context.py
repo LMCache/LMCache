@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Platform-agnostic cache-context factory.
 
-The concrete implementations live in their respective sub-packages:
-
-* :class:`~lmcache.v1.platform.devices.cuda.cache_context.GPUCacheContext` --
-  CUDA-backed.
-* :class:`~lmcache.v1.platform.devices.cpu.cache_context.CPUCacheContext` --
-  CPU-only fallback (POSIX-SHM-backed KV tensors).
+The concrete implementations live in each device's sub-package under
+:mod:`lmcache.v1.platform.devices`.
 
 :func:`create_cache_context` keeps the dispatch out of the call site
 in :mod:`lmcache.v1.multiprocess.server`. Selection is data-driven
@@ -95,9 +91,9 @@ def create_cache_context(
 
     Selection is driven by ``tensor.device.type`` of *kv_caches*:
     the platform ``DeviceSpec`` registry is consulted and the
-    matching spec's ``create_cache_context`` hook is invoked.
-    ``"cuda"``, ``"cpu"``, future ``"xpu"`` ... all resolve through
-    the same code path -- no ``isinstance`` / ``if-elif`` chain.
+    matching spec's ``create_cache_context`` hook is invoked. Every
+    device type resolves through the same code path -- no
+    ``isinstance`` / ``if-elif`` chain.
 
     Args:
         kv_caches: KV cache tensor wrappers from the serving engine.

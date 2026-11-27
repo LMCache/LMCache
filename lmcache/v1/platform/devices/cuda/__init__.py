@@ -142,6 +142,18 @@ class CudaDeviceSpec(DeviceSpec):
         """Return the KV-cache IPC wrapper class (isolated-IPC aware)."""
         return _select_ipc_wrapper_cls()
 
+    @property
+    def ipc_wrapper_types(self) -> tuple[type[DeviceIPCWrapper], ...]:
+        """Return every CUDA wrapper, whichever IPC policy the peer uses."""
+        # First Party
+        from lmcache.v1.platform.devices.cuda.ipc_wrapper import (
+            CudaIPCWrapper,
+            RawCudaIPCWrapper,
+            VmmCudaIPCWrapper,
+        )
+
+        return (CudaIPCWrapper, RawCudaIPCWrapper, VmmCudaIPCWrapper)
+
     def is_available(self) -> bool:
         """Check CUDA availability without importing lmcache.__init__."""
         try:

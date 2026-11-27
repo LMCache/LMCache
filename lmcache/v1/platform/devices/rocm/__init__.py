@@ -38,6 +38,14 @@ class RocmDeviceSpec(CudaDeviceSpec):
         return super().ipc_wrapper_cls
 
     @property
+    def ipc_wrapper_types(self) -> tuple[type[DeviceIPCWrapper], ...]:
+        """Return the CUDA wrappers plus the HIP VMM one."""
+        # First Party
+        from lmcache.v1.platform.devices.rocm.ipc_wrapper import VmmRocmIPCWrapper
+
+        return (*super().ipc_wrapper_types, VmmRocmIPCWrapper)
+
+    @property
     def pin_memory_backend(self) -> type[PinMemoryBackend] | None:
         """Return the ROCm host-memory pinning backend."""
         # First Party

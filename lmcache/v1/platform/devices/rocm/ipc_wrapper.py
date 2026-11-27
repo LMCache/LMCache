@@ -13,14 +13,14 @@ from __future__ import annotations
 from types import ModuleType
 
 # First Party
-from lmcache.v1.platform.base.ipc_wire import VmmRocmIPCData
 from lmcache.v1.platform.devices.cuda.ipc_wrapper import VmmCudaIPCWrapper
+from lmcache.v1.platform.devices.rocm.ipc_wire import VmmRocmIPCData
 
 
 class VmmRocmIPCWrapper(VmmCudaIPCWrapper):
     """:class:`VmmCudaIPCWrapper` on the HIP VMM API (``rocm.bindings``)."""
 
-    _wire_cls = VmmRocmIPCData
+    wire_type = VmmRocmIPCData
 
     @staticmethod
     def _driver() -> ModuleType:

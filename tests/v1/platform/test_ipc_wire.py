@@ -12,20 +12,19 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.platform.base.ipc_wire import (
-    CpuShmIPCData,
-    CudaIPCData,
-    MusaIPCData,
-    NpuIPCData,
-    NpuPlaneData,
-    RawCudaIPCData,
-    TensorMetadata,
-    VmmCudaIPCData,
-    VmmRocmIPCData,
-    WireIPCData,
-)
+from lmcache.v1.platform.base.ipc_wire import TensorMetadata
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.devices.cpu.ipc_wire import CpuShmIPCData
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
+from lmcache.v1.platform.devices.cuda.ipc_wire import (
+    CudaIPCData,
+    RawCudaIPCData,
+    VmmCudaIPCData,
+)
+from lmcache.v1.platform.devices.gcu.ipc_wire import GcuIPCData
+from lmcache.v1.platform.devices.musa.ipc_wire import MusaIPCData
+from lmcache.v1.platform.devices.npu.ipc_wire import NpuIPCData, NpuPlaneData
+from lmcache.v1.platform.devices.rocm.ipc_wire import VmmRocmIPCData
 from lmcache.v1.transport.grpc._proto_gen import common_pb2
 from lmcache.v1.transport.grpc.codecs.common import get_message_codecs
 from lmcache.v1.transport.zmq.codec import (
@@ -85,6 +84,11 @@ DESCRIPTORS = [
         alloc_offset=16,
         nbytes=24,
     ),
+    GcuIPCData(
+        version=1,
+        metadata=METADATA,
+        handle=(0, b"h" * 64, 24, 0, b"refcounter", 0, b"e" * 64, False),
+    ),
 ]
 
 
@@ -123,7 +127,9 @@ def test_pickle_rejected_before_execution(
 
 
 @pytest.mark.parametrize("descriptor", DESCRIPTORS)
-def test_descriptor_roundtrip_through_both_transports(descriptor: WireIPCData) -> None:
+def test_descriptor_roundtrip_through_both_transports(
+    descriptor: msgspec.Struct,
+) -> None:
     """Concrete wrapper types and all transmitted fields survive both codecs."""
     wrapper = DeviceIPCWrapper.Deserialize(msgspec.msgpack.encode(descriptor))
     encoded = get_customized_encoder(list[DeviceIPCWrapper]).encode([wrapper])

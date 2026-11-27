@@ -20,8 +20,8 @@ class PinMemoryBackend:
         Args:
             ptr: Raw pointer (data_ptr) to the memory region.
             size: Size in bytes of the region to pin.
-            flags: Platform-specific registration flags (e.g.
-                ``cudaHostRegisterDefault = 0``).
+            flags: Platform-specific registration flags passed to the
+                backend's host-register call; ``0`` requests the default.
 
         Returns:
             True if pinning succeeded, False otherwise.

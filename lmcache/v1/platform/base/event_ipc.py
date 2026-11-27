@@ -167,10 +167,10 @@ _EXPORTED_EVENT_RING_SIZE = 2048
 
 
 class DefaultEventIPCBackend(EventIPCBackend):
-    """CUDA-style event IPC backend over an injectable event module.
+    """Event IPC backend over an injectable event module.
 
     Works for any backend whose ``Event`` class supports interprocess handles,
-    including the ``StubEvent`` used in CPU-only environments.
+    including the ``StubEvent`` used when no accelerator is present.
 
     Args:
         event_module: Object exposing an ``Event`` class that supports

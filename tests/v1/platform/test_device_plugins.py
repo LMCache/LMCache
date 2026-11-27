@@ -3,14 +3,19 @@
 
 # Standard
 from collections.abc import Callable
-from typing import Any
+from typing import Any, ClassVar
 
 # Third Party
+import msgspec
 import pytest
+import torch
 
 # First Party
 from lmcache.v1.platform import _device_detect
 from lmcache.v1.platform.base.device_spec import DeviceSpec
+from lmcache.v1.platform.base.ipc_wire import IPCData, TensorMetadata
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
 from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
 from lmcache.v1.platform.devices.rocm import RocmDeviceSpec
 import lmcache.v1.common.subclass_discovery as subclass_discovery_module
@@ -87,6 +92,79 @@ class _SharedVendorBDeviceSpec(DeviceSpec):
         return "shared"
 
 
+class _PluginIPCData(IPCData, tag="external_ipc"):
+    """Wire descriptor owned by the external test plugin."""
+
+    token: bytes
+
+
+class _ShadowIPCData(_PluginIPCData, tag="cpu_shm"):
+    """Plugin descriptor that reuses a built-in wire tag."""
+
+
+class _PluginIPCWrapper(DeviceIPCWrapper):
+    """IPC wrapper shipped by the external test plugin."""
+
+    wire_type: ClassVar[type[_PluginIPCData]] = _PluginIPCData
+
+    def __init__(self, token: bytes) -> None:
+        self.restore_metadata(
+            TensorMetadata("float32", (2, 3), (3, 1), 0, "external-uuid")
+        )
+        self.handle = token
+
+    def to_wire(self) -> msgspec.Struct:
+        """Describe the plugin handle with the plugin's own wire type."""
+        return self.wire_type(
+            version=1, metadata=self.wire_metadata(), token=self.handle
+        )
+
+    @classmethod
+    def from_wire(cls, data: msgspec.Struct) -> "_PluginIPCWrapper":
+        """Restore the plugin handle from its descriptor."""
+        assert isinstance(data, cls.wire_type)
+        wrapper = cls(data.token)
+        wrapper.restore_metadata(data.metadata)
+        return wrapper
+
+
+class _ShadowIPCWrapper(_PluginIPCWrapper):
+    """Plugin wrapper whose descriptor collides with a built-in tag."""
+
+    wire_type = _ShadowIPCData
+
+
+class _IPCPluginDeviceSpec(_ExternalDeviceSpec):
+    """External spec that ships its own IPC wrappers."""
+
+    @property
+    def ipc_wrapper_types(self) -> tuple[type[DeviceIPCWrapper], ...]:
+        """Return the plugin wrappers, one of them shadowing a built-in."""
+        return (_PluginIPCWrapper, _ShadowIPCWrapper)
+
+
+class _UntypedIPCWrapper(DeviceIPCWrapper):
+    """Plugin wrapper that forgot to declare ``wire_type``."""
+
+
+class _UntypedIPCDeviceSpec(_ExternalDeviceSpec):
+    """External spec whose wrapper has no wire type."""
+
+    @property
+    def ipc_wrapper_types(self) -> tuple[type[DeviceIPCWrapper], ...]:
+        """Return a wrapper without a wire type."""
+        return (_UntypedIPCWrapper,)
+
+
+class _MissingRuntimeDeviceSpec(_ExternalDeviceSpec):
+    """External spec whose vendor runtime is not installed."""
+
+    @property
+    def ipc_wrapper_types(self) -> tuple[type[DeviceIPCWrapper], ...]:
+        """Fail the lazy import of the vendor wrapper module."""
+        raise ImportError("vendor runtime is not installed")
+
+
 class _FakeEntryPoint:
     """Small importlib.metadata.EntryPoint stand-in."""
 
@@ -105,11 +183,14 @@ def reset_device_registry_cache() -> Any:
     """Keep the process-wide registry cache isolated between tests."""
     backend_registry_builder = _device_detect._build_backend_registry
     device_registry_builder = _device_detect._build_device_registry
+    ipc_wire_registry_builder = _device_detect._build_ipc_wire_registry
     backend_registry_builder.cache_clear()
     device_registry_builder.cache_clear()
+    ipc_wire_registry_builder.cache_clear()
     yield
     backend_registry_builder.cache_clear()
     device_registry_builder.cache_clear()
+    ipc_wire_registry_builder.cache_clear()
 
 
 def _set_entry_points(
@@ -462,3 +543,57 @@ def test_cuda_device_type_prefers_default_backend_without_hardware(
     monkeypatch.setattr(torch.version, "hip", hip_version)
 
     assert isinstance(_device_detect.get_device_spec("cuda"), CudaDeviceSpec)
+
+
+def _set_ipc_plugin(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_entry_points(
+        monkeypatch,
+        [
+            _FakeEntryPoint(
+                "external",
+                "lmcache_external:IPCPluginDeviceSpec",
+                lambda: _IPCPluginDeviceSpec,
+            )
+        ],
+    )
+
+
+def test_plugin_ipc_wrapper_roundtrips(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plugin's own wire type crosses the MP wire without LMCache changes."""
+    _set_ipc_plugin(monkeypatch)
+    wrapper = _PluginIPCWrapper(b"plugin-handle")
+
+    restored = DeviceIPCWrapper.Deserialize(DeviceIPCWrapper.Serialize(wrapper))
+
+    assert type(restored) is _PluginIPCWrapper
+    assert restored == wrapper
+
+
+def test_plugin_cannot_take_over_builtin_wire_tag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A built-in wire tag keeps decoding to the built-in wrapper."""
+    _set_ipc_plugin(monkeypatch)
+    builtin = CpuShmTensorWrapper.wrap(torch.zeros(2, 3))
+
+    restored = DeviceIPCWrapper.Deserialize(DeviceIPCWrapper.Serialize(builtin))
+
+    assert type(restored) is CpuShmTensorWrapper
+    with pytest.raises(ValueError):
+        DeviceIPCWrapper.Serialize(_ShadowIPCWrapper(b"shadow"))
+
+
+@pytest.mark.parametrize("spec_cls", [_UntypedIPCDeviceSpec, _MissingRuntimeDeviceSpec])
+def test_broken_plugin_wrappers_do_not_break_builtin_ipc(
+    monkeypatch: pytest.MonkeyPatch, spec_cls: type[DeviceSpec]
+) -> None:
+    """A plugin whose IPC wrappers cannot load is skipped like a broken spec."""
+    _set_entry_points(
+        monkeypatch,
+        [_FakeEntryPoint("external", "lmcache_external:Spec", lambda: spec_cls)],
+    )
+    builtin = CpuShmTensorWrapper.wrap(torch.zeros(2, 3))
+
+    restored = DeviceIPCWrapper.Deserialize(DeviceIPCWrapper.Serialize(builtin))
+
+    assert type(restored) is CpuShmTensorWrapper

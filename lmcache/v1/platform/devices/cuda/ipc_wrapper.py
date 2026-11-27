@@ -33,18 +33,18 @@ import threading
 import uuid
 
 # Third Party
+import msgspec
 import torch
 
 # First Party
 from lmcache import torch_device_type
 from lmcache.v1.common.logging import init_logger
-from lmcache.v1.platform.base.ipc_wire import (
+from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper, resolve_fd
+from lmcache.v1.platform.devices.cuda.ipc_wire import (
     CudaIPCData,
     RawCudaIPCData,
     VmmCudaIPCData,
-    WireIPCData,
 )
-from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper, resolve_fd
 from lmcache.v1.platform.devices.cuda.utils import (
     _bind_primary_context,
     _cuda,
@@ -128,6 +128,7 @@ class CudaIPCWrapper(DeviceIPCWrapper):
     #: ``torch.device.type`` this wrapper handles. Kept as a class-level
     #: constant so external tooling / tests can introspect the binding.
     device_type: ClassVar[str] = "cuda"
+    wire_type: ClassVar[type[msgspec.Struct]] = CudaIPCData
 
     @classmethod
     def wrap(cls, tensor: torch.Tensor) -> "CudaIPCWrapper":
@@ -171,7 +172,7 @@ class CudaIPCWrapper(DeviceIPCWrapper):
         return CudaIPCData(version=1, metadata=self.wire_metadata(), handle=self.handle)
 
     @classmethod
-    def from_wire(cls, data: WireIPCData) -> "CudaIPCWrapper":
+    def from_wire(cls, data: msgspec.Struct) -> "CudaIPCWrapper":
         """Restore a validated shared-storage descriptor without opening it."""
         if not isinstance(data, CudaIPCData):
             raise ValueError("Expected CUDA IPC descriptor")
@@ -241,6 +242,7 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
     #: :attr:`~lmcache.v1.platform.devices.cuda.CudaDeviceSpec.ipc_wrapper_cls`
     #: under isolated IPC, instantiated directly by the TRT-LLM adapter.
     device_type: ClassVar[str] = "cuda"
+    wire_type: ClassVar[type[msgspec.Struct]] = RawCudaIPCData
 
     @classmethod
     def wrap(cls, tensor: torch.Tensor) -> "RawCudaIPCWrapper":
@@ -328,7 +330,7 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
         )
 
     @classmethod
-    def from_wire(cls, data: WireIPCData) -> "RawCudaIPCWrapper":
+    def from_wire(cls, data: msgspec.Struct) -> "RawCudaIPCWrapper":
         """Restore a driver descriptor with no imported mappings."""
         if not isinstance(data, RawCudaIPCData):
             raise ValueError("Expected raw CUDA IPC descriptor")
@@ -454,7 +456,7 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
     #: when the ``use_vmm_api`` switch is on.
     device_type: ClassVar[str] = "cuda"
     #: Wire descriptor type; a subclass for another runtime brings its own tag.
-    _wire_cls: ClassVar[type[VmmCudaIPCData]] = VmmCudaIPCData
+    wire_type: ClassVar[type[VmmCudaIPCData]] = VmmCudaIPCData
 
     @classmethod
     def wrap(cls, tensor: torch.Tensor) -> "VmmCudaIPCWrapper":
@@ -590,7 +592,7 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
 
     def to_wire(self) -> VmmCudaIPCData:
         """Return the VMM descriptor, excluding local fds and mapping counts."""
-        return self._wire_cls(
+        return self.wire_type(
             version=1,
             metadata=self.wire_metadata(),
             export_id=self._export_id,
@@ -602,9 +604,9 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
         )
 
     @classmethod
-    def from_wire(cls, data: WireIPCData) -> "VmmCudaIPCWrapper":
+    def from_wire(cls, data: msgspec.Struct) -> "VmmCudaIPCWrapper":
         """Restore a VMM descriptor with no local fd or imported mappings."""
-        if not isinstance(data, cls._wire_cls):
+        if not isinstance(data, cls.wire_type):
             raise ValueError("Expected VMM CUDA IPC descriptor")
         obj = object.__new__(cls)
         obj.restore_metadata(data.metadata)
