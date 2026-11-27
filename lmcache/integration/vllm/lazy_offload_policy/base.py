@@ -126,18 +126,18 @@ class OffloadPolicy(ABC):
         where the previous one ended, and a policy must keep them in that
         order: they are submitted as one coalesced store.
 
-        An operation the policy cannot take custody of is dropped here
-        rather than buffered: one covered by a block that carries no
-        prefix-cache hash (its later eviction would be undetectable), or one
-        belonging to a request whose prefix chain is already broken.
+        An operation belonging to a request whose prefix chain is already
+        broken is dropped here rather than buffered.
 
         Args:
             meta: The store operation: the request id, the token range, and
                 the GPU blocks holding that range's KV.
-            block_hashes: Prefix-cache hash of every block covering
-                ``meta``'s token range, read now. The policy keeps this
-                snapshot and compares against it later; a block whose hash
-                changed was recycled, so the buffered data is gone.
+            block_hashes: Prefix-cache hash of every hashed block covering
+                ``meta``'s token range, read now; the manager has replaced
+                each hash-less block by the null block, which is left out
+                of this mapping. The policy keeps this snapshot and
+                compares against it later; a block whose hash changed was
+                recycled, so the buffered data is gone.
         """
 
     @abstractmethod
