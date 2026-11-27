@@ -1,27 +1,28 @@
 Chunk-Size Resolution
 =====================
 
-The vLLM multiprocess connector resolves an effective LMCache chunk size at
-startup. This keeps chunk boundaries aligned with every vLLM KV cache group,
-including hybrid-attention, recurrent-state, and decode-context-parallel
-(DCP) layouts, without changing the MP server's configured chunk size.
+Multiprocess connectors resolve an effective LMCache chunk size at startup.
+This keeps chunk boundaries aligned with each engine's KV cache geometry
+without changing the MP server's configured chunk size. vLLM, SGLang, ATOM,
+and TensorRT-LLM support this resolution.
 
 Effective chunk size
 --------------------
 
-``lmcache server --chunk-size`` is the server minimum. The optional connector
-setting ``lmcache.mp.chunk_size`` supplies a client minimum. The connector
-computes the effective token span of every cacheable KV group, excluding
-scratch groups, and uses their least common multiple as the required
-alignment::
+``lmcache server --chunk-size`` is the server minimum. vLLM and SGLang can
+optionally set a client minimum through ``lmcache.mp.chunk_size``. Every
+connector reads the server minimum, applies any supported client minimum, and
+rounds the result up to the engine's required alignment::
 
     base = max(server_minimum, client_minimum)
     effective_chunk_size = smallest multiple of required_alignment
                            that is >= base
 
-When the client minimum is omitted, ``base`` is the server minimum.
+When the client minimum is omitted, ``base`` is the server minimum. vLLM and
+SGLang use the least common multiple of their cacheable KV group spans as the
+required alignment. ATOM and TensorRT-LLM use their paged KV block size.
 
-For attention groups under DCP, the effective span is
+For vLLM attention groups under DCP, the effective span is
 ``block_size * decode_context_parallel_size``. Recurrent-state groups use
 their physical block size because their state is replicated rather than DCP
 sharded.
@@ -41,8 +42,7 @@ MP servers, every server must resolve the same effective size.
 Initialization flow
 -------------------
 
-#. vLLM resolves its KV cache groups. ``LMCacheMPConnector`` computes the
-   required alignment from their effective token spans.
+#. The connector computes the engine's required alignment.
 #. The scheduler adapter and each worker adapter call ``GET_CHUNK_SIZE`` to
    read the MP server minimum.
 #. Each adapter combines the server minimum, optional client minimum, and
@@ -62,8 +62,8 @@ configuration mismatch.
 Restart recovery
 ----------------
 
-The scheduler and worker adapters keep the effective size in memory. Their
-heartbeat threads detect an unhealthy-to-healthy transition after an MP
+The vLLM scheduler and worker adapters keep the effective size in memory.
+Their heartbeat threads detect an unhealthy-to-healthy transition after an MP
 server restart and perform recovery before marking that server healthy:
 
 #. Read the recovered server minimum and resolve the size again from the
