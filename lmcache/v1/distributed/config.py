@@ -768,6 +768,9 @@ class StorageManagerConfig:
     (in flight, or loaded but not yet consumed) before new prefetch requests
     wait. """
 
+    prefetch_load_timeout: float | None = None
+    """L2 prefetch budget (seconds), including queueing and lookup; None disables."""
+
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
 
@@ -836,6 +839,14 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
             the device range of a Device-DAX L1, or more than one shared
             Device-DAX L1 or an unsupported one is configured.
     """
+    if config.prefetch_load_timeout is not None and not (
+        math.isfinite(config.prefetch_load_timeout) and config.prefetch_load_timeout > 0
+    ):
+        raise ValueError(
+            "prefetch_load_timeout must be a finite positive number of seconds "
+            f"or None to disable (got {config.prefetch_load_timeout})"
+        )
+
     by_tag = {c.tag: c for c in config.l1_manager_configs}
     shared = [
         c
@@ -1141,6 +1152,13 @@ def add_storage_manager_args(
         "--l2-prefetch-inflight-watermark.",
     )
     policy_group.add_argument(
+        "--l2-prefetch-load-timeout",
+        type=float,
+        default=None,
+        help="L2 prefetch budget in seconds before falling back to recompute. "
+        "Default: disabled.",
+    )
+    policy_group.add_argument(
         "--periodic-notifier-interval-ms",
         type=int,
         default=5,
@@ -1249,6 +1267,7 @@ def parse_args_to_config(
             store_policy=args.l2_store_policy,
             prefetch_policy=args.l2_prefetch_policy,
             prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
+            prefetch_load_timeout=args.l2_prefetch_load_timeout,
             periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
         )
     if args.l1_size_gb is None or defaults is None:
@@ -1332,6 +1351,7 @@ def parse_args_to_config(
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_inflight_watermark=args.l2_prefetch_inflight_watermark,
+        prefetch_load_timeout=args.l2_prefetch_load_timeout,
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )
     return config

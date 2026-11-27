@@ -325,6 +325,12 @@ class L1ManagerInterface(Protocol):
         """Commit ``tag``'s buffers and read-lock the resident objects."""
         ...
 
+    def finish_prefetch(
+        self, keys: list[ObjectKey], tag: str = ""
+    ) -> dict[ObjectKey, L1Error]:
+        """Admit retained prefetch buffers and discard temporary ones."""
+        ...
+
     def finish_write_and_delete(
         self, keys: list[ObjectKey], tag: str = ""
     ) -> dict[ObjectKey, L1Error]:
