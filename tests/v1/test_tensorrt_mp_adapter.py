@@ -99,6 +99,34 @@ def test_failed_retrieve_waits_for_device_result_and_fails_closed(
     device_future.result.assert_called_once_with(timeout=5.0)
 
 
+def test_lookup_uses_block_aligned_server_chunk_size(
+    trt_mp_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TensorRT-LLM lookup boundaries use the aligned server minimum."""
+    module = trt_mp_module
+    client = MagicMock(name="req_client")
+    client.get_chunk_size.return_value.result.return_value = 250
+    client.query_prefetch_status.return_value.result.return_value = 0
+    monkeypatch.setattr(
+        module.RequestClientFactory,
+        "create",
+        MagicMock(return_value=client),
+    )
+    llm_args = SimpleNamespace(
+        kv_cache_config=SimpleNamespace(tokens_per_block=64),
+        kv_connector_config=SimpleNamespace(server_url="tcp://127.0.0.1:5555"),
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        model="trt-test-model",
+    )
+    scheduler = module.LMCacheMPKvConnectorScheduler(llm_args)
+    request = SimpleNamespace(request_id=7, get_tokens=lambda beam: list(range(300)))
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert client.lookup.call_args.args[0].end == 256
+
+
 def test_store_wait_retains_event_on_raw_future(
     trt_mp_module,
 ) -> None:

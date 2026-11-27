@@ -280,6 +280,10 @@ class L1ManagerInterface(Protocol):
         """Register a listener for this L1's lifecycle notifications."""
         ...
 
+    def unregister_listener(self, listener: L1ManagerListener) -> None:
+        """Remove a listener before its resources are closed."""
+        ...
+
     def reserve_read(
         self, keys: list[ObjectKey], read_locks: int = 1
     ) -> dict[ObjectKey, L1OperationResult]:

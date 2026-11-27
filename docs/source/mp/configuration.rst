@@ -88,9 +88,9 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Port to bind the selected request server.
    * - ``--chunk-size``
      - ``256``
-     - Minimum chunk size for KV cache operations (in tokens). The vLLM MP
-       connector may resolve a larger model-specific effective size to satisfy
-       the model's KV geometry; see :doc:`chunk_size_negotiation`.
+     - Minimum chunk size for KV cache operations (in tokens). MP engine
+       connectors may resolve a larger model-specific effective size to satisfy
+       the engine's KV geometry; see :doc:`chunk_size_negotiation`.
    * - ``--null-block-id``
      - ``0``
      - Engine block ID that denotes absent KV data. Keep the default for

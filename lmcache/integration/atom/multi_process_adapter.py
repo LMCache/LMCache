@@ -50,9 +50,23 @@ class _IpcEvent(Protocol):
     def wait(self, stream: object | None = None) -> None: ...
 
 
-def _get_chunk_size(client: RequestClient, timeout: float) -> int:
-    """Read the server's configured token chunk size."""
-    return int(client.get_chunk_size().result(timeout))
+def _get_chunk_size(
+    client: RequestClient, timeout: float, required_alignment: int
+) -> int:
+    """Resolve the server minimum to the ATOM block alignment.
+
+    Args:
+        client: MP request client used to read the server minimum.
+        timeout: Maximum seconds to wait for the response.
+        required_alignment: ATOM block size in tokens.
+
+    Returns:
+        The server minimum rounded up to ``required_alignment``.
+    """
+    server_minimum = client.get_chunk_size().result(timeout)
+    return (
+        (server_minimum + required_alignment - 1) // required_alignment
+    ) * required_alignment
 
 
 def _caller_chunk_hashes(
@@ -64,7 +78,7 @@ def _caller_chunk_hashes(
         chunk_hashes: ``lmcache_chunk_hashes`` of the prompt's complete
             chunks in ``[0, end)``, concatenated.
         end: End token index of the key being built.
-        chunk_size: The server's chunk size.
+        chunk_size: The adapter's effective chunk size.
         enabled: Whether the adapter was built with ``client_chunk_hashes``.
 
     Returns:
@@ -141,7 +155,9 @@ class AtomMPSchedulerAdapter:
         self._parallel = parallel_config
         self._mq_timeout = mq_timeout
         try:
-            self.lmcache_tokens_per_chunk = _get_chunk_size(client, mq_timeout)
+            self.lmcache_tokens_per_chunk = _get_chunk_size(
+                client, mq_timeout, block_size
+            )
             if self.lmcache_tokens_per_chunk % block_size:
                 raise ValueError(
                     "LMCache chunk size must be divisible by ATOM block size, got "
@@ -360,7 +376,9 @@ class AtomMPWorkerAdapter:
         self._transfer_mode = transfer_mode
         self.instance_id = uuid.uuid4().int & ((1 << 63) - 1)
         try:
-            self.lmcache_tokens_per_chunk = _get_chunk_size(client, mq_timeout)
+            self.lmcache_tokens_per_chunk = _get_chunk_size(
+                client, mq_timeout, block_size
+            )
             if self.lmcache_tokens_per_chunk % block_size:
                 raise ValueError(
                     "LMCache chunk size must be divisible by ATOM block size, got "

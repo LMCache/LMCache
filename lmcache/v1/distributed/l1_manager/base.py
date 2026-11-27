@@ -295,6 +295,12 @@ class BaseL1Manager(L1ManagerInterface):
         with self._lock:
             self._registered_listeners.append(listener)
 
+    def unregister_listener(self, listener: L1ManagerListener) -> None:
+        """Wait for any active callback and remove the listener if registered."""
+        with self._lock:
+            if listener in self._registered_listeners:
+                self._registered_listeners.remove(listener)
+
     @l1_mgr_synchronized
     def reserve_read(
         self,
