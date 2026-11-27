@@ -5,6 +5,14 @@ let proxyNodes = {};
 let allProxies = []; // Store all proxies for filtering
 const nativeFetch = window.fetch.bind(window);
 
+// Ensure unsupported configuration write controls start disabled
+if (typeof document !== 'undefined') {
+    const initialSetConfigBtn = document.getElementById('setConfigBtn');
+    if (initialSetConfigBtn) initialSetConfigBtn.disabled = true;
+    const initialConfigValueInput = document.getElementById('configValueInput');
+    if (initialConfigValueInput) initialConfigValueInput.disabled = true;
+}
+
 window.fetch = (resource, options = {}) => {
     const apiKey = sessionStorage.getItem('lmcacheFrontendApiKey');
     const url = new URL(resource instanceof Request ? resource.url : resource, window.location.href);
@@ -102,6 +110,8 @@ window.addEventListener('DOMContentLoaded', () => {
     // Config management buttons
     document.getElementById('getConfigBtn').addEventListener('click', getConfig);
     document.getElementById('setConfigBtn').addEventListener('click', setConfig);
+    document.getElementById('setConfigBtn').disabled = true;
+    document.getElementById('configValueInput').disabled = true;
 
     // Refresh page button
     document.getElementById('refreshPageBtn').addEventListener('click', refreshCurrentPage);
@@ -854,10 +864,13 @@ async function loadConfig() {
     const contentDiv = document.getElementById('configContent');
     const configKeyInput = document.getElementById('configKeyInput');
     const configValueInput = document.getElementById('configValueInput');
+    const setConfigBtn = document.getElementById('setConfigBtn');
 
     contentDiv.textContent = 'Loading...';
     configKeyInput.value = '';
     configValueInput.value = '';
+    if (configValueInput) configValueInput.disabled = true;
+    if (setConfigBtn) setConfigBtn.disabled = true;
 
     try {
         const response = await fetch(transformPath('conf'));
@@ -892,34 +905,15 @@ async function getConfig() {
 async function setConfig() {
     if (!currentNode) return;
 
-    const configKeyInput = document.getElementById('configKeyInput');
+    const setConfigBtn = document.getElementById('setConfigBtn');
+    if (setConfigBtn) {
+        setConfigBtn.disabled = true;
+    }
     const configValueInput = document.getElementById('configValueInput');
-
-    const configKey = configKeyInput.value.trim();
-    const configValue = configValueInput.value.trim();
-
-    if (!configKey) {
-        alert('Please enter a configuration key');
-        return;
+    if (configValueInput) {
+        configValueInput.disabled = true;
     }
-
-    if (!configValue) {
-        alert('Please enter a configuration value');
-        return;
-    }
-
-    try {
-        const url = transformPath('conf') + `?key=${encodeURIComponent(configKey)}&value=${encodeURIComponent(configValue)}`;
-        const response = await fetch(url, { method: 'GET' });
-        const text = await response.text();
-        alert(text);
-
-        if (response.ok) {
-            loadConfig();
-        }
-    } catch (error) {
-        alert(`Failed to set configuration: ${error.message}`);
-    }
+    alert('Configuration updates are not supported for multiprocess servers.');
 }
 
 // Load meta information
@@ -1043,6 +1037,8 @@ function clearAllTabs() {
     document.getElementById('loggerInput').value = '';
     document.getElementById('configKeyInput').value = '';
     document.getElementById('configValueInput').value = '';
+    document.getElementById('configValueInput').disabled = true;
+    document.getElementById('setConfigBtn').disabled = true;
     document.getElementById('envSearchInput').value = '';
     envVariablesData = null;
 }
