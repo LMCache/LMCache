@@ -646,10 +646,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 including auto-start with multiple server endpoints.
             ConnectionError: If the configured MP server cannot be reached.
         """
-        # Older supported vLLM releases allow connectors to omit this value,
-        # while current vLLM's type declaration requires it.
         super().__init__(vllm_config, role, kv_cache_config)  # type: ignore[arg-type]
+        self._defer_kv_registration = hasattr(KVConnectorBase_V1, "on_kv_cache_ready")
+        if role == KVConnectorRole.WORKER and not self._defer_kv_registration:
+            logger.warning(
+                "vLLM lacks on_kv_cache_ready; keeping legacy KV registration "
+                "and lazy heartbeat startup. Upgrade vLLM to a version with "
+                "vllm-project/vllm#66574 to enable startup-ready registration."
+            )
         self._connector_stats = LMCacheMPConnectorStats()
+        self._pending_kv_caches: dict[str, torch.Tensor] | None = None
+        self._kv_cache_ready = False
 
         # Fail fast, before the server handshake below.
         kv_cache_config = getattr(self, "_kv_cache_config", None)
@@ -1017,50 +1024,48 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         assert self._connector_metadata is not None
         return self._connector_metadata
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        """
-        Initialize with the KV caches. Useful for pre-registering the
-        KV Caches in the KVConnector (e.g. for NIXL).
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        """Defer registration until readiness, or register immediately on old vLLM.
 
         Args:
-            kv_caches: dictionary of layer names, kv cache
+            kv_caches: Layer names mapped to KV tensors. With the readiness
+                hook, a later call before readiness replaces the pending mapping.
+
+        Raises:
+            RuntimeError: If deferred startup registration already completed.
+                Use unregister_kv_caches/restore_kv_caches for sleep and wake-up.
         """
-        logger.info("Registering kv caches!")
-        kv_cache_config = getattr(self, "_kv_cache_config", None)
-        # Must precede both group-info creation and transfer registration so
-        # they see the same edited views.
-        layout_hints = vllm_layout_hints(self._vllm_config)
-        kv_caches = apply_kv_cache_group_edits(
-            kv_cache_config, kv_caches, layout_hints=layout_hints
-        )
-        engine_group_infos = create_engine_group_infos_from_vllm(
-            kv_cache_config,
-            kv_caches,
-            layout_hints=layout_hints,
-            dcp_size=self._dcp_size,
-            kv_tp_size=self._kv_tp_size,
-        )
-        self.worker_adapter.register_kv_caches(
-            kv_caches,
-            engine_group_infos=engine_group_infos,
-            layout_hints=layout_hints,
-        )
-        if self._save_unfull_chunk and not isinstance(
-            self.worker_adapter.transfer_ctx, LMCacheDrivenTransferContext
-        ):
-            # The engine-driven server paths copy whole chunks only.
-            raise ValueError(
-                "lmcache.mp.save_unfull_chunk requires the lmcache_driven transfer mode"
+        if not self._defer_kv_registration:
+            self._register_kv_caches(kv_caches)
+            return
+        if self._kv_cache_ready:
+            raise RuntimeError(
+                "KV caches are already ready; use unregister_kv_caches and "
+                "restore_kv_caches to replace their backing memory."
             )
-        if self.dispatcher is not None:
-            dispatch(
-                self.dispatcher,
-                "register",
-                kv_caches=kv_caches,
-                kv_cache_config=kv_cache_config,
-                vllm_config=self._vllm_config,
-            )
-        return
+        self._pending_kv_caches = dict(kv_caches)
+
+    def on_kv_cache_ready(self) -> None:
+        """Register after warmup/final sizing, then start heartbeat before requests.
+
+        Wait for the registration ACK; errors propagate to fail startup.
+        Repeated calls after successful registration are no-ops. Sleep and
+        wake-up use unregister_kv_caches/restore_kv_caches instead.
+
+        Raises:
+            RuntimeError: If register_kv_caches has not supplied the tensors.
+            ConnectionError: If registration is not acknowledged in mq_timeout.
+            ValueError: If cache geometry or the transfer mode is invalid.
+        """
+        if self._kv_cache_ready:
+            return
+        kv_caches = self._pending_kv_caches
+        if kv_caches is None:
+            raise RuntimeError("register_kv_caches must precede on_kv_cache_ready")
+        self._register_kv_caches(kv_caches)
+        self.worker_adapter.start_heartbeat()
+        self._kv_cache_ready = True
+        self._pending_kv_caches = None
 
     def unregister_kv_caches(self) -> None:
         """Drop the LMCache server's registration of the KV caches before
@@ -2334,3 +2339,41 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if block_ids and self._gpu_block_pool is not None:
             pool = self._gpu_block_pool
             pool.free_blocks([pool.blocks[block_id] for block_id in block_ids])
+
+    def _register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        """Register KV tensors and dispatch their resolved cache geometry."""
+        logger.info("Registering kv caches!")
+        kv_cache_config = getattr(self, "_kv_cache_config", None)
+        # Must precede both group-info creation and transfer registration so
+        # they see the same edited views.
+        layout_hints = vllm_layout_hints(self._vllm_config)
+        kv_caches = apply_kv_cache_group_edits(
+            kv_cache_config, kv_caches, layout_hints=layout_hints
+        )
+        engine_group_infos = create_engine_group_infos_from_vllm(
+            kv_cache_config,
+            kv_caches,
+            layout_hints=layout_hints,
+            dcp_size=self._dcp_size,
+            kv_tp_size=self._kv_tp_size,
+        )
+        self.worker_adapter.register_kv_caches(
+            kv_caches,
+            engine_group_infos=engine_group_infos,
+            layout_hints=layout_hints,
+        )
+        if self._save_unfull_chunk and not isinstance(
+            self.worker_adapter.transfer_ctx, LMCacheDrivenTransferContext
+        ):
+            # The engine-driven server paths copy whole chunks only.
+            raise ValueError(
+                "lmcache.mp.save_unfull_chunk requires the lmcache_driven transfer mode"
+            )
+        if self.dispatcher is not None:
+            dispatch(
+                self.dispatcher,
+                "register",
+                kv_caches=kv_caches,
+                kv_cache_config=kv_cache_config,
+                vllm_config=self._vllm_config,
+            )

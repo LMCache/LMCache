@@ -184,6 +184,8 @@ def test_real_vllm_request_packs_tokens_after_streaming_session_update() -> None
     )
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.hash_block_size = 16
+    scheduler.max_model_len = 32
+    scheduler.num_sampled_tokens_per_step = 1
     scheduler.log_stats = False
     scheduler.collect_stats = False
     scheduler.queued_workload_tally = None
