@@ -76,6 +76,10 @@ effective sizes in tokens.
      - 16
      - 512
      - 512
+   * - vLLM (hybrid model)
+     - 544
+     - 600
+     - 1088
    * - SGLang
      - 32 and 48 (alignment 96)
      - 300
@@ -89,6 +93,21 @@ effective sizes in tokens.
      - Uses server minimum
      - 256
 
+In the hybrid vLLM example, one 544-token block falls below the 600-token
+minimum, so the connector uses two blocks (1088 tokens).
+
+Initialization flow
+-------------------
+
+#. The connector reads the MP server minimum with ``GET_CHUNK_SIZE``.
+#. It combines the server minimum with the optional client minimum and rounds
+   up to the required block alignment.
+#. The connector checks the effective size against the engine's KV block
+   geometry. A vLLM scheduler using ``lmcache.mp.server_urls`` also checks
+   that every server it uses resolves to the same effective size.
+#. Each worker registers its KV cache with the effective size. The MP server
+   validates the size and records it with the KV layout.
+
 Sharing one server
 ------------------
 
@@ -97,14 +116,15 @@ blocks can use 256-token and 512-token chunks on the same server. Start the
 server with ``--chunk-size 256``, leave the first deployment's client minimum
 unset, and set it to ``512`` on the second.
 
-The scheduler and workers use the same effective chunk size. Workers send
-it with their KV cache registration, and the server records it by model name
-and world size. All deployments registered under the same ``(model_name,
-world_size)`` pair on one server must agree on the effective size. To change
-the size for that pair, unregister all workers using the old size before
-registering workers with the new size. A single vLLM deployment configured
-with ``lmcache.mp.server_urls`` must resolve the same effective chunk size on
-every server it uses.
+All deployments registered under the same ``(model_name, world_size)`` pair
+on one server must agree on the effective size. To change it, shut down all
+engine deployments using that pair before starting workers with the new
+size. The server releases the layout when the last worker unregisters during
+shutdown or the server reaps its stale registration. If a worker exits without
+unregistering, wait for cleanup under ``--worker-reap-timeout-seconds`` or
+``--worker-registration-grace-seconds`` (see :doc:`configuration`). If reaping
+is disabled and a stale registration remains, restart the MP server before
+starting the replacement workers.
 
 .. _mp-global-chunk-size:
 
