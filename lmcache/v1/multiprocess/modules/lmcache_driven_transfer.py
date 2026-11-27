@@ -2,6 +2,8 @@
 """LMCache-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
+from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any, Sequence
 import threading
@@ -23,6 +25,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     ShardReplicationDesc,
+    ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
 from lmcache.v1.gpu_connector.gds_context import GDSBufferRegistration
@@ -49,6 +52,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     trim_and_stage_unfull_chunk_block_ids,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.session import Session
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -65,6 +69,19 @@ from lmcache.v1.transport.errors import InvalidRequestError
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
+
+
+def _check_store_hasher(session: Session, expected: TokenHasher) -> None:
+    """An active request's checkpoints must use the registered rolling hash."""
+    actual = session.hasher
+    if actual is not expected and (
+        actual.chunk_size,
+        actual.hash_algorithm_name,
+        actual.none_hash,
+    ) != (expected.chunk_size, expected.hash_algorithm_name, expected.none_hash):
+        raise InvalidRequestError(
+            "native STORE hashing context differs from its active request"
+        )
 
 
 def get_layout_desc(
@@ -181,6 +198,16 @@ def _fold_shard_replication_desc(
     )
 
 
+@dataclass(eq=False)
+class StoreBindingRegistration:
+    """One cohort of profiled workers. Its final removal marks it inactive
+    under the transfer registry lock before releasing any event metadata.
+    """
+
+    profile: KVEventProfile
+    active: bool = True
+
+
 @dataclass
 class ContextEntry:
     """Registered cache context metadata for a single worker instance.
@@ -204,8 +231,9 @@ class ContextEntry:
             PING. Selects the reap window (timeout vs registration grace).
             Latched only by PING, never by traffic.
         event_backend: Cached event backend selected for this context's device.
-        event_profile: Native identity contract retained until unregister, reap
-            or shutdown. None retains current event behavior.
+        event_profile: Native identity contract accepted for this worker.
+        store_registration: Lifetime shared with other profiled workers in
+            this model and world size.
     """
 
     cache_context: BaseCacheContext
@@ -216,6 +244,7 @@ class ContextEntry:
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
     event_profile: KVEventProfile | None = None
+    store_registration: StoreBindingRegistration | None = None
 
 
 class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
@@ -234,6 +263,20 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     """
 
     module_name = "lmcache_driven_transfer"
+    bind_store_events: (
+        Callable[
+            [
+                IPCCacheServerKey,
+                Sequence[ObjectKey],
+                StoreBindingRegistration | None,
+                int,
+                str,
+            ],
+            bool,
+        ]
+        | None
+    ) = None
+    retire_store_bindings: Callable[[StoreBindingRegistration], None] | None = None
 
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
@@ -283,6 +326,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             "release_imported_event",
             self._release_imported_event,
             payload_type=tuple[int, int],
+        )
+        self._device_host_func_dispatcher.register(
+            "complete_bound_write",
+            self._complete_bound_write,
+            payload_type=tuple[dict[ObjectKey, int], str, bool],
         )
         self._device_host_func_dispatcher.start()
 
@@ -335,6 +383,28 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             l1_owners: The L1 manager that reserved each key.
         """
         self._ctx.storage_manager.abort_write(list(l1_owners.keys()), l1_owners)
+
+    def _release_store_bindings(self, transfer: str) -> None:
+        # L1 ownership notifications and releases must be consumed in FIFO order.
+        self._ctx.event_bus.publish(
+            Event(
+                event_type=EventType.MP_STORE_BINDINGS_RELEASED,
+                metadata={"transfer_key": transfer},
+            )
+        )
+
+    def _complete_bound_write(
+        self, payload: tuple[dict[ObjectKey, int], str, bool]
+    ) -> None:
+        """Release this transfer's binding after its L1 reservations settle."""
+        owners, transfer, succeeded = payload
+        try:
+            if succeeded:
+                self._finish_write(owners)
+            else:
+                self._abort_write(owners)
+        finally:
+            self._release_store_bindings(transfer)
 
     def register_host_func(self, kind: str, handler: Any, payload_type: Any) -> None:
         """Register *handler* for *kind* on the per-process device host-func
@@ -413,7 +483,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             The instance IDs reaped this scan.
         """
         now = time.monotonic()
-        reaped: list[tuple[int, ContextEntry]] = []
         with self._lock:
             stale_ids = [
                 iid
@@ -425,24 +494,30 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     else registration_grace_s
                 )
             ]
-            for iid in stale_ids:
-                reaped.append((iid, self._cache_contexts.pop(iid)))
-        reaped_ids: list[int] = []
-        entries: list[ContextEntry] = []
-        for iid, e in reaped:
+            entries = self._pop_contexts_locked(stale_ids)
+        for iid, entry in zip(stale_ids, entries, strict=True):
             logger.warning(
                 "Reaped GPU instance %d: silent for %.1fs (pinged=%s)",
                 iid,
-                now - e.last_seen,
-                e.has_liveness_signal,
+                now - entry.last_seen,
+                entry.has_liveness_signal,
             )
-            reaped_ids.append(iid)
-            entries.append(e)
-        if reaped:
-            del e  # a bound name would pin the final entry (see _release_entries)
-            reaped.clear()
+        if entries:
+            del entry  # Let _release_entries unmap the last IPC segment.
             self._release_entries(entries)
-        return reaped_ids
+        return stale_ids
+
+    def _pop_contexts_locked(self, ids: Sequence[int]) -> list[ContextEntry]:
+        """Remove workers and retire a binding registration with its final peer."""
+        removed = [e for i in ids if (e := self._cache_contexts.pop(i, None))]
+        retiring = {e.store_registration for e in removed if e.store_registration}
+        if retiring:
+            for peer in self._cache_contexts.values():
+                if peer.store_registration:
+                    retiring.discard(peer.store_registration)
+            for registration in retiring:
+                registration.active = False
+        return removed
 
     def _release_entries(self, entries: list[ContextEntry]) -> None:
         """Release a batch of entries and reclaim their device memory.
@@ -453,6 +528,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         """
         if not entries:
             return
+        if self.retire_store_bindings is not None:
+            for registration in {
+                e.store_registration
+                for e in entries
+                if e.store_registration and not e.store_registration.active
+            }:
+                self.retire_store_bindings(registration)
         for entry in entries:
             entry.cache_context.close()
             self._ctx.layout_desc_registry.unregister(
@@ -499,8 +581,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._device_host_func_dispatcher.stop()
 
         with self._lock:
-            entries = list(self._cache_contexts.values())
-            self._cache_contexts.clear()
+            entries = self._pop_contexts_locked(list(self._cache_contexts))
         self._release_entries(entries)
         if self._fd_channel is not None:
             set_fd_resolver(None)
@@ -663,6 +744,18 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             raise
 
         with self._lock:
+            registration = None
+            if event_profile is not None:
+                registration = next(
+                    (
+                        e.store_registration
+                        for e in self._cache_contexts.values()
+                        if (e.model_name, e.world_size) == (model_name, world_size)
+                    ),
+                    None,
+                )
+                if registration is None:
+                    registration = StoreBindingRegistration(event_profile)
             self._cache_contexts[instance_id] = ContextEntry(
                 cache_context=cache_context,
                 model_name=model_name,
@@ -672,6 +765,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 has_liveness_signal=False,
                 event_backend=event_backend,
                 event_profile=event_profile,
+                store_registration=registration,
             )
 
         logger.info(
@@ -689,11 +783,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             instance_id: The GPU instance ID (such as PID).
         """
         with self._lock:
-            popped = [
-                e
-                for e in (self._cache_contexts.pop(instance_id, None),)
-                if e is not None
-            ]
+            popped = self._pop_contexts_locked([instance_id])
         if not popped:
             logger.warning(
                 "No registered GPU context found for instance ID %d", instance_id
@@ -757,6 +847,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ``mask_object_groups`` (default: every object group) committed it.
 
         Raises:
+            InvalidRequestError: Supplied native bindings disagree with the
+                registration, STORE range, or a retained descriptor. Rejection
+                precedes any session update or L1 reservation.
             RuntimeError: If the backend does not support IPC event handles.
 
         Notes:
@@ -773,21 +866,107 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             stores that chunk in the same transaction; its block IDs follow
             the full chunks' in every group, and its mask entry comes last.
         """
-        st = time.perf_counter()
-
-        entry = self.get_and_touch_context_entry(instance_id)
+        transfer = next_transfer_key(key.request_id)
+        bind = self.bind_store_events
+        if bind is not None and not key.event_bindings:
+            bind = None
+        if bind is None:
+            entry = self.get_and_touch_context_entry(instance_id)
+        else:
+            # A rejected descriptor must not refresh liveness or create a session.
+            with self._lock:
+                entry = self._cache_contexts.get(instance_id)
         if entry is None:
-            # The worker can reconnect to a replacement server before its next
-            # registration probe. No device work was submitted in that window,
-            # so return an empty completion-event handle and a terminal False
-            # response instead of leaving the MQ future unanswered. Echoing the
-            # producer handle would make the originating process import its own
-            # IPC event, which is invalid on HIP.
             logger.warning(
-                "Rejecting STORE for unregistered GPU instance ID %d",
-                instance_id,
+                "Rejecting STORE for unregistered GPU instance ID %d", instance_id
             )
             return b"", False, []
+        if bind is None:
+            return self._store_chunks(
+                key,
+                instance_id,
+                gpu_block_ids,
+                event_ipc_handle,
+                skip_chunks,
+                mask_object_groups,
+                transfer,
+                entry,
+            )
+
+        if (key.model_name, key.world_size) != (
+            entry.model_name,
+            entry.world_size,
+        ) or key.worker_id is None:
+            raise InvalidRequestError(
+                "native STORE context does not match registration"
+            )
+        layouts = self._ctx.layout_desc_registry
+        hasher = layouts.get_token_hasher(key.model_name, key.world_size)
+        if key.chunk_hashes:
+            raise InvalidRequestError("native STORE bindings require packed token ids")
+        if (
+            key.start % hasher.chunk_size
+            or not 0 <= key.start < key.end <= key.num_tokens
+        ):
+            raise InvalidRequestError("native STORE binding chunk range mismatch")
+        sessions = self._ctx.session_manager
+        session = sessions.get(key.request_id)
+        if session is None:
+            session = Session(key.request_id, hasher)
+        else:
+            _check_store_hasher(session, hasher)
+        first, hashes = session.prepare_store_hashes(key)
+        start = key.start // hasher.chunk_size - first
+        replication = layouts.find_shard_replication_desc(
+            key.model_name, key.world_size
+        )
+        groups = entry.cache_context.kv_layer_groups_manager.num_object_groups
+        objects = ipc_key_to_object_keys(
+            key,
+            [TokenHasher.hash_to_bytes(h) for h in hashes[start:]],
+            list(range(groups)),
+            replication,
+        )
+        with ExitStack() as release:
+            retained = bind(
+                key, objects[0], entry.store_registration, hasher.chunk_size, transfer
+            )
+            if retained:
+                release.callback(self._release_store_bindings, transfer)
+            if self.get_and_touch_context_entry(instance_id) is not entry:
+                return b"", False, []
+            live_session = sessions.get_or_create(key.request_id, hasher)
+            if live_session is not session:
+                _check_store_hasher(live_session, hasher)
+            live_session.accept_store_hashes(key, first, hashes)
+            return self._store_chunks(
+                key,
+                instance_id,
+                gpu_block_ids,
+                event_ipc_handle,
+                skip_chunks,
+                mask_object_groups,
+                transfer,
+                entry,
+                release if retained else None,
+                objects,
+            )
+
+    def _store_chunks(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+        skip_chunks: list[bool] | None,
+        mask_object_groups: Sequence[int] | None,
+        transfer_key: str,
+        entry: ContextEntry,
+        binding_release: ExitStack | None = None,
+        obj_keys_per_obj_group: list[list[ObjectKey]] | None = None,
+    ) -> tuple[bytes, bool, list[bool]]:
+        st = time.perf_counter()
+
         cache_context = entry.cache_context
         model_name = entry.model_name
         chunk_size = entry.chunk_size
@@ -796,9 +975,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             raise RuntimeError("Registered cache context has no event backend")
 
         num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
-        obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
-            key, list(range(num_object_groups))
-        )
+        if obj_keys_per_obj_group is None:
+            obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
+                key, list(range(num_object_groups))
+            )
         unfull_obj_keys = (
             self._ctx.resolve_unfull_chunk_obj_keys(
                 key, list(range(num_object_groups)), chunk_size
@@ -903,7 +1083,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ):
                 self._publish_token_bindings(key, obj_keys_per_obj_group[0], chunk_size)
 
-            transfer_key = next_transfer_key(key.request_id)
             self._ctx.event_bus.publish_on_stream(
                 cache_context.cupy_stream,
                 Event(
@@ -992,19 +1171,23 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 # Fail closed: commit the reserved objects only when every chunk
                 # copied successfully; otherwise the whole store is skipped.
                 stored_count = len(all_dict) if store_succeeded else 0
-                if stored_count:
-                    submit_callback_to_stream(
-                        cache_context.cupy_stream,
-                        "finish_write",
-                        l1_owners,
-                    )
-                else:
+                if not store_succeeded:
                     total_bytes = 0
-                    if l1_owners:
-                        # Abort after the partial copies drain, not at write TTL.
+                if l1_owners:
+                    if binding_release is None:
                         submit_callback_to_stream(
-                            cache_context.cupy_stream, "abort_write", l1_owners
+                            cache_context.cupy_stream,
+                            "finish_write" if store_succeeded else "abort_write",
+                            l1_owners,
                         )
+                    else:
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream,
+                            "complete_bound_write",
+                            (l1_owners, transfer_key, store_succeeded),
+                        )
+                        # Host completion owns the release from here on.
+                        binding_release.pop_all()
                 # Report only chunks that actually stored, plus the unfull
                 # chunk's tokens when every object group stored it.
                 stored_chunks = (

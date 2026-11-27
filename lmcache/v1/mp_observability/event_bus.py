@@ -117,6 +117,7 @@ class EventBus:
         self._thread: threading.Thread | None = None
         self._registered_subscribers: list[EventSubscriber] = []
         self._discard_count: int = 0
+        self._completed_drains = 0
         self._notified_discard_count = 0
         self._drop_callbacks: list[Callable[[], None]] = []
         self._last_discard_warning: float = 0.0
@@ -297,6 +298,10 @@ class EventBus:
         """
         return len(self._queue)
 
+    def completed_drains(self) -> int:
+        """Count empty boundaries observed after all popped callbacks returned."""
+        return self._completed_drains
+
     def oldest_event_lag_seconds(self) -> float:
         """Wall-clock age of the oldest queued event, or 0.0 when empty.
 
@@ -359,6 +364,7 @@ class EventBus:
             try:
                 event = self._queue.popleft()
             except IndexError:
+                self._completed_drains += 1
                 break
             for cb in snapshot.get(event.event_type, []):
                 try:

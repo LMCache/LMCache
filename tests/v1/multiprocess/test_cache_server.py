@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from dataclasses import replace
 from typing import Any, Generator, Literal
 import multiprocessing as mp
 import os
@@ -12,7 +13,13 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.client.transport.factory import RequestClientFactory
-from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey
+from lmcache.v1.common.custom_types import (
+    EngineType,
+    EventBinding,
+    IPCCacheServerKey,
+    KVEventProfile,
+)
+from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -24,7 +31,9 @@ from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.server import run_cache_server
 from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
 from lmcache.v1.platform.base.ipc_wrapper import KVCache
+from lmcache.v1.transport.errors import MPRequestError
 from lmcache.v1.transport.request_client import RequestClient
+from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 # Configuration constants
 SERVER_HOST = "localhost"
@@ -245,12 +254,14 @@ def server_process_runner(
     port: int,
     chunk_size: int,
     cpu_buffer_size: float,
+    event_test_mode: Literal["sync", "aio", "native"] | None = None,
 ) -> None:
     """
     Entry point for the server process.
     """
     mp_config = MPServerConfig(
         transport=transport,
+        grpc_server_mode=event_test_mode or "auto",
         host=host,
         port=port,
         chunk_size=chunk_size,
@@ -267,7 +278,9 @@ def server_process_runner(
     run_cache_server(
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
-        obs_config=DEFAULT_OBSERVABILITY_CONFIG,
+        obs_config=replace(
+            DEFAULT_OBSERVABILITY_CONFIG, enabled=event_test_mode is not None
+        ),
     )
 
 
@@ -280,6 +293,7 @@ def request_transport(request: pytest.FixtureRequest) -> RequestTransport:
 @pytest.fixture(scope="module")
 def server_process(
     request_transport: RequestTransport,
+    request: pytest.FixtureRequest,
 ) -> Generator[mp.Process, None, None]:
     """
     Fixture that starts the cache server in a separate process.
@@ -295,6 +309,7 @@ def server_process(
             SERVER_PORT,
             CHUNK_SIZE,
             CPU_BUFFER_SIZE,
+            getattr(request, "param", None),
         ),
         daemon=True,
     )
@@ -449,6 +464,140 @@ def test_store_and_lookup(
     non_existent_keys = [create_cache_key(i + 1000) for i in range(5)]
     lookup_result2 = lookup_all(client, non_existent_keys)
     assert lookup_result2 == 0, "Non-existent keys should not be found"
+
+
+@pytest.mark.parametrize(
+    "request_transport,server_process",
+    [
+        ("grpc", "sync"),
+        ("grpc", "aio"),
+        pytest.param("grpc", "native", marks=requires_pygrpc_native),
+    ],
+    indirect=True,
+)
+def test_profiled_store_rejects_conflicting_binding_until_eviction(
+    client: RequestClient,
+) -> None:
+    """A bound GPU STORE survives session end and releases its binding on clear."""
+    instance = os.getpid()
+    client_context = ClientContext(
+        device=torch.device(torch_device_type), num_pages=2 * BLOCKS_PER_KEY
+    )
+    profile = KVEventProfile("engine-v1", 16)
+    model = "bound-store"
+    groups = [
+        EngineGroupInfo(0, tuple(range(client_context.num_layers)), tokens_per_block=16)
+    ]
+    registered = client.register_kv_cache(
+        instance,
+        client_context.get_kv_cache(),
+        model,
+        1,
+        EngineType.VLLM,
+        {},
+        groups,
+        profile,
+        CHUNK_SIZE,
+    )
+    assert registered.result(timeout=DEFAULT_TIMEOUT) == profile
+    key = create_cache_key(9, model)
+    binding = EventBinding(profile, tuple(range(BLOCKS_PER_KEY)), None)
+    bound = replace(key, event_bindings=(binding,))
+    other = replace(
+        bound,
+        event_bindings=(
+            replace(binding, block_hashes=tuple(range(100, 100 + BLOCKS_PER_KEY))),
+        ),
+    )
+    blocks = [list(range(BLOCKS_PER_KEY))]
+    handle = _recorded_event_handle()
+    try:
+        assert (
+            client.store(bound, instance, blocks, handle)
+            .to_device_future()
+            .result(timeout=DEFAULT_TIMEOUT)
+        )
+        client.end_session(bound.request_id).result(timeout=DEFAULT_TIMEOUT)
+        with pytest.raises(
+            MPRequestError, match="conflicting native STORE binding"
+        ) as rejected:
+            client.store(other, instance, blocks, handle).result(
+                timeout=DEFAULT_TIMEOUT
+            )
+        assert rejected.value.code == "INVALID_ARGUMENT"
+        client.clear(force=True).result(timeout=DEFAULT_TIMEOUT)
+        # Clear returns before the event bus dispatches the eviction.
+        deadline = time.monotonic() + DEFAULT_TIMEOUT
+        while True:
+            try:
+                assert (
+                    client.store(other, instance, blocks, handle)
+                    .to_device_future()
+                    .result(timeout=DEFAULT_TIMEOUT)
+                )
+                break
+            except MPRequestError as exc:
+                if (
+                    "conflicting native STORE binding" not in exc.details
+                    or time.monotonic() >= deadline
+                ):
+                    raise
+                time.sleep(0.01)
+        # Rolling the last registration must not require clearing the warm L1.
+        client.unregister_kv_cache(instance).result(timeout=DEFAULT_TIMEOUT)
+        profile = KVEventProfile("engine-v2", 16)
+        assert (
+            client.register_kv_cache(
+                instance,
+                client_context.get_kv_cache(),
+                model,
+                1,
+                EngineType.VLLM,
+                {},
+                groups,
+                profile,
+                CHUNK_SIZE,
+            ).result(timeout=DEFAULT_TIMEOUT)
+            == profile
+        )
+        growing = IPCCacheServerKey.from_token_ids(
+            model,
+            1,
+            0,
+            [9] * CHUNK_SIZE + [10] * CHUNK_SIZE,
+            0,
+            2 * CHUNK_SIZE,
+            "new-engine",
+        )
+        growing = replace(
+            growing,
+            event_bindings=(
+                EventBinding(profile, tuple(range(16)), None),
+                EventBinding(profile, tuple(range(16, 32)), 15),
+            ),
+        )
+        assert (
+            client.store(growing, instance, [list(range(2 * BLOCKS_PER_KEY))], handle)
+            .to_device_future()
+            .result(timeout=DEFAULT_TIMEOUT)
+        )
+        # The device event can precede the host callback that makes the suffix readable.
+        deadline = time.monotonic() + DEFAULT_TIMEOUT
+        while True:
+            hits = lookup_all(client, [growing])
+            client.free_lookup_locks(growing.no_worker_id_version(), 1).result(
+                timeout=DEFAULT_TIMEOUT
+            )
+            if hits == 2:
+                break
+            assert time.monotonic() < deadline, (
+                f"Only {hits} of 2 chunks became readable"
+            )
+            time.sleep(0.01)
+        client.end_session(growing.request_id).result(timeout=DEFAULT_TIMEOUT)
+    finally:
+        client.clear(force=True).result(timeout=DEFAULT_TIMEOUT)
+        client.unregister_kv_cache(instance).result(timeout=DEFAULT_TIMEOUT)
 
 
 def test_store_fails_closed_on_incomplete_block_ids(

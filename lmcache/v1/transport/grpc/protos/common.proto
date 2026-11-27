@@ -12,6 +12,20 @@ message KVEventProfile {
   int64 block_size = 2;
 }
 
+message NativeBlockHash {
+  oneof value {
+    bytes raw = 1;
+    sint64 signed_value = 2;
+    uint64 unsigned_value = 3;
+  }
+}
+
+message EventBinding {
+  KVEventProfile profile = 1;
+  repeated NativeBlockHash block_hashes = 2;
+  NativeBlockHash parent_block_hash = 3;
+}
+
 message ObjectKeyIdentity {
   bytes chunk_hash = 1;
   int64 kv_rank = 2;
@@ -37,6 +51,7 @@ message IpcCacheServerKey {
   reserved "num_kv_readers";
   // Client-computed chunk hashes of [0, end), sent instead of token_bytes.
   bytes chunk_hashes = 11;
+  repeated EventBinding event_bindings = 12;
 }
 
 // Store / Retrieve and CacheBlend retrieve share this reply shape.

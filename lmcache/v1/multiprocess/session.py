@@ -65,15 +65,99 @@ class Session:
                 position 0.
         """
         with self._lock:
-            self.tokens = packed_token_ids
+            if self.client_hashed_tokens:
+                # Unbound transfers may extend a chain supplied by the client.
+                self.tokens = packed_token_ids
+            else:
+                self._replace_tokens(packed_token_ids)
+
+    def _matching_hash_count(self, packed: bytes, stop: int) -> int:
+        """Return a reusable rolling checkpoint under the session lock."""
+        cached = min(self.num_chunks_processed, stop)
+        if cached and packed is not self.tokens:
+            size = cached * self.hasher.chunk_size * TOKEN_STRIDE
+            if not packed.startswith(memoryview(self.tokens)[:size]):
+                return 0
+        return cached
+
+    def _replace_tokens(self, packed: bytes) -> None:
+        if self.num_chunks_processed and packed is not self.tokens:
+            stride = self.hasher.chunk_size * TOKEN_STRIDE
+            keep = self._matching_hash_count(packed, len(packed) // stride)
+            if keep < self.num_chunks_processed:
+                del self.chunk_hashes[keep:]
+                self.num_chunks_processed = keep
+                self.last_prefix_hash = self.chunk_hashes[-1] if keep else None
+        self.tokens = packed
+
+    def prepare_store_hashes(
+        self, key: IPCCacheServerKey
+    ) -> tuple[int, list[bytes | int]]:
+        """Preview full-chunk hashes without changing the request.
+
+        Args:
+            key: STORE with a validated chunk-aligned start and packed tokens.
+
+        Returns:
+            First chunk index and raw rolling hashes through the last complete
+            chunk. A new session includes the prefix needed to seed its cache.
+        """
+        stride = self.hasher.chunk_size * TOKEN_STRIDE
+        first = key.start // self.hasher.chunk_size
+        stop = key.end // self.hasher.chunk_size
+        with self._lock:
+            # Client-supplied hashes have no verified packed-token checkpoint.
+            cached = (
+                0
+                if self.client_hashed_tokens
+                else self._matching_hash_count(key.token_bytes, stop)
+            )
+            begin = min(first, cached)
+            hashes = self.chunk_hashes[begin:cached]
+            parent = self.chunk_hashes[cached - 1] if cached else self.hasher.none_hash
+        packed = memoryview(key.token_bytes)
+        for i in range(cached, stop):
+            parent = self.hasher.hash_packed_chunk(
+                packed[i * stride : (i + 1) * stride], parent
+            )
+            hashes.append(parent)
+        return begin, hashes
+
+    def accept_store_hashes(
+        self, key: IPCCacheServerKey, first: int, hashes: list[bytes | int]
+    ) -> None:
+        """Install admitted hashes, preserving a concurrent longer matching STORE.
+
+        Args:
+            key: The accepted STORE whose tokens were used for the preview.
+            first: First chunk index returned by prepare_store_hashes.
+            hashes: Corresponding raw hashes, using this session's hasher.
+        """
+        with self._lock:
+            if self.client_hashed_tokens:
+                self.chunk_hashes.clear()
+                self.num_chunks_processed = self.client_hashed_tokens = 0
+                self.last_prefix_hash = None
+                self.tokens = key.token_bytes
+            elif not self.tokens.startswith(key.token_bytes):
+                self._replace_tokens(key.token_bytes)
+            # The session may have ended between preview and admission.
+            if self.num_chunks_processed < first:
+                self._compute_hash(first)
+            if self.num_chunks_processed < first + len(hashes):
+                self.chunk_hashes.extend(hashes[self.num_chunks_processed - first :])
+                self.num_chunks_processed = len(self.chunk_hashes)
+                self.last_prefix_hash = self.chunk_hashes[-1]
+            if self.lookup_ipc_key is None:
+                self.lookup_ipc_key = key.no_worker_id_version()
 
     def update_from_key(self, key: IPCCacheServerKey) -> None:
         """Take the request's prompt from ``key``: its tokens or its hashes.
 
         For a key carrying client-computed chunk hashes of ``[0, key.end)``,
         the hashes of chunks not hashed yet are appended, as hashing the
-        tokens would have; chunks already hashed keep their hashes, matching
-        the token path, where :meth:`set_tokens` never rehashes them.
+        tokens would have. Ordinary transfers can extend the same request from
+        either form. Native binding admission verifies its packed tokens.
 
         Args:
             key: Key carrying ``token_bytes`` or ``chunk_hashes``.
