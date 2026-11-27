@@ -3,7 +3,9 @@
 # Usage: run-single-test.sh <test_name>
 #   test_name: lm_eval | lm_eval_preemption | hma_lm_eval_gemma4 | vllm_bench
 #              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
-#              | restart_recovery | lazy_offload | sleep_mode | gds_smoke
+#              | restart_recovery | multi_chunk_size
+#              | lazy_offload | sleep_mode
+#              | gds_smoke
 #              | eviction_aware_lazy_offload
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
@@ -126,6 +128,20 @@ elif [ "$TEST_NAME" = "vllm_bench" ]; then
     export MODEL="${MODEL:-$DEFAULT_MODEL}"
     # Match baseline and connector block geometry for the throughput check.
     export VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-64}"
+elif [ "$TEST_NAME" = "multi_chunk_size" ]; then
+    # Register two distinct model layouts on one MP server. Both engines stay
+    # live while the workload verifies their independent chunk profiles.
+    export CHUNK_SIZE="${CHUNK_SIZE:-256}"
+    export CLIENT_CHUNK_SIZE="${CLIENT_CHUNK_SIZE:-512}"
+    export SECOND_CLIENT_CHUNK_SIZE="${SECOND_CLIENT_CHUNK_SIZE:-768}"
+    export MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
+    export SECOND_ENGINE_MODEL="${SECOND_ENGINE_MODEL:-Qwen/Qwen3-1.7B}"
+    export SECOND_ENGINE_PORT="${SECOND_ENGINE_PORT:-8001}"
+    export SECOND_ENGINE_LOG_FILE="${SECOND_ENGINE_LOG_FILE:-/tmp/build_${BUILD_ID}_${INFERENCE_ENGINE}_second.log}"
+    export GPU_FOR_SECOND_ENGINE="${GPU_FOR_SECOND_ENGINE:-1}"
+    export MAX_MODEL_LEN="${MAX_MODEL_LEN:-2048}"
+    export LAUNCH_SECOND_ENGINE=true
+    export ENGINE_USE_ALL_DEVICES=true
 elif [ "$TEST_NAME" = "eviction_aware_lazy_offload" ]; then
     export LMCACHE_MP_LAZY_OFFLOAD=true
     export LMCACHE_MP_LAZY_OFFLOAD_POLICY=EVICTION_AWARE

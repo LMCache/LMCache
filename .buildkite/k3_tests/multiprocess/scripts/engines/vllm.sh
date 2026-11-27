@@ -180,6 +180,7 @@ engine_kv_transfer_config() {
     LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD="${LMCACHE_MP_LAZY_OFFLOAD_THRESHOLD:-2}" \
     LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT="${LMCACHE_MP_LAZY_OFFLOAD_SELECT_COUNT:-1}" \
     LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS="${LMCACHE_MP_LAZY_OFFLOAD_HORIZON_STEPS:-2.5}" \
+    CLIENT_CHUNK_SIZE="${CLIENT_CHUNK_SIZE:-}" \
     NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-}" \
     KV_CACHE_MEMORY_BYTES="${KV_CACHE_MEMORY_BYTES:-}" \
         python3 - <<'PY'
@@ -193,6 +194,8 @@ extra_config = {
 }
 if os.environ.get("VLLM_TARGET_DEVICE") == "xpu":
     extra_config["lmcache.mp.use_vmm_api"] = False
+if os.environ["CLIENT_CHUNK_SIZE"]:
+    extra_config["lmcache.mp.chunk_size"] = int(os.environ["CLIENT_CHUNK_SIZE"])
 # A pinned KV pool (preemption_correctness sets NUM_GPU_BLOCKS_OVERRIDE) turns
 # off vLLM's extensible (VMM) KV cache. With use_vmm_api unset the connector
 # still declares POSIX-fd export, which needs that cache, so vLLM >= 0.34.0

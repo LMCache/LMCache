@@ -2,7 +2,8 @@
 # Each step gets its own K8s pod with the exact GPU count it needs.
 # Tests are grouped by GPU requirement; the 2-GPU group is listed first so
 # these heavier jobs get scheduled before 1-GPU jobs.
-#   2-GPU: LMCache+vLLM on GPU 0, baseline on GPU 1 (or TP=2 across both).
+#   2-GPU: LMCache+engine on GPU 0 and a baseline or second engine on GPU 1
+#          (or TP=2 across both).
 #   1-GPU: LMCache+vLLM on GPU 0 only (no baseline server).
 
 # Retry policy for known-flaky long-running multiprocess steps.
@@ -251,6 +252,20 @@ steps:
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log", "ci_results_*/long_doc_qa/**/*"]
+
+      - label: ":compression: {{matrix.inference_engine}} / multi_chunk_size / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh multi_chunk_size
+        matrix: *common-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
+          CHUNK_SIZE: "256"
+          CLIENT_CHUNK_SIZE: "512"
+          SECOND_CLIENT_CHUNK_SIZE: "768"
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log", "ci_results_*/multi_chunk_size/**/*"]
 
       - label: ":compression: {{matrix.inference_engine}} / long_doc_qa_l2 / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa_l2
