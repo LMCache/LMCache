@@ -100,6 +100,7 @@ L1 managers that own payload are `LOCAL`. The segment names the primary pool:
 | `DEVDAX` (pure Device-DAX) | `(CXL, LOCAL)` |
 | `GDS` slab | `(GDS, LOCAL)` |
 | `SHADOW` (for borrowing L2 adapters) | the borrowed segment, `SHADOW` |
+| `PLUGIN` | whatever the plugin's `get_memory_tags()` returns; adapters bind to it like to a built-in L1 with the same tags |
 
 ### L2 own tags
 
