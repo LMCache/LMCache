@@ -11,6 +11,7 @@ by SGLang; the selected transfer context moves their KV data.
 from __future__ import annotations
 
 # Standard
+from math import lcm
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 import hashlib
 import logging
@@ -241,6 +242,9 @@ class UnifiedLMCacheMPConnector:
         self._mp_transfer_mode = config.get_extra_config_value(
             "lmcache.mp.mp_transfer_mode", None
         )
+        self._client_minimum_chunk_size: int | None = config.get_extra_config_value(
+            "lmcache.mp.chunk_size", None
+        )
 
         self.model_name = model_config.model_path
         (
@@ -389,7 +393,27 @@ class UnifiedLMCacheMPConnector:
         return specs, tuple(spec["engine_group_id"] for spec in specs)
 
     def _get_chunk_size(self) -> int:
-        return int(self._req_client.get_chunk_size().result(timeout=self._mq_timeout))
+        server_minimum = self._req_client.get_chunk_size().result(
+            timeout=self._mq_timeout
+        )
+        if server_minimum <= 0:
+            raise ValueError(
+                "LMCache server minimum chunk size must be positive, got "
+                f"{server_minimum}"
+            )
+        client_minimum = self._client_minimum_chunk_size
+        if client_minimum is not None and client_minimum <= 0:
+            raise ValueError(
+                "LMCache client minimum chunk size must be positive, got "
+                f"{client_minimum}"
+            )
+        alignment = lcm(*(group.tokens_per_block for group in self._kv_groups))
+        base = (
+            server_minimum
+            if client_minimum is None
+            else max(server_minimum, client_minimum)
+        )
+        return ((base + alignment - 1) // alignment) * alignment
 
     @property
     def is_lookup_leader(self) -> bool:
