@@ -27,7 +27,6 @@ spec:
 
   prometheus:
     enabled: true
-    port: 9090
     serviceMonitor:
       enabled: true
       labels:
@@ -36,5 +35,5 @@ spec:
   logLevel: INFO
   podAnnotations:
     prometheus.io/scrape: "true"
-    prometheus.io/port: "9090"
+    prometheus.io/port: "8080"
   priorityClassName: system-node-critical
