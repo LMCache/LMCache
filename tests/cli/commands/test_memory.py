@@ -49,7 +49,6 @@ def test_memory_command_explains_ungenerated_bindings(
     assert excinfo.value.code == 1
     err = capsys.readouterr().err
     assert "_generate.py" in err
-    assert "pip install lmcache" in err
 
 
 @pytest.mark.skipif(

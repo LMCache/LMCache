@@ -102,9 +102,7 @@ def missing_grpc_bindings_hint() -> str | None:
                 "This installation is missing LMCache's generated gRPC "
                 "bindings. From the repository root, regenerate them with:\n"
                 "  pip install -r requirements/proto.txt\n"
-                "  python lmcache/v1/transport/grpc/_proto_gen/_generate.py\n"
-                "or install the built package, which includes them: "
-                "pip install lmcache"
+                "  python lmcache/v1/transport/grpc/_proto_gen/_generate.py"
             )
     return None
 
