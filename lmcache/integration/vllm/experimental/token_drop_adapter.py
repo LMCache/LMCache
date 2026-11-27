@@ -5,7 +5,12 @@
 from __future__ import annotations
 
 # Standard
+from collections.abc import Callable, Iterable, Mapping
 from functools import wraps
+from typing import TYPE_CHECKING, cast
+
+# Third Party
+import torch
 
 # First Party
 from lmcache.integration.vllm.experimental.token_drop_scheduler import (
@@ -14,6 +19,13 @@ from lmcache.integration.vllm.experimental.token_drop_scheduler import (
     set_resident_kv_tokens,
 )
 from lmcache.integration.vllm.utils import extract_request_configs_from_request
+
+if TYPE_CHECKING:
+    # Third Party
+    from vllm.model_executor.layers.attention.attention import Attention
+    from vllm.v1.attention.backend import AttentionImpl
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+
 
 _SUPPORTED_VLLM_VERSION = "0.25.1"
 
@@ -147,3 +159,103 @@ def install_token_drop_prefix_caching_publication_guard() -> None:
     # Prevent wrapping the prefix-cache publication method more than once.
     setattr(cache_full_blocks_with_publication_guard, guard_marker, True)
     BlockPool.cache_full_blocks = cache_full_blocks_with_publication_guard
+
+
+class TokenDropQueryHooks:
+    """Capture post-RoPE Q with reversible attention hooks."""
+
+    def __init__(self) -> None:
+        """Store per-layer state for restoring attention forwards."""
+        self._restore_state: dict[
+            str,
+            tuple[
+                AttentionImpl[FlashAttentionMetadata], Callable[..., torch.Tensor], bool
+            ],
+        ] = {}
+
+    def install(
+        self,
+        layer_names: Iterable[str],
+        no_compile_layers: Mapping[str, Attention],
+        capture_query: Callable[[str, torch.Tensor], None],
+    ) -> None:
+        """Install query capture hooks on attention layers.
+
+        Requires FlashAttention with FULL CUDA Graph replay disabled.
+        Repeated installs are no-ops. Failed installs roll back.
+
+        Args:
+            layer_names: Layers to hook.
+            no_compile_layers: vLLM mapping used to look up attention layers by name.
+            capture_query: Callback receiving the layer name and a borrowed,
+                read-only view of the post-RoPE Q tensor.
+
+        Raises:
+            RuntimeError: Unsupported vLLM version.
+            KeyError: Missing layer.
+        """
+        _check_vllm_version()
+        if self._restore_state:
+            return
+
+        restore_state = {}
+        for layer_name in layer_names:
+            attention_impl = cast(
+                "AttentionImpl[FlashAttentionMetadata]",
+                no_compile_layers[layer_name].impl,
+            )
+            restore_state[layer_name] = (
+                attention_impl,
+                attention_impl.forward,
+                "forward" in vars(attention_impl),
+            )
+
+        self._restore_state = restore_state
+        for attention_impl, original_forward, _ in restore_state.values():
+
+            def forward_with_query_capture(
+                attn_layer: Attention,
+                query: torch.Tensor,
+                key: torch.Tensor,
+                value: torch.Tensor,
+                kv_cache: torch.Tensor,
+                attn_metadata: FlashAttentionMetadata | None,
+                *args: object,
+                _original_forward: Callable[..., torch.Tensor] = original_forward,
+                **kwargs: object,
+            ) -> torch.Tensor:
+                if attn_metadata is not None:
+                    capture_query(
+                        attn_layer.layer_name, query[: attn_metadata.num_actual_tokens]
+                    )
+                return _original_forward(
+                    attn_layer,
+                    query,
+                    key,
+                    value,
+                    kv_cache,
+                    attn_metadata,
+                    *args,
+                    **kwargs,
+                )
+
+            try:
+                attention_impl.forward = forward_with_query_capture
+            except Exception:
+                # Roll back earlier hooks if a later layer rejects installation.
+                self.remove()
+                raise
+
+    def remove(self) -> None:
+        """Remove hooks and restore the original forwards."""
+        for (
+            attention_impl,
+            original_forward,
+            had_instance_forward_override,
+        ) in self._restore_state.values():
+            if had_instance_forward_override:
+                attention_impl.forward = original_forward
+            elif "forward" in vars(attention_impl):
+                # Remove the instance override to restore the original class method.
+                delattr(attention_impl, "forward")
+        self._restore_state.clear()
