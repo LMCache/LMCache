@@ -31,7 +31,10 @@ from lmcache.v1.mp_coordinator.schemas import (
     decode_tokens,
 )
 from lmcache.v1.mp_coordinator.views.key_directory import DirectoryStats, KeyDirectory
-from lmcache.v1.multiprocess.cache_control.key_resolver import resolve_object_keys
+from lmcache.v1.multiprocess.cache_control.key_resolver import (
+    resolve_chunk_object_keys,
+    resolve_object_keys,
+)
 
 router = APIRouter()
 
@@ -40,17 +43,22 @@ router = APIRouter()
 async def lookup_placements(
     body: DirectoryLookupRequest, request: Request
 ) -> DirectoryLookupResponse:
-    """Resolve keys — or a request's token sequence — to placements.
+    """Resolve keys — or a request's token sequence, or chunk hashes — to
+    placements.
 
     The tokens form hashes ``token_ids`` with the fleet's token hasher
     and expands each complete chunk into its per-rank object keys.
     Chunk hashes are prefix-chained, so ``token_ids`` must be the
     request's full sequence from position 0; trailing incomplete chunks
-    are ignored.
+    are ignored. The chunk-hash form expands each named chunk the same
+    way, so a chunk in the middle of a prompt is reached without its
+    prefix. Both then reach every object group the directory holds; chunk
+    hashes without a world size reach every stored copy, whatever the world
+    size.
 
     Args:
-        body: Either the keys to resolve or the token sequence and its
-            key-resolution parameters.
+        body: The keys to resolve, or the token sequence or chunk hashes
+            and their key-resolution parameters.
 
     Returns:
         Chunk count plus one result per resolved key, in request order,
@@ -59,7 +67,8 @@ async def lookup_placements(
 
     Raises:
         HTTPException: 400 when the token sequence exceeds the
-            per-request cap or a key field is invalid.
+            per-request cap or a key field is invalid (tokens and
+            chunk-hash forms).
     """
     ctx = get_context(request)
     directory = ctx.views.get(KeyDirectory)
@@ -69,17 +78,31 @@ async def lookup_placements(
         chunks = len(obj_keys)
     else:
         try:
-            obj_keys, chunks = resolve_object_keys(
-                token_hasher=ctx.token_hasher,
-                model_name=body.model_name,
-                world_size=body.world_size,
-                token_ids=body.token_ids,
-                cache_salt=body.cache_salt,
-                tags=body.tags,
-            )
+            if body.chunk_hashes:
+                obj_keys, chunks = resolve_chunk_object_keys(
+                    body.chunk_hashes,
+                    body.model_name,
+                    body.world_size,
+                    body.cache_salt,
+                    tags=body.tags,
+                )
+            else:
+                obj_keys, chunks = resolve_object_keys(
+                    token_hasher=ctx.token_hasher,
+                    model_name=body.model_name,
+                    # The tokens form defaults to a single-GPU setup.
+                    world_size=body.world_size or 1,
+                    token_ids=body.token_ids,
+                    cache_salt=body.cache_salt,
+                    tags=body.tags,
+                )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        obj_keys = directory.get_keys_across_object_groups(obj_keys)
+        if body.chunk_hashes and not body.world_size:
+            # Hashes without a world size name every stored copy of the chunk.
+            obj_keys = directory.get_stored_keys_of_chunks(obj_keys)
+        else:
+            obj_keys = directory.get_keys_across_object_groups(obj_keys)
         encoded_keys = [key.to_encoded_object_key() for key in obj_keys]
     placements = directory.lookup(obj_keys)
     keys_with_placements = [
@@ -87,7 +110,7 @@ async def lookup_placements(
         for key, key_placements in zip(obj_keys, placements, strict=True)
         if key_placements
     ]
-    # By tokens, a chunk counts once across its ranks and object groups.
+    # By tokens or hash, a chunk counts once across its ranks and object groups.
     chunks_found = (
         len(keys_with_placements)
         if body.keys

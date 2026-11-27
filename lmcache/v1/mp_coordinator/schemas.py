@@ -18,8 +18,11 @@ import ipaddress
 from pydantic import (
     AfterValidator,
     BaseModel,
+    BeforeValidator,
     Field,
+    PlainSerializer,
     StringConstraints,
+    WithJsonSchema,
     field_validator,
     model_validator,
 )
@@ -27,7 +30,7 @@ import numpy as np
 
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
-from lmcache.v1.distributed.api import Tier, validate_identity_tags
+from lmcache.v1.distributed.api import ObjectKey, Tier, validate_identity_tags
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.views.key_directory import Placement
 from lmcache.v1.multiprocess.cache_control.key_resolver import (
@@ -43,6 +46,49 @@ def _validate_matching_tags(value: dict[str, str]) -> dict[str, str]:
 
 
 MatchingTags = Annotated[dict[str, str], AfterValidator(_validate_matching_tags)]
+
+
+def _decode_chunk_hash_hex(value: object) -> object:
+    """Decode a chunk hash from the hex form the directory and pin listings
+    use.
+
+    Args:
+        value: The hex-encoded chunk hash.
+
+    Returns:
+        The hash's bytes, or ``value`` unchanged when it is not a string, for
+        the type check to reject.
+
+    Raises:
+        ValueError: If ``value`` is an empty or non-hex string.
+    """
+    if not isinstance(value, str):
+        return value
+    if not value:
+        raise ValueError("a chunk hash must not be empty")
+    return bytes.fromhex(value)
+
+
+# A chunk hash: hex on the wire, bytes once validated.
+ChunkHash = Annotated[
+    bytes,
+    BeforeValidator(_decode_chunk_hash_hex),
+    PlainSerializer(bytes.hex, return_type=str),
+    WithJsonSchema({"type": "string", "format": "hex"}),
+]
+
+
+def _null_as_every_world_size(value: object) -> object:
+    """Read an explicit ``null`` world size as ``0``, every world size."""
+    return 0 if value is None else value
+
+
+# A content request's world size; omitted or ``null`` reads as ``0``. Each form
+# reads ``0`` its own way: every world size for chunk hashes, a rejection for
+# pin, delete and prefetch by tokens, and ``1`` for a lookup by tokens.
+ContentWorldSize = Annotated[
+    int, BeforeValidator(_null_as_every_world_size), Field(ge=0)
+]
 
 _URL_HOST_DELIMITERS = frozenset("/\\:?#@[]")
 
@@ -396,7 +442,7 @@ class CacheEventsResponse(BaseModel):
 class DirectoryLookupRequest(BaseModel):
     """Body of ``POST /directory/lookup``.
 
-    Supply exactly one of the two lookup forms:
+    Supply exactly one of the three lookup forms:
 
     * ``keys`` — resolve these keys directly.
     * ``token_ids`` (with ``model_name`` / ``world_size``) — resolve a
@@ -405,22 +451,35 @@ class DirectoryLookupRequest(BaseModel):
       prefix-chained, so this must be the request's **full** token
       sequence from position 0; a mid-request slice resolves to
       different keys. Trailing incomplete chunks are ignored.
+    * ``chunk_hashes`` (with ``model_name``) — resolve chunks named by hash
+      exactly as the tokens form resolves the chunks it hashes, so a chunk
+      in the middle of a prompt is reached without its prefix. Without a
+      ``world_size`` (omitted, ``null`` or ``0``) a hash resolves to every
+      stored copy of its chunk, whatever the world size. At most
+      ``MAX_KEYS_PER_REQUEST`` hashes; a repeated hash counts once.
 
     Attributes:
         keys: The keys to resolve (keys form).
         token_ids: The request's full token sequence (tokens form).
-        model_name: Model whose rank fan-out to use (tokens form).
-        world_size: World size selecting the per-rank fan-out
-            (tokens form).
+        chunk_hashes: Chunk hashes, hex-encoded on the wire (chunk-hash form).
+        model_name: Model whose rank fan-out to use (tokens and chunk-hash
+            forms).
+        world_size: World size selecting the per-rank fan-out (tokens and
+            chunk-hash forms). Omitted, ``null`` or ``0``: ``1`` in the
+            tokens form, every world size in the chunk-hash form.
         cache_salt: Per-tenant isolation salt applied to produced keys
-            (tokens form).
-        tags: Matching tags supplied when the content was stored (tokens form).
+            (tokens and chunk-hash forms).
+        tags: Matching tags supplied when the content was stored (tokens and
+            chunk-hash forms).
     """
 
     keys: list[EncodedObjectKey] = Field(default_factory=list)
     token_ids: list[int] = Field(default_factory=list)
+    chunk_hashes: list[ChunkHash] = Field(
+        default_factory=list, max_length=MAX_KEYS_PER_REQUEST
+    )
     model_name: str = ""
-    world_size: int = Field(default=1, ge=1)
+    world_size: ContentWorldSize = 0
     cache_salt: str = ""
     tags: MatchingTags = Field(default_factory=dict)
 
@@ -450,21 +509,22 @@ class DirectoryLookupRequest(BaseModel):
             The unchanged request once exactly one form is present.
 
         Raises:
-            ValueError: If both or neither of ``keys`` / ``token_ids``
-                is supplied, or the tokens form omits ``model_name``.
+            ValueError: If not exactly one of ``keys`` / ``token_ids`` /
+                ``chunk_hashes`` is supplied, or the tokens or chunk-hash
+                form omits ``model_name``.
         """
-        if bool(self.keys) == bool(self.token_ids):
-            raise ValueError("supply exactly one of 'keys' or 'token_ids'")
-        if self.token_ids and not self.model_name:
-            raise ValueError("'model_name' is required with 'token_ids'")
+        _require_one_form(self.keys, self.token_ids, self.chunk_hashes)
+        if (self.token_ids or self.chunk_hashes) and not self.model_name:
+            form = "token_ids" if self.token_ids else "chunk_hashes"
+            raise ValueError(f"'model_name' is required with '{form}'")
         return self
 
 
-class KeysOrTokensRequest(BaseModel):
-    """Cache content named either by object keys or by a token sequence.
+class CacheContentRequest(BaseModel):
+    """Cache content named by object keys, a token sequence, or chunk hashes.
 
     The base of the coordinator bodies that act on cache content: pin and
-    unpin, prefetch, delete. Supply exactly one of the two forms:
+    unpin, prefetch, delete. Supply exactly one of the three forms:
 
     * ``keys`` — name chunks by key, in the wire form the directory and pin
       listings return. It reaches a chunk in the middle of a prompt without
@@ -487,20 +547,38 @@ class KeysOrTokensRequest(BaseModel):
       another parallel setup's keys, and the request would report success
       having touched nothing.
 
+    * ``chunk_hashes`` (with ``model_name``) — name chunks by hash, in the
+      hex form the directory and pin listings return, with the setup that
+      stores them stated once rather than per key. Like the keys form it
+      reaches a chunk in the middle of a prompt, and each hash names its
+      whole chunk exactly as a key does. Without a ``world_size`` (omitted,
+      ``null`` or ``0``) a hash names its chunk in every world size: one pin
+      covers every parallel setup's copies, stored or not, and a delete
+      reaches every stored copy. At most ``MAX_KEYS_PER_REQUEST`` hashes; a
+      repeated hash counts once.
+
     Attributes:
         keys: Keys naming the chunks (keys form).
         token_ids: The full token sequence (tokens form).
-        model_name: Model whose rank fan-out to use (tokens form).
-        world_size: World size selecting the per-rank fan-out (tokens form).
+        chunk_hashes: Chunk hashes, hex-encoded on the wire (chunk-hash form).
+        model_name: Model whose rank fan-out to use (tokens and chunk-hash
+            forms).
+        world_size: World size selecting the per-rank fan-out: required in
+            the tokens form; in the chunk-hash form, omitted, ``null`` or
+            ``0`` names every world size.
         cache_salt: Per-tenant isolation salt applied to produced keys
-            (tokens form).
-        tags: Matching tags supplied when the content was stored (tokens form).
+            (tokens and chunk-hash forms).
+        tags: Matching tags supplied when the content was stored (tokens and
+            chunk-hash forms).
     """
 
     keys: list[EncodedObjectKey] = Field(default_factory=list)
     token_ids: list[int] = Field(default_factory=list)
+    chunk_hashes: list[ChunkHash] = Field(
+        default_factory=list, max_length=MAX_KEYS_PER_REQUEST
+    )
     model_name: str = ""
-    world_size: int = Field(default=1, ge=1)
+    world_size: ContentWorldSize = 0
     cache_salt: str = ""
     tags: MatchingTags = Field(default_factory=dict)
 
@@ -517,7 +595,8 @@ class KeysOrTokensRequest(BaseModel):
 
         Raises:
             ValueError: If there are more than ``MAX_KEYS_PER_REQUEST`` keys,
-                or a key cannot convert into an ``ObjectKey``.
+                a key cannot convert into an ``ObjectKey``, or a key's
+                ``kv_rank`` packs no world size.
         """
         if len(value) > MAX_KEYS_PER_REQUEST:
             raise ValueError(
@@ -525,26 +604,37 @@ class KeysOrTokensRequest(BaseModel):
                 f"(limit={MAX_KEYS_PER_REQUEST}, got={len(value)})"
             )
         for encoded in value:
-            encoded.to_object_key()
+            # World size 0 names a chunk at every world size, which only the
+            # chunk-hash form asks for; a key carrying it would pin or delete
+            # far more than the one setup it appears to name.
+            if not ObjectKey.WorldSizeFromKVRank(encoded.to_object_key().kv_rank):
+                raise ValueError(
+                    "a key's kv_rank packs no world size; pass keys as the "
+                    "directory lists them, or use chunk_hashes without a "
+                    "world_size to name every world size"
+                )
         return value
 
     @model_validator(mode="after")
-    def _validate_one_form(self) -> "KeysOrTokensRequest":
+    def _validate_one_form(self) -> "CacheContentRequest":
         """Enforce that exactly one form is supplied (surfaced as 422).
 
         Returns:
             The unchanged request once exactly one form is present.
 
         Raises:
-            ValueError: If both or neither of ``keys`` / ``token_ids``
-                is supplied, or the tokens form omits ``model_name`` or a
-                required ``world_size``.
+            ValueError: If not exactly one of ``keys`` / ``token_ids`` /
+                ``chunk_hashes`` is supplied, the tokens or chunk-hash form
+                omits ``model_name``, or the tokens form omits
+                ``world_size``.
         """
-        if bool(self.keys) == bool(self.token_ids):
-            raise ValueError("supply exactly one of 'keys' or 'token_ids'")
-        if self.token_ids and not self.model_name:
-            raise ValueError("'model_name' is required with 'token_ids'")
-        if self.token_ids and "world_size" not in self.model_fields_set:
+        _require_one_form(self.keys, self.token_ids, self.chunk_hashes)
+        if (self.token_ids or self.chunk_hashes) and not self.model_name:
+            form = "token_ids" if self.token_ids else "chunk_hashes"
+            raise ValueError(f"'model_name' is required with '{form}'")
+        # A defaulted world size would resolve another parallel setup's keys,
+        # and the request would report success having touched nothing.
+        if self.token_ids and not self.world_size:
             raise ValueError("'world_size' is required with 'token_ids'")
         return self
 
@@ -705,11 +795,11 @@ class BlendLookupResponse(BaseModel):
     matches: list[BlendMatchModel] = Field(default_factory=list)
 
 
-class PrefetchRequest(KeysOrTokensRequest):
+class PrefetchRequest(CacheContentRequest):
     """Body of ``POST /cache/prefetches`` on the coordinator.
 
     Asks the coordinator to warm one MP server's L1 with the named chunks, in
-    either form of :class:`KeysOrTokensRequest`. The coordinator forwards
+    either form of :class:`CacheContentRequest`. The coordinator forwards
     the supplied form alone to that server's own ``POST /cache/prefetches``,
     which resolves it against its registered layouts. A key names its chunk:
     the server warms that chunk in every object group and rank.
@@ -722,7 +812,7 @@ class PrefetchRequest(KeysOrTokensRequest):
 
     @model_validator(mode="after")
     def _validate_one_setup(self) -> "PrefetchRequest":
-        """Reject keys that no single parallel setup holds (surfaced as 422).
+        """Reject content no single parallel setup holds (surfaced as 422).
 
         One prefetch warms one model's layout on the target, which would
         reject such keys itself; checking here reports the caller's error
@@ -733,10 +823,15 @@ class PrefetchRequest(KeysOrTokensRequest):
 
         Raises:
             ValueError: The keys disagree on model, world size, cache salt or
-                tags, or their ``kv_rank`` packs no world size.
+                tags, or their ``kv_rank`` packs no world size; or the
+                chunk-hash form names no world size.
         """
         if self.keys:
             named_chunks_of_keys([encoded.to_object_key() for encoded in self.keys])
+        if self.chunk_hashes and not self.world_size:
+            raise ValueError(
+                "'world_size' is required with 'chunk_hashes' for a prefetch"
+            )
         return self
 
 
@@ -759,12 +854,12 @@ class PrefetchResponse(BaseModel):
     status: str
 
 
-class PinRequest(KeysOrTokensRequest):
+class PinRequest(CacheContentRequest):
     """Body of ``POST`` / ``DELETE /cache/pins`` on the coordinator.
 
     Pinning protects keys from L2 eviction until unpinned. L2 pins are
     fleet-wide (per ``cache_salt``), so no target instance is needed. Content
-    is named in either form of :class:`KeysOrTokensRequest`; the coordinator
+    is named in either form of :class:`CacheContentRequest`; the coordinator
     resolves the tokens form locally. A pin covers its chunk in every object
     group and on every rank of its world size, and one request pins each
     chunk once however many of its keys it names.
@@ -814,10 +909,10 @@ class PinListResponse(BaseModel):
     pins: list[PinnedKeyInfo] = Field(default_factory=list)
 
 
-class DeleteRequest(KeysOrTokensRequest):
+class DeleteRequest(CacheContentRequest):
     """Body of ``POST /cache/delete`` on the coordinator.
 
-    Content is named in either form of :class:`KeysOrTokensRequest`; the
+    Content is named in either form of :class:`CacheContentRequest`; the
     coordinator expands each key to every copy of its chunk the directory
     holds, in any object group and on any rank of the key's world size, and
     sends them to the node in batches it accepts.
@@ -856,3 +951,20 @@ class DeleteResponse(BaseModel):
     affected: int = 0
     skipped: int = 0
     status: str
+
+
+def _require_one_form(
+    keys: list[EncodedObjectKey], token_ids: list[int], chunk_hashes: list[bytes]
+) -> None:
+    """Require exactly one way of naming cache content.
+
+    Args:
+        keys: The request's ``keys``.
+        token_ids: The request's ``token_ids``.
+        chunk_hashes: The request's ``chunk_hashes``.
+
+    Raises:
+        ValueError: If not exactly one of them is non-empty.
+    """
+    if [bool(keys), bool(token_ids), bool(chunk_hashes)].count(True) != 1:
+        raise ValueError("supply exactly one of 'keys', 'token_ids' or 'chunk_hashes'")

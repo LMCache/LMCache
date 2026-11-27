@@ -340,7 +340,9 @@ class KeyDirectory(View):
         group and on any kv rank. A delete by key uses this, so any one of a
         chunk's keys removes the whole chunk rather than one rank's share of
         it. Another world size's copy is a different parallel setup's
-        object and is left alone.
+        object and is left alone -- unless the key's ``kv_rank`` packs no
+        world size, which names the chunk in every world size; such a key
+        is no stored key and is not returned itself.
 
         Args:
             keys: Keys naming the chunks.
@@ -353,7 +355,8 @@ class KeyDirectory(View):
         with self._lock:
             stored_copies: dict[ObjectKey, None] = {}
             for key in keys:
-                stored_copies[key] = None
+                if ObjectKey.WorldSizeFromKVRank(key.kv_rank):
+                    stored_copies[key] = None
                 stored_copies.update(
                     dict.fromkeys(
                         sorted(
@@ -389,6 +392,7 @@ class KeyDirectory(View):
     def _get_stored_copies_of_chunk(self, key: ObjectKey) -> list[ObjectKey]:
         """Return the stored keys of ``key``'s chunk in its parallel setup:
         same chunk hash, model, salt, tags and world size, any group or rank.
+        A key of world size ``0`` matches every world size.
 
         Call under the directory lock.
         """
@@ -399,7 +403,8 @@ class KeyDirectory(View):
         return [
             stored_key
             for stored_key in chunk_binding.keys
-            if ObjectKey.WorldSizeFromKVRank(stored_key.identity.kv_rank) == world_size
+            if world_size
+            in (0, ObjectKey.WorldSizeFromKVRank(stored_key.identity.kv_rank))
             and replace(
                 stored_key.identity,
                 object_group_id=key.identity.object_group_id,

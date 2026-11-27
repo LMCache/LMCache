@@ -1057,3 +1057,24 @@ def test_restored_per_rank_pins_load_as_one_pin():
     assert ctrl.list_pins("", "", 0, 10)[0] == 1
     ctrl.unpin([rank0])
     assert ctrl.filter_unpinned([rank1]) == [rank1]
+
+
+def test_a_pin_without_a_world_size_is_counted_apart_and_restores():
+    """A pin through a key of world size 0 covers the chunk at every world
+    size, is counted apart from a pin taken with a world size -- releasing
+    one keeps the other -- and loads back from a saved table unchanged."""
+    source, _, _ = _setup()
+    every_world_size = _make_key("a")
+    tp1, tp2 = _on_rank(every_world_size, 1, 0), _on_rank(every_world_size, 2, 1)
+    source.pin([every_world_size])
+    source.pin([tp2])
+
+    ctrl, _, _ = _setup()
+    ctrl.restore(source.capture())
+
+    assert ctrl.filter_unpinned([tp1, tp2]) == []
+    ctrl.unpin([tp2])
+    assert ctrl.filter_unpinned([tp1, tp2]) == []
+    ctrl.pin([tp2])
+    ctrl.unpin([every_world_size])
+    assert ctrl.filter_unpinned([tp1, tp2]) == [tp1]

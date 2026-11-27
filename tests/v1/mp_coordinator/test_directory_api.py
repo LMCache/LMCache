@@ -4,6 +4,7 @@ ingestion, placement lookup, and stats)."""
 
 # Third Party
 from fastapi.testclient import TestClient
+import pytest
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
@@ -216,6 +217,18 @@ def test_lookup_tokens_selects_only_the_requested_tags():
             "/directory/lookup", json=_lookup_tokens_body(256)
         ).json()["results"]
         assert untagged_result["placements"] == []
+
+
+@pytest.mark.parametrize("world_size", [0, None])
+def test_lookup_tokens_without_a_world_size_resolves_a_single_gpu_setup(world_size):
+    with _client() as client:
+        explicit = client.post("/directory/lookup", json=_lookup_tokens_body(256))
+        body = {**_lookup_tokens_body(256), "world_size": world_size}
+
+        resp = client.post("/directory/lookup", json=body)
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == explicit.json()
 
 
 def test_lookup_tokens_invalid_model_name_is_400():
@@ -446,6 +459,62 @@ def test_lookup_keys_form_returns_placements_and_tokens():
         assert results[1]["placements"] == []
 
 
+def test_lookup_by_chunk_hash_reports_every_rank_and_group_of_that_chunk():
+    """A chunk named by hash resolves like the token form, without its prefix:
+    one result per rank, across every object group the directory holds, all
+    counted as one chunk. Other chunks are left out."""
+    with _client() as client:
+        stored = [
+            {**_key(h="aa", rank=rank, world_size=2), "object_group_id": group}
+            for group in (0, 1)
+            for rank in (0, 1)
+        ]
+        other = _key(h="bb", world_size=2)
+        entries = [{"key": key, "size_bytes": 1} for key in [*stored, other]]
+        _post_events(client, [_batch(entries=entries)])
+
+        resp = client.post(
+            "/directory/lookup",
+            json={"chunk_hashes": ["aa"], "model_name": MODEL, "world_size": 2},
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["chunks"] == 1
+        found = [
+            (r["key"]["object_group_id"], r["key"]["kv_rank"]) for r in body["results"]
+        ]
+        assert sorted(found) == sorted(
+            (key["object_group_id"], key["kv_rank"]) for key in stored
+        )
+        assert all(len(r["placements"]) == 1 for r in body["results"])
+
+
+def test_lookup_by_chunk_hash_without_a_world_size_reports_every_world_size():
+    """Without a world size a hash resolves to every stored copy of its
+    chunk, whatever the world size; a chunk stored nowhere has no results."""
+    with _client() as client:
+        stored = [
+            _key(h="aa", rank=rank, world_size=world_size)
+            for world_size in (1, 2)
+            for rank in range(world_size)
+        ]
+        entries = [{"key": key, "size_bytes": 1} for key in stored]
+        _post_events(client, [_batch(entries=entries)])
+
+        resp = client.post(
+            "/directory/lookup",
+            json={"chunk_hashes": ["aa", "ff"], "model_name": MODEL},
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["chunks"] == 2
+        assert sorted(r["key"]["kv_rank"] for r in body["results"]) == sorted(
+            key["kv_rank"] for key in stored
+        )
+
+
 def test_lookup_and_listing_report_access_counts():
     def _access(seq: int) -> dict:
         return _batch(
@@ -493,6 +562,45 @@ def test_lookup_requires_exactly_one_form():
         assert neither.status_code == 422
         no_model = client.post("/directory/lookup", json={"token_ids": [1, 2]})
         assert no_model.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"chunk_hashes": ["aa"], "world_size": 1}, id="no-model"),
+        pytest.param(
+            {"chunk_hashes": ["zz"], "model_name": "m", "world_size": 1},
+            id="not-hex",
+        ),
+        pytest.param(
+            {"chunk_hashes": [""], "model_name": "m", "world_size": 1},
+            id="empty-hash",
+        ),
+        pytest.param(
+            {
+                "chunk_hashes": ["aa"],
+                "keys": [_key()],
+                "model_name": "m",
+                "world_size": 1,
+            },
+            id="with-keys",
+        ),
+        pytest.param(
+            {
+                "chunk_hashes": ["aa"],
+                "token_ids": [1],
+                "model_name": "m",
+                "world_size": 1,
+            },
+            id="with-token-ids",
+        ),
+    ],
+)
+def test_lookup_rejects_a_malformed_chunk_hash_form(body: dict):
+    """The chunk form needs model_name and excludes the other forms; each
+    hash must be non-empty hex."""
+    with _client() as client:
+        assert client.post("/directory/lookup", json=body).status_code == 422
 
 
 # -- Request validation ------------------------------------------------------

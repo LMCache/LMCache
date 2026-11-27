@@ -4,8 +4,10 @@
 Cache-control operations describe content by ``token_ids`` rather than internal
 :class:`ObjectKey` values, which callers cannot construct.
 :func:`resolve_object_keys` hashes the tokens and expands each complete chunk
-into one key per rank in object group ``0``; coordinator callers reach the
-other groups through what the directory holds and how pins match.
+into one key per rank in object group ``0``, and
+:func:`resolve_chunk_object_keys` does the same for chunks named by hash;
+coordinator callers reach the other groups through what the directory holds
+and how pins match.
 :func:`resolve_grouped_object_keys` is the node's prefetch resolver, and
 expands every object group the model registered, each with its own layout and
 attention window; :func:`resolve_grouped_chunk_keys` does the same for chunks
@@ -110,17 +112,75 @@ def resolve_object_keys(
         ValueError: ``token_ids`` exceeds the per-request cap, or a key field
             (e.g. ``cache_salt``) is invalid.
     """
-    ipc_key, chunk_hashes = _resolve_ipc_key_and_hashes(
+    _, chunk_hashes = _resolve_ipc_key_and_hashes(
         token_hasher, model_name, world_size, token_ids, cache_salt, tags=tags
     )
-    if not chunk_hashes:
+    return resolve_chunk_object_keys(
+        chunk_hashes,
+        model_name,
+        world_size,
+        cache_salt,
+        tags=tags,
+    )
+
+
+def resolve_chunk_object_keys(
+    chunk_hashes: list[bytes],
+    model_name: str,
+    world_size: int,
+    cache_salt: str,
+    *,
+    tags: Mapping[str, str] | None = None,
+) -> tuple[list[ObjectKey], int]:
+    """Resolve chunks named by hash to their object keys.
+
+    The same keys :func:`resolve_object_keys` gives for a token sequence, for
+    chunks named by hash, so a chunk in the middle of a prompt is reached
+    without its prefix. Each distinct hash expands into one key per rank in
+    object group ``0``, in first-named order.
+
+    A ``world_size`` of ``0`` names each chunk without a parallel setup: it
+    resolves to one key per chunk in object group ``0`` whose ``kv_rank`` is
+    ``0``, which packs no world size and so matches no stored key.
+
+    Args:
+        chunk_hashes: The chunks' hashes; a repeated hash counts once.
+        model_name: Model whose rank fan-out to use.
+        world_size: Tensor-parallel world size selecting the per-rank fan-out,
+            or ``0`` for every world size.
+        cache_salt: Per-tenant isolation salt.
+        tags: Matching tags supplied when the content was stored.
+
+    Returns:
+        ``(obj_keys, chunk_count)``: one key per (distinct chunk, rank), or
+        per distinct chunk for world size ``0``, and the number of distinct
+        chunks.
+
+    Raises:
+        ValueError: A key field (e.g. ``cache_salt``) is invalid.
+    """
+    unique_chunk_hashes = list(dict.fromkeys(chunk_hashes))
+    ipc_key = _lookup_ipc_key(model_name, world_size, [], cache_salt, tags=tags)
+    if not unique_chunk_hashes:
         return [], 0
+    if world_size == 0:
+        all_world_sizes_identity = ObjectKeyIdentity(
+            chunk_hash=b"",
+            kv_rank=0,
+            model_name=model_name,
+            cache_salt=cache_salt,
+            tags=tags or {},
+        )
+        return [
+            ObjectKey(identity=replace(all_world_sizes_identity, chunk_hash=chunk_hash))
+            for chunk_hash in unique_chunk_hashes
+        ], len(unique_chunk_hashes)
     # The coordinator holds no KV registration, so this resolves the
     # per-rank layout of object group 0 only.
     obj_keys = ipc_key_to_object_keys(
-        ipc_key, chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
+        ipc_key, unique_chunk_hashes, [0], DEFAULT_SHARD_REPLICATION_DESC
     )[0]
-    return obj_keys, len(chunk_hashes)
+    return obj_keys, len(unique_chunk_hashes)
 
 
 def resolve_grouped_object_keys(

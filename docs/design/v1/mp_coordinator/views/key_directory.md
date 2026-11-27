@@ -214,13 +214,17 @@ reach the rest without the coordinator knowing how many groups there are:
   which adds each resolved key's stored copies in other groups. Delete uses
   `get_stored_keys_of_chunks`, which adds the stored copies in any group and
   on any rank of the key's world size, because a key names its whole chunk
-  and a chunk missing one rank's share is unusable. A chunk in two groups is
-  looked up and deleted in two.
+  and a chunk missing one rank's share is unusable. A key whose `kv_rank`
+  packs world size `0` -- chunk hashes sent without a world size -- names
+  the chunk in every world size, so it adds every stored copy and is not
+  itself returned. A chunk in two groups is looked up and deleted in two.
 - **Pins** match regardless of group and rank: the pin table stores each
   chunk under its rank-0 key in group `0` and maps every entry and check to
   that key. One pin covers the chunk in every group and on every rank of its
   world size, including copies not stored yet, so neither eviction nor a
-  delete can take part of a pinned chunk.
+  delete can take part of a pinned chunk. A pin taken without a world size
+  is stored under the chunk's group-`0`, `kv_rank` `0` key and covers every
+  world size; a key is pinned if either entry holds it.
 
 Blend matching also omits `object_group_id` from its fleet namespace. After a
 content match, the serving Blend instance expands the chunk into the object
@@ -235,12 +239,16 @@ Duplicates and stale batches are counted in the response, not errors.
 See [ingest.md](../ingest.md).
 - `POST /directory/lookup` — resolve content to placements **and** token
 ids, in either direction (POST because the payload rides in the body).
-Supply exactly one of: `keys` (resolve keys directly) or `token_ids`
+Supply exactly one of: `keys` (resolve keys directly), `token_ids`
 (prefix-exact resolution via the fleet `TokenHasher` + per-rank fan-out,
 expanded to every stored object group -- see *Object groups* above;
 requires `model_name` / `world_size` / `cache_salt`
 since key identity includes them — and the sequence must be the
-request's whole prefix, since chunk hashes are prefix-chained). One
+request's whole prefix, since chunk hashes are prefix-chained), or
+`chunk_hashes` (the same fan-out and group expansion for chunks named by
+hash, so a mid-prompt chunk resolves without its prefix; `model_name`
+required; without a `world_size` a hash resolves to every stored copy of its
+chunk, whatever the world size, through `get_stored_keys_of_chunks`). One
 result per resolved key, request order, with placements, token ids,
 and `access_count`. Unknown keys get empty lists and `0`.
 Position-independent token matching arrives with the content index
