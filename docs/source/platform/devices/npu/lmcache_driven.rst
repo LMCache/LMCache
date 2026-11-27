@@ -118,7 +118,7 @@ The LMCache main branch (``dev``) provides the MP transfer architecture (the
    git clone https://github.com/LMCache/LMCache.git
    cd LMCache
    pip install -r requirements/build.txt
-   pip install -v --no-build-isolation -e .
+   TORCH_DEVICE_BACKEND_AUTOLOAD=0 pip install -v --no-build-isolation -e .
    cd ..
 
 .. warning::
