@@ -30,7 +30,7 @@ from lmcache.v1.distributed.api import (
 # re-RoPE reused KV from the wrong source position.
 UNKNOWN_TOKEN_OFFSET = -1
 
-CACHE_EVENT_SCHEMA_VERSION = 1
+CACHE_EVENT_SCHEMA_VERSION = 2
 """Version of the cache-event wire shape: :class:`CacheEventBatch` as carried
 by ``POST /events``. Bumped when a field is added, removed or changes meaning,
 so an ``events``-level trace file names the shape its records hold and a
@@ -147,12 +147,21 @@ class CacheEventEntry:
         token_offset: Token position of the chunk's first token in the
             sequence it was stored under; prefix-chained chunk hashes do
             not reveal it. :data:`UNKNOWN_TOKEN_OFFSET` when unreported.
+        parent_hash_hex: Hex ``chunk_hash`` of the chunk before this one in
+            the sequence it was stored under, stamped on ``store`` entries.
+            Empty for a sequence's first chunk or when unreported.
+        request_ids: The emitting instance's requests whose store
+            submitted this chunk, stamped on ``store`` entries. A list
+            because concurrent requests can submit the same chunk. Empty
+            when unreported.
     """
 
     key: EncodedObjectKey
     size_bytes: int = 0
     token_ids: list[int] = field(default_factory=list)
     token_offset: int = UNKNOWN_TOKEN_OFFSET
+    parent_hash_hex: str = ""
+    request_ids: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Enforce intrinsic invariants.

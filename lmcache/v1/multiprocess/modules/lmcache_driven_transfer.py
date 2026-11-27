@@ -1410,8 +1410,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         """Publish one ``MP_TOKENS`` event for ``key``'s chunks.
 
         Pairs each complete chunk in ``[key.start, key.end)`` with its
-        ObjectKey chunk hash, token position, and the preceding chunk's hash
-        (``None`` for a sequence's first chunk). Must be called at store
+        ObjectKey and chunk hash, token position, and the preceding chunk's
+        hash (``None`` for a sequence's first chunk). The ObjectKey carries
+        the request's namespace: chunk hashes depend on tokens alone, so
+        the request id alone cannot say which tenant's keys it stored.
+        The event's ``session_id`` is the request id. Must be called at store
         submission, before the write-finished events reach the bus, so the
         cache-event subscribers can stamp them onto the STORE entries. A
         store that later fails leaves only unused cache entries.
@@ -1466,6 +1469,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     "token_chunks": token_chunks,
                     "token_offsets": token_offsets,
                     "parent_hashes": parent_hashes,
+                    "object_keys": obj_keys,
                 },
             )
         )

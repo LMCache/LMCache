@@ -31,6 +31,7 @@ from lmcache.v1.distributed.api import CapacitySnapshot, L1BackendType, ObjectKe
 from lmcache.v1.distributed.internal_api import L1ObjectMeta
 from lmcache.v1.mp_coordinator.api import (
     UNKNOWN_TOKEN_OFFSET,
+    BlendNamespace,
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
@@ -63,6 +64,10 @@ _KAFKA_MAX_BUFFER_KBYTES = 64 * 1024
 # Token-binding cache bound: covers the window between a chunk's
 # token-binding event and its last (async L2) store event.
 _TOKEN_BINDING_CACHE_SIZE = 65536
+
+# Requests remembered per chunk binding, most recent kept: a chunk that
+# many requests re-submit would otherwise grow every STORE entry.
+_MAX_REQUEST_IDS_PER_CHUNK = 8
 
 
 class CacheEventPublishError(Exception):
@@ -464,10 +469,18 @@ class _ChunkTokens:
     Attributes:
         token_ids: The chunk's token ids.
         token_offset: Position of its first token in the stored sequence.
+        parent_hash_hex: Hex hash of the preceding chunk; empty for a
+            sequence's first chunk.
+        requests: ``(request_id, namespace)`` of the requests whose store
+            submitted the chunk, oldest first. The namespace is kept
+            because chunk hashes depend on tokens alone: two tenants
+            storing the same tokens share one binding.
     """
 
     token_ids: tuple[int, ...]
     token_offset: int
+    parent_hash_hex: str = ""
+    requests: tuple[tuple[str, BlendNamespace], ...] = ()
 
 
 # Stands in for a chunk the binding cache does not know, so a STORE entry
@@ -694,11 +707,30 @@ class CacheEventSubscriber(EventSubscriber):
         chunk_hashes: list[bytes] = event.metadata["chunk_hashes"]
         token_chunks: list[list[int]] = event.metadata["token_chunks"]
         token_offsets: list[int] = event.metadata["token_offsets"]
-        for chunk_hash, chunk, offset in zip(
-            chunk_hashes, token_chunks, token_offsets, strict=True
+        parent_hashes: list[bytes | None] = event.metadata["parent_hashes"]
+        object_keys: list[ObjectKey] = event.metadata["object_keys"]
+        for chunk_hash, chunk, offset, parent_hash, object_key in zip(
+            chunk_hashes,
+            token_chunks,
+            token_offsets,
+            parent_hashes,
+            object_keys,
+            strict=True,
         ):
+            # Concurrent requests can submit the same chunk; keep each one,
+            # or the earlier request loses its tail chunk.
+            request = (event.session_id, BlendNamespace.from_object_key(object_key))
+            requests = tuple(
+                r
+                for r in self._token_bindings.get(chunk_hash, _NO_BINDING).requests
+                if r != request
+            )
+            requests = (*requests, request)[-_MAX_REQUEST_IDS_PER_CHUNK:]
             self._token_bindings[chunk_hash] = _ChunkTokens(
-                token_ids=tuple(chunk), token_offset=offset
+                token_ids=tuple(chunk),
+                token_offset=offset,
+                parent_hash_hex=parent_hash.hex() if parent_hash is not None else "",
+                requests=requests,
             )
             self._token_bindings.move_to_end(chunk_hash)
         if len(self._token_bindings) <= _TOKEN_BINDING_CACHE_SIZE:
@@ -755,13 +787,20 @@ class CacheEventSubscriber(EventSubscriber):
 
     def _store_entry(self, key: ObjectKey, size_bytes: int) -> CacheEventEntry:
         """Build a STORE entry, stamping the chunk's token content when the
-        token-binding cache knows the chunk."""
+        token-binding cache knows the chunk. Only requests of ``key``'s own
+        namespace are stamped."""
         binding = self._token_bindings.get(key.chunk_hash, _NO_BINDING)
+        request_ids: list[str] = []
+        if binding.requests:
+            namespace = BlendNamespace.from_object_key(key)
+            request_ids = [rid for rid, ns in binding.requests if ns == namespace]
         return CacheEventEntry(
             key=key.to_encoded_object_key(),
             size_bytes=size_bytes,
             token_ids=list(binding.token_ids),
             token_offset=binding.token_offset,
+            parent_hash_hex=binding.parent_hash_hex,
+            request_ids=request_ids,
         )
 
     def _record(
