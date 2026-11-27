@@ -155,10 +155,16 @@ get_wanted_l1_memory_tags() -> tuple[MemoryTags, ...]  # adapter config
 
 ```
 StorageManager.__init__
-  → StoreController(l1_manager, l2_adapters, descriptors, policy, eviction_config)
+  → PrefetchController(...)
+  → StoreController(l1_manager, l2_adapters, descriptors, policy,
+                    eviction_config,
+                    has_inflight_loads=prefetch_controller.has_inflight_loads)
+  → prefetch_controller.register_load_idle_callback(controller.wake)
   → controller.start()        # spawns background thread
+  → prefetch_controller.start()
   ...
 StorageManager.close()
+  → prefetch_controller.stop()
   → controller.stop()         # joins thread, releases locks
 ```
 
@@ -166,7 +172,8 @@ StorageManager.close()
 
 The StoreController's background thread polls on:
 
-1. **StoreListener eventfd** — fired by BaseL1Manager when `finish_write()` completes.
+1. **StoreListener eventfd** — fired by BaseL1Manager when `finish_write()`
+   completes, and by `StoreController.wake()` when foreground L2 loads drain.
    The listener is an `L1ManagerListener` registered with BaseL1Manager.
 2. **Per-adapter store eventfds** — fired when L2 store tasks complete.
 
@@ -191,8 +198,10 @@ _process_new_keys(keys)
   │
   ├─ 2. Queue the groups. Pop them oldest first while in-flight stores
   │     read-lock less than the budget (see below); the rest wait unlocked.
+  │     While prefetch loads run, pop one slice at a time instead (see
+  │     Foreground Prefetch Priority).
   │
-  ├─ 3. For each popped group:
+  ├─ 3. For each popped group or slice:
   │     StorePolicy.select_store_targets(group_keys, adapters)
   │       → dict[adapter_index, list[ObjectKey]]
   │
@@ -255,6 +264,38 @@ Waiting groups hold no locks. When L1 deletes a waiting key, the controller
 drops it from the queue, so it is never stored to L2 and the queue only holds
 keys that are still in L1. Dropped keys count in `lmcache_mp.l1_read_failure`
 (`during=l2_store`, `reason=not_found`), as they would at submit time.
+
+### Foreground Prefetch Priority
+
+Stores copy chunks that are already in L1, so they are off the latency
+path. Prefetch loads from L2 are on it: the request waits for them before
+TTFT. When one big store and a load share an adapter's queue or bandwidth,
+the load waits for the store.
+
+So when the controller is given `PrefetchController.has_inflight_loads`,
+`_submit_queued()` cuts stores from the queue instead of sending whole
+groups, and limits how many stores each non-draining adapter has in flight.
+The next store goes out once one adapter is below its limit, so a slower
+adapter can fall behind, up to the budget above, without holding back the
+faster ones. While at most `STORE_YIELD_MAX_QUEUED_KEYS` (512) keys wait, the
+limit is one store, which takes up to `STORE_SLICE_MAX_KEYS` (4) of the
+oldest queued keys and goes out only while no load runs on those adapters,
+so a load on an adapter that keeps up waits behind at most 4 keys. The rest
+waits unlocked in the controller's queue instead of in the adapter's. When an
+adapter's last load finishes or is aborted, `PrefetchController` calls
+`StoreController.wake()`, and the next store goes out without waiting for
+`STORE_LOOP_POLL_TIMEOUT_MS`.
+
+Waiting keys hold no locks, so L1 can evict them before they reach L2. Past
+512 waiting keys, stores stop waiting for loads and take up to
+`STORE_CATCH_UP_MAX_KEYS` (32) same-shape keys from the front of the queue.
+Some L2s keep up only with several stores in flight, for example when an
+adapter writes the keys of one store one by one. So every
+`STORE_CATCH_UP_STEP_KEYS` (128) more waiting keys allow one more store in
+flight per adapter: when the queue keeps growing, more stores go out until
+L2 keeps up, and when one store keeps up, the queue stays short and only one
+goes out. As with the budget, a store stops counting once its read locks
+lapse, so a store that never finishes cannot stop the queue.
 
 ### Lock Invariants
 

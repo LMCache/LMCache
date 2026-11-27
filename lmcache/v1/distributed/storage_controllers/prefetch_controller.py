@@ -17,6 +17,7 @@ releasing a request at any point is a walk over its maps.
 
 # Standard
 from collections import Counter, defaultdict, deque
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import enum
@@ -649,6 +650,8 @@ class PrefetchController(StorageControllerInterface):
             self._load_efd_to_adapter[adapter.get_load_event_fd()] = adapter_id
 
         self._event_bus = get_event_bus()
+        # Written only before start(), then read on the prefetch loop thread.
+        self._load_idle_callbacks: list[Callable[[], None]] = []
 
         PrefetchController._gauge_target = self
         if not PrefetchController._gauges_registered:
@@ -868,6 +871,35 @@ class PrefetchController(StorageControllerInterface):
                 (reserved_bytes, {"l2_name": desc.type_name, "adapter_index": idx})
             )
         return observations
+
+    def has_inflight_loads(self, adapter_ids: Iterable[int]) -> bool:
+        """Return whether any in-flight request is loading from one of
+        ``adapter_ids``. Safe from any thread: it reads ``dict.copy()``
+        snapshots, as :meth:`get_inflight_loads_observations` does.
+
+        Args:
+            adapter_ids: Adapter indices to check.
+
+        Returns:
+            True if some request has an L2 load task on one of them.
+        """
+        targets = set(adapter_ids)
+        if not targets:
+            return False
+        for request in self._in_flight_requests.copy().values():
+            if targets.intersection(request.inflight_load_tasks.copy()):
+                return True
+        return False
+
+    def register_load_idle_callback(self, callback: Callable[[], None]) -> None:
+        """Call ``callback`` on the prefetch loop thread whenever an adapter's
+        last L2 load finishes or is aborted. Register before :meth:`start`;
+        the callback must not block.
+
+        Args:
+            callback: Zero-argument callback.
+        """
+        self._load_idle_callbacks.append(callback)
 
     # =========================================================================
     # Lifecycle
@@ -1640,6 +1672,7 @@ class PrefetchController(StorageControllerInterface):
         """
         states = request.key_states
         tag = _get_prefetch_write_tag(request.request_id)
+        finished_adapters: list[int] = []
         for adapter_idx in list(request.inflight_load_tasks):
             if adapter_idx not in signaled_adapters:
                 continue
@@ -1689,6 +1722,7 @@ class PrefetchController(StorageControllerInterface):
             del states.l2_locked_keys[adapter_idx]
             del request.inflight_load_tasks[adapter_idx]
             request.load_bytes_by_adapter.pop(adapter_idx, None)
+            finished_adapters.append(adapter_idx)
 
             self._event_bus.publish(
                 Event(
@@ -1724,6 +1758,8 @@ class PrefetchController(StorageControllerInterface):
                         metadata={"reason": "not_found", "keys": failed_keys},
                     )
                 )
+
+        self._notify_load_idle(finished_adapters)
 
     # =========================================================================
     # Completion and cleanup
@@ -1805,6 +1841,7 @@ class PrefetchController(StorageControllerInterface):
     def _abort_request(self, request: InFlightPrefetchRequest) -> None:
         """Give up on a request after an error: return everything it holds,
         report a miss for every cell, and drop it from the in-flight table."""
+        finished_adapters = list(request.inflight_load_tasks)
         self._release_all_locks(request)
         empty = Bitmap2D.zeros(len(request.key_groups), len(request.key_groups[0].keys))
         self._publish_result(
@@ -1816,6 +1853,7 @@ class PrefetchController(StorageControllerInterface):
             ),
         )
         self._retire_request(request)
+        self._notify_load_idle(finished_adapters)
 
     def _retire_request(self, request: InFlightPrefetchRequest) -> None:
         """Remove a finished request from the in-flight table."""
@@ -1857,3 +1895,19 @@ class PrefetchController(StorageControllerInterface):
             )
             self._release_all_locks(request)
             self._retire_request(request)
+
+    def _notify_load_idle(self, finished_adapters: list[int]) -> None:
+        """Run the load-idle callbacks if any of ``finished_adapters`` has no
+        load left. Callback errors are logged, not raised."""
+        busy = {
+            idx
+            for request in self._in_flight_requests.values()
+            for idx in request.inflight_load_tasks
+        }
+        if all(idx in busy for idx in finished_adapters):
+            return
+        for callback in self._load_idle_callbacks:
+            try:
+                callback()
+            except Exception:
+                logger.exception("Unexpected error in prefetch load-idle callback")
