@@ -483,3 +483,70 @@ func TestIsolatedIPCEnabled(t *testing.T) {
 		})
 	}
 }
+
+func TestSetDefaults_GPUVendorRBLNDefaultsNodeSelector(t *testing.T) {
+	e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		GPUVendor: ptr(GPUVendorRBLN),
+	}}
+	e.SetDefaults()
+	if len(e.Spec.NodeSelector) != 1 || e.Spec.NodeSelector["rebellions.ai/npu.present"] != labelValueTrue {
+		t.Fatalf("expected rebellions.ai/npu.present NodeSelector, got %v", e.Spec.NodeSelector)
+	}
+}
+
+func TestEngineDrivenTransfer(t *testing.T) {
+	cases := []struct {
+		name   string
+		vendor *string
+		want   bool
+	}{
+		{"nvidia default", nil, false},
+		{"amd", ptr(GPUVendorAMD), false},
+		{"rbln", ptr(GPUVendorRBLN), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := &LMCacheEngineSpec{GPUVendor: c.vendor}
+			if got := s.EngineDrivenTransfer(); got != c.want {
+				t.Fatalf("EngineDrivenTransfer() = %v, want %v", got, c.want)
+			}
+			if s.EngineDrivenTransfer() && s.IsolatedIPCEnabled() {
+				t.Fatalf("engine-driven transfer needs the shared /dev/shm, but isolated IPC is on by default")
+			}
+		})
+	}
+}
+
+func TestValidateSpec_RBLN(t *testing.T) {
+	cases := []struct {
+		name      string
+		mutate    func(s *LMCacheEngineSpec)
+		wantField string
+	}{
+		{"minimal is valid", func(*LMCacheEngineSpec) {}, ""},
+		{"isolatedIPC false is valid", func(s *LMCacheEngineSpec) { s.IsolatedIPC = ptr(false) }, ""},
+		{"isolatedIPC true", func(s *LMCacheEngineSpec) { s.IsolatedIPC = ptr(true) }, "spec.isolatedIPC"},
+		{"hostIPC true is valid", func(s *LMCacheEngineSpec) { s.HostIPC = ptr(true) }, ""},
+		{"pd", func(s *LMCacheEngineSpec) { s.PD = &PDSpec{} }, "spec.pd"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := &LMCacheEngine{Spec: LMCacheEngineSpec{
+				L1:        L1BackendSpec{SizeGB: 10},
+				GPUVendor: ptr(GPUVendorRBLN),
+			}}
+			c.mutate(&e.Spec)
+			errs := e.ValidateSpec()
+			if c.wantField == "" {
+				if len(errs) != 0 {
+					t.Fatalf("expected no errors, got %v", errs)
+				}
+				return
+			}
+			if len(errs) != 1 || errs[0].Field != c.wantField {
+				t.Fatalf("expected one error on %s, got %v", c.wantField, errs)
+			}
+		})
+	}
+}
