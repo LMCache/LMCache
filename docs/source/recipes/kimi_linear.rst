@@ -34,7 +34,7 @@ Validated models
       As a Mamba / linear-attention hybrid, Kimi-Linear needs the same
       settings as the other GDN hybrids: the ``align`` Mamba cache mode, prefix
       caching, and object-group separation on the LMCache server (enabled by
-      default). The chunk size is negotiated from vLLM's *unified block size*
+      default). The chunk size is resolved from vLLM's *unified block size*
       ``N``, which is
       model- and parallelism-specific — vLLM logs
       ``Setting attention block size to N tokens`` at startup. Because the KDA
@@ -56,14 +56,14 @@ Validated models
       .. note::
 
          ``N`` **scales inversely with the tensor-parallel size** for this
-         model, so changing ``--tensor-parallel-size`` changes the negotiated
+         model, so changing ``--tensor-parallel-size`` changes the effective
          chunk size. The MLA cache is *replicated* across TP ranks (its per-rank
          size is fixed), while the KDA state is *sharded* (its per-rank size is
          divided by the TP degree). vLLM picks ``N`` so an attention page is at
          least as large as a KDA state page, so a smaller per-rank KDA state
          yields a smaller ``N`` — and vice versa. Concretely, going from
          **TP=2 → TP=1** doubles the per-rank KDA state, so ``N`` doubles from
-         ``944`` to ``1888`` and the server negotiates a compatible chunk size.
+         ``944`` to ``1888`` and the connector resolves a compatible chunk size.
          Always re-read ``N`` from the startup log after changing the TP degree
          — do not scale it by hand.
 
@@ -100,7 +100,7 @@ Validated models
         Mamba / linear-attention models: it gives the KDA layers their own
         cache objects so their recurrent state is stored and loaded
         independently of the MLA layers.
-      - ``--chunk-size`` (server) is a minimum. The connector negotiates the
+      - ``--chunk-size`` (server) is a minimum. The connector resolves the
         smallest multiple of ``N`` that is at least that value. See
         :doc:`/mp/chunk_size_negotiation`.
       - ``--trust-remote-code`` loads Kimi-Linear's custom modeling code.

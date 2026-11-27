@@ -81,7 +81,8 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   void do_single_set(WorkerFSConn& conn, const std::string& key,
                      const void* buf, size_t len, size_t chunk_size) override;
   bool do_single_exists(WorkerFSConn& conn, const std::string& key) override;
-  bool do_single_delete(WorkerFSConn& conn, const std::string& key) override;
+  DeleteResult do_single_delete_result(WorkerFSConn& conn,
+                                       const std::string& key) override;
 
   void on_workers_stopped() override;
 
