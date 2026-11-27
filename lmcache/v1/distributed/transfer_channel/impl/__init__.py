@@ -5,17 +5,13 @@ Importing this package imports each implementation module, which in turn
 self-registers its factory via ``register_transfer_channel_factory``.
 """
 
+# isort: off
 # First Party
 from lmcache.v1.distributed.transfer_channel.impl import (  # noqa: F401
     nixl_impl,
-)
-
-# Keep NIXL registration before HIXL when this package is imported.
-# isort: split
-# First Party
-from lmcache.v1.distributed.transfer_channel.impl import (  # noqa: F401
     hixl_impl,
 )
+# isort: on
 
 try:
     # First Party
