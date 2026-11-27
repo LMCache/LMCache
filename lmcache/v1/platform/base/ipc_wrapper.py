@@ -2,18 +2,16 @@
 """Base class for device IPC wrappers.
 
 :class:`DeviceIPCWrapper` is the abstract base for KV-cache IPC wrapper
-implementations.  Every concrete wrapper (e.g. :class:`~.cpu.shm.CpuShmTensorWrapper`,
-:class:`~.cuda.ipc_wrapper.CudaIPCWrapper`) subclasses it so they share
-the single msgspec ext code (1). A data-only descriptor selects the
-concrete implementation from a local allowlist.
+implementations. Every concrete wrapper subclasses it so they share the
+single msgspec ext code (1). A data-only descriptor selects the concrete
+implementation among the wrappers that registered device specs declare.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
-from typing import Any, Callable, Tuple, cast
-import importlib
+from typing import Any, Callable, ClassVar, Tuple, Union
 import threading
 
 # Third Party
@@ -22,12 +20,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.v1.platform.base.ipc_wire import (
-    DTYPES,
-    WRAPPER_TYPES,
-    TensorMetadata,
-    WireIPCData,
-)
+from lmcache.v1.platform.base.ipc_wire import DTYPES, TensorMetadata
 
 # Importer-side hook resolving an export id to a POSIX fd that the exporter
 # delivered out of band (fds cannot ride the wire descriptor; see
@@ -98,12 +91,14 @@ class DeviceIPCWrapper:
     dispatch by ``tensor.device.type`` without any if/elif chain.
     """
 
+    # The descriptor type this wrapper writes and reads; its tag must be
+    # unique among registered wrappers.
+    wire_type: ClassVar[type[msgspec.Struct]]
+
     # Interface fields populated by each concrete subclass's
     # ``__init__``.  Declared here so the base-class ``__eq__`` (and
     # type-checkers) can see them; ``handle`` is intentionally typed as
-    # ``Any`` because each backend stores a different opaque payload
-    # (``tuple`` for CUDA shared-storage IPC, ``None`` for the SHM /
-    # raw-CUDA paths that override ``to_tensor``).
+    # ``Any`` because each backend stores a different opaque payload.
     handle: Any
     dtype: torch.dtype
     shape: Tuple[int, ...]
@@ -255,12 +250,12 @@ class DeviceIPCWrapper:
         self.storage_offset = metadata.storage_offset
         self.device_uuid = metadata.device_uuid
 
-    def to_wire(self) -> WireIPCData:
-        """Return an explicit descriptor for a supported IPC implementation."""
+    def to_wire(self) -> msgspec.Struct:
+        """Return this wrapper's descriptor, an instance of :attr:`wire_type`."""
         raise NotImplementedError
 
     @classmethod
-    def from_wire(cls, data: WireIPCData) -> "DeviceIPCWrapper":
+    def from_wire(cls, data: msgspec.Struct) -> "DeviceIPCWrapper":
         """Restore a wrapper from its validated descriptor without opening it."""
         raise NotImplementedError
 
@@ -275,14 +270,14 @@ class DeviceIPCWrapper:
             Versioned descriptor bytes for both MP transports.
 
         Raises:
-            ValueError: If the wrapper is not an explicitly supported type.
+            ValueError: If no registered device spec declares the wrapper
+                for its descriptor type.
         """
+        # First Party
+        from lmcache.v1.platform._device_detect import get_ipc_wrapper_types
+
         data = obj.to_wire()
-        module, name = WRAPPER_TYPES[type(data)]
-        if (type(obj).__module__, type(obj).__name__) != (
-            f"lmcache.v1.platform.devices.{module}",
-            name,
-        ):
+        if get_ipc_wrapper_types().get(type(data)) is not type(obj):
             raise ValueError("Unsupported IPC wrapper type")
         return msgspec.msgpack.encode(data)
 
@@ -299,16 +294,13 @@ class DeviceIPCWrapper:
         Raises:
             msgspec.DecodeError: If the descriptor is malformed or unsupported.
         """
-        descriptor = msgspec.msgpack.decode(data, type=WireIPCData)
-        module, name = WRAPPER_TYPES[type(descriptor)]
-        # Module and class names come exclusively from the local allowlist.
-        wrapper_cls = cast(
-            type[DeviceIPCWrapper],
-            getattr(
-                importlib.import_module(f"lmcache.v1.platform.devices.{module}"), name
-            ),
-        )
-        return wrapper_cls.from_wire(descriptor)
+        # First Party
+        from lmcache.v1.platform._device_detect import get_ipc_wrapper_types
+
+        # Only wire types that registered device specs declare can decode.
+        wrappers = get_ipc_wrapper_types()
+        descriptor = msgspec.msgpack.decode(data, type=Union[tuple(wrappers)])
+        return wrappers[type(descriptor)].from_wire(descriptor)
 
 
 KVCache = list[DeviceIPCWrapper]

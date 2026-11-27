@@ -24,17 +24,13 @@ from collections.abc import Sequence
 from typing import Any, ClassVar
 
 # Third Party
+import msgspec
 import torch
 
 # First Party
-from lmcache.v1.platform.base.ipc_wire import (
-    DTYPES,
-    NpuIPCData,
-    NpuPlaneData,
-    TensorMetadata,
-    WireIPCData,
-)
+from lmcache.v1.platform.base.ipc_wire import DTYPES, TensorMetadata
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.devices.npu.ipc_wire import NpuIPCData, NpuPlaneData
 
 #: Per-plane IPC record: ``(handle, dtype, shape, stride, storage_offset)``.
 #: ``handle`` is the opaque payload of ``UntypedStorage._share_npu_()``;
@@ -56,6 +52,7 @@ class NpuIPCWrapper(DeviceIPCWrapper):
     #: ``torch.device.type`` this wrapper handles; also read by the
     #: server's ``_detect_device_type`` to route to the NPU device spec.
     device_type: ClassVar[str] = "npu"
+    wire_type: ClassVar[type[msgspec.Struct]] = NpuIPCData
 
     #: Per-plane ``(handle, dtype, shape, stride, storage_offset)`` records.
     _plane_records: tuple[PlaneRecord, ...]
@@ -141,7 +138,7 @@ class NpuIPCWrapper(DeviceIPCWrapper):
         )
 
     @classmethod
-    def from_wire(cls, data: WireIPCData) -> "NpuIPCWrapper":
+    def from_wire(cls, data: msgspec.Struct) -> "NpuIPCWrapper":
         """Restore the registered layer form without opening NPU resources."""
         if not isinstance(data, NpuIPCData):
             raise ValueError("Expected NPU IPC descriptor")

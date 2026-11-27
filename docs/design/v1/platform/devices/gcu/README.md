@@ -2,10 +2,9 @@
 
 This package wires Enflame GCU into LMCache's platform abstraction so that
 ``torch.gcu`` is detected as a first-class accelerator. All GCU-specific
-behaviour lives under ``lmcache/v1/platform/devices/gcu/``; the only shared-file
-change is the ``GcuIPCData`` wire descriptor registered in
-``lmcache/v1/platform/base/ipc_wire.py``, which defaults to the existing
-CUDA/torch behaviour when GCU is absent.
+behaviour lives under ``lmcache/v1/platform/devices/gcu/``, including the
+``GcuIPCData`` wire descriptor, which ``GcuDeviceSpec.ipc_wrapper_types``
+registers for decoding.
 
 ## Package layout
 
@@ -15,6 +14,7 @@ CUDA/torch behaviour when GCU is absent.
 | ``device_ops.py`` | ``GcuDeviceOps``: forwards the unified ``DeviceOps`` surface to the ``triton_kernel_gcu`` plugin's ``torch.ops.TRITON_GCU.lmcache`` operators. |
 | ``cache_context.py`` | ``GcuCacheContext``: ``GPUCacheContext`` with CPU-resident pointer tables and a cupy-free observability stream. |
 | ``event_ipc.py`` | ``GcuEventIPCBackend``: GCU interprocess events with a direct-probe capability check. |
+| ``ipc_wire.py`` | ``GcuIPCData``: the data-only wire descriptor ``GcuIPCWrapper`` reads and writes. |
 | ``ipc_wrapper.py`` | ``GcuIPCWrapper``: KV-cache tensor sharing via ``UntypedStorage._share_gcu_`` / ``_new_shared_gcu``. |
 | ``pin_memory.py`` | ``GcuPinMemoryBackend``: host pinning via ``topsHostRegister`` / ``topsHostUnregister``. |
 
@@ -45,8 +45,8 @@ the topsfile path is synchronous, so no stream-ordering callback is needed.
 
 ``GcuIPCWrapper`` mirrors ``CudaIPCWrapper`` but rides
 ``UntypedStorage._share_gcu_`` / ``_new_shared_gcu``. Its wire descriptor is
-``GcuIPCData`` (same 8-tuple handle shape as ``CudaIPCData``), registered in
-``lmcache/v1/platform/base/ipc_wire.py``. Device identity prefers
+``GcuIPCData`` (same 8-tuple handle shape as ``CudaIPCData``), defined in
+``lmcache/v1/platform/devices/gcu/ipc_wire.py``. Device identity prefers
 ``get_device_properties(idx).uuid`` and falls back to the ordinal with a warning
 when torch_gcu exposes no physical identifier.
 

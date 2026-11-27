@@ -248,6 +248,23 @@ class DeviceSpec:
         """
         return None
 
+    @property
+    def ipc_wrapper_types(self) -> tuple[type[DeviceIPCWrapper], ...]:
+        """Every :class:`DeviceIPCWrapper` subclass this device can receive.
+
+        Each wrapper's ``wire_type`` joins the set of descriptors that
+        :meth:`DeviceIPCWrapper.Deserialize` accepts, so a device brings its
+        own wire format without editing the platform base. The default is
+        :attr:`ipc_wrapper_cls` alone. Override it when the exporting process
+        can pick among several wrappers, so the receiver accepts each of them.
+
+        Returns:
+            The receivable wrapper classes; empty when the device has no IPC
+            wrapper support.
+        """
+        wrapper_cls = self.ipc_wrapper_cls
+        return () if wrapper_cls is None else (wrapper_cls,)
+
     def _get_pin_backend(self) -> PinMemoryBackend:
         """Return the cached pin-memory backend, instantiating on first use."""
         backend = self._pin_backend_cache

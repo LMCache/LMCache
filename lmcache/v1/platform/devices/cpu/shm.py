@@ -23,12 +23,13 @@ import threading
 import weakref
 
 # Third Party
+import msgspec
 import torch
 
 # First Party
 from lmcache.v1.common.logging import init_logger
-from lmcache.v1.platform.base.ipc_wire import CpuShmIPCData, WireIPCData
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.devices.cpu.ipc_wire import CpuShmIPCData
 from lmcache.v1.platform.posix_shm import (
     shm_create_readwrite,
     shm_map_readwrite,
@@ -76,6 +77,7 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
     #: constant so external tooling / tests can introspect the binding
     #: without instantiating the wrapper.
     device_type: ClassVar[str] = "cpu"
+    wire_type: ClassVar[type[msgspec.Struct]] = CpuShmIPCData
 
     # POSIX shared-memory name (``/lmcache_...``) -- leading ``/`` is
     # required by ``shm_open(3)`` on both Linux and macOS.
@@ -162,7 +164,7 @@ class CpuShmTensorWrapper(DeviceIPCWrapper):
         )
 
     @classmethod
-    def from_wire(cls, data: WireIPCData) -> "CpuShmTensorWrapper":
+    def from_wire(cls, data: msgspec.Struct) -> "CpuShmTensorWrapper":
         """Restore a shared-memory descriptor without mapping the segment."""
         if not isinstance(data, CpuShmIPCData):
             raise ValueError("Expected CPU SHM IPC descriptor")

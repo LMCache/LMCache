@@ -15,6 +15,7 @@ import inspect
 import os
 
 # Third Party
+import msgspec
 import torch
 
 # First Party
@@ -22,8 +23,8 @@ from lmcache.v1.common.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
 from lmcache.v1.common.utils import assert_contiguous
-from lmcache.v1.platform.base.ipc_wire import MusaIPCData, WireIPCData
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.devices.musa.ipc_wire import MusaIPCData
 
 ENV_MUSA_HANDLE_TRANSFER = "LMCACHE_MUSA_HANDLE_TRANSFER"
 
@@ -231,6 +232,7 @@ class MusaIPCWrapper(DeviceIPCWrapper):
     """Wire-compatible wrapper for TorchMUSA memory IPC handles."""
 
     device_type: ClassVar[str] = "musa"
+    wire_type: ClassVar[type[msgspec.Struct]] = MusaIPCData
 
     _opened_handle: _TorchMusaIPCOwner | None
 
@@ -297,7 +299,7 @@ class MusaIPCWrapper(DeviceIPCWrapper):
         )
 
     @classmethod
-    def from_wire(cls, data: WireIPCData) -> "MusaIPCWrapper":
+    def from_wire(cls, data: msgspec.Struct) -> "MusaIPCWrapper":
         """Restore a MUSA descriptor without a receiver-local owner."""
         if not isinstance(data, MusaIPCData):
             raise ValueError("Expected MUSA IPC descriptor")

@@ -17,7 +17,9 @@ cached process-wide.
 """
 
 # Standard
+from collections.abc import Mapping
 from functools import lru_cache
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 import importlib.metadata
 import os
@@ -26,8 +28,12 @@ import os
 from lmcache.v1.common.logging import init_logger
 
 if TYPE_CHECKING:
+    # Third Party
+    import msgspec
+
     # First Party
     from lmcache.v1.platform.base.device_spec import DeviceSpec
+    from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 logger = init_logger(__name__)
 
@@ -145,6 +151,57 @@ def _build_device_registry() -> "dict[str, tuple[DeviceSpec, ...]]":
     for spec in _build_backend_registry().values():
         registry.setdefault(spec.device_type, []).append(spec)
     return {device_type: tuple(specs) for device_type, specs in registry.items()}
+
+
+@lru_cache(maxsize=1)
+def _build_ipc_wire_registry() -> "dict[type[msgspec.Struct], type[DeviceIPCWrapper]]":
+    """Index every registered spec's IPC wrappers by their wire type.
+
+    Like a broken plugin spec, a spec whose wrappers cannot be imported or
+    lack a tagged wire type is skipped, so it cannot break IPC for the
+    other devices.
+    """
+    # Third Party
+    import msgspec
+
+    wrappers: dict[type[msgspec.Struct], type[DeviceIPCWrapper]] = {}
+    tag_owners: dict[str | int, type[DeviceIPCWrapper]] = {}
+    for spec in _build_backend_registry().values():
+        try:
+            spec_wrappers = spec.ipc_wrapper_types
+        except ImportError:
+            logger.exception(
+                "Ignoring the IPC wrappers of DeviceSpec %s", type(spec).__qualname__
+            )
+            continue
+        for wrapper in spec_wrappers:
+            wire_type = getattr(wrapper, "wire_type", None)
+            if not (
+                isinstance(wire_type, type)
+                and issubclass(wire_type, msgspec.Struct)
+                and wire_type.__struct_config__.tag is not None
+            ):
+                logger.warning(
+                    "Ignoring IPC wrapper %s from DeviceSpec %s: wire_type is not "
+                    "a tagged msgspec.Struct",
+                    wrapper.__qualname__,
+                    type(spec).__qualname__,
+                )
+                continue
+            tag = wire_type.__struct_config__.tag
+            owner = tag_owners.setdefault(tag, wrapper)
+            if owner is not wrapper:
+                logger.warning(
+                    "Ignoring IPC wrapper %s from DeviceSpec %s because wire tag "
+                    "%r is already registered by %s",
+                    wrapper.__qualname__,
+                    type(spec).__qualname__,
+                    tag,
+                    owner.__qualname__,
+                )
+                continue
+            wrappers[wire_type] = wrapper
+    return wrappers
 
 
 def _get_env_choice(env_var_name: str) -> "str | None":
@@ -297,6 +354,19 @@ def get_device_spec(device_type: str) -> "DeviceSpec | None":
     if len(default_specs) == 1:
         return default_specs[0]
     return None
+
+
+def get_ipc_wrapper_types() -> "Mapping[type[msgspec.Struct], type[DeviceIPCWrapper]]":
+    """Return the IPC wrapper registered for each accepted wire type.
+
+    Built-in specs register first, then device plugins. A wrapper whose
+    wire tag is already taken by another wrapper is ignored with a warning,
+    so a plugin cannot change how a built-in descriptor decodes.
+
+    Returns:
+        A read-only mapping from wire descriptor type to wrapper class.
+    """
+    return MappingProxyType(_build_ipc_wire_registry())
 
 
 @lru_cache(maxsize=1)

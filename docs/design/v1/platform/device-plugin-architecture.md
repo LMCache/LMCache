@@ -89,13 +89,45 @@ paths and per-layer KV-cache registration therefore do not re-probe
 `is_available()`, and the auto-selected backend is logged once per process.
 `LMCACHE_DEVICE_BACKEND` must be set before that first lookup.
 
+## IPC Wire Descriptors
+
+KV-cache IPC wrappers cross the MP wire as data-only MessagePack descriptors.
+Each wrapper names its descriptor type in `wire_type`, a tagged `msgspec.Struct`
+that lives next to the wrapper in the device package:
+
+```python
+class FooIPCData(IPCData, tag="foo"):
+    handle: bytes
+
+
+class FooIPCWrapper(DeviceIPCWrapper):
+    wire_type = FooIPCData
+    ...
+
+
+class FooDeviceSpec(DeviceSpec):
+    @property
+    def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper]:
+        return FooIPCWrapper
+```
+
+`DeviceIPCWrapper.Deserialize` decodes only the wire types of the wrappers
+that registered specs list in `ipc_wrapper_types`, so a plugin brings its own
+descriptor without editing `platform/base`. `ipc_wrapper_types` defaults to
+`ipc_wrapper_cls`. A device overrides it when the exporting process can pick
+among several wrappers: CUDA lists all three of its wrappers because the
+exporting process chooses one by IPC policy, and the receiver must accept any
+of them.
+
 ## Ordering, Conflicts, and Failure Isolation
 
 Built-in device specs are registered before external specs. External entry
 points are sorted by `(name, value)` before loading. If multiple specs claim the
 same `backend_name`, the first valid entry wins and later entries are logged and
 ignored. This prevents an external wheel from silently replacing a bundled
-backend with the same identity.
+backend with the same identity. IPC wire tags follow the same rule: a wrapper
+whose tag another wrapper already registered is logged and ignored, so a plugin
+cannot change how a built-in descriptor decodes.
 
 Multiple backends may intentionally share one `device_type`. If exactly one of
 them reports `is_available()`, LMCache selects it automatically. If more than
@@ -108,7 +140,9 @@ torch's `cuda` device type, while mutually exclusive runtime checks select the
 Each external entry point has an independent failure boundary. Load,
 validation, and construction exceptions produce a warning and skip only that
 plugin. This keeps CLI and CPU fallback behavior available when an optional
-vendor runtime or shared library is absent. Exceptions from `is_available()`
+vendor runtime or shared library is absent. The same holds for IPC wrappers: a
+spec whose `ipc_wrapper_types` fails to import, or whose wrapper lacks a tagged
+`wire_type`, loses only its own wrappers. Exceptions from `is_available()`
 remain the plugin's responsibility: implementations should catch vendor probe
 errors and return `False`.
 
@@ -126,7 +160,7 @@ must trust installed device-plugin distributions.
 ## Non-goals
 
 - Hot installation or registry refresh in a running process.
-- Silently overriding an existing `backend_name`.
+- Silently overriding an existing `backend_name` or IPC wire tag.
 - Priority-based automatic selection when multiple implementations for one
   `device_type` report available simultaneously.
 - Guaranteeing ABI compatibility for native extensions outside the version

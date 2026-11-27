@@ -26,13 +26,14 @@ from typing import Any, ClassVar
 import threading
 
 # Third Party
+import msgspec
 import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.common.logging import init_logger
-from lmcache.v1.platform.base.ipc_wire import GcuIPCData, WireIPCData
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+from lmcache.v1.platform.devices.gcu.ipc_wire import GcuIPCData
 
 logger = init_logger(__name__)
 
@@ -41,6 +42,7 @@ class GcuIPCWrapper(DeviceIPCWrapper):
     """IPC wrapper for GCU KV-cache tensors from the torch caching allocator."""
 
     device_type: ClassVar[str] = "gcu"
+    wire_type: ClassVar[type[msgspec.Struct]] = GcuIPCData
 
     _ordinal_fallback_warned: ClassVar[bool] = False
 
@@ -152,7 +154,7 @@ class GcuIPCWrapper(DeviceIPCWrapper):
         return GcuIPCData(version=1, metadata=self.wire_metadata(), handle=self.handle)
 
     @classmethod
-    def from_wire(cls, data: WireIPCData) -> "GcuIPCWrapper":
+    def from_wire(cls, data: msgspec.Struct) -> "GcuIPCWrapper":
         """Restore a validated shared-storage descriptor without opening it."""
         if not isinstance(data, GcuIPCData):
             raise ValueError("Expected GCU IPC descriptor")

@@ -513,6 +513,14 @@ checks — both must succeed, otherwise the factory raises
    :attr:`~lmcache.v1.platform.base.device_spec.DeviceSpec.ipc_wrapper_cls`.
    :func:`~lmcache.v1.platform.resolve_kv_wrapper_factory` reads that
    binding off the registered spec — no separate registry / auto-scan.
+   The wrapper names its MessagePack descriptor in ``wire_type``: a
+   ``msgspec.Struct`` subclass of
+   :class:`~lmcache.v1.platform.base.ipc_wire.IPCData` with a unique
+   ``tag``, defined in your device package. Only wire types of registered
+   wrappers decode on the receiving side. If the exporting process can
+   choose among several wrappers, also override
+   :attr:`~lmcache.v1.platform.base.device_spec.DeviceSpec.ipc_wrapper_types`
+   to list all of them.
 2. ``DeviceSpec.is_lmcache_driven_available()`` must return ``True``
    (the base-class default is ``False``; a device with the complete
    handle-transfer stack overrides it to ``True``).

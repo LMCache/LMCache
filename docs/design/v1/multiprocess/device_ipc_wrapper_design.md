@@ -36,7 +36,7 @@ transport shares:
 - **Interface fields** — `dtype`, `shape`, `stride`, `storage_offset`, `device_uuid`. Subclasses populate these in `__init__`; the base uses them for equality and the receiving side uses them to rebuild the logical view.
 - **Device discovery** — `_get_device_uuid`, `_discover_devices`,`_get_device_index_from_uuid`. These are `@classmethod`s (not static) and route through the `torch_dev` abstraction, so they work across device backends, and a subclass can override `_get_device_uuid` if its backend needs a different identity source.
 - **Equality** — `__eq__` uses a `type(self) is type(other)` guard, so two different wrapper subclasses never compare equal even if their fields coincide.
-- **Serialization** — `Serialize`/`Deserialize` encode typed MessagePack descriptors from `platform/base/ipc_wire.py`. A fixed local tag-to-wrapper allowlist preserves concrete identity without loading Python objects from the wire.
+- **Serialization** — `Serialize`/`Deserialize` encode typed MessagePack descriptors. Each wrapper declares its descriptor as `wire_type`, defined in its device package, and each `DeviceSpec` lists the wrappers it can receive in `ipc_wrapper_types`. Only wire types from registered specs decode, which preserves concrete identity without loading Python objects from the wire. Shared descriptor parts (`IPCData`, `TensorMetadata`) live in `platform/base/ipc_wire.py`.
 - **`to_tensor()`** — abstract; raises `NotImplementedError`. Every subclass overrides it with its transport-specific reconstruction.
 
 ## How to dispatch
