@@ -67,3 +67,11 @@ def test_kafka_source_config_defaults() -> None:
     config = KafkaCacheEventSourceConfig(bootstrap_servers="broker:9092")
     assert config.topic == "lmcache-cache-events"
     assert config.group_id == "lmcache-coordinator"
+
+
+@pytest.mark.parametrize("target", [1.0, 1.1, -0.1])
+def test_target_watermark_must_sit_below_the_trigger(target) -> None:
+    with pytest.raises(ValueError, match="target_watermark"):
+        MPCoordinatorConfig(trigger_watermark=1.0, target_watermark=target)
+    MPCoordinatorConfig(trigger_watermark=1.0, target_watermark=0.7)
+    MPCoordinatorConfig(trigger_watermark=1.0, target_watermark=0.0)

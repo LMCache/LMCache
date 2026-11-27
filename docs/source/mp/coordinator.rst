@@ -73,6 +73,14 @@ keeps the default below.
      - ``1.0``
      - Eviction fires when usage reaches this fraction of the quota
        (0.0 exclusive to 1.0).
+   * - ``--target-watermark``
+     - ``0.0``
+     - Low watermark of the hysteresis band. When above ``0.0`` and below
+       ``--trigger-watermark``, a salt over the trigger is evicted down to
+       this fraction of its quota in one pass instead of
+       ``--eviction-ratio``, so a sustained write burst cannot pin it at the
+       quota. ``0.0`` keeps the fixed ratio. Any other value (at or above
+       the trigger, or negative) is refused at startup.
    * - ``--chunk-size``
      - ``256``
      - Fleet-wide size in tokens for KV chunks, CacheBlend matching, and

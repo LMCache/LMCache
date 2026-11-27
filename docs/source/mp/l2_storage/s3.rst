@@ -25,6 +25,51 @@ S3-compatible endpoint (MinIO, Ceph RGW, etc.).
 - ``max_capacity_gb`` (float, default ``0.0``): Aggregate capacity used by
   ``get_usage()``.  A value of ``0`` disables aggregate eviction
   (``usage_fraction == -1.0``).
+- ``store_reject_watermark`` (float, default ``0.0``, >= 0): Best-effort
+  write ceiling.  When ``usage_fraction`` is at or above this value, new
+  stores are dropped instead of written: the store task completes as failed,
+  and the chunk is recomputed on a later miss.  This bounds how far usage can
+  overshoot the cap while eviction catches up.  ``0`` disables it, and it
+  never applies without ``max_capacity_gb`` (usage is then ``-1``).  With
+  ``max_capacity_gb`` and an ``eviction`` block, a non-zero value below
+  ``eviction.trigger_watermark`` is refused at config load: stores would stop
+  before usage reached the trigger, so eviction would never run.
+- ``eviction`` (object): L2 eviction settings shared by all adapters,
+  including the ``target_watermark`` hysteresis; see
+  :ref:`mp-l2-eviction` and the example below.
+
+**Eviction under sustained writes:**
+
+Two behaviours are always on and have no setting:
+
+- **Bulk deletes.**  Eviction deletes objects with S3 ``DeleteObjects``,
+  up to 1000 keys per request, instead of one ``DeleteObject`` per key.
+  Keys that S3 reports as failed in the response stay tracked and are
+  retried on a later sweep.  If the endpoint rejects ``DeleteObjects`` as
+  unsupported (HTTP ``405`` or ``501``, or the S3 error codes
+  ``NotImplemented``, ``XNotImplemented`` or ``MethodNotAllowed``), the
+  adapter deletes those keys one ``DeleteObject``
+  at a time, at most 64 in flight, in the same sweep.  It logs one WARNING
+  and keeps using per-key deletes for the rest of the process.
+- **Write coalescing.**  A store of a key whose upload is already in flight
+  does not upload it again, so concurrent stores of the same chunk upload it
+  once.  The later store task waits for that upload and takes its outcome: it
+  completes once its own uploads and every upload it joined have finished, and
+  succeeds only if all of them did.  A task whose keys were all coalesced
+  reports 0 bytes.
+
+Two are opt-in: ``store_reject_watermark`` above, and eviction hysteresis
+(``"target_watermark"`` in the ``eviction`` object), which makes a sweep that
+fires at ``trigger_watermark`` evict down to ``target_watermark`` in one pass.
+
+``report_status()`` exposes the balance between writes and eviction:
+
+- ``eviction_lag``: usage above the cap (``max(0, usage_fraction - 1)``).
+- ``store_in_flight_chunks``: keys with an upload in flight.
+- ``store_rejected_chunks``: keys dropped at ``store_reject_watermark``.
+- ``store_coalesced_chunks``: keys skipped because an upload was in flight.
+- ``bulk_delete_supported``: ``false`` once the endpoint rejected
+  ``DeleteObjects`` and deletes go key by key.
 
 **Object sizes:**
 
@@ -47,3 +92,6 @@ therefore miss on every load through this adapter.
 
     # Local MinIO over plain HTTP
     --l2-adapter '{"type": "s3", "s3_endpoint": "minio.local:9000", "s3_region": "us-east-1", "disable_tls": true, "aws_access_key_id": "minio", "aws_secret_access_key": "minio123"}'
+
+    # 500 GB cap: evict at 90 % down to 70 %, and drop new stores above 110 %
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2", "max_capacity_gb": 500, "store_reject_watermark": 1.1, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "target_watermark": 0.7}}'

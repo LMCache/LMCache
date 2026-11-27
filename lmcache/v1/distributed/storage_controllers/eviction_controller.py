@@ -33,6 +33,23 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def hysteresis_eviction_ratio(
+    current: float, target: float, fallback_ratio: float
+) -> float:
+    """Fraction of tracked keys to evict so usage drops from ``current`` to
+    ``target`` in one pass.
+
+    ``current`` and ``target`` are in the same unit: a usage fraction, or
+    bytes against a quota. KV chunks are close to uniform in size, so a
+    key-count ratio approximates a byte ratio. Hysteresis is off when
+    ``target`` is ``0`` or less, and ``fallback_ratio`` (the configured
+    ``eviction_ratio``) is returned unchanged.
+    """
+    if target <= 0.0 or current <= 0.0:
+        return fallback_ratio
+    return max(0.0, min(1.0, (current - target) / current))
+
+
 class EvictionController(StorageControllerInterface):
     """
     Abstract base class for eviction controllers.
@@ -114,6 +131,7 @@ class L1EvictionController(EvictionController):
             "thread_alive": self._thread.is_alive(),
             "eviction_policy": self._eviction_config.eviction_policy,
             "trigger_watermark": self._eviction_config.trigger_watermark,
+            "target_watermark": self._eviction_config.target_watermark,
             "eviction_ratio": self._eviction_config.eviction_ratio,
         }
 
@@ -158,36 +176,44 @@ class L1EvictionController(EvictionController):
         )
 
     def eviction_loop(self):
-        watermark = self._eviction_config.trigger_watermark
-        eviction_ratio = self._eviction_config.eviction_ratio
-
         while not self._stop_flag.is_set():
             time.sleep(1)
-            used_bytes, total_bytes = self._l1_manager.get_memory_usage()
-            if self._eviction_config.extra_logging_enabled:
-                self._maybe_log_memory_usage(used_bytes, total_bytes)
-            usage = 0 if total_bytes == 0 else used_bytes / total_bytes
-            if usage < watermark:
-                logger.debug(
-                    "L1 memory usage %.2f below watermark %.2f; skipping eviction.",
-                    usage,
-                    watermark,
-                )
-                self._publish_skipped(usage, watermark)
-                continue
+            self._check_and_evict()
 
-            logger.info(
-                "L1 memory usage %.2f above watermark %.2f; triggering eviction.",
+    def _check_and_evict(self) -> None:
+        """One eviction pass: evict if L1 usage is at or above the trigger."""
+        watermark = self._eviction_config.trigger_watermark
+        used_bytes, total_bytes = self._l1_manager.get_memory_usage()
+        if self._eviction_config.extra_logging_enabled:
+            self._maybe_log_memory_usage(used_bytes, total_bytes)
+        usage = 0 if total_bytes == 0 else used_bytes / total_bytes
+        if usage < watermark:
+            logger.debug(
+                "L1 memory usage %.2f below watermark %.2f; skipping eviction.",
                 usage,
                 watermark,
             )
-            actions = self._eviction_policy.get_eviction_actions(
-                eviction_ratio,
-                key_eligible_filter=self._l1_manager.is_key_evictable,
-            )
-            for action in actions:
-                self.execute_eviction_action(action)
-            self._publish_triggered(usage, watermark)
+            self._publish_skipped(usage, watermark)
+            return
+
+        effective_ratio = hysteresis_eviction_ratio(
+            usage,
+            self._eviction_config.target_watermark,
+            self._eviction_config.eviction_ratio,
+        )
+        logger.info(
+            "L1 memory usage %.2f above watermark %.2f; evicting ratio=%.2f.",
+            usage,
+            watermark,
+            effective_ratio,
+        )
+        actions = self._eviction_policy.get_eviction_actions(
+            effective_ratio,
+            key_eligible_filter=self._l1_manager.is_key_evictable,
+        )
+        for action in actions:
+            self.execute_eviction_action(action)
+        self._publish_triggered(usage, watermark)
 
     def execute_eviction_action(self, action: EvictionAction):
         if action.destination == EvictionDestination.DISCARD:
@@ -287,6 +313,7 @@ class L2EvictionController(StorageControllerInterface):
                 {
                     "eviction_policy": state.eviction_config.eviction_policy,
                     "trigger_watermark": state.eviction_config.trigger_watermark,
+                    "target_watermark": state.eviction_config.target_watermark,
                     "eviction_ratio": state.eviction_config.eviction_ratio,
                     "current_usage": usage.usage_fraction,
                     "total_bytes_used": usage.total_bytes_used,
@@ -319,6 +346,7 @@ class L2EvictionController(StorageControllerInterface):
     def _check_and_evict_global(self, state: L2AdapterEvictionState):
         """Aggregate-usage eviction (``LRU`` / ``noop``)."""
         watermark = state.eviction_config.trigger_watermark
+        target = state.eviction_config.target_watermark
         eviction_ratio = state.eviction_config.eviction_ratio
 
         # ``usage_fraction == -1`` means the adapter doesn't support
@@ -335,12 +363,22 @@ class L2EvictionController(StorageControllerInterface):
             )
             return
 
+        # Hysteresis: when a low (target) watermark is configured, evict down to
+        # it in one pass instead of a fixed ratio, so headroom always exists and
+        # eviction can't fall behind a sustained write burst (a single-watermark
+        # fixed-ratio sweep lets usage pin at the cap under load).
+        effective_ratio = hysteresis_eviction_ratio(
+            current_usage, target, eviction_ratio
+        )
+
         logger.info(
-            "L2 usage %.2f above watermark %.2f; triggering eviction.",
+            "L2 usage %.2f above watermark %.2f; evicting ratio=%.2f (target=%.2f).",
             current_usage,
             watermark,
+            effective_ratio,
+            target,
         )
-        actions = state.eviction_policy.get_eviction_actions(eviction_ratio)
+        actions = state.eviction_policy.get_eviction_actions(effective_ratio)
         for action in actions:
             self._execute_eviction_action(state.adapter, action)
 
@@ -363,6 +401,7 @@ class L2EvictionController(StorageControllerInterface):
         """
         assert self._quota_manager is not None
         watermark = state.eviction_config.trigger_watermark
+        target = state.eviction_config.target_watermark
         eviction_ratio = state.eviction_config.eviction_ratio
         usage = state.adapter.get_usage()
 
@@ -379,9 +418,15 @@ class L2EvictionController(StorageControllerInterface):
             if user_bytes < watermark * limit:
                 continue
 
-            # Unregistered / zero-quota salts: wipe everything.
-            # Registered salts: evict the configured ratio of their list.
-            effective_ratio = 1.0 if limit == 0 else eviction_ratio
+            # Unregistered / zero-quota salts: wipe everything. Registered salts:
+            # with hysteresis (target_watermark>0) evict down to target*limit in
+            # one pass; otherwise evict the fixed configured ratio.
+            if limit == 0:
+                effective_ratio = 1.0
+            else:
+                effective_ratio = hysteresis_eviction_ratio(
+                    user_bytes, target * limit, eviction_ratio
+                )
             logger.info(
                 "cache_salt=%r over quota (bytes=%d, limit=%d, "
                 "watermark=%.2f); evicting ratio=%.2f.",

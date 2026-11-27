@@ -66,6 +66,9 @@ Commonly used flags include:
      - L1 eviction policy (``LRU``, ``ARC``, ``IsolatedLRU``, or ``noop``).
    * - ``--eviction-trigger-watermark RATIO``
      - L1 fill ratio at which eviction begins.
+   * - ``--eviction-target-watermark RATIO``
+     - L1 fill ratio a triggered eviction cycle evicts down to (hysteresis);
+       ``0`` (default) uses ``--eviction-ratio``.
    * - ``--eviction-ratio RATIO``
      - Fraction of L1 cleared per eviction cycle.
    * - ``--max-workers N``

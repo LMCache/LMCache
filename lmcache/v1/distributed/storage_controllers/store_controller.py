@@ -11,6 +11,7 @@ The controller runs a background thread with an event-driven loop that:
 
 # Standard
 from collections import Counter, OrderedDict, defaultdict, deque
+from collections.abc import Callable
 from dataclasses import dataclass
 import enum
 import select
@@ -46,6 +47,74 @@ logger = init_logger(__name__)
 
 # Poll timeout in milliseconds for the store loop
 STORE_LOOP_POLL_TIMEOUT_MS = 500
+
+# At most one WARNING per this many seconds for failed L2 store tasks.
+STORE_FAILURE_WARN_INTERVAL_S = 10.0
+
+
+class StoreFailureLog:
+    """Rate-limits the WARNING for failed L2 store tasks.
+
+    An adapter that drops stores on purpose (for example the S3 adapter at its
+    ``store_reject_watermark`` ceiling) fails every task while usage stays
+    there, and one WARNING listing the keys per task floods the log. The first
+    failure in each interval is logged at WARNING with its keys, the rest at
+    DEBUG, and the next WARNING reports how many were folded into DEBUG since
+    the last one.
+
+    Args:
+        interval_s: Minimum seconds between two WARNINGs.
+        clock: Monotonic clock, injectable for tests.
+    """
+
+    def __init__(
+        self,
+        interval_s: float = STORE_FAILURE_WARN_INTERVAL_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._interval_s = interval_s
+        self._clock = clock
+        self._last_warn: float | None = None
+        self._suppressed_tasks = 0
+        self._suppressed_keys = 0
+
+    def record(
+        self, task_id: L2TaskId, adapter_index: int, keys: list[ObjectKey]
+    ) -> None:
+        """Log one failed store task."""
+        now = self._clock()
+        if self._last_warn is not None and now - self._last_warn < self._interval_s:
+            self._suppressed_tasks += 1
+            self._suppressed_keys += len(keys)
+            logger.debug(
+                "Store task %d to adapter %d failed for keys: %s",
+                task_id,
+                adapter_index,
+                keys,
+            )
+            return
+        if self._suppressed_tasks:
+            logger.warning(
+                "Store task %d to adapter %d failed for keys: %s "
+                "(%d more failed store tasks, %d keys, logged at DEBUG "
+                "in the last %.0f s)",
+                task_id,
+                adapter_index,
+                keys,
+                self._suppressed_tasks,
+                self._suppressed_keys,
+                now - self._last_warn if self._last_warn is not None else 0.0,
+            )
+        else:
+            logger.warning(
+                "Store task %d to adapter %d failed for keys: %s",
+                task_id,
+                adapter_index,
+                keys,
+            )
+        self._last_warn = now
+        self._suppressed_tasks = 0
+        self._suppressed_keys = 0
 
 
 def _group_keys_by_shape(
@@ -301,6 +370,7 @@ class StoreController(StorageControllerInterface):
         # In-flight tasks still counted against the budget -> when their read
         # locks lapse. Deadlines ascend in insertion order.
         self._budget_deadlines: OrderedDict[tuple[int, L2TaskId], float] = OrderedDict()
+        self._store_failure_log = StoreFailureLog()
 
         StoreController._gauge_target = self
         StoreController._gauge_targets[l1_manager.config.tag] = self
@@ -919,12 +989,7 @@ class StoreController(StorageControllerInterface):
                     },
                 )
             )
-            logger.warning(
-                "Store task %d to adapter %d failed for keys: %s",
-                task_id,
-                adapter_index,
-                task.keys,
-            )
+            self._store_failure_log.record(task_id, adapter_index, task.keys)
 
     def _delete_from_l1(self, keys: list[ObjectKey]) -> None:
         """Delete ``keys`` from L1 and defer the ones a reader still holds."""

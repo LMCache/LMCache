@@ -8,10 +8,12 @@ routes PUT/GET/HEAD/DELETE against a shared dict.  No network required.
 
 # Standard
 from concurrent.futures import Future as ConcurrentFuture
+import logging
 import select
 import threading
 
 # Third Party
+from awscrt.s3 import S3ResponseError
 import pytest
 import torch
 
@@ -22,7 +24,9 @@ from lmcache.v1.distributed.l2_adapters import s3_l2_adapter as s3mod
 from lmcache.v1.distributed.l2_adapters.s3_l2_adapter import (
     S3L2Adapter,
     S3L2AdapterConfig,
+    _build_delete_objects_body,
     _object_key_to_string,
+    _parse_delete_objects_errors,
 )
 from lmcache.v1.memory_management import (
     MemoryFormat,
@@ -57,6 +61,21 @@ class _FakeBackend:
         self._get_count = 0
         self._delete_count = 0
         self._head_count = 0
+        # DeleteObjects behaviour. ``_bulk_delete_rejection`` = (status, code)
+        # makes every multi-delete fail the way an endpoint without
+        # DeleteObjects does; ``_bulk_delete_fail_keys`` are reported as
+        # per-key <Error> entries in an otherwise successful 200 response.
+        self._bulk_delete_rejection: tuple[int, str] | None = None
+        self._bulk_delete_fail_keys: set[str] = set()
+        self._bulk_delete_requests = 0
+        self._single_delete_requests = 0
+        # When set, a PUT signals ``_put_started`` and then waits on
+        # ``_put_gate`` before landing, so a test can hold one upload in
+        # flight while it submits another.
+        self._put_gate: threading.Event | None = None
+        self._put_started = threading.Event()
+        # When True, a PUT held on ``_put_gate`` fails once released.
+        self._fail_held_put = False
 
     def reset(self):
         with self._lock:
@@ -65,6 +84,12 @@ class _FakeBackend:
             self._get_chunk_size = None
             self._put_count = self._get_count = 0
             self._delete_count = self._head_count = 0
+            self._bulk_delete_rejection = None
+            self._bulk_delete_fail_keys = set()
+            self._bulk_delete_requests = self._single_delete_requests = 0
+            self._put_gate = None
+            self._put_started = threading.Event()
+            self._fail_held_put = False
 
     def get(self, key: str) -> bytes | None:
         with self._lock:
@@ -114,6 +139,21 @@ def _path_to_key(path: str) -> str:
     from urllib.parse import unquote
 
     return unquote(path.lstrip("/"))
+
+
+def _parse_delete_request_keys(xml: bytes) -> list[str]:
+    """Extract ``<Object><Key>`` strings from a DeleteObjects request body."""
+    # Standard
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(xml)
+    return [
+        key.text
+        for obj in root
+        if obj.tag.rsplit("}", 1)[-1] == "Object"
+        for key in obj
+        if key.tag.rsplit("}", 1)[-1] == "Key" and key.text
+    ]
 
 
 def _build_list_objects_v2_response(
@@ -232,6 +272,70 @@ class _FakeS3Request:
                 if not self.finished_future.done():
                     self.finished_future.set_exception(e)
             return
+
+        # DeleteObjects (multi-delete) is a POST to the bucket root with a
+        # ``?delete`` subresource and an XML body listing keys. Intercept before
+        # the per-key branch so it isn't treated as an object named "".
+        if (
+            method == "POST"
+            and operation_name == "DeleteObjects"
+            and path == "/?delete"
+        ):
+            request.body_stream.seek(0)
+            xml = bytes(request.body_stream.read())
+            keys = _parse_delete_request_keys(xml)
+            with _BACKEND._lock:
+                _BACKEND._bulk_delete_requests += 1
+                rejection = _BACKEND._bulk_delete_rejection
+                fail_keys = set(_BACKEND._bulk_delete_fail_keys)
+            if rejection is not None:
+                # What the CRT raises for a non-2xx response: an
+                # S3ResponseError with the status and the XML error body.
+                status, code = rejection
+                self.finished_future.set_exception(
+                    S3ResponseError(
+                        code=14343,
+                        name="AWS_ERROR_S3_INVALID_RESPONSE_STATUS",
+                        message="Invalid response status from request",
+                        status_code=status,
+                        headers=[("content-type", "application/xml")],
+                        body=(
+                            f"<Error><Code>{code}</Code>"
+                            "<Message>not supported</Message></Error>"
+                        ).encode(),
+                        operation_name="DeleteObjects",
+                    )
+                )
+                _call_on_done(on_done, error=None, status_code=status)
+                return
+            try:
+                with _BACKEND._lock:
+                    _BACKEND._delete_count += len(keys)
+                for k in keys:
+                    if k not in fail_keys:
+                        _BACKEND.delete(k)
+                if on_headers is not None:
+                    on_headers(200, [("content-type", "application/xml")])
+                # Quiet mode: the body lists only the keys that failed.
+                errors = "".join(
+                    f"<Error><Key>{k}</Key><Code>AccessDenied</Code></Error>"
+                    for k in keys
+                    if k in fail_keys
+                )
+                if on_body is not None:
+                    on_body(
+                        b'<?xml version="1.0"?><DeleteResult '
+                        b'xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+                        + errors.encode()
+                        + b"</DeleteResult>",
+                        0,
+                    )
+                self.finished_future.set_result(None)
+                _call_on_done(on_done, error=None, status_code=200)
+            except Exception as e:
+                if not self.finished_future.done():
+                    self.finished_future.set_exception(e)
+            return
         key_str = _path_to_key(path)
 
         err_inj = _BACKEND._inject_error
@@ -241,6 +345,14 @@ class _FakeS3Request:
                 raise RuntimeError(err_inj)
 
             if method == "PUT":
+                gate = _BACKEND._put_gate
+                if gate is not None:
+                    _BACKEND._put_started.set()
+                    gate.wait(timeout=5.0)
+                    # Lets a test fail an upload that others coalesced onto,
+                    # without failing any other PUT.
+                    if _BACKEND._fail_held_put:
+                        raise RuntimeError("held PUT failed")
                 data = b""
                 body = request.body_stream
                 # body is a MemoryViewStream — read it fully
@@ -292,6 +404,7 @@ class _FakeS3Request:
             elif method == "DELETE":
                 with _BACKEND._lock:
                     _BACKEND._delete_count += 1
+                    _BACKEND._single_delete_requests += 1
                 _BACKEND.delete(key_str)
                 if on_headers is not None:
                     on_headers(204, [])
@@ -705,6 +818,15 @@ class TestEviction:
         adapter.delete([key])
         assert not _BACKEND.contains(_object_key_to_string(key))
 
+    def test_delete_batches_over_1000_keys(self, adapter):
+        # >1000 keys → multiple DeleteObjects requests; all must be removed.
+        keys = [create_object_key(i) for i in range(1500)]
+        for k in keys:
+            self._store(adapter, k, create_memory_obj())
+        adapter.delete(keys)
+        for k in keys:
+            assert not _BACKEND.contains(_object_key_to_string(k))
+
     def test_lock_blocks_delete(self, adapter):
         key = create_object_key(1)
         self._store(adapter, key, create_memory_obj())
@@ -1062,3 +1184,388 @@ class TestS3L2AdapterListKeys:
             page.entries[0].key
             == create_object_key(0, model_name="m").to_encoded_object_key()
         )
+
+
+# =============================================================================
+# DeleteObjects (multi-delete) helper unit tests
+# =============================================================================
+
+
+def test_build_delete_objects_body_quiet_and_escaped():
+    body = _build_delete_objects_body(["m@0@aa", "weird&<key>"])
+    assert b"<Quiet>true</Quiet>" in body
+    # ElementTree XML-escapes special chars in keys.
+    assert b"weird&amp;&lt;key&gt;" in body
+    assert _parse_delete_request_keys(body) == ["m@0@aa", "weird&<key>"]
+
+
+def test_parse_delete_objects_errors_empty_is_all_ok():
+    assert _parse_delete_objects_errors(b"") == set()
+    assert _parse_delete_objects_errors(b"   ") == set()
+
+
+def test_parse_delete_objects_errors_reports_failed_keys():
+    # Quiet-mode response with a namespace and one failed key.
+    resp = (
+        b'<?xml version="1.0"?><DeleteResult '
+        b'xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+        b"<Error><Key>m@1@bb</Key><Code>AccessDenied</Code></Error>"
+        b"</DeleteResult>"
+    )
+    assert _parse_delete_objects_errors(resp) == {"m@1@bb"}
+
+
+def test_parse_delete_objects_errors_malformed_raises():
+    # Third Party
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        _parse_delete_objects_errors(b"<not-xml")
+
+
+# =============================================================================
+# DeleteObjects fallback for endpoints without multi-object delete
+# =============================================================================
+
+
+class _WarningCapture(logging.Handler):
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+@pytest.fixture
+def s3_warnings():
+    """WARNING records from the adapter's logger, which does not propagate
+    to pytest's caplog."""
+    handler = _WarningCapture()
+    s3mod.logger.addHandler(handler)
+    try:
+        yield handler.messages
+    finally:
+        s3mod.logger.removeHandler(handler)
+
+
+def _bulk_counts() -> tuple[int, int]:
+    with _BACKEND._lock:
+        return _BACKEND._bulk_delete_requests, _BACKEND._single_delete_requests
+
+
+def _store_keys(adapter, ids):
+    keys = [create_object_key(i) for i in ids]
+    for k in keys:
+        _store_and_drain(adapter, [k], [create_memory_obj()])
+    return keys
+
+
+@pytest.mark.parametrize(
+    "status,code",
+    [(501, "NotImplemented"), (405, "MethodNotAllowed"), (400, "XNotImplemented")],
+)
+def test_delete_falls_back_when_bulk_delete_unsupported(
+    adapter, s3_warnings, status, code
+):
+    keys = _store_keys(adapter, range(3))
+    assert adapter.get_usage().total_bytes_used > 0
+    _BACKEND._bulk_delete_rejection = (status, code)
+
+    adapter.delete(keys)
+
+    # The same sweep frees the keys, one DeleteObject each.
+    assert not any(_BACKEND.contains(_object_key_to_string(k)) for k in keys)
+    assert adapter.get_usage().total_bytes_used == 0
+    assert _bulk_counts() == (1, 3)
+    assert adapter.report_status()["bulk_delete_supported"] is False
+    assert sum("rejected DeleteObjects" in m for m in s3_warnings) == 1
+
+
+def test_bulk_delete_fallback_is_sticky(adapter, s3_warnings):
+    _BACKEND._bulk_delete_rejection = (501, "NotImplemented")
+    adapter.delete(_store_keys(adapter, range(2)))
+    assert _bulk_counts() == (1, 2)
+
+    # Later sweeps skip the doomed bulk request and warn only once.
+    later = _store_keys(adapter, range(10, 14))
+    adapter.delete(later)
+    assert _bulk_counts() == (1, 6)
+    assert not any(_BACKEND.contains(_object_key_to_string(k)) for k in later)
+    assert sum("rejected DeleteObjects" in m for m in s3_warnings) == 1
+
+
+def test_bulk_delete_unsupported_mid_sweep_frees_every_batch(adapter):
+    # 1200 keys = two DeleteObjects batches, both rejected: all keys of the
+    # sweep must still be deleted through the fallback.
+    keys = [create_object_key(i) for i in range(1200)]
+    for k in keys:
+        _store_and_drain(adapter, [k], [create_memory_obj(size=4)])
+    _BACKEND._bulk_delete_rejection = (501, "NotImplemented")
+
+    adapter.delete(keys)
+
+    assert not any(_BACKEND.contains(_object_key_to_string(k)) for k in keys)
+    assert adapter.get_usage().total_bytes_used == 0
+    assert _bulk_counts() == (2, 1200)
+
+
+def test_per_key_delete_errors_do_not_trigger_fallback(adapter):
+    k0, k1 = _store_keys(adapter, range(2))
+    _BACKEND._bulk_delete_fail_keys = {_object_key_to_string(k1)}
+
+    adapter.delete([k0, k1])
+
+    # A 200 response with an <Error> entry is a partial failure: the failed
+    # key stays stored and tracked, and the bulk path stays in use.
+    assert not _BACKEND.contains(_object_key_to_string(k0))
+    assert _BACKEND.contains(_object_key_to_string(k1))
+    assert adapter.get_usage().total_bytes_used == create_memory_obj().get_size()
+    assert _bulk_counts() == (1, 0)
+    assert adapter.report_status()["bulk_delete_supported"] is True
+
+
+def test_other_bulk_delete_failures_do_not_trigger_fallback(adapter):
+    keys = _store_keys(adapter, range(2))
+    _BACKEND._bulk_delete_rejection = (500, "InternalError")
+
+    adapter.delete(keys)
+
+    assert all(_BACKEND.contains(_object_key_to_string(k)) for k in keys)
+    assert _bulk_counts() == (1, 0)
+    assert adapter.report_status()["bulk_delete_supported"] is True
+
+
+def test_is_bulk_delete_unsupported_classification():
+    def err(status, code):
+        return S3ResponseError(
+            code=1,
+            name="AWS_ERROR_S3_INVALID_RESPONSE_STATUS",
+            message="",
+            status_code=status,
+            headers=[],
+            body=f"<Error><Code>{code}</Code></Error>".encode(),
+        )
+
+    assert s3mod._is_bulk_delete_unsupported(err(501, "NotImplemented"))
+    assert s3mod._is_bulk_delete_unsupported(err(405, "MethodNotAllowed"))
+    # Supporting endpoints also return InvalidRequest; it must not make the
+    # sticky fallback fire.
+    assert not s3mod._is_bulk_delete_unsupported(err(400, "InvalidRequest"))
+    assert s3mod._is_bulk_delete_unsupported(err(400, "XNotImplemented"))
+    assert not s3mod._is_bulk_delete_unsupported(err(500, "InternalError"))
+    assert not s3mod._is_bulk_delete_unsupported(err(403, "AccessDenied"))
+    assert not s3mod._is_bulk_delete_unsupported(RuntimeError("connection reset"))
+
+
+# =============================================================================
+# A1 best-effort writes + A4 coalescing
+# =============================================================================
+
+
+def _store_and_drain(adapter, keys, objs):
+    adapter.submit_store_task(keys, objs)
+    wait_for_event_fd(adapter.get_store_event_fd())
+    adapter.pop_completed_store_tasks()
+
+
+def test_store_rejected_at_reject_watermark():
+    # cap 1 MB, reject at 0.8: one 1 MB object fills it; the next store is dropped
+    # (best-effort cache-miss) rather than written, bounding the overshoot.
+    config = S3L2AdapterConfig(
+        s3_endpoint="s3://test-bucket",
+        s3_region="us-east-1",
+        s3_prefer_http2=False,
+        s3_num_io_threads=1,
+        max_capacity_gb=0.001,  # 1 MiB
+        store_reject_watermark=0.8,
+    )
+    a = S3L2Adapter(config)
+    try:
+        k1 = create_object_key(1)
+        k2 = create_object_key(2)
+        # ~1 MB → usage ~0.93
+        _store_and_drain(a, [k1], [create_memory_obj(size=250_000)])
+        assert _BACKEND.contains(_object_key_to_string(k1))
+        # usage now >= 0.8 → k2 dropped, not written.
+        _store_and_drain(a, [k2], [create_memory_obj(size=250_000)])
+        assert not _BACKEND.contains(_object_key_to_string(k2))
+        assert a.report_status()["store_rejected_chunks"] >= 1
+    finally:
+        a.close()
+
+
+def test_store_coalesces_duplicate_keys():
+    # Same content-addressed key twice in one batch: the second is coalesced
+    # (single-flight), so the object is written once, not twice.
+    config = S3L2AdapterConfig(
+        s3_endpoint="s3://test-bucket",
+        s3_region="us-east-1",
+        s3_prefer_http2=False,
+        s3_num_io_threads=1,
+        max_capacity_gb=0.001,
+    )
+    a = S3L2Adapter(config)
+    try:
+        k = create_object_key(7)
+        _store_and_drain(a, [k, k], [create_memory_obj(), create_memory_obj()])
+        assert _BACKEND.contains(_object_key_to_string(k))
+        assert a.report_status()["store_coalesced_chunks"] >= 1
+        # In-flight set is released after completion.
+        assert a.report_status()["store_in_flight_chunks"] == 0
+    finally:
+        a.close()
+
+
+def test_store_coalesces_across_separate_tasks():
+    # Task 1's PUT is held in flight; task 2 stores the same key and must be
+    # coalesced: no second PUT, and task 2 completes only once task 1's PUT
+    # has, successfully with 0 bytes.
+    config = S3L2AdapterConfig(
+        s3_endpoint="s3://test-bucket",
+        s3_region="us-east-1",
+        s3_prefer_http2=False,
+        s3_num_io_threads=1,
+        max_capacity_gb=0.001,
+    )
+    a = S3L2Adapter(config)
+    gate = threading.Event()
+    _BACKEND._put_gate = gate
+    try:
+        k = create_object_key(9)
+        first = a.submit_store_task([k], [create_memory_obj()])
+        assert _BACKEND._put_started.wait(timeout=5.0)
+        assert a.report_status()["store_in_flight_chunks"] == 1
+
+        second = a.submit_store_task([k], [create_memory_obj()])
+        assert a.report_status()["store_coalesced_chunks"] == 1
+        # Nothing completes while the PUT it joined is in flight.
+        assert not wait_for_event_fd(a.get_store_event_fd(), timeout=0.2)
+        assert a.pop_completed_store_tasks() == {}
+
+        gate.set()
+        done: dict = {}
+        assert wait_until(
+            lambda: done.update(a.pop_completed_store_tasks())
+            or {first, second} <= done.keys(),
+            timeout=5.0,
+        )
+        assert done[first].is_successful()
+        assert done[second].is_successful()
+        assert done[second].bytes_transferred() == 0
+        assert _BACKEND.counts()["put"] == 1
+        assert a.report_status()["store_in_flight_chunks"] == 0
+    finally:
+        gate.set()
+        a.close()
+
+
+def test_coalesced_store_fails_when_the_joined_put_fails():
+    # Task 2 = [in-flight key, new key]. Its own PUT succeeds, but the PUT it
+    # joined fails, so it must report failure: its caller would otherwise
+    # treat a chunk that was never stored as stored.
+    config = S3L2AdapterConfig(
+        s3_endpoint="s3://test-bucket",
+        s3_region="us-east-1",
+        s3_prefer_http2=False,
+        s3_num_io_threads=1,
+        max_capacity_gb=0.001,
+    )
+    a = S3L2Adapter(config)
+    gate = threading.Event()
+    _BACKEND._put_gate = gate
+    try:
+        shared, own = create_object_key(21), create_object_key(22)
+        first = a.submit_store_task([shared], [create_memory_obj()])
+        assert _BACKEND._put_started.wait(timeout=5.0)
+        # Only the held PUT waits on the gate (and fails); task 2's own PUT
+        # runs after it and succeeds.
+        _BACKEND._put_gate = None
+        second = a.submit_store_task(
+            [shared, own], [create_memory_obj(), create_memory_obj()]
+        )
+        assert a.pop_completed_store_tasks() == {}
+
+        _BACKEND._fail_held_put = True
+        gate.set()
+        done: dict = {}
+        assert wait_until(
+            lambda: done.update(a.pop_completed_store_tasks())
+            or {first, second} <= done.keys(),
+            timeout=5.0,
+        )
+        assert not done[first].is_successful()
+        assert not done[second].is_successful()
+        assert not _BACKEND.contains(_object_key_to_string(shared))
+        # Task 2's own key was stored: it failed on the PUT it joined.
+        assert _BACKEND.contains(_object_key_to_string(own))
+        assert a.report_status()["store_in_flight_chunks"] == 0
+    finally:
+        gate.set()
+        a.close()
+
+
+def test_repeated_key_in_one_task_does_not_wait_on_itself():
+    # A key listed twice in one task is written once by that task's own PUT;
+    # the task must still complete (it must not wait for itself).
+    config = S3L2AdapterConfig(
+        s3_endpoint="s3://test-bucket",
+        s3_region="us-east-1",
+        s3_prefer_http2=False,
+        s3_num_io_threads=1,
+        max_capacity_gb=0.001,
+    )
+    a = S3L2Adapter(config)
+    try:
+        k = create_object_key(23)
+        task = a.submit_store_task([k, k], [create_memory_obj(), create_memory_obj()])
+        done: dict = {}
+        assert wait_until(
+            lambda: done.update(a.pop_completed_store_tasks()) or task in done,
+            timeout=5.0,
+        )
+        assert done[task].is_successful()
+        assert _BACKEND.counts()["put"] == 1
+    finally:
+        a.close()
+
+
+@pytest.mark.parametrize(
+    "reject, trigger, ok",
+    [
+        (0.8, 0.9, False),  # stores stop before eviction can fire
+        (0.9, 0.9, True),
+        (1.1, 0.9, True),
+        (0.0, 0.9, True),  # off
+    ],
+)
+def test_reject_watermark_must_not_sit_below_the_trigger(reject, trigger, ok):
+    spec = {
+        "s3_endpoint": "s3://test-bucket",
+        "s3_region": "us-west-2",
+        "max_capacity_gb": 10,
+        "store_reject_watermark": reject,
+        "eviction": {"eviction_policy": "LRU", "trigger_watermark": trigger},
+    }
+    if ok:
+        S3L2AdapterConfig.from_dict(spec)
+    else:
+        with pytest.raises(ValueError, match="store_reject_watermark"):
+            S3L2AdapterConfig.from_dict(spec)
+
+
+def test_reject_watermark_below_trigger_allowed_without_aggregate_eviction():
+    # Without a capacity there is no usage fraction, so neither the ceiling
+    # nor aggregate eviction applies; without an eviction block there is no
+    # trigger to stay above.
+    base = {"s3_endpoint": "s3://test-bucket", "s3_region": "us-west-2"}
+    S3L2AdapterConfig.from_dict(
+        {
+            **base,
+            "store_reject_watermark": 0.5,
+            "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9},
+        }
+    )
+    S3L2AdapterConfig.from_dict(
+        {**base, "max_capacity_gb": 10, "store_reject_watermark": 0.5}
+    )
