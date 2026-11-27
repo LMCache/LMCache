@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
+from contextlib import ExitStack
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 import argparse
 import shutil
 import signal
@@ -14,18 +16,17 @@ import time
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.logging import init_logger
 from lmcache.usage_telemetry.l1_usage import InitializeL1Usage
 from lmcache.usage_telemetry.l2_usage import InitializeL2ConnectorUsage
 from lmcache.usage_telemetry.mp import InitializeMPUsageContext
 from lmcache.usage_telemetry.mp_continuous import InitializeMPContinuousUsage
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
     parse_args_to_config,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
-from lmcache.v1.mp_coordinator.registrar import bind_coordinator_chunk_size
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
     add_observability_args,
@@ -55,6 +56,7 @@ from lmcache.v1.multiprocess.engine_module import (
     EngineModule,
     ModuleBuildContext,
     discover_modules,
+    modules_for_service,
     order_modules,
 )
 from lmcache.v1.multiprocess.ext_server_module import (
@@ -69,6 +71,13 @@ from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.ipc_policy import set_isolated_ipc
+from lmcache.v1.transport.zmq import ZMQ_MIGRATION_DOC_URL
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.transport.grpc_impl.server_base import (
+        GrpcMultiprocessServerBase,
+    )
 
 logger = init_logger(__name__)
 
@@ -83,20 +92,32 @@ class MPCacheServer:
     Args:
         context: The shared engine context.
         modules: Engine modules in construction and handler-registration order.
+        p2p_server: Independent peer listener owned by this engine lifecycle.
     """
 
     def __init__(
         self,
         context: MPCacheServerContext,
         modules: list[EngineModule],
+        p2p_server: GrpcMultiprocessServerBase | None = None,
     ) -> None:
         self._context = context
         self._modules = modules
+        self._p2p_server = p2p_server
 
     @property
     def context(self) -> MPCacheServerContext:
         """Return the shared engine context."""
         return self._context
+
+    @property
+    def mq_port(self) -> int:
+        """Return the independent peer listener port, or zero when disabled."""
+        return self._p2p_server.bound_port if self._p2p_server is not None else 0
+
+    def attach_p2p_server(self, p2p_server: GrpcMultiprocessServerBase) -> None:
+        """Attach an already built peer listener; ``close`` then owns it."""
+        self._p2p_server = p2p_server
 
     def report_status(self) -> dict:
         """Return an aggregated status dict from all modules.
@@ -109,7 +130,7 @@ class MPCacheServer:
         status: dict = {
             "is_healthy": sm["is_healthy"],
             "engine_type": self.__class__.__name__,
-            "chunk_size": self._context.chunk_size,
+            "chunk_size": self._context.default_chunk_size,
             "hash_algorithm": self._context.hash_algorithm_name,
             "active_sessions": self._context.session_manager.active_count(),
             "storage_manager": sm,
@@ -120,6 +141,8 @@ class MPCacheServer:
 
     def close(self) -> None:
         """Close modules in reverse build order, then release shared resources."""
+        if self._p2p_server is not None:
+            self._p2p_server.close(wait=True)
         for module in reversed(self._modules):
             module.close()
         self._context.close()
@@ -413,6 +436,8 @@ def _start_cache_server(
     # stock hybrid clients.
     is_blend = mp_config.engine_type == "blend"
 
+    # TODO(chunxiaozheng): Support multiple chunk sizes in CacheBlend and
+    # Coordinator, then remove this compatibility guard.
     ctx = MPCacheServerContext(
         storage_manager_config=storage_manager_config,
         chunk_size=mp_config.chunk_size,
@@ -421,49 +446,68 @@ def _start_cache_server(
         separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,
         session_ttl_seconds=mp_config.session_ttl_seconds,
+        requires_global_chunk_size=is_blend or bool(coordinator_config.url),
     )
 
     components = _build_server_components(ctx, mp_config, coordinator_config)
-    engine = MPCacheServer(ctx, components.modules)
+    with ExitStack() as startup_resources:
+        # Registered before the peer listener is built, so a bind failure still
+        # releases the modules and the context.
+        engine = MPCacheServer(ctx, components.modules)
+        startup_resources.callback(engine.close)
 
-    InitializeMPUsageContext(mp_config, storage_manager_config)
-    continuous_usage = InitializeMPContinuousUsage(event_bus, ctx.chunk_size)
-    if continuous_usage is not None:
-        ctx.add_chunk_size_bind_listener(continuous_usage.update_chunk_size)
-    if coordinator_config.url:
-
-        def bind_chunk_size_to_coordinator(chunk_size: int) -> None:
-            bind_coordinator_chunk_size(
-                coordinator_config.url,
-                chunk_size,
-                api_key_files=mp_config.api_key_files,
+        p2p_server = None
+        if mp_config.p2p_config.enabled:
+            # First Party
+            from lmcache.v1.distributed.p2p import P2PClient
+            from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
+                build_grpc_request_server,
             )
 
-        ctx.add_chunk_size_bind_listener(bind_chunk_size_to_coordinator)
-    InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
-    InitializeL1Usage(event_bus, ctx.storage_manager)
+            p2p_server = build_grpc_request_server(
+                modules_for_service(components.modules, "p2p"),
+                replace(mp_config, port=mp_config.p2p_config.rpc_port),
+                rpc_client=P2PClient,
+            )
+            engine.attach_p2p_server(p2p_server)
 
-    transport = mp_config.transport
-    server: RequestServer = create_request_server(
-        components.modules,
-        mp_config,
-    )
+        InitializeMPUsageContext(mp_config, storage_manager_config)
+        InitializeMPContinuousUsage(event_bus)
+        InitializeL2ConnectorUsage(event_bus, ctx.storage_manager)
+        InitializeL1Usage(event_bus, ctx.storage_manager)
 
-    logger.info(
-        "LMCache %s cache server is running on %s:%d",
-        transport,
-        mp_config.host,
-        mp_config.port,
-    )
-
-    if not hasattr(torch_dev, "init"):
-        logger.warning(
-            "Backend '%s' does not support init(), skipping device init",
-            torch_device_type,
+        transport = mp_config.transport
+        if transport == "zmq":
+            logger.warning(
+                "The zmq request transport is deprecated and will be removed "
+                "in a future release. Start the server with --transport grpc "
+                "and point clients at grpc://host:port. See %s",
+                ZMQ_MIGRATION_DOC_URL,
+            )
+        server: RequestServer = create_request_server(
+            modules_for_service(components.modules, "worker"),
+            mp_config,
         )
-    else:
-        torch_dev.init()
-    server.start()
+        startup_resources.callback(server.close)
+
+        logger.info(
+            "LMCache %s cache server is running on %s:%d",
+            transport,
+            mp_config.host,
+            mp_config.port,
+        )
+
+        if not hasattr(torch_dev, "init"):
+            logger.warning(
+                "Backend '%s' does not support init(), skipping device init",
+                torch_device_type,
+            )
+        else:
+            torch_dev.init()
+        server.start()
+        if p2p_server is not None:
+            p2p_server.start()
+        startup_resources.pop_all()
 
     logger.info("LMCache cache server is running...")
 

@@ -12,8 +12,6 @@ import pytest
 from lmcache.v1.platform.devices.npu import device_ops as npu_device_ops_module
 from lmcache.v1.platform.devices.npu.device_ops import NpuDeviceOps
 
-pytestmark = pytest.mark.no_shared_allocator
-
 
 def _install_fake_c_ops(monkeypatch: pytest.MonkeyPatch, **symbols: object) -> None:
     fake_c_ops = types.ModuleType("lmcache_ascend.c_ops")

@@ -16,8 +16,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_device_type
-from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.kv_format import detect_format, extract_kv_cache_shapes
 from lmcache.v1.common.kv_format.detectors import vllm as vllm_detector
 import lmcache.lmcache_native as lmcache_native
@@ -39,21 +38,13 @@ def test_vllm_cross_layer():
     assert out.data_ptr() == kv.data_ptr()
 
 
-# The CPU-HND safeguard forces HND regardless of hint when running on a CPU
-# host; bypass it so the hint-driven NHD/HND branch is exercised on any host.
-_VLLM_DEV = "lmcache.v1.common.kv_format.detectors.vllm.torch_device_type"
-_MOCK_DEVICE_TYPE = "cuda" if torch_device_type == "cpu" else torch_device_type
-
-
-def test_vllm_flash_attn_hnd(monkeypatch):
-    monkeypatch.setattr(_VLLM_DEV, _MOCK_DEVICE_TYPE)
+def test_vllm_flash_attn_hnd():
     kv = [_t(2, NB, BS, NH, HS) for _ in range(NL)]
     fmt_hnd, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "HND"})
     assert fmt_hnd == F.NL_X_TWO_NB_NH_BS_HS
 
 
-def test_vllm_flash_infer_nhd(monkeypatch):
-    monkeypatch.setattr(_VLLM_DEV, _MOCK_DEVICE_TYPE)
+def test_vllm_flash_infer_nhd():
     kv = [_t(NB, 2, BS, NH, HS) for _ in range(NL)]
     fmt, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
     assert fmt == F.NL_X_NB_TWO_BS_NH_HS
@@ -66,11 +57,10 @@ def test_vllm_mla():
 
 
 @pytest.mark.parametrize("hint", [{}, {"kv_layout": "NHD"}, {"kv_layout": "HND"}])
-def test_vllm_rbln_native_singleton_axis(monkeypatch, hint):
+def test_vllm_rbln_native_singleton_axis(hint):
     # vLLM-RBLN's 6-D HND layout is its own format, so it is detected from the
     # shape alone on any host and whatever the hint says (vLLM-RBLN reports no
     # layout, and the format is HND by definition).
-    monkeypatch.setattr(_VLLM_DEV, "cuda")
     kv = [_t(2, NB, NH, 1, BS, HS) for _ in range(NL)]
     with patch.object(vllm_detector.logger, "warning") as mock_warning:
         fmt, out = detect_format(kv, EngineType.VLLM, hint)
@@ -81,11 +71,10 @@ def test_vllm_rbln_native_singleton_axis(monkeypatch, hint):
     assert out[0].data_ptr() == kv[0].data_ptr()
 
 
-def test_vllm_rbln_num_blocks_2_keeps_kv_first_reading(monkeypatch):
+def test_vllm_rbln_num_blocks_2_keeps_kv_first_reading():
     # [2, 2, NH, 1, BS, HS] fits both RBLN layouts; the K/V-first reading wins
     # and the ambiguity is logged. LMCache loggers do not propagate, so the
     # module logger is patched instead of using caplog.
-    monkeypatch.setattr(_VLLM_DEV, "cuda")
     kv = [_t(2, 2, NH, 1, BS, HS) for _ in range(NL)]
     with patch.object(vllm_detector.logger, "warning") as mock_warning:
         fmt, _ = detect_format(kv, EngineType.VLLM, {})
@@ -93,20 +82,18 @@ def test_vllm_rbln_num_blocks_2_keeps_kv_first_reading(monkeypatch):
     mock_warning.assert_called_once()
 
 
-def test_vllm_blocks_first_fused_num_heads_2(monkeypatch):
+def test_vllm_blocks_first_fused_num_heads_2():
     # Raw 4-D [NB, NH, BS, 2*HS] with NH == 2 (a common GQA config): a 5-D
     # split would make the K/V axis and the head axis both equal 2, ambiguous
     # with flash-infer. Detection must use the rank-4 shape to land on the
     # content-size format, and keep the tensor raw.
-    monkeypatch.setattr(_VLLM_DEV, _MOCK_DEVICE_TYPE)
     raw = [_t(NB, 2, BS, 2 * HS) for _ in range(NL)]
     fmt, out = detect_format(raw, EngineType.VLLM, {"kv_layout": "HND"})
     assert fmt == F.NL_X_NB_NH_BS_CS
     assert tuple(out[0].shape) == (NB, 2, BS, 2 * HS)
 
 
-def test_vllm_blocks_first_fused_hnd(monkeypatch):
-    monkeypatch.setattr(_VLLM_DEV, _MOCK_DEVICE_TYPE)
+def test_vllm_blocks_first_fused_hnd():
     raw_hnd = [_t(NB, NH, BS, 2 * HS) for _ in range(NL)]
     fmt_hnd, _ = detect_format(raw_hnd, EngineType.VLLM, {"kv_layout": "HND"})
     assert fmt_hnd == F.NL_X_NB_NH_BS_CS

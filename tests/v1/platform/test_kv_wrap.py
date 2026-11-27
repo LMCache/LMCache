@@ -19,8 +19,6 @@ from lmcache.v1.platform import kv_wrap
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.fd_channel import FdChannelServer, is_fd_channel_supported
 
-pytestmark = pytest.mark.no_shared_allocator
-
 
 class _RecordingFactory:
     def __init__(self) -> None:

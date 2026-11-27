@@ -14,15 +14,13 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import (
-    get_customized_decoder,
-    get_customized_encoder,
-)
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.devices.npu import NpuDeviceSpec
 from lmcache.v1.platform.devices.npu.ipc_wrapper import NpuIPCWrapper, PlaneRecord
-
-pytestmark = pytest.mark.no_shared_allocator
+from lmcache.v1.transport.zmq.codec import (
+    get_customized_decoder,
+    get_customized_encoder,
+)
 
 requires_npu = pytest.mark.skipif(
     not (hasattr(torch, "npu") and torch.npu.is_available()),

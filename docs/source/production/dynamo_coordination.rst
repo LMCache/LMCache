@@ -93,6 +93,14 @@ On the host, run one of these commands from the root of the LMCache repository:
 Kubernetes
 ----------
 
+.. warning::
+
+   The Kubernetes steps below rely on the LMCache Kubernetes operator
+   (``operator/``), which is deprecated and no longer maintained. It is
+   expected to be removed from this repository in 2027Q1. Existing release
+   artifacts (e.g. ``operator-v*`` ``install.yaml``) will not receive fixes or
+   updates. Do not build new deployments on it.
+
 Prerequisites
 ~~~~~~~~~~~~~
 

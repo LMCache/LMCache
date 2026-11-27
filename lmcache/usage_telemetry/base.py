@@ -17,7 +17,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
 from lmcache.usage_telemetry.identity import get_usage_identity
 from lmcache.usage_telemetry.messages import UsageMessage
@@ -27,6 +26,7 @@ from lmcache.usage_telemetry.transport import (
     build_usage_payload,
     usage_server_url,
 )
+from lmcache.v1.common.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party

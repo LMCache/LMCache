@@ -45,7 +45,7 @@ spec:
                 --max-model-len 4096 \
                 --gpu-memory-utilization 0.85 \
                 --tensor-parallel-size 1 \
-                --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://127.0.0.1","lmcache.mp.port":6555,"lmcache.mp.mp_transfer_mode":"engine_driven"}}'
+                --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"127.0.0.1","lmcache.mp.port":6555,"lmcache.mp.mp_transfer_mode":"engine_driven"}}'
           env:
             - name: PYTHONHASHSEED
               value: "0"

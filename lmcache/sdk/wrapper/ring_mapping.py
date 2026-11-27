@@ -2,8 +2,9 @@
 """Open the Q ring owned by vLLM process, for the SDK's transfers.
 
 vLLM's worker captures each step's query rows into a paged Q ring
-(``lmcache.sdk.qringbuffer.QRingBuffer``) and stores full chunks to L1. The SDK
-borrows the ring's **free blocks**: the server copies cached L1 objects into them.
+(``lmcache.integration.vllm.experimental.qringbuffer.QRingBuffer``) and stores full
+chunks to L1. The SDK borrows the ring's **free blocks**: the server copies cached
+L1 objects into them.
 This module opens the ring through its own IPC handles, which the server forwards
 (``get_q_ring``), and holds what every transfer shares: the reservation of free
 pieces, so concurrent transfers use disjoint pieces, and the check that vLLM took
@@ -23,11 +24,11 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.logging import init_logger
 from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_codec import TOKEN_STRIDE
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.transport.qstore import QRingInfo
+from lmcache.v1.transport.request_client import RequestClient
 
 logger = init_logger(__name__)
 
