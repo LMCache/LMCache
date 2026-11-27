@@ -82,6 +82,20 @@ PR on GitHub. Buildkite picks up PR labels automatically; when the filter
 sees `force-ci` it runs the full pipeline regardless of which files changed.
 
 
+### Token dropping fast lane
+
+The `token dropping` label extends `skip expensive ci` to also skip the Python
+test matrix, CPU Device Tests, and `k3-unit-tests`.
+
+Use this label only for isolated token-dropping building blocks that do not
+affect existing functionality. All relevant dedicated CPU/GPU tests must pass
+on the current PR HEAD before merging or enabling auto-merge.
+
+Dedicated token-dropping CI remains path-triggered. `force-ci` overrides the
+fast lane.
+
+Label changes take effect on the next CI-triggering push.
+
 ### Trigger strategy
 
 Not all tests should run on every PR. The general pattern:

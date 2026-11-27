@@ -62,7 +62,15 @@ should_skip_expensive_k3_pipeline() {
         return 1
     fi
 
-    if pr_has_label "skip expensive ci"; then
+    # The token-dropping fast lane is a maintainer opt-in for isolated
+    # building blocks. Do not broaden the existing general-purpose label.
+    if pr_has_label "token dropping" && \
+        [[ "${pipeline_name}" == "multiprocess" || "${pipeline_name}" == "unit" ]]; then
+        echo "--- :label: PR has 'token dropping'; skipping ${pipeline_name} tests"
+        return 0
+    fi
+
+    if [[ "${pipeline_name}" == "multiprocess" ]] && pr_has_label "skip expensive ci"; then
         echo "--- :label: PR has 'skip expensive ci'; skipping ${pipeline_name} tests"
         return 0
     fi

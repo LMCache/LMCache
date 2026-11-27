@@ -224,6 +224,51 @@ should_skip_multiprocess_heavy ".buildkite/k3_tests/multiprocess/pipeline.yml"
 
 
 @pytest.mark.parametrize(
+    ("pr", "labels", "pipeline", "expected_skip"),
+    [
+        # The legacy MP entrypoint shares the same helper.
+        ("42", "token dropping", "multiprocess", True),
+        ("42", "skip expensive ci", "multiprocess", True),
+        ("42", "token dropping,skip expensive ci,force-ci", "multiprocess", False),
+        ("42", "token dropping", "blend", False),
+        ("42", "not token dropping", "multiprocess", False),
+        ("false", "token dropping", "multiprocess", False),
+        ("false", "token dropping", "unit", False),
+    ],
+)
+def test_expensive_pipeline_label_scope(
+    tmp_path: Path, pr: str, labels: str, pipeline: str, expected_skip: bool
+) -> None:
+    """Exercise the shared helper, including the legacy MP entrypoint."""
+    bash = _find_bash()
+    if bash is None:
+        pytest.skip("Git Bash / bash not available")
+    assert bash is not None
+    helper = tmp_path / "helpers.sh"
+    helper.write_text(
+        (UPLOAD_SCRIPT.parent / "helpers.sh").read_text(encoding="utf-8"),
+        encoding="utf-8",
+        newline="\n",
+    )
+    entrypoint = (
+        "should_skip_expensive_multiprocess_pipeline"
+        if pipeline == "multiprocess"
+        else f"should_skip_expensive_k3_pipeline {pipeline}"
+    )
+    env = {
+        **os.environ,
+        "BUILDKITE_PULL_REQUEST": pr,
+        "BUILDKITE_PULL_REQUEST_LABELS": labels,
+    }
+    proc = subprocess.run(
+        [bash, "-c", f'source "{helper.as_posix()}"; {entrypoint}'],
+        env=env,
+        check=False,
+    )
+    assert (proc.returncode == 0) is expected_skip
+
+
+@pytest.mark.parametrize(
     ("labels", "source", "pipeline_rel", "expected_uploaded"),
     [
         # full: PR-smoke runs, heavy is bypassed
@@ -274,7 +319,7 @@ def test_upload_pipeline_parallel_labels(
     pipeline_rel: str,
     expected_uploaded: bool,
 ) -> None:
-    """Verify 3-label parallel execution: full, force-ci, and skip expensive ci."""
+    """Verify upload behavior for full, force-ci, and CI fast-lane labels."""
     _run_upload_pipeline(
         tmp_path,
         labels=labels,
@@ -282,6 +327,39 @@ def test_upload_pipeline_parallel_labels(
         pipeline_rel=pipeline_rel,
         changed_file="lmcache/v1/cache_engine.py",
         expected_uploaded=expected_uploaded,
+    )
+
+
+@pytest.mark.parametrize(
+    "pipeline_rel",
+    [
+        ".buildkite/k3_tests/multiprocess/smoke-pipeline.yml",
+        ".buildkite/k3_tests/multiprocess/pipeline.yml",
+        ".buildkite/k3_tests/unit/pipeline.yml",
+    ],
+)
+@pytest.mark.parametrize(
+    ("labels", "skip_mp", "skip_unit"),
+    [
+        ("", False, False),
+        ("skip expensive ci", True, False),
+        ("token dropping", True, True),
+        ("token dropping,force-ci", False, False),
+        ("token dropping,skip expensive ci,force-ci", False, False),
+    ],
+)
+def test_fast_lane_pipeline_upload(
+    tmp_path: Path, pipeline_rel: str, labels: str, skip_mp: bool, skip_unit: bool
+) -> None:
+    """Use a shared CI path so native heavy-tier bypass cannot mask a regression."""
+    skip = skip_unit if "/unit/" in pipeline_rel else skip_mp
+    _run_upload_pipeline(
+        tmp_path,
+        labels=labels,
+        source="webhook",
+        pipeline_rel=pipeline_rel,
+        changed_file=".buildkite/k3_tests/common_scripts/path-filter.sh",
+        expected_uploaded=not skip,
     )
 
 
