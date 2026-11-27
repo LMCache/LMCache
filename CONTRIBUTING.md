@@ -294,8 +294,6 @@ pytest -xvs tests/v1/test_kv_cache_groups.py::test_function_name
 
 Test dependencies: `uv pip install -r requirements/test.txt`
 
-Pytest marker: `@pytest.mark.no_shared_allocator` disables the shared-allocator monkeypatch for a test.
-
 ### Testing Practices
 
 - Write tests against the **public interface and docstring contract**, not the implementation. Test as if you don't know the internals — verify that behavior matches what the docstring describes.

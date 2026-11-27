@@ -75,7 +75,7 @@ def registration(
 ) -> Iterator[tuple[transfer.LMCacheDrivenTransferModule, list[MagicMock]]]:
     """Stub device boundaries; retain actual registration/layout state."""
     context = MagicMock()
-    context.chunk_size = 256
+    context.default_chunk_size = 256
     context.hash_algorithm_name = "blake3"
     context.layout_desc_registry = LayoutDescRegistry()
     created: list[MagicMock] = []

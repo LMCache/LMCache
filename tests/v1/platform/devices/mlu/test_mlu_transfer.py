@@ -19,8 +19,6 @@ from lmcache.v1.common.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.devices.mlu import MluDeviceSpec
 from lmcache.v1.platform.devices.mlu.device_ops import MluDeviceOps
 
-pytestmark = pytest.mark.no_shared_allocator
-
 FORMATS = [
     EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
     EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,

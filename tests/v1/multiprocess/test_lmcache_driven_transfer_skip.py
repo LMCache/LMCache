@@ -166,7 +166,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     ]
     ctx = MagicMock()
     ctx.get_read_owners.return_value = None
-    ctx.chunk_size = 128
+    ctx.default_chunk_size = 128
     ctx.null_block_id = 0
     ctx.resolve_obj_keys.return_value = obj_keys
     ctx.layout_desc_registry.get_chunk_size.return_value = 256
@@ -220,7 +220,7 @@ def _make_checkpoint_module(
     context.transfer_object_group = entry.cache_context.transfer_object_group
     entry.cache_context = context
     entry.chunk_size = 2
-    module.context.chunk_size = 1
+    module.context.default_chunk_size = 1
     module.context.layout_desc_registry.get_chunk_size.return_value = 2
     module.context.null_block_id = -1
     module.context.session_manager.get.return_value = None
@@ -467,7 +467,6 @@ def _dsv4_swa_cache_context(chunk_tokens: int, sw_tokens: int, tpb: int):
     return ctx
 
 
-@pytest.mark.no_shared_allocator
 def test_downsample_keeps_last_window_of_each_chunk_dsv4_swa():
     """DSv4 SWA: chunk 4096, window 128, tpb 32 → keep last 4 block ids / chunk."""
     chunk, sw, tpb, n_chunks = 4096, 128, 32, 19
@@ -486,7 +485,6 @@ def test_downsample_keeps_last_window_of_each_chunk_dsv4_swa():
     assert out[0][start:] == original[-keep:]
 
 
-@pytest.mark.no_shared_allocator
 def test_downsample_full_attention_keeps_every_block():
     chunk, tpb, n_chunks = 4096, 128, 19
     ctx = _dsv4_swa_cache_context(chunk, sw_tokens=chunk, tpb=tpb)

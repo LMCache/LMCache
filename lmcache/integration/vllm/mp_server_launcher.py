@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol, cast
 from urllib.parse import urlparse
+import importlib.util
 import math
 import shlex
 import subprocess
@@ -27,6 +28,7 @@ _AUTOSTART_KEY = "lmcache.mp.autostart"
 _SERVER_ARGS_KEY = "lmcache.mp.autostart.server_args"
 _WAIT_TIMEOUT_KEY = "lmcache.mp.autostart.wait_timeout"
 
+_SERVER_PACKAGE = "lmcache.v1.multiprocess"
 _DEFAULT_WAIT_TIMEOUT = 90.0
 _LOCAL_HOSTS = {"localhost", "127.0.0.1"}
 # The URL scheme picks the server transport, so server_args cannot override it.
@@ -337,7 +339,7 @@ class MPServerAutostartConfig:
         return [
             sys.executable,
             "-m",
-            "lmcache.v1.multiprocess.http_server",
+            f"{_SERVER_PACKAGE}.http_server",
             "--host",
             self.host,
             "--port",
@@ -378,6 +380,8 @@ class MPServerLauncher:
             None.
 
         Raises:
+            RuntimeError: If no server is reachable and this environment has no
+                server to start, as with only ``lmcache-client`` installed.
             ConnectionError: If the server process exits early or does not become
                 healthy before the configured timeout.
         """
@@ -390,6 +394,15 @@ class MPServerLauncher:
                 server_url,
             )
             return
+
+        if importlib.util.find_spec(_SERVER_PACKAGE) is None:
+            raise RuntimeError(
+                f"No LMCache MP server is reachable at {server_url}, and "
+                "lmcache.mp.autostart cannot start one here: starting a server "
+                f"needs the full lmcache distribution, and {_SERVER_PACKAGE} is "
+                "not installed (lmcache-client has no server). Install lmcache, "
+                "or start the server separately and connect to it."
+            )
 
         command = self.config.command()
         logger.info("Auto-starting LMCache MP server with command: %s", command)
@@ -572,6 +585,8 @@ def maybe_start_mp_server_from_url(
     Raises:
         ValueError: If an auto-start configuration value or server URL is
             invalid.
+        RuntimeError: If no server is reachable and this environment has no
+            server to start, as with only ``lmcache-client`` installed.
         ConnectionError: If auto-start is enabled and the server does not
             become reachable before the configured timeout.
     """

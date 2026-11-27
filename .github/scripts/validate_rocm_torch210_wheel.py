@@ -95,52 +95,48 @@ def _validate_atom_integration() -> bool:
     return True
 
 
-def _validate_gpu_kernels() -> str:
+def _validate_gpu_kernels() -> None:
     """Run small LMCache D2H and H2D HIP kernel transfers."""
     # First Party
+    from lmcache.v1.common.utils import make_page_buffer_shape_desc
+    from lmcache.v1.platform.native_block_transfer import transfer_with_address_kernel
     import lmcache.cuda_ops  # noqa: PLC0415
+    import lmcache.lmcache_native as native
 
     blocks, block_size, heads, head_size = 2, 16, 2, 8
-    elements = blocks * block_size * heads * head_size
-    key = torch.arange(elements, dtype=torch.float32, device="cuda").reshape(
-        blocks, block_size, heads, head_size
+    elements = 2 * blocks * block_size * heads * head_size
+    pages = torch.arange(elements, dtype=torch.float32, device="cuda").reshape(
+        2, blocks, block_size, heads, head_size
     )
-    value = key + 10_000
-    slots = torch.tensor([0, 3, 17, 31], dtype=torch.int64, device="cuda")
+    fmt = native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    desc = make_page_buffer_shape_desc([pages], fmt, 0, 1, blocks, block_size)
     host = torch.empty(
-        (2, 1, len(slots), heads * head_size),
-        dtype=torch.float32,
-        pin_memory=True,
+        (2, 1, block_size, heads, head_size), pin_memory=True, dtype=pages.dtype
     )
 
-    lmcache.cuda_ops.load_and_reshape_flash(host, key, value, slots, 0)
-    torch.cuda.synchronize()
-    expected_key = (
-        key.reshape(-1, heads, head_size)[slots].cpu().reshape(len(slots), -1)
-    )
-    expected_value = (
-        value.reshape(-1, heads, head_size)[slots].cpu().reshape(len(slots), -1)
-    )
-    assert torch.equal(host[0, 0], expected_key)
-    assert torch.equal(host[1, 0], expected_value)
+    def transfer(
+        pool: torch.Tensor, block: int, direction: native.TransferDirection
+    ) -> None:
+        transfer_with_address_kernel(
+            lmcache.cuda_ops.multi_layer_block_kv_transfer,
+            [pool],
+            [host],
+            [block],
+            pool.device,
+            direction,
+            desc,
+            block_size,
+            fmt,
+            0,
+        )
+        torch.cuda.synchronize()
 
-    key_back = torch.zeros_like(key)
-    value_back = torch.zeros_like(value)
-    lmcache.cuda_ops.reshape_and_cache_back_flash(host, key_back, value_back, slots, 0)
-    torch.cuda.synchronize()
-    assert torch.equal(
-        key_back.reshape(-1, heads, head_size)[slots],
-        key.reshape(-1, heads, head_size)[slots],
-    )
-    assert torch.equal(
-        value_back.reshape(-1, heads, head_size)[slots],
-        value.reshape(-1, heads, head_size)[slots],
-    )
-
-    properties = torch.cuda.get_device_properties(0)
-    arch = getattr(properties, "gcnArchName", "unknown").split(":", 1)[0]
-    assert arch in {"gfx942", "gfx950"}, arch
-    return f"{properties.name} {arch}"
+    transfer(pages, 1, native.TransferDirection.D2H)
+    assert torch.equal(host[:, 0], pages[:, 1].cpu())
+    restored = torch.zeros_like(pages)
+    transfer(restored, 0, native.TransferDirection.H2D)
+    assert torch.equal(restored[:, 0], pages[:, 1])
+    assert torch.count_nonzero(restored[:, 1]).item() == 0
 
 
 def main() -> None:
@@ -165,7 +161,11 @@ def main() -> None:
 
     if os.environ.get("LMCACHE_ROCM_REQUIRE_GPU", "0") == "1":
         assert torch.cuda.is_available(), "ROCm GPU is not available"
-        print("ROCm GPU and LMCache kernels:", _validate_gpu_kernels())
+        properties = torch.cuda.get_device_properties(0)
+        arch = getattr(properties, "gcnArchName", "unknown").split(":", 1)[0]
+        assert arch in {"gfx942", "gfx950"}, arch
+        _validate_gpu_kernels()
+        print("ROCm GPU and LMCache kernels:", properties.name, arch)
 
     print(
         "OK: ROCm torch 2.10 wheel ABI;",
