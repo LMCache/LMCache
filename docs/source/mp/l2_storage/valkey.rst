@@ -112,6 +112,12 @@ construction fails with::
   ``num_workers`` a multiple of the list length. Omit to let the provider
   choose, which opens one card for every worker. An unknown name fails
   adapter construction with the host's domain names in the message.
+  ``"auto"`` builds the list for you from the EFA devices the process can
+  open (read from ``/sys/class/infiniband`` and ``/dev/infiniband``; the same
+  domains ``fi_info -p efa -f efa-direct`` prints), sorted by name, and logs
+  them at start-up. In a container only the devices it was given count. It
+  needs ``rdma_provider: "efa-direct"``; if no device can be opened the
+  adapter refuses to start and asks for an explicit list.
 
 **Configuration examples:**
 

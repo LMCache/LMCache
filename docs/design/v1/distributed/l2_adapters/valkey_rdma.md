@@ -241,7 +241,7 @@ JSON schema (CLI `--l2-adapter`); every `valkey` field is accepted, plus:
 |-------|---------|---------|
 | `transport` | `"tcp"` | `"rdma"` selects this transport. |
 | `rdma_provider` | `"efa-direct"` | `"efa-direct"` opens EFA hardware; `"tcp"` opens libfabric's software provider, for development and tests only. |
-| `rdma_interface` | unset | Fabric domain, or list of domains, to open on a host with more than one card, named as `fi_info -p efa` lists them. Workers take a list round-robin in client-creation order, so a list of `k` cards with `num_workers` a multiple of `k` puts the same number of transfers in flight on each card, and each card's registered-memory cap applies to its own workers only. One domain, or none, sends every worker through one card. |
+| `rdma_interface` | unset | Fabric domain, or list of domains, to open on a host with more than one card, named as `fi_info -p efa` lists them. Workers take a list round-robin in client-creation order, so a list of `k` cards with `num_workers` a multiple of `k` puts the same number of transfers in flight on each card, and each card's registered-memory cap applies to its own workers only. One domain, or none, sends every worker through one card. `"auto"` uses every EFA device this process can open, as its efa-direct domain `<device>-rdm`, sorted by name, found when the pool is built: the devices under `/sys/class/infiniband` with the `efa` driver whose `uverbsN` node in `/dev/infiniband` this process may read and write (in a container, only the devices it was given), which is the list `fi_info -p efa -f efa-direct` prints. It is refused with `rdma_provider: "tcp"`, whose domains are the host's network interfaces, and fails construction if no EFA device can be opened. |
 
 ## Non-goals
 
