@@ -82,10 +82,15 @@ Options
    * - ``--extra-config JSON``
      - JSON object of settings the core flags do not name, read by whichever
        view or controller looks for them. Lets a new one ship with its own
-       settings without a flag here. The coordinator reads one key itself,
-       ``controller_packages``: a list of importable paths to load
+       settings without a flag here. The coordinator reads two keys itself:
+       ``controller_packages`` is a list of importable paths to load
        out-of-tree controllers from, e.g.
-       ``--extra-config '{"controller_packages": ["acme.controllers"]}'``.
+       ``--extra-config '{"controller_packages": ["acme.controllers"]}'``;
+       ``disabled_controllers`` is a list of controller class names to
+       leave unbuilt, so a replacement controller can take a built-in's
+       place instead of running beside it, e.g.
+       ``--extra-config '{"controller_packages": ["acme.controllers"], "disabled_controllers": ["FleetEvictionController"]}'``.
+       A name matching no discovered controller raises at startup.
        Controllers only; views are in-tree.
    * - ``--timeout-keep-alive SECS``
      - Seconds the HTTP server keeps idle connections open before closing
