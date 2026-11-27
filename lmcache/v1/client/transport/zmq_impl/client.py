@@ -51,10 +51,15 @@ class ZmqMultiprocessClient(RequestClient):
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> MessagingFuture[Any] | MessagingStream[Any]:
-        payloads = rpc_spec.bind_payloads(args, kwargs)
+        payloads = list(rpc_spec.bind_payloads(args, kwargs))
+        # Drop trailing default lookup_id == "" so older ZMQ servers with fewer
+        # parameters keep working seamlessly on legacy requests.
+        params = list(rpc_spec.signature.parameters.values())
+        if params and params[-1].name == "lookup_id" and payloads[-1] == "":
+            payloads.pop()
         return self._message_queue_client.submit_request(
             rpc_spec.operation,
-            list(payloads),
+            payloads,
         )
 
 

@@ -37,10 +37,32 @@ from lmcache.v1.transport.zmq.wire import (
 logger = init_logger(__name__)
 
 
+def _required_payload_count(handler: Callable[..., Any], max_payloads: int) -> int:
+    """Count required positional parameters on ``handler`` for optional-tail compat."""
+    try:
+        sig = inspect.signature(handler)
+    except (TypeError, ValueError):
+        return max_payloads
+    required = 0
+    for param in sig.parameters.values():
+        if param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            break
+        if param.default is inspect.Parameter.empty:
+            required += 1
+    return min(required, max_payloads)
+
+
 def unwrap_request_payloads(
-    b_payloads: list[bytes], payload_clss: list[Any]
+    b_payloads: list[bytes],
+    payload_clss: list[Any],
+    min_payloads: int | None = None,
 ) -> list[Any]:
-    if len(b_payloads) != len(payload_clss):
+    lo = len(payload_clss) if min_payloads is None else min_payloads
+    if not (lo <= len(b_payloads) <= len(payload_clss)):
         raise InvalidRequestError("Payload count does not match expected count")
 
     decoded_payloads = [
@@ -109,9 +131,12 @@ class SyncRequestHandler(RequestHandlerBase[ResponseType]):
         self.payload_clss = payload_clss
         self.response_cls = response_cls
         self.handler = handler
+        self.min_payloads = _required_payload_count(handler, len(payload_clss))
 
     def __call__(self, payloads: list[bytes]) -> ResponseType:
-        return self.handler(*unwrap_request_payloads(payloads, self.payload_clss))
+        return self.handler(
+            *unwrap_request_payloads(payloads, self.payload_clss, self.min_payloads)
+        )
 
     def get_response_class(self) -> ResponseType:
         return self.response_cls
@@ -140,6 +165,7 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
         self.payload_clss = payload_clss
         self.handler = handler
         self.response_cls = response_cls
+        self.min_payloads = _required_payload_count(handler, len(payload_clss))
 
     def __call__(
         self, payloads: list[bytes], affinity_key: int = 0
@@ -148,7 +174,9 @@ class BlockingRequestHandler(RequestHandlerBase[ResponseType]):
             "BlockingRequestHandler has no executor assigned. "
             "Call add_normal_thread_pool or add_affinity_thread_pool first."
         )
-        decoded_payloads = unwrap_request_payloads(payloads, self.payload_clss)
+        decoded_payloads = unwrap_request_payloads(
+            payloads, self.payload_clss, self.min_payloads
+        )
         if isinstance(self.executor, AffinityThreadPool):
             return self.executor.submit(
                 self.handler, *decoded_payloads, affinity_key=affinity_key

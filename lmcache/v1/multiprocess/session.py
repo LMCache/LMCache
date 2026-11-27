@@ -12,7 +12,7 @@ import threading
 import time
 
 # First Party
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import IPCCacheServerKey, SessionKey
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.periodic_thread import (
     PeriodicThread,
@@ -40,7 +40,7 @@ class Session:
     to allow concurrent access from multiple TP worker threads.
     """
 
-    request_id: str
+    request_id: SessionKey
     hasher: TokenHasher
     tokens: bytes = b""
     chunk_hashes: list = field(default_factory=list)
@@ -51,9 +51,11 @@ class Session:
     client_hashed_tokens: int = 0
     created_at: float = field(default_factory=time.time)
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
+    read_owner: str = ""
     prefetch_hit_chunks: int = -1
     prefetch_locked_gids: tuple = ()
     _prefetch_owners: dict[ObjectKey, int] = field(default_factory=dict, repr=False)
+    _reads_closed: bool = False
     extras: dict[str, Any] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -230,6 +232,8 @@ class Session:
         """Record a new lookup and reset the previous lookup's result."""
         with self._lock:
             self.lookup_ipc_key = key
+            if key.read_owner:
+                self.read_owner = key.read_owner
             self.prefetch_hit_chunks = -1
             self.prefetch_locked_gids = ()
             self._prefetch_owners.clear()
@@ -239,12 +243,28 @@ class Session:
         hit_chunks: int,
         locked_gids: tuple[int, ...],
         l1_owners: dict[ObjectKey, int] | None = None,
-    ) -> None:
-        """Record the lock set acquired by the current lookup."""
+    ) -> bool:
+        """Record the lock set acquired by the current lookup.
+
+        Returns False if read ownership on this session was already closed.
+        """
         with self._lock:
+            if self._reads_closed:
+                return False
             self.prefetch_hit_chunks = hit_chunks
             self.prefetch_locked_gids = locked_gids
             self._prefetch_owners = dict(l1_owners) if l1_owners is not None else {}
+            return True
+
+    def close_read_ownership(self) -> tuple[str, dict[ObjectKey, int]]:
+        """Close read ownership once and return ``(read_owner, retained_l1_owners)``."""
+        with self._lock:
+            if self._reads_closed:
+                return "", {}
+            self._reads_closed = True
+            owners = self._prefetch_owners.copy()
+            self._prefetch_owners.clear()
+            return self.read_owner, owners
 
     def get_prefetch_owners(self) -> dict[ObjectKey, int]:
         """Snapshot the L1 owners whose read locks this session's lookup retained."""
@@ -266,7 +286,7 @@ class SessionManager:
     ) -> None:
         self._default_hasher = hasher
         self._ttl = ttl
-        self._sessions: dict[str, Session] = {}
+        self._sessions: dict[SessionKey, Session] = {}
         self._lock = threading.Lock()
         #: Callbacks invoked for every destroyed session, so owners of
         #: per-request state (e.g. entries in ``Session.extras``) can release
@@ -279,18 +299,9 @@ class SessionManager:
             self._cleanup_thread.start()
 
     def get_or_create(
-        self, request_id: str, hasher: TokenHasher | None = None
+        self, request_id: SessionKey, hasher: TokenHasher | None = None
     ) -> Session:
-        """Get existing session or create a new one.
-
-        Args:
-            request_id: Unique request identifier.
-            hasher: Token hasher for a newly created session. Defaults to the
-                manager's default hasher.
-
-        Returns:
-            The Session for this request_id.
-        """
+        """Get existing session or create a new one."""
         with self._lock:
             if request_id not in self._sessions:
                 self._sessions[request_id] = Session(
@@ -299,12 +310,12 @@ class SessionManager:
                 logger.debug("Created session for request_id=%s", request_id)
             return self._sessions[request_id]
 
-    def get(self, request_id: str) -> Optional[Session]:
+    def get(self, request_id: SessionKey) -> Optional[Session]:
         """Return an existing session without creating ownership state."""
         with self._lock:
             return self._sessions.get(request_id)
 
-    def remove(self, request_id: str) -> Optional[Session]:
+    def remove(self, request_id: SessionKey) -> Optional[Session]:
         """Remove a session by request_id.
 
         Args:

@@ -98,7 +98,7 @@ def test_rpc_types_come_from_request_client_annotations() -> None:
     assert lookup.response_type is type(None)
 
     query = get_rpc_spec("query_prefetch_status")
-    assert query.payload_types == (str,)
+    assert query.payload_types == (str, str)
     assert query.response_type == int | None
 
     clear = get_rpc_spec("clear")
