@@ -116,7 +116,12 @@ jobs:
 
   cpu-device-test:
     needs: changes
-    if: needs.changes.outputs.lmcache == 'true'
+    if: >-
+      needs.changes.outputs.lmcache == 'true' &&
+      !(github.event_name == 'pull_request' &&
+        !github.event.pull_request.draft &&
+        contains(github.event.pull_request.labels.*.name, 'token dropping') &&
+        !contains(github.event.pull_request.labels.*.name, 'force-ci'))
     name: CPU device (${{ matrix.os }} / ${{ matrix.model.name }} / ${{ matrix.request_transport }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120

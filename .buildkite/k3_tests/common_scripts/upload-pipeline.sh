@@ -37,6 +37,9 @@ case "${PIPELINE_FILE}" in
     *k3_tests/multiprocess/pipeline.yml|*k3_tests/multiprocess/smoke-pipeline.yml)
         expensive_pipeline_name="multiprocess"
         ;;
+    *k3_tests/unit/pipeline.yml)
+        expensive_pipeline_name="unit"
+        ;;
     *)
         expensive_pipeline_name=""
         ;;
@@ -45,11 +48,15 @@ esac
 if [[ -n "${expensive_pipeline_name}" ]] && \
     should_skip_expensive_k3_pipeline "${expensive_pipeline_name}"; then
     echo "+++ :fast_forward: Skipping ${expensive_pipeline_name} CI"
+    skip_label="skip expensive ci"
+    if pr_has_label "token dropping"; then
+        skip_label="token dropping"
+    fi
     if command -v buildkite-agent >/dev/null 2>&1; then
         buildkite-agent annotate \
             --style success \
             --context "skip expensive ci" \
-            "Skipped: PR has the \`skip expensive ci\` label. Add a \`force-ci\` label to run the full ${expensive_pipeline_name} suite." \
+            "Skipped: PR has the \`${skip_label}\` label. Add a \`force-ci\` label to run the full ${expensive_pipeline_name} suite." \
             || true
     fi
     exit 0
