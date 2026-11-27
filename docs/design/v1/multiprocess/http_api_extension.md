@@ -31,15 +31,27 @@ Located at `lmcache/v1/multiprocess/http_apis/`.
 
 Each file in this directory that matches the `*_api.py` naming
 convention is automatically discovered and registered. Existing
-modules:
+modules (see `docs/source/mp/http_api.rst` for the user-facing
+reference; keep that page as the source of truth when this table
+falls behind):
 
 | Module | Endpoint | Method | Description |
 |---|---|---|---|
 | `info_api.py` | `/` | GET | Basic liveness check |
 | `info_api.py` | `/healthcheck` | GET | K8s probe endpoint |
 | `info_api.py` | `/status` | GET | Internal status report |
+| `info_api.py` | `/version`, `/lmc_version`, `/commit_id` | GET | Version descriptors (re-exposed from the shared `internal_api_server.vllm` version router) |
 | `config_api.py` | `/config` | GET | Server config dump |
+| `config_api.py` | `/config/adapters` | GET | L2 adapter config listing |
 | `cache_api.py` | `/cache/clear` | POST | Force-clear L1 cache |
+| `cache_api.py` | `/cache/objects` | GET / DELETE | List / delete cached objects |
+| `cache_api.py` | `/cache/prefetches` | POST | Submit an out-of-band prefetch job |
+| `cache_api.py` | `/cache/prefetches/{request_id}` | GET | Poll a submitted prefetch job |
+| `cache_api.py` | `/cache/checksums` | POST | Compute checksums over cached objects |
+| `quota_api.py` | `/quota` | GET | List per-`cache_salt` isolated-LRU quotas |
+| `quota_api.py` | `/quota/{cache_salt}` | PUT / GET / DELETE | Register, inspect, or drop a quota for a `cache_salt` |
+| `reconfigure_api.py` | `/reconfigure/{backend}/status` | GET | Poll a running backend reconfiguration |
+| `reconfigure_api.py` | `/reconfigure/{backend}/{operation}` | POST | Trigger a backend reconfiguration operation |
 
 ### `http_server.py`
 
