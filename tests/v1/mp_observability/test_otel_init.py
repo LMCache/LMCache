@@ -6,6 +6,7 @@ from types import ModuleType
 from unittest.mock import MagicMock, patch
 import os
 import sys
+import threading
 
 # Third Party
 from prometheus_client.parser import text_string_to_metric_families
@@ -17,6 +18,7 @@ from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
     init_observability,
 )
+from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
 from lmcache.v1.mp_observability.otel_init import (
     init_grpc_otel_metrics,
     init_otel_metrics,
@@ -220,29 +222,59 @@ def _stub_metrics_subscriber_modules(monkeypatch):
     )
 
 
-def test_init_observability_propagates_flag_false(monkeypatch):
+@pytest.fixture
+def owned_observability():
+    """Start observability through the returned factory and tear it down.
+
+    ``init_observability`` starts an EventBus drain thread and replaces the
+    global singleton without stopping the previous one. A bus left running
+    here keeps draining the native event buffer shared with later CUDA
+    recorder tests and steals their events, so every bus started through the
+    factory is stopped and the global bus is reset to a disabled one.
+    """
+    started = []
+
+    def _init(cfg: ObservabilityConfig, **kwargs):
+        bus = init_observability(cfg, **kwargs)
+        started.append(bus)
+        return bus
+
+    yield _init
+
+    for bus in started:
+        bus.stop()
+    init_event_bus(EventBusConfig(enabled=False))
+    leaked = [t.name for t in threading.enumerate() if t.name == "EventBus"]
+    assert not leaked, f"EventBus drain threads left running: {leaked}"
+
+
+def test_init_observability_propagates_flag_false(monkeypatch, owned_observability):
     """``init_observability`` must forward ``False`` to
     ``init_otel_metrics``."""
     _stub_metrics_subscriber_modules(monkeypatch)
     cfg = ObservabilityConfig(enabled=True, metrics_enabled=True, logging_enabled=False)
     with patch("lmcache.v1.mp_observability.otel_init.init_otel_metrics") as mock_init:
-        init_observability(cfg, start_prometheus_http_server=False)
+        owned_observability(cfg, start_prometheus_http_server=False)
     mock_init.assert_called_once()
     assert mock_init.call_args.kwargs["start_http_server"] is False
     assert mock_init.call_args.kwargs["enable_grpc_metrics"] is False
 
 
-def test_init_observability_propagates_flag_true_by_default(monkeypatch):
+def test_init_observability_propagates_flag_true_by_default(
+    monkeypatch, owned_observability
+):
     _stub_metrics_subscriber_modules(monkeypatch)
     cfg = ObservabilityConfig(enabled=True, metrics_enabled=True, logging_enabled=False)
     with patch("lmcache.v1.mp_observability.otel_init.init_otel_metrics") as mock_init:
-        init_observability(cfg)
+        owned_observability(cfg)
     mock_init.assert_called_once()
     assert mock_init.call_args.kwargs["start_http_server"] is True
     assert mock_init.call_args.kwargs["enable_grpc_metrics"] is False
 
 
-def test_init_observability_propagates_grpc_metrics_flag(monkeypatch):
+def test_init_observability_propagates_grpc_metrics_flag(
+    monkeypatch, owned_observability
+):
     _stub_metrics_subscriber_modules(monkeypatch)
     cfg = ObservabilityConfig(
         enabled=True,
@@ -251,12 +283,14 @@ def test_init_observability_propagates_grpc_metrics_flag(monkeypatch):
         logging_enabled=False,
     )
     with patch("lmcache.v1.mp_observability.otel_init.init_otel_metrics") as mock_init:
-        init_observability(cfg)
+        owned_observability(cfg)
     mock_init.assert_called_once()
     assert mock_init.call_args.kwargs["enable_grpc_metrics"] is False
 
 
-def test_init_observability_propagates_grpc_metrics_enabled(monkeypatch):
+def test_init_observability_propagates_grpc_metrics_enabled(
+    monkeypatch, owned_observability
+):
     _stub_metrics_subscriber_modules(monkeypatch)
     cfg = ObservabilityConfig(
         enabled=True,
@@ -265,7 +299,7 @@ def test_init_observability_propagates_grpc_metrics_enabled(monkeypatch):
         logging_enabled=False,
     )
     with patch("lmcache.v1.mp_observability.otel_init.init_otel_metrics") as mock_init:
-        init_observability(cfg)
+        owned_observability(cfg)
     mock_init.assert_called_once()
     assert mock_init.call_args.kwargs["enable_grpc_metrics"] is True
 
