@@ -137,6 +137,24 @@ class TestContextLifecycle:
         with pytest.raises(OSError, match="nds_init"):
             instance.driver_open()
 
+    def test_driver_open_rejects_uapi_other_than_v0_1(
+        self, fake_cdll: _FakeCDLL, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A library that returns 0 but does not report v0.1 must not stay open."""
+        for version in (0, 0x0002):
+
+            def nds_init(param: Any, reported: int = version) -> int:
+                param._obj.version = reported
+                return 0
+
+            monkeypatch.setattr(fake_cdll, "nds_init", nds_init, raising=False)
+            fake_cdll.calls.clear()
+            instance = OpenEulerNDSLibrary(library_path="/fake/libnds.so")
+            with pytest.raises(RuntimeError, match="need v0.1"):
+                instance.driver_open()
+            assert instance._driver_open is False
+            assert len(fake_cdll.calls["nds_exit"]) == 1
+
     def test_driver_close_destroys_remaining_contexts(
         self, lib: OpenEulerNDSLibrary, fake_cdll: _FakeCDLL
     ) -> None:

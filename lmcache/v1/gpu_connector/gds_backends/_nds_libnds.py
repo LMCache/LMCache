@@ -100,6 +100,8 @@ def _launch_npu_stream_host_callback(
 
 
 _DEFAULT_NDS_LIBRARY_PATH = "/usr/local/lib/libnds.so"
+# (major << 8) | minor. The ctypes layouts in this file match this UAPI only.
+_NDS_UAPI_VERSION = 0x0001
 
 NDS_IO_OP_PREAD = 0
 NDS_IO_OP_PWRITE = 1
@@ -268,6 +270,13 @@ class OpenEulerNDSLibrary:
         param = _NdsInitParam()
         ret = self._lib.nds_init(ctypes.byref(param))
         _posix_errno(ret, "nds_init")
+        # nds_init writes the driver UAPI. An older library leaves this zero.
+        if param.version != _NDS_UAPI_VERSION:
+            # The .so already opened the device. Exit so a later open can retry.
+            self._lib.nds_exit()
+            got = f"v{param.version >> 8}.{param.version & 0xFF}"
+            need = f"v{_NDS_UAPI_VERSION >> 8}.{_NDS_UAPI_VERSION & 0xFF}"
+            raise RuntimeError(f"openEuler libnds UAPI {got}, need {need}")
         self._driver_open = True
 
     def driver_close(self) -> None:
