@@ -24,6 +24,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
+from lmcache.v1.mp_coordinator.schemas import INCARNATION_METADATA_KEY
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.modules import p2p_controller
@@ -658,12 +659,16 @@ def _entry(
     url: str,
     ip: str = "10.0.0.9",
     mq_port: int = 5555,
+    metadata: dict[str, str] | None = None,
+    registration_time: float = 0.0,
 ) -> dict:
     return {
         "instance_id": instance_id,
         "ip": ip,
         "p2p_advertised_url": url,
         "mq_port": mq_port,
+        "metadata": metadata or {},
+        "registration_time": registration_time,
     }
 
 
@@ -711,6 +716,108 @@ def test_poll_cycle_registered_excludes_self_and_adds_peer():
     status = controller.report_status()
     assert status["p2p_state"] == _P2PState.REGISTERED.value
     assert status["p2p_peers"] == ["peerA"]
+
+
+def _poll(controller: P2PController, client: MagicMock, peers: list[dict]) -> str:
+    """Run one poll cycle over ``peers`` plus this instance; return its summary."""
+    client.get.return_value = _instances_response([_entry("self", "me:1"), *peers])
+    return controller._poll_cycle().message
+
+
+def _token(value: str) -> dict[str, str]:
+    return {INCARNATION_METADATA_KEY: value} if value else {}
+
+
+@pytest.mark.parametrize(
+    "before, after, rebuilt",
+    [
+        ("p1", "p2", True),  # restarted at the same addresses
+        ("p1", "p1", False),  # same process
+        ("", "", False),  # peers that send no token: as before
+        ("", "p1", True),  # an old peer upgraded in place
+    ],
+)
+def test_poll_cycle_rebuilds_peer_iff_incarnation_changed(
+    before: str, after: str, rebuilt: bool
+) -> None:
+    """A peer listed again at the same addresses is rebuilt iff its
+    incarnation token changed (a restart with a pinned port)."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.side_effect = [7, 8]
+    client = _enable_polling(controller, advertise_url="me:1")
+
+    _poll(controller, client, [_entry("peerA", "tc:1", metadata=_token(before))])
+    _poll(controller, client, [_entry("peerA", "tc:1", metadata=_token(after))])
+
+    if rebuilt:
+        ctx.storage_manager.delete_l2_adapter.assert_called_once_with(7)
+        assert ctx.storage_manager.add_l2_adapter.call_count == 2
+    else:
+        ctx.storage_manager.delete_l2_adapter.assert_not_called()
+        assert ctx.storage_manager.add_l2_adapter.call_count == 1
+    assert controller.report_status()["p2p_peers"] == ["peerA"]
+
+
+def test_poll_cycle_new_id_at_held_url_replaces_old_adapter_first():
+    """A peer restarted under a new id is listed next to its stale old
+    registration; the newer one replaces the old adapter, removing it before
+    creating its own, so the two never share the URL's client."""
+    controller, ctx = _make_controller()
+    calls = MagicMock()
+    ctx.storage_manager.add_l2_adapter.side_effect = [7, 8]
+    calls.attach_mock(ctx.storage_manager.add_l2_adapter, "add")
+    calls.attach_mock(ctx.storage_manager.delete_l2_adapter, "delete")
+    client = _enable_polling(controller, advertise_url="me:1")
+    old = _entry("old", "tc:1", registration_time=10.0)
+
+    _poll(controller, client, [old])
+    summary = _poll(
+        controller,
+        client,
+        [_entry("new", "tc:1", registration_time=20.0), old],
+    )
+
+    assert [c[0] for c in calls.mock_calls] == ["add", "delete", "add"]
+    ctx.storage_manager.delete_l2_adapter.assert_called_once_with(7)
+    assert summary.endswith("added=1 removed=1")
+    assert controller.report_status()["p2p_peers"] == ["new"]
+
+
+def test_poll_cycle_keeps_latest_registration_per_url():
+    """Of two ids listed at one transfer URL, only the most recently
+    registered one, the process listening there now, gets an adapter."""
+    controller, ctx = _make_controller()
+    ctx.storage_manager.add_l2_adapter.return_value = 7
+    client = _enable_polling(controller, advertise_url="me:1")
+
+    _poll(
+        controller,
+        client,
+        [
+            _entry("new", "tc:1", registration_time=20.0),
+            _entry("old", "tc:1", registration_time=10.0),
+            _entry("other", "tc:2", registration_time=5.0),
+        ],
+    )
+
+    assert controller.report_status()["p2p_peers"] == ["new", "other"]
+    urls = sorted(
+        c.args[0].peer_transfer_channel_server_url
+        for c in ctx.storage_manager.add_l2_adapter.call_args_list
+    )
+    assert urls == ["tc:1", "tc:2"]
+
+
+def test_poll_cycle_skips_own_previous_registration():
+    """A server restarted under a new id may still see its previous
+    registration at its own transfer URL; it must not connect to itself."""
+    controller, ctx = _make_controller()
+    client = _enable_polling(controller, advertise_url="me:1")
+
+    _poll(controller, client, [_entry("self-old", "me:1", registration_time=1.0)])
+
+    ctx.storage_manager.add_l2_adapter.assert_not_called()
+    assert controller.report_status()["p2p_peers"] == []
 
 
 def test_poll_cycle_unexpected_error_does_not_crash():

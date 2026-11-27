@@ -117,6 +117,13 @@ def decode_tokens(tokens_b64: str) -> np.ndarray:
     return np.frombuffer(raw, dtype="<u4").astype(np.uint64)
 
 
+# Registration metadata key of a random token an MP server draws once per
+# process: a peer whose token changed was restarted, even at the same addresses.
+# Unlike the cache-event and KV-event incarnations, it is sent with every
+# registration, so it exists when those event streams are disabled.
+INCARNATION_METADATA_KEY = "incarnation"
+
+
 class RegisterRequest(BaseModel):
     """Body of a ``POST /instances`` registration request.
 
@@ -130,7 +137,8 @@ class RegisterRequest(BaseModel):
             such as Docker service names containing underscores are accepted.
         http_port: Port of the mp server's HTTP server, which the coordinator
             calls to push work to this instance.
-        metadata: Free-form registration hints.
+        metadata: Free-form registration hints. MP servers send
+            ``INCARNATION_METADATA_KEY``.
         chunk_size: Configured MP server chunk size. Optional for compatibility
             with servers that predate coordinator chunk-size validation.
         p2p_advertised_url: URL the instance advertises for peer-to-peer

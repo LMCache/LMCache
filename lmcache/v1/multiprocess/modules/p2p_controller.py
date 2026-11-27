@@ -37,6 +37,7 @@ from lmcache.v1.distributed.transfer_channel import (
     delete_transfer_channel_context,
     initialize_transfer_channel_context,
 )
+from lmcache.v1.mp_coordinator.schemas import INCARNATION_METADATA_KEY
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
@@ -136,6 +137,11 @@ class _PeerInstance:
     ip: str
     p2p_advertised_url: str
     mq_port: int
+    incarnation: str = ""
+    """ Per-process token from the registration metadata; empty for peers
+    that do not send one """
+    registration_time: float = 0.0
+    """ Coordinator wall-clock time of the peer's latest registration """
 
 
 @dataclass
@@ -146,6 +152,7 @@ class _PeerAdapter:
     ip: str
     p2p_advertised_url: str
     mq_port: int
+    incarnation: str = ""
     consecutive_misses: int = 0
 
 
@@ -630,14 +637,33 @@ class P2PController(DiscoverableModule):
         if not self._is_self_registered(instances):
             return self._apply_state(_P2PState.UNREGISTERED, {})
 
-        upstream = {
-            inst.instance_id: inst
-            for inst in instances
-            if inst.instance_id != self._instance_id
-            and inst.p2p_advertised_url
-            and inst.ip
-            and inst.mq_port
-        }
+        # One peer per transfer URL: a process restarted under a new id
+        # leaves its old registration listed until it goes stale; the most
+        # recent registration is the process listening there now. Our own
+        # URL is skipped too, as it may still list our previous process.
+        by_url: dict[str, _PeerInstance] = {}
+        for inst in instances:
+            if (
+                inst.instance_id == self._instance_id
+                or inst.p2p_advertised_url == self._p2p_config.advertise_url
+                or not inst.p2p_advertised_url
+                or not inst.ip
+                or not inst.mq_port
+            ):
+                continue
+            held = by_url.get(inst.p2p_advertised_url)
+            if held is not None:
+                if inst.registration_time <= held.registration_time:
+                    inst, held = held, inst
+                logger.debug(
+                    "Ignoring P2P peer %s: its transfer URL %s is held by the "
+                    "newer registration %s",
+                    held.instance_id,
+                    inst.p2p_advertised_url,
+                    inst.instance_id,
+                )
+            by_url[inst.p2p_advertised_url] = inst
+        upstream = {inst.instance_id: inst for inst in by_url.values()}
         return self._apply_state(_P2PState.REGISTERED, upstream)
 
     def _fetch_instances(self) -> list[_PeerInstance]:
@@ -667,6 +693,10 @@ class P2PController(DiscoverableModule):
                     ip=raw.get("ip", ""),
                     p2p_advertised_url=raw.get("p2p_advertised_url", ""),
                     mq_port=int(raw.get("mq_port", 0) or 0),
+                    incarnation=(raw.get("metadata") or {}).get(
+                        INCARNATION_METADATA_KEY, ""
+                    ),
+                    registration_time=float(raw.get("registration_time", 0) or 0),
                 )
             )
         return instances
@@ -715,8 +745,15 @@ class P2PController(DiscoverableModule):
     def _reconcile(self, upstream: dict[str, _PeerInstance]) -> tuple[int, int]:
         """Bring the local peer adapters in line with ``upstream``.
 
+        A new or changed peer first replaces every adapter at its transfer
+        URL, its own included: the transfer-channel client is cached per URL,
+        so a surviving adapter there would hand the new one a client bound
+        to the previous process, and closing it later would close the client
+        the new adapter shares.
+
         Args:
-            upstream: The peers that should each have a live adapter.
+            upstream: The peers that should each have a live adapter, at
+                most one per transfer URL.
 
         Returns:
             A ``(added, removed)`` count of adapter changes this cycle.
@@ -725,16 +762,20 @@ class P2PController(DiscoverableModule):
         removed = 0
         for peer_id, inst in upstream.items():
             current = self._adapters.get(peer_id)
-            if current is None:
-                if self._add_adapter(inst):
-                    added += 1
-            elif self._peer_changed(current, inst):
-                self._remove_adapter(peer_id)
-                removed += 1
-                if self._add_adapter(inst):
-                    added += 1
-            else:
+            if current is not None and not self._peer_changed(current, inst):
                 current.consecutive_misses = 0
+                continue
+            replaced = [
+                other_id
+                for other_id, other in self._adapters.items()
+                if other_id == peer_id
+                or other.p2p_advertised_url == inst.p2p_advertised_url
+            ]
+            for other_id in replaced:
+                self._remove_adapter(other_id)
+                removed += 1
+            if self._add_adapter(inst):
+                added += 1
 
         for peer_id in list(self._adapters.keys()):
             if peer_id in upstream:
@@ -755,12 +796,15 @@ class P2PController(DiscoverableModule):
             inst: The peer's freshly discovered info.
 
         Returns:
-            ``True`` if any connection field differs.
+            ``True`` if any connection field or the incarnation differs. A
+            changed incarnation is a restarted process at possibly the same
+            addresses, whose transfer-channel client must be rebuilt.
         """
         return (
             adapter.p2p_advertised_url != inst.p2p_advertised_url
             or adapter.ip != inst.ip
             or adapter.mq_port != inst.mq_port
+            or adapter.incarnation != inst.incarnation
         )
 
     def _add_adapter(self, inst: _PeerInstance) -> bool:
@@ -795,6 +839,7 @@ class P2PController(DiscoverableModule):
                 ip=inst.ip,
                 p2p_advertised_url=inst.p2p_advertised_url,
                 mq_port=inst.mq_port,
+                incarnation=inst.incarnation,
             )
         logger.debug(
             "Added P2P adapter %d for peer %s (%s)",
