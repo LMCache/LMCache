@@ -43,7 +43,6 @@ from lmcache.v1.common.token_codec import (  # noqa: E402
 )
 
 IMAGE_PLACEHOLDER_ID = 99
-pytestmark = pytest.mark.no_shared_allocator
 
 
 @dataclass
@@ -152,8 +151,8 @@ def test_real_vllm_prefill_token_ids_uses_int32_buffer():
     assert token_ids.itemsize == 4
 
 
-def test_real_vllm_request_packs_tokens_after_streaming_session_update():
-    """The optimized token source follows a real streaming vLLM request."""
+def test_real_vllm_request_packs_tokens_after_streaming_session_update() -> None:
+    """Pack live streaming-request tokens across vLLM scheduler versions."""
     if not hasattr(Request, "prefill_token_ids"):
         pytest.skip("vLLM does not expose prefill_token_ids")
 
@@ -187,6 +186,7 @@ def test_real_vllm_request_packs_tokens_after_streaming_session_update():
     scheduler.hash_block_size = 16
     scheduler.log_stats = False
     scheduler.collect_stats = False
+    scheduler.queued_workload_tally = None
     scheduler.num_waiting_for_streaming_input = 0
     scheduler.num_sampled_tokens_per_step = 1
     scheduler.max_model_len = 128

@@ -12,7 +12,6 @@ import pytest
 import zmq
 
 # First Party
-from lmcache.v1.client.transport.errors import MPRequestError
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.transport.zmq_impl.mq_client import MessageQueueClient
 from lmcache.v1.common.api import MemoryLayoutDesc
@@ -24,7 +23,7 @@ from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as transfer
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
-from lmcache.v1.transport.errors import InvalidRequestError
+from lmcache.v1.transport.errors import InvalidRequestError, MPRequestError
 from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 from lmcache.v1.transport.grpc.method_registry import (
     get_method_codec_registry,
@@ -76,7 +75,7 @@ def registration(
 ) -> Iterator[tuple[transfer.LMCacheDrivenTransferModule, list[MagicMock]]]:
     """Stub device boundaries; retain actual registration/layout state."""
     context = MagicMock()
-    context.chunk_size = 256
+    context.default_chunk_size = 256
     context.hash_algorithm_name = "blake3"
     context.layout_desc_registry = LayoutDescRegistry()
     created: list[MagicMock] = []

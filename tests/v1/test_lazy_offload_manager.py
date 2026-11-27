@@ -25,8 +25,6 @@ from lmcache.integration.vllm.lazy_offload_policy.fifo import (  # noqa: E402
     FIFOOffloadPolicy,
 )
 
-pytestmark = pytest.mark.no_shared_allocator
-
 
 class _RecordingFIFOPolicy(FIFOOffloadPolicy):
     """FIFO policy that keeps every drain signal it receives."""

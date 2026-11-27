@@ -1,0 +1,22 @@
+name: Weekly full build (CUDA)
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-full-build-cuda
+  cancel-in-progress: false
+
+jobs:
+  weekly:
+    uses: ./.github/workflows/weekly_device_build.yml
+    with:
+      label: CUDA
+      manifest: .buildkite/k3_tests/weekly/manifest.json
+      out_dir: weekly-full-build
+      artifact: weekly-full-build
+      timeout_minutes: 330
+    secrets: inherit

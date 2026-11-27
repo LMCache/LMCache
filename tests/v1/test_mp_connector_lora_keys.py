@@ -42,8 +42,6 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (  # noqa: E402
 )
 from lmcache.integration.vllm.utils import LORA_TAG_KEY  # noqa: E402
 
-pytestmark = pytest.mark.no_shared_allocator
-
 ADAPTER_A = LoRARequest("adapter-a", 1, "/adapters/a")
 ADAPTER_B = LoRARequest("adapter-b", 2, "/adapters/b")
 

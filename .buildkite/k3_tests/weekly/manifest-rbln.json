@@ -1,0 +1,25 @@
+{
+  "description": "What the RBLN weekly full build runs and what counts as a successful full run. Read by .github/scripts/weekly_full_build.py.",
+  "organization": "lmcache",
+  "branch": "ci-weekly-full",
+  "env": {
+    "CI_WEEKLY_FULL": "1"
+  },
+  "suite_skip_annotations": [
+    "path-filter-skip",
+    "skip expensive ci",
+    "mp-heavy-skip"
+  ],
+  "workload_skip_annotation_prefix": "weekly-skip-",
+  "expected_unsupported": [],
+  "pipelines": [
+    {
+      "slug": "rbln-mp-test",
+      "name": "RBLN MP hardware smoke",
+      "required": [
+        "^RBLN MP Hardware Smoke$"
+      ],
+      "not_run_allowed": []
+    }
+  ]
+}

@@ -17,6 +17,7 @@ import time
 import zlib
 
 # Third Party
+import msgspec
 import torch
 
 # First Party
@@ -56,6 +57,8 @@ _MAX_FIXED_BUFFER_REGION_BYTES = 1 << 30
 # recovery. Use a conservative reader count to expose device parallelism without
 # relying on high thread counts; io_uring recovery should use batched reads.
 DEFAULT_RECOVERY_READ_THREADS = 8
+# Warn once when a checkpoint payload uses this share of one metadata copy.
+_META_USAGE_WARN_RATIO = 0.8
 
 
 def round_up(x: int, align: int) -> int:
@@ -119,6 +122,17 @@ class _Entry:
     offset: int
     size: int
     meta: DiskCacheMetadata
+
+
+class _CheckpointEntry(msgspec.Struct, gc=False):
+    """A version-1 JSON record with only acyclic metadata fields."""
+
+    offset: int
+    size: int
+    shape: torch.Size | None
+    dtype: str | None
+    fmt: str | None
+    cached_positions: list[Any] | None
 
 
 @dataclass
@@ -251,6 +265,7 @@ class RawBlockCore:
         self._worker_error_logged: bool = False
 
         self._meta_seq: int = 0
+        self._meta_usage_warned = False
         self._meta_dirty_total: int = 0
         self._meta_persisted: int = 0
         self._inflight_io_count: int = 0
@@ -1838,14 +1853,12 @@ class RawBlockCore:
                 "data_base_offset": self._data_base_offset,
                 "next_slot": self._next_slot,
                 "entries": {
-                    encoded_key: {
-                        "offset": entry.offset,
-                        "size": entry.meta.size,
-                        "shape": list(entry.meta.shape)
-                        if entry.meta.shape is not None
-                        else None,
-                        "dtype": self._checkpoint_dtype_name(entry.meta.dtype),
-                        "fmt": (
+                    encoded_key: _CheckpointEntry(
+                        offset=entry.offset,
+                        size=entry.meta.size,
+                        shape=entry.meta.shape,
+                        dtype=self._checkpoint_dtype_name(entry.meta.dtype),
+                        fmt=(
                             entry.meta.fmt.name
                             if entry.meta.fmt is not None
                             and hasattr(entry.meta.fmt, "name")
@@ -1853,13 +1866,13 @@ class RawBlockCore:
                             if entry.meta.fmt is not None
                             else None
                         ),
-                        "cached_positions": (
+                        cached_positions=(
                             entry.meta.cached_positions.tolist()
                             if entry.meta.cached_positions is not None
                             and hasattr(entry.meta.cached_positions, "tolist")
                             else None
                         ),
-                    }
+                    )
                     for encoded_key, entry in self._index.items()
                 },
             }
@@ -1877,7 +1890,7 @@ class RawBlockCore:
         """
         if dtype is None:
             return None
-        return TORCH_DTYPE_TO_STR_DTYPE.get(dtype, str(dtype))
+        return TORCH_DTYPE_TO_STR_DTYPE.get(dtype) or str(dtype)
 
     def _write_checkpoint(self, payload: bytes, dirty_total_snapshot: int) -> bool:
         """Write one checkpoint copy and advance persisted metadata counters."""
@@ -1885,11 +1898,28 @@ class RawBlockCore:
         if len(payload) > payload_cap:
             logger.warning(
                 "RawBlockCore metadata payload too large (%d > %d), "
-                "skipping checkpoint",
+                "skipping checkpoint; newer entries are lost on restart. "
+                "Increase meta_total_bytes (this changes the device layout, "
+                "so the existing cache is not recovered).",
                 len(payload),
                 payload_cap,
             )
             return False
+        if (
+            not self._meta_usage_warned
+            and len(payload) >= _META_USAGE_WARN_RATIO * payload_cap
+        ):
+            self._meta_usage_warned = True
+            logger.warning(
+                "RawBlockCore metadata checkpoint uses %d of %d bytes (%.0f%%); "
+                "checkpoints are skipped once the index no longer fits. "
+                "Increase meta_total_bytes if the index keeps growing (this "
+                "changes the device layout, so the existing cache is not "
+                "recovered).",
+                len(payload),
+                payload_cap,
+                100.0 * len(payload) / payload_cap,
+            )
 
         next_seq = self._meta_seq + 1
         target_idx = int((next_seq - 1) % self._meta_copy_count)
@@ -1961,9 +1991,7 @@ class RawBlockCore:
 
         snapshot_ts = time.monotonic()
         snapshot, dirty_total_snapshot = self._snapshot_state()
-        payload = json.dumps(snapshot, separators=(",", ":"), ensure_ascii=True).encode(
-            "utf-8"
-        )
+        payload = msgspec.json.encode(snapshot)
         written = self._write_checkpoint(payload, dirty_total_snapshot)
         if written:
             with self._lock:

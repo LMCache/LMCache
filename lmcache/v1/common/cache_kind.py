@@ -36,6 +36,48 @@ class LMCacheSDKCacheKind(enum.Enum):
             return f"{model_name}##query"
         return model_name
 
+    def server_session_id(self, request_id: str) -> str:
+        """Namespace a request id so this kind gets its own server session.
+
+        The server keeps one token sequence per request id, along with the
+        rolling chunk hashes computed from it, and extends those hashes rather
+        than recomputing them. KV and query stores for the same request build
+        their keys from different chains (see key_origin), so sharing a session
+        would silently give whichever store ran second the other's cached
+        hashes.
+
+        Args:
+            request_id: The engine's request id.
+
+        Returns:
+            The request id to put on this kind's cache keys.
+        """
+        if self is LMCacheSDKCacheKind.QUERY:
+            return f"{request_id}##query"
+        return request_id
+
+    def key_origin(self, segment_start: int) -> int:
+        """First token of the chain this kind's cache keys are built from.
+
+        Chunk hashes chain from a root token, and a cache entry is only
+        addressable through the same chain that stored it. For KV, it
+        covers every token and chains from token 0, while query tensors exist
+        only for the tokens the last generate() actually computed. The previous
+        generate() may not have associated query rows since the KV is compacted,
+        hence the need to start the query chain at the first token where query
+        is actually computed.
+
+        Args:
+            segment_start: First token index whose rows the most recent
+                generate() computed.
+
+        Returns:
+            The chunk-aligned token index this kind's key chain starts at.
+        """
+        if self is LMCacheSDKCacheKind.QUERY:
+            return segment_start
+        return 0
+
     def base_model_name(self, model_name: str) -> str:
         """Remove the kind prefix from a model name for registration.
 

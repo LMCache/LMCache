@@ -62,8 +62,7 @@ slab with the ``cudaHostRegisterPortable`` flag so multi-GCU D2H/H2D works
 The ``triton_kernel_gcu`` plugin must register its operators under
 ``torch.ops.TRITON_GCU.lmcache``: the KV transfer family
 (``multi_layer_kv_transfer``, ``single_layer_kv_transfer``,
-``multi_layer_block_kv_transfer``, ``load_and_reshape_flash``,
-``reshape_and_cache_back_flash``), the CacheGen codec (``calculate_cdf``,
+``multi_layer_block_kv_transfer``), the CacheGen codec (``calculate_cdf``,
 ``encode_fast_new``, ``decode_fast_new``, ``decode_fast_prefsum``), rotary
 (``rotary_embedding_k_fused``, ``rotary_embedding_k_fused_strided``),
 ``lmcache_memcpy_async``, ``batched_memcpy``, the ``alloc_*``/``free_*`` host ops,

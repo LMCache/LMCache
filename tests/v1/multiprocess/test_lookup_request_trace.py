@@ -16,7 +16,7 @@ TOKEN_IDS = (11, 22, 33)
 def test_lookup_event_carries_key_token_ids():
     """The handler attaches the key's token ids, unpacked."""
     ctx = MagicMock()
-    ctx.chunk_size = 256
+    ctx.default_chunk_size = 256
     ctx.event_bus.has_subscribers.side_effect = (
         lambda event_type: event_type is EventType.MP_LOOKUP
     )

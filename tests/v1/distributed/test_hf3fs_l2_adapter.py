@@ -960,7 +960,7 @@ class TestHf3fsNativeConnector:
             peer.close()
 
         client.submit_batch_delete([key])
-        assert _wait_for_completions(client)[0][3] == [False]
+        assert _wait_for_completions(client)[0][3] == [True]
 
         client.submit_batch_exists([key])
         assert _wait_for_completions(client)[0][3] == [False]

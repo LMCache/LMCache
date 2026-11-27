@@ -89,8 +89,8 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--chunk-size``
      - ``256``
      - Minimum chunk size for KV cache operations (in tokens). The vLLM MP
-       connector may negotiate it upward to satisfy the model's KV geometry;
-       see :doc:`chunk_size_negotiation`.
+       connector may resolve a larger model-specific effective size to satisfy
+       the model's KV geometry; see :doc:`chunk_size_negotiation`.
    * - ``--null-block-id``
      - ``0``
      - Engine block ID that denotes absent KV data. Keep the default for
@@ -212,6 +212,11 @@ Source: ``lmcache/v1/multiprocess/config.py``
        withdraw announced CPU placements and stop reporting them; successful
        worker stores do not synthesize events. Caching continues unchanged.
        Publication while idle requires vLLM to call ``take_events()`` while idle.
+       A chunk is announced whether its L1 copy was stored by this engine or
+       loaded by one of its lookups from L2 or a P2P peer. A temporary
+       prefetch copy (``--l2-prefetch-policy skip_l1``, which
+       ``--enable-p2p-write`` selects) is removed again when its reader
+       finishes.
        Events still carry LMCache chunk hashes and chunk size; native engine
        block identities are separate work.
        Must be ``0`` for clients that send chunk hashes instead of tokens;
@@ -988,13 +993,14 @@ by one interleave layout from being loaded by another. It does not change the
 model name served by vLLM, but the decorated cache model name is visible in MP
 metric labels so operators can distinguish incompatible cache layouts.
 
-The vLLM MP connector automatically negotiates a compatible chunk size. For a
+The vLLM MP connector automatically resolves a compatible effective chunk size.
+For a
 single attention group, the required alignment is
 ``block_size * decode_context_parallel_size``. For a hybrid model, it is the
 least common multiple of every attention group's DCP-scaled block span and
-every recurrent-state group's unscaled physical block span. The server treats
-``--chunk-size`` as a minimum and rounds it up to the smallest compatible
-multiple; see :doc:`chunk_size_negotiation`.
+every recurrent-state group's unscaled physical block span. The connector
+treats the server's ``--chunk-size`` as a minimum and rounds it up locally to
+the smallest compatible multiple; see :doc:`chunk_size_negotiation`.
 
 The example model also needs a vLLM build that can run it under DCP:
 Kimi-Linear DCP support landed after v0.27.1 (vLLM commit ``63ac04a61e``,
@@ -1003,7 +1009,7 @@ PR #50484). On stock v0.27.1 the command below fails at startup with
 
 .. code-block:: bash
 
-    # block_size 1024 x dcp 2 -> a configured minimum of 256 negotiates to 2048
+    # block_size 1024 x dcp 2 -> a server minimum of 256 resolves to 2048
     lmcache server --host localhost --port 6000 --chunk-size 256 \
         --l1-size-gb 20 --eviction-policy LRU
 
@@ -1173,6 +1179,10 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        Auto-start supports exactly one server endpoint; configuring
        multiple ``lmcache.mp.server_urls`` raises ``ValueError`` during
        connector initialization.
+       Starting a server needs the full ``lmcache`` distribution. With only
+       ``lmcache-client`` installed, worker 0 raises ``RuntimeError`` instead
+       of starting one when no server answers at the endpoint; a server that
+       is already running there is still used.
    * - ``lmcache.mp.autostart.wait_timeout``
      - ``90.0``
      - Timeout (seconds) to wait for the auto-started server to respond to

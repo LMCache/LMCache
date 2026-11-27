@@ -20,6 +20,7 @@ import types
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.v1.distributed.l2_adapters.raw_block import (
@@ -519,7 +520,6 @@ def _available_slots(status: Mapping[str, int]) -> int:
     return status["free_slot_count"] + (status["max_slots"] - status["next_slot"])
 
 
-@pytest.mark.no_shared_allocator
 def test_raw_block_core_rejects_work_after_terminal_worker_failure(
     tmp_path: Path,
 ) -> None:
@@ -563,7 +563,6 @@ def test_raw_block_core_rejects_work_after_terminal_worker_failure(
     assert core.report_status()["is_healthy"] is False
 
 
-@pytest.mark.no_shared_allocator
 @requires_rust_raw_block_io
 def test_raw_block_core_uecc_quarantines_only_the_failed_payload_slot(
     tmp_path: Path,
@@ -620,7 +619,6 @@ def test_raw_block_core_uecc_quarantines_only_the_failed_payload_slot(
         core.close()
 
 
-@pytest.mark.no_shared_allocator
 @requires_rust_raw_block_io
 @pytest.mark.parametrize(
     "typed", [False, True], ids=["message-only-wheel", "typed-wheel"]
@@ -663,7 +661,6 @@ def test_uecc_text_alone_does_not_quarantine(
         core.close()
 
 
-@pytest.mark.no_shared_allocator
 @requires_rust_raw_block_io
 def test_uecc_after_slot_reuse_removes_current_owner(tmp_path: Path) -> None:
     fake = _RecordingRawDevice(size=RAW_BLOCK_CI_CAPACITY_BYTES)
@@ -725,7 +722,6 @@ def test_uecc_after_slot_reuse_removes_current_owner(tmp_path: Path) -> None:
         reopened.close()
 
 
-@pytest.mark.no_shared_allocator
 def test_raw_block_core_request_error_does_not_mark_worker_failed(
     tmp_path: Path,
 ) -> None:
@@ -1363,12 +1359,17 @@ def test_raw_block_core_posix_put_many_uses_sequential_pwrite(tmp_path: Path) ->
 def test_raw_block_core_recovers_checkpoint_from_temp_file(tmp_path):
     path = make_raw_block_file(tmp_path)
     config = make_raw_block_core_config(path)
-    spec = encode_object_key(make_object_key(31))
-    payload = b"recoverable-raw-block-payload"
+    spec = encode_object_key(
+        make_object_key(31, model_name="model-模型", cache_salt="résumé")
+    )
+    payload = bytes(range(48))
+    obj = make_memory_obj(payload)
+    obj.metadata.shape = torch.Size([2, 3, 8])
+    obj.metadata.cached_positions = torch.tensor([1, 7, 11])
 
     core = RawBlockCore(config)
     try:
-        put_result = core.put_many([spec], [make_memory_obj(payload)])
+        put_result = core.put_many([spec], [obj])
         assert put_result.results == [True]
         core.checkpoint_now()
     finally:
@@ -1377,6 +1378,13 @@ def test_raw_block_core_recovers_checkpoint_from_temp_file(tmp_path):
     recovered = RawBlockCore(config)
     try:
         assert recovered.contains_key(spec.encoded) is True
+        (meta,) = recovered.get_metadata_many([spec.encoded])
+        assert meta is not None
+        assert meta.shape == obj.metadata.shape
+        assert meta.dtype == obj.metadata.dtype
+        assert meta.fmt == obj.metadata.fmt
+        assert meta.cached_positions is not None
+        assert torch.equal(meta.cached_positions, obj.metadata.cached_positions)
         loaded = make_empty_memory_obj(len(payload))
         assert recovered.load_many_into([spec.encoded], [loaded]) == [True]
         assert memory_obj_bytes(loaded) == payload
