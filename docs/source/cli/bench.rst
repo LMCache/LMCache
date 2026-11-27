@@ -2532,7 +2532,9 @@ emits a zero-duration ``mp.request.trace`` span under the request's root
 span, carrying ``lmcache.model``, ``lmcache.input_ids`` (the prompt token
 ids) and ``session_id``; the span's start time is the lookup timestamp.
 A request the engine looks up again (for example after preemption) emits
-one span per lookup; the analyzer keeps only its earliest span.
+one span per lookup; the analyzer keeps only its earliest span for each
+``(model, request id)`` pair. Different models may reuse a request id without
+losing either request.
 
 This is the ``lmcache`` trace format, the default value of
 ``--trace-format``; its contract is in :ref:`trace-analyze-formats`.
@@ -2594,7 +2596,15 @@ only this from each request, in order of importance:
   request, and the engine looks a request up again after preemption, so
   that format needs it. A producer that records each request once can use
   any unique value.
-* **a model name**, only for ``--model``; it may be empty.
+* **a model name**, which isolates request ids and cached chunks and supports
+  the ``--model`` filter; it may be empty. All records with an empty model name
+  share that namespace.
+
+Models compete for one shared token-capacity budget, but identical token ids
+do not produce prefix or non-prefix hits across different models. This is a
+token-budget simulation, not a byte-capacity estimate for differently sized
+models. Isolation dimensions absent from the trace, such as cache salt or KV
+dtype, are not inferred.
 
 How those are packaged is the producer's choice: OTLP spans, OTLP logs or
 flat JSON lines all work, as long as the file is one JSON value per
@@ -2745,5 +2755,5 @@ Options
    * - ``--trace-format {dynamo}``
      - ``dynamo`` is the Dynamo frontend's ``request_payload`` record.
    * - ``--model NAME``
-     - Only analyze requests for this model name. Use it when one trace
-       mixes models, since the simulated cache is shared.
+     - Only analyze requests for this model name. Filtering happens before
+       replay, so other models no longer compete for the shared capacity.
