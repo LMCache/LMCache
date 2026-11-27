@@ -662,6 +662,30 @@ class TestConfig:
             {"s3_endpoint": "s3://my-bucket", "s3_region": "us-east-1"}
         )
 
+    @pytest.mark.parametrize(
+        "endpoint, region, match",
+        [
+            ("s3://s3.us-west-2.amazonaws.com", "us-west-2", "path-style"),
+            ("s3.us-west-2.amazonaws.com/kv", "us-west-2", "path"),
+            ("s3://my.kv.s3.us-west-2.amazonaws.com", "us-west-2", "dots"),
+            ("s3://kv-cache.minio.local:9000", "us-west-2", "virtual-hosted"),
+            ("s3://kv-cache.s3.us-west-2.amazonaws.com", "eu-west-1", "region"),
+            ("s3://kv-cache.s3.amazonaws.com", "us-west-2", "region"),
+        ],
+    )
+    def test_per_salt_rejects_ambiguous_endpoints(self, endpoint, region, match):
+        with pytest.raises(ValueError, match=match):
+            S3L2AdapterConfig(
+                s3_endpoint=endpoint,
+                s3_region=region,
+                s3_bucket_mode="per_cache_salt",
+            )
+
+    def test_single_mode_endpoints_are_unchanged(self):
+        """The stricter endpoint rules apply only to per_cache_salt mode."""
+        for ep in ("s3://my.kv.s3.us-west-2.amazonaws.com", "minio.local:9000"):
+            S3L2AdapterConfig(s3_endpoint=ep, s3_region="us-west-2")
+
     def test_help_lists_new_fields(self):
         text = S3L2AdapterConfig.help()
         for field in (

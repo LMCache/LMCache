@@ -406,16 +406,24 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         # config time rather than on the first request in per_cache_salt mode.
         if s3_bucket_mode == "per_cache_salt":
             template = s3_bucket_template or _bucket_router.DEFAULT_TEMPLATE
-            host = s3_endpoint.removeprefix("s3://")
-            if "." not in host:
-                # Without a host suffix there is nowhere to route a tenant
-                # bucket, and every key would silently share the base bucket.
+            # The tenant bucket replaces the endpoint's first host label, so
+            # the whole host must be an unambiguous AWS virtual-hosted name:
+            # a path-style or dotted-bucket endpoint would route tenants into
+            # the wrong bucket or share one bucket among all of them.
+            try:
+                parsed = _bucket_router.parse_virtual_hosted_endpoint(s3_endpoint)
+            except ValueError as e:
                 raise ValueError(
-                    "s3_bucket_mode 'per_cache_salt' needs a virtual-hosted "
-                    "s3_endpoint ('s3://<bucket>.s3.<region>.amazonaws.com'), "
-                    f"got {s3_endpoint!r}"
+                    f"s3_bucket_mode 'per_cache_salt' needs a virtual-hosted "
+                    f"s3_endpoint ('s3://<bucket>.s3.<region>.amazonaws.com'): {e}"
+                ) from e
+            region = s3_region or _bucket_router.GLOBAL_ENDPOINT_REGION
+            if parsed.effective_region != region:
+                raise ValueError(
+                    f"s3_endpoint {s3_endpoint!r} is in region "
+                    f"{parsed.effective_region!r} but s3_region is {s3_region!r}"
                 )
-            base_bucket = _bucket_router.bucket_of_host(host)
+            base_bucket = parsed.bucket
             try:
                 _bucket_router.validate_template(template, base_bucket)
             except (KeyError, ValueError, IndexError) as e:

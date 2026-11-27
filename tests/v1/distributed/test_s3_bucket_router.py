@@ -127,6 +127,63 @@ def test_validate_template_accepts_defaults():
     r.validate_template("kv-cache-{salt}", "kv-cache")
 
 
+@pytest.mark.parametrize(
+    "endpoint, bucket, region",
+    [
+        ("s3://kv-cache.s3.us-west-2.amazonaws.com", "kv-cache", "us-west-2"),
+        ("kv-cache.s3.us-east-1.amazonaws.com", "kv-cache", "us-east-1"),
+        ("kv-cache.s3-us-west-2.amazonaws.com", "kv-cache", "us-west-2"),
+        ("kv-cache.s3.dualstack.eu-west-1.amazonaws.com", "kv-cache", "eu-west-1"),
+        ("kv-cache.s3.cn-north-1.amazonaws.com.cn", "kv-cache", "cn-north-1"),
+        ("kv-cache.s3.amazonaws.com", "kv-cache", "us-east-1"),  # global
+        ("kv-cache.s3-external-1.amazonaws.com", "kv-cache", "us-east-1"),
+        ("s3-bucket.s3.us-west-2.amazonaws.com", "s3-bucket", "us-west-2"),
+    ],
+)
+def test_parse_virtual_hosted_endpoint(endpoint, bucket, region):
+    parsed = r.parse_virtual_hosted_endpoint(endpoint)
+    assert parsed.bucket == bucket
+    assert parsed.effective_region == region
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "s3://s3.us-west-2.amazonaws.com",  # path-style: no bucket label
+        "s3.amazonaws.com",
+        "s3.us-west-2.amazonaws.com/kv-cache",  # path-style with the bucket
+        "https://kv-cache.s3.us-west-2.amazonaws.com",
+        "kv-cache.s3.us-west-2.amazonaws.com:443",
+        "kv-cache.s3.us-west-2.amazonaws.com/prefix",
+        "my.bucket.s3.us-west-2.amazonaws.com",  # dotted bucket
+        "KV-Cache.s3.us-west-2.amazonaws.com",
+        "kv-cache",  # bucket only
+        "kv-cache.minio.local",  # not AWS
+        "kv-cache.s3.us-west-2.example.com",
+        "ab.s3.us-west-2.amazonaws.com",  # bucket name too short
+    ],
+)
+def test_parse_rejects_ambiguous_or_path_style(endpoint):
+    with pytest.raises(ValueError):
+        r.parse_virtual_hosted_endpoint(endpoint)
+
+
+def test_dotted_bucket_error_says_why():
+    with pytest.raises(ValueError, match="dots"):
+        r.parse_virtual_hosted_endpoint("my.bucket.s3.us-west-2.amazonaws.com")
+
+
+@pytest.mark.parametrize("template", ["{base}.{salt}", "kv.{salt}", "{salt}.x"])
+def test_templates_with_dots_are_rejected(template):
+    with pytest.raises(ValueError, match="dotted"):
+        r.validate_template(template, "kv-cache")
+
+
+def test_generated_names_never_contain_dots():
+    for salt in ("tenant.a", "a.b.c", "...", "x." * 60):
+        assert "." not in r.tenant_bucket_name(salt, r.DEFAULT_TEMPLATE, "kv-cache")
+
+
 def test_bucket_hosts():
     assert r.bucket_hosts(BASE, set()) == [BASE]
     hosts = r.bucket_hosts(BASE, {"kv-cache-b-1", "kv-cache-a-2"})

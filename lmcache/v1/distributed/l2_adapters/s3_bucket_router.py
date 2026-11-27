@@ -44,6 +44,76 @@ _IPV4 = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
 _RESERVED_PREFIXES = ("xn--", "sthree-", "amzn-s3-demo-")
 _RESERVED_SUFFIXES = ("-s3alias", "--ol-s3", "--x-s3", "--table-s3")
 _TEMPLATE_FIELDS = frozenset({"base", "salt"})
+# Host suffixes of the AWS S3 virtual-hosted endpoints, after "<bucket>.":
+# s3.<region>.amazonaws.com, s3-<region>.amazonaws.com (legacy dash form),
+# s3.dualstack.<region>.amazonaws.com, the global s3.amazonaws.com and
+# s3-external-1.amazonaws.com (both us-east-1), and the .com.cn partition.
+_AWS_S3_SUFFIX = re.compile(
+    r"^s3(?:-external-1|\.dualstack)?"
+    r"(?:[.-](?P<region>[a-z]{2}(?:-[a-z]+)+-\d+))?"
+    r"\.amazonaws\.com(?:\.cn)?$"
+)
+#: Region the regionless S3 endpoints (s3.amazonaws.com) resolve to.
+GLOBAL_ENDPOINT_REGION = "us-east-1"
+
+
+class VirtualHostedEndpoint:
+    """An AWS S3 endpoint of the form ``<bucket>.<s3 suffix>``."""
+
+    def __init__(self, bucket: str, suffix: str, region: str | None):
+        self.bucket = bucket
+        self.suffix = suffix
+        #: Region named by the host, or None for the regionless endpoints.
+        self.region = region
+
+    @property
+    def effective_region(self) -> str:
+        return self.region or GLOBAL_ENDPOINT_REGION
+
+
+def parse_virtual_hosted_endpoint(endpoint: str) -> VirtualHostedEndpoint:
+    """Parse the whole endpoint for ``per_cache_salt`` mode.
+
+    Accepts only ``[s3://]<bucket>.<AWS S3 suffix>`` with a dot-free,
+    lowercase bucket label: the tenant bucket replaces that label, so it must
+    be the entire first label of the host.
+
+    Raises:
+        ValueError: a path-style endpoint (no bucket label, or a path), a
+            port, credentials or a query, a dotted or illegal bucket name, or
+            a host that is not an AWS S3 endpoint.
+    """
+    host = endpoint.removeprefix("s3://")
+    if not host or any(c in host for c in "/?#@:"):
+        raise ValueError(
+            f"{endpoint!r} is not a bare virtual-hosted host: no scheme other "
+            "than s3://, path, port, query or credentials is allowed"
+        )
+    if host != host.lower():
+        raise ValueError(f"{endpoint!r} must be lowercase")
+    if _AWS_S3_SUFFIX.match(host):
+        raise ValueError(
+            f"{endpoint!r} is a path-style endpoint with no bucket label; use "
+            "'<bucket>.s3.<region>.amazonaws.com'"
+        )
+    pos = host.find(".")
+    while pos != -1:
+        m = _AWS_S3_SUFFIX.match(host[pos + 1 :])
+        if m:
+            bucket = host[:pos]
+            if "." in bucket:
+                raise ValueError(
+                    f"bucket {bucket!r} in {endpoint!r} contains dots, which "
+                    "per_cache_salt mode does not allow"
+                )
+            if not is_valid_bucket_name(bucket):
+                raise ValueError(f"{bucket!r} in {endpoint!r} is not a bucket name")
+            return VirtualHostedEndpoint(bucket, host[pos + 1 :], m.group("region"))
+        pos = host.find(".", pos + 1)
+    raise ValueError(
+        f"{endpoint!r} is not an AWS S3 virtual-hosted endpoint "
+        "('<bucket>.s3.<region>.amazonaws.com')"
+    )
 
 
 def sanitize_salt(salt: str) -> str:
@@ -99,10 +169,14 @@ def validate_template(template: str, base_bucket: str) -> None:
             f"leaves no room for the {SALT_HASH_LEN}-character salt hash "
             f"within {MAX_BUCKET_NAME_LEN} characters"
         )
-    for sample in ("x", "tenant:a", "T" * 128):
+    for sample in ("x", "tenant:a", "tenant.a", "T" * 128):
         name = tenant_bucket_name(sample, template, base_bucket)
         if not is_valid_bucket_name(name):
             raise ValueError(f"produces an invalid bucket name {name!r}")
+        if "." in name:
+            # The sanitizer never emits dots, so one can only come from the
+            # template or the base bucket.
+            raise ValueError(f"produces a dotted bucket name {name!r}")
 
 
 def tenant_bucket_name(

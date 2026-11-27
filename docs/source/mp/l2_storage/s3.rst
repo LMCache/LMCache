@@ -32,10 +32,14 @@ By default every object goes to the one bucket in ``s3_endpoint``, and a
 request's ``cache_salt`` only becomes part of the object name.  With
 ``s3_bucket_mode: "per_cache_salt"``, each salted object goes to a bucket of
 its own instead, so tenants do not share bucket capacity, lifecycle, or
-bucket policy.  Unsalted objects stay in the ``s3_endpoint`` bucket.  This
-mode needs the virtual-hosted endpoint form
-(``s3://<bucket>.s3.<region>.amazonaws.com``), because the adapter selects the
-bucket through the ``Host`` header.
+bucket policy.  Unsalted objects stay in the ``s3_endpoint`` bucket.  The
+adapter selects the bucket through the ``Host`` header by replacing the
+endpoint's first host label, so this mode checks the whole endpoint when the
+config is loaded.  It accepts only an AWS S3 virtual-hosted endpoint
+(``s3://<bucket>.s3.<region>.amazonaws.com``, or the ``s3-<region>``,
+dual-stack, ``s3.amazonaws.com`` and ``.com.cn`` variants) whose bucket name
+has no dots and whose region matches ``s3_region``.  Path-style endpoints,
+ports, paths and non-AWS hosts are refused.
 
 - ``s3_bucket_mode`` (string, default ``"single"``): ``"single"`` or
   ``"per_cache_salt"``.
