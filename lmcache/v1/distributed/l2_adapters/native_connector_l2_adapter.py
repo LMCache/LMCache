@@ -27,6 +27,7 @@ from typing import Any
 import ctypes
 import select
 import threading
+import time
 
 # First Party
 from lmcache.lmcache_native import Bitmap
@@ -42,6 +43,8 @@ from lmcache.v1.memory_management import MemoryObj, TensorMemoryObj
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
+
+_FAILED_COMPLETION_LOG_INTERVAL_S = 10.0
 
 
 @cache
@@ -207,6 +210,11 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         # Bridges the async store submit → demux completion gap so the
         # demux thread can fire ``_notify_keys_stored(keys, sizes)``.
         self._pending_store_sizes: dict[int, tuple[list[ObjectKey], list[int]]] = {}
+
+        # Failed native completions, counted and logged at most once per
+        # _FAILED_COMPLETION_LOG_INTERVAL_S. Only the demux thread uses these.
+        self._failed_completions = 0
+        self._failed_completion_logged_at: float | None = None
 
         # Task ID counter
         self._next_task_id: L2TaskId = 0
@@ -447,6 +455,19 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # Internal helpers
     # ---------------------------------------------------------------
 
+    def _log_failed_completion(self, fid: int, error: Any) -> None:
+        now = time.monotonic()
+        self._failed_completions += 1
+        last = self._failed_completion_logged_at
+        if last is None or now - last >= _FAILED_COMPLETION_LOG_INTERVAL_S:
+            logger.warning(
+                "Native connector completion %d failed (%d failed so far): %s",
+                fid,
+                self._failed_completions,
+                str(error)[:500],
+            )
+            self._failed_completion_logged_at = now
+
     def _get_next_task_id(self) -> L2TaskId:
         """Increment and return the next task ID.
         Must be called under _lock."""
@@ -499,6 +520,11 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                     result_bools,
                 ) in completions:
                     fid = int(future_id)
+                    if not ok:
+                        # The caller reports a failed completion as a miss or a
+                        # failed store. Log the connector's error here, otherwise
+                        # a transport failure looks the same as a cold cache.
+                        self._log_failed_completion(fid, error)
                     entry = self._pending_ops.pop(fid, None)
                     if entry is None:
                         logger.warning(
