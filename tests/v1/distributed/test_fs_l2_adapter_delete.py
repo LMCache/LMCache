@@ -11,6 +11,8 @@ accounting and feed the coordinator's cache-event stream.
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
+import asyncio
+import threading
 import time
 
 # Third Party
@@ -18,11 +20,14 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.l2_adapters import fs_l2_adapter as fs_adapter_module
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
     FSL2Adapter,
     FSL2AdapterConfig,
 )
 from lmcache.v1.memory_management import MemoryObj
+
+pytestmark = pytest.mark.no_shared_allocator
 
 
 class _RecordingListener:
@@ -198,6 +203,126 @@ class TestDelete:
         assert bitmap is not None, "load task did not complete within 5s"
         assert bitmap.popcount() == 0
         assert listener.accessed == []
+
+    def test_delete_waits_for_delayed_unlink_before_replacement(
+        self,
+        adapter: AdapterFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Return only after an old unlink can no longer remove a replacement."""
+        adp, _listener = adapter
+        key = _key(b"\x03" * 4)
+        _store_and_wait(adp, [key], [b"old-object"])
+
+        unlink_entered = threading.Event()
+        release_unlink = threading.Event()
+        original_unlink = fs_adapter_module.aiofiles.os.unlink
+
+        async def delayed_unlink(path: str | Path) -> None:
+            unlink_entered.set()
+            await asyncio.to_thread(release_unlink.wait)
+            await original_unlink(path)
+
+        monkeypatch.setattr(fs_adapter_module.aiofiles.os, "unlink", delayed_unlink)
+        monkeypatch.setattr(fs_adapter_module, "_DELETE_COMPLETION_WARNING_S", 0.01)
+
+        cleanup_errors: list[BaseException] = []
+
+        def cleanup() -> None:
+            try:
+                adp.delete([key])
+            except BaseException as error:  # pragma: no cover - surfaced below
+                cleanup_errors.append(error)
+
+        worker = threading.Thread(target=cleanup)
+        worker.start()
+        try:
+            assert unlink_entered.wait(timeout=5.0)
+            time.sleep(0.05)
+            assert worker.is_alive(), (
+                "delete returned while physical unlink was pending"
+            )
+        finally:
+            release_unlink.set()
+            worker.join(timeout=5.0)
+
+        assert not worker.is_alive()
+        assert cleanup_errors == []
+        _store_and_wait(adp, [key], [b"replacement-object"])
+        assert _lookup_and_wait(adp, [key]) == [True]
+
+    def test_close_waits_for_physical_unlink(
+        self,
+        adapter: AdapterFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Closing the loop must not outlive an executor's pending unlink."""
+        adp, listener = adapter
+        key = _key(b"\x05" * 4)
+        _store_and_wait(adp, [key], [b"old-object"])
+        entered = threading.Event()
+        release = threading.Event()
+        terminal = threading.Event()
+        original_unlink = fs_adapter_module.os.unlink
+
+        def blocking_unlink(path: str | Path) -> None:
+            entered.set()
+            assert release.wait(timeout=5.0)
+            original_unlink(path)
+            terminal.set()
+
+        async def executor_unlink(path: str | Path) -> None:
+            await asyncio.to_thread(blocking_unlink, path)
+
+        monkeypatch.setattr(fs_adapter_module.aiofiles.os, "unlink", executor_unlink)
+        monkeypatch.setattr(fs_adapter_module, "_DELETE_COMPLETION_WARNING_S", 0.01)
+        deleting = threading.Thread(target=adp.delete, args=([key],))
+        closing = threading.Thread(target=adp.close)
+        deleting.start()
+        try:
+            assert entered.wait(timeout=5.0)
+            closing.start()
+            time.sleep(0.05)
+            assert deleting.is_alive(), "close released a pending deletion"
+            assert closing.is_alive(), "close left physical unlink running"
+            assert not terminal.is_set()
+        finally:
+            release.set()
+            deleting.join(timeout=5.0)
+            if closing.ident is not None:
+                closing.join(timeout=5.0)
+        assert not deleting.is_alive()
+        assert not closing.is_alive()
+        assert terminal.is_set()
+        assert listener.deleted == [key]
+        adp.delete([key])
+
+    def test_terminal_unlink_failure_is_not_reported_deleted(
+        self,
+        adapter: AdapterFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A terminal failure is distinct from a still-pending unlink.
+
+        Once the filesystem operation has raised, ``delete`` may return, but
+        it must not notify listeners or decrement byte accounting. The intact
+        object remains addressable rather than becoming an untracked deletion.
+        """
+        adp, listener = adapter
+        key = _key(b"\x04" * 4)
+        payload = b"survives-terminal-delete-failure"
+        _store_and_wait(adp, [key], [payload])
+
+        async def failing_unlink(_path: str | Path) -> None:
+            raise OSError("injected terminal unlink failure")
+
+        monkeypatch.setattr(fs_adapter_module.aiofiles.os, "unlink", failing_unlink)
+
+        adp.delete([key])
+
+        assert listener.deleted == []
+        assert adp.get_usage().total_bytes_used == len(payload)
+        assert _lookup_and_wait(adp, [key]) == [True]
 
 
 class TestStoreLoadNotifications:

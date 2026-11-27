@@ -390,17 +390,19 @@ def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
 def _poll_transfer(request_id: str, future: Any) -> tuple[bool, Any]:
     """Return whether a store or retrieve has ended, and its result.
 
-    A failed request ends with a false result, so losing the server costs the
-    cache and not the engine. Any other error stays fatal: the server may
-    still be working on the blocks, so they can't be handed back.
+    A false result with a completed device event is a failed cache operation.
+    An RPC exception provides no device-completion proof and must propagate:
+    reporting it as finished would let the engine reuse blocks still in use.
     """
     try:
         if not future.query():
             return False, None
         return True, future.result(timeout=60)
     except REQUEST_FAILURES as exc:
-        logger.warning("Transfer failed for %s: %s", request_id, exc)
-        return True, False
+        raise RuntimeError(
+            f"Cannot release KV blocks for request {request_id}: "
+            "transfer completion is unknown"
+        ) from exc
 
 
 @dataclass
@@ -1417,9 +1419,8 @@ class LMCacheMPWorkerAdapter:
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
         # Publishing a freshly registered context and shutdown() both take
-        # this lock: shutdown marks itself started under it, and a context is
-        # published only if shutdown has not started, so shutdown always sees
-        # the context it must unregister and close.
+        # this lock. Submission also holds it through ownership tracking, so
+        # a replacement or shutdown fence cannot miss an admitted transfer.
         self._transfer_ctx_lock = threading.Lock()
         self._shutdown_started = False
         # Serializes unregister_kv_caches(), restore_kv_caches() and heartbeat
@@ -1619,30 +1620,35 @@ class LMCacheMPWorkerAdapter:
         ``RuntimeError``. A no-op before :meth:`register_kv_caches` and when
         already unregistered.
 
-        Note:
-            The server's imports keep the KV caches' memory alive, so the
-            engine frees nothing by releasing it while they are registered.
-            An unregistration the server does not acknowledge within
-            ``mq_timeout`` is logged, not raised.
+        Raises:
+            RuntimeError: If a submitted transfer's completion is unknown or
+                the server does not acknowledge unregistration. The context
+                remains registered locally; the caller must not release or
+                re-back KV memory after this failure.
         """
         with self._registration_lock:
             if self._kv_caches_released or not self.kv_caches:
                 return
-            self._wait_for_inflight_transfers()
             with self._transfer_ctx_lock:
                 transfer_ctx = self.transfer_ctx
+                if transfer_ctx is not None:
+                    transfer_ctx.flush_inflight_stores()
+                    self._wait_for_inflight_transfers()
+                    logger.info(
+                        "Unregistering KV caches so the engine can release them"
+                    )
+                    try:
+                        future = transfer_ctx.unregister()
+                        if future is not None:
+                            future.result(timeout=self._mq_timeout)
+                    except REQUEST_FAILURES as exc:
+                        raise RuntimeError(
+                            "Cannot release MP transfer resources: the server did not "
+                            "acknowledge unregister"
+                        ) from exc
+                    transfer_ctx.close()
                 self.transfer_ctx = None
-            self._kv_caches_released = True
-            if transfer_ctx is None:
-                return
-            logger.info("Unregistering KV caches so the engine can release them")
-            try:
-                future = transfer_ctx.unregister()
-                if future is not None:
-                    future.result(timeout=self._mq_timeout)
-            except REQUEST_FAILURES:
-                logger.exception("Unregistering KV caches failed")
-            transfer_ctx.close()
+                self._kv_caches_released = True
 
     def restore_kv_caches(self) -> None:
         """Register the KV caches again after the engine re-backs their memory.
@@ -1706,6 +1712,10 @@ class LMCacheMPWorkerAdapter:
             ConnectionError: if the server does not respond within
                 mq_timeout.
         """
+        with self._transfer_ctx_lock:
+            if self.transfer_ctx is not None:
+                self.transfer_ctx.flush_inflight_stores()
+                self._wait_for_inflight_transfers()
         self.kv_caches = kv_caches
         transfer_ctx = self._create_transfer_context(kv_caches)
         layout_hints = self._layout_hints
@@ -1738,11 +1748,21 @@ class LMCacheMPWorkerAdapter:
                 "register_kv_caches within "
                 f"{self._mq_timeout}s. Is the server running?"
             ) from None
-        with self._transfer_ctx_lock:
-            published = not self._shutdown_started
-            if published:
-                old_ctx = self.transfer_ctx
-                self.transfer_ctx = transfer_ctx
+        try:
+            with self._transfer_ctx_lock:
+                published = not self._shutdown_started
+                if published:
+                    old_ctx = self.transfer_ctx
+                    if old_ctx is not None:
+                        old_ctx.flush_inflight_stores()
+                        self._wait_for_inflight_transfers()
+                    self.transfer_ctx = transfer_ctx
+        except RuntimeError:
+            # Work admitted during registration still belongs to the old
+            # context. The unpublished replacement has no transfers; close
+            # it locally, without unregistering the old server-side owner.
+            transfer_ctx.close()
+            raise
         if not published:
             # Shutdown started while this context was registering (e.g. a
             # recovery cycle that outlived shutdown's heartbeat join). It
@@ -1947,18 +1967,19 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
-        transfer_ctx = self._require_transfer_ctx("submitting store requests")
-        future = transfer_ctx.submit_store(
-            request_id,
-            key,
-            self.kv_caches,
-            self._block_ids_per_group(op),
-            event,
-            self.blocks_in_chunk,
-        )
-        self.store_futures[request_id] = future
-        if event is not None:
-            self.store_events[request_id] = event
+        with self._transfer_ctx_lock:
+            transfer_ctx = self._require_transfer_ctx("submitting store requests")
+            future = transfer_ctx.submit_store(
+                request_id,
+                key,
+                self.kv_caches,
+                self._block_ids_per_group(op),
+                event,
+                self.blocks_in_chunk,
+            )
+            self.store_futures[request_id] = future
+            if event is not None:
+                self.store_events[request_id] = event
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
@@ -2005,19 +2026,20 @@ class LMCacheMPWorkerAdapter:
             cache_salt=cache_salt,
             request_configs=request_configs,
         )
-        transfer_ctx = self._require_transfer_ctx("submitting retrieve requests")
-        future = transfer_ctx.submit_retrieve(
-            request_id,
-            key,
-            self.kv_caches,
-            self._block_ids_per_group(op),
-            event,
-            self.blocks_in_chunk,
-            skip_first_n_tokens=op.skip_first_n_tokens,
-        )
-        self.retrieve_futures[request_id] = (future, op.flat_block_ids)
-        if event is not None:
-            self.retrieve_events[request_id] = event
+        with self._transfer_ctx_lock:
+            transfer_ctx = self._require_transfer_ctx("submitting retrieve requests")
+            future = transfer_ctx.submit_retrieve(
+                request_id,
+                key,
+                self.kv_caches,
+                self._block_ids_per_group(op),
+                event,
+                self.blocks_in_chunk,
+                skip_first_n_tokens=op.skip_first_n_tokens,
+            )
+            self.retrieve_futures[request_id] = (future, op.flat_block_ids)
+            if event is not None:
+                self.retrieve_events[request_id] = event
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(
@@ -2156,6 +2178,11 @@ class LMCacheMPWorkerAdapter:
                 including retrieves dropped at submit time while unhealthy
                 (reported exactly once; blocks already in error_block_ids).
 
+        Raises:
+            RuntimeError: If an RPC failure leaves transfer completion unknown.
+                Futures and IPC events remain retained. The caller must stop
+                serving instead of reporting the affected blocks as finished.
+
         Notes:
             When enabling async scheduling in vLLM, the same request ID may appear
             multiple times in `finished_req_ids_from_engine`. The adapter should
@@ -2169,41 +2196,20 @@ class LMCacheMPWorkerAdapter:
                 finished_req_ids=finished_req_ids_from_engine,
             )
 
-        # If unhealthy, drain all pending futures immediately
+        # Heartbeat failure says nothing about transfers already submitted to
+        # the server. Keep their futures and IPC events alive until each
+        # transfer reports terminal completion; reporting them here would let
+        # vLLM reuse blocks that the server may still be reading or writing.
+        # Requests dropped before submission are different: no remote work can
+        # reference their blocks, so they remain safe to report exactly once.
         if not self.is_healthy:
-            finished_stores = set(self.store_futures.keys())
-            finished_retrieves = set()
-            for request_id, (
-                _r_future,
-                r_block_ids,
-            ) in self.retrieve_futures.items():
-                finished_retrieves.add(request_id)
-                self.error_block_ids.update(r_block_ids)
-                self._failed_request_ids.add(request_id)
-            self.store_futures.clear()
-            self.retrieve_futures.clear()
-            self.store_events.clear()
-            self.retrieve_events.clear()
-
-            # Retrieves dropped at submit time still must be reported,
-            # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
-            # Swap-drain (not update-then-clear): a concurrent
-            # submit_retrieve_request add lands in the old set (reported now)
-            # or the fresh set (reported next call), never lost.
             dropped = self._dropped_retrieves
             self._dropped_retrieves = set()
-            finished_retrieves.update(dropped)
-
             ret_stores = self._process_finished_stores(
-                finished_stores, finished_req_ids_from_engine
+                set(), finished_req_ids_from_engine - self.retrieve_futures.keys()
             )
-            # A request may have a pending retrieve AND appear in
-            # finished_req_ids_from_engine (it ran without loading KV after
-            # the server died).  The scheduler processes finished_recving
-            # first and deletes the request, so we must not also report it
-            # in finished_sending.
-            ret_stores -= finished_retrieves
-            return ret_stores, finished_retrieves
+            ret_stores -= dropped
+            return ret_stores, dropped
 
         finished_stores = set()
         finished_retrieves = set()
@@ -2287,6 +2293,10 @@ class LMCacheMPWorkerAdapter:
             - The second set contains the finished retrieve request ids,
                 including retrieves dropped at submit time while unhealthy
                 (reported exactly once; blocks already in error_block_ids).
+
+        Raises:
+            RuntimeError: If an RPC failure leaves transfer completion unknown.
+                No completion receipt releases the affected pinned blocks.
         """
         if not self.lazy_offload:
             raise ValueError(
@@ -2296,37 +2306,14 @@ class LMCacheMPWorkerAdapter:
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "reclaim")
 
-        # If unhealthy, drain all pending futures immediately
+        # Preserve submitted transfers and their IPC events across a heartbeat
+        # outage. Lazy-offload completion receipts release pinned engine blocks,
+        # so only requests known never to have reached the server can complete
+        # while health is unknown.
         if not self.is_healthy:
-            finished_stores = set(self.store_futures.keys())
-            finished_retrieves = set()
-            for request_id, (
-                _r_future,
-                r_block_ids,
-            ) in self.retrieve_futures.items():
-                finished_retrieves.add(request_id)
-                self.error_block_ids.update(r_block_ids)
-                self._failed_request_ids.add(request_id)
-            self.store_futures.clear()
-            self.retrieve_futures.clear()
-            self.store_events.clear()
-            self.retrieve_events.clear()
-
-            # Retrieves dropped at submit time still must be reported,
-            # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
-            # Swap-drain (not update-then-clear): a concurrent
-            # submit_retrieve_request add lands in the old set (reported now)
-            # or the fresh set (reported next call), never lost.
             dropped = self._dropped_retrieves
             self._dropped_retrieves = set()
-            finished_retrieves.update(dropped)
-
-            for req_id in finished_stores:
-                self._completed_store_requests[req_id] = 1
-                # The drained future's outcome is unknown; the data cannot
-                # be assumed stored.
-                self._failed_store_requests.add(req_id)
-            return None, finished_retrieves
+            return None, dropped
 
         finished_stores = set()
         finished_retrieves = set()
@@ -2456,33 +2443,42 @@ class LMCacheMPWorkerAdapter:
     def handle_preemptions(self, need_flush_before_forward: bool) -> None:
         """Handle worker-side preemption hints from connector metadata.
 
-        When ``need_flush_before_forward`` is true, synchronize deferred
-        engine-driven gather work before the next forward pass can overwrite
-        paged KV blocks.
+        When ``need_flush_before_forward`` is true, wait for outstanding
+        server-side stores or engine-driven gathers before the next forward
+        pass can overwrite paged KV blocks.
 
         Args:
             need_flush_before_forward: When True, flush in-flight gather
                 operations on the transfer context. When False, this is a no-op.
+
+        Raises:
+            RuntimeError: If a submitted store cannot be proven complete. The
+                next forward pass must not reuse its KV blocks in that case.
         """
         if not need_flush_before_forward:
             return
         # Preempted requests restart from scratch, so drop their query tables.
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "handle_preemptions")
-        transfer_ctx = self.transfer_ctx
-        if not self.is_healthy or transfer_ctx is None:
-            return
-        transfer_ctx.flush_inflight_stores()
-        # Force device sync here, compare to preemption, perf panelty is trivial
-        torch_dev.synchronize()
+        with self._transfer_ctx_lock:
+            transfer_ctx = self.transfer_ctx
+            if transfer_ctx is None:
+                return
+            transfer_ctx.flush_inflight_stores()
+            torch_dev.synchronize()
 
     def shutdown(self) -> None:
-        """
-        Shutdown the LMCache MP worker adapter.
+        """Shutdown the LMCache MP worker adapter.
 
         Stops the heartbeat (if started) before UNREGISTER: no new ping
         on the closing request client, and a straggler in-flight cycle cannot
         re-register or flip the health event after unregistration.
+
+        Raises:
+            RuntimeError: If an in-flight store cannot be proven complete or
+                the server does not acknowledge unregistration. Resources
+                remain live. A delayed reply may permit a retry; a terminal
+                RPC error requires external recovery, not continued serving.
         """
         with self._transfer_ctx_lock:
             self._shutdown_started = True
@@ -2491,17 +2487,22 @@ class LMCacheMPWorkerAdapter:
                 self._heartbeat.stop()
 
         if self.transfer_ctx is not None:
+            # A heartbeat or RPC failure is not a device-completion fence.
+            # Keep the context, request client, and IPC resources alive if any
+            # submitted store cannot be joined; releasing them would allow
+            # the engine to recycle memory the server may still reference.
+            self.transfer_ctx.flush_inflight_stores()
+            self._wait_for_inflight_transfers()
             logger.info("Unregistering kv caches")
             try:
                 future = self.transfer_ctx.unregister()
                 if future is not None:
                     future.result(timeout=self._mq_timeout)
             except REQUEST_FAILURES as exc:
-                logger.warning(
-                    "Unregistering from the LMCache server failed: %s. "
-                    "Proceeding with shutdown.",
-                    exc,
-                )
+                raise RuntimeError(
+                    "Cannot release MP transfer resources: the server did not "
+                    "acknowledge unregister"
+                ) from exc
 
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "shutdown")
@@ -2525,8 +2526,10 @@ class LMCacheMPWorkerAdapter:
 
         Raises:
             RuntimeError: If the KV caches are unregistered or were never
-                registered.
+                registered, or shutdown has started.
         """
+        if self._shutdown_started:
+            raise RuntimeError(f"Cannot continue {action}: worker shutdown has started")
         transfer_ctx = self.transfer_ctx
         if transfer_ctx is not None:
             return transfer_ctx
@@ -2539,13 +2542,14 @@ class LMCacheMPWorkerAdapter:
         )
 
     def _wait_for_inflight_transfers(self) -> None:
-        """Wait until the server is done with the KV caches for every
-        submitted store and retrieve, up to ``mq_timeout`` in total.
+        """Prove completion without consuming the engine's completion reports.
 
-        Note:
-            The futures stay tracked, so ``get_finished`` still reports every
-            request. A failed transfer counts as done. One still running at
-            the deadline is logged.
+        The request timeout bounds waiting for server replies. Device-event
+        synchronization can take longer. RPC errors do not prove that device
+        work stopped, so callers must retain the registration on failure.
+
+        Raises:
+            RuntimeError: If any transfer's completion cannot be established.
         """
         futures = [
             *self.store_futures.values(),
@@ -2554,18 +2558,16 @@ class LMCacheMPWorkerAdapter:
         deadline = time.monotonic() + self._mq_timeout
         for future in futures:
             try:
-                done = future.wait(timeout=max(0.0, deadline - time.monotonic()))
-            except REQUEST_FAILURES:
-                # Not logged here: polling the request in get_finished reports
-                # the failure once.
-                continue
-            if not done:
-                logger.warning(
-                    "A transfer was still in flight after %.1fs. The server "
-                    "may still touch the KV caches",
-                    self._mq_timeout,
-                )
-                return
+                if not future.wait(timeout=max(0.0, deadline - time.monotonic())):
+                    raise RuntimeError(
+                        "Cannot release KV blocks: transfer completion is unknown "
+                        "after waiting for the server reply"
+                    )
+                future.result(timeout=0)
+            except REQUEST_FAILURES as exc:
+                raise RuntimeError(
+                    "Cannot release KV blocks: transfer completion is unknown"
+                ) from exc
 
     def _update_and_get_finished_store(
         self,

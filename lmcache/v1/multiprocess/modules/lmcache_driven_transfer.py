@@ -1358,17 +1358,25 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
             finally:
-                event_backend.record_event(event, cache_context.stream)
-                if retained_keys:
-                    submit_callback_to_stream(
-                        cache_context.cupy_stream,
-                        "finish_read_by_owner",
-                        read_completion,
-                    )
+                try:
+                    event_backend.record_event(event, cache_context.stream)
+                    if retained_keys:
+                        submit_callback_to_stream(
+                            cache_context.cupy_stream,
+                            "finish_read_by_owner",
+                            read_completion,
+                        )
+                except Exception:
+                    # A failed completion callback does not stop queued copies.
+                    # Keep their exact L1 owners until the stream is drained.
+                    cache_context.stream.synchronize()
+                    if retained_keys:
+                        self._ctx.storage_manager.finish_read_by_owner(read_completion)
+                    raise
                 num_tokens = (
                     num_chunks * chunk_size
                     + (key.end % chunk_size if unfull_obj_keys else 0)
-                    if len(prefetched_keys) == expected_retained
+                    if retrieve_succeeded and len(prefetched_keys) == expected_retained
                     else 0
                 )
                 self._ctx.event_bus.publish_on_stream(

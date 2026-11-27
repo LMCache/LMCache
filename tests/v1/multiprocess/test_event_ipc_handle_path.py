@@ -191,6 +191,77 @@ def test_worker_exports_events_through_platform_backend(
     assert all(call[-1] == device for call in backend.calls[3:])
 
 
+def test_store_flush_retains_timeout_until_terminal_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out store stays tracked and a later terminal retry can join it."""
+    # First Party
+    from lmcache.v1.client import worker_transfer
+
+    backend = _FakeEventBackend()
+    monkeypatch.setattr(
+        worker_transfer,
+        "get_event_ipc_backend",
+        lambda device: backend,
+    )
+    monkeypatch.setattr(
+        worker_transfer,
+        "wrap_kv_caches",
+        lambda kv_caches: [SimpleNamespace(fd_payload=lambda: None)],
+    )
+    client = MagicMock()
+    client.register_kv_cache.return_value = _resolved_future(True)
+    raw_store_future: MessagingFuture[tuple[bytes, bool]] = MessagingFuture()
+    client.store.return_value = raw_store_future
+    context = worker_transfer.LMCacheDrivenTransferContext(1, client)
+    kv_caches = {"layer_0": torch.empty(1)}
+    context.register(kv_caches, "model", 1, 1, 0.0)
+    event = cast(worker_transfer.IPCEvent, object())
+    context.submit_store("request", "key", kv_caches, [[0]], event, 1)
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="terminal completion"):
+            context.flush_inflight_stores()
+    raw_store_future.set_result((b"", True))
+    context.flush_inflight_stores()
+    context.flush_inflight_stores()
+
+
+def test_store_flush_keeps_rpc_failure_completion_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An RPC exception cannot authorize reuse of server-visible KV blocks."""
+    # First Party
+    from lmcache.v1.client import worker_transfer
+
+    backend = _FakeEventBackend()
+    monkeypatch.setattr(
+        worker_transfer,
+        "get_event_ipc_backend",
+        lambda device: backend,
+    )
+    monkeypatch.setattr(
+        worker_transfer,
+        "wrap_kv_caches",
+        lambda kv_caches: [SimpleNamespace(fd_payload=lambda: None)],
+    )
+    client = MagicMock()
+    client.register_kv_cache.return_value = _resolved_future(True)
+    raw_store_future: MessagingFuture[tuple[bytes, bool]] = MessagingFuture()
+    raw_store_future.set_exception(ConnectionError("response lost"))
+    client.store.return_value = raw_store_future
+    context = worker_transfer.LMCacheDrivenTransferContext(1, client)
+    kv_caches = {"layer_0": torch.empty(1)}
+    context.register(kv_caches, "model", 1, 1, 0.0)
+    event = cast(worker_transfer.IPCEvent, object())
+    context.submit_store("request", "key", kv_caches, [[0]], event, 1)
+
+    with pytest.raises(RuntimeError, match="terminal completion"):
+        context.flush_inflight_stores()
+    with pytest.raises(RuntimeError, match="terminal completion"):
+        context.flush_inflight_stores()
+
+
 def test_server_store_and_retrieve_delegate_event_ordering(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

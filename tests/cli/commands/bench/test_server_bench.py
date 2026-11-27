@@ -30,6 +30,8 @@ import zmq
 from lmcache.cli.commands.bench import BenchCommand
 from lmcache.cli.commands.bench.server_bench import client as client_module
 from lmcache.cli.commands.bench.server_bench.buffers import KVCacheBuffers
+from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
+from lmcache.cli.commands.bench.server_bench.config import BenchConfig
 from lmcache.cli.commands.bench.server_bench.helpers import (
     _build_token_ids,
     _make_key,
@@ -38,6 +40,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _send_lookup,
 )
 from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.client.worker_transfer import LMCacheDrivenTransferContext
 from lmcache.v1.common.kv_layer_groups import (
     DTYPE_MAP,
     KVLayerGroupInfo,
@@ -943,6 +946,70 @@ class TestAllocShapeContract:
 class TestClientMultiWorker:
     """Test scheduler LOOKUP and per-rank STORE/RETRIEVE fan-out."""
 
+    @pytest.mark.parametrize("failure", ["store", "unregister"])
+    def test_close_preserves_worker_resources_when_completion_is_unknown(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: str,
+    ) -> None:
+        """Unproven completion cannot free worker KV tensors during teardown."""
+        tensors: list[weakref.ReferenceType] = []
+        context = MagicMock(spec=LMCacheDrivenTransferContext)
+
+        def register(kv_caches: dict, *args: object, **kwargs: object) -> None:
+            tensors.extend(weakref.ref(tensor) for tensor in kv_caches.values())
+
+        context.register.side_effect = register
+        request_client = MagicMock()
+        zmq_context = MagicMock()
+        monkeypatch.setattr(zmq, "Context", lambda: zmq_context)
+        monkeypatch.setattr(
+            RequestClientFactory, "create", lambda *_args, **_kwargs: request_client
+        )
+        monkeypatch.setattr(client_module, "_get_chunk_size", lambda _client: 2)
+        monkeypatch.setattr(
+            client_module, "create_transfer_context", lambda *_args, **_kwargs: context
+        )
+        bench = ServerBenchClient(
+            BenchConfig(
+                rpc_url="ipc:///tmp/test-bench-failed-close",
+                http_url="",
+                mode="cpu",
+                transfer_mode="lmcache_driven",
+                tp_size=1,
+                use_mla=False,
+                num_tokens=3,
+                kvcache_shape_spec="(2,8,2,1,4):float16:1",
+                num_blocks=8,
+                block_size=2,
+            ),
+            lambda _message: None,
+        )
+        bench.start()
+        # The mock must not retain the registration's tensor arguments.
+        context.reset_mock()
+        if failure == "store":
+            context.flush_inflight_stores.side_effect = RuntimeError("unknown")
+        else:
+            context.unregister.return_value.result.side_effect = TimeoutError(
+                "lost ACK"
+            )
+
+        with pytest.raises(RuntimeError):
+            bench.close()
+
+        context.close.assert_not_called()
+        request_client.close.assert_not_called()
+        zmq_context.term.assert_not_called()
+        gc.collect()
+        assert tensors and all(ref() is not None for ref in tensors)
+
+        context.flush_inflight_stores.side_effect = None
+        context.unregister.return_value.result.side_effect = None
+        bench.close()
+        gc.collect()
+        assert all(ref() is None for ref in tensors)
+
     @pytest.mark.parametrize(
         ("mode", "transfer_mode", "num_groups"),
         [
@@ -1497,6 +1564,7 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
         record_event=record_event,
         export_event=export_event,
         import_event=lambda handle, device: handle,
+        query_event=lambda event: True,
         synchronize_event=synchronize_event,
     )
 
@@ -1547,6 +1615,7 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
         lambda message: None,
     )
     bench.start()
+    release_after_close = False
     try:
         request = bench.create_request(
             0, "req-event", "test", token_ids=tuple(range(4))
@@ -1565,11 +1634,19 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
         assert event_ref is not None
         gc.collect()
         if times_out:
-            # The device wrapper has gone out of scope; only transport remains.
+            # A timed-out store remains owned by the transfer context until
+            # close proves it terminal. Retrieves have no reuse fence here.
             assert event_ref() is not None
             raw_future.set_result((b"", True))
-            raw_future.release_references()
-            gc.collect()
-        assert event_ref() is None
+            if operation == "store":
+                release_after_close = True
+            else:
+                raw_future.release_references()
+                gc.collect()
+        assert (event_ref() is not None) is release_after_close
     finally:
         bench.close()
+    if release_after_close:
+        raw_future.release_references()
+        gc.collect()
+        assert event_ref() is None

@@ -1065,7 +1065,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     def unregister_kv_caches(self) -> None:
         """Drop the LMCache server's registration of the KV caches before
         vLLM releases their memory (sleep, KV cache release, weight update).
-        Idempotent.
+        Idempotent after successful unregistration.
+
+        Raises:
+            RuntimeError: If completion or unregistration is unproven. This
+                propagates before the engine releases or re-backs KV memory.
         """
         self.worker_adapter.unregister_kv_caches()
 
@@ -1207,19 +1211,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "wait_for_save", event=event)
 
-    # TODO: How does lmcache driven path handle preemption?
-    # NOTE1: handle_preemptions is called by vllm each step regardless
-    #        preemption really happens or not.
-    # NOTE2: preemption hint is managed by KVConnectorRole.SCHEDULER,
-    #        that's why here we have to judge preemption by
-    #        need_flush_before_forward flag which is set by SCHEDULER.
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
-        """Flush async engine-driven stores only when scheduler metadata requests it.
+        """Fence outstanding stores before a preempted request's blocks are reused.
 
         Args:
             kv_connector_metadata: Connector metadata produced by the scheduler;
                 only acts when it is a :class:`LMCacheMPConnectorMetadata` with
                 ``need_flush_before_forward=True``.
+
+        Raises:
+            RuntimeError: If store completion is unknown. This deliberately
+                propagates to the model runner before its next forward pass;
+                catching it and continuing would permit unsafe block reuse.
         """
         worker_adapter = getattr(self, "worker_adapter", None)
         if self.role != KVConnectorRole.WORKER or worker_adapter is None:
@@ -1335,6 +1338,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         operations are completed and the connector is cleaned up properly.
         On the scheduler side it also logs the lazy-offload counter ledger
         so the drop rate is auditable from the log.
+
+        Raises:
+            RuntimeError: If worker transfer completion or unregistration is
+                unproven. This propagates to the engine's teardown caller;
+                the adapter retains IPC resources and does not finish cleanup.
         """
         if hasattr(self, "worker_adapter"):
             self.worker_adapter.shutdown()

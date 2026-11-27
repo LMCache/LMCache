@@ -31,10 +31,11 @@ sleep / discard / weight update
   unregister_kv_caches() ----------> [registration lock]
                                      wait for in-flight stores/retrieves
                                        (each future's server-side device
-                                        work done, mq_timeout in total)
-                                     detach transfer_ctx, mark released
+                                        work done; reply waits are bounded)
                                      transfer_ctx.unregister() ---------> drop context, close imports
+                                     wait for acknowledgement
                                      transfer_ctx.close()
+                                     detach transfer_ctx, mark released
   release_physical()                 (memory freed: nothing imports it)
 ...
 wake_up / weight update done
@@ -63,8 +64,12 @@ one restore.
   under a running copy. The adapter therefore waits for every tracked
   store and retrieve future first, including the server's completion
   event. The futures stay tracked, so `get_finished()` still reports
-  them after wake-up. A failed transfer counts as done. A transfer still
-  running after `mq_timeout` is logged and the unregistration proceeds.
+  them after wake-up. A completed false result counts as done; an RPC
+  exception does not. If completion is unknown, raise before unregistering.
+  If unregistration is unacknowledged, retain the context and raise before
+  local close/detachment. vLLM's caller must not continue memory release.
+  `mq_timeout` bounds reply waits, not device-event synchronization, which
+  can take longer. See the [failure contract](mp_preemption_correctness.md#failure-contract-and-availability).
 - **Transfers while unregistered fail loudly.** The adapter drops its
   transfer context, so `submit_store_request()`,
   `submit_retrieve_request()` and `create_recorded_event()` raise
