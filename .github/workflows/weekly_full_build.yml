@@ -1,20 +1,31 @@
 name: Weekly full build
 
-# Runs the full CUDA suite once a week as a regression checkpoint while
-# per-PR CI gets narrower: k3-unit-tests, the whole k3-multiprocess-test
-# matrix plus the full-size DeepSeek-V4-Flash TP=4 correctness test, and
-# k3-blend-test. A run passes only when every required job ran and passed
-# (.buildkite/k3_tests/weekly/manifest.json, README.md next to it).
+# Orchestrates the weekly CUDA, Intel XPU, AMD ROCm, and RBLN suites from a
+# single schedule and produces one combined workflow run. Each device suite
+# lives in its own workflow file (weekly_full_build_<device>.yml) so it can
+# be maintained independently, while manual and scheduled runs always go
+# through this orchestrator.
 #
-# Sunday 08:00 UTC is the quietest window of the k8s GPU queue in the 30-day
-# PR CI baseline (2026-10-17 to 2026-11-15): 0.6 of 16 GPUs busy on average
-# over the following six hours.
+# Sunday 08:00 UTC is the quietest window of the k8s CUDA GPU queue in the
+# 30-day PR CI baseline (2026-10-17 to 2026-11-15): 0.6 of 16 GPUs busy on
+# average over the following six hours.
 
 on:
-  # Enable after validating manual runs:
-  # schedule:
-  #   - cron: '0 8 * * 0'
+  schedule:
+    - cron: '0 8 * * 0'
   workflow_dispatch:
+    inputs:
+      device:
+        description: Device suite to run
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - cuda
+          - xpu
+          - amd
+          - rbln
 
 permissions:
   contents: read
@@ -24,11 +35,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  full-build:
-    name: Weekly full build (CUDA)
+  prepare:
+    name: Prepare ci-weekly-full branch
     if: github.repository == 'LMCache/LMCache'
     runs-on: ubuntu-24.04
-    timeout-minutes: 350
+    timeout-minutes: 15
     permissions:
       # Moves the CI-owned ci-weekly-full branch to the tested commit.
       contents: write
@@ -68,22 +79,30 @@ jobs:
           # through "Cancel Intermediate Builds".
           sleep 90
 
-      - name: Run and check the full build on Buildkite
-        env:
-          BUILDKITE_API_TOKEN: ${{ secrets.BUILD_KITE_API_TOKEN }}
-          SOURCE_COMMIT: ${{ github.sha }}
-        run: |
-          python3 .github/scripts/weekly_full_build.py \
-            --manifest .buildkite/k3_tests/weekly/manifest.json \
-            --commit "${SOURCE_COMMIT}" \
-            --out-dir weekly-full-build \
-            --timeout-minutes 330
+  cuda:
+    name: Weekly full build (CUDA)
+    needs: prepare
+    if: github.repository == 'LMCache/LMCache' && (github.event_name != 'workflow_dispatch' || inputs.device == 'all' || inputs.device == 'cuda')
+    uses: ./.github/workflows/weekly_full_build_cuda.yml
+    secrets: inherit
 
-      - name: Keep the report and failed-job logs
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: weekly-full-build-${{ github.run_number }}
-          path: weekly-full-build/
-          if-no-files-found: warn
-          retention-days: 90
+  xpu:
+    name: Weekly full build (XPU)
+    needs: prepare
+    if: github.repository == 'LMCache/LMCache' && (github.event_name != 'workflow_dispatch' || inputs.device == 'all' || inputs.device == 'xpu')
+    uses: ./.github/workflows/weekly_full_build_xpu.yml
+    secrets: inherit
+
+  amd:
+    name: Weekly full build (AMD)
+    needs: prepare
+    if: github.repository == 'LMCache/LMCache' && (github.event_name != 'workflow_dispatch' || inputs.device == 'all' || inputs.device == 'amd')
+    uses: ./.github/workflows/weekly_full_build_amd.yml
+    secrets: inherit
+
+  rbln:
+    name: Weekly full build (RBLN)
+    needs: prepare
+    if: github.repository == 'LMCache/LMCache' && (github.event_name != 'workflow_dispatch' || inputs.device == 'all' || inputs.device == 'rbln')
+    uses: ./.github/workflows/weekly_full_build_rbln.yml
+    secrets: inherit

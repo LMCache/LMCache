@@ -19,6 +19,7 @@ Runtime test gating:
 """
 
 # Standard
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 import os
@@ -278,39 +279,52 @@ def hf3fs_test_mount_point(tmp_path) -> Path:
 
 
 @pytest.fixture
-def hf3fs_test_base_path(hf3fs_test_mount_point: Path, tmp_path) -> Path:
+def hf3fs_test_base_path(hf3fs_test_mount_point: Path, tmp_path) -> Iterator[Path]:
     """Create and yield a base path under the mount point.
 
-    When 3FS cluster is available, creates a unique test subdirectory.
+    When 3FS cluster is available, creates a unique test subdirectory
+    and removes it on teardown.
     Otherwise creates a tmp_path subdirectory for config-only tests.
     """
     if _has_3fs_cluster():
         test_dir = hf3fs_test_mount_point / f"test_{uuid.uuid4().hex[:8]}"
         test_dir.mkdir(parents=True, exist_ok=True)
-        return test_dir
+        try:
+            yield test_dir
+        finally:
+            shutil.rmtree(test_dir, ignore_errors=True)
+        return
     bp = hf3fs_test_mount_point / "path1"
     bp.mkdir(exist_ok=True)
-    return bp
+    yield bp
 
 
 @pytest.fixture
-def hf3fs_test_multi_base_paths(hf3fs_test_mount_point: Path, tmp_path):
+def hf3fs_test_multi_base_paths(
+    hf3fs_test_mount_point: Path, tmp_path
+) -> Iterator[tuple[Path, Path]]:
     """Create and yield multiple base paths under the mount point.
 
-    When 3FS cluster is available, creates two unique test subdirectories.
+    When 3FS cluster is available, creates two unique test subdirectories
+    and removes them on teardown.
     Otherwise creates tmp_path subdirectories for config-only tests.
     """
     if _has_3fs_cluster():
         path1 = hf3fs_test_mount_point / f"test_{uuid.uuid4().hex[:8]}_a"
         path2 = hf3fs_test_mount_point / f"test_{uuid.uuid4().hex[:8]}_b"
-        path1.mkdir(parents=True, exist_ok=True)
-        path2.mkdir(parents=True, exist_ok=True)
-        return path1, path2
+        try:
+            path1.mkdir(parents=True, exist_ok=True)
+            path2.mkdir(parents=True, exist_ok=True)
+            yield path1, path2
+        finally:
+            shutil.rmtree(path1, ignore_errors=True)
+            shutil.rmtree(path2, ignore_errors=True)
+        return
     path1 = hf3fs_test_mount_point / "path1"
     path2 = hf3fs_test_mount_point / "path2"
     path1.mkdir(exist_ok=True)
     path2.mkdir(exist_ok=True)
-    return path1, path2
+    yield path1, path2
 
 
 @pytest.fixture
@@ -338,10 +352,8 @@ def hf3fs_native_client(hf3fs_test_base_path):
         enable_key_buffer=True,
     )
     yield client, str(mount_point), base_paths
+    # hf3fs_test_base_path removes the test directory after this teardown.
     client.close()
-    # Cleanup test directory if it was created for this test
-    if _has_3fs_cluster() and test_dir.exists():
-        shutil.rmtree(test_dir, ignore_errors=True)
 
 
 @pytest.fixture
@@ -960,7 +972,7 @@ class TestHf3fsNativeConnector:
             peer.close()
 
         client.submit_batch_delete([key])
-        assert _wait_for_completions(client)[0][3] == [False]
+        assert _wait_for_completions(client)[0][3] == [True]
 
         client.submit_batch_exists([key])
         assert _wait_for_completions(client)[0][3] == [False]
@@ -1231,7 +1243,6 @@ class TestHf3fsShardDirs:
             assert not any(_wait_for_completions(client)[0][3])
         finally:
             client.close()
-            shutil.rmtree(base, ignore_errors=True)
 
     def test_concurrent_stores_create_shared_shard_dir(
         self, hf3fs_test_base_path: Path
@@ -1253,7 +1264,6 @@ class TestHf3fsShardDirs:
             )
         finally:
             client.close()
-            shutil.rmtree(base, ignore_errors=True)
 
     def test_key_buffer_scan_finds_sharded_files(
         self, hf3fs_test_base_path: Path
@@ -1283,7 +1293,6 @@ class TestHf3fsShardDirs:
         finally:
             scanner.close()
             flat_reader.close()
-            shutil.rmtree(base, ignore_errors=True)
 
     def test_multi_base_path_with_shard_dirs(self) -> None:
         """Sharding applies inside each base path selected for a key."""

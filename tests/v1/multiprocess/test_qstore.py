@@ -37,7 +37,7 @@ QSTORE_SPEC = ExtServerModuleSpec("lmcache.v1.multiprocess.plugin_modules.qstore
 def _ctx() -> MagicMock:
     """Creates a context stub to test QStoreModule."""
     ctx = MagicMock(name="ctx")
-    ctx.chunk_size = 256
+    ctx.default_chunk_size = 256
     ctx.separate_object_groups = False
     ctx.full_sw_kv = False
     return ctx
@@ -555,7 +555,7 @@ def _sdk_module(stub_device, monkeypatch, attn_desc: Any = None):
     from lmcache.v1.common.attn_window import AttnWindowDesc
 
     ctx = _ctx()
-    ctx.chunk_size = 4
+    ctx.default_chunk_size = 4
     keys = {0: ["a0", "a1", "a2"]}
     ctx.resolve_obj_keys.side_effect = lambda key, groups: [keys[g] for g in groups]
     kv_context = MagicMock(name="kv_context")

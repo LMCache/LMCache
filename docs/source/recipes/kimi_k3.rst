@@ -49,7 +49,7 @@ Validated models
       As a Mamba / linear-attention hybrid, Kimi K3 needs the same settings as
       the other KDA / GDN hybrids: the ``align`` Mamba cache mode, prefix
       caching, and object-group separation on the LMCache server (enabled by
-      default). The chunk size is negotiated from vLLM's *unified block size*
+      default). The chunk size is resolved from vLLM's *unified block size*
       ``N`` (see
       :ref:`mamba-block-size`). For Kimi K3 at ``--tensor-parallel-size 8``
       the unified block size is ``N = 768``:
@@ -71,7 +71,7 @@ Validated models
       ``Setting attention block size to N tokens`` startup log line.
 
       Start the LMCache MP server with an explicitly compatible minimum
-      (a lower minimum would negotiate to ``N = 768``):
+      (a lower minimum would resolve to ``N = 768``):
 
       .. code-block:: bash
 
@@ -116,7 +116,7 @@ Validated models
       - Object-group separation must remain enabled on the server for hybrid
         Mamba / linear-attention models: it gives the KDA layers their own cache
         objects.
-      - ``--chunk-size`` (server) is a minimum. The connector negotiates the
+      - ``--chunk-size`` (server) is a minimum. The connector resolves the
         smallest multiple of ``N`` that is at least that value. See
         :doc:`/mp/chunk_size_negotiation`.
       - The server's ``--port 6555`` must match ``lmcache.mp.port`` in the
@@ -150,7 +150,7 @@ Validated models
       - The ``+rocm7.2`` LMCache wheel loads on ROCm 10 (its native extensions
         link ``libamdhip64.so.7``, which ROCm 10 still ships).
       - With DCP 8 and fp8 KV the MLA group registers 12288 tokens per block;
-        ``--chunk-size 12288`` works, and a lower minimum negotiates to 12288.
+        ``--chunk-size 12288`` works, and a lower minimum resolves to 12288.
       - Set ``--l1-init-size-gb`` equal to ``--l1-size-gb`` for a terabyte-scale
         L1. With the default lazy expansion the server keeps pinning host
         memory while vLLM registers its KV caches, and the GPU mappings can

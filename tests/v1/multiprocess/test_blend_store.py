@@ -188,7 +188,7 @@ def _coord_engine(chunk_size: int = 4):
     """A BlendModule mock with the coordinator-leg methods bound."""
 
     eng = MagicMock(spec=BlendModule)
-    eng._ctx = SimpleNamespace(chunk_size=chunk_size)
+    eng._ctx = SimpleNamespace(default_chunk_size=chunk_size)
     # _event_bus is an instance attr (set in __init__), so spec= omits it;
     # _poll_coordinator_match publishes CB_COORDINATOR_MATCH_END through it.
     eng._event_bus = MagicMock()
@@ -677,7 +677,7 @@ def _store_hook_engine(stored_mask):
     )
     eng._transfer_module.get_and_touch_context_entry.return_value = None
     eng._ctx = MagicMock()
-    eng._ctx.chunk_size = 4
+    eng._ctx.default_chunk_size = 4
     session = MagicMock()
     session.get_hashes.return_value = list(range(100, 100 + len(stored_mask)))
     eng._ctx.session_manager.get_or_create.return_value = session
@@ -1084,7 +1084,7 @@ def test_l1_eviction_event_removes_the_fingerprint(
     fingerprint from the matcher, unless L2 may still serve the key or the
     chunk's fingerprint registration is still queued."""
     ctx = MagicMock()
-    ctx.chunk_size = 4
+    ctx.default_chunk_size = 4
     ctx.event_bus = EventBus(EventBusConfig(enabled=True))
     ctx.session_manager.destroy_listeners = []
     ctx.storage_manager.l2_adapters.return_value = [MagicMock()] * num_l2_adapters

@@ -245,11 +245,16 @@ bool FSConnector::do_single_exists(WorkerFSConn& conn, const std::string& key) {
   return std::filesystem::exists(file_path);
 }
 
-bool FSConnector::do_single_delete(WorkerFSConn& conn, const std::string& key) {
+DeleteResult FSConnector::do_single_delete_result(WorkerFSConn& conn,
+                                                  const std::string& key) {
   std::string filename = key_to_filename(key);
   auto file_path = conn.base_path / filename;
   std::error_code ec;
-  return std::filesystem::remove(file_path, ec);
+  if (std::filesystem::remove(file_path, ec)) {
+    return DeleteResult::DELETED;
+  }
+  // remove() returns false without an error only when the file did not exist.
+  return ec ? DeleteResult::NOT_DELETED : DeleteResult::NOT_FOUND;
 }
 
 // ---------------------------------------------------------------

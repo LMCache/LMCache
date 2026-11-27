@@ -25,11 +25,6 @@ try:
 except (AttributeError, ValueError, OSError):
     PAGE = 4096
 
-#: None of these tests allocate through the shared allocator, and the
-#: autouse fixture's 5GB pinned allocation fails on hosts where the
-#: lmcache_ascend plugin is installed but no ACL context can be established.
-pytestmark = pytest.mark.no_shared_allocator
-
 
 class _FakeAclRt:
     """``acl.rt`` double that records host-registration calls."""

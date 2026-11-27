@@ -238,30 +238,6 @@ class GcuDeviceOps(DeviceOps):
                 dtype_code,
             )
 
-    def load_and_reshape_flash(
-        self,
-        key_value: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        layer_idx: int,
-    ) -> None:
-        self._op("load_and_reshape_flash")(
-            key_value, key_cache, value_cache, slot_mapping, layer_idx
-        )
-
-    def reshape_and_cache_back_flash(
-        self,
-        key_value: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        layer_idx: int,
-    ) -> None:
-        self._op("reshape_and_cache_back_flash")(
-            key_value, key_cache, value_cache, slot_mapping, layer_idx
-        )
-
     # ── Ops: codec ───────────────────────────────────────────────────
 
     def calculate_cdf(self, input_tensor: torch.Tensor, num_bins: int) -> torch.Tensor:

@@ -28,8 +28,6 @@ from lmcache.v1.platform.devices.npu.cache_context import (
 )
 import lmcache.lmcache_native as lmcache_native
 
-pytestmark = pytest.mark.no_shared_allocator
-
 requires_npu = pytest.mark.skipif(
     not (hasattr(torch, "npu") and torch.npu.is_available()),
     reason="Ascend NPU hardware is required",
