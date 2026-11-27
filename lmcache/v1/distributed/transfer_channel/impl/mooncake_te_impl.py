@@ -326,7 +326,10 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
         Raises:
             ValueError: The two address lists differ in length, or an object
                 has different sizes on the two sides.
-            RuntimeError: The engine refused the batch.
+            RuntimeError: The engine refused the first batch, so nothing is in
+                flight. If a later per-buffer batch is refused, the task is
+                still returned and reports the unsubmitted buffers as failed
+                once the submitted ones finish.
         """
         if len(local_addresses) != len(remote_addresses):
             raise ValueError(
@@ -386,10 +389,10 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
                     "to ensure whole-transfer completion for peer %s",
                     self._remote_session_id,
                 )
-            try:
-                for idx, (local_ptr, remote_ptr, length) in enumerate(
-                    zip(local_ptrs, remote_ptrs, data_lengths, strict=True)
-                ):
+            for idx, (local_ptr, remote_ptr, length) in enumerate(
+                zip(local_ptrs, remote_ptrs, data_lengths, strict=True)
+            ):
+                try:
                     batch_id = submit(
                         self._remote_session_id,
                         [local_ptr],
@@ -399,11 +402,21 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
                     self._validate_batch_id(batch_id, operation)
                     if batch_id in pending_batches:
                         raise RuntimeError(f"Duplicate batch ID returned: {batch_id}")
-                    pending_batches[batch_id] = idx
-            except Exception:
-                if pending_batches:
-                    _best_effort_free_batches(engine, list(pending_batches.keys()))
-                raise
+                except Exception:
+                    if not pending_batches:
+                        raise
+                    # Batches already submitted cannot be cancelled and keep
+                    # accessing the caller's buffers, so the task must stay in
+                    # flight until they drain; unsubmitted buffers are failed.
+                    logger.exception(
+                        "Submitted %d of %d buffers to peer %s; "
+                        "reporting the rest as failed",
+                        len(pending_batches),
+                        object_count,
+                        self._remote_session_id,
+                    )
+                    break
+                pending_batches[batch_id] = idx
 
         task = _PendingTransferTask(
             object_count=object_count,

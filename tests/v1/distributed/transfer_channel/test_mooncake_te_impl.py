@@ -309,19 +309,63 @@ def test_legacy_engine_single_buffer_submits_one_batch() -> None:
     assert result.succeeded_mask == [True]
 
 
-def test_legacy_engine_partial_submit_failure_rolls_back_and_raises() -> None:
-    engine = _FakeLegacyMooncakeEngine(support_free_batch_id=True)
+@pytest.mark.parametrize(
+    "support_free_batch_id", [False, True], ids=["no_free_batch_id", "free_batch_id"]
+)
+@pytest.mark.parametrize("operation", ["READ", "WRITE"])
+def test_legacy_engine_partial_submit_failure_waits_for_submitted_buffers(
+    operation: str, support_free_batch_id: bool
+) -> None:
+    """Buffers already submitted when a later submit fails keep being tracked.
+
+    They cannot be cancelled, so the task must stay unfinished until they drain
+    instead of raising while they still write into the caller's buffers.
+    """
+    engine = _FakeLegacyMooncakeEngine(support_free_batch_id=support_free_batch_id)
     engine.fail_on_submit_index = 2
-    engine.fail_return_value = INVALID_BATCH_ID
+    client = _make_client(engine)
+    local, remote = _sample_addresses(3)
+
+    task_id = (
+        client.submit_read(local, remote)
+        if operation == "READ"
+        else client.submit_write(local, remote)
+    )
+
+    batch0, batch1 = engine.submit_order
+    # In-flight batch handles must not be released behind the engine's back.
+    assert engine.freed_batches == []
+
+    assert client.query_status(task_id).is_finished() is False
+    engine.set_object_status(0, 1)
+    assert client.query_status(task_id).is_finished() is False
+
+    engine.set_object_status(1, 1)
+    result = client.query_status(task_id)
+    assert result.is_finished() is True
+    assert result.succeeded_mask == [True, True, False]
+    # Both handles were reclaimed through the normal polling path.
+    assert engine.freed_batches == [batch0, batch1]
+
+    with pytest.raises(KeyError):
+        client.query_status(task_id)
+
+
+@pytest.mark.parametrize(
+    "fail_return_value", [0, INVALID_BATCH_ID], ids=["zero", "invalid"]
+)
+def test_legacy_engine_first_submit_failure_raises(fail_return_value: int) -> None:
+    """With nothing in flight, a submit failure still raises and registers no task."""
+    engine = _FakeLegacyMooncakeEngine(support_free_batch_id=True)
+    engine.fail_on_submit_index = 0
+    engine.fail_return_value = fail_return_value
     client = _make_client(engine)
     local, remote = _sample_addresses(3)
 
     with pytest.raises(RuntimeError, match="Failed to submit async read"):
         client.submit_read(local, remote)
 
-    # Previously submitted sub-batches 0 and 1 were released via free_batch_id.
-    assert engine.freed_batches == engine.submit_order
-    # No dangling task was registered.
+    assert engine.submit_order == []
     with pytest.raises(KeyError):
         client.query_status(0)
 
