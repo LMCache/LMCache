@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
 from typing import Any
 import os
 
@@ -15,22 +14,10 @@ import torch
 # First Party
 from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
 from lmcache.v1.gpu_connector.gds_backends._file import FDGDSHandle, FileGDSBackend
-from lmcache.v1.gpu_connector.gds_backends.base import GDSHandle, Submission
+from lmcache.v1.gpu_connector.gds_backends.base import Submission
 
-# Shared GDS page alignment (cuFile / hipFile and GDSContext slab rounding).
-# libnds itself only requires 512-byte sector alignment.
-_GDS_ALIGNMENT = 4096
 # hal_kernel_p2p_get_pages rejects a VA that does not start on a 2 MiB boundary.
 _NDS_PAGE = 2 * 1024 * 1024
-
-
-@dataclass(eq=False)
-class _RegisteredRegion:
-    """One NPU staging region for bounds checks."""
-
-    tensor: torch.Tensor
-    base_ptr: int
-    nbytes: int
 
 
 class Backend(FileGDSBackend):
@@ -41,11 +28,9 @@ class Backend(FileGDSBackend):
 
     def __init__(self) -> None:
         super().__init__()
-        self._registered_streams: set[int] = set()
-        self._regions: dict[int, _RegisteredRegion] = {}
-        self._slab_size_bytes = 0
-        # Kernel pins are 2 MiB-aligned covers of ``_regions``. Adjacent
-        # GDS slices share one pin when rounding the start down would overlap.
+        # Logical NPU ranges. Kernel pins are 2 MiB-aligned covers of these;
+        # adjacent GDS slices share one pin when rounding down would overlap.
+        self._regions: dict[int, int] = {}
         self._pins: list[tuple[int, int]] = []
 
     @classmethod
@@ -59,11 +44,6 @@ class Backend(FileGDSBackend):
             raise ValueError("nds backend requires torch.npu")
         if not npu.is_available():
             raise ValueError("nds backend requires an available NPU")
-
-    def open_slab(self, location: str, size: int, direct_io: bool) -> GDSHandle:
-        """Record the slab length, then create the regular file."""
-        self._slab_size_bytes = size
-        return super().open_slab(location, size, direct_io)
 
     def open_handle(self, fd: int, path: str) -> "NDSHandle":
         try:
@@ -94,9 +74,7 @@ class Backend(FileGDSBackend):
         if base in self._regions:
             raise ValueError(f"NDS buffer base 0x{base:x} is already registered")
         self._ensure_driver_open()
-        self._regions[base] = _RegisteredRegion(
-            tensor=view, base_ptr=base, nbytes=nbytes
-        )
+        self._regions[base] = nbytes
         try:
             self._sync_pins()
         except BaseException:
@@ -116,8 +94,8 @@ class Backend(FileGDSBackend):
     def _merged_pin_spans(self) -> list[tuple[int, int]]:
         """2 MiB-aligned covers of the logical regions, overlap merged."""
         spans = [
-            (region.base_ptr & ~(_NDS_PAGE - 1), region.base_ptr + region.nbytes)
-            for region in self._regions.values()
+            (base & ~(_NDS_PAGE - 1), base + nbytes)
+            for base, nbytes in self._regions.items()
         ]
         spans.sort()
         merged: list[tuple[int, int]] = []
@@ -148,52 +126,11 @@ class Backend(FileGDSBackend):
                 self._pins.append((addr, size))
 
     def register_stream(self, raw_stream: int) -> None:
-        if raw_stream in self._registered_streams:
-            return
         self._ensure_driver_open()
-        self._registered_streams.add(raw_stream)
-        try:
-            self._library().register_stream(raw_stream)
-        except BaseException:
-            self._registered_streams.discard(raw_stream)
-            raise
+        self._library().register_stream(raw_stream)
 
     def deregister_stream(self, raw_stream: int) -> None:
-        if raw_stream not in self._registered_streams:
-            return
-        try:
-            self._library().deregister_stream(raw_stream)
-        finally:
-            self._registered_streams.discard(raw_stream)
-
-    def _validate_stream(self, raw_stream: int) -> None:
-        if raw_stream not in self._registered_streams:
-            raise RuntimeError(f"NDS stream {raw_stream} is not registered")
-
-    def _validate_io_bounds(
-        self,
-        file_offset: int,
-        size: int,
-        buf_base: int,
-        buf_offset: int,
-        alignment: int = _GDS_ALIGNMENT,
-    ) -> None:
-        """Check GDS alignment, slab span, and the registered NPU region."""
-        if size <= 0:
-            raise ValueError("I/O size must be positive")
-        if file_offset < 0 or buf_offset < 0:
-            raise ValueError("I/O offsets must be non-negative")
-        if file_offset % alignment or size % alignment or buf_offset % alignment:
-            raise ValueError(
-                f"NDS I/O requires {alignment}-byte alignment for offset and size"
-            )
-        if self._slab_size_bytes and file_offset + size > self._slab_size_bytes:
-            raise ValueError("file I/O exceeds slab size")
-        region = self._regions.get(buf_base)
-        if region is None:
-            raise RuntimeError(f"NDS buffer base 0x{buf_base:x} is not registered")
-        if buf_offset + size > region.nbytes:
-            raise RuntimeError("buffer I/O exceeds registered region")
+        self._library().deregister_stream(raw_stream)
 
     def _library(self):
         # First Party
@@ -207,15 +144,19 @@ class Backend(FileGDSBackend):
         self._library().driver_open()
 
     def _close_driver(self) -> None:
-        self._library().driver_close()
+        try:
+            self._library().driver_close()
+        finally:
+            # nds_exit drops every kernel pin. Forget them or the next open
+            # would treat the old spans as already registered.
+            self._regions.clear()
+            self._pins.clear()
 
 
 class NDSHandle(FDGDSHandle):
     """Owning NDS slab-file handle. Reads and writes use the file descriptor."""
 
-    def __init__(self, backend: Backend, fd: int, handle: Any, path: str) -> None:
-        super().__init__(backend, fd, handle, path)
-        self._backend: Backend = backend
+    _backend: Backend
 
     def read_async(
         self,
@@ -229,7 +170,7 @@ class NDSHandle(FDGDSHandle):
 
         ``bytes_done`` is zero until the callback completes the ``PREAD``.
         """
-        return self._transfer_async(
+        return self._submit(
             buf_base, size, file_offset, buf_offset, raw_stream, is_write=False
         )
 
@@ -245,11 +186,11 @@ class NDSHandle(FDGDSHandle):
 
         ``bytes_done`` is zero until the callback completes the ``PWRITE``.
         """
-        return self._transfer_async(
+        return self._submit(
             buf_base, size, file_offset, buf_offset, raw_stream, is_write=True
         )
 
-    def _transfer_async(
+    def _submit(
         self,
         buf_base: int,
         size: int,
@@ -261,18 +202,15 @@ class NDSHandle(FDGDSHandle):
     ) -> Submission:
         if self._fd < 0:
             raise RuntimeError("NDS slab file is not open on this handle")
-        self._backend._validate_stream(raw_stream)
-        self._backend._validate_io_bounds(file_offset, size, buf_base, buf_offset)
         sub = Submission(size=size, file_offset=file_offset, buf_offset=buf_offset)
-        lib = self._backend._library()
-        op = lib.write_async if is_write else lib.read_async
-        op(
-            self._handle,
+        self._backend._library().submit_async(
+            self._fd,
             buf_base,
             size,
             file_offset,
             buf_offset,
             sub.result,
             raw_stream,
+            is_write=is_write,
         )
         return sub

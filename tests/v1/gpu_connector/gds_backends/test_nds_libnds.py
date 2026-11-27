@@ -9,6 +9,8 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 import ctypes
+import errno
+import itertools
 import threading
 
 # Third Party
@@ -330,8 +332,8 @@ class TestStreamOrderedAsyncIO:
         npu = _mock_current_stream(monkeypatch, stream_id=7, launch_fn=captured.append)
         lib.register_stream(7)
         result = ctypes.c_int64(0)
-        lib.read_async(3, 0x1000, 4096, 0x8000, 0, result, 7)
-        lib.read_async(3, 0x1000, 4096, 0x8000, 0, result, 7)
+        lib.submit_async(3, 0x1000, 4096, 0x8000, 0, result, 7, is_write=False)
+        lib.submit_async(3, 0x1000, 4096, 0x8000, 0, result, 7, is_write=False)
         assert npu.launched_streams == [7, 7]
         assert result.value == 0
         assert "nds_io_submit" not in fake_cdll.calls
@@ -417,21 +419,29 @@ class TestStreamOrderedAsyncIO:
         marker(7, "kernel-a")
         issue(
             7,
-            lambda: lib.read_async(3, 0x1000, 4096, 0x1000, 0, read_a, 7),
+            lambda: lib.submit_async(
+                3, 0x1000, 4096, 0x1000, 0, read_a, 7, is_write=False
+            ),
         )
         marker(7, "kernel-b")
         issue(
             7,
-            lambda: lib.write_async(4, 0x2000, 12288, 0x2000, 128, write_b, 7),
+            lambda: lib.submit_async(
+                4, 0x2000, 12288, 0x2000, 128, write_b, 7, is_write=True
+            ),
         )
         marker(7, "kernel-c")
         issue(
             11,
-            lambda: lib.read_async(5, 0x4000, 4096, 0x4000, 0, read_other, 11),
+            lambda: lib.submit_async(
+                5, 0x4000, 4096, 0x4000, 0, read_other, 11, is_write=False
+            ),
         )
         issue(
             7,
-            lambda: lib.read_async(3, 0x5000, 8192, 0x5000, 64, read_c, 7),
+            lambda: lib.submit_async(
+                3, 0x5000, 8192, 0x5000, 64, read_c, 7, is_write=False
+            ),
         )
         marker(7, "kernel-d")
 
@@ -493,8 +503,16 @@ class TestStreamOrderedAsyncIO:
         _mock_current_stream(monkeypatch, stream_id=7, launch_fn=lambda cb: cb())
         lib.register_stream(7)
         result = ctypes.c_int64(0)
-        submit = lib.read_async if operation == "read" else lib.write_async
-        submit(9, 0x1000, 4096, 0xA000, 128, result, 7)
+        lib.submit_async(
+            9,
+            0x1000,
+            4096,
+            0xA000,
+            128,
+            result,
+            7,
+            is_write=operation == "write",
+        )
         assert result.value == 4096
         submits = fake_cdll.calls["nds_io_submit"]
         assert len(submits) == 1
@@ -507,9 +525,46 @@ class TestStreamOrderedAsyncIO:
         self, lib: OpenEulerNDSLibrary, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _mock_current_stream(monkeypatch, stream_id=8, launch_fn=lambda cb: cb())
+        lib.register_stream(7)
         result = ctypes.c_int64(0)
         with pytest.raises(RuntimeError, match="current NPU stream"):
-            lib.read_async(3, 0x1000, 4096, 0, 0, result, 7)
+            lib.submit_async(3, 0x1000, 4096, 0, 0, result, 7, is_write=False)
+
+    def test_async_accepts_stream_on_another_device(
+        self, lib: OpenEulerNDSLibrary, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """current_stream() is device 0; the transfer stream is current on device 1."""
+
+        def current_stream(index: int | None = None) -> SimpleNamespace:
+            return SimpleNamespace(npu_stream=7 if index == 1 else 1)
+
+        monkeypatch.setattr(nl, "_aclrt_launch_host_func", lambda: lambda *_a: 0)
+        monkeypatch.setattr(
+            torch,
+            "npu",
+            SimpleNamespace(
+                is_available=lambda: True,
+                device_count=lambda: 2,
+                current_stream=current_stream,
+            ),
+            raising=False,
+        )
+        nl._pending_callbacks.clear()
+        lib.register_stream(7)
+        try:
+            lib.submit_async(
+                3,
+                0x1000,
+                4096,
+                0,
+                0,
+                ctypes.c_int64(0),
+                7,
+                is_write=False,
+            )
+            assert len(nl._pending_callbacks) == 1
+        finally:
+            nl._pending_callbacks.clear()
 
     def test_async_requires_torch_stream_host_callback(
         self,
@@ -521,7 +576,7 @@ class TestStreamOrderedAsyncIO:
         lib.register_stream(7)
         result = ctypes.c_int64(0)
         with pytest.raises(RuntimeError, match="aclrtLaunchHostFunc"):
-            lib.read_async(3, 0x1000, 4096, 0, 0, result, 7)
+            lib.submit_async(3, 0x1000, 4096, 0, 0, result, 7, is_write=False)
         assert result.value == 0
         assert nl._pending_callbacks == {}
         assert "nds_io_submit" not in fake_cdll.calls
@@ -534,14 +589,113 @@ class TestStreamOrderedAsyncIO:
     ) -> None:
         _mock_current_stream(monkeypatch, stream_id=7, launch_fn=lambda cb: cb())
         missing_ctx_result = ctypes.c_int64(0)
-        lib.read_async(3, 0x1000, 4096, 0x8000, 0, missing_ctx_result, 7)
-        assert missing_ctx_result.value == -1
+        with pytest.raises(RuntimeError, match="no io_ctx"):
+            lib.submit_async(
+                3, 0x1000, 4096, 0x8000, 0, missing_ctx_result, 7, is_write=False
+            )
+        assert missing_ctx_result.value == 0
 
         lib.register_stream(7)
         fake_cdll.completion_res = -5
+        logged: list[str] = []
+        monkeypatch.setattr(
+            nl.logger, "error", lambda msg, *args: logged.append(msg % args)
+        )
         io_err_result = ctypes.c_int64(0)
-        lib.read_async(3, 0x1000, 4096, 0x8000, 0, io_err_result, 7)
+        lib.submit_async(
+            3, 0x1000, 4096, 0x8000, 0, io_err_result, 7, is_write=False
+        )
         assert io_err_result.value == -5
+        assert logged and "NDS async I/O failed" in logged[0]
+
+
+class TestBlockingIOLimits:
+    def test_getevents_retries_when_a_signal_interrupts_the_wait(
+        self, lib: OpenEulerNDSLibrary, fake_cdll: _FakeCDLL
+    ) -> None:
+        waits = {"n": 0}
+
+        def interrupt_once(
+            _ctx: Any, _min_nr: int, _max_nr: int, events_out: Any, _timeout: Any
+        ) -> int:
+            waits["n"] += 1
+            if waits["n"] == 1:
+                return -errno.EINTR
+            events_out[0].res = 0
+            return 1
+
+        fake_cdll.getevents_hook = interrupt_once
+        lib.register_stream(7)
+        assert lib._io(lib._stream_ctxs[7], 3, 0x1000, 4096, 0, 0, False) == 4096
+        assert waits["n"] == 2
+
+    def test_io_rejects_sizes_the_driver_cannot_encode(
+        self, lib: OpenEulerNDSLibrary
+    ) -> None:
+        lib.register_stream(7)
+        ctx = lib._stream_ctxs[7]
+        assert lib._io(ctx, 3, 0x1000, 2 << 30, 0, 0, False) == 2 << 30
+        for size in (0, (2 << 30) + 4096, (1 << 32) + 4096):
+            with pytest.raises(ValueError, match="2 GiB"):
+                lib._io(ctx, 3, 0x1000, size, 0, 0, False)
+
+
+class TestCallbackId:
+    def test_callback_id_stays_inside_64_bits_and_skips_live_ids(self) -> None:
+        saved = nl._callback_ids
+        nl._pending_callbacks.clear()
+        try:
+            nl._callback_ids = itertools.count((1 << 64) - 1)
+            first = nl._allocate_callback_id()
+            assert first == (1 << 64) - 1
+            assert ctypes.c_void_p(first).value == first
+            nl._pending_callbacks[first] = lambda: None
+            # 2^64 folds to 0, which c_void_p turns into NULL, so it is skipped.
+            assert nl._allocate_callback_id() == 1
+        finally:
+            nl._callback_ids = saved
+            nl._pending_callbacks.clear()
+
+
+class TestLibraryPath:
+    def test_explicit_missing_path_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(nl.os.path, "isfile", lambda _path: False)
+        with pytest.raises(FileNotFoundError):
+            OpenEulerNDSLibrary("/missing/libnds.so")
+
+    def test_absent_default_file_uses_the_dynamic_loader(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("NDS_LIBRARY_PATH", raising=False)
+        loaded: list[str] = []
+        monkeypatch.setattr(nl.os.path, "isfile", lambda _path: False)
+        monkeypatch.setattr(
+            nl.ctypes,
+            "CDLL",
+            lambda path, mode=0: loaded.append(path) or _FakeCDLL(),
+        )
+        OpenEulerNDSLibrary()
+        assert loaded == ["libnds.so"]
+
+    def test_default_file_is_used_when_present(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("NDS_LIBRARY_PATH", raising=False)
+        loaded: list[str] = []
+        monkeypatch.setattr(
+            nl.os.path,
+            "isfile",
+            lambda path: path == nl._DEFAULT_NDS_LIBRARY_PATH,
+        )
+        monkeypatch.setattr(
+            nl.ctypes,
+            "CDLL",
+            lambda path, mode=0: loaded.append(path) or _FakeCDLL(),
+        )
+        OpenEulerNDSLibrary()
+        assert loaded == [nl._DEFAULT_NDS_LIBRARY_PATH]
 
 
 class TestStructLayout:

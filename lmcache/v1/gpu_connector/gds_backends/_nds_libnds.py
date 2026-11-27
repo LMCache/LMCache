@@ -25,6 +25,8 @@ from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
 import ctypes
+import errno
+import itertools
 import os
 
 # Third Party
@@ -37,15 +39,18 @@ logger = init_logger(__name__)
 
 _ACL_HOST_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
 
+# void* cookie is 64-bit (c_void_p(1 << 64) is NULL); fold the counter and skip
+# 0 and ids still queued. Python's count itself does not wrap.
+_CALLBACK_ID_SPACE = 1 << 64
+_callback_ids = itertools.count(1)
+_pending_callbacks: dict[int, Callable[[], None]] = {}
 
-class _HostCallbackPayload(ctypes.Structure):
-    """Own the Python callback while CANN holds its address as user data."""
 
-    _fields_ = [("callback", ctypes.py_object)]
-
-
-# One trampoline for every launch. The payload address is its user data.
-_pending_callbacks: dict[int, _HostCallbackPayload] = {}
+def _allocate_callback_id() -> int:
+    while True:
+        callback_id = next(_callback_ids) % _CALLBACK_ID_SPACE
+        if callback_id and callback_id not in _pending_callbacks:
+            return callback_id
 
 
 def _exception_to_submission_result(exc: BaseException) -> int:
@@ -56,8 +61,14 @@ def _exception_to_submission_result(exc: BaseException) -> int:
 
 
 @_ACL_HOST_FUNC
-def _host_trampoline(payload_address: int) -> None:
-    _pending_callbacks.pop(payload_address).callback()
+def _host_trampoline(callback_id: int) -> None:
+    _pending_callbacks.pop(callback_id)()
+
+
+def _npu_stream_handle(npu: Any, index: int | None) -> int | None:
+    stream = npu.current_stream() if index is None else npu.current_stream(index)
+    handle = getattr(stream, "npu_stream", None)
+    return handle if isinstance(handle, int) else None
 
 
 @lru_cache(maxsize=1)
@@ -77,25 +88,38 @@ def _launch_npu_stream_host_callback(
         raise RuntimeError("NDS stream-ordered I/O requires torch.npu")
     # Reading npu_stream calls NPUStream::stream(), which drains the torch
     # task queue. Launch on this pointer, not one saved at register_stream.
-    handle = getattr(npu.current_stream(), "npu_stream", None)
-    if not isinstance(handle, int) or handle != raw_stream:
-        current = handle if isinstance(handle, int) else 0
-        raise RuntimeError(
-            f"NDS I/O must run on the current NPU stream "
-            f"(registered 0x{raw_stream:x}, current 0x{current:x})"
-        )
-    payload = _HostCallbackPayload(callback)
-    payload_address = ctypes.addressof(payload)
-    _pending_callbacks[payload_address] = payload
+    # current_stream() is the thread's active device; a transfer on another
+    # NPU drains that device before accepting its stream.
+    handle = _npu_stream_handle(npu, None)
+    if handle != raw_stream:
+        matched = False
+        device_count = getattr(npu, "device_count", lambda: 0)()
+        for index in range(device_count):
+            try:
+                candidate = _npu_stream_handle(npu, index)
+            except TypeError:
+                candidate = None
+            if candidate == raw_stream:
+                handle = candidate
+                matched = True
+                break
+        if not matched:
+            current = handle if isinstance(handle, int) else 0
+            raise RuntimeError(
+                "NDS I/O must run on the current NPU stream "
+                f"(registered 0x{raw_stream:x}, current 0x{current:x})"
+            )
+    callback_id = _allocate_callback_id()
+    _pending_callbacks[callback_id] = callback
     err = int(
         _aclrt_launch_host_func()(
             ctypes.c_void_p(handle),
             _host_trampoline,
-            ctypes.c_void_p(payload_address),
+            ctypes.c_void_p(callback_id),
         )
     )
     if err != 0:
-        _pending_callbacks.pop(payload_address, None)
+        _pending_callbacks.pop(callback_id, None)
         raise RuntimeError(f"aclrtLaunchHostFunc failed with error {err}")
 
 
@@ -243,12 +267,17 @@ class OpenEulerNDSLibrary:
 
     def __init__(self, library_path: str | None = None) -> None:
         if library_path is None:
-            library_path = os.environ.get("NDS_LIBRARY_PATH", _DEFAULT_NDS_LIBRARY_PATH)
-        self._library_path = library_path
-        if not os.path.isfile(library_path):
-            raise FileNotFoundError(
-                f"openEuler NDS library not found at {library_path}"
-            )
+            library_path = os.environ.get("NDS_LIBRARY_PATH")
+        if library_path is not None:
+            if not os.path.isfile(library_path):
+                raise FileNotFoundError(
+                    f"openEuler NDS library not found at {library_path}"
+                )
+        elif os.path.isfile(_DEFAULT_NDS_LIBRARY_PATH):
+            library_path = _DEFAULT_NDS_LIBRARY_PATH
+        else:
+            # Let the dynamic loader search ldconfig and LD_LIBRARY_PATH.
+            library_path = "libnds.so"
         self._lib = ctypes.CDLL(library_path, mode=ctypes.RTLD_LOCAL)
         self._declare_signatures(self._lib)
         self._driver_open = False
@@ -351,51 +380,7 @@ class OpenEulerNDSLibrary:
             return
         _posix_errno(ret, "nds_unregister_mem")
 
-    def read_async(
-        self,
-        file_fd: int,
-        ptr_base: int,
-        size: int,
-        file_offset: int,
-        buf_offset: int,
-        result: ctypes.c_int64,
-        raw_stream: int,
-    ) -> None:
-        """Enqueue one stream-ordered read of the slab file."""
-        self._submit_async(
-            file_fd,
-            ptr_base,
-            size,
-            file_offset,
-            buf_offset,
-            result,
-            raw_stream,
-            is_write=False,
-        )
-
-    def write_async(
-        self,
-        file_fd: int,
-        ptr_base: int,
-        size: int,
-        file_offset: int,
-        buf_offset: int,
-        result: ctypes.c_int64,
-        raw_stream: int,
-    ) -> None:
-        """Enqueue one stream-ordered write of the slab file."""
-        self._submit_async(
-            file_fd,
-            ptr_base,
-            size,
-            file_offset,
-            buf_offset,
-            result,
-            raw_stream,
-            is_write=True,
-        )
-
-    def _submit_async(
+    def submit_async(
         self,
         file_fd: int,
         ptr_base: int,
@@ -407,11 +392,16 @@ class OpenEulerNDSLibrary:
         *,
         is_write: bool,
     ) -> None:
+        """Enqueue one stream-ordered read or write of the slab file.
+
+        An unregistered stream fails here, before the host callback is queued.
+        """
+        self._stream_ctx(raw_stream)
+
         def host_work() -> None:
             try:
-                ctx = self._stream_ctx(raw_stream)
                 done = self._io(
-                    ctx,
+                    self._stream_ctx(raw_stream),
                     file_fd,
                     ptr_base,
                     size,
@@ -421,6 +411,13 @@ class OpenEulerNDSLibrary:
                 )
                 result.value = done
             except BaseException as exc:
+                logger.error(
+                    "NDS async I/O failed (fd=%d, offset=%d, size=%d): %s",
+                    file_fd,
+                    file_offset,
+                    size,
+                    exc,
+                )
                 result.value = _exception_to_submission_result(exc)
 
         _launch_npu_stream_host_callback(raw_stream, host_work)
@@ -440,26 +437,28 @@ class OpenEulerNDSLibrary:
         ``ctx`` belongs to one stream, and ACL runs that stream's callbacks
         one at a time, so this call cannot observe another submission.
         """
-        if size <= 0:
-            raise ValueError("I/O size must be positive")
-        iov = _NdsIoVec(buf_addr=ptr_base + buf_offset, buf_len=size, reserved=0)
-        cb = _NdsIoCb()
-        cb.opcode = NDS_IO_OP_PWRITE if is_write else NDS_IO_OP_PREAD
-        cb.rw_flags = NDS_IO_F_REGISTERED_MEM  # buffer already pinned
-        cb.obj.reserved = 0  # must be zero
-        cb.obj.u.fd = file_fd  # file or block-device fd
-        cb.offset = file_offset  # byte offset in that fd
-        cb.user_data = 0  # unused completion cookie
-        cb.iov = ctypes.pointer(iov)  # one HBM vector
-        cb.iov_cnt = 1  # one vector
-        cb.host_pid = 0  # required with registered memory
-        cb.reserved = (0, 0)  # must be zero
+        # libnds packs buf_len in uint32 and the driver rejects above 2 GiB.
+        # A larger Python int would wrap in the ctypes field.
+        if size <= 0 or size > (2 << 30):
+            raise ValueError("I/O size must be positive and at most 2 GiB")
+        iov = _NdsIoVec(buf_addr=ptr_base + buf_offset, buf_len=size)
+        cb = _NdsIoCb(
+            opcode=NDS_IO_OP_PWRITE if is_write else NDS_IO_OP_PREAD,
+            rw_flags=NDS_IO_F_REGISTERED_MEM,
+            offset=file_offset,
+            iov=ctypes.pointer(iov),
+            iov_cnt=1,
+        )
+        cb.obj.u.fd = file_fd
         ret = self._lib.nds_io_submit(ctx, 1, ctypes.byref(cb))
         if ret != 1:
             _posix_errno(ret if ret < 0 else -1, "nds_io_submit")
         events = (_NdsIoEvent * 1)()
         # NULL timeout waits until this context has a completion.
+        # EINTR abandons a still-running DMA in the queue; retry that wait.
         ret = self._lib.nds_io_getevents(ctx, 1, 1, events, None)
+        while ret == -errno.EINTR:
+            ret = self._lib.nds_io_getevents(ctx, 1, 1, events, None)
         if ret != 1:
             _posix_errno(ret if ret < 0 else -5, "nds_io_getevents")
         if events[0].res != 0:
@@ -468,7 +467,5 @@ class OpenEulerNDSLibrary:
 
 
 @lru_cache(maxsize=1)
-def get_openeuler_nds_library(
-    library_path: str | None = None,
-) -> OpenEulerNDSLibrary:
-    return OpenEulerNDSLibrary(library_path=library_path)
+def get_openeuler_nds_library() -> OpenEulerNDSLibrary:
+    return OpenEulerNDSLibrary()

@@ -67,7 +67,7 @@ def _gds_available() -> bool:
     correctly via its host-bounce fallback, so library loadability is a
     sufficient gate for the correctness checks below.
     Ascend NPU: ``/dev/p2p_device`` plus a loadable ``libnds.so``
-    (``NDS_LIBRARY_PATH``, default ``/usr/local/lib/libnds.so``).
+    (``NDS_LIBRARY_PATH``, else ``/usr/local/lib/libnds.so``, else the loader).
     """
     if not torch_dev.is_available():
         return False
@@ -77,8 +77,12 @@ def _gds_available() -> bool:
         # Standard
         import ctypes
 
+        library = os.environ.get("NDS_LIBRARY_PATH")
+        if not library:
+            default = "/usr/local/lib/libnds.so"
+            library = default if os.path.isfile(default) else "libnds.so"
         try:
-            ctypes.CDLL(os.environ.get("NDS_LIBRARY_PATH", "/usr/local/lib/libnds.so"))
+            ctypes.CDLL(library)
         except OSError:
             return False
         return True
