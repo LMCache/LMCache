@@ -1116,17 +1116,18 @@ class LMCacheMPSchedulerAdapter:
         self,
         requests: tuple[RequestSnapshotEntry, ...],
         scheduling_policy: str,
-    ) -> None:
+    ) -> bool:
         """Submit a snapshot to every backing server without waiting for replies.
-
-        Skip reporting while unhealthy, as with block-allocation reports.
 
         Args:
             requests: Copied request records; their order is not scheduling order.
             scheduling_policy: vLLM scheduling policy name, such as ``fcfs``.
+
+        Returns:
+            True if submitted, False if skipped because the adapter is unhealthy.
         """
         if not self.is_healthy:
-            return
+            return False
 
         self._snapshot_sequence += 1
         snapshot = RequestSnapshot(
@@ -1138,6 +1139,7 @@ class LMCacheMPSchedulerAdapter:
         )
         for client in self.req_clients.values():
             client.report_request_snapshot(snapshot)
+        return True
 
     # Helper functions
     def _buffer_kv_events(self, events: Sequence[CacheEvent]) -> None:

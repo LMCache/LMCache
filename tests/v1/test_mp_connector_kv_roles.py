@@ -143,6 +143,7 @@ def mock_io(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """Stub transport, telemetry and GPU resources, keeping worker logic real."""
     scheduler = MagicMock(lmcache_tokens_per_chunk=4)
     scheduler.check_lookup_result.return_value = 0
+    scheduler.report_request_snapshot.return_value = True
     transfer = MagicMock()
     transfer.create_recorded_event.return_value = None
     for submit in (transfer.submit_store, transfer.submit_retrieve):
@@ -374,7 +375,7 @@ def test_request_snapshot_interval_reports_final_empty_immediately(
     mock_io: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The final removal clears reported state once without waiting for cadence."""
+    """Retry a skipped final empty snapshot on the next step, then resume cadence."""
     now = 100.0
     monkeypatch.setattr(connector_mod.time, "monotonic", lambda: now)
     connector = throttled_snapshot_connector
@@ -384,14 +385,22 @@ def test_request_snapshot_interval_reports_final_empty_immediately(
 
     request.status = RequestStatus.FINISHED_STOPPED
     connector.request_finished(request, [])
+    report = mock_io.scheduler.report_request_snapshot
+    report.return_value = False
     now = 100.01
     connector.build_connector_meta(_schedule())
-    assert mock_io.scheduler.report_request_snapshot.call_count == 2
-    mock_io.scheduler.report_request_snapshot.assert_called_with((), "priority")
+    assert report.call_count == 2
+    report.assert_called_with((), "priority")
 
+    report.return_value = True
     now = 100.02
     connector.build_connector_meta(_schedule())
-    assert mock_io.scheduler.report_request_snapshot.call_count == 2
+    assert report.call_count == 3
+    report.assert_called_with((), "priority")
+
+    now = 100.03
+    connector.build_connector_meta(_schedule())
+    assert report.call_count == 3
 
 
 @pytest.mark.parametrize("value", [-1, True, False, 100.0, "100", None])

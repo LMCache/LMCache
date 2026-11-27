@@ -276,8 +276,8 @@ class SnapshotSink:
 
     def report_request_snapshot(
         self, requests: tuple[RequestSnapshotEntry, ...], scheduling_policy: str
-    ) -> None:
-        """Wrap copied entries for encoding."""
+    ) -> bool:
+        """Capture the snapshot for encoding and return True to confirm submission."""
         self.sequence += 1
         self.snapshot = RequestSnapshot(
             "benchmark",
@@ -286,6 +286,7 @@ class SnapshotSink:
             scheduling_policy,
             requests,
         )
+        return True
 
     def shutdown(self) -> None:
         """Release the last captured snapshot."""

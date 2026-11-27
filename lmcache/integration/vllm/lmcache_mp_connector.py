@@ -1746,6 +1746,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         This function should NOT modify fields in the scheduler_output.
         Also, calling this function will reset the state of the connector.
         Report request snapshots, if enabled, without waiting for a response.
+        Only submitted snapshots advance the reporting interval.
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
@@ -1791,13 +1792,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 )
                 for request in self._observed_requests.values()
             )
-            self.scheduler_adapter.report_request_snapshot(
+            if self.scheduler_adapter.report_request_snapshot(
                 requests, self._vllm_config.scheduler_config.policy
-            )
-            self._request_snapshot_next_report_time = (
-                now + self._request_snapshot_interval_seconds
-            )
-            self._request_snapshot_was_active = bool(requests)
+            ):
+                self._request_snapshot_next_report_time = (
+                    now + self._request_snapshot_interval_seconds
+                )
+                self._request_snapshot_was_active = bool(requests)
 
         return metadata
 

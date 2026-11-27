@@ -497,13 +497,13 @@ def test_request_snapshots_skip_unhealthy_servers(
     adapter.maybe_submit_lookup_request("lookup", list(range(256)))
     FakeHeartbeatThread.instances[0].health_event.clear()
     assert not adapter.is_healthy
-    adapter.report_request_snapshot((), "fcfs")
+    assert adapter.report_request_snapshot((), "fcfs") is False
     for client in clients.values():
         client.report_request_snapshot.assert_not_called()
 
     FakeHeartbeatThread.instances[0].health_event.set()
     assert adapter.is_healthy
-    adapter.report_request_snapshot((), "fcfs")
+    assert adapter.report_request_snapshot((), "fcfs") is True
     for client in clients.values():
         client.report_request_snapshot.assert_called_once()
 
