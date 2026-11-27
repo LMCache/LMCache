@@ -70,6 +70,10 @@ serde factory.
      - ``key_provider`` (default ``hkdf``), ``master_key_path`` (required
        for ``hkdf``), ``aes_bits`` (``128`` default, or ``256``),
        ``max_workers`` (thread pool size, default 1)
+   * - ``gha``
+     - Intel only. 4/8-bit quantization of attention KV with native CPU /
+       XPU kernels; MLA and unrecognized groups are stored unchanged.
+     - See `GHA serde (Intel)`_.
 
 .. warning::
 
@@ -127,6 +131,110 @@ Supported presets:
    * - ``turboquant_3bit_nc``
      - 3-bit MSE key with norm correction
      - 3-bit value quantization
+
+
+GHA serde (Intel)
+---------------------
+
+GHA quantizes attention K/V to 4 or 8 bits on the way to L2 and restores
+it on load, with native kernels for Intel CPUs and Intel XPUs. It is
+**Intel-only** and not built by default: build LMCache with the SYCL (Intel
+XPU) backend and ``BUILD_GHA=1``:
+
+.. code-block:: bash
+
+    # oneAPI's icpx must be on PATH (SYCL build profile)
+    BUILD_GHA=1 pip install -e . --no-build-isolation
+
+This builds the host-CPU kernels twice, ``lmcache.gha_quant`` (x86-64, AVX2
+required) and ``lmcache.gha_quant_avx512`` (AVX-512 F/BW/DQ/VL), plus
+``lmcache.gha_quant_xpu``. At import time the serde loads the AVX-512 build
+when ``/proc/cpuinfo`` reports all four AVX-512 subsets, and the AVX2 build
+otherwise. Set ``LMCACHE_GHA_CPU_ISA=avx2`` to force the AVX2 build;
+``avx512`` is ignored (with a warning) on a CPU without AVX-512. On any other
+platform the modules are not built and configuring ``"type": "gha"`` raises an
+error.
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 100 \
+        --eviction-policy LRU \
+        --l2-adapter '{
+            "type": "fs",
+            "base_path": "/data/lmcache/l2",
+            "serde": {"type": "gha", "qbit": 4, "device": "xpu"}
+        }'
+
+No model geometry (head count / head size) is needed. The scaling depends on
+how the engine lays out K/V:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 40 40
+
+   * - ``per_tensor``
+     - Split K/V chunks ``[2, L, T, H]``
+     - Fused K/V chunks ``[L, T, H]``
+   * - ``false`` (default)
+     - one scale per token
+     - one scale per hidden channel
+   * - ``true``
+     - one scale per plane
+     - one scale per plane
+
+.. list-table:: GHA config fields
+   :header-rows: 1
+   :widths: 25 20 55
+
+   * - Field
+     - Default
+     - Meaning
+   * - ``qbit``
+     - ``4``
+     - ``4`` or ``8`` bits per value
+   * - ``per_tensor``
+     - ``false``
+     - one scale per plane for every chunk (smaller, less accurate)
+   * - ``device``
+     - ``cpu``
+     - where the kernels run: ``cpu`` or ``xpu``
+   * - ``rh``, ``asym``, ``precond``
+     - ``true``
+     - randomized Hadamard transform, asymmetric range, preconditioner
+   * - ``num_threads``
+     - ``4``
+     - OpenMP threads of the CPU kernels
+   * - ``kv_fp8_dtype``
+     - none
+     - ``float8_e4m3fn`` / ``float8_e5m2`` when the engine KV cache is fp8
+       (fused layout, ``per_tensor=false`` only)
+   * - ``groups``, ``default_group``
+     - layout read from the chunk shape
+     - per ``object_group_id`` layout: ``cache_category`` and
+       ``attention_plane_layout`` (``auto``, ``split_kv``, ``fused_kv`` or
+       ``mla``)
+   * - ``max_workers``
+     - ``1``
+     - serde thread-pool size
+
+Any other key is rejected. Store and load must use the same config,
+including ``device``: the CPU and XPU kernels pack 4-bit fused payloads
+differently, so data written with ``"device": "cpu"`` cannot be read with
+``"device": "xpu"`` and vice versa.
+
+By default every group is read from its chunk shape: ``[2, L, T, H]`` is split
+K/V and ``[L, T, H]`` is fused K/V. An MLA latent or an indexer cache has the
+same ``[L, T, H]`` shape as fused K/V, so **declare such groups explicitly**
+or they are quantized as fused K/V:
+
+.. code-block:: json
+
+    "groups": {"1": [{"cache_category": "attention",
+                      "attention_plane_layout": "mla"}]}
+
+A chunk that cannot be quantized (MLA, unknown layout, or not smaller once
+quantized) is stored unchanged and logged once at ``INFO``.
 
 
 Encryption serde
@@ -200,6 +308,8 @@ transform logic, then register a factory keyed on a name you pick:
 
         def estimate_serialized_size(self, layout_desc) -> int:
             # Upper bound on serialized byte size for this layout.
+            # Override estimate_serialized_size_for_key(layout_desc, key)
+            # too if the size depends on the object's group.
             ...
 
     class MyDeserializer(Deserializer):

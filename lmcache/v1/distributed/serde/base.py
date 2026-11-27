@@ -84,6 +84,24 @@ class Serializer(abc.ABC):
         """
         raise NotImplementedError
 
+    def estimate_serialized_size_for_key(
+        self, layout_desc: MemoryLayoutDesc, key: ObjectKey
+    ) -> int:
+        """Key-aware variant of :meth:`estimate_serialized_size`.
+
+        Serdes whose output size depends on which object group a key belongs
+        to (e.g. per-group codecs) override this. The default ignores the key,
+        which is correct for every content- and group-agnostic serde.
+
+        Args:
+            layout_desc: Memory layout of the source KV data.
+            key: Object key the buffer is being allocated for.
+
+        Returns:
+            Number of bytes to allocate for the temp buffer.
+        """
+        return self.estimate_serialized_size(layout_desc)
+
 
 class Deserializer(abc.ABC):
     """Sync deserializer — users implement this.
@@ -216,6 +234,16 @@ class SerdeProcessor(abc.ABC):
         any safety margin. See :meth:`Serializer.estimate_serialized_size`.
         """
         raise NotImplementedError
+
+    def estimate_serialized_size_for_key(
+        self, layout_desc: MemoryLayoutDesc, key: ObjectKey
+    ) -> int:
+        """Key-aware variant of :meth:`estimate_serialized_size`.
+
+        The L2 serde wrapper sizes each key's temp buffer with this. The
+        default ignores the key.
+        """
+        return self.estimate_serialized_size(layout_desc)
 
     # ----- Lifecycle -----
 

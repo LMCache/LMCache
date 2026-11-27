@@ -16,7 +16,8 @@ or controllers — it just defines:
   a thread pool and signaling an eventfd on completion.
 - A factory / registration mechanism so adapters can reference a serde
   by name (`{"type": "fp8", ...}` in JSON config).
-- One built-in serde: **fp8 quantization**.
+- Built-in serdes: **fp8 quantization**, plus TurboQuant, AES-GCM and
+  GHA (see their own docs).
 
 How the async interface is actually plugged into the L2 path lives in
 [`docs/design/v1/distributed/l2_adapters/serde_wrapper.md`][wrapper-doc]
@@ -39,6 +40,7 @@ lmcache/v1/distributed/serde/
   multi.py            # MultiSerializer / MultiDeserializer (tuple-shaped
                       # extension; see "Multi-output extension" below)
   utils.py            # serialized_layout_desc, make_temp_key
+  gha/            # GHA 4/8-bit quantization (see gha.md)
 ```
 
 ## Two-Layer Interface
@@ -100,9 +102,12 @@ classes and register a factory.
 - Must be an **upper bound** on the actual serialized output. Include
   any safety margin inside this method (the fp8 serializer returns
   `1.5 × num_elements` for exactly this reason).
-- Must only depend on `layout_desc` (shapes + dtypes). The wrapper
-  uses the first object's layout to size temps for the whole batch,
-  so a data-dependent estimate would break all-or-nothing allocation.
+- Must only depend on `layout_desc` (shapes + dtypes), not on the data:
+  the buffer is allocated before serializing.
+- A serde whose output size depends on which object group a key belongs
+  to (e.g. GHA) overrides `estimate_serialized_size_for_key(layout,
+  key)`; the wrapper sizes every temp buffer through it. The default
+  ignores the key.
 
 ### `Deserializer.deserialize(src, dst, key) -> None`
 

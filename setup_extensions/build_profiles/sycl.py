@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """SYCL / Intel XPU GPU backend profile.
 
-Builds ``lmcache.xpu_ops`` using the DPC++ compiler (icpx).
+Builds ``lmcache.xpu_ops`` using the DPC++ compiler (icpx). With
+``BUILD_GHA=1`` it also builds the optional GHA quantization kernels
+(``lmcache.gha_quant`` / ``lmcache.gha_quant_avx512`` for the host CPU and
+``lmcache.gha_quant_xpu``);
+GHA is only built on this (Intel) platform.
 Requires Intel oneAPI environment to be sourced before building.
 """
 
 # Standard
 from typing import TYPE_CHECKING, Optional
 import os
+import platform
 import shutil
 
 if TYPE_CHECKING:
@@ -25,6 +30,15 @@ from setup_extensions.build_profiles import BuildProfile
 # ``lmcache.libs`` although the XPU runtime image already ships them via
 # ``intel-cmplr-lib-rt``.
 _NO_INTEL_LIB = "-no-intel-lib"
+
+
+def is_gha_enabled() -> bool:
+    """Return True when the optional GHA kernels should be built.
+
+    Controlled by ``BUILD_GHA`` (default off). Only the SYCL (Intel)
+    profile consults it; other platforms never build GHA.
+    """
+    return os.environ.get("BUILD_GHA", "0") == "1"
 
 
 class SyclProfile(BuildProfile):
@@ -93,8 +107,113 @@ class SyclProfile(BuildProfile):
                 extra_link_args=["-fsycl", _NO_INTEL_LIB],
             ),
         ]
+        if is_gha_enabled():
+            ext_modules.extend(self._gha_extensions(include_dirs, library_dirs))
         cmdclass = {"build_ext": cpp_extension.BuildExtension}
         return ext_modules, cmdclass
+
+    def _gha_extensions(
+        self, include_dirs: list[str], library_dirs: list[str]
+    ) -> list["Extension"]:
+        """GHA CPU (x86-64 AVX2 and AVX-512) and XPU quantization kernels.
+
+        The CPU kernels are built twice from the same sources:
+        ``lmcache.gha_quant`` (AVX2) and ``lmcache.gha_quant_avx512``
+        (AVX-512 F/BW/DQ/VL). The serde picks one at import time from the
+        host CPU's flags, so the AVX-512 module is never loaded on a CPU
+        without AVX-512.
+        """
+        # Third Party
+        from torch.utils import cpp_extension
+
+        ext_modules = []
+        if platform.machine().lower() in {"x86_64", "amd64"}:
+            # (module name, sources, ISA flags). The AVX-512 variant compiles
+            # thin wrapper sources that #include the shared ones, so the two
+            # builds get distinct object files instead of overwriting (or
+            # reusing) each other's.
+            cpu_variants = [
+                (
+                    "gha_quant",
+                    [
+                        "csrc/sycl/gha/cpu/gha_quant_wrapper.cpp",
+                        "csrc/sycl/gha/cpu/quant.cpp",
+                    ],
+                    ["-mavx2", "-mfma", "-mf16c"],
+                ),
+                (
+                    "gha_quant_avx512",
+                    [
+                        "csrc/sycl/gha/cpu/avx512/gha_quant_wrapper_avx512.cpp",
+                        "csrc/sycl/gha/cpu/avx512/quant_avx512.cpp",
+                    ],
+                    [
+                        "-mavx2",
+                        "-mfma",
+                        "-mf16c",
+                        "-mavx512f",
+                        "-mavx512bw",
+                        "-mavx512dq",
+                        "-mavx512vl",
+                    ],
+                ),
+            ]
+            for module, sources, isa_flags in cpu_variants:
+                ext_modules.append(
+                    cpp_extension.CppExtension(
+                        f"lmcache.{module}",
+                        sources=sources,
+                        include_dirs=["csrc/sycl/gha/cpu"],
+                        extra_compile_args={
+                            "cxx": [
+                                *self.default_cxx_flags(),
+                                "-O3",
+                                "-std=c++20",
+                                *isa_flags,
+                                "-fopenmp",
+                                "-DUSE_MULTITHREADING",
+                                f"-DGHA_QUANT_MODULE_NAME={module}",
+                            ],
+                        },
+                        extra_link_args=["-fopenmp"],
+                    )
+                )
+        else:
+            print(
+                "[GHA] WARNING: the GHA CPU kernels need x86-64; "
+                "skipping lmcache.gha_quant and lmcache.gha_quant_avx512"
+            )
+        ext_modules.append(
+            cpp_extension.CppExtension(
+                "lmcache.gha_quant_xpu",
+                sources=[
+                    "csrc/sycl/gha/xpu/gha_quant_xpu_wrapper.cpp",
+                    "csrc/sycl/gha/xpu/quant_sycl.cpp",
+                ],
+                include_dirs=include_dirs,
+                library_dirs=library_dirs,
+                extra_compile_args={
+                    "cxx": [
+                        "-D_GLIBCXX_USE_CXX11_ABI=1",
+                        "-O3",
+                        "-g0",
+                        "-std=c++20",
+                        "-fsycl",
+                        "-fno-sycl-id-queries-fit-in-int",
+                        "-fp-model=precise",
+                        "-DGHA_XPU=1",
+                        _NO_INTEL_LIB,
+                    ],
+                },
+                extra_link_args=[
+                    "-fsycl",
+                    "-Xspirv-translator",
+                    "-spirv-ext=+SPV_INTEL_split_barrier",
+                    _NO_INTEL_LIB,
+                ],
+            )
+        )
+        return ext_modules
 
     def extra_cxx_flags_for(self, spec) -> list[str]:
         """SYCL uses CXX11 ABI for all common extensions except
