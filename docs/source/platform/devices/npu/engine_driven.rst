@@ -108,7 +108,7 @@ The LMCache main branch (``dev``) provides the MP transfer architecture (the
    cd /workspace
    git clone https://github.com/LMCache/LMCache.git
    cd LMCache
-   pip install -r requirements/build.txt   # grpcio-tools generates the gRPC bindings
+   pip install -r requirements/build.txt
    pip install -v --no-build-isolation -e .
    cd ..
 
