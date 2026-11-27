@@ -29,7 +29,8 @@ from lmcache.integration.sglang.unified_lmcache_mp_connector import (
 )
 from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.kv_format import detect_format
-from lmcache.v1.common.token_codec import unpack_token_ids
+from lmcache.v1.common.token_codec import pack_token_ids, unpack_token_ids
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     ipc_key_to_object_keys,
@@ -39,7 +40,11 @@ import lmcache.lmcache_native as lmcache_native
 
 @contextmanager
 def _store_connector(
-    rank: int = 0, parallel_axis: str = "single"
+    rank: int = 0,
+    parallel_axis: str = "single",
+    *,
+    client: Mock | None = None,
+    config_file: str | None = None,
 ) -> Iterator[tuple[UnifiedLMCacheMPConnector, Mock, Mock]]:
     """Construct a connector with mocked transfer and heartbeat dependencies."""
     adapter = Mock()
@@ -52,9 +57,8 @@ def _store_connector(
     adapter_name = "lmcache.integration.sglang.unified_kv_adapter"
     adapter_module = ModuleType(adapter_name)
     vars(adapter_module)["SGLangUnifiedKVAdapter"] = Mock(return_value=adapter)
-    config = SimpleNamespace(mp_host="127.0.0.1", mp_port=5555)
-    config.get_extra_config_value = lambda _key, default: default
-    client = Mock()
+    if client is None:
+        client = Mock()
     client.get_chunk_size.return_value.result.return_value = 8
     transfer = Mock()
     transfer.submit_store.return_value.query.return_value = True
@@ -62,10 +66,7 @@ def _store_connector(
     heartbeat = Mock(stop_requested=False)
     with (
         patch.dict("sys.modules", {adapter_name: adapter_module}),
-        patch(
-            "lmcache.v1.client.client_config.load_mp_client_config",
-            return_value=config,
-        ),
+        patch.dict("os.environ", {"LMCACHE_MP_HOST": "127.0.0.1"}),
         patch(
             "lmcache.v1.client.transport.factory.RequestClientFactory.create",
             return_value=client,
@@ -80,7 +81,7 @@ def _store_connector(
         ),
     ):
         connector = UnifiedLMCacheMPConnector(
-            config_file=None,
+            config_file=config_file,
             model_config=SimpleNamespace(model_path="test-model"),
             tp_size=2 if parallel_axis == "tp" else 1,
             tp_rank=rank if parallel_axis == "tp" else 0,
@@ -115,6 +116,74 @@ def _submit_store(
     )
     assert operation is not None
     return operation
+
+
+@pytest.mark.parametrize("client_chunk_hashes", [False, True])
+def test_sglang_mp_request_keys(tmp_path: Path, client_chunk_hashes: bool) -> None:
+    """All SGLang RPCs name the same chunks in either key mode."""
+    config = tmp_path / "lmcache.yaml"
+    config.write_text(
+        "extra_config:\n  lmcache.mp.client_chunk_hashes: true\n"
+        if client_chunk_hashes
+        else "extra_config: {}\n",
+        encoding="utf-8",
+    )
+    client = Mock()
+    client.query_prefetch_status.return_value.result.return_value = 16
+
+    with _store_connector(client=client, config_file=str(config)) as (
+        connector,
+        transfer,
+        _,
+    ):
+        tokens = list(range(25))
+        lookup = connector.submit_lookup(
+            "request", tokens, local_hit_tokens=8, cache_salt="tenant"
+        )
+        assert connector.poll_lookup(lookup) is None
+        assert connector.poll_lookup(lookup) == 16
+        connector.free_lookup_locks("request", 0, 8)
+        connector.submit_load(lookup, torch.arange(4, 12), local_hit_tokens=8)
+        first_store = _submit_store(connector, 24)
+        assert connector.complete_store(first_store)
+        _submit_store(connector, 32)
+
+        lookup_key = client.lookup.call_args.args[0]
+        release_key = client.free_lookup_locks.call_args.args[0]
+        load_key = transfer.submit_retrieve.call_args.args[1]
+        store_keys = [call.args[1] for call in transfer.submit_store.call_args_list]
+        hasher = TokenHasher(connector.chunk_size, "blake3")
+
+        assert lookup_key.cache_salt == release_key.cache_salt == load_key.cache_salt
+        assert lookup_key.cache_salt == "tenant"
+        for key, start, end in zip(
+            (lookup_key, release_key, load_key, *store_keys),
+            (0, 0, 8, 16, 24),
+            (24, 8, 16, 24, 32),
+            strict=True,
+        ):
+            assert (key.start, key.end) == (start, end)
+            if client_chunk_hashes:
+                assert key.token_bytes == b""
+                assert key.split_chunk_hashes() == hasher.compute_chunk_hashes(
+                    list(range(end))
+                )
+
+        if not client_chunk_hashes:
+            assert lookup_key.token_bytes == pack_token_ids(tokens)
+            assert release_key.token_bytes is lookup_key.token_bytes
+            assert load_key.token_bytes is lookup_key.token_bytes
+            assert store_keys[-1].token_bytes == pack_token_ids(list(range(32)))
+
+        if client_chunk_hashes:
+            connector.finish_request("request")
+            # A new request can reuse the ID and have the same trailing chunk.
+            changed = [255, *range(1, 32)]
+            connector.submit_lookup(
+                "request", changed, local_hit_tokens=0, cache_salt=""
+            )
+            key = client.lookup.call_args.args[0]
+            assert key.split_chunk_hashes() == hasher.compute_chunk_hashes(changed)
 
 
 def _run_staggered_recovery(rank: int, rendezvous: str, parallel_axis: str) -> None:
@@ -233,6 +302,7 @@ def _new_connector() -> UnifiedLMCacheMPConnector:
     connector._heartbeat = Mock(stop_requested=False)
     connector._heartbeat_lock = threading.Lock()
     connector._needs_store_progress_reset = False
+    connector._chunk_hash_cache = None
     connector._transfer_ctx_lock = threading.Lock()
     connector._closed = False
     connector.tp_size = 1

@@ -3,10 +3,14 @@
 
 # Standard
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, Optional
 
 # Third Party
 import torch
+
+# First Party
+from lmcache.v1.common.token_codec import pack_token_ids
 
 if TYPE_CHECKING:
     # Third Party
@@ -18,6 +22,8 @@ if TYPE_CHECKING:
 
 @dataclass
 class LMCacheLookupOperation:
+    """State for one lookup and its immutable snapshot of the token prefix."""
+
     request_id: str
     token_ids: list[int]
     local_hit_tokens: int
@@ -27,6 +33,11 @@ class LMCacheLookupOperation:
     total_hit_tokens: Optional[int] = None
     locks_held: bool = False
     lock_start: int = 0
+
+    @cached_property
+    def token_bytes(self) -> bytes:
+        """Return the packed snapshot shared by this operation's token keys."""
+        return pack_token_ids(self.token_ids)
 
 
 @dataclass(frozen=True)
