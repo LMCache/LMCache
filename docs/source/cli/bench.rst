@@ -2694,7 +2694,9 @@ hashes (the trailing partial chunk is never cached):
   kept. Evicted chunks are removed from the matcher. Only matched tokens
   are reported; CacheBlend's recompute is not modelled.
 
-Capacity is a token budget, since the trace carries no KV shape.
+Capacity is a token budget, since the trace carries no KV shape. Only whole
+chunks fit. A budget smaller than one chunk yields zero prefix and non-prefix
+hits.
 
 
 Quick start
