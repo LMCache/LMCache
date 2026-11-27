@@ -33,6 +33,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, Union
 import functools
+import os
 import threading
 
 if TYPE_CHECKING:
@@ -367,8 +368,15 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
         startup_nodes = _parse_startup_nodes(d.get("startup_nodes"))
 
         cluster_mode = bool(d.get("cluster_mode", False))
-        username = str(d.get("username", ""))
-        password = str(d.get("password", ""))
+        # Config/JSON takes precedence; env vars serve as defaults so that
+        # secrets can be injected by the orchestrator without appearing in
+        # command-line arguments or config files (mirrors RESP adapter).
+        username = str(d.get("username", "")) or os.environ.get(
+            "LMCACHE_VALKEY_USERNAME", ""
+        )
+        password = str(d.get("password", "")) or os.environ.get(
+            "LMCACHE_VALKEY_PASSWORD", ""
+        )
         key_prefix = str(d.get("key_prefix", ""))
 
         num_workers_raw = d.get("num_workers", 8)
@@ -444,8 +452,10 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             "standalone mode only the first entry is used.\n"
             "- cluster_mode (bool, default false): use "
             "GlideClusterClient when true.\n"
-            "- username (str, default empty): auth username.\n"
-            "- password (str, default empty): auth password.\n"
+            "- username (str, default empty): auth username "
+            "(overridden by LMCACHE_VALKEY_USERNAME env var when empty).\n"
+            "- password (str, default empty): auth password "
+            "(overridden by LMCACHE_VALKEY_PASSWORD env var when empty).\n"
             "- key_prefix (str, default empty): deployment namespace "
             "joined with each key by '@'. Must not contain '@'.\n"
             "- num_workers (int, default 8): worker thread count "
@@ -478,7 +488,11 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
             "- rdma_interface (str or list of str, optional): fabric domain or "
             "domains to open on a host with more than one card; workers are "
             "spread across a list round-robin. Omit to let the provider "
-            "choose. RDMA only."
+            "choose. RDMA only.\n\n"
+            "Environment variable defaults (read at config parse time, "
+            "overridden by explicit JSON values):\n"
+            "- LMCACHE_VALKEY_USERNAME: default auth username\n"
+            "- LMCACHE_VALKEY_PASSWORD: default auth password"
         )
 
 

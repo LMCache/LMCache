@@ -59,8 +59,13 @@ construction fails with::
   ``GlideClusterClient``; otherwise use standalone ``GlideClient``.
 - ``username`` (str, default ``""``): Optional auth username. Requires
   ``password``. Leave empty to use the default user with password-only
-  auth.
-- ``password`` (str, default ``""``): Optional auth password.
+  auth. If the JSON field is empty, the value of the
+  ``LMCACHE_VALKEY_USERNAME`` environment variable is used instead.
+- ``password`` (str, default ``""``): Optional auth password. If the
+  JSON field is empty, the value of the ``LMCACHE_VALKEY_PASSWORD``
+  environment variable is used instead. Using an environment variable
+  keeps the credential out of command-line arguments (which are visible
+  in ``ps`` and process supervisors).
 - ``key_prefix`` (str, default ``""``): Deployment-level key namespace,
   joined with the standard wire key by ``@``. **Must not contain**
   ``@``. Leave empty for a wire-format identical to the unprefixed
