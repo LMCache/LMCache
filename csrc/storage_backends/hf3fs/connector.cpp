@@ -751,6 +751,10 @@ void Hf3fsConnector::buffer_scan_worker_(
       }
 
       const std::string filename = entry.path().filename().string();
+      // A long-name fallback ("l-<sha256>.data") has no key to recover, so it
+      // is skipped here. The file is still reachable: exists stats the path
+      // built from the key and delete removes it by key, so a skipped name is
+      // neither hidden from lookups nor unreclaimable.
       std::string recovered = filename_to_key(filename);
       if (!recovered.empty()) {
         local_set.insert(std::move(recovered));

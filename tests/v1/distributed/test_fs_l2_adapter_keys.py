@@ -352,3 +352,30 @@ class TestIPCCacheServerKeyCacheSalt:
         decoded = msgspec.msgpack.decode(wire, type=IPCCacheServerKey)
         assert decoded == k
         assert decoded.cache_salt == "alice"
+
+
+def _long_key() -> ObjectKey:
+    """A key whose legacy name exceeds NAME_MAX: 47-char path, real hash, salt."""
+    return ObjectKey(
+        chunk_hash=bytes(range(32)),
+        model_name="models--Qwen--Qwen3-1.7B/snapshots/" + "a" * 12,
+        kv_rank=1,
+        cache_salt="s" * 64,
+        tags={"kv_dtype": "f8pth", "revision": "abc123"},
+    )
+
+
+def test_a_name_that_cannot_fit_falls_back_to_a_digest():
+    """A 47-character path with a real hash, salt and tags has no byte left."""
+    key = _long_key()
+    name = _object_key_to_filename(key)
+
+    assert len(name.encode()) <= 255
+    assert name.startswith("l-") and name.endswith(".data")
+    assert len(name) == len("l-") + 64 + len(".data")
+    assert _object_key_to_filename(key) == name
+
+
+def test_a_digest_name_is_not_decodable():
+    """The fallback trades reversibility for storable keys; the key is the name."""
+    assert _filename_to_object_key(_object_key_to_filename(_long_key())) is None

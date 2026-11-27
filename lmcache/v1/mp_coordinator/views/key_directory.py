@@ -24,7 +24,11 @@ import numpy as np
 
 # First Party
 from lmcache.v1.common.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey, Tier
+from lmcache.v1.distributed.api import (
+    ObjectKey,
+    ObjectKeyIdentity,
+    Tier,
+)
 from lmcache.v1.mp_coordinator.api import (
     UNKNOWN_TOKEN_OFFSET,
     BlendMatch,
@@ -159,6 +163,35 @@ class _KeyRecord:
     placements: list[Placement] = field(default_factory=list)
     last_access: float = 0.0
     access_count: int = 0
+
+
+#: The one tag a token-addressed delete may ignore. ``get_request_tags``
+#: strips the ``lmcache.tag.`` prefix, so this is the identity-side name; the
+#: caller cannot know the engine's KV dtype unless it names one.
+_LOOSELY_MATCHED_TAG = "kv_dtype"
+
+
+def _identity_matches(
+    stored: "ObjectKeyIdentity",
+    expected: "ObjectKeyIdentity",
+    object_group_id: int,
+    kv_rank: int,
+) -> bool:
+    """Whether ``stored`` is ``expected`` seen from one group and rank.
+
+    ``kv_dtype`` is ignored when the caller omits it, so a token-addressed
+    delete that knows only the revision still reaches both dtype copies.
+    Every other tag, and a ``kv_dtype`` the caller does name, must match
+    exactly.
+    """
+    candidate = replace(stored, object_group_id=object_group_id, kv_rank=kv_rank)
+    expected_tags = dict(expected.tags)
+    candidate_tags = dict(candidate.tags)
+    if _LOOSELY_MATCHED_TAG not in expected_tags:
+        candidate_tags.pop(_LOOSELY_MATCHED_TAG, None)
+    return replace(candidate, tags=candidate_tags) == replace(
+        expected, tags=expected_tags
+    )
 
 
 @dataclass
@@ -396,16 +429,17 @@ class KeyDirectory(View):
         if chunk_binding is None:
             return []
         world_size = ObjectKey.WorldSizeFromKVRank(key.identity.kv_rank)
+        expected = key.identity
         return [
             stored_key
             for stored_key in chunk_binding.keys
             if ObjectKey.WorldSizeFromKVRank(stored_key.identity.kv_rank) == world_size
-            and replace(
+            and _identity_matches(
                 stored_key.identity,
-                object_group_id=key.identity.object_group_id,
-                kv_rank=key.identity.kv_rank,
+                expected,
+                key.identity.object_group_id,
+                key.identity.kv_rank,
             )
-            == key.identity
         ]
 
     def _get_stored_keys_in_other_groups(self, key: ObjectKey) -> list[ObjectKey]:

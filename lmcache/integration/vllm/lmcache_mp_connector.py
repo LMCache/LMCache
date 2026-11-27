@@ -94,6 +94,10 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.v1.client.worker_transfer import LMCacheDrivenTransferContext
 from lmcache.v1.common.banner import print_banner_once
+from lmcache.v1.common.engine_dtype import (
+    KV_DTYPE_TAG_NAME,
+    kv_dtype_tag_code,
+)
 from lmcache.v1.common.logging import init_logger as lmcache_init_logger
 from lmcache.v1.common.utils import CacheRemoveEvent
 
@@ -151,6 +155,39 @@ _DCP_LAYOUT_NAMESPACE = "##lmcache-dcp-layout-v1-"
 # Request-config key whose value becomes ``ObjectKeyIdentity.tags["revision"]``.
 # See ``get_request_tags`` in ``lmcache.v1.distributed.api``.
 _REVISION_TAG_KEY = "lmcache.tag.revision"
+
+_KV_DTYPE_TAG_KEY = KV_DTYPE_TAG_NAME
+
+
+def _kv_dtype_tag(vllm_config: "VllmConfig") -> str:
+    """Return the KV cache dtype this engine must tag its objects with.
+
+    The declared ``cache_dtype`` is authoritative when it is not ``auto``: two
+    vLLM runs can store the same model's KV cache as ``fp8_per_token_head`` and
+    ``int8_per_token_head``, which share a page size but not a byte layout, so
+    the engine's string has to reach the key. With ``auto`` the model dtype is
+    what the cache is allocated as.
+    """
+    cache_config = getattr(vllm_config, "cache_config", None)
+    cache_dtype = getattr(cache_config, "cache_dtype", None)
+    model_dtype = getattr(getattr(vllm_config, "model_config", None), "dtype", None)
+    if cache_dtype in (None, "", "auto"):
+        # Every layer uses the model dtype, so a skip list cannot change the
+        # bytes and must not change the tag.
+        return kv_dtype_tag_code(model_dtype)
+    code = kv_dtype_tag_code(cache_dtype)
+    skip_layers = getattr(cache_config, "kv_cache_dtype_skip_layers", None)
+    if skip_layers:
+        # vLLM keeps the skipped layers in the model dtype, so two engines with
+        # the same fp8 cache_dtype but different skip lists write different
+        # bytes. The list is a set of layer indices plus the ``sliding_window``
+        # token, so sort it to make the tag canonical.
+        skip_spec = ",".join(sorted({str(item).strip() for item in skip_layers}))
+        auto_code = kv_dtype_tag_code(model_dtype)
+        return f"{code}|skip:{skip_spec}|auto:{auto_code}"
+    return code
+
+
 _MAX_LCM_EXPANSION_FACTOR = 4
 _USE_VMM_API_KEY = "lmcache.mp.use_vmm_api"
 
@@ -680,6 +717,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # Identity tag sent with every request; empty when the engine pinned no
         # revision, so unpinned engines keep their existing cache namespace.
         self._revision_tag = _revision_cache_token(vllm_config) or ""
+        self._kv_dtype_tag = _kv_dtype_tag(vllm_config)
 
         assert vllm_config.kv_transfer_config is not None
         self._can_store = vllm_config.kv_transfer_config.is_kv_producer
@@ -2202,6 +2240,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     self.scheduler_adapter.end_session(session_id)
             new_tracker = LMCacheMPRequestTracker(request)
             self._apply_revision_tag(new_tracker)
+            self._apply_kv_dtype_tag(new_tracker)
             self.request_trackers[request_id] = new_tracker
         return self.request_trackers[request_id]
 
@@ -2230,6 +2269,35 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 revision_tag,
             )
         configs[_REVISION_TAG_KEY] = revision_tag
+        tracker.request_configs = configs
+
+    def _apply_kv_dtype_tag(self, tracker: LMCacheMPRequestTracker) -> None:
+        """Carry the engine's KV cache dtype as an ``lmcache.tag.kv_dtype`` tag.
+
+        Two live engines can serve the same model with different KV cache
+        dtypes. Their objects have the same size but not the same bytes, so the
+        dtype has to be part of the identity and the server cannot derive it
+        from the registration: the latest registration would speak for both.
+        Sending it with the request keeps each engine's keys its own.
+
+        A request that already sets the tag to another value would store
+        objects under a dtype that is not the one serving it, so the engine
+        value wins and the conflict is logged.
+        """
+        dtype_tag = getattr(self, "_kv_dtype_tag", "")
+        if not dtype_tag:
+            return
+        configs = dict(getattr(tracker, "request_configs", None) or {})
+        configured = configs.get(_KV_DTYPE_TAG_KEY)
+        if configured is not None and configured != dtype_tag:
+            logger.warning(
+                "Request %s sets %s=%r, overriding it with the engine KV dtype %r",
+                tracker.request_id,
+                _KV_DTYPE_TAG_KEY,
+                configured,
+                dtype_tag,
+            )
+        configs[_KV_DTYPE_TAG_KEY] = dtype_tag
         tracker.request_configs = configs
 
     def _cleanup_request_tracker(self, request_id: str) -> None:

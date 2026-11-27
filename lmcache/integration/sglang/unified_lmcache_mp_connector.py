@@ -30,6 +30,10 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
     SGLangKVComponentGroup,
 )
 from lmcache.v1.client.heartbeat import HeartbeatThread
+from lmcache.v1.common.engine_dtype import (
+    KV_DTYPE_TAG_NAME,
+    kv_dtype_tag_code,
+)
 
 if TYPE_CHECKING:
     # First Party
@@ -61,6 +65,24 @@ class _ImmediateFuture:
 
     def retain_reference(self, value: object) -> None:
         del value
+
+
+def _groups_kv_dtype_tag(groups: Sequence[Any]) -> str:
+    """Return a per-group dtype signature for the identity tag.
+
+    SGLang registers several component groups, and they can differ: an MLA
+    latent in fp8 next to a bf16 indexer, or a recurrent state in fp32. The
+    tag lists every tensor's dtype in registration order, groups separated by
+    ``;`` and tensors by ``,``, so two engines that agree on the first group
+    but differ later cannot share keys, and neither can two that register the
+    same dtypes at different positions.
+    """
+    parts: list[str] = []
+    for group in groups:
+        parts.append(
+            ",".join(kv_dtype_tag_code(tensor.dtype) for tensor in group.kv_tensors)
+        )
+    return ";".join(parts)
 
 
 class UnifiedLMCacheMPConnector:
@@ -280,6 +302,11 @@ class UnifiedLMCacheMPConnector:
         self.device = kv_tensors[0].device
         self.instance_id = uuid.uuid4().int & ((1 << 63) - 1)
         self._kv_caches = {f"kv_{i}": tensor for i, tensor in enumerate(kv_tensors)}
+        # Part of the object identity: two engines can serve the same model
+        # with different KV cache dtypes and the server cannot see which one
+        # sent a request. Groups can differ from each other, so the tag keeps
+        # one entry per registered group instead of the first tensor's dtype.
+        self._kv_dtype_tag = _groups_kv_dtype_tag(wire_groups)
         self._kv_groups = tuple(wire_groups)
         (
             self._engine_group_info_specs,
@@ -660,6 +687,12 @@ class UnifiedLMCacheMPConnector:
         # First Party
         from lmcache.v1.common.custom_types import IPCCacheServerKey
 
+        dtype_tag = getattr(self, "_kv_dtype_tag", "")
+        if dtype_tag:
+            request_configs = {
+                **(request_configs or {}),
+                KV_DTYPE_TAG_NAME: dtype_tag,
+            }
         return IPCCacheServerKey.from_token_ids(
             model_name=self.model_name,
             world_size=self.kv_world_size,
