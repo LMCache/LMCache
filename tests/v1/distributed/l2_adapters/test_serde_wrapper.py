@@ -161,6 +161,9 @@ class FakeInnerAdapter(L2AdapterInterface):
         self.load_hits: list[int] | None = None
         self.fail_submit_store = False
         self.fail_submit_load = False
+        # Report loads while a fill still writes the objects.
+        self.pipelined_load = False
+        self.load_fills: dict[L2TaskId, FillTracker] = {}
 
         self.store_calls: list[list[ObjectKey]] = []
         self.load_calls: list[list[ObjectKey]] = []
@@ -227,6 +230,8 @@ class FakeInnerAdapter(L2AdapterInterface):
         if self.fail_submit_load:
             raise RuntimeError("injected inner submit_load_task failure")
         task_id = self._new_task_id()
+        if self.pipelined_load:
+            self.load_fills[task_id] = FillTracker(objects)
         if self.load_hits is not None:
             bitmap = Bitmap(len(keys))
             for index in self.load_hits:
@@ -239,6 +244,9 @@ class FakeInnerAdapter(L2AdapterInterface):
     def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
         with self._task_lock:
             return self._completed_load.pop(task_id, None)
+
+    def take_load_fill(self, task_id: L2TaskId) -> FillTracker | None:
+        return self.load_fills.get(task_id)
 
     def delete(self, keys: list[ObjectKey]) -> None:
         self.passthrough_calls.append(("delete", (keys,)))
@@ -660,6 +668,54 @@ def test_failed_pipelined_load_keeps_its_fill_registered(
     assert pending_fill.find(objs[1]) is fill
     wait_for_l1_usage(l1, baseline)
     fill.release()
+
+
+def test_load_waits_for_the_inner_fill_before_deserializing(
+    l1: DramL1Manager,
+    inner: FakeInnerAdapter,
+    serde: FakeSerde,
+    wrapper: SerdeL2AdapterWrapper,
+) -> None:
+    inner.pipelined_load = True
+    inner.load_hits = [0, 1]
+    keys, objs = commit_objects(l1, 2)
+    baseline = l1_usage(l1)
+
+    task_id = wrapper.submit_load_task(keys, objs)
+    time.sleep(0.1)
+
+    # The temps are still being written: nothing is deserialized yet.
+    assert serde.deserialize_calls == []
+    assert wrapper.query_load_result(task_id) is None
+
+    (inner_fill,) = inner.load_fills.values()
+    inner_fill.settle(True)
+
+    assert wait_for_load_result(wrapper, task_id).get_indices_list() == [0, 1]
+    assert serde.deserialize_calls == [keys]
+    wait_for_l1_usage(l1, baseline)
+
+
+def test_failed_inner_fill_loads_nothing(
+    l1: DramL1Manager,
+    inner: FakeInnerAdapter,
+    serde: FakeSerde,
+    wrapper: SerdeL2AdapterWrapper,
+) -> None:
+    inner.pipelined_load = True
+    inner.load_hits = [0, 1]
+    keys, objs = commit_objects(l1, 2)
+    baseline = l1_usage(l1)
+
+    task_id = wrapper.submit_load_task(keys, objs)
+    (inner_fill,) = inner.load_fills.values()
+    inner_fill.settle(False)
+
+    assert wait_for_load_result(wrapper, task_id).popcount() == 0
+    assert serde.deserialize_calls == []
+    wait_for_l1_usage(l1, baseline)
+    # The failed fill no longer claims the freed temps.
+    assert pending_fill._fills == {}
 
 
 # =============================================================================

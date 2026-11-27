@@ -156,6 +156,9 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         # inner adapter's fd straight through (no chaining needed there).
         self._store_efd = create_event_notifier()
         self._load_efd = create_event_notifier()
+        # Wakes the internal thread when the fill of a held inner load
+        # settles.
+        self._inner_fill_efd = create_event_notifier()
 
         # Task-id space separate from inner's. Reverse maps let the
         # internal thread pair inner / serde completions back to our
@@ -174,6 +177,9 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         self._completed_load: dict[L2TaskId, Bitmap] = {}
         # Fills of pipelined loads whose result was reported, until taken.
         self._load_fills: dict[L2TaskId, FillTracker] = {}
+        # Inner loads reported while the inner adapter still writes the
+        # temps, held until their fill settles. Internal thread only.
+        self._held_inner_loads: dict[L2TaskId, tuple[Bitmap, FillTracker]] = {}
 
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
@@ -491,6 +497,9 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         # (use-after-free).
         self._inner.close()
         self._serde.close()
+        for _, inner_fill in self._held_inner_loads.values():
+            inner_fill.release()
+        self._held_inner_loads.clear()
 
         # Now safe to release leftover temp buffers. Store tasks in
         # SERIALIZE phase hold write locks on their temps; tasks in
@@ -533,6 +542,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
 
         self._store_efd.close()
         self._load_efd.close()
+        self._inner_fill_efd.close()
 
     # ------------------------------------------------------------------
     # Internal loop
@@ -544,11 +554,13 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         inner_load_efd = self._inner.get_load_event_fd()
         serialize_efd = self._serde.get_serialize_event_fd()
         deserialize_efd = self._serde.get_deserialize_event_fd()
+        inner_fill_efd = self._inner_fill_efd.fileno()
 
         poller.register(inner_store_efd, select.POLLIN)
         poller.register(inner_load_efd, select.POLLIN)
         poller.register(serialize_efd, select.POLLIN)
         poller.register(deserialize_efd, select.POLLIN)
+        poller.register(inner_fill_efd, select.POLLIN)
 
         while not self._stop_flag.is_set():
             ready = poller.poll(_POLL_TIMEOUT_MS)
@@ -564,7 +576,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                         self._drain_serialize()
                     elif fd == inner_store_efd:
                         self._drain_inner_store()
-                    elif fd == inner_load_efd:
+                    elif fd in (inner_load_efd, inner_fill_efd):
                         self._drain_inner_load()
                     elif fd == deserialize_efd:
                         self._drain_deserialize()
@@ -656,18 +668,39 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
 
     def _drain_inner_load(self) -> None:
         """Drain inner load completions; on per-key success submit
-        deserialize, otherwise fail the keys immediately."""
+        deserialize, otherwise fail the keys immediately.
+
+        An inner load reported while its temps are still being written is
+        held until its fill settles; a failed fill loads nothing.
+        """
         with self._lock:
             pending = list(self._inner_to_load.keys())
         for inner_id in pending:
-            bitmap = self._inner.query_load_result(inner_id)
-            if bitmap is None:
-                continue
+            held = self._held_inner_loads.pop(inner_id, None)
+            if held is None:
+                bitmap = self._inner.query_load_result(inner_id)
+                if bitmap is None:
+                    continue
+                inner_fill = self._inner.take_load_fill(inner_id)
+                if inner_fill is not None and not inner_fill.settled:
+                    self._held_inner_loads[inner_id] = (bitmap, inner_fill)
+                    inner_fill.on_settled(lambda _ok: self._inner_fill_efd.notify())
+                    continue
+            else:
+                bitmap, inner_fill = held
+                if not inner_fill.settled:
+                    self._held_inner_loads[inner_id] = held
+                    continue
             with self._lock:
                 wrapped_id = self._inner_to_load.pop(inner_id, None)
                 state = (
                     self._load_tasks.get(wrapped_id) if wrapped_id is not None else None
                 )
+            if inner_fill is not None and inner_fill.failed:
+                # Unregister the temps before they can be freed.
+                inner_fill.release()
+                if state is not None:
+                    bitmap = Bitmap(len(state.keys))
             if wrapped_id is None or state is None:
                 continue
 
