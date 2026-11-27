@@ -49,8 +49,15 @@ message RetrieveRequest {
   int64 skip_first_n_tokens = 5;
 }
 
+// First two fields preserve legacy event/success wire semantics.
+message RetrieveEventIpcHandleResult {
+  bytes event_ipc_handle = 1;
+  bool success = 2;
+  bytes encoded_coverage = 3;
+}
+
 message RetrieveResponse {
-  EventIpcHandleResult result = 1;
+  RetrieveEventIpcHandleResult result = 1;
 }
 
 service LMCacheDrivenService {

@@ -12,7 +12,13 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey, KVEventProfile
+from lmcache.v1.common.custom_types import (
+    EngineType,
+    IPCCacheServerKey,
+    KVEventProfile,
+    RetrieveCoverage,
+    RetrieveReply,
+)
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.common.logging import init_logger
@@ -1124,7 +1130,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
         skip_first_n_tokens: int = 0,
-    ) -> tuple[bytes, bool]:
+    ) -> RetrieveReply:
         """Retrieve the CPU KV cache and put into GPU blocks.
 
         Args:
@@ -1142,7 +1148,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         Returns:
             A tuple where the first element is the IPC handle of the event
             that signals the completion of the retrieve operation, and the
-            second element indicates whether the key was successfully retrieved.
+            second element is a boolean status or terminal chunk coverage when
+            requested by a coverage-aware client. Coverage is usable only after
+            the completion event; omitted chunks are never copied to the GPU.
             The event handle is empty when no device work was submitted.
 
         Raises:
@@ -1187,6 +1195,18 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             else []
         )
         num_chunks = len(obj_keys_per_obj_group[0])
+        coverage_enabled = bool((key.request_configs or {}).get("holemiss_coverage"))
+        omitted_chunks = (key.request_configs or {}).get("holemiss_omitted_chunks", [])
+        if coverage_enabled and (num_object_groups != 1 or unfull_obj_keys):
+            raise ValueError("Holemiss coverage requires one full-chunk object group")
+        if omitted_chunks and (
+            not coverage_enabled
+            or any(
+                not isinstance(c, int) or c < 0 or c >= num_chunks
+                for c in omitted_chunks
+            )
+        ):
+            raise ValueError("Invalid request-scoped omitted chunk")
 
         # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
         # Must be published via publish() (not publish_on_stream) so the
@@ -1328,7 +1348,15 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     total_bytes += sum(mo.get_size() for mo in window_objs)
                     # None-pad the skipped prefix so block-id slicing is unchanged.
                     memory_objs: list[MemoryObj | None] = [None] * skip + window_objs
-                    cache_context.transfer_object_group(
+                    transfer = cache_context.transfer_object_group
+                    if omitted_chunks:
+                        transfer = lambda *args, **kwargs: transfer_kv_per_object_group(
+                            cache_context,
+                            *args,
+                            omitted_chunks=omitted_chunks,
+                            **kwargs,
+                        )
+                    transfer(
                         block_ids_per_group_gpu,
                         memory_objs,
                         object_group_id=obj_group_id,
@@ -1398,7 +1426,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
         return (
             event_backend.export_event(event, cache_context.device),
-            retrieve_succeeded,
+            RetrieveCoverage(
+                num_chunks,
+                [c for c in range(num_chunks) if c not in omitted_chunks],
+                list(omitted_chunks),
+            )
+            if coverage_enabled and retrieve_succeeded
+            else retrieve_succeeded,
         )
 
     def _publish_token_bindings(

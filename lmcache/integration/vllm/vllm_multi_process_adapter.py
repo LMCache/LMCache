@@ -17,6 +17,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.v1.common.custom_types import RetrieveCoverage
 from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.integration.vllm.experimental import dispatch
@@ -541,7 +542,7 @@ class LoadStoreOp:
 
 
 StoreResult = bool
-RetrieveResult = bool
+RetrieveResult = bool | RetrieveCoverage
 LookupResult = int
 
 
@@ -1433,6 +1434,7 @@ class LMCacheMPWorkerAdapter:
         # Request futures
         self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
         # request_id -> (future, block_ids)
+        self._retrieve_completions: list[tuple[str, RetrieveCoverage]] = []
         self.retrieve_futures: dict[
             str, tuple[MessagingFuture[RetrieveResult], list[int]]
         ] = {}
@@ -2228,15 +2230,24 @@ class LMCacheMPWorkerAdapter:
 
             finished_retrieves.add(request_id)
 
+            if isinstance(r_result, RetrieveCoverage):
+                r_result.validate()
+                self._retrieve_completions.append((request_id, r_result))
             if not r_result:
-                self.error_block_ids.update(r_block_ids)
-                self._failed_request_ids.add(request_id)
-                logger.error(
-                    "Something went wrong when processing the "
-                    "retrieve request for request_id=%s, result=%s",
-                    request_id,
-                    r_result,
+                failed_ids = (
+                    r_result.failed_block_ids(r_block_ids, 1)
+                    if isinstance(r_result, RetrieveCoverage)
+                    else r_block_ids
                 )
+                self.error_block_ids.update(failed_ids)
+                self._failed_request_ids.add(request_id)
+                if not isinstance(r_result, RetrieveCoverage):
+                    logger.error(
+                        "Something went wrong when processing the "
+                        "retrieve request for request_id=%s, result=%s",
+                        request_id,
+                        r_result,
+                    )
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:
@@ -2352,15 +2363,24 @@ class LMCacheMPWorkerAdapter:
 
             finished_retrieves.add(request_id)
 
+            if isinstance(r_result, RetrieveCoverage):
+                r_result.validate()
+                self._retrieve_completions.append((request_id, r_result))
             if not r_result:
-                self.error_block_ids.update(r_block_ids)
-                self._failed_request_ids.add(request_id)
-                logger.error(
-                    "Something went wrong when processing the "
-                    "retrieve request for request_id=%s, result=%s",
-                    request_id,
-                    r_result,
+                failed_ids = (
+                    r_result.failed_block_ids(r_block_ids, 1)
+                    if isinstance(r_result, RetrieveCoverage)
+                    else r_block_ids
                 )
+                self.error_block_ids.update(failed_ids)
+                self._failed_request_ids.add(request_id)
+                if not isinstance(r_result, RetrieveCoverage):
+                    logger.error(
+                        "Something went wrong when processing the "
+                        "retrieve request for request_id=%s, result=%s",
+                        request_id,
+                        r_result,
+                    )
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:
@@ -2427,6 +2447,16 @@ class LMCacheMPWorkerAdapter:
             The number of vllm blocks in a LMCache data chunk
         """
         return self.blocks_in_chunk
+
+    def get_retrieve_completions(self) -> list[tuple[str, RetrieveCoverage]]:
+        """Drain terminal chunk coverage after the GPU completion event.
+
+        Returns:
+            Request IDs and original-range chunk coverage, exactly once.
+            Legacy or unknown failures remain on the existing error channels.
+        """
+        completed, self._retrieve_completions = self._retrieve_completions, []
+        return completed
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Drain failed receive blocks for single-group or legacy recovery.

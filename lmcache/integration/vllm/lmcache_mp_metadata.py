@@ -346,6 +346,7 @@ class LMCacheMPRequestMetadata:
     op: LoadStoreOp
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
+    transfer_generation: int | None = None
 
     @staticmethod
     def GetStoreMetadata(

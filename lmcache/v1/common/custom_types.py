@@ -509,3 +509,52 @@ class EngineType(Enum):
     SGLANG = "sglang"
     TRTLLM = "trtllm"
     MOCK = "mock"
+
+
+@dataclass(frozen=True)
+class RetrieveCoverage:
+    """Terminal GPU delivery coverage, indexed in the original chunk range.
+
+    Each complete chunk must occur exactly once in loaded or failed. A
+    caller must wait for the accompanying IPC event before using coverage.
+    Legacy consumers may test truthiness to retain all-or-nothing behavior.
+    """
+
+    total_chunks: int
+    loaded_chunks: list[int]
+    failed_chunks: list[int]
+
+    def validate(self) -> None:
+        """Reject incomplete, overlapping or out-of-range terminal coverage."""
+        cells = self.loaded_chunks + self.failed_chunks
+        if sorted(cells) != list(range(self.total_chunks)):
+            raise ValueError(
+                "Retrieve coverage must partition the complete chunk range"
+            )
+
+    def __bool__(self) -> bool:
+        return not self.failed_chunks
+
+    def failed_block_ids(
+        self, block_ids: list[int], blocks_per_chunk: int
+    ) -> list[int]:
+        """Map missing chunks to their original physical GPU block IDs.
+
+        Args:
+            block_ids: Original flattened single-group destination block table.
+            blocks_per_chunk: Number of engine blocks in one LMCache chunk.
+
+        Returns:
+            Physical block IDs belonging to the failed chunks.
+        """
+        self.validate()
+        if len(block_ids) != self.total_chunks * blocks_per_chunk:
+            raise ValueError("Destination block table does not match chunk coverage")
+        return [
+            block_ids[c * blocks_per_chunk + b]
+            for c in self.failed_chunks
+            for b in range(blocks_per_chunk)
+        ]
+
+
+RetrieveReply = tuple[bytes, bool | RetrieveCoverage]

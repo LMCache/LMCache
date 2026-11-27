@@ -39,6 +39,7 @@ def transfer_kv_per_object_group(
     *,
     transfer_key: str,
     block_ids_host: Sequence[Sequence[int]] = (),
+    omitted_chunks: Sequence[int] = (),
 ) -> None:
     """Transfer one object group's chunks, each by the engine its L1 object
     selects. Runs are issued in chunk order on the context's stream.
@@ -61,12 +62,24 @@ def transfer_kv_per_object_group(
         direction: H2D (retrieve) or D2H (store).
         transfer_key: Operation id for phase timing.
         block_ids_host: Block IDs as host lists; empty forces the kernel path.
+        omitted_chunks: Chunks intentionally unavailable; leave destinations untouched.
 
     Raises:
         ValueError: If a None entry is found on retrieve.
         NotImplementedError: If an object is owned by a peer.
     """
+    runs = []
+    omitted = set(omitted_chunks)
     for engine, start, end in split_into_runs(memory_objs):
+        run_start = start
+        for index in range(start, end):
+            if index in omitted:
+                if run_start < index:
+                    runs.append((engine, run_start, index))
+                run_start = index + 1
+        if run_start < end:
+            runs.append((engine, run_start, end))
+    for engine, start, end in runs:
         chunk_range = (start, end)
         is_host_memory = engine is TransferEngine.GPU_DMA
         if (
