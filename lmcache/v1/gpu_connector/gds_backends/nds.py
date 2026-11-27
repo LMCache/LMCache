@@ -15,11 +15,13 @@ import torch
 # First Party
 from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
 from lmcache.v1.gpu_connector.gds_backends._file import FDGDSHandle, FileGDSBackend
-from lmcache.v1.gpu_connector.gds_backends.base import Submission
+from lmcache.v1.gpu_connector.gds_backends.base import GDSHandle, Submission
 
 # Shared GDS page alignment (cuFile / hipFile and GDSContext slab rounding).
 # libnds itself only requires 512-byte sector alignment.
 _GDS_ALIGNMENT = 4096
+# hal_kernel_p2p_get_pages rejects a VA that does not start on a 2 MiB boundary.
+_NDS_PAGE = 2 * 1024 * 1024
 
 
 @dataclass(eq=False)
@@ -41,6 +43,10 @@ class Backend(FileGDSBackend):
         super().__init__()
         self._registered_streams: set[int] = set()
         self._regions: dict[int, _RegisteredRegion] = {}
+        self._slab_size_bytes = 0
+        # Kernel pins are 2 MiB-aligned covers of ``_regions``. Adjacent
+        # GDS slices share one pin when rounding the start down would overlap.
+        self._pins: list[tuple[int, int]] = []
 
     @classmethod
     def is_default(cls) -> bool:
@@ -53,6 +59,11 @@ class Backend(FileGDSBackend):
             raise ValueError("nds backend requires torch.npu")
         if not npu.is_available():
             raise ValueError("nds backend requires an available NPU")
+
+    def open_slab(self, location: str, size: int, direct_io: bool) -> GDSHandle:
+        """Record the slab length, then create the regular file."""
+        self._slab_size_bytes = size
+        return super().open_slab(location, size, direct_io)
 
     def open_handle(self, fd: int, path: str) -> "NDSHandle":
         try:
@@ -83,17 +94,58 @@ class Backend(FileGDSBackend):
         if base in self._regions:
             raise ValueError(f"NDS buffer base 0x{base:x} is already registered")
         self._ensure_driver_open()
-        self._library().register_memory(base, nbytes)
         self._regions[base] = _RegisteredRegion(
             tensor=view, base_ptr=base, nbytes=nbytes
         )
+        try:
+            self._sync_pins()
+        except BaseException:
+            del self._regions[base]
+            try:
+                self._sync_pins()
+            except Exception:
+                pass
+            raise
 
     def deregister_buffer(self, buf: torch.Tensor) -> None:
         """Reverse :meth:`register_buffer` for ``buf``."""
         base = buf.view(torch.uint8).data_ptr()
-        reg = self._regions.pop(base, None)
-        if reg is not None:
-            self._library().unregister_memory(reg.base_ptr, reg.nbytes)
+        if self._regions.pop(base, None) is not None:
+            self._sync_pins()
+
+    def _merged_pin_spans(self) -> list[tuple[int, int]]:
+        """2 MiB-aligned covers of the logical regions, overlap merged."""
+        spans = [
+            (region.base_ptr & ~(_NDS_PAGE - 1), region.base_ptr + region.nbytes)
+            for region in self._regions.values()
+        ]
+        spans.sort()
+        merged: list[tuple[int, int]] = []
+        for start, end in spans:
+            if merged and start < merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        return [(start, end - start) for start, end in merged]
+
+    def _sync_pins(self) -> None:
+        """Make the kernel pins match :meth:`_merged_pin_spans`.
+
+        Drop stale pins before adding new ones so a grown cover does not
+        overlap the range it replaces (the driver rejects that with EEXIST).
+        """
+        desired = self._merged_pin_spans()
+        desired_set = set(desired)
+        library = self._library()
+        for addr, size in list(self._pins):
+            if (addr, size) not in desired_set:
+                library.unregister_memory(addr, size)
+                self._pins.remove((addr, size))
+        pinned = set(self._pins)
+        for addr, size in desired:
+            if (addr, size) not in pinned:
+                library.register_memory(addr, size)
+                self._pins.append((addr, size))
 
     def register_stream(self, raw_stream: int) -> None:
         if raw_stream in self._registered_streams:
@@ -126,7 +178,7 @@ class Backend(FileGDSBackend):
         buf_offset: int,
         alignment: int = _GDS_ALIGNMENT,
     ) -> None:
-        """Check GDS alignment and the registered NPU region before I/O."""
+        """Check GDS alignment, slab span, and the registered NPU region."""
         if size <= 0:
             raise ValueError("I/O size must be positive")
         if file_offset < 0 or buf_offset < 0:
@@ -135,6 +187,8 @@ class Backend(FileGDSBackend):
             raise ValueError(
                 f"NDS I/O requires {alignment}-byte alignment for offset and size"
             )
+        if self._slab_size_bytes and file_offset + size > self._slab_size_bytes:
+            raise ValueError("file I/O exceeds slab size")
         region = self._regions.get(buf_base)
         if region is None:
             raise RuntimeError(f"NDS buffer base 0x{buf_base:x} is not registered")

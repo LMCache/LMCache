@@ -402,8 +402,35 @@ class TestBufferAndStreamRegistration:
         region = 16 * 1024 * 1024
         buf = _fake_npu_tensor(ptr=0x100000, nbytes=region * 2)
         backend.register_buffer(buf)
-        assert ("register_memory", 0x100000, region * 2) in fake_lib.calls
-        assert fake_lib.calls.count(("register_memory", 0x100000, region * 2)) == 1
+        # 0x100000 is not 2 MiB aligned, so the pin starts at the previous boundary.
+        assert ("register_memory", 0, 0x100000 + region * 2) in fake_lib.calls
+        assert fake_lib.calls.count(("register_memory", 0, 0x100000 + region * 2)) == 1
+
+    def test_misaligned_gds_slices_share_one_pin(
+        self, backend: na.Backend, fake_lib: _FakeNDSLibrary
+    ) -> None:
+        """16 MiB slices of one misaligned buffer must not overlap in the driver."""
+        slice_bytes = 16 * 1024 * 1024
+        base = 0x108000
+        first = _fake_npu_tensor(ptr=base, nbytes=slice_bytes)
+        second = _fake_npu_tensor(ptr=base + slice_bytes, nbytes=slice_bytes)
+        backend.register_buffer(first)
+        backend.register_buffer(second)
+        assert fake_lib.calls == [
+            ("driver_open",),
+            ("register_memory", 0, base + slice_bytes),
+            ("unregister_memory", 0, base + slice_bytes),
+            ("register_memory", 0, base + 2 * slice_bytes),
+        ]
+        fake_lib.calls.clear()
+        backend.deregister_buffer(second)
+        assert fake_lib.calls == [
+            ("unregister_memory", 0, base + 2 * slice_bytes),
+            ("register_memory", 0, base + slice_bytes),
+        ]
+        fake_lib.calls.clear()
+        backend.deregister_buffer(first)
+        assert fake_lib.calls == [("unregister_memory", 0, base + slice_bytes)]
 
     def test_register_buffer_non_monotonic_addresses_io_and_deregister(
         self,
@@ -417,7 +444,7 @@ class TestBufferAndStreamRegistration:
         backend.register_buffer(b_low)
         assert fake_lib.calls.count(("driver_open",)) == 1
         assert ("register_memory", 0x200000, 8192) in fake_lib.calls
-        assert ("register_memory", 0x100000, 4096) in fake_lib.calls
+        assert ("register_memory", 0, 0x101000) in fake_lib.calls
 
         _mock_slab_fs(monkeypatch)
         handle = backend.open_slab("/slabs", 8192, direct_io=False)
@@ -430,7 +457,7 @@ class TestBufferAndStreamRegistration:
 
         fake_lib.calls.clear()
         backend.deregister_buffer(b_low)
-        assert fake_lib.calls == [("unregister_memory", 0x100000, 4096)]
+        assert fake_lib.calls == [("unregister_memory", 0, 0x101000)]
         with pytest.raises(RuntimeError, match="not registered"):
             handle.read_async(0x100000, 4096, 0, 0, 7)
         assert handle.read_async(0x200000, 4096, 0, 4096, 7).bytes_done == 4096
