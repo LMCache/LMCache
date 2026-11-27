@@ -102,7 +102,7 @@ def encode_native_storage_keys(keys: list[ObjectKey]) -> list[str]:
     token = encode_tags(first.tags)
     salt = first.cache_salt
     suffix = f"@{salt}@{token}" if token else (f"@{salt}" if salt else "")
-    prefixes = {}
+    prefixes: dict[tuple[str, int, int], str] = {}
     result = []
     for index, key in enumerate(keys):
         ident = key.identity
