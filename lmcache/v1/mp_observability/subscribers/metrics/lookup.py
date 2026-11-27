@@ -20,9 +20,6 @@ the engine's prefix cache and LMCache together.
 
 All counters carry ``model_name`` and ``cache_salt`` attributes so they can
 be sliced per model and per tenant / isolation domain on the dashboard.
-
-See ``docs/design/v1/mp_observability/L1_L2_HIT_RATE_PLAN.md`` for the full
-rationale behind co-locating numerator and denominator on a single event.
 """
 
 # Future

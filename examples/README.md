@@ -38,7 +38,6 @@ over gRPC / HTTP.
 |---------|-------------|----------|
 | [`observability/`](observability/) | Full observability stack: OTel → Prometheus + Tempo → Grafana. Pre-provisioned dashboard shows cache hit rate, read/write throughput, and per-request trace waterfalls. Started with `docker compose up`. | 1 GPU + Docker |
 | [`multi_process/`](multi_process/) | Kubernetes DaemonSet YAML for deploying the LMCache server as a per-node sidecar (60 GB L1, 4 workers). Includes resource `requests`/`limits` calibrated to the L1 size. | Kubernetes cluster with GPU nodes |
-| [`remote_config_server/`](remote_config_server/) | Flask reference server for centralised LMCache configuration. Workers POST their current config on startup and receive overrides — useful for managing settings across a large fleet. | None |
 
 ### Framework Integrations
 
@@ -66,10 +65,7 @@ These examples, backends, and tools are not tied to a specific deployment mode.
 
 | Example | What it does | Hardware |
 |---------|-------------|----------|
-| [`kv_cache_reuse/remote_backends/`](kv_cache_reuse/remote_backends/) | Remote storage backends: InfiniStore, Mooncake, S3, Valkey, Redis. Each subdirectory has its own README with backend-specific setup. | 1 GPU + respective backend |
-| [`kv_cache_reuse/share_across_instances/centralized_sharing/`](kv_cache_reuse/share_across_instances/centralized_sharing/) | Two vLLM instances share KV cache through Redis. A prefix computed by instance A is reused by instance B. ⚠️ Requires `PYTHONHASHSEED=0` in all processes — without this, hashes differ across processes and cache lookups silently miss. | 2 GPUs (same node) + Redis |
 | [`serde/fp8/`](serde/fp8/) | Quantize KV cache to fp8 before writing to disk (L2 adapter), then dequantize on prefetch. Halves disk storage requirements. | Hopper / Ada GPU (H100, RTX 40-series) |
-| [`redis_lookup/`](redis_lookup/) | Shows the Redis key schema used by LMCache (`model@world_size@worker_id@chunk_hash`) and `redis-cli` commands for inspecting live cache entries. | Redis + 1 GPU |
 
 ### Developer Extensibility
 
