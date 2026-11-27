@@ -103,10 +103,10 @@ jobs:
               - '.github/workflows/test.yml'
 
             token_drop:
-              - 'lmcache/integration/vllm/experimental/token_drop_adapter.py'
-              - 'lmcache/integration/vllm/experimental/token_drop_scheduler.py'
-              - 'tests/v1/test_token_drop_allocator_adapter.py'
-              - 'tests/v1/test_token_drop_prefix_caching_publication_guard.py'
+              - 'lmcache/integration/vllm/experimental/token_drop*.py'
+              - 'lmcache/integration/vllm/lmcache_mp_connector.py'
+              - 'lmcache/integration/vllm/lmcache_mp_metadata.py'
+              - 'tests/v1/test_token_drop*.py'
               - '.github/workflows/test.yml'
 
   test:
@@ -222,13 +222,13 @@ jobs:
           assert vllm.__version__.split("+", 1)[0] == "0.25.1", vllm.__version__
           PY
 
-          pytest -q -rs --junitxml=token-drop-tests.xml tests/v1/test_token_drop_allocator_adapter.py tests/v1/test_token_drop_prefix_caching_publication_guard.py
+          pytest -q -rs --junitxml=token-drop-tests.xml tests/v1/test_token_drop_allocator_adapter.py tests/v1/test_token_drop_prefix_caching_publication_guard.py tests/v1/test_token_drop_query_hooks.py tests/v1/test_token_drop_worker_adapter.py tests/v1/test_token_drop_native_ownership.py tests/v1/test_token_drop_aio_lifecycle.py tests/v1/test_token_drop_scheduler_resident.py tests/v1/test_token_drop_ownership_boundaries.py
 
           python - <<'PY'
           import xml.etree.ElementTree as ET
 
           cases = list(ET.parse("token-drop-tests.xml").getroot().iter("testcase"))
-          assert len(cases) >= 18, "Expected at least 18 token-dropping test cases"
+          assert len(cases) >= 27, "Expected at least 27 token-dropping test cases"
           assert not any(c.find("skipped") is not None for c in cases), "Token-dropping test skipped"
           assert any(
               c.get("name") == "test_allocator_hook_installation_is_idempotent"
@@ -238,6 +238,36 @@ jobs:
               c.get("name", "").startswith("test_token_dropping_blocks_stay_private_and_normal_blocks_are_cached[")
               for c in cases
           ), "Prefix-cache publication test was not executed"
+          assert any(
+              c.get("name") == "test_pinned_vllm_flash_attention_profiling_forward_is_preserved"
+              for c in cases
+          ), "Pinned vLLM attention contract was not executed"
+          for required in (
+              "test_pinned_flash_attention_impl_captures_real_query_path",
+              "test_install_worker_hook_does_not_patch_global_slot_mapping",
+              "test_nested_scheduled_td_dispatch_excludes_full_on_first_prefill",
+              "test_native_td_reclaim_preserves_reallocated_block_ownership",
+              "test_allocator_hook_isolates_native_pools_with_identical_request_ids",
+              "test_scheduler_generations_and_finish_state_are_instance_local",
+              "test_scheduler_cannot_reclaim_from_another_pool",
+              "test_resident_binding_does_not_keep_pool_or_state_alive",
+              "test_owner_gc_while_pool_survives",
+              "test_connector_shutdown_unbinds_only_its_own_pool",
+              "test_shutdown_failure_still_releases_binding",
+              "test_failed_pool_rebind_preserves_original_connector_binding",
+              "test_unbound_pool_preserves_native_publication_for_tagged_request",
+              "test_read_view_exposes_selection_only_and_preserves_native_kv",
+              "test_disabled_normal_request_preserves_original_eager_prefetch_early_return",
+              "test_disabled_token_drop_opt_in_fails_before_any_hook_or_tracker",
+          ):
+              assert any(c.get("name") == required for c in cases), f"{required} was not executed"
+          for mode in (
+              "NONE", "PIECEWISE", "FULL", "FULL_DECODE_ONLY", "FULL_AND_PIECEWISE"
+          ):
+              assert any(
+                  c.get("name") == f"test_td_admission_preserves_engine_cudagraph_config[{mode}]"
+                  for c in cases
+              ), f"Batch-local graph admission test for {mode} was not executed"
           print(f"{len(cases)} token-dropping tests passed, 0 skipped")
           PY
 

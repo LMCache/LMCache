@@ -63,6 +63,20 @@ def _make_kv_cache_manager():
     )
 
 
+@pytest.fixture
+def bound_manager():
+    # First Party
+    from lmcache.integration.vllm.experimental.token_drop_scheduler import (
+        TokenDropScheduler,
+    )
+
+    manager = _make_kv_cache_manager()
+    owner = TokenDropScheduler()
+    owner.bind_block_pool(manager.block_pool)
+    yield manager
+    owner.unbind_block_pool(manager.block_pool)
+
+
 def _make_request(request_id, *, token_dropping):
     # Third Party
     from vllm.v1.core.kv_cache_utils import BlockHash
@@ -100,7 +114,7 @@ def _cache_one_block(manager, request):
     ],
 )
 def test_token_dropping_blocks_stay_private_and_normal_blocks_are_cached(
-    guarded_block_pool, monkeypatch, first_request_kind
+    guarded_block_pool, monkeypatch, first_request_kind, bound_manager
 ):
     # An unsupported partial-publication path must not silently be exercised.
     monkeypatch.setattr(
@@ -108,7 +122,7 @@ def test_token_dropping_blocks_stay_private_and_normal_blocks_are_cached(
         "cache_partial_block",
         lambda *_args, **_kwargs: pytest.fail("Unexpected partial publication"),
     )
-    manager = _make_kv_cache_manager()
+    manager = bound_manager
     requests = {
         "token_dropping": _make_request("token-dropping", token_dropping=True),
         "normal": _make_request("normal", token_dropping=False),
@@ -155,3 +169,36 @@ def test_repeated_guard_installation_does_not_stack_wrappers(guarded_block_pool)
     installed = guarded_block_pool.cache_full_blocks
     install_token_drop_prefix_caching_publication_guard()
     assert guarded_block_pool.cache_full_blocks is installed
+
+
+def test_td_lookup_bypasses_identical_normal_prefix_hash(
+    guarded_block_pool, bound_manager
+):
+    """TD must never reuse a normal request's cached KV block."""
+    manager = bound_manager
+    normal = _make_request("normal", token_dropping=False)
+    td = _make_request("td", token_dropping=True)
+    td.block_hashes = normal.block_hashes
+
+    normal_block = _cache_one_block(manager, normal)
+    assert normal_block.block_hash is not None
+    assert manager.get_computed_blocks(td)[1] == 16  # Native positive control.
+
+    # Scheduler admission sets this flag before the first APC lookup.
+    td.skip_reading_prefix_cache = True
+    assert manager.get_computed_blocks(td)[1] == 0
+
+    td_block = _cache_one_block(manager, td)
+    assert td_block.block_hash is None
+    assert td_block.ref_cnt == 1
+    assert manager.get_computed_blocks(normal)[1] == 16
+
+
+def test_unbound_pool_preserves_native_publication_for_tagged_request(
+    guarded_block_pool,
+):
+    manager = _make_kv_cache_manager()
+    tagged = _make_request("unbound", token_dropping=True)
+    block = _cache_one_block(manager, tagged)
+    assert block.block_hash is not None
+    assert manager.get_computed_blocks(tagged)[1] == 16
