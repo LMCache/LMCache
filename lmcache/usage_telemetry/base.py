@@ -3,7 +3,8 @@
 
 Both deployment modes send a one-shot context report at startup: the
 single-process engine via :mod:`lmcache.inprocess.usage_telemetry.context`
-and the MP cache server via :mod:`.mp`. This module owns the shared
+(in the external LMCache_inprocess package) and the MP cache server via
+:mod:`.mp`. This module owns the shared
 ``UsageContextBase`` used by both.
 """
 
@@ -16,7 +17,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.usage_telemetry.guard import swallow_telemetry_errors
 from lmcache.usage_telemetry.identity import get_usage_identity
 from lmcache.usage_telemetry.messages import UsageMessage
@@ -26,6 +26,7 @@ from lmcache.usage_telemetry.transport import (
     build_usage_payload,
     usage_server_url,
 )
+from lmcache.v1.common.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party

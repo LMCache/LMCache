@@ -52,6 +52,13 @@ void execute_cb_retrieve_plan(const torch::Device& device,
         compute_done[parity].block(copy_stream);
       }
       for (const auto& copy : step.staging) {
+        if (copy.host_offset == kCBStagingD2D) {  // src: a slot staged above
+          C10_CUDA_CHECK(cudaMemcpyAsync(
+              reinterpret_cast<void*>(copy.dest),
+              reinterpret_cast<const void*>(copy.src), copy.nbytes,
+              cudaMemcpyDeviceToDevice, at::cuda::getCurrentCUDAStream()));
+          continue;
+        }
         lmcache_memcpy_async(copy.dest, copy.src, copy.nbytes,
                              TransferDirection::H2D, copy.host_offset,
                              host_buffer_alignment);

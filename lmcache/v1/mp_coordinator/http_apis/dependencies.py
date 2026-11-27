@@ -10,14 +10,14 @@ handlers fetch it via :func:`get_outbound_client`.
 """
 
 # Standard
-from dataclasses import dataclass, field
-import threading
+from dataclasses import dataclass
 
 # Third Party
 from fastapi import Request
 import httpx
 
 # First Party
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.mp_coordinator.background_loops import (
     BackgroundLoops,
     EventLoopMonitor,
@@ -31,8 +31,6 @@ from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
 from lmcache.v1.mp_coordinator.ingest.event_source import CacheEventSource
 from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
 from lmcache.v1.mp_coordinator.views.base import View
-from lmcache.v1.mp_coordinator.views.key_directory import KeyDirectory
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 
 @dataclass
@@ -81,46 +79,26 @@ class CoordinatorContext:
     background_loops: BackgroundLoops
     event_loop_monitor: EventLoopMonitor
     controller_status: ControllerStatus
-    _configured_chunk_size: int = field(init=False, repr=False)
-    _hash_algorithm: str = field(init=False, repr=False)
-    _chunk_size_finalized: bool = field(default=False, init=False, repr=False)
-    _chunk_size_lock: threading.Lock = field(
-        default_factory=threading.Lock, init=False, repr=False
-    )
 
-    def __post_init__(self) -> None:
-        self._configured_chunk_size = self.token_hasher.chunk_size
-        self._hash_algorithm = self.token_hasher.hash_algorithm_name
+    def validate_chunk_size(self, chunk_size: int) -> int:
+        """Validate an MP server's chunk size against the coordinator.
 
-    def bind_chunk_size(self, chunk_size: int) -> int:
-        """Bind all chunk-size-dependent coordinator components once.
+        Args:
+            chunk_size: The MP server's configured chunk size.
 
-        Repeating the same binding is idempotent. A different size is rejected
-        because one coordinator's hashing and blend index cannot safely describe
-        fleets using different chunk boundaries.
+        Returns:
+            The matching coordinator chunk size.
+
+        Raises:
+            ValueError: If the MP server uses a different chunk size.
         """
-        with self._chunk_size_lock:
-            if self._chunk_size_finalized:
-                if chunk_size == self.token_hasher.chunk_size:
-                    return chunk_size
-                raise ValueError(
-                    f"Coordinator is already bound to chunk size "
-                    f"{self.token_hasher.chunk_size}; use a separate coordinator "
-                    f"for a fleet requiring chunk size {chunk_size}"
-                )
-            if chunk_size < self._configured_chunk_size:
-                raise ValueError(
-                    f"Chunk size {chunk_size} is smaller than the coordinator's "
-                    f"configured minimum {self._configured_chunk_size}"
-                )
-
-            token_hasher = TokenHasher(
-                chunk_size=chunk_size, hash_algorithm=self._hash_algorithm
+        configured_chunk_size = self.token_hasher.chunk_size
+        if chunk_size != configured_chunk_size:
+            raise ValueError(
+                f"Coordinator uses chunk size {configured_chunk_size}, but the "
+                f"MP server uses {chunk_size}"
             )
-            self.views.get(KeyDirectory).bind_chunk_size(chunk_size)
-            self.token_hasher = token_hasher
-            self._chunk_size_finalized = True
-            return chunk_size
+        return configured_chunk_size
 
 
 def get_context(request: Request) -> CoordinatorContext:

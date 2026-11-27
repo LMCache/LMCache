@@ -14,7 +14,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
+from lmcache.v1.transport.futures import DeviceMessagingFuture, MessagingFuture
 
 
 class _FakeEventBackend:
@@ -78,6 +78,9 @@ class _FakeStorageManager:
     ) -> None:
         return None
 
+    def abort_write(self, keys: list[object], l1_owners: dict[object, int]) -> None:
+        return None
+
     def finish_read_by_owner(self, batch: list[tuple[int, list[object]]]) -> None:
         return None
 
@@ -110,7 +113,7 @@ def test_worker_exports_events_through_platform_backend(
 ) -> None:
     """Store and retrieve send backend-exported handles and keep device context."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.client import worker_transfer
 
     backend = _FakeEventBackend()
     monkeypatch.setattr(
@@ -122,6 +125,11 @@ def test_worker_exports_events_through_platform_backend(
         worker_transfer,
         "wrap_kv_caches",
         lambda kv_caches: list(kv_caches.values()),
+    )
+    monkeypatch.setattr(
+        worker_transfer,
+        "kv_wrapper_fds_delivered",
+        lambda wrappers, fd_channel_path, timeout: nullcontext(),
     )
 
     client = MagicMock()
@@ -137,7 +145,9 @@ def test_worker_exports_events_through_platform_backend(
         1,
         1,
         1.0,
+        lmcache_chunk_tokens=256,
     )
+    assert client.register_kv_cache.call_args.args[-1] == 256
     unregister_future = context.unregister()
     stream = MagicMock(name="current_stream")
     monkeypatch.setattr(worker_transfer.torch_dev, "current_stream", lambda: stream)
@@ -239,7 +249,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         return len(held) - 1
 
     server_context = SimpleNamespace(
-        chunk_size=1,
+        default_chunk_size=1,
         null_block_id=0,
         storage_manager=storage_manager,
         get_read_owners=lambda request_id: None,
@@ -275,6 +285,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         cache_context=cast(Any, cache_context),
         model_name="model",
         world_size=1,
+        chunk_size=256,
         event_backend=cast(Any, backend),
     )
     monkeypatch.setattr(
@@ -282,7 +293,12 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         "get_and_touch_context_entry",
         lambda instance_id: entry,
     )
-    key = SimpleNamespace(request_id="request", cache_salt="", worker_id=0)
+    key = SimpleNamespace(
+        request_id="request",
+        cache_salt="",
+        worker_id=0,
+        has_unfull_chunk=lambda chunk_size: False,
+    )
 
     assert module.store(key, 1, [[]], b"store-producer") == (
         b"completion-handle",
@@ -319,9 +335,9 @@ def test_server_store_and_retrieve_delegate_event_ordering(
 def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
     """The scoped multiprocess modules remain backend-neutral."""
     # First Party
-    from lmcache.v1.multiprocess import futures
+    from lmcache.v1.client import worker_transfer
     from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.transport import futures
 
     for module in (futures, lmcache_driven_transfer, worker_transfer):
         source = inspect.getsource(module)

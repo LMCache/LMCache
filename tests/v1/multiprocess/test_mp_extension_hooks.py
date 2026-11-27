@@ -29,7 +29,7 @@ change the hook deliberately and treat it as an extension-API change.
 # Standard
 from types import SimpleNamespace
 from typing import Any, Callable, cast
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 import inspect
 import threading
 
@@ -41,13 +41,12 @@ from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LMCacheMPWorkerAdapter,
 )
-from lmcache.v1.multiprocess import object_group_transfer
+from lmcache.v1.client.worker_transfer import (
+    LMCacheDrivenTransferContext,
+)
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
-)
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
-    LMCacheDrivenTransferContext,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from tests.v1.multiprocess.test_lmcache_driven_transfer_skip import (
@@ -91,7 +90,9 @@ def test_retrieve_copies_only_through_the_cache_context(monkeypatch):
     cache_context = module.get_and_touch_context_entry(1).cache_context
 
     _handle, ok = module.retrieve(
-        key=SimpleNamespace(request_id="req", cache_salt="salt"),
+        key=SimpleNamespace(
+            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+        ),
         instance_id=1,
         gpu_block_ids=[[1, 2, 3], [0, 0, 9]],
         event_ipc_handle=b"x",
@@ -105,7 +106,7 @@ def test_store_copies_only_through_the_cache_context(monkeypatch):
     module, cache_context, _reads, _copied = _make_checkpoint_module(monkeypatch)
 
     _handle, ok = module.store(
-        SimpleNamespace(request_id="req", worker_id=1),
+        SimpleNamespace(request_id="req", worker_id=1, has_unfull_chunk=_no_unfull),
         1,
         [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
         b"producer",
@@ -113,42 +114,6 @@ def test_store_copies_only_through_the_cache_context(monkeypatch):
 
     assert ok
     assert _copies(cache_context) == [(0, _D2H), (1, _D2H)]
-
-
-def test_transfer_module_has_no_direct_copy_path():
-    # A direct import would let a new copy site skip the context's override.
-    assert not hasattr(mod, "transfer_kv_per_object_group")
-
-
-def test_default_context_copy_forwards_every_argument(monkeypatch):
-    copy = MagicMock()
-    monkeypatch.setattr(object_group_transfer, "transfer_kv_per_object_group", copy)
-    cache_context = cast(BaseCacheContext, object())
-    block_ids, memory_objs = [object()], [None]
-
-    BaseCacheContext.transfer_object_group(
-        cache_context,
-        cast(Any, block_ids),
-        memory_objs,
-        object_group_id=2,
-        batch_size=4,
-        skip_first_n_tokens=16,
-        direction=_H2D,
-        transfer_key="key",
-        block_ids_host=[[1]],
-    )
-
-    copy.assert_called_once_with(
-        cache_context,
-        block_ids,
-        memory_objs,
-        object_group_id=2,
-        batch_size=4,
-        skip_first_n_tokens=16,
-        direction=_H2D,
-        transfer_key="key",
-        block_ids_host=[[1]],
-    )
 
 
 # ------------------------------------------------------------------ #
@@ -168,6 +133,7 @@ def test_register_builds_the_context_through_the_hook():
             engine_type,
             layout_hints,
             engine_group_infos,
+            chunk_size,
         ):
             seen.update(
                 kv_caches=kv_caches,
@@ -175,17 +141,21 @@ def test_register_builds_the_context_through_the_hook():
                 engine_type=engine_type,
                 layout_hints=layout_hints,
                 engine_group_infos=engine_group_infos,
+                chunk_size=chunk_size,
             )
             raise _StopHere
 
     module = _Module.__new__(_Module)
+    module._ctx = MagicMock(default_chunk_size=256)
     module._lock = threading.Lock()
     module._cache_contexts = {}
     kv_caches, infos = object(), [object()]
     engine_type = next(iter(mod.EngineType))
 
     with pytest.raises(_StopHere):
-        module.register_kv_cache(7, kv_caches, "m", 1, engine_type, {}, infos)
+        module.register_kv_cache(
+            7, kv_caches, "m", 1, engine_type, {}, infos, event_profile=None
+        )
 
     # Empty hints are normalized to None before the hook, as before.
     assert seen == {
@@ -194,6 +164,7 @@ def test_register_builds_the_context_through_the_hook():
         "engine_type": engine_type,
         "layout_hints": None,
         "engine_group_infos": infos,
+        "chunk_size": 256,
     }
 
 
@@ -202,7 +173,7 @@ def test_default_cache_context_hook_applies_server_settings(monkeypatch):
     monkeypatch.setattr(mod, "create_cache_context", create)
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._ctx = SimpleNamespace(
-        chunk_size=128, separate_object_groups=True, full_sw_kv=True
+        default_chunk_size=128, separate_object_groups=True, full_sw_kv=True
     )
     kv_caches, infos = object(), [object()]
     engine_type = next(iter(mod.EngineType))
@@ -213,17 +184,23 @@ def test_default_cache_context_hook_applies_server_settings(monkeypatch):
         engine_type=engine_type,
         layout_hints=None,
         engine_group_infos=infos,
+        chunk_size=320,
     )
 
     assert result == "context"
     create.assert_called_once_with(
         kv_caches,
-        128,
+        320,
         layout_hints=None,
         engine_group_infos=infos,
         engine_type=engine_type,
         separate_object_groups=True,
         full_sw_kv=True,
+        object_group_transfer=mod.transfer_kv_per_object_group,
+        buffer_registration=ANY,
+    )
+    assert isinstance(
+        create.call_args.kwargs["buffer_registration"], mod.GDSBufferRegistration
     )
 
 
@@ -257,6 +234,7 @@ def test_default_transfer_context_hook_uses_adapter_settings(monkeypatch):
     adapter.instance_id = 42
     adapter.req_client = object()
     adapter._mp_transfer_mode = "lmcache_driven"
+    adapter._server_url = "tcp://localhost:16555"
     kv_caches = {"layer.0": object()}
 
     assert adapter._create_transfer_context(kv_caches) == "transfer-context"
@@ -265,6 +243,7 @@ def test_default_transfer_context_hook_uses_adapter_settings(monkeypatch):
         instance_id=42,
         req_client=adapter.req_client,
         mode="lmcache_driven",
+        fd_channel_path="/dev/shm/lmcache_fd_16555.sock",
     )
 
 
@@ -329,7 +308,7 @@ def test_connector_worker_role_routes_through_the_adapter_hook():
         (
             LMCacheDrivenTransferModule._create_cache_context,
             "self, kv_caches, *, instance_id, engine_type, layout_hints, "
-            "engine_group_infos",
+            "engine_group_infos, chunk_size",
         ),
         (
             LMCacheMPWorkerAdapter._create_transfer_context,
@@ -351,3 +330,8 @@ def test_temp_buffer_hook_signature_is_stable():
         "self, kv_layer_groups_manager, lmcache_tokens_per_chunk, device, "
         "max_batch_size, full_sw_kv"
     )
+
+
+def _no_unfull(chunk_size: int) -> bool:
+    """``has_unfull_chunk`` of a key double that addresses full chunks only."""
+    return False

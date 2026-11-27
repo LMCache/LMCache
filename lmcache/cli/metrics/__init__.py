@@ -1,20 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Metrics package — collector, handlers, and formatters."""
+"""Compatibility path for :mod:`lmcache.v1.common.metrics`."""
 
 # First Party
-from lmcache.cli.metrics.formatter import (
+from lmcache.v1.common.metrics import (
+    FileHandler,
     JsonFormatter,
+    Metrics,
     MetricsFormatter,
+    MetricsHandler,
+    Section,
+    StreamHandler,
     TerminalFormatter,
     get_formatter,
 )
-from lmcache.cli.metrics.handler import (
-    FileHandler,
-    MetricsHandler,
-    StreamHandler,
-)
-from lmcache.cli.metrics.metrics import Metrics
-from lmcache.cli.metrics.section import Section
 
 __all__ = [
     "FileHandler",

@@ -8,7 +8,7 @@ from typing import Any, Callable, TypeVar, get_type_hints
 import inspect
 
 # First Party
-from lmcache.v1.multiprocess.rpc import RpcOperation, get_rpc_spec
+from lmcache.v1.transport.rpc import RpcOperation, get_rpc_spec
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -76,9 +76,13 @@ def _normalize_none_type(value: Any) -> Any:
     return type(None) if value is None else value
 
 
-def validate_handler(operation: RpcOperation, handler: Callable[..., Any]) -> None:
+def validate_handler(
+    operation: RpcOperation,
+    handler: Callable[..., Any],
+    rpc_client: type | None = None,
+) -> None:
     """Check handler against operation's RPC types; raise TypeError on mismatch."""
-    spec = get_rpc_spec(operation)
+    spec = get_rpc_spec(operation, rpc_client)
     handler_signature = inspect.signature(handler)
     hints = get_type_hints(handler)
     parameters = tuple(handler_signature.parameters.values())
@@ -104,7 +108,9 @@ def validate_handler(operation: RpcOperation, handler: Callable[..., Any]) -> No
         )
 
 
-def iter_request_handlers(module: object) -> tuple[BoundRequestHandler, ...]:
+def iter_request_handlers(
+    module: object, rpc_client: type | None = None
+) -> tuple[BoundRequestHandler, ...]:
     """Discover decorated module handlers and validate them against RPC specs."""
     handlers: list[BoundRequestHandler] = []
     seen: set[RpcOperation] = set()
@@ -119,7 +125,7 @@ def iter_request_handlers(module: object) -> tuple[BoundRequestHandler, ...]:
             raise ValueError(
                 f"{module_type.__name__} has multiple handlers for {operation!r}"
             )
-        validate_handler(operation, handler)
+        validate_handler(operation, handler, rpc_client)
         seen.add(operation)
         handlers.append(
             BoundRequestHandler(

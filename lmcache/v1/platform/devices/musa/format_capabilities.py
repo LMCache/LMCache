@@ -3,8 +3,8 @@
 
 # First Party
 from lmcache.lmcache_native import EngineKVFormat
-from lmcache.v1.gpu_connector.kv_format import get_spec_class
-from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
+from lmcache.v1.common.kv_format import get_spec_class
+from lmcache.v1.common.kv_format.specs.base import KVFormatSpec
 
 
 def _is_regular_per_layer_layout(spec: type[KVFormatSpec]) -> bool:

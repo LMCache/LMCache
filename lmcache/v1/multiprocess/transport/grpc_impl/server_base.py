@@ -9,19 +9,21 @@ from typing import Any
 import threading
 
 # First Party
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.security.api_key import APIKeyVerifier
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.ext_server_module import register_grpc_services
 from lmcache.v1.multiprocess.transport.base import RequestServer
-from lmcache.v1.multiprocess.transport.grpc_impl.client import parse_grpc_target
-from lmcache.v1.multiprocess.transport.grpc_impl.descriptors import (
-    ServiceBinding,
-    get_service_bindings,
-)
 from lmcache.v1.multiprocess.transport.grpc_impl.server_handlers import (
     GrpcRequestHandler,
     bind_module_handlers,
     build_service_handlers,
 )
+from lmcache.v1.transport.grpc.descriptors import (
+    ServiceBinding,
+    get_service_bindings,
+)
+from lmcache.v1.transport.grpc.endpoint import parse_grpc_target
 
 
 class GrpcMultiprocessServerBase(RequestServer):
@@ -40,10 +42,15 @@ class GrpcMultiprocessServerBase(RequestServer):
         max_cpu_workers: int,
         max_gpu_workers: int,
         grpc_server_workers: int,
+        authentication: APIKeyVerifier | None = None,
+        rpc_client: type | None = None,
     ) -> None:
         if max_cpu_workers <= 0:
             raise ValueError("max_cpu_workers must be greater than 0")
+        init_logger("grpc")
         self._bind_url = bind_url
+        self._rpc_client = rpc_client
+        self._authentication = authentication or APIKeyVerifier()
         self._affinity_pool = AffinityThreadPool(
             max_workers=max_gpu_workers,
             thread_name_prefix="grpc-affinity",
@@ -73,26 +80,28 @@ class GrpcMultiprocessServerBase(RequestServer):
             TypeError: If a module handler does not match its protocol types.
             ValueError: If a module exposes invalid handler metadata.
         """
-        handlers_by_operation = bind_module_handlers(modules)
+        handlers_by_operation = bind_module_handlers(modules, self._rpc_client)
         server = self._grpc_server()
-        for binding in get_service_bindings().values():
+        for binding in get_service_bindings(self._rpc_client).values():
             add_servicer = getattr(
                 binding.grpc_module,
                 f"add_{binding.descriptor.name}Servicer_to_server",
             )
-            service_handlers = build_service_handlers(binding, handlers_by_operation)
+            service_handlers = build_service_handlers(
+                binding, handlers_by_operation, self._rpc_client
+            )
             add_servicer(self._make_servicer(binding, service_handlers), server)
         register_grpc_services(modules, server)
 
-    def close(self) -> None:
-        """Stop the gRPC server and release its threads. Safe to call twice."""
+    def close(self, *, wait: bool = False) -> None:
+        """Stop the server; wait=True drains handler threads before returning."""
         if self._closed.is_set():
             return
         self._closed.set()
         try:
             self._stop_server()
         finally:
-            self._release_threads(wait=False)
+            self._release_threads(wait=wait)
 
     def _bind(self, server: Any) -> None:
         self._bound_port = server.add_insecure_port(parse_grpc_target(self._bind_url))

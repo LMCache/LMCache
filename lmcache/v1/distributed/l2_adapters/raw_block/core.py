@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 # Standard
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -17,15 +17,11 @@ import time
 import zlib
 
 # Third Party
+import msgspec
 import torch
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.utils import (
-    STR_DTYPE_TO_TORCH_DTYPE,
-    TORCH_DTYPE_TO_STR_DTYPE,
-    DiskCacheMetadata,
-)
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.l2_adapters.raw_block.io_engine import (
     DEFAULT_IOURING_QUEUE_DEPTH,
     IoUringBlockIOConfig,
@@ -38,10 +34,13 @@ from lmcache.v1.distributed.l2_adapters.raw_block.io_engine import (
     normalize_raw_block_placement_ids,
 )
 from lmcache.v1.distributed.l2_adapters.raw_block.key_codec import (
-    RawBlockKeyNamespace,
     RawBlockKeySpec,
-    decode_legacy_key,
-    slot_identity_from_encoded_key,
+    object_key_slot_identity,
+)
+from lmcache.v1.distributed.utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
+    TORCH_DTYPE_TO_STR_DTYPE,
+    DiskCacheMetadata,
 )
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 
@@ -58,6 +57,8 @@ _MAX_FIXED_BUFFER_REGION_BYTES = 1 << 30
 # recovery. Use a conservative reader count to expose device parallelism without
 # relying on high thread counts; io_uring recovery should use batched reads.
 DEFAULT_RECOVERY_READ_THREADS = 8
+# Warn once when a checkpoint payload uses this share of one metadata copy.
+_META_USAGE_WARN_RATIO = 0.8
 
 
 def round_up(x: int, align: int) -> int:
@@ -71,6 +72,22 @@ def round_up(x: int, align: int) -> int:
         ``x`` rounded up to a multiple of ``align``.
     """
     return ((x + align - 1) // align) * align
+
+
+def _allocation_span_bytes(memory_obj: MemoryObj) -> int:
+    """Return how many bytes the object's allocation spans from its data start.
+
+    Args:
+        memory_obj: Memory object whose tensor starts at its data pointer.
+
+    Returns:
+        The smaller of the backing tensor size and the physical size, or 0 when
+        the object has no local tensor.
+    """
+    tensor = memory_obj.raw_tensor
+    if tensor is None:
+        return 0
+    return min(tensor.nbytes, memory_obj.get_physical_size())
 
 
 @dataclass(frozen=True)
@@ -107,6 +124,17 @@ class _Entry:
     meta: DiskCacheMetadata
 
 
+class _CheckpointEntry(msgspec.Struct, gc=False):
+    """A version-1 JSON record with only acyclic metadata fields."""
+
+    offset: int
+    size: int
+    shape: torch.Size | None
+    dtype: str | None
+    fmt: str | None
+    cached_positions: list[Any] | None
+
+
 @dataclass
 class _Inflight:
     offset: int
@@ -124,23 +152,17 @@ class RawBlockPutManyResult:
 
 class RawBlockCore:
     """
-    Shared raw-block storage engine used by both legacy non-MP and MP L2 paths.
+    Raw-block storage engine for the distributed L2 path.
 
     This class owns the raw-device I/O path, slot allocation, checkpoint/recovery,
     and lock refcounts that protect slots from deletion while in use.
     """
 
-    def __init__(
-        self,
-        config: RawBlockCoreConfig,
-        *,
-        key_namespace: RawBlockKeyNamespace,
-    ):
+    def __init__(self, config: RawBlockCoreConfig):
         """Initialize the raw-block storage engine.
 
         Args:
             config: Raw-block device, layout, I/O, and checkpoint settings.
-            key_namespace: Encoding namespace used by keys stored in this core.
 
         Raises:
             ValueError: If the supplied configuration is invalid.
@@ -184,8 +206,6 @@ class RawBlockCore:
                 "io_engine='io_uring' and use_uring_cmd=true"
             )
         self._recovery_read_threads = DEFAULT_RECOVERY_READ_THREADS
-        self.key_namespace = key_namespace
-
         if not self.device_path:
             raise ValueError("RawBlockCore requires a non-empty device_path")
         if self.block_align <= 0 or (self.block_align & (self.block_align - 1)) != 0:
@@ -229,6 +249,8 @@ class RawBlockCore:
         self._inflight: dict[str, _Inflight] = {}
 
         self._next_slot: int = 0
+        self._quarantined_slots: set[int] = set()
+        self._last_payload_uecc: str | None = None
         self._free_slots: dict[int, None] = {}
         self._free_slots_by_placement_id: dict[int, dict[int, None]] = {}
         self._slot_placement_ids: dict[int, int] = {}
@@ -240,8 +262,10 @@ class RawBlockCore:
 
         self._io_engine: Optional[RawBlockIO] = None
         self._closed = False
+        self._worker_error_logged: bool = False
 
         self._meta_seq: int = 0
+        self._meta_usage_warned = False
         self._meta_dirty_total: int = 0
         self._meta_persisted: int = 0
         self._inflight_io_count: int = 0
@@ -467,8 +491,14 @@ class RawBlockCore:
 
         Returns:
             Metadata for the contiguous leading hit prefix. The returned list
-            stops at the first missing key.
+            stops at the first missing key. A terminal worker failure returns
+            an empty list without locking entries.
         """
+        assert self._io_engine is not None
+        worker_error = self._io_engine.worker_error()
+        if worker_error is not None:
+            self._log_worker_error_once(worker_error)
+            return []
         with self._lock:
             metas: list[DiskCacheMetadata] = []
             for encoded_key in encoded_keys:
@@ -553,6 +583,11 @@ class RawBlockCore:
         device write failure rolls back every key submitted in the same batch.
         Batches are bounded, so a request larger than one batch can leave
         earlier batches committed while a later one rolls back.
+
+        With ``io_engine='io_uring'`` and zero-copy enabled, a payload that is
+        not block-aligned is written straight from its allocation: the padding
+        after the logical payload, up to the next block boundary, is zeroed in
+        place. The logical payload is unchanged.
 
         Args:
             keys: Ordered raw-block key specs corresponding to ``objs``.
@@ -664,9 +699,12 @@ class RawBlockCore:
 
         Returns:
             A list of booleans aligned with ``encoded_keys``. A permanently
-            failed io_uring worker reports all misses without locking keys.
+            failed io_uring worker reports all misses without
+            locking keys.
         """
-        if self._worker_error() is not None:
+        worker_error = self._worker_error()
+        if worker_error is not None:
+            self._log_worker_error_once(worker_error)
             return [False] * len(encoded_keys)
         results: list[bool] = []
         with self._lock:
@@ -683,29 +721,42 @@ class RawBlockCore:
         self,
         encoded_keys: Sequence[str],
         objs: Sequence[MemoryObj],
+        *,
+        on_quarantine: Callable[[list[str]], None] | None = None,
     ) -> list[bool]:
         """Load raw-block payloads into caller-provided memory objects.
+
+        With zero-copy enabled, a read may fill the destination up to the
+        block-aligned end of the stored payload, including allocation padding
+        beyond the logical destination.
 
         Args:
             encoded_keys: Ordered encoded raw-block keys to load.
             objs: Destination memory objects. Buffers must remain valid until
                 this method returns. A destination shorter than its stored
                 payload is reported as an unsuccessful load.
+            on_quarantine: Called after retiring payload slots, with the encoded
+                keys removed from the index, outside the core lock.
 
         Returns:
             A list of per-key load success booleans aligned with
-            ``encoded_keys``.
+            ``encoded_keys``. A confirmed passthrough payload UECC removes its
+            slot for this open handle. Other successfully loaded keys remain
+            hits. A terminal worker failure reports all misses.
 
         Raises:
             ValueError: If either sequence is empty or the sequence lengths do
                 not match.
-            RuntimeError: If the native io_uring worker has permanently failed.
         """
         if not encoded_keys or not objs:
             raise ValueError("encoded_keys and objs must be non-empty")
         if len(encoded_keys) != len(objs):
             raise ValueError("encoded_keys and objs must have the same length")
-        self.raise_if_failed()
+        assert self._io_engine is not None
+        worker_error = self._io_engine.worker_error()
+        if worker_error is not None:
+            self._log_worker_error_once(worker_error)
+            return [False] * len(encoded_keys)
 
         with self._lock:
             items = [
@@ -767,27 +818,44 @@ class RawBlockCore:
                     logger.error("RawBlockCore load failed for %s: %s", encoded_key, e)
 
             if read_indices:
+                unrecovered_reads: dict[int, str] = {}
                 try:
-                    io_results = self._read_buffers(
+                    io_results = self._io_engine.read_buffers(
                         read_offsets,
                         read_buffers,
                         read_payload_lens,
                         read_total_lens,
+                        unrecovered_reads=unrecovered_reads,
                     )
                 except Exception as e:
                     logger.error("RawBlockCore batched load failed: %s", e)
                     io_results = [False] * len(read_indices)
 
-                for item_idx, ok in zip(read_indices, io_results, strict=True):
-                    if not ok:
-                        continue
-                    entry = items[item_idx][1]
-                    if entry is None:
-                        continue
-                    objs[
-                        item_idx
-                    ].metadata.cached_positions = entry.meta.cached_positions
-                    results[item_idx] = True
+                if unrecovered_reads:
+                    removed = []
+                    with self._lock:
+                        for read_idx, error in unrecovered_reads.items():
+                            key, entry = items[read_indices[read_idx]]
+                            assert entry is not None
+                            removed.extend(
+                                self._quarantine_slot_locked(key, entry, error)
+                            )
+                    if on_quarantine is not None:
+                        on_quarantine(removed)
+
+                worker_error = self._io_engine.worker_error()
+                if worker_error is not None:
+                    self._log_worker_error_once(worker_error)
+                    return results
+
+                with self._lock:
+                    for item_idx, ok in zip(read_indices, io_results, strict=True):
+                        key, entry = items[item_idx]
+                        if ok and entry is not None and self._index.get(key) is entry:
+                            objs[
+                                item_idx
+                            ].metadata.cached_positions = entry.meta.cached_positions
+                            results[item_idx] = True
         finally:
             with self._lock:
                 self._inflight_io_count -= 1
@@ -828,9 +896,8 @@ class RawBlockCore:
         deleted: list[bool] = []
         with self._lock:
             for encoded_key in encoded_keys:
-                entry = self._index.get(encoded_key)
                 locked = self._lock_refcnt.get(encoded_key, 0) > 0
-                if entry is not None and locked and not force:
+                if locked and not force:
                     deleted.append(False)
                     continue
 
@@ -856,7 +923,9 @@ class RawBlockCore:
             indicates that usable capacity is unknown.
         """
         with self._lock:
-            usable_capacity = self._max_slots * self.slot_bytes
+            usable_capacity = (
+                self._max_slots - len(self._quarantined_slots)
+            ) * self.slot_bytes
             if usable_capacity <= 0:
                 return (-1.0, -1.0)
             used_slots = len(self._index) + len(self._inflight)
@@ -909,13 +978,17 @@ class RawBlockCore:
                 "is_healthy": not self._closed and worker_error is None,
                 "worker_error": worker_error,
                 "type": "RawBlockCore",
-                "key_namespace": self.key_namespace,
                 "device_path": self.device_path,
                 "block_align": self.block_align,
                 "header_bytes": self.header_bytes,
                 "slot_bytes": self.slot_bytes,
                 "meta_total_bytes": self.meta_total_bytes,
-                "usable_capacity_bytes": self._max_slots * self.slot_bytes,
+                "usable_capacity_bytes": (
+                    self._max_slots - len(self._quarantined_slots)
+                )
+                * self.slot_bytes,
+                "quarantined_slot_count": len(self._quarantined_slots),
+                "last_payload_uecc": self._last_payload_uecc,
                 "indexed_key_count": len(self._index),
                 "inflight_key_count": len(self._inflight),
                 "locked_key_count": sum(
@@ -968,6 +1041,28 @@ class RawBlockCore:
         assert self._io_engine is not None
         return self._io_engine.worker_error()
 
+    def _log_worker_error_once(self, worker_error: str) -> None:
+        """Log the terminal worker error at ERROR the first time it is seen.
+
+        After close, ``report_status()`` reports ``worker_error: None``, so
+        this log line is what survives for operators. Called from the
+        data paths that observe the error, not from status inspection.
+
+        Args:
+            worker_error: Terminal worker error observed by the data path.
+        """
+        if self._worker_error_logged:
+            return
+        with self._lock:
+            if self._worker_error_logged:
+                return
+            self._worker_error_logged = True
+        logger.error(
+            "RawBlockCore terminal worker error on %s: %s",
+            self.device_path,
+            worker_error,
+        )
+
     def _cleanup_after_init_failure(self) -> None:
         """Close resources that may have been opened before init failed."""
         self._meta_stop_evt.set()
@@ -987,20 +1082,29 @@ class RawBlockCore:
         *,
         zero_tail: bool,
     ) -> Optional[memoryview]:
-        """Build an aligned memoryview for direct O_DIRECT I/O when possible.
+        """Build an aligned memoryview for direct block-aligned I/O when possible.
+
+        With ``io_engine='io_uring'`` (regular or io_uring_cmd), the view of a
+        padded payload extends into the object's physical allocation when that
+        allocation covers ``total_len``, so the transfer needs no bounce
+        buffer. ``[payload_len, total_len)`` is then zeroed in place when
+        ``zero_tail`` is true; the logical payload is unchanged.
 
         Args:
             memory_obj: Memory object whose backing allocation may be aligned.
             payload_len: Logical payload length in bytes.
-            total_len: I/O length after any O_DIRECT padding.
-            buffer_len: Available buffer length in bytes.
+            total_len: I/O length after block-alignment padding.
+            buffer_len: Logical buffer length exposed by the caller.
             zero_tail: Whether to zero any padded tail bytes before writing.
 
         Returns:
             A direct memoryview over the allocation, or None when the memory
             object is unsuitable for direct I/O.
         """
-        if not self.use_odirect or not self.enable_zero_copy:
+        if not self._requires_transfer_alignment or not self.enable_zero_copy:
+            return None
+        if self.use_uring_cmd and buffer_len >= total_len:
+            # io_uring_cmd already submits a full-length logical buffer as is.
             return None
 
         ptr_val = getattr(memory_obj, "data_ptr", None)
@@ -1019,6 +1123,14 @@ class RawBlockCore:
             return None
         if buffer_len < payload_len:
             return None
+        # POSIX already writes the aligned prefix directly and pads only the
+        # tail, so only io_uring gains from reaching into the allocation.
+        if (
+            buffer_len < total_len
+            and self.io_engine == "io_uring"
+            and _allocation_span_bytes(memory_obj) >= total_len
+        ):
+            buffer_len = total_len
 
         view_len = min(buffer_len, total_len)
         if view_len < payload_len:
@@ -1073,9 +1185,9 @@ class RawBlockCore:
                     f"Aligned payload {total_len} exceeds slot capacity "
                     f"{payload_capacity}"
                 )
-            # byte_array exposes only payload_len bytes, so a padded payload
-            # reaches the Rust write path shorter than total_len and is bounced
-            # there, which also zeroes [payload_len, total_len).
+            # byte_array exposes only payload_len bytes. Without a direct view
+            # covering total_len, the I/O engine bounces the payload and zeroes
+            # [payload_len, total_len) in its own buffer.
             direct_view = self._build_direct_odirect_view(
                 memory_obj=memory_obj,
                 payload_len=payload_len,
@@ -1531,6 +1643,36 @@ class RawBlockCore:
         """Convert a data-slot byte offset to its slot index."""
         return (offset - self._data_base_offset) // self.slot_bytes
 
+    def _quarantine_slot_locked(
+        self, key: str, observed: _Entry, error: str
+    ) -> list[str]:
+        """Retire the failed physical slot and invalidate its current owner."""
+        slot = self._offset_to_slot(observed.offset)
+        if slot in self._quarantined_slots:
+            return []
+        self._quarantined_slots.add(slot)
+        self._last_payload_uecc = error
+        self._free_slots.pop(slot, None)
+        self._remove_slot_from_affinity_pool_locked(slot)
+        if self._index.get(key) is observed:
+            removed = [key]
+        else:
+            # A force-delete or unlocked reader can race slot reuse. Invalidate
+            # the owner at the failed offset, preserving a new copy elsewhere.
+            removed = [
+                k for k, entry in self._index.items() if entry.offset == observed.offset
+            ]
+            for pending in self._inflight.values():
+                if pending.offset == observed.offset:
+                    pending.canceled = True
+        for encoded_key in removed:
+            del self._index[encoded_key]
+        self._meta_dirty_total += len(removed)
+        logger.error(
+            "RawBlockCore quarantined slot %d on %s: %s", slot, self.device_path, error
+        )
+        return removed
+
     def _allocate_slot_locked(self, placement_id: PlacementId = None) -> int:
         """Allocate a slot offset while ``self._lock`` is held."""
         self._ensure_capacity_and_layout()
@@ -1554,6 +1696,8 @@ class RawBlockCore:
             self._set_slot_placement_id_locked(slot, placement_id)
             return self._slot_to_offset(slot)
 
+        while self._next_slot in self._quarantined_slots:
+            self._next_slot += 1
         if self._next_slot < self._max_slots:
             slot = self._next_slot
             self._next_slot += 1
@@ -1565,7 +1709,7 @@ class RawBlockCore:
         """Add a slot to the free list while ``self._lock`` is held."""
         if slot < 0 or slot >= self._max_slots:
             return
-        if slot in self._free_slots:
+        if slot in self._free_slots or slot in self._quarantined_slots:
             return
         self._free_slots[slot] = None
         if not self.fdp_slot_affinity_enabled:
@@ -1709,14 +1853,12 @@ class RawBlockCore:
                 "data_base_offset": self._data_base_offset,
                 "next_slot": self._next_slot,
                 "entries": {
-                    encoded_key: {
-                        "offset": entry.offset,
-                        "size": entry.meta.size,
-                        "shape": list(entry.meta.shape)
-                        if entry.meta.shape is not None
-                        else None,
-                        "dtype": self._checkpoint_dtype_name(entry.meta.dtype),
-                        "fmt": (
+                    encoded_key: _CheckpointEntry(
+                        offset=entry.offset,
+                        size=entry.meta.size,
+                        shape=entry.meta.shape,
+                        dtype=self._checkpoint_dtype_name(entry.meta.dtype),
+                        fmt=(
                             entry.meta.fmt.name
                             if entry.meta.fmt is not None
                             and hasattr(entry.meta.fmt, "name")
@@ -1724,13 +1866,13 @@ class RawBlockCore:
                             if entry.meta.fmt is not None
                             else None
                         ),
-                        "cached_positions": (
+                        cached_positions=(
                             entry.meta.cached_positions.tolist()
                             if entry.meta.cached_positions is not None
                             and hasattr(entry.meta.cached_positions, "tolist")
                             else None
                         ),
-                    }
+                    )
                     for encoded_key, entry in self._index.items()
                 },
             }
@@ -1748,7 +1890,7 @@ class RawBlockCore:
         """
         if dtype is None:
             return None
-        return TORCH_DTYPE_TO_STR_DTYPE.get(dtype, str(dtype))
+        return TORCH_DTYPE_TO_STR_DTYPE.get(dtype) or str(dtype)
 
     def _write_checkpoint(self, payload: bytes, dirty_total_snapshot: int) -> bool:
         """Write one checkpoint copy and advance persisted metadata counters."""
@@ -1756,11 +1898,28 @@ class RawBlockCore:
         if len(payload) > payload_cap:
             logger.warning(
                 "RawBlockCore metadata payload too large (%d > %d), "
-                "skipping checkpoint",
+                "skipping checkpoint; newer entries are lost on restart. "
+                "Increase meta_total_bytes (this changes the device layout, "
+                "so the existing cache is not recovered).",
                 len(payload),
                 payload_cap,
             )
             return False
+        if (
+            not self._meta_usage_warned
+            and len(payload) >= _META_USAGE_WARN_RATIO * payload_cap
+        ):
+            self._meta_usage_warned = True
+            logger.warning(
+                "RawBlockCore metadata checkpoint uses %d of %d bytes (%.0f%%); "
+                "checkpoints are skipped once the index no longer fits. "
+                "Increase meta_total_bytes if the index keeps growing (this "
+                "changes the device layout, so the existing cache is not "
+                "recovered).",
+                len(payload),
+                payload_cap,
+                100.0 * len(payload) / payload_cap,
+            )
 
         next_seq = self._meta_seq + 1
         target_idx = int((next_seq - 1) % self._meta_copy_count)
@@ -1832,9 +1991,7 @@ class RawBlockCore:
 
         snapshot_ts = time.monotonic()
         snapshot, dirty_total_snapshot = self._snapshot_state()
-        payload = json.dumps(snapshot, separators=(",", ":"), ensure_ascii=True).encode(
-            "utf-8"
-        )
+        payload = msgspec.json.encode(snapshot)
         written = self._write_checkpoint(payload, dirty_total_snapshot)
         if written:
             with self._lock:
@@ -1923,6 +2080,8 @@ class RawBlockCore:
                     cached_positions_list = entry.get("cached_positions")
                     dtype_name = entry.get("dtype")
 
+                    if self._offset_to_slot(offset) in self._quarantined_slots:
+                        continue
                     if not self._is_valid_checkpoint_entry(offset, size):
                         continue
 
@@ -1940,10 +2099,7 @@ class RawBlockCore:
                         if cached_positions_list is not None
                         else None
                     )
-                    dtype = self._recover_checkpoint_dtype(
-                        str(encoded_key),
-                        dtype_name,
-                    )
+                    dtype = self._recover_checkpoint_dtype(dtype_name)
 
                     meta = DiskCacheMetadata(
                         path=f"{self.device_path}@{offset}",
@@ -1962,6 +2118,7 @@ class RawBlockCore:
                 self._offset_to_slot(int(entry.offset))
                 for entry in self._index.values()
             }
+            used_slots.update(self._quarantined_slots)
             # Rebuild from committed entries instead of trusting checkpoint
             # free_slots. A crash-time checkpoint can otherwise preserve a slot
             # reserved by an uncommitted in-flight write as neither used nor free.
@@ -1978,13 +2135,11 @@ class RawBlockCore:
 
     def _recover_checkpoint_dtype(
         self,
-        encoded_key: str,
         dtype_name: Any,
     ) -> torch.dtype | None:
-        """Recover checkpoint dtype from entry metadata or legacy key strings.
+        """Recover checkpoint dtype from entry metadata.
 
         Args:
-            encoded_key: Encoded raw-block key from the checkpoint entry.
             dtype_name: Raw dtype value stored in the checkpoint entry.
 
         Returns:
@@ -2005,18 +2160,7 @@ class RawBlockCore:
                 if isinstance(torch_dtype, torch.dtype):
                     return torch_dtype
 
-        if self.key_namespace != "legacy":
-            return None
-
-        try:
-            return decode_legacy_key(encoded_key).dtype
-        except Exception:
-            logger.debug(
-                "Unable to recover dtype from legacy raw-block key %s",
-                encoded_key,
-                exc_info=True,
-            )
-            return None
+        return None
 
     def _validate_loaded_entries(self) -> None:
         """Drop recovered entries whose slot headers do not match metadata."""
@@ -2181,10 +2325,7 @@ class RawBlockCore:
         if slot_hdr is None:
             return True
         try:
-            expected_identity = slot_identity_from_encoded_key(
-                encoded_key,
-                self.key_namespace,
-            )
+            expected_identity = object_key_slot_identity(encoded_key)
         except Exception:
             return True
         slot_identity, payload_len = slot_hdr

@@ -54,6 +54,9 @@ instead of running the script.
 
 ## Kubernetes
 
+> [!WARNING]
+> The Kubernetes recipe below relies on the LMCache Kubernetes operator (`operator/`), which is deprecated and no longer maintained. It is expected to be removed from this repository in 2027Q1. Existing release artifacts (e.g. `operator-v*` `install.yaml`) will not receive fixes or updates. Do not build new deployments on it.
+
 ### LMCacheEngine
 
 [`kubernetes/lmcache_engine.yaml`](kubernetes/lmcache_engine.yaml) declares the MP

@@ -152,7 +152,7 @@ multiprocess (MP) mode.
   `hasattr(device_ops, "op_name")`.
 - `ops_types.py` defines shared enums, descriptors, and native plan type stubs.
 
-## Transfer Mode Routing (`transfer_context/worker_transfer.py`)
+## Transfer Mode Routing (`lmcache/v1/client/worker_transfer.py`)
 
 ```
 MPTransferMode.AUTO (default):
@@ -212,10 +212,11 @@ server smoke tests on a CPU-only host) and CLI loading without torch. In
 MP mode, CPU workers use `EngineDrivenTransferContext` (inline or SHM
 backend) for KV transfer; there is no GPU-side connector involved.
 
-`normalize_kv_and_discover_format` also hardcodes `kv_layout = "HND"`
-when `torch_device_type == "cpu"`, because vLLM's
-`get_kv_cache_layout()` reports `NHD` for its CPU attention backend
-which is wrong for that backend's actual KV cache layout.
+`normalize_kv_and_discover_format` uses the engine's `kv_layout` hint and
+does not look at the device; without a hint it reads vLLM caches as `NHD`.
+vLLM's CPU attention backend allocates `HND`, so `vllm_layout_hints()` and
+`CPUCacheContext` fill in `kv_layout = "HND"` when vLLM does not report a
+layout.
 
 ## Adding New Hardware
 

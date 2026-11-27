@@ -2,7 +2,7 @@
 """Fan-out of connector/adapter lifecycle hooks to active experimental features.
 
 The connector and worker adapter know only this dispatcher; the dispatcher
-knows the features; each feature knows the SDK. Adding a tensor type never
+knows the worker-side tensor features. Adding a tensor type never
 touches the connector or the adapter -- see ``registry.py``.
 """
 
@@ -11,13 +11,16 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Collection
 
 # First Party
-from lmcache.sdk.cache_kind import LMCacheSDKCacheKind
-from lmcache.sdk.qringbuffer import QRingBufferAdapter, QRingBufferCapture
-from lmcache.utils import init_logger
-from lmcache.v1.multiprocess.custom_types import TRANSFER_QUERY
+from lmcache.integration.vllm.experimental.qringbuffer import (
+    QRingBufferAdapter,
+    QRingBufferCapture,
+)
+from lmcache.v1.common.cache_kind import LMCacheSDKCacheKind
+from lmcache.v1.common.custom_types import TRANSFER_QUERY
+from lmcache.v1.common.logging import init_logger
 
 if TYPE_CHECKING:
     # Third Party
@@ -32,7 +35,7 @@ if TYPE_CHECKING:
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
         LMCacheMPWorkerAdapter,
     )
-    from lmcache.v1.multiprocess.transfer_context.worker_transfer import IPCEvent
+    from lmcache.v1.client.worker_transfer import IPCEvent
 
 logger = init_logger(__name__)
 
@@ -68,8 +71,15 @@ class QTensorFeature:
     def wait_for_save(self, event: IPCEvent | None) -> None:
         self._capture.batched_submit_qstore_requests(event=event)
 
-    def reclaim(self) -> None:
+    def reclaim(self, finished_req_ids: Collection[str] = frozenset()) -> None:
+        self._capture.drop_finished_requests(finished_req_ids)
         self._q_ring_adapter.reclaim_finished_q_stores()
+        # Report the Qring's used blocks, so SDK will not assign these IDs
+        # for transfer to SDK's CPU buffer.
+        self._q_ring_adapter.publish_state()
+
+    def handle_preemptions(self) -> None:
+        self._capture.drop_all_requests("preemption")
 
     def reregister(self) -> bool:
         try:
@@ -89,6 +99,7 @@ class QTensorFeature:
         logger.warning(
             "Finished re-registering experimental tensors after server recovery"
         )
+        self._capture.drop_all_requests("server recovery")
         return True
 
     def shutdown(self) -> None:
@@ -159,7 +170,7 @@ class Dispatcher:
     """Holds the experimental features built into the server and connector, and
     fans out lifecycle hooks to all of them. The connector and adapter doesn't
     need to distinguish the types of intermediate tensors. Dispatcher holds the
-    TensorFeature which talks to the SDK.
+    TensorFeature which uses the client transfer context.
 
     Args:
         features: The active features, in fan-out order.
@@ -193,10 +204,15 @@ class Dispatcher:
         for feature in self._features:
             feature.wait_for_save(event)
 
-    def reclaim(self) -> None:
+    def reclaim(self, finished_req_ids: Collection[str] = frozenset()) -> None:
         """Fan out ``reclaim`` (adapter ``get_finished``)."""
         for feature in self._features:
-            feature.reclaim()
+            feature.reclaim(finished_req_ids)
+
+    def handle_preemptions(self) -> None:
+        """Fan out ``handle_preemptions`` (adapter ``handle_preemptions``)."""
+        for feature in self._features:
+            feature.handle_preemptions()
 
     def reregister(self) -> bool:
         """Fan out ``reregister`` (adapter heartbeat recovery)."""

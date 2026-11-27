@@ -36,11 +36,11 @@ import logging
 import struct
 
 # First Party
-from lmcache.cli.metrics import Metrics
 from lmcache.tools.cache_simulator.lru_cache import LRUCacheFast
-from lmcache.v1.multiprocess.custom_types import CBMatchResult
+from lmcache.v1.common.custom_types import CBMatchResult
+from lmcache.v1.common.metrics import Metrics
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.multiprocess.modules.blend.matcher import BlendTokenRangeMatcher
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 #: Name of the span the tracing subscriber emits per traced request.
 TRACE_SPAN_NAME = "mp.request.trace"
@@ -450,14 +450,15 @@ def replay(
         records: Requests in replay order.
         hashes: Chunk hashes per request, as from :func:`hash_records`.
         chunk_size: Tokens per chunk the hashes were computed with.
-        capacity_tokens: Cache capacity in tokens.
+        capacity_tokens: Cache capacity in tokens. Only whole chunks fit;
+            smaller budgets yield zero prefix and non-prefix hits.
 
     Returns:
         Aggregate and per-request hit accounting.
     """
-    capacity_chunks = max(1, capacity_tokens // chunk_size)
+    capacity_chunks = capacity_tokens // chunk_size
     cache = LRUCacheFast(capacity_chunks)
-    matcher = BlendTokenRangeMatcher(chunk_size)
+    matcher = BlendTokenRangeMatcher(chunk_size) if capacity_chunks else None
 
     total_tokens = 0
     prefix_total = 0
@@ -474,7 +475,7 @@ def replay(
         prefix_tokens = hit_prefix * chunk_size
 
         non_prefix_tokens = 0
-        if chunk_hashes:
+        if matcher is not None and chunk_hashes:
             segments = select_non_prefix_segments(
                 matcher.match_sub_sequence(record.input_ids), prefix_tokens
             )
@@ -833,7 +834,7 @@ def run_trace_analyze(args: argparse.Namespace, metrics: Metrics) -> None:
     # summary; only problems are worth printing here.
     for name in (
         "lmcache.v1.multiprocess.modules.blend.matcher",
-        "lmcache.v1.multiprocess.token_hasher",
+        "lmcache.v1.common.token_hasher",
     ):
         logging.getLogger(name).setLevel(logging.WARNING)
 

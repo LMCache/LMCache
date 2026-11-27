@@ -426,7 +426,15 @@ class FlameProfiler:
         )
 
     def stop(self, log: Callable[[str], None]) -> None:
-        """Stop the recorder and render the SVG. Idempotent."""
+        """Stop and render once, logging ProfileError instead of raising it."""
+        try:
+            self.stop_and_render(log)
+        except ProfileError as e:
+            stage = "recording" if self._mode in PY_SPY_MODES else "render"
+            log(f"[Profile] {stage} failed: {e}")
+
+    def stop_and_render(self, log: Callable[[str], None]) -> None:
+        """Stop and render once, raising ProfileError on failure."""
         if self._stopped:
             return
         self._stopped = True
@@ -458,11 +466,7 @@ class FlameProfiler:
         # py-spy renders the SVG itself and, unlike perf, reports failure
         # through its exit status rather than an empty capture.
         if self._mode in PY_SPY_MODES:
-            try:
-                self._check_py_spy_succeeded(log)
-            except ProfileError as e:
-                log(f"[Profile] recording failed: {e}")
-                return
+            self._check_py_spy_succeeded(log)
             log(f"[Profile] wrote {self._output}")
             return
 
@@ -476,9 +480,6 @@ class FlameProfiler:
         try:
             self._check_samples_captured(log)
             self._render()
-        except ProfileError as e:
-            log(f"[Profile] render failed: {e}")
-            return
         finally:
             self._remove_intermediate_files()
         log(f"[Profile] wrote {self._output}")
@@ -705,7 +706,8 @@ def record_attached(
 
     Records for *duration* seconds (non-positive = until Ctrl-C); the
     interrupt is absorbed so the partial capture is still rendered. Raises
-    ProfileError if the target is gone or the toolchain is unavailable.
+    ProfileError if the target is gone, the toolchain is unavailable,
+    recording produces no usable output, or rendering fails.
     """
     try:
         os.kill(pid, 0)
@@ -735,4 +737,4 @@ def record_attached(
     except KeyboardInterrupt:
         log("[Profile] interrupted; rendering what was captured")
     finally:
-        profiler.stop(log)
+        profiler.stop_and_render(log)

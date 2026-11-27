@@ -8,7 +8,6 @@ from contextvars import ContextVar
 from unittest import mock
 import asyncio
 import threading
-import time
 
 # Third Party
 from google.api_core.exceptions import DeadlineExceeded
@@ -30,6 +29,9 @@ from lmcache.v1.memory_management import (
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd
+
+# Test helpers
+from tests.v1.distributed.utils import wait_until
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -206,7 +208,7 @@ def create_test_memory_obj(val: int, size: int) -> TensorMemoryObj:
     return TensorMemoryObj(tensor, meta, parent_allocator=None)
 
 
-def wait_for_event(efd_fileno: int, timeout: float = 2.0) -> bool:
+def wait_for_event(efd_fileno: int, timeout: float = 5.0) -> bool:
     """Helper to select on eventfd for completion notification."""
     # Standard
     import select
@@ -367,10 +369,8 @@ class TestBigtableL2Adapter:
         listener = TestListener()
         adapter.register_listener(listener)
 
+        # delete() blocks until the delete and its listener callback finish
         adapter.delete([key1, key2])
-
-        # Give background event loop thread a brief moment to run delete
-        time.sleep(0.1)
 
         # key2 is deleted, key1 is not
         assert key2 in listener.deleted
@@ -451,21 +451,6 @@ class TestBigtableL2Adapter:
         row_key_no_salt = encoder.encode_row_key(key_no_salt)
         assert row_key_no_salt == b"0102@my-model@0000000f@3@0102030405060708"
 
-        # Test with layerwise key
-        # Standard
-        from dataclasses import dataclass
-
-        @dataclass(frozen=True)
-        class LayerwiseObjectKey(ObjectKey):
-            layer_id: int = 0
-
-        key_layerwise = LayerwiseObjectKey(identity=key.identity, layer_id=5)
-        row_key_layerwise = encoder.encode_row_key(key_layerwise)
-        assert (
-            row_key_layerwise
-            == b"0102@my-model@0000000f@3@0102030405060708@user-salt@layer_5"
-        )
-
         # Test BigtablePayloadSharder
         sharder = BigtablePayloadSharder(num_layers=4, layer_group_size=2, kv_size=2)
         payload = b"K0K0K1K1K2K2K3K3V0V0V1V1V2V2V3V3"
@@ -501,7 +486,6 @@ class TestBigtableL2Adapter:
 
         adapter.close()
 
-    @pytest.mark.no_shared_allocator
     @pytest.mark.parametrize("layer_group_size", [0, 10])
     @pytest.mark.parametrize("include_valid_key", [False, True])
     def test_rejected_store_reports_failure(
@@ -549,7 +533,6 @@ class TestBigtableL2Adapter:
         finally:
             adapter.close()
 
-    @pytest.mark.no_shared_allocator
     def test_store_at_size_limit_succeeds(self) -> None:
         """An unsharded payload equal to the configured limit remains valid."""
         cfg = create_test_config()
@@ -719,9 +702,11 @@ class TestBigtableL2Adapter:
         )
 
         async_block = asyncio.Event()
+        read_row_entered = threading.Event()
 
         # We mock read_row to block indefinitely
         async def mock_read_row(*args, **kwargs):
+            read_row_entered.set()
             await async_block.wait()
             return None
 
@@ -734,8 +719,8 @@ class TestBigtableL2Adapter:
             lookup_task_id = adapter.submit_lookup_and_lock_task(
                 [key1, key2], {0: _EMPTY_LAYOUT}
             )
-            # Allow task to run and block on read_row
-            time.sleep(0.1)
+            # Cancel only once the task is blocked inside read_row
+            assert read_row_entered.wait(timeout=5.0)
 
             # Trigger cancellation from event loop thread
             adapter._loop.call_soon_threadsafe(cancel_lookup)
@@ -784,11 +769,8 @@ class TestBigtableL2Adapter:
         assert wait_for_event(adapter.get_lookup_and_lock_event_fd())
         adapter.query_lookup_and_lock_result(lookup_task_id)
 
-        # Allow background threads to run callback
-        time.sleep(0.1)
-
         # Verify key was popped and listener notified
-        assert key in listener.deleted
+        assert wait_until(lambda: key in listener.deleted)
         with adapter._lock:
             assert key not in adapter._key_sizes
 

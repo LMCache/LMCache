@@ -20,7 +20,10 @@ async def get_metrics(request: Request):
 @router.post("/metrics/reset")
 async def reset_metrics():
     """
-    Reset Prometheus metrics to their initial state.
+    Compatibility no-op: returns ``ok`` without resetting any metric.
+
+    MP metrics are OpenTelemetry cumulative instruments, which cannot be
+    reset in place. Diff ``GET /metrics`` scrapes instead.
     """
     # TODO(baoloongmao): implement reset metrics later.
     return PlainTextResponse(content="ok", media_type="text/plain")

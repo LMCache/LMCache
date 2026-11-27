@@ -139,19 +139,5 @@ Reference
      - Holds the random anonymous machine UUID. Delete it to rotate the
        identifier.
 
-Local logging
-~~~~~~~~~~~~~
-
-If you would like to log to a file in addition to (or instead of) sending data to the server, pass a local-log path when initializing:
-
-.. code-block:: python
-
-   from lmcache.inprocess.usage_telemetry.context import InitializeUsageContext
-
-   usage_ctx = InitializeUsageContext(
-       config=engine_config,
-       metadata=engine_metadata,
-       local_log="~/.config/lmcache/usage.log"
-   )
-
-Omitting the ``local_log`` argument (or passing ``None``) disables local file logging.
+The legacy single-process telemetry integration is maintained by the separate
+`LMCache_inprocess <https://github.com/LMCache/LMCache_inprocess>`_ package.

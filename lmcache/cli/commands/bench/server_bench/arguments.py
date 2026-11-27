@@ -26,8 +26,8 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
 
     parser.add_argument(
         "--rpc-url",
-        default="tcp://localhost:5555",
-        help=("MP request endpoint (default: tcp://localhost:5555)"),
+        default="grpc://localhost:5555",
+        help=("MP request endpoint (default: grpc://localhost:5555)"),
     )
     parser.add_argument(
         "--mode",
@@ -53,6 +53,18 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
             "PREPARE/COMMIT). "
             "`auto` keeps the historical mapping: "
             "gpu->lmcache_driven, cpu->engine_driven."
+        ),
+    )
+    parser.add_argument(
+        "--isolated-ipc",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Use the IPC mechanisms for a bench client and server that share "
+            "no host IPC namespace or /dev/shm (CUDA: timeline-semaphore "
+            "events instead of interprocess event handles). GPU mode only. "
+            "Must match the server's --isolated-ipc setting; on a mismatch "
+            "the server cannot open the client's events. (Default is False)"
         ),
     )
     parser.add_argument(
@@ -123,7 +135,7 @@ def add_server_arguments(parser: argparse.ArgumentParser) -> None:
             "'(1,1024,16,1,128):float16:4;"
             "(2,1024,16,8,128):float16:28'. "
             "All groups must share the same NB and BS. "
-            "See lmcache.v1.kv_layer_groups.parse_kvcache_shape_spec "
+            "See lmcache.v1.common.kv_layer_groups.parse_kvcache_shape_spec "
             "for the authoritative parser. Default: '%s'" % _DEFAULT_SHAPE_SPEC
         ),
     )

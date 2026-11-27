@@ -62,7 +62,7 @@ server instances in a registry and evicts those whose heartbeats lapse.
 
 ```bash
 lmcache coordinator \
-    --host 0.0.0.0 --port 9300 \
+    --host 127.0.0.1 --port 9300 \
     --instance-timeout 30 \
     --health-check-interval 10
 ```
@@ -181,7 +181,7 @@ Checksum:                                OK
 ### `lmcache bench`
 
 **`bench server`** -- end-to-end sanity test for a running LMCache MP cache
-server (ZMQ + HTTP). For each sequence in ``[--start, --end)`` the tool runs a
+server (gRPC + HTTP). For each sequence in ``[--start, --end)`` the tool runs a
 cold pass (``LOOKUP`` miss → ``STORE``) and a warm pass (``LOOKUP`` hit →
 ``RETRIEVE``), then verifies the retrieved data using per-chunk checksums.
 Exercises the full RPC path
@@ -205,11 +205,11 @@ gpu→lmcache_driven, cpu→engine_driven.
 
 ```bash
 $ lmcache bench server \
-    --rpc-url tcp://localhost:5555 \
+    --rpc-url grpc://localhost:5555 \
     --url http://localhost:8080 \
     --start 0 --end 2
 
-Connecting to LMCache MP Server at tcp://localhost:5555 (mode=gpu, transfer=auto) ...
+Connecting to LMCache MP Server at grpc://localhost:5555 (mode=gpu, transfer=auto) ...
 Server chunk_size = 256
 Resolved KV shape spec: (2,1024,16,8,128):float16:32
 [seq=0] LOOKUP cold:  0/2 chunks hit (1.82 ms)
@@ -222,7 +222,7 @@ Resolved KV shape spec: (2,1024,16,8,128):float16:32
 
 With ``--end`` unset, the loop runs forever; stop with ``Ctrl-C``. The KV
 tensor layout is controlled by ``--kvcache-shape-spec`` (see
-``lmcache/v1/kv_layer_groups.py``); see :doc:`bench_server` in the user guide
+``lmcache/v1/common/kv_layer_groups.py``); see :doc:`bench_server` in the user guide
 for the full flag list.
 
 **`bench l2`** -- store / lookup / load throughput benchmark against an
@@ -303,7 +303,7 @@ in `lmcache/cli/corpora/`.
 
 - **Auto-discovery (N-level):** Commands at all levels are discovered
   automatically via `discover_subclasses()` (in
-  `lmcache/v1/utils/subclass_discovery.py`). No manual registration is needed
+  `lmcache/v1/common/subclass_discovery.py`). No manual registration is needed
   — adding a new command at any depth is a single-file change.
   - **Leaf commands:** Inherit from `BaseCommand` directly.
   - **Command groups:** Inherit from `CompositeCommand(BaseCommand)`. Its
@@ -380,7 +380,7 @@ lmcache/cli/
 
 - **Entry point:** `lmcache = "lmcache.cli.main:main"` in `pyproject.toml`.
 - **Auto-discovery mechanism:** Powered by `discover_subclasses()` in
-  `lmcache/v1/utils/subclass_discovery.py`. Uses `pkgutil.iter_modules` to
+  `lmcache/v1/common/subclass_discovery.py`. Uses `pkgutil.iter_modules` to
   scan direct submodules, then `inspect.getmembers` to find concrete
   `BaseCommand` subclasses. Each subclass is yielded at most once.
 - **`CompositeCommand` pattern:** A `CompositeCommand` scans its own package

@@ -23,14 +23,14 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform import synchronize_device
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
+    from lmcache.v1.common.kv_format.types import DiscoverableKVCache
 
 logger = init_logger(__name__)
 
@@ -61,7 +61,7 @@ def _paged_pointer_table(
     # ``lmcache.device_ops``, which is resolved only once the backends that
     # import this module have been imported.
     # First Party
-    from lmcache.v1.gpu_connector.kv_format.specs.registry import get_spec
+    from lmcache.v1.common.kv_format.specs.registry import get_spec
 
     addresses = get_spec(paged_kv, engine_kv_format).data_ptrs(list(range(num_layers)))
     # Addresses are unsigned; the kernel reads the same bits as int64.

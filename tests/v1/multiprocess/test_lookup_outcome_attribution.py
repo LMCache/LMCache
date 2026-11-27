@@ -16,11 +16,16 @@ import pytest
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.token_codec import pack_token_ids
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    PrefetchHandle,
+    PrefetchResult,
+)
 from lmcache.v1.mp_observability.event import EventType
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
 
 CHUNK_SIZE = 256
 
@@ -51,7 +56,6 @@ def _lookup_key(
         request_id="req-1",
         cache_salt="salt",
         request_configs=request_configs,
-        num_kv_readers=1,
     )
 
 
@@ -93,7 +97,8 @@ def _end_metadata(
 
     Args:
         chunk_hashes: Chunk hashes the token hasher reports; empty triggers the
-            ``empty_chunk_hashes`` early exit.
+            ``empty_chunk_hashes`` early exit (the key's ``end`` is 0, so it
+            asks for no unfull chunk).
         windows: Per-object-group window sizes (``-1`` is full attention);
             defaults to one full-attention group.
         world_size: kv_rank shards per chunk.
@@ -126,18 +131,24 @@ def _end_metadata(
     # result before ``begin_lookup`` resets it.
     _sess = ctx.session_manager.get_or_create.return_value
     _sess.take_prefetch_release.return_value = None
-    ctx.chunk_size = CHUNK_SIZE
+    ctx.default_chunk_size = CHUNK_SIZE
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find.return_value = MagicMock() if layout_found else None
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=windows, world_size=world_size
+    )
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        DEFAULT_SHARD_REPLICATION_DESC
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = (
         {group_id: MagicMock() for group_id in range(len(windows))}
         if group_layouts_found
         else {}
     )
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    token_hasher = MagicMock()
+    token_hasher.compute_packed_chunk_hashes.return_value = chunk_hashes
+    ctx.layout_desc_registry.get_chunk_size.return_value = CHUNK_SIZE
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     ctx.storage_manager.submit_prefetch_task.return_value = PrefetchHandle(
         prefetch_request_id=0,
         external_request_id="req-1",

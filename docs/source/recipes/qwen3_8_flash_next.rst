@@ -36,9 +36,9 @@ Validated models
       **Status:** Validated with LMCache.
 
       Like the other GDN hybrids, this model needs the same settings: the
-      ``align`` Mamba cache mode, prefix caching, and
-      ``--separate-object-groups`` on the LMCache server. The chunk size is
-      negotiated from vLLM's *unified block size*, which vLLM logs at startup
+      ``align`` Mamba cache mode, prefix caching, and object-group separation
+      on the LMCache server (enabled by default). The chunk size is
+      resolved from vLLM's *unified block size*, which vLLM logs at startup
       as ``Setting attention block size to N tokens``:
 
       .. list-table::
@@ -52,14 +52,13 @@ Validated models
            - 400
            - 8
 
-      Start the LMCache MP server. The connector negotiates the configured
+      Start the LMCache MP server. The connector resolves the configured
       minimum up to ``N``; see :doc:`/mp/chunk_size_negotiation`:
 
       .. code-block:: bash
 
          lmcache server \
              --chunk-size 400 \
-             --separate-object-groups \
              --l1-size-gb 100 \
              --eviction-policy LRU
 
@@ -79,8 +78,8 @@ Validated models
       |
 
       ``--mamba-cache-mode align`` is required (GDN does not support the ``all``
-      mode). ``--separate-object-groups`` (server) is required for hybrid models
-      so the linear-attention layers get their own cache objects.
+      mode). Object-group separation must remain enabled on the server so the
+      linear-attention layers get their own cache objects.
 
       Adjust ``--tensor-parallel-size`` to match your hardware. For the generic
       LMCache + vLLM wiring (ports, remote hosts), see
@@ -109,7 +108,7 @@ Compression support
    * - Method
      - Status
      - Notes
-   * - :doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`
+   * - :doc:`CacheGen <../mp/cachegen>`
      - Not supported
      - Hybrid groups' cached pages are byte-opaque.
 

@@ -10,28 +10,28 @@ inference data path.
 Where the routes come from
 --------------------------
 
-Routes are assembled from three sources, all merged into one FastAPI app by
+Routes are assembled from two sources, both merged into one FastAPI app by
 :class:`~lmcache.v1.multiprocess.http_api_registry.HTTPAPIRegistry` at startup:
 
 - **MP-native routes** — any module named ``*_api.py`` under
   ``lmcache/v1/multiprocess/http_apis/`` that exposes a module-level
   ``router`` (a :class:`fastapi.APIRouter`) is auto-discovered. This covers
   the operational surface: status, cache control, L2 management, quota, and
-  runtime reconfiguration.
+  runtime reconfiguration. The basic-info group
+  ``lmcache/v1/multiprocess/http_apis/info_api.py`` serves ``/``,
+  ``/healthcheck``, ``/status``, ``/version``, ``/lmc_version``, and
+  ``/commit_id``.
 - **Shared "common" routes** —
   ``lmcache/v1/multiprocess/http_apis/common_api.py`` aggregates every
-  compatible router under ``lmcache/v1/internal_api_server/common/`` (skipping
-  any module listed in ``_MP_INCOMPATIBLE_MODULES``, currently empty) and
-  forwards them to the auto-discovery pipeline. These are the cross-server
-  diagnostics shared with the vLLM-embedded API server (``/env``,
-  ``/loglevel``, ``/metrics``, ``/threads``, ``/periodic-threads*``,
-  ``/run_script``). Adding a new compatible module under
-  ``internal_api_server/common`` requires no wiring changes on the MP side.
-- **Re-exported version routes** — the basic-info group
-  ``lmcache/v1/multiprocess/http_apis/info_api.py`` includes the router
-  from ``lmcache/v1/internal_api_server/vllm/version_api.py``, exposing
-  ``/version``, ``/lmc_version``, and ``/commit_id`` alongside ``/``,
-  ``/healthcheck`` and ``/status``.
+  compatible router under ``lmcache/v1/multiprocess/http_apis/common/``
+  (skipping any module listed in ``_MP_INCOMPATIBLE_MODULES``, currently
+  empty) and forwards them to the auto-discovery pipeline. These are the
+  cross-server diagnostics (``/env``, ``/loglevel``, ``/metrics``,
+  ``/threads``, ``/periodic-threads*``, ``/run_script``), also served by the
+  vLLM-embedded API server in the external
+  `LMCache_inprocess <https://github.com/LMCache/LMCache_inprocess>`_ package.
+  Adding a new compatible module under ``http_apis/common`` requires no wiring
+  changes on the MP side.
 
 .. contents::
    :local:
@@ -107,9 +107,9 @@ Endpoint Overview
 -----------------
 
 The routes are grouped by purpose below. The operational surface (health,
-status, cache and storage control) lives at top-level paths; routes inherited
-from the shared ``internal_api_server`` package keep their original paths for
-compatibility with the vLLM-embedded API server.
+status, cache and storage control) lives at top-level paths; the shared
+``http_apis/common`` routes keep the same paths as on the vLLM-embedded API
+server.
 
 .. note::
 
@@ -274,7 +274,7 @@ compatibility with the vLLM-embedded API server.
      - Prometheus exposition format.
    * - POST
      - ``/metrics/reset``
-     - Reset all observability metrics to their initial state.
+     - Compatibility no-op in MP mode; returns ``ok`` without resetting.
 
 **Diagnostics and debugging**
 
@@ -566,15 +566,15 @@ the engine is initialized, it just has no L2 storage).
 Version descriptors. Each returns a bare JSON **string** (not an object):
 
 - ``GET /version`` — the combined descriptor from
-  ``lmcache.utils.get_version()``, formatted ``"<version>-<commit_id>"``
+  ``lmcache.v1.common.utils.get_version()``, formatted ``"<version>-<commit_id>"``
   (e.g. ``"0.3.1-ca79ea33"``). On a source checkout without build-time
   version metadata, each missing component falls back to the literal
   ``"NA"`` (so a metadata-less build returns ``"NA-NA"``).
 - ``GET /lmc_version`` — the raw package version string
-  (``lmcache.utils.VERSION``); empty string ``""`` when the generated
+  (``lmcache.v1.common.utils.VERSION``); empty string ``""`` when the generated
   ``lmcache._version`` module is absent.
 - ``GET /commit_id`` — the git commit id baked into the build
-  (``lmcache.utils.COMMIT_ID``); empty string ``""`` when unavailable.
+  (``lmcache.v1.common.utils.COMMIT_ID``); empty string ``""`` when unavailable.
 
 All three are unconditional ``200 OK``.
 
@@ -762,6 +762,10 @@ skip read/write-locked keys unless ``force`` is set. Blocking adapter I/O is run
 off the event loop. When the tier includes L2 the primary (or selected) L2
 adapter must be configured, else ``503``; a pure ``l1`` delete needs no adapter.
 
+Deletion is best effort. It does not wait for or cancel store or write-back
+tasks already in flight for these keys, so such a task can make a key resident
+again after the call returns. This also holds for ``tier=all`` and ``force``.
+
 Per-key successful L2 deletions fire ``on_l2_keys_deleted`` on the
 adapter's listeners — when the coordinator is wired (see
 ``--coordinator-event-reporting``), the deletions show up at the
@@ -804,11 +808,14 @@ Each ``EncodedObjectKey`` is
       "model_name": "meta-llama/Llama-3-8B",
       "kv_rank": 0,
       "object_group_id": 0,
-      "cache_salt": "user-a"
+      "cache_salt": "user-a",
+      "tags": {"adapter_revision": "abc123"}
     }
 
-``object_group_id`` (default ``0``) and ``cache_salt`` (default ``""``)
-are optional for backward compatibility with older wire payloads.
+``object_group_id`` (default ``0``), ``cache_salt`` (default ``""``), and
+``tags`` (default ``{}``) are optional for backward compatibility with older
+wire payloads. Tags are identity fields: names must be nonempty strings and
+values must be strings.
 
 **Response** (``200 OK``):
 
@@ -847,7 +854,8 @@ with ``ok=false`` and an ``error`` field carrying the reason.
             "tier": "all",
             "keys": [
               {"chunk_hash_hex": "aa", "model_name": "m",
-               "kv_rank": 0, "object_group_id": 0, "cache_salt": "user-a"}
+               "kv_rank": 0, "object_group_id": 0, "cache_salt": "user-a",
+               "tags": {"adapter_revision": "abc123"}}
             ]
         }'
     # -> {"deleted": 2, "skipped": 0, "ok": true}
@@ -902,7 +910,8 @@ cause keys to appear, disappear, or shift between pages.
             "model_name": "meta-llama/Llama-3-8B",
             "kv_rank": 0,
             "object_group_id": 0,
-            "cache_salt": "user-a"
+            "cache_salt": "user-a",
+            "tags": {"adapter_revision": "abc123"}
           },
           "size_bytes": 4194304
         }
@@ -943,10 +952,13 @@ the requests that will use them, so the first request hits L1 instead of
 paying the L2 fetch inline. Useful when a workload is about to be routed to a
 node (a traffic shift, a hot shared system prompt).
 
-The caller describes content by **token ids**, never by internal cache keys (a
-key is a content hash plus a per-rank layout bitmap, which callers cannot
-construct). The server hashes the tokens, expands each chunk across the node's
-ranks, and submits a *warm* prefetch: loaded chunks are **retained**
+The caller describes content by **token ids**, or by **keys** it already holds
+(for example from the coordinator's directory). Supply exactly one. Token ids
+always cover every chunk from position 0, since chunk hashes are
+prefix-chained; keys reach a chunk in the middle of a prompt without its prefix
+chunks. A key names its chunk: whichever object group and rank it carries, the
+chunk is warmed in every group and rank. The server expands each chunk across
+the node's object groups and ranks, and submits a *warm* prefetch: loaded chunks are **retained**
 (permanent) and left **unlocked** — there is no downstream reader to pin them
 for, so a later real lookup takes its own lock. The call returns immediately;
 the load runs in the storage manager's own thread. It coalesces across all
@@ -961,21 +973,32 @@ configured L2 adapters, so there is no ``?adapter=`` selector.
    * - Field
      - Type
      - Description
+   * - ``keys``
+     - list[object]
+     - Keys form. Each ``{"chunk_hash_hex", "model_name", "kv_rank",
+       "object_group_id", "cache_salt", "tags"}``; they must agree on model,
+       world size (packed in ``kv_rank``), ``cache_salt`` and ``tags``; at
+       most 10,000 keys. The token-form fields below are then ignored.
    * - ``model_name``
      - string
-     - The served model id, exactly as registered (e.g. ``Qwen/Qwen3-8B``).
+     - Tokens form, required. The served model id, exactly as registered
+       (e.g. ``Qwen/Qwen3-8B``).
    * - ``world_size``
      - int
-     - The value vLLM registered for the node's KV layout and rank fan-out
-       (``1`` for a single-GPU, TP=1 deployment).
+     - Tokens form, required. The value vLLM registered for the node's KV
+       layout and rank fan-out (``1`` for a single-GPU, TP=1 deployment).
    * - ``token_ids``
      - list[int]
-     - The prompt token ids. Must use the same tokenizer / special-token
-       settings as the store, and contain at least one full ``chunk_size`` of
-       tokens — only complete chunks are warmed.
+     - Tokens form. The prompt token ids. Must use the same tokenizer /
+       special-token settings as the store; only complete chunks are warmed.
    * - ``cache_salt``
      - string
      - Per-tenant key isolation; must match the store (default ``""``).
+   * - ``tags``
+     - map[string, string]
+     - Matching tags used when the content was stored, without the
+       ``lmcache.tag.`` prefix (default ``{}``). Empty tags select only
+       untagged content.
 
 **Response** (``202 Accepted``):
 
@@ -993,12 +1016,24 @@ no ``request_id`` to poll:
 **HTTP status codes:**
 
 - ``202``: submitted (or a ``noop`` as above).
-- ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt``
-  violates its invariants.
-- ``409``: no layout registered for ``(model_name, world_size)`` — the model
-  has not allocated KV cache on this node yet (start vLLM first).
-- ``422``: request body fails field-level validation.
-- ``503``: engine not initialized.
+- ``400``: ``token_ids`` exceeds the per-request cap, ``cache_salt``
+  violates its invariants, or ``keys`` disagree on model, world size,
+  ``cache_salt`` or ``tags`` or pack no world size in ``kv_rank``.
+- ``422``: request body fails field-level validation, supplies both or
+  neither of ``keys`` / ``token_ids``, omits ``model_name`` or
+  ``world_size`` in the tokens form, or carries more than 10,000 keys.
+- ``503``: engine not initialized, or no layout registered for
+  ``(model_name, world_size)`` — the model has not allocated KV cache on this
+  node yet (start vLLM first).
+
+.. note::
+
+   **Sliding-window models:** the two forms load different chunks. The tokens
+   form keeps each object group's attention window, and a warm prefetch plans
+   nothing for a model with a sliding-window group. The keys form names chunks
+   that need not be a contiguous prefix, so it has no window to keep: it loads
+   every named chunk in every group and retains it in L1 until evicted. Serving
+   is unaffected, since a lookup still applies each group's window.
 
 **Example:**
 
@@ -1007,8 +1042,17 @@ no ``request_id`` to poll:
     curl -s -X POST http://localhost:8080/cache/prefetches \
         -H 'Content-Type: application/json' \
         -d '{"model_name": "Qwen/Qwen3-8B", "world_size": 1,
-             "token_ids": [101, 102, 103], "cache_salt": "user-a"}'
+             "token_ids": [101, 102, 103], "cache_salt": "user-a",
+             "tags": {"adapter_revision": "abc123"}}'
     # -> {"request_id": "abc123", "chunks": 1, "status": "submitted"}
+
+    # Keys form: warm one mid-prompt chunk.
+    curl -s -X POST http://localhost:8080/cache/prefetches \
+        -H 'Content-Type: application/json' \
+        -d '{"keys": [{"chunk_hash_hex": "aa12...", "model_name": "Qwen/Qwen3-8B",
+                       "kv_rank": 16777472, "object_group_id": 0,
+                       "cache_salt": "user-a", "tags": {}}]}'
+    # -> {"request_id": "def456", "chunks": 1, "status": "submitted"}
 
 ``GET /cache/prefetches/{request_id}``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1363,7 +1407,7 @@ dict). A successful DAX ``add`` looks like:
         -H 'Content-Type: application/json' \
         -d '{"device_path": "/dev/dax0.0", "size": "100GiB"}'
 
-See :doc:`/kv_cache/storage_backends/dax` for detailed request examples,
+See :doc:`/mp/l2_storage/dax` for detailed request examples,
 mode semantics, and validation guidance.
 
 Runtime L1 Reconfiguration (Device-DAX)
@@ -1489,9 +1533,12 @@ metrics body.
 ``POST /metrics/reset``
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-Resets all LMCache observability metrics to their initial state
-(``reset_observability_metrics``). Intended for test harnesses and
-benchmarks — not for production.
+Retained for compatibility. In MP mode this endpoint is currently a
+**no-op**: it returns ``ok`` but does not reset any metric. MP metrics are
+OpenTelemetry cumulative instruments, which cannot be reset in place.
+
+To measure an experiment, scrape ``GET /metrics`` before and after it and
+use the difference between the two readings.
 
 **Response** (``200 OK``, ``text/plain``):
 
@@ -1501,7 +1548,7 @@ benchmarks — not for production.
 
 **HTTP status codes:**
 
-- ``200``: metrics reset.
+- ``200``: request accepted (no metrics are reset).
 
 **Example:**
 
@@ -1599,7 +1646,7 @@ by each thread's name, ``ident``, and current stack trace.
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Returns a JSON snapshot of the
-:class:`~lmcache.v1.periodic_thread.PeriodicThreadRegistry`: counts by
+:class:`~lmcache.v1.common.periodic_thread.PeriodicThreadRegistry`: counts by
 level plus per-thread status (last run timestamp, latest summary, etc.).
 
 .. list-table::
@@ -1842,14 +1889,11 @@ will pick the module up automatically at startup — no central
 registration list to edit.
 
 If the route is generic enough to be shared with the vLLM-embedded API
-server, add it under ``lmcache/v1/internal_api_server/common/`` instead.
-It will be picked up on the MP side via ``common_api.py`` unless its
-module name is listed in ``_MP_INCOMPATIBLE_MODULES`` there (reserved
-for modules that require vLLM-specific ``app.state`` attributes; the
-list is currently empty). A handler that lives under
-``internal_api_server/vllm/`` can still be surfaced on the MP server by
-including its router from a group module under ``http_apis/`` (as
-``info_api.py`` does for the version endpoints).
+server in the external ``LMCache_inprocess`` package, add it under
+``lmcache/v1/multiprocess/http_apis/common/`` instead. It will be picked up
+on the MP side via ``common_api.py`` unless its module name is listed in
+``_MP_INCOMPATIBLE_MODULES`` there (reserved for modules that require
+vLLM-specific ``app.state`` attributes; the list is currently empty).
 
 When adding a new endpoint, please also add a matching section to this
 page documenting the endpoint's purpose, request/response schema, and

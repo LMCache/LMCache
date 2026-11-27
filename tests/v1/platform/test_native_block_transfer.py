@@ -16,15 +16,15 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.custom_types import EngineType
+from lmcache.v1.common.kv_format.types import DiscoverableKVCache
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
+from lmcache.v1.common.utils import (
     make_page_buffer_shape_desc,
     normalize_kv_and_discover_format,
 )
 from lmcache.v1.platform import native_block_transfer
 from lmcache.v1.platform.native_block_transfer import transfer_with_address_kernel
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 D2H = lmcache_native.TransferDirection.D2H

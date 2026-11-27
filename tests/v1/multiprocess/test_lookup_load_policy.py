@@ -14,14 +14,19 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import AttnWindowDesc, PrefetchHandle, PrefetchResult
+from lmcache.v1.common.attn_window import AttnWindowDesc
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.distributed.api import (
+    DEFAULT_SHARD_REPLICATION_DESC,
+    PrefetchHandle,
+    PrefetchResult,
+)
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.config import (
     CoordinatorConfig,
     MPServerConfig,
     RuntimePluginConfig,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_module import ModuleBuildContext
 from lmcache.v1.multiprocess.kv_load_policy import KVLoadContext, KVLoadPolicy
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
@@ -50,13 +55,19 @@ class _ConfiguredPolicy(KVLoadPolicy):
 
 def _ctx() -> MagicMock:
     ctx = MagicMock()
-    ctx.chunk_size = CHUNK_SIZE
+    ctx.default_chunk_size = CHUNK_SIZE
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1], world_size=1
     )
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        DEFAULT_SHARD_REPLICATION_DESC
+    )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = CHUNK_HASHES
+    token_hasher = MagicMock()
+    token_hasher.compute_packed_chunk_hashes.return_value = CHUNK_HASHES
+    ctx.layout_desc_registry.get_chunk_size.return_value = CHUNK_SIZE
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     ctx.storage_manager.submit_prefetch_task.return_value = PrefetchHandle(
         prefetch_request_id=0,
         external_request_id="req-1",
@@ -81,7 +92,6 @@ def _key(
         end=len(CHUNK_HASHES) * CHUNK_SIZE,
         request_id="req-1",
         request_configs=request_configs,
-        num_kv_readers=1,
     )
 
 

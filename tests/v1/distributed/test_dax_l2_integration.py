@@ -41,13 +41,10 @@ from tests.v1.distributed.test_dax_l2_adapter import (
 )
 from tests.v1.distributed.utils import single_row_spec
 
-pytestmark = [
-    pytest.mark.no_shared_allocator,
-    pytest.mark.skipif(
-        os.environ.get("RUN_DAX_L2_INTEGRATION") != "1",
-        reason="set RUN_DAX_L2_INTEGRATION=1",
-    ),
-]
+pytestmark = pytest.mark.skipif(
+    os.environ.get("RUN_DAX_L2_INTEGRATION") != "1",
+    reason="set RUN_DAX_L2_INTEGRATION=1",
+)
 
 SLOT_BYTES = 2 << 20
 
@@ -107,6 +104,7 @@ def _storage_roundtrip(tmp_path: Path, dax_l1: bool) -> None:
         eviction_config=EvictionConfig(eviction_policy="noop"),
         l2_adapter_config=L2AdaptersConfig([_config(path, slot)]),
         store_policy="skip_l1",
+        prefetch_policy="skip_l1",
     )
     manager = StorageManager(config)
     key = create_object_key(40)
