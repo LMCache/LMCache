@@ -148,6 +148,25 @@ Source: ``lmcache/v1/multiprocess/config.py``
        so workers of either device type can connect without manual
        configuration.
        Choices: ``lmcache_driven``, ``engine_driven``, ``auto``.
+   * - ``--rocm-host-event-wait``
+     - ``false``
+     - ROCm-only workaround. With this flag on ROCm, LMCache-driven STORE /
+       RETRIEVE enqueue their copies only once the engine's producer IPC
+       event has completed on the host (non-blocking ``query()``), instead of
+       issuing a ``hipStreamWaitEvent`` on the imported event and enqueuing
+       the copies right away. Enable it when the MP server runs next to the
+       engine on ROCm (e.g. MI3xx), where a pending cross-queue barrier can
+       slow the engine's kernels on the same hardware pipe. Transfers are
+       drained per instance in arrival order: a transfer whose event has
+       already completed runs inline in the handler; others wait in a FIFO
+       drained by a poller thread (50 us backoff doubling to 1 ms) and the
+       handler answers with a ``DeferredResponse``, so the affinity thread
+       serving that rank is never blocked. A transfer whose event does not
+       complete within 60 s, or that has not started at shutdown, answers
+       ``(b"", False)`` without submitting any device work. Off by default on
+       every platform; passing it off ROCm logs one warning and is otherwise
+       a no-op. The environment variable ``LMCACHE_ROCM_HOST_EVENT_WAIT=1``
+       also enables it.
    * - ``--isolated-ipc`` / ``--no-isolated-ipc``
      - ``false``
      - Assume engine workers and this server run in containers that share
