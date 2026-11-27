@@ -35,10 +35,10 @@ class ServerCommand(BaseCommand):
 
         Composes argument groups from the multiprocess, storage manager,
         HTTP frontend, Prometheus, and telemetry config modules.
-        When the server runtime cannot be imported (generated gRPC bindings
-        missing after an editable build, or a lightweight ``lmcache-cli``
-        install), logs the remedy and skips argument registration;
-        ``execute`` then prints the same remedy.
+        When the server runtime cannot be imported, logs the remedy and skips
+        argument registration; ``execute`` then prints the same remedy: an
+        editable build that skipped the gRPC generator is pointed at it, a
+        lightweight ``lmcache-cli`` install at ``pip install lmcache``.
 
         Args:
             parser: The ``ArgumentParser`` for this subcommand.

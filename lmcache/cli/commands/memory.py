@@ -30,10 +30,10 @@ class MemoryCommand(BaseCommand):
         """Add the orchestrator flags, shared with
         ``python -m lmcache.v1.memory_orchestrator``.
 
-        When the orchestrator runtime cannot be imported (generated gRPC
-        bindings missing after an editable build, or a lightweight
-        ``lmcache-cli`` install), logs the remedy and skips registration;
-        ``execute`` then prints the same remedy.
+        When the orchestrator runtime cannot be imported, logs the remedy and
+        skips registration; ``execute`` then prints the same remedy: an
+        editable build that skipped the gRPC generator is pointed at it, a
+        lightweight ``lmcache-cli`` install at ``pip install lmcache``.
 
         Args:
             parser: The ``ArgumentParser`` for this subcommand.

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Sequence
+from pathlib import Path
 import abc
 import argparse
 import importlib
@@ -75,12 +76,25 @@ def missing_grpc_bindings_hint() -> str | None:
     setuptools downgrades a failing custom ``build_py`` to a warning, so a
     missing ``grpcio-tools`` leaves a package that imports without the
     bindings and the commands that need them fail with an import error that
-    hides the cause.
+    hides the cause. The remedy runs the generator from the repository, so it
+    is only offered for a package installed from a source checkout, where
+    ``requirements/proto.txt`` sits next to it; the ``lmcache-cli`` wheel ships
+    without the bindings too, and its users get ``None`` so that the caller's
+    reinstall advice stands.
+
+    Note:
+        Imports each ``_proto_gen`` package to list its modules. Callers run
+        this inside an ``except ImportError`` handler, so it relies on those
+        packages and their parents importing nothing beyond their docstrings.
 
     Returns:
-        The remedy, or ``None`` when both generated packages hold ``*_pb2``
-        modules.
+        The remedy, or ``None`` when the package is not installed from a
+        source checkout or both generated packages hold ``*_pb2`` modules.
     """
+    # <repository>/lmcache/cli/commands/base.py
+    repository_root = Path(__file__).resolve().parents[3]
+    if not (repository_root / "requirements" / "proto.txt").is_file():
+        return None
     for package in _GENERATED_GRPC_PACKAGES:
         search_path = importlib.import_module(package).__path__
         if not any(m.name.endswith("_pb2") for m in pkgutil.iter_modules(search_path)):

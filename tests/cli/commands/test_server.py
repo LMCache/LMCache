@@ -14,7 +14,7 @@ import sys
 import pytest
 
 # First Party
-from lmcache.cli.commands import server
+from lmcache.cli.commands import base, server
 from lmcache.cli.commands.server import ServerCommand
 from lmcache.v1.multiprocess.config import parse_args_to_p2p_config
 from lmcache.v1.transport.grpc import _proto_gen
@@ -313,10 +313,37 @@ class TestServerCommandExecute:
         assert "pip install lmcache" in err
         assert "_generate.py" not in err
 
-    @pytest.mark.skipif(
-        importlib.util.find_spec("lmcache.lmcache_native") is None,
-        reason="Fresh CLI process requires the native extension",
-    )
+    def test_execute_asks_for_the_full_package_outside_a_checkout(
+        self,
+        parser: argparse.ArgumentParser,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An installed wheel without bindings gets the reinstall advice only.
+
+        The package is relocated to a site-packages-like directory with no
+        ``requirements/proto.txt`` next to it, and the generator output is
+        hidden as in the bindings-missing cases.
+        """
+        args = parser.parse_args(["server"])
+        no_bindings = tmp_path / "no_bindings"
+        no_bindings.mkdir()
+        installed = (
+            tmp_path / "site-packages" / "lmcache" / "cli" / "commands" / "base.py"
+        )
+        with (
+            patch.dict(sys.modules, {"lmcache.v1.distributed.config": None}),
+            patch.object(_proto_gen, "__path__", [str(no_bindings)]),
+            patch.object(base, "__file__", str(installed)),
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            ServerCommand().execute(args)
+
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "pip install lmcache" in err
+        assert "_generate.py" not in err
+
     def test_cli_names_the_generator_when_bindings_are_missing(
         self, tmp_path: Path
     ) -> None:
