@@ -18,6 +18,7 @@ import pytest
 
 # First Party
 from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
@@ -201,7 +202,6 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     monkeypatch.setattr(mod, "downsample_and_stage_block_ids", lambda cc, b: b)
     monkeypatch.setattr(mod, "submit_callback_to_stream", lambda *a, **k: None)
     monkeypatch.setattr(mod, "torch_dev", MagicMock())
-    monkeypatch.setattr(mod, "Event", MagicMock())
 
     return module, read_calls, transfer_calls
 
@@ -318,6 +318,42 @@ def test_store_mask_checks_only_the_requested_object_groups(
     )
     assert ok
     assert mask == expected
+
+
+@pytest.mark.parametrize(
+    ("block_ids", "cache_hit"),
+    [
+        pytest.param([], True, id="rejected"),
+        pytest.param([1], True, id="hit"),
+        pytest.param([1], False, id="miss"),
+    ],
+)
+def test_retrieve_events_require_valid_block_ids(
+    monkeypatch: pytest.MonkeyPatch, block_ids: list[int], cache_hit: bool
+) -> None:
+    """Only admitted retrieves publish a complete transfer lifecycle, even on a miss."""
+    module, _, _ = _make_module(monkeypatch, 1, [-1])
+    if not cache_hit:
+        module.context.storage_manager.unsafe_read = MagicMock(return_value=([], []))
+    key = SimpleNamespace(request_id="req", cache_salt="", has_unfull_chunk=_no_unfull)
+    handle, ok = module.retrieve(key, 1, [block_ids], b"producer")
+
+    backend = module.get_and_touch_context_entry(1).event_backend
+    assert handle == backend.export_event.return_value
+    assert ok == (bool(block_ids) and cache_hit)
+    published = [
+        (method, args[-1].event_type)
+        for method, args, _ in module.context.event_bus.method_calls
+    ]
+    assert published == (
+        [
+            ("publish", EventType.MP_RETRIEVE_SUBMITTED),
+            ("publish_on_stream", EventType.MP_RETRIEVE_START),
+            ("publish_on_stream", EventType.MP_RETRIEVE_END),
+        ]
+        if block_ids
+        else []
+    )
 
 
 def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
