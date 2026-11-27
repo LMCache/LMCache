@@ -101,7 +101,7 @@ class EngagementCheck:
 
     Attributes:
         measured: Whether counters were read at all.
-        blend_share: Share of looked-up tokens served by blending, run-wide.
+        blend_share: Share of looked-up tokens matched for blending, run-wide.
         min_window_share: Lowest share over consecutive windows of
             :data:`ENGAGEMENT_WINDOW` questions. Equals ``blend_share`` when
             the run is shorter than one window.
@@ -111,7 +111,8 @@ class EngagementCheck:
             ``blend_share``.
         fingerprints_registered: Chunks indexed during the pass.
         engaged: Whether the gate's run-wide and minimum-window values reach
-            its minimum. ``True`` when not measured, so an unmeasured run is
+            its minimum and, for the blend-share gate, transfers are positive.
+            ``True`` when not measured, so an unmeasured run is
             reported (not invalidated).
         gate: What ``engaged`` was decided on: :data:`GATE_BLEND_SHARE`, or
             :data:`GATE_REUSE` for the ``concatenated`` scenario. The blend
@@ -120,6 +121,10 @@ class EngagementCheck:
             segmented prefix and blended) over the plan's expected reuse,
             run-wide. ``None`` under the other gate, unmeasured, or when the
             plan expects no reuse.
+        scatter_tokens: KV tokens transferred by CacheBlend during the pass.
+        min_window_scatter_tokens: Fewest transferred KV tokens in a complete
+            question window, or the pass total when shorter than one window.
+            The blend-share gate requires both counts to be positive.
         min_window_reuse_ratio: The lowest ``reuse_ratio`` over consecutive
             windows of :data:`ENGAGEMENT_WINDOW` questions, leaving out
             windows that expect no reuse. Equals ``reuse_ratio`` when no
@@ -136,6 +141,8 @@ class EngagementCheck:
     gate: str = GATE_BLEND_SHARE
     reuse_ratio: float | None = None
     min_window_reuse_ratio: float | None = None
+    scatter_tokens: float = 0.0
+    min_window_scatter_tokens: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -387,7 +394,8 @@ def check_engagement(
     Uses the blend metrics captured during the candidate pass; a candidate
     run without them is reported as unmeasured, never invalidated.
 
-    Without *expected_reuse*, the gate is the blend share. With it (the
+    Without *expected_reuse*, the gate requires the blend share and positive
+    KV transfers for the pass and each complete question window. With it (the
     ``concatenated`` scenario), the gate is observed over expected reuse:
     the blend server must serve, as exact prefix or by blending, close to
     every token the plan's matcher model says it can. Reuse beyond the
@@ -426,6 +434,7 @@ def check_engagement(
     share = candidate.counters.blend_share
     windows: list[float] = []
     reuse_windows: list[float] = []
+    scatter_windows: list[float] = []
     for start in range(
         0, len(candidate.answers) - ENGAGEMENT_WINDOW + 1, ENGAGEMENT_WINDOW
     ):
@@ -433,16 +442,25 @@ def check_engagement(
         for answer in candidate.answers[start : start + ENGAGEMENT_WINDOW]:
             total = total + answer.counters
         windows.append(total.blend_share)
+        scatter_windows.append(total.scatter_tokens)
         if expected_reuse is not None:
             expected = sum(expected_reuse[start : start + ENGAGEMENT_WINDOW])
             if expected > 0:
                 reuse_windows.append(_reused_tokens(total) / expected)
     min_window = min(windows) if windows else share
+    min_scatter = (
+        min(scatter_windows) if scatter_windows else candidate.counters.scatter_tokens
+    )
 
     if expected_reuse is None:
         reuse_ratio = None
         min_window_reuse = None
-        engaged = share >= min_blend_share and min_window >= min_blend_share
+        engaged = (
+            share >= min_blend_share
+            and min_window >= min_blend_share
+            and candidate.counters.scatter_tokens > 0
+            and min_scatter > 0
+        )
     else:
         expected_total = sum(expected_reuse)
         reuse_ratio = (
@@ -469,6 +487,8 @@ def check_engagement(
         gate=gate,
         reuse_ratio=reuse_ratio,
         min_window_reuse_ratio=min_window_reuse,
+        scatter_tokens=candidate.counters.scatter_tokens,
+        min_window_scatter_tokens=min_scatter,
     )
 
 
@@ -822,6 +842,14 @@ def _invalid_reasons(
         reasons.extend(run_problems(run))
     if not engagement.engaged and engagement.gate == GATE_REUSE:
         reasons.append(_reuse_reason(engagement, min_reuse_ratio))
+    elif not engagement.engaged and (
+        engagement.blend_share >= min_blend_share
+        and engagement.min_window_share >= min_blend_share
+    ):
+        reasons.append(
+            "no CacheBlend KV transfer was observed for the pass or a question "
+            "window despite lookup hits; rerun with scatter-token metrics"
+        )
     elif not engagement.engaged:
         reason = (
             f"blend share {engagement.blend_share:.3f} (min window "
