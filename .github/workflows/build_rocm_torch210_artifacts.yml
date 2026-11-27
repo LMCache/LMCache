@@ -6,6 +6,17 @@ name: Build ROCm Torch 2.10 Artifacts
 
 on:
     workflow_call:
+        inputs:
+            dev_version:
+                description: >-
+                    Build a .devN pre-release instead of the current release
+                    version, so nightly wheels are versioned like the other
+                    nightlies (e.g.
+                    0.5.4.dev15+rocm7.2.4.torch2.10.git3d3aa833.cxx11abi1) and
+                    never collide with a published release.
+                type: boolean
+                default: false
+                required: false
         secrets:
             dockerhub_token:
                 description: DockerHub token used to avoid image pull rate limits.
@@ -70,6 +81,7 @@ jobs:
                   dockerhub_token: ${{ secrets.dockerhub_token }}
                   free_disk_space: "true"
                   resolve_version: "true"
+                  dev_version: ${{ inputs.dev_version }}
                   fallback_version: 0.0.0.dev
                   version_suffix: +${{ env.ROCM_TORCH210_LOCAL_VERSION }}
                   version_environment_variable: ROCM_TORCH210_VERSION
