@@ -3,8 +3,8 @@ S3
 
 An L2 adapter that stores KV cache objects as S3 objects using the AWS
 Common Runtime (CRT).  Works with AWS S3, S3 Express One Zone, and any
-S3-compatible endpoint (MinIO, Ceph RGW, etc.) that accepts virtual-hosted
-style requests.
+S3-compatible endpoint (for example, Backblaze B2, Ceph RGW, Cloudflare R2,
+or MinIO) that accepts virtual-hosted style requests.
 
 **Required fields:**
 
