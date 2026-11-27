@@ -8,7 +8,7 @@ import threading
 
 # First Party
 from lmcache.v1.common.attn_window import DEFAULT_ATTN_WINDOW_DESC, AttnWindowDesc
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import IPCCacheServerKey, SessionKey
 from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
@@ -93,6 +93,7 @@ def finish_lookup_read(
     key: IPCCacheServerKey,
     obj_keys: list[ObjectKey],
     l1_owners: dict[ObjectKey, int] | None = None,
+    read_owner: str = "",
 ) -> None:
     """Release a lookup's read locks on ``obj_keys``, each object group the
     count its prefetch reserved (:meth:`ShardReplicationDesc.num_kv_readers`).
@@ -102,6 +103,7 @@ def finish_lookup_read(
         key: The lookup's IPC key, naming the registration.
         obj_keys: The object keys to release.
         l1_owners: The L1 manager that holds each key, when known.
+        read_owner: Optional named read-reservation owner.
     """
     desc = ctx.layout_desc_registry.find_shard_replication_desc(
         key.model_name, key.world_size
@@ -112,9 +114,17 @@ def finish_lookup_read(
             desc.num_kv_readers(obj_key.object_group_id), []
         ).append(obj_key)
     for read_locks, group_keys in by_read_locks.items():
-        ctx.storage_manager.finish_read_prefetched(
-            group_keys, read_locks=read_locks, l1_owners=l1_owners
-        )
+        if read_owner:
+            ctx.storage_manager.finish_read_prefetched(
+                group_keys,
+                read_locks=read_locks,
+                l1_owners=l1_owners,
+                read_owner=read_owner,
+            )
+        else:
+            ctx.storage_manager.finish_read_prefetched(
+                group_keys, read_locks=read_locks, l1_owners=l1_owners
+            )
 
 
 class LayoutDescRegistry:
@@ -504,18 +514,19 @@ class MPCacheServerContext:
         """The storage manager instance."""
         return self._storage_manager
 
-    def get_read_owners(self, request_id: str) -> dict[ObjectKey, int] | None:
-        """Get the exact prefetch owners for a request, or None for legacy single L1.
+    def get_read_owners(self, session_key: SessionKey) -> dict[ObjectKey, int] | None:
+        """Get the exact prefetch owners for a request or named lookup session.
 
-        Args:
-            request_id: Request whose lookup acquired the read locks.
-
-        Raises:
-            ValueError: A multi-L1 retrieve has no live lookup session.
+        For named sessions (``tuple[str, str]``), always returns the session's
+        recorded ``l1_owners`` (or ``{}`` if the session was closed). For legacy
+        ``str`` request IDs, returns ``None`` on single-L1 setups.
         """
+        if isinstance(session_key, tuple):
+            session = self._session_manager.get(session_key)
+            return session.get_prefetch_owners() if session is not None else {}
         if not self._storage_manager.is_multi_l1:
             return None
-        session = self._session_manager.get(request_id)
+        session = self._session_manager.get(session_key)
         if session is None:
             raise ValueError("Multi-L1 retrieve requires a live prefetch session")
         return session.get_prefetch_owners()
@@ -573,7 +584,12 @@ class MPCacheServerContext:
         token_hasher = self.layout_desc_registry.get_token_hasher(
             key.model_name, key.world_size
         )
-        session = self.session_manager.get_or_create(key.request_id, token_hasher)
+        if key.lookup_id:
+            session = self.session_manager.get(key.session_key)
+            if session is None:
+                raise KeyError(f"Lookup session {key.session_key!r} is closed")
+        else:
+            session = self.session_manager.get_or_create(key.request_id, token_hasher)
         session.update_from_key(key)
         if session.lookup_ipc_key is None:
             session.lookup_ipc_key = key.no_worker_id_version()
@@ -620,7 +636,12 @@ class MPCacheServerContext:
         token_hasher = self.layout_desc_registry.get_token_hasher(
             key.model_name, key.world_size
         )
-        session = self.session_manager.get_or_create(key.request_id, token_hasher)
+        if key.lookup_id:
+            session = self.session_manager.get(key.session_key)
+            if session is None:
+                raise KeyError(f"Lookup session {key.session_key!r} is closed")
+        else:
+            session = self.session_manager.get_or_create(key.request_id, token_hasher)
         session.set_tokens(key.token_bytes)
         unfull_hash = TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(key.end))
         return [

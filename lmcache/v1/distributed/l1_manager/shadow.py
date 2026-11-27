@@ -4,6 +4,7 @@
 # Standard
 from typing import cast
 import threading
+import time
 
 # First Party
 from lmcache import torch_dev
@@ -104,7 +105,7 @@ class ShadowL1Manager(BaseL1Manager):
         evict, so the controllers of a shadow hear no key event."""
 
     def reserve_read(
-        self, keys: list[ObjectKey], read_locks: int = 1
+        self, keys: list[ObjectKey], read_locks: int = 1, read_owner: str = ""
     ) -> dict[ObjectKey, L1OperationResult]:
         """Miss every key: a shadow is never a lookup hit source. Its views
         belong to the requests that borrowed them; a new request borrows
@@ -166,6 +167,7 @@ class ShadowL1Manager(BaseL1Manager):
         keys: list[ObjectKey],
         read_locks: int = 1,
         tag: str = "",
+        read_owner: str = "",
     ) -> dict[ObjectKey, L1OperationResult]:
         """Make bound placeholders resident and read-locked.
 
@@ -178,7 +180,7 @@ class ShadowL1Manager(BaseL1Manager):
         for key in keys:
             staged = self._get_staging(key, tag)
             entry = self._objects.get(key)
-            if staged is None or entry is None:
+            if staged is None or entry is None or entry.active_reads > 0:
                 continue
             obj = cast(BorrowedMemoryObj, staged.memory_obj)
             resident = cast(BorrowedMemoryObj, entry.memory_obj)
@@ -186,7 +188,9 @@ class ShadowL1Manager(BaseL1Manager):
                 older = resident.lease
                 resident.replace_lease(obj.lease)
                 obj.replace_lease(older)
-        return super().finish_write_and_reserve_read(keys, read_locks, tag)
+        return super().finish_write_and_reserve_read(
+            keys, read_locks, tag, read_owner=read_owner
+        )
 
     def unsafe_read(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1OperationResult]:
         """Read held views; one whose lease ended is ``KEY_NOT_READABLE``."""
@@ -220,10 +224,9 @@ class ShadowL1Manager(BaseL1Manager):
         """Free the views no reader holds and the placeholders whose write
         reservation expired: their readers' or writer's TTL lapsed, so nothing
         will release them, and a shadow has no eviction to reclaim them."""
+        now = time.monotonic()
         lapsed = [
-            key
-            for key, entry in self._objects.items()
-            if not entry.read_lock.is_locked()
+            key for key, entry in self._objects.items() if not entry.is_read_locked(now)
         ]
         self._memory_manager.free([self._objects.pop(key).memory_obj for key in lapsed])
         for key in list(self._staging):

@@ -265,7 +265,16 @@ class MessageQueueClient:
                     rpc_spec = wrapped_request.rpc_spec
                     b_operation = encode_operation(rpc_spec.operation)
                     payload_classes = rpc_spec.payload_types
-                    if len(payload_classes) != len(wrapped_request.request_payloads):
+                    min_payloads = sum(
+                        1
+                        for p in rpc_spec.signature.parameters.values()
+                        if p.default is p.empty
+                    )
+                    if not (
+                        min_payloads
+                        <= len(wrapped_request.request_payloads)
+                        <= len(payload_classes)
+                    ):
                         expected_classes = [str(cls) for cls in payload_classes]
                         actual_classes = [
                             type(payload).__name__
