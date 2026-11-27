@@ -70,6 +70,9 @@ class CoordinatorQueryCommand(BaseCommand):
     def execute(self, args: argparse.Namespace) -> None:
         """Fetch the selected API and emit it.
 
+        Use the API's JSON renderer when available and ``--format json``
+        is selected, preserving values that terminal output abbreviates.
+
         Args:
             args: Parsed CLI arguments.
         """
@@ -93,5 +96,8 @@ class CoordinatorQueryCommand(BaseCommand):
             return
 
         metrics = self.create_metrics(f"Coordinator: {args.api}", args)
-        api.render(get_json(url), metrics)
+        render = api.render
+        if args.format == "json" and api.render_json is not None:
+            render = api.render_json
+        render(get_json(url), metrics)
         metrics.emit()
