@@ -117,7 +117,7 @@ class AesGcmSerializer(Serializer):
         dek = self._keys.get_key(key.cache_salt)
         iv = os.urandom(_IV_LEN)
         ciphertext = AESGCM(dek).encrypt(
-            iv, bytes(src.byte_array), _associated_data(key.identity)
+            iv, memoryview(src.byte_array).cast("B"), _associated_data(key.identity)
         )
         # Cast to native "B": MemoryObj.byte_array is a ctypes-backed memoryview
         # with format "<B", which does not support slice assignment.
@@ -167,7 +167,7 @@ class AesGcmDeserializer(Deserializer):
         """
         out = memoryview(dst.byte_array).cast("B")
         plaintext_len = len(out)
-        blob = bytes(src.byte_array)
+        blob = memoryview(src.byte_array).cast("B")
         frame_end = _HDR_LEN + plaintext_len + _TAG_LEN
         if len(blob) < frame_end or blob[0] != _VERSION:
             raise ValueError("aesgcm serde: malformed frame or unknown version")

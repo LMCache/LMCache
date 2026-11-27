@@ -54,6 +54,27 @@ class _ByteBuf:
         return bytes(self._arr)
 
 
+class _WindowBuf(_ByteBuf):
+    """Expose a contiguous window while retaining guards around its storage."""
+
+    def __init__(self, data: bytes, prefix: bytes, suffix: bytes) -> None:
+        super().__init__(prefix + data + suffix)
+        self.start = len(prefix)
+        self.stop = self.start + len(data)
+
+    @property
+    def byte_array(self) -> memoryview:
+        return super().byte_array[self.start : self.stop]
+
+
+class _ReadOnlyWindowBuf(_WindowBuf):
+    """Expose a read-only source view, as allowed for read-locked KV bytes."""
+
+    @property
+    def byte_array(self) -> memoryview:
+        return super().byte_array.toreadonly()
+
+
 def _key(cache_salt: str = "alice") -> ObjectKey:
     return ObjectKey(
         chunk_hash=b"\x11" * 32, model_name="m", kv_rank=0, cache_salt=cache_salt
@@ -290,3 +311,49 @@ def test_factory_unsupported_provider():
         create_serde_processor(
             SerdeConfig(type="aesgcm", kwargs={"key_provider": "keyring"})
         )
+
+
+@pytest.mark.parametrize("size", [0, 1, 65537])
+@pytest.mark.parametrize("key_len", [16, 32])
+def test_roundtrip_with_readonly_buffer_windows(size: int, key_len: int) -> None:
+    """Only the exposed window is transformed, including empty and padded frames."""
+    serializer, deserializer = _serde(cache_salt_key_len=key_len)
+    key = _key()
+    plaintext = bytes(i % 251 for i in range(size))
+    src = _ReadOnlyWindowBuf(plaintext, b"source-prefix", b"source-suffix")
+    frame = _WindowBuf(bytes(size + _FRAME_OVERHEAD), b"frame-prefix", b"frame-suffix")
+    source_before = src.buf
+    written = serializer.serialize(src, frame, key)  # type: ignore[arg-type]
+    assert written == size + _FRAME_OVERHEAD
+    assert src.buf == source_before
+    assert frame.buf.startswith(b"frame-prefix")
+    assert frame.buf.endswith(b"frame-suffix")
+    padded = _ReadOnlyWindowBuf(
+        bytes(frame.byte_array) + b"padding" * 9, b"load-prefix", b"load-suffix"
+    )
+    ciphertext_before = padded.buf
+    dst = _WindowBuf(b"\xee" * size, b"target-prefix", b"target-suffix")
+    deserializer.deserialize(padded, dst, key)  # type: ignore[arg-type]
+    assert bytes(dst.byte_array) == plaintext
+    assert dst.buf.startswith(b"target-prefix")
+    assert dst.buf.endswith(b"target-suffix")
+    assert padded.buf == ciphertext_before
+
+
+@pytest.mark.parametrize("tamper", ["nonce", "ciphertext", "tag", "identity"])
+def test_authentication_failure_preserves_destination(tamper: str) -> None:
+    """Unauthenticated plaintext must never overwrite the destination buffer."""
+    serializer, deserializer = _serde()
+    key = _key()
+    plaintext = b"cached-kv" * 128
+    frame = bytearray(_encrypt(serializer, plaintext, key))
+    if tamper == "identity":
+        key = ObjectKey(identity=key.identity, model_name="different-model")
+    else:
+        offset = {"nonce": 1, "ciphertext": 13, "tag": len(frame) - 1}[tamper]
+        frame[offset] ^= 1
+    dst = _WindowBuf(b"\xee" * len(plaintext), b"prefix", b"suffix")
+    before = dst.buf
+    with pytest.raises(InvalidTag):
+        deserializer.deserialize(_ByteBuf(frame), dst, key)  # type: ignore[arg-type]
+    assert dst.buf == before
