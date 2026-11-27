@@ -97,7 +97,8 @@ How the main server decides where an object lives:
   stay local.
 * From the threshold on, each newly stored batch of objects is written into
   one peer and its local copy is deleted, which keeps local usage around the
-  threshold. With several headless peers, batches rotate over them.
+  threshold. With several headless peers, batches rotate over peers whose
+  usage thresholds are met.
 * Objects are never moved after the fact: an object that stayed local stays
   local until normal eviction removes it.
 * A later request for an object that lives on a peer is served through the

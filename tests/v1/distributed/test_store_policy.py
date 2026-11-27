@@ -227,6 +227,65 @@ class TestP2PStorePolicyTargets:
 
         assert chosen == [[0], [2], [0], [2]]
 
+    @pytest.mark.parametrize(
+        ("thresholds", "expected_peers"),
+        [
+            ((0.9, 0.7, 0.75), [1, 2, 1, 2, 1, 2]),
+            ((0.7, 0.9, 0.75), [0, 2, 0, 2, 0, 2]),
+            ((0.7, 0.75, 0.9), [0, 1, 0, 1, 0, 1]),
+        ],
+    )
+    def test_peers_below_their_thresholds_do_not_block_rotation(
+        self, thresholds: tuple[float, ...], expected_peers: list[int]
+    ) -> None:
+        """Eligible peers take turns even when another peer cannot receive writes."""
+        policy = make_p2p_policy(used_bytes=800)
+        keys = [make_object_key(i) for i in range(2)]
+        adapters = [
+            make_descriptor(10),
+            make_peer_descriptor(20, write_enabled=False),
+            *[
+                make_peer_descriptor(i, threshold=threshold)
+                for i, threshold in enumerate(thresholds)
+            ],
+        ]
+
+        for peer in expected_peers:
+            assert policy.select_store_targets(keys, adapters) == {10: keys, peer: keys}
+
+    def test_rotation_resumes_when_a_peer_becomes_eligible(self) -> None:
+        """A call with no eligible peer does not prevent later stores."""
+        policy = make_p2p_policy(used_bytes=800)
+        keys = [make_object_key(0)]
+        adapters = [
+            make_descriptor(10),
+            make_peer_descriptor(0, threshold=0.9),
+            make_peer_descriptor(1, threshold=0.95),
+        ]
+
+        assert policy.select_store_targets(keys, adapters) == {10: keys}
+        assert policy.select_store_targets(keys, adapters) == {10: keys}
+
+        adapters[2] = make_peer_descriptor(1, threshold=0.7)
+        assert policy.select_store_targets(keys, adapters) == {10: keys, 1: keys}
+
+    def test_rotation_handles_peer_membership_changes(self) -> None:
+        """Stores use the current descriptors after peers join or leave."""
+        policy = make_p2p_policy(used_bytes=800)
+        keys = [make_object_key(0)]
+        peer0 = make_peer_descriptor(0)
+        peer1 = make_peer_descriptor(1)
+        blocked_peer = make_peer_descriptor(2, threshold=0.9)
+        peer3 = make_peer_descriptor(3)
+
+        assert policy.select_store_targets(keys, [peer0, peer1]) == {0: keys}
+        assert policy.select_store_targets(keys, [peer0, blocked_peer, peer3]) == {
+            3: keys
+        }
+        assert policy.select_store_targets(keys, [peer3]) == {3: keys}
+        assert policy.select_store_targets(keys, []) == {}
+        assert policy.select_store_targets(keys, [blocked_peer, peer1]) == {1: keys}
+
     def test_without_a_local_dram_l1_no_peer_is_chosen(self):
         """Only the local DRAM L1 is transferable to a peer."""
         policy = make_p2p_policy(used_bytes=1000, tags=_LOCAL_CXL)
