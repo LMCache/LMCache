@@ -8,7 +8,7 @@ steps:
     matrix:
       setup:
         request_transport:
-          - "zmq"
+          - "grpc"
     env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
     command: |
       set -euo pipefail

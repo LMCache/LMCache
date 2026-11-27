@@ -38,15 +38,15 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _send_lookup,
 )
 from lmcache.v1.client.transport.factory import RequestClientFactory
-from lmcache.v1.common.token_codec import unpack_token_ids
-from lmcache.v1.kv_layer_groups import (
+from lmcache.v1.common.kv_layer_groups import (
     DTYPE_MAP,
     KVLayerGroupInfo,
     parse_kvcache_shape_spec,
 )
-from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
+from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.transport.futures import MessagingFuture
+from lmcache.v1.transport.request_client import RequestClient
 from lmcache.v1.transport.zmq.wire import decode_operation
 
 
@@ -418,7 +418,7 @@ class TestCommandArguments:
         parser: argparse.ArgumentParser,
     ) -> None:
         args = parser.parse_args(["bench", "server"])
-        assert args.rpc_url == "tcp://localhost:5555"
+        assert args.rpc_url == "grpc://localhost:5555"
         assert args.mode == "gpu"
         assert args.num_tokens == 512
         assert args.num_blocks == 1024
@@ -721,7 +721,7 @@ class TestAllocateKVCache:
         wrong tensors for layers in later groups.
         """
         # First Party
-        from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
+        from lmcache.v1.common.kv_layer_groups import KVLayerGroupInfo
 
         # Group A: 3 layers of (2, 2, 2, 8, 16), float16
         # Group B: 2 layers of (1, 2, 2, 4, 32), bfloat16
@@ -891,7 +891,7 @@ class TestAllocShapeContract:
 
     def test_mla_alloc_shape_is_rank3(self) -> None:
         # First Party
-        from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
+        from lmcache.v1.common.kv_layer_groups import KVLayerGroupInfo
 
         group = KVLayerGroupInfo(
             layer_indices=[0, 1],
@@ -915,7 +915,7 @@ class TestAllocShapeContract:
 
     def test_classical_alloc_shape_is_rank5(self) -> None:
         # First Party
-        from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
+        from lmcache.v1.common.kv_layer_groups import KVLayerGroupInfo
 
         group = KVLayerGroupInfo(
             layer_indices=[0],

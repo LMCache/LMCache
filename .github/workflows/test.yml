@@ -2,12 +2,23 @@ name: Test
 
 on:
   workflow_call:
+    inputs:
+      python_versions:
+        description: >-
+          JSON array of Python versions for the CPU unit tests, e.g.
+          '["3.12", "3.14"]'. Empty keeps the default: 3.12 on draft PRs,
+          every supported version otherwise.
+        type: string
+        default: ""
+      force_rust:
+        description: >-
+          Run the Rust raw-block jobs even when no raw-block path changed
+          (the PR author ticked `rust` in the CI scope checklist).
+        type: boolean
+        default: false
   workflow_dispatch:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches:
-      - "dev"
-      - "release-**"
+  # PR runs are started by code_quality_checks.yml: on drafts directly, and
+  # after pre-commit once the PR is ready for review.
 
 env:
   LC_ALL: en_US.UTF-8
@@ -27,17 +38,36 @@ permissions:
 
 jobs:
   changes:
-    if: github.event.pull_request.draft != true
     name: Detect changes
     runs-on: ubuntu-24.04
     permissions:
       pull-requests: read
     outputs:
       lmcache: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.lmcache == 'true' }}
-      raw_block: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.raw_block == 'true' }}
+      raw_block: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || inputs.force_rust == true || steps.filter.outputs.raw_block == 'true' }}
       hf3fs_native: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' || steps.filter.outputs.hf3fs_native == 'true' }}
       token_drop: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.token_drop == 'true' }}
+      python_versions: ${{ steps.python.outputs.versions }}
     steps:
+      # Draft PR pushes run one representative Python; ready-for-review PRs
+      # pass the versions their author picked. Push, release and dispatch
+      # runs cover every version. Inside a reusable workflow, github.event is
+      # the caller's event.
+      - name: Select Python versions
+        id: python
+        env:
+          SELECTED: ${{ inputs.python_versions }}
+          DRAFT: ${{ github.event.pull_request.draft == true }}
+        run: |
+          if [[ -n "$SELECTED" ]]; then
+            versions=$SELECTED
+          elif [[ "$DRAFT" == "true" ]]; then
+            versions='["3.12"]'
+          else
+            versions='["3.11", "3.12", "3.13", "3.14"]'
+          fi
+          echo "versions=$versions" | tee -a "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         if: github.event_name == 'push'
         with:
@@ -50,17 +80,19 @@ jobs:
           filters: |
             lmcache:
               - '**.py'
+              - '.github/deprecated-modules.toml'
               - 'pyproject.toml'
               - 'requirements/**.txt'
               - '.github/workflows/test.yml'
+              - '.github/scripts/pr-ci-scope.sh'
               - '!operator/**'
             raw_block:
               - 'rust/raw_block/**'
               - 'lmcache/v1/distributed/l2_adapters/raw_block/**'
               - 'lmcache/v1/distributed/l2_adapters/raw_block_l2_adapter.py'
               - 'lmcache/v1/multiprocess/**'
-              - 'tests/v1/distributed/raw_block/test_*.py'
-              - 'tests/v1/distributed/raw_block/test_utils.py'
+              - 'tests/v1/distributed/raw_block/**'
+              - 'tests/v1/distributed/test_raw_block_l2_adapter.py'
               - 'tests/v1/multiprocess/test_raw_block_l2_adapter.py'
               - '.github/workflows/test.yml'
             hf3fs_native:
@@ -84,11 +116,7 @@ jobs:
     runs-on: "${{ matrix.platform }}"
     strategy:
       matrix:
-        python:
-          - "3.11"
-          - "3.12"
-          - "3.13"
-          - "3.14"
+        python: ${{ fromJSON(needs.changes.outputs.python_versions) }}
         platform:
           - "ubuntu-24.04"
 
@@ -138,7 +166,7 @@ jobs:
 
   hf3fs-native-tests:
     needs: changes
-    if: needs.changes.outputs.hf3fs_native == 'true'
+    if: needs.changes.outputs.hf3fs_native == 'true' && github.event.pull_request.draft != true
     name: HF3FS connector native tests
     runs-on: ubuntu-24.04
 
@@ -160,7 +188,7 @@ jobs:
 
   token-drop-vllm-0251:
     needs: changes
-    if: needs.changes.outputs.token_drop == 'true'
+    if: needs.changes.outputs.token_drop == 'true' && github.event.pull_request.draft != true
     name: "Token-dropping tests (vLLM 0.25.1)"
     runs-on: ubuntu-24.04
     steps:
@@ -215,7 +243,7 @@ jobs:
 
   rust-unit-tests:
     needs: changes
-    if: needs.changes.outputs.raw_block == 'true'
+    if: needs.changes.outputs.raw_block == 'true' && github.event.pull_request.draft != true
     name: Rust unit tests
     runs-on: ubuntu-24.04
 
@@ -241,7 +269,7 @@ jobs:
 
   raw-block-tests:
     needs: changes
-    if: needs.changes.outputs.raw_block == 'true'
+    if: needs.changes.outputs.raw_block == 'true' && github.event.pull_request.draft != true
     name: raw-block temp-file tests
     runs-on: ubuntu-24.04
     env:
@@ -287,14 +315,14 @@ jobs:
 
       - name: Run raw-block tests
         run: |
-          pytest -q --basetemp=.pytest-tmp/raw-block \
-            tests/v1/distributed/raw_block/test_device.py \
-            tests/v1/distributed/raw_block/test_core.py \
+          python -m pytest -q --basetemp=.pytest-tmp/raw-block \
+            tests/v1/distributed/raw_block/ \
+            tests/v1/distributed/test_raw_block_l2_adapter.py \
             tests/v1/multiprocess/test_raw_block_l2_adapter.py
 
   grpc-native-tests:
     needs: changes
-    if: needs.changes.outputs.lmcache == 'true'
+    if: needs.changes.outputs.lmcache == 'true' && github.event.pull_request.draft != true
     name: gRPC native server tests
     runs-on: ubuntu-latest
     env:
@@ -330,6 +358,7 @@ jobs:
       - name: Run native, shared transport, real server and liveness tests
         run: |
           pytest -q tests/v1/multiprocess/test_grpc_native_server.py \
+            tests/v1/distributed/test_p2p.py \
             tests/v1/multiprocess/test_grpc_transport.py \
             tests/v1/multiprocess/test_grpc_real_server.py \
             tests/v1/multiprocess/test_worker_liveness.py

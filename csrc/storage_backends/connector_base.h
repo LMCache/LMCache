@@ -38,7 +38,8 @@ class:
 - 4. do_single_exists()
 
 optionally override do_single_delete() to support eviction (default returns
-false for all keys).
+false for all keys), or do_single_delete_result() when the backend can tell
+an absent key from a failed delete.
 
 see the RedisConnector (csrc/redis/) implementing the RESP2 protocol over TCP
 for an example
@@ -163,7 +164,7 @@ class ConnectorBase : public IStorageConnector {
     auto [batch_future_id, batch_state, num_tiles] =
         prepare_batch_operation(num_items, Op::BATCH_TILE_DELETE);
 
-    // pre-allocate per-key results (1 = deleted, 0 = not found)
+    // pre-allocate per-key results (DeleteResult, default NOT_DELETED)
     batch_state->per_key_results.assign(num_items, 0);
 
     // fan out work to threads
@@ -308,6 +309,14 @@ class ConnectorBase : public IStorageConnector {
     (void)key;
     return false;  // no-op default for backward compat with plugins
   }
+  // A false from do_single_delete() may be an error, so it maps to
+  // NOT_DELETED and the key stays tracked; only an override can report
+  // NOT_FOUND.
+  virtual DeleteResult do_single_delete_result(ConnectionType& conn,
+                                               const std::string& key) {
+    return do_single_delete(conn, key) ? DeleteResult::DELETED
+                                       : DeleteResult::NOT_DELETED;
+  }
   virtual size_t choose_num_tiles(Op op, size_t num_items) const {
     return std::min<size_t>(worker_count_for_op(op), num_items);
   }
@@ -339,10 +348,11 @@ class ConnectorBase : public IStorageConnector {
   virtual void do_batch_delete(ConnectionType& conn, const Request& req) {
     for (size_t i = 0; i < req.keys.size(); ++i) {
       try {
-        bool deleted = do_single_delete(conn, req.keys[i]);
-        req.batch->per_key_results[req.start_idx + i] = deleted ? 1 : 0;
+        req.batch->per_key_results[req.start_idx + i] =
+            static_cast<uint8_t>(do_single_delete_result(conn, req.keys[i]));
       } catch (const std::exception& e) {
-        req.batch->per_key_results[req.start_idx + i] = 0;
+        req.batch->per_key_results[req.start_idx + i] =
+            static_cast<uint8_t>(DeleteResult::NOT_DELETED);
         fprintf(stderr, "[LMCache DELETE] key %s failed: %s\n",
                 req.keys[i].c_str(), e.what());
       }
@@ -360,6 +370,26 @@ class ConnectorBase : public IStorageConnector {
       return it->second;
     }
     return num_workers_;
+  }
+
+  // Helpers for derived connectors that complete batches outside workers_.
+  void validate_batch_inputs(const std::vector<std::string>& keys,
+                             const std::vector<void*>& bufs,
+                             const std::vector<size_t>& lens) {
+    if (keys.size() != bufs.size() || keys.size() != lens.size()) {
+      throw std::runtime_error("keys, bufs, and lens size mismatch");
+    }
+    if (keys.empty()) {
+      throw std::runtime_error("keys list is empty");
+    }
+  }
+
+  void push_completion(Completion&& c) {
+    {
+      std::lock_guard<std::mutex> lk(comp_mu_);
+      completions_.push(std::move(c));
+    }
+    signal_eventfd_();
   }
 
  private:
@@ -385,17 +415,6 @@ class ConnectorBase : public IStorageConnector {
     size_t start = tile_idx * base_tile_size + std::min(tile_idx, larger_tiles);
     size_t tile_size = base_tile_size + (tile_idx < larger_tiles ? 1 : 0);
     return {start, start + tile_size};
-  }
-
-  void validate_batch_inputs(const std::vector<std::string>& keys,
-                             const std::vector<void*>& bufs,
-                             const std::vector<size_t>& lens) {
-    if (keys.size() != bufs.size() || keys.size() != lens.size()) {
-      throw std::runtime_error("keys, bufs, and lens size mismatch");
-    }
-    if (keys.empty()) {
-      throw std::runtime_error("keys list is empty");
-    }
   }
 
   // returns: (batch_future_id, batch_state, num_tiles)
@@ -459,14 +478,6 @@ class ConnectorBase : public IStorageConnector {
       requests_.push(std::move(req));
     }
     req_cv_.notify_one();
-  }
-
-  void push_completion(Completion&& c) {
-    {
-      std::lock_guard<std::mutex> lk(comp_mu_);
-      completions_.push(std::move(c));
-    }
-    signal_eventfd_();
   }
 
   void drain_eventfd_() { notifier_->consume(); }

@@ -6,7 +6,6 @@ This document describes the current test layout under `tests/` and the baseline 
 
 Top-level test areas:
 
-- `tests/benchmarks/`: shared benchmark validation and native-kernel microbenchmarks.
 - `tests/cli/`: tests for CLI commands and user-facing CLI behavior.
 - `tests/lmcache_frontend/`: frontend integration tests.
 - `tests/native/`: native C++ tests that build without the Python extension; `tests/native/storage_backends/hf3fs/run_tests.py` runs the HF3FS connector against an SDK double.
@@ -15,6 +14,7 @@ Top-level test areas:
 - `tests/v1/`: core v1 unit and integration-style tests (multiprocess, distributed, platform, gpu_connector, etc.); representative v1 sub-areas include:
 - Top-level files like `tests/test_*.py`: cross-cutting tests (utils, serde, telemetry, observability, and similar).
 
+- `tests/v1/inprocess_contract/`: contracts for APIs still shipped by LMCache and used by the external in-process engine. Run with `pytest -q tests/v1/inprocess_contract/`. Device-specific and shared layout tests also live with their implementations.
 - `tests/v1/platform/`: platform abstraction and device-specific behavior tests.
 - `tests/v1/multiprocess/`: multiprocess runtime behavior, IPC primitives, engine-driven transfer, and process-interaction scenarios.
 - `tests/v1/mp_coordinator/`: coordinator lifecycle, worker orchestration, and MP control-plane coordination checks.

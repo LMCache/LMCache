@@ -119,7 +119,7 @@ def _round_trip(
         [module, lookup], MPServerConfig(host="127.0.0.1", port=port)
     )
     server.start()
-    client = RequestClientFactory.create(f"tcp://127.0.0.1:{port}")
+    client = RequestClientFactory.create(f"grpc://127.0.0.1:{port}")
     worker = EngineDrivenTransferContext(1, client)
     destination = {name: torch.zeros_like(t) for name, t in source.items()}
     key = IPCCacheServerKey.from_token_ids(

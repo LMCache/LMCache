@@ -17,8 +17,6 @@ from lmcache.v1.client.async_engine_driven import (
 )
 from lmcache.v1.platform.devices.mlu import MluDeviceSpec
 
-pytestmark = pytest.mark.no_shared_allocator
-
 
 @pytest.mark.parametrize("shm", [False, True])
 def test_async_store_flush_and_close_on_mlu(

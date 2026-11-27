@@ -9,6 +9,8 @@ interfaces of ``lmcache_mp_connector``.
 """
 
 # Standard
+from array import array
+from collections.abc import Sequence
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -22,7 +24,7 @@ pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
     KVConnectorRole,
 )
-from vllm.v1.request import RequestStatus  # noqa: E402
+from vllm.v1.request import Request, RequestStatus  # noqa: E402
 from vllm.v1.utils import ConstantList  # noqa: E402
 
 # First Party
@@ -41,7 +43,6 @@ from lmcache.v1.common.token_codec import (  # noqa: E402
 )
 
 IMAGE_PLACEHOLDER_ID = 99
-pytestmark = pytest.mark.no_shared_allocator
 
 
 @dataclass
@@ -67,7 +68,7 @@ class _FakeRequest:
 
     def __init__(
         self,
-        prompt_token_ids: list[int],
+        prompt_token_ids: Sequence[int],
         mm_features: list[_FakeMMFeature] | None = None,
         cache_salt: str = "",
         sampling_params_extra_args: dict[str, object] | None = None,
@@ -77,10 +78,11 @@ class _FakeRequest:
         self.status = RequestStatus.WAITING
         self.cache_salt = cache_salt
         self.lora_request = None
-        self.prompt_token_ids = list(prompt_token_ids)
+        self.prompt_token_ids: Sequence[int] = list(prompt_token_ids)
         self.num_prompt_tokens = len(prompt_token_ids)
         self._live_token_ids = list(prompt_token_ids)
         self.all_token_ids = ConstantList(self._live_token_ids)
+        self.prefill_token_ids: Sequence[int] = self._live_token_ids
         self.mm_features = mm_features or []
         self.sampling_params = _FakeSamplingParams(
             extra_args=sampling_params_extra_args
@@ -106,15 +108,93 @@ def _make_mm_request(
 def test_text_only_request_uses_raw_token_ids():
     prompt = list(range(100, 108))
     tracker = LMCacheMPRequestTracker(_FakeRequest(prompt))
-    assert tracker.get_token_ids() == prompt
+    assert tracker.get_token_ids(0, len(prompt)) == prompt
 
 
 def test_text_only_request_returns_mutable_copy():
     prompt = list(range(100, 108))
     tracker = LMCacheMPRequestTracker(_FakeRequest(prompt))
-    token_ids = tracker.get_token_ids()
+    token_ids = tracker.get_token_ids(0, len(prompt))
     token_ids[0] = -1
-    assert tracker.get_token_ids() == prompt
+    assert tracker.get_token_ids(0, len(prompt)) == prompt
+
+
+def test_array_backed_all_tokens_pack_with_a_decode_tail():
+    prompt = list(range(100, 108))
+    request = _FakeRequest(prompt)
+    tracker = LMCacheMPRequestTracker(request)
+    request.append_decode_token(500)
+    request.prefill_token_ids = array("i", [*prompt, 500])
+
+    assert unpack_token_ids(tracker.packed_token_ids()) == [*prompt, 500]
+
+
+def test_real_vllm_prefill_token_ids_uses_int32_buffer():
+    """The optimized vLLM token source qualifies for bulk packing."""
+    if not hasattr(Request, "prefill_token_ids"):
+        pytest.skip("vLLM does not expose prefill_token_ids")
+
+    # Third Party
+    from vllm import SamplingParams
+
+    request = Request(
+        request_id="request",
+        prompt_token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+    )
+    token_ids = request.prefill_token_ids
+
+    assert not isinstance(token_ids, list)
+    assert isinstance(token_ids, array)
+    assert token_ids.typecode == "i"
+    assert token_ids.itemsize == 4
+
+
+def test_real_vllm_request_packs_tokens_after_streaming_session_update() -> None:
+    """Pack live streaming-request tokens across vLLM scheduler versions."""
+    if not hasattr(Request, "prefill_token_ids"):
+        pytest.skip("vLLM does not expose prefill_token_ids")
+
+    # Third Party
+    from vllm import SamplingParams
+    from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.request import StreamingUpdate
+
+    session = Request(
+        request_id="session",
+        prompt_token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=4),
+        pooling_params=None,
+        resumable=True,
+    )
+    tracker = LMCacheMPRequestTracker(session)
+    assert unpack_token_ids(tracker.packed_token_ids()) == [1, 2, 3]
+
+    session.append_output_token_ids([10, 11])
+    session.num_computed_tokens = 4
+    assert unpack_token_ids(tracker.packed_token_ids()) == [1, 2, 3, 10, 11]
+
+    update = StreamingUpdate(
+        mm_features=None,
+        prompt_token_ids=[4, 5],
+        max_tokens=4,
+        arrival_time=1.0,
+        sampling_params=SamplingParams(max_tokens=4),
+    )
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.hash_block_size = 16
+    scheduler.log_stats = False
+    scheduler.collect_stats = False
+    scheduler.queued_workload_tally = None
+    scheduler.num_waiting_for_streaming_input = 0
+    scheduler.num_sampled_tokens_per_step = 1
+    scheduler.max_model_len = 128
+    scheduler._update_request_as_session(session, update)
+
+    expected = list(session.all_token_ids)
+    assert list(session.prefill_token_ids) == expected
+    assert unpack_token_ids(tracker.packed_token_ids()) == expected
 
 
 def test_mm_request_overwrites_placeholder_span():
@@ -123,7 +203,7 @@ def test_mm_request_overwrites_placeholder_span():
         _make_mm_request(prompt, identifier="0xabcd", offset=2, length=3)
     )
     v = list(mm_hash_to_token_values("0xabcd", 3))
-    assert tracker.get_token_ids() == [1, 2, *v, 3, 4, 5]
+    assert tracker.get_token_ids(0, len(prompt)) == [1, 2, *v, 3, 4, 5]
 
 
 def test_different_images_produce_different_key_tokens():
@@ -134,7 +214,9 @@ def test_different_images_produce_different_key_tokens():
     tracker_b = LMCacheMPRequestTracker(
         _make_mm_request(prompt, identifier="0xbbbb", offset=2, length=3)
     )
-    assert tracker_a.get_token_ids() != tracker_b.get_token_ids()
+    assert tracker_a.get_token_ids(0, len(prompt)) != tracker_b.get_token_ids(
+        0, len(prompt)
+    )
 
 
 def test_decode_tokens_appended_unchanged():
@@ -144,7 +226,14 @@ def test_decode_tokens_appended_unchanged():
     request.append_decode_token(500)
     request.append_decode_token(501)
     v = list(mm_hash_to_token_values("0xabcd", 2))
-    assert tracker.get_token_ids() == [1, 2, *v, 3, 500, 501]
+    assert tracker.get_token_ids(0, len(request.all_token_ids)) == [
+        1,
+        2,
+        *v,
+        3,
+        500,
+        501,
+    ]
 
 
 def test_tracker_extracts_request_configs():
@@ -457,7 +546,9 @@ def test_store_metadata_ignores_scratch_groups():
 
 def test_packed_token_ids_matches_one_shot_for_a_multimodal_request():
     prompt = [1, 2] + [IMAGE_PLACEHOLDER_ID] * 3 + [3, 4, 5]
-    tracker = LMCacheMPRequestTracker(
-        _make_mm_request(prompt, identifier="0xabcd", offset=2, length=3)
+    request = _make_mm_request(prompt, identifier="0xabcd", offset=2, length=3)
+    request.prompt_token_ids = array("i", prompt)
+    tracker = LMCacheMPRequestTracker(request)
+    assert unpack_token_ids(tracker.packed_token_ids()) == tracker.get_token_ids(
+        0, len(tracker.all_token_ids)
     )
-    assert unpack_token_ids(tracker.packed_token_ids()) == tracker.get_token_ids()

@@ -94,7 +94,8 @@ queue when, for every L1 manager that receives loads from a non-draining L2
 adapter, both conditions hold:
 
 ```
-(1) staging_bytes + lookup_bytes < inflight_watermark * total_bytes
+(1) staging_bytes + lookup_bytes + prefetch_locked_bytes + request_bytes
+        <= inflight_watermark * total_bytes
 (2) total_bytes - used_bytes - lookup_bytes >= request_bytes
 ```
 
@@ -107,21 +108,36 @@ adapter, both conditions hold:
 - `request_bytes` is the same worst case for the head request.
 - `used_bytes, total_bytes` come from `get_memory_usage()`, the same numbers
   eviction uses (the total is the grown heap on the lazy tier).
-- With no request in flight the head request is admitted regardless, so a
-  request that can never fit does not block the queue; its reservations then
-  fail per cell as before (`l1_oom`).
+- `prefetch_locked_bytes` is `get_prefetch_locked_bytes()`: objects this
+  controller read-locked for a request that has not consumed them yet, both L1
+  hits and loads from L2 (`track_prefetch_locked`). An object leaves the count
+  when its last reader finishes or it leaves L1; a read lock that expires (read
+  TTL) is dropped at the next check. Read locks the store path takes while
+  writing to L2 are not counted: they are short-lived and belong to no waiting
+  request.
+- With no request in flight and no prefetch-locked bytes, the head request is
+  admitted regardless, so a request that can never fit does not block the
+  queue; its reservations then fail per cell as before (`l1_oom`).
 
-Condition (1) bounds how much of L1 prefetch may occupy; condition (2) keeps a
-request from starting when L1, full of resident data, could not hold its loads.
+Condition (1) bounds everything prefetch holds for requests that have not run
+yet. Prefetch-locked bytes must count: an engine looks up its whole waiting
+queue at once, so without them a burst fills L1 with locked data for requests
+minutes from running, and later prefetches fail. Condition (2) keeps a request from
+starting when L1, full of resident data, could not hold its loads.
+
+**Priority.** `PrefetchPriority.HIGH` (the CacheBlend sparse leg after its
+prefix leg) waits in its own queue, and no `NORMAL` request starts while one
+waits. It passes the same checks; its prefix leg was charged at the worst case
+of the whole prompt, so it fits once in-flight lookups settle.
 
 The check runs at the end of every loop iteration, so a completed load (which
 wakes the loop) admits the next requests immediately. Staging held only by
 stores is re-checked at the poll timeout (500 ms) at the latest.
 
 Example: a 16 GiB L1 with the default 0.5 watermark (an 8 GiB budget) and
-requests of 288 MiB (2048 tokens of Qwen3-8B KV). 28 requests stage 7.9 GiB,
-still under the budget, so a 29th starts: 29 requests run at once, where the
-old fixed limit was 8.
+requests of 288 MiB (2048 tokens of Qwen3-8B KV). 28 requests hold 7.9 GiB, so
+a 29th waits: 28 are loading or loaded-but-unconsumed at once, where the old
+fixed limit was 8.
 
 ## Flow
 
@@ -146,7 +162,10 @@ afterwards.
 4. **Reserve** (`_transition_to_load_phase`). For each L2 adapter in the plan,
    `reserve_write` staging buffers in its affinity L1 manager under a
    per-request write tag, with retention decided per key by
-   `policy.plan_l1_retention` (every key is retained under `NO_LOCK`).
+   `policy.plan_l1_retention` (every key is retained under `NO_LOCK`). For an
+   L1 the request may read, it passes `allow_resident=True`, so a key another
+   request landed since the lookup is staged anyway and admission read-locks
+   the resident copy.
    Reservation failure is **per cell**: `L2_PREFETCH_FAILED` is published with
    reason `l1_oom` or `l1_contended`, the affected L2 locks are returned, and
    the request is re-planned on what was reserved. Staging buffers the replan
@@ -253,9 +272,15 @@ Gauges: `lmcache_mp.num_inflight_l2_loads`,
 - **L2 recency skips L1-only requests.** Adapters that refresh LRU recency on
   lookup (S3, Valkey, Bigtable, HF bucket, SageMaker HyperPod) do not see a
   request L1 alone serves, so a chunk hot in L1 can age out of L2 first.
-- **Write conflicts are misses.** A key that becomes resident between the
-  lookup and the reserve step fails reservation (`l1_contended`) and is
-  reported as a miss; the engine recomputes and re-stores it.
+- **Write conflicts cost a redundant load.** A key that becomes resident in a
+  readable L1 between the lookup and the reserve step is staged and loaded
+  anyway, and admission keeps the resident copy. `l1_contended` reports a key
+  resident in an affinity L1 the request may not read.
+- **`NO_LOCK` can be served a temporary object.** `NO_LOCK` retains every
+  key it loads, but admission of a key that landed meanwhile keeps the
+  resident object as it is. If another request loaded that object as
+  temporary, the cell is reported as a hit, but the object is freed when its
+  last reader releases it, so a warm prefetch can leave the key out of L1.
 - **Uniform rows.** Every key group has the same number of keys.
 
 ## Contract-anchoring tests
@@ -265,10 +290,11 @@ with a real `DramL1Manager` and `MockL2Adapter`:
 
 - `TestL1AndL2` — an L1 suffix extends an L2 prefix into one hit; resident
   keys are not reloaded; L1 hits outside the prefix are released.
-- `TestReservationFailures` — an out-of-memory or contended cell drops its L2
-  lock and the request replans (`"prefix"` shortens the hit, `"full"` keeps
-  the other cells, `"whole_chunk"` keeps only the columns every row
-  reserved); an L1 hit survives a racing evictor.
+- `TestReservationFailures` — an out-of-memory cell drops its L2 lock and the
+  request replans (`"prefix"` shortens the hit, `"full"` keeps the other
+  cells, `"whole_chunk"` keeps only the columns every row reserved); a key
+  another writer admits after the lock pass is still served under both
+  `"prefix"` and `"full"`; an L1 hit survives a racing evictor.
 - `TestLockModeAndRetention` — `NO_LOCK` releases every L1 lock at finish and
   leaves loaded objects permanent; `"skip_l1"` deletes loaded keys after the
   retrieve, `"default"` keeps them.

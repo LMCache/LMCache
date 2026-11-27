@@ -27,6 +27,7 @@ from lmcache.v1.distributed.api import (
     PrefetchResult,
     ShardReplicationDesc,
 )
+from lmcache.v1.multiprocess.cache_control.key_resolver import MAX_KEYS_PER_REQUEST
 from lmcache.v1.multiprocess.cache_control.object_service import MAX_DELETE_BATCH
 from lmcache.v1.multiprocess.http_apis.cache_api import router as cache_router
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
@@ -461,6 +462,9 @@ class _FakeLayoutRegistry:
             raise ValueError(f"no shard replication descriptor for {model_name!r}")
         return ShardReplicationDesc()
 
+    def get_token_hasher(self, model_name: str, world_size: int) -> "_FakeTokenHasher":
+        return _FakeTokenHasher()
+
 
 class _PrefetchHandle:
     def __init__(self, total: int) -> None:
@@ -522,6 +526,19 @@ def _ctx(layout: Optional[object]) -> _FakeContext:
         layout_desc_registry=_FakeLayoutRegistry(layout=layout),
         storage_manager=_PrefetchStorageManager(),
     )
+
+
+def encoded_key_json(key: ObjectKey) -> dict:
+    """A key's JSON wire form."""
+    encoded = key.to_encoded_object_key()
+    return {
+        "chunk_hash_hex": encoded.chunk_hash_hex,
+        "model_name": encoded.model_name,
+        "kv_rank": encoded.kv_rank,
+        "object_group_id": encoded.object_group_id,
+        "cache_salt": encoded.cache_salt,
+        "tags": dict(encoded.tags),
+    }
 
 
 def _prefetch_body(
@@ -593,6 +610,49 @@ class TestPrefetchEndpoint:
         assert body["found_keys"] == 4
         assert body["total_keys"] == 4
         assert client.get(f"/cache/prefetches/{rid}").status_code == 404
+
+    def test_submit_by_keys_warms_the_named_chunk(self):
+        ctx = _ctx(layout=object())
+        client = TestClient(_make_prefetch_app(ctx))
+        key = ObjectKey(
+            chunk_hash=(1).to_bytes(4, "big"),
+            model_name="m",
+            kv_rank=ObjectKey.ComputeKVRank(2, 0, 2, 0),
+            cache_salt="alice",
+        )
+        resp = client.post(
+            "/cache/prefetches",
+            json={"keys": [encoded_key_json(key)]},
+        )
+        assert resp.status_code == 202, resp.text
+        assert resp.json()["chunks"] == 1
+        assert ("m", 2) in ctx.layout_desc_registry.lookup_calls
+        assert {
+            key.chunk_hash for key in ctx.storage_manager.submit_calls[0]["keys"]
+        } == {(1).to_bytes(4, "big")}
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param({"cache_salt": "alice"}, id="neither-form"),
+            pytest.param(
+                {"model_name": "m", "token_ids": [1, 2, 3, 4]},
+                id="tokens-without-world-size",
+            ),
+            pytest.param("both-forms", id="both-forms"),
+            pytest.param("too-many-keys", id="too-many-keys"),
+        ],
+    )
+    def test_rejects_request_without_exactly_one_form(self, body):
+        """Exactly one of keys / token_ids; the tokens form needs a world
+        size, and the keys form is capped."""
+        client = TestClient(_make_prefetch_app(_ctx(layout=object())))
+        key = encoded_key_json(ObjectKey(chunk_hash=b"\x01", model_name="m", kv_rank=0))
+        if body == "both-forms":
+            body = {**_prefetch_body([1, 2, 3, 4]), "keys": [key]}
+        elif body == "too-many-keys":
+            body = {"keys": [key] * (MAX_KEYS_PER_REQUEST + 1)}
+        assert client.post("/cache/prefetches", json=body).status_code == 422
 
     def test_status_unknown_request_id_404(self):
         client = TestClient(_make_prefetch_app(_ctx(layout=object())))

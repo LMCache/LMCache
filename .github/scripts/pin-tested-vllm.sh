@@ -16,7 +16,7 @@
 # Callers that run the script only on success should set
 #   PIN_VLLM_STATUS=tested.
 # Callers that record a failure MUST also set PIN_VLLM_REASON and
-#   PIN_VLLM_STATUS=failed so the CSV row carries a human-readable
+#   PIN_VLLM_STATUS=failed so the history record carries a human-readable
 #   reason field. A failure row does not need a version: when the caller
 #   runs on a machine without vllm installed, VLLM_VERSION degrades to
 #   "unknown" instead of aborting the run.
@@ -129,7 +129,7 @@ if [[ "${VLLM_SHORT_SHA}" == "${VLLM_VERSION}" \
     VLLM_SHORT_SHA=""
 fi
 
-VLLM_FULL_SHA=""
+VLLM_FULL_SHA="${VLLM_SOURCE_SHA:-}"
 if [[ -n "${VLLM_SHORT_SHA}" ]]; then
     gh_auth_args=()
     if [[ -n "${GITHUB_TOKEN:-}" ]]; then
@@ -152,13 +152,13 @@ if [[ -n "${VLLM_SHORT_SHA}" ]]; then
     done
 fi
 
-if [[ -n "${VLLM_FULL_SHA}" ]]; then
-    VLLM_ARCHIVE_INDEX="https://wheels.vllm.ai/${VLLM_FULL_SHA}/cu130"
+if [[ -n "${VLLM_FULL_SHA}" && "${PIN_BACKEND}" == "cuda" ]]; then
+    VLLM_ARCHIVE_INDEX="https://wheels.vllm.ai/${VLLM_FULL_SHA}/${VLLM_CUDA_VARIANT:-cu130}"
     echo "Resolved full SHA: ${VLLM_FULL_SHA}"
     echo "Archive index:     ${VLLM_ARCHIVE_INDEX}"
 else
     VLLM_ARCHIVE_INDEX=""
-    if [[ "${PIN_INSTALLATION_FORM}" == "wheel" ]]; then
+    if [[ "${PIN_INSTALLATION_FORM}" == "wheel" && -z "${VLLM_FULL_SHA}" ]]; then
         echo "[WARN] could not resolve full SHA for short SHA" \
              "'${VLLM_SHORT_SHA:-<none>}'; archive_index_url will be empty" \
              "and consumers will fall back to live API lookup" >&2
@@ -249,6 +249,7 @@ CI_PLATFORM="${CI_PLATFORM}" \
 VLLM_VERSION="${VLLM_VERSION}" \
 VLLM_SHORT_SHA="${VLLM_SHORT_SHA}" \
 VLLM_FULL_SHA="${VLLM_FULL_SHA}" \
+VLLM_BUILT_AT="${VLLM_BUILT_AT:-}" \
 VLLM_ARCHIVE_INDEX="${VLLM_ARCHIVE_INDEX}" \
 VLLM_IMAGE_TAG="${VLLM_IMAGE_TAG}" \
 VLLM_IMAGE_REF="${VLLM_IMAGE_REF}" \
@@ -291,6 +292,8 @@ else:
         archive_index_url=os.environ["VLLM_ARCHIVE_INDEX"],
         os_platform=os.environ["OS_PLATFORM"],
     )
+    if os.environ["VLLM_BUILT_AT"]:
+        record["built_at"] = os.environ["VLLM_BUILT_AT"]
 with open(sys.argv[1], "a", encoding="utf-8") as history:
     history.write(json.dumps(record, sort_keys=True) + "\n")
 PY
@@ -368,7 +371,8 @@ for attempt in 1 2 3; do
     # writer's record and compatibility pointer instead.
     RECORD="$(tail -n1 "${HISTORY_FILE}")"
     LATEST_CONTENT=""
-    if [[ "${PIN_INSTALLATION_FORM}" == "wheel" && -f "${LATEST_FILE}" ]]; then
+    if [[ "${PIN_INSTALLATION_FORM}" == "wheel" \
+        && "${PIN_VLLM_STATUS}" == "tested" && -f "${LATEST_FILE}" ]]; then
         LATEST_CONTENT="$(cat "${LATEST_FILE}")"
     fi
     git reset --hard "origin/${CI_BRANCH}"
