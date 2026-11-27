@@ -71,8 +71,9 @@ needs:
   workflow pauses every stream during ``modify``); a transfer that happens
   during vLLM prefill/decode will fail.
 
-The SDK request client supports either ZMQ or gRPC. Its ``url`` scheme and the
-vLLM connector endpoint must match the server's ``--transport`` setting.
+The SDK request client supports gRPC (default) or the deprecated ZMQ. Its ``url``
+scheme and the vLLM connector endpoint must match the server's ``--transport``
+setting.
 
 .. code-block:: bash
 
@@ -127,13 +128,13 @@ Each type of tensor (KV, query intermediate) has its own context.
     import lmcache.sdk as lmc_sdk
 
     kv_ctx = lmc_sdk.kvcache.connect(
-        url="tcp://localhost:6555",         # tcp:// for ZMQ; grpc:// for gRPC
+        url="grpc://localhost:6555",        # grpc:// for gRPC; tcp:// for ZMQ
         http_url="http://localhost:8080",   # must match --http-port
         model_name="Qwen/Qwen3-8B",
         timeout=60,
     )
     q_ctx = lmc_sdk.qcache.connect(
-        url="tcp://localhost:6555",         # tcp:// for ZMQ; grpc:// for gRPC
+        url="grpc://localhost:6555",        # grpc:// for gRPC; tcp:// for ZMQ
         http_url="http://localhost:8080",   # must match --http-port
         model_name="Qwen/Qwen3-8B",
         timeout=60,
@@ -146,10 +147,19 @@ Each type of tensor (KV, query intermediate) has its own context.
 Writing a custom edit function
 ------------------------------
 
-An edit function takes the Mapping[kind, retrieved tensor] and its token ids and returns the
-edited ``(kv, tokens)``. ``batch.modify(fn)`` applies it for every requests. The
-function should be implemented as if it's only for single request, and the SDK
-will call it in parallel for every requests in the batch.
+An edit function takes a ``TensorDict`` (a dict of the retrieved tensor per
+cache kind) and its token ids and returns the edited ``(kv, tokens)``.
+``batch.modify(fn)`` applies it for every requests. The function should be
+implemented as if it's only for single request, and the SDK will call it in
+parallel for every requests in the batch.
+
+The KV covers every cached token ``[0, T)``. Query tensors exist only for the
+tokens the latest ``prefill`` or ``decode`` computed: tokens loaded from the
+cache (for example the prefix kept by an earlier ``modify``) have no query
+rows. So the query tensor covers ``[segment_start_token_id, T)``, where
+``tensors.segment_start_token_id`` is the chunk-aligned first token that pass
+computed. Query rows are captured across forward steps, so they include
+chunked-prefill and decoded tokens.
 
 ``modify`` operates only on the **chunk-aligned** prefix. A trailing partial
 chunk is tracked by the SDK and re-sent on the next ``decode``, so
@@ -221,8 +231,12 @@ Classes
      - Protocol you implement: a callable that submits a request to your engine.
    * - ``context.ModifyFnType``
      - Type alias for the edit function you pass to ``modify`` / ``modify_kv``:
-       ``Callable[[Mapping[LMCacheSDKCacheKind, torch.Tensor], Sequence[int]],
+       ``Callable[[TensorDict, Sequence[int]],
        tuple[torch.Tensor, Sequence[int]]]``.
+   * - ``context.TensorDict``
+     - ``dict[LMCacheSDKCacheKind, torch.Tensor]`` handed to the edit
+       function, plus ``segment_start_token_id``: the first token the latest
+       generate pass computed, where the query tensor begins.
    * - ``lmcache.v1.common.metrics.Metrics``
      - Aggregated report returned by ``batch.prefill`` / ``modify`` / ``decode``
        (not an ``lmcache.sdk`` type). Emit it or convert it to a dict.

@@ -39,11 +39,10 @@ class _RecordingFactory:
     def create(self, url: str, *, context: object = None, api_key: str | None = None):
         self.calls.append((url, api_key))
         client = MagicMock()
-        # The adapters await a future from the size negotiation, not a value.
+        # The adapters await a future from the server-size query, not a value.
         future = MagicMock()
         future.result.return_value = 16
         client.get_chunk_size.return_value = future
-        client.negotiate_chunk_size.return_value = future
         return client
 
 

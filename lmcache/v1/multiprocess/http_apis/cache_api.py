@@ -29,9 +29,9 @@ from fastapi import APIRouter, HTTPException, Query, Request
 import torch
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.utils import compress_slot_mapping
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import Tier
+from lmcache.v1.distributed.utils import compress_slot_mapping
 from lmcache.v1.multiprocess.http_apis.dependencies import get_context
 from lmcache.v1.multiprocess.http_apis.schemas import (
     ChecksumRequest,
@@ -106,16 +106,25 @@ async def delete_cache_objects(
 
 @router.post("/cache/prefetches", response_model=None, status_code=202)
 async def submit_prefetch(body: PrefetchRequest, request: Request) -> dict[str, object]:
-    """Submit a warm prefetch of a token sequence from L2 into L1.
+    """Submit a warm prefetch of keys, or a token sequence, from L2 into L1.
 
     Responses:
         202: ``{"request_id", "chunks", "status": "submitted"}``, or
             ``{"chunks": 0, "status": "noop"}`` for a sub-chunk sequence.
-        400: token cap exceeded, invalid ``cache_salt``, or unsupported tiers.
-        422: body validation.
+        400: token cap exceeded, invalid ``cache_salt``, keys that disagree
+            on model/salt/tags/world size, or unsupported tiers.
+        422: body validation, including both or neither of ``keys`` /
+            ``token_ids``.
         503: not initialized, or no layout registered for the model.
     """
-    return get_context(request).prefetch_service.submit(
+    service = get_context(request).prefetch_service
+    if body.keys:
+        return service.submit_keys(
+            [encoded.to_object_key() for encoded in body.keys],
+            body.source_tier,
+            body.target_tier,
+        )
+    return service.submit(
         body.model_name,
         body.world_size,
         body.token_ids,

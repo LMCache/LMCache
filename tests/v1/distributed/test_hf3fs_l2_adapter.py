@@ -31,7 +31,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -960,7 +960,7 @@ class TestHf3fsNativeConnector:
             peer.close()
 
         client.submit_batch_delete([key])
-        assert _wait_for_completions(client)[0][3] == [False]
+        assert _wait_for_completions(client)[0][3] == [True]
 
         client.submit_batch_exists([key])
         assert _wait_for_completions(client)[0][3] == [False]

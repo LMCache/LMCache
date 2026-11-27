@@ -1,0 +1,12 @@
+# Paste this into the k3-multiprocess-smoke Buildkite pipeline's "Steps" editor.
+# It uploads the independent PR-smoke tier (0/1-GPU) so PRs get fast feedback
+# without waiting on 2/4-GPU heavy multiprocess jobs.
+agents:
+  queue: "k8s"
+
+env:
+  HF_TOKEN: ""  # set your HuggingFace token here (needed for gated model access)
+
+steps:
+  - label: ":pipeline: Upload PR-smoke pipeline"
+    command: bash .buildkite/k3_tests/common_scripts/upload-pipeline.sh .buildkite/k3_tests/multiprocess/smoke-pipeline.yml

@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.mp_coordinator.http_apis.dependencies import get_context
 from lmcache.v1.mp_coordinator.schemas import (
     HeartbeatResponse,
@@ -54,7 +54,7 @@ async def register_instance(
     ctx = get_context(request)
     if body.chunk_size is not None:
         try:
-            ctx.bind_chunk_size(body.chunk_size)
+            ctx.validate_chunk_size(body.chunk_size)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
     # Capacity is not taken here: it arrives as a report on the cache-event

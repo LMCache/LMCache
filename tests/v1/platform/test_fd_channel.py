@@ -23,8 +23,6 @@ from lmcache.v1.platform.fd_channel import (
     is_fd_channel_supported,
 )
 
-pytestmark = pytest.mark.no_shared_allocator
-
 requires_fd_channel = pytest.mark.skipif(
     not is_fd_channel_supported(), reason="AF_UNIX SOCK_SEQPACKET"
 )

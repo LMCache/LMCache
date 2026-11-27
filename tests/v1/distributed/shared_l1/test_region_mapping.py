@@ -24,7 +24,6 @@ from lmcache.v1.memory_orchestrator.api import RegionContract
 from lmcache.v1.platform import current_device_spec
 from tests.v1.distributed.shared_l1.utils import CAPACITY, region_file
 
-pytestmark = pytest.mark.no_shared_allocator
 ALIGN = OFFSET = 4096
 LAYOUT = MemoryLayoutDesc([torch.Size([1024])], [torch.uint8])
 

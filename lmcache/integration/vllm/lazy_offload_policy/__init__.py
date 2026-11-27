@@ -18,7 +18,7 @@ from lmcache.integration.vllm.lazy_offload_policy.fifo import FIFOOffloadPolicy
 from lmcache.integration.vllm.lazy_offload_policy.prefix_write_index import (
     PrefixWriteIndex,
 )
-from lmcache.utils import init_logger
+from lmcache.v1.common.logging import init_logger
 
 if TYPE_CHECKING:
     # Third Party

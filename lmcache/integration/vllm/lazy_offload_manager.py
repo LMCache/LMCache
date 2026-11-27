@@ -41,7 +41,7 @@ from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPRequestMetadata,
     LoadStoreOp,
 )
-from lmcache.utils import init_logger
+from lmcache.v1.common.logging import init_logger
 
 if TYPE_CHECKING:
     # Third Party

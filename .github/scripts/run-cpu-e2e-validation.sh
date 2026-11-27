@@ -18,7 +18,7 @@ LMCACHE_PID=""
 VLLM_PID=""
 LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
 LMCACHE_REQUEST_PORT="${LMCACHE_REQUEST_PORT:-${LMCACHE_ZMQ_PORT:-5555}}"
-LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-zmq}"
+LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-grpc}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 LMCACHE_L1_SIZE_GB="${LMCACHE_L1_SIZE_GB:-1}"
 LMCACHE_EVICTION_POLICY="${LMCACHE_EVICTION_POLICY:-LRU}"
@@ -376,9 +376,9 @@ start_vllm() {
   local kv_cache_bytes
   kv_cache_bytes="$(python3 -c "print(int(${VLLM_CPU_KVCACHE_SPACE} * 1024 * 1024 * 1024))")"
   # Tell LMCacheMPConnector where the lmcache server actually listens.
-  # Without this it falls back to tcp://localhost:5555 and dies with
-  # "Cannot reach the LMCache MP server" whenever the selected request
-  # transport or port differs from that legacy default.
+  # Without this it falls back to the connector's default endpoint and dies
+  # with "Cannot reach the LMCache MP server" whenever the selected request
+  # transport or port differs from that default.
   local kv_transfer_config
   kv_transfer_config="$(python3 -c "
 import json
@@ -596,7 +596,9 @@ else
   fi
 fi
 
-lmcache server "${LMCACHE_ARGS[@]}" \
+# LMCACHE_SERVER_VENV: the server's own venv with the full wheel, while vLLM
+# runs the lmcache-client wheel (install_lmcache_cpu.sh).
+"${LMCACHE_SERVER_VENV:+${LMCACHE_SERVER_VENV}/bin/}lmcache" server "${LMCACHE_ARGS[@]}" \
   >"${LMCACHE_LOG}" 2>&1 &
 LMCACHE_PID=$!
 echo "LMCache server started (PID=${LMCACHE_PID})"
@@ -647,13 +649,26 @@ if [ "$(uname -s)" = "Linux" ]; then
   fi
   if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
     echo "Installing missing system packages: ${MISSING_PKGS[*]}"
+    APT_GET=(apt-get)
     if command -v sudo >/dev/null 2>&1; then
-      sudo apt-get update -o Acquire::Retries=3
-      sudo apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}"
-    else
-      apt-get update -o Acquire::Retries=3
-      apt-get install -y --no-install-recommends "${MISSING_PKGS[@]}"
+      APT_GET=(sudo apt-get)
     fi
+    # A mirror can remove a superseded .deb between the index refresh and
+    # the download. Refresh the indexes again before retrying the install.
+    for attempt in 1 2 3; do
+      if "${APT_GET[@]}" update -o Acquire::Retries=3 \
+           -o Acquire::http::No-Cache=true -o APT::Update::Error-Mode=any \
+         && "${APT_GET[@]}" install -y --no-install-recommends "${MISSING_PKGS[@]}"; then
+        break
+      else
+        apt_status=$?
+      fi
+      if [ "${attempt}" -eq 3 ]; then
+        (exit "${apt_status}") # Run the existing ERR trap and preserve the APT exit code.
+      fi
+      echo "APT setup failed (attempt ${attempt}/3), retrying in 5 seconds" >&2
+      sleep 5
+    done
   else
     echo "libnuma1 and FFmpeg runtime libs already present, skipping apt install"
   fi
@@ -695,6 +710,18 @@ if ! echo "${completion_response}" | grep -q "${VLLM_MODEL_ID}"; then
   false
 fi
 echo "✅ E2E request validation passed"
+
+if [ -n "${LMCACHE_SERVER_VENV:-}" ]; then
+  # Nothing but vLLM uses its environment, and the checkout has no built
+  # lmcache_native, so this proves vLLM imported lmcache from the client wheel.
+  client_native="$(cd /tmp && python3 -I -c 'import importlib.metadata as md
+print(md.distribution("lmcache-client").locate_file("lmcache/lmcache_native"))')"
+  if ! grep -qsF "${client_native}" /proc/[0-9]*/maps; then
+    echo "❌ No process loaded ${client_native}*.so from the lmcache-client wheel"
+    false
+  fi
+  echo "✅ vLLM runs lmcache from the lmcache-client wheel (${client_native%/*})"
+fi
 
 # Verify transport mode (logged after vLLM connects to LMCache server)
 echo "[Phase 2 / Step 5.5] Verifying transport mode: expecting '${EXPECTED_TRANSPORT}'"

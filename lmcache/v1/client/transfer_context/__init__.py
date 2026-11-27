@@ -12,22 +12,19 @@ from lmcache.v1.platform.transfer_mode import MPTransferMode
 # Local
 from .base import (
     EngineDrivenContext,
-    EngineDrivenContextMetadata,
     compute_kv_layout,
     create_engine_driven_context,
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
 from .inline import EngineDrivenContextInline
-from .shm import EngineDrivenContextShm, ShmSlotDescriptor
+from .shm import EngineDrivenContextShm
 
 __all__ = [
     "MPTransferMode",
     "EngineDrivenContext",
-    "EngineDrivenContextMetadata",
     "EngineDrivenContextInline",
     "EngineDrivenContextShm",
-    "ShmSlotDescriptor",
     "compute_kv_layout",
     "create_engine_driven_context",
     "gather_paged_kv_to_cpu",

@@ -23,11 +23,11 @@ import torch
 
 # First Party
 from lmcache import device_ops, torch_dev
-from lmcache.logging import init_logger
 from lmcache.v1.common.custom_types import (
     CBMatchResult,
     IPCCacheServerKey,
 )
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -643,7 +643,7 @@ class RetrieveMixin:
                 "before submitting retrieve requests"
             )
         rope_state = self._cb_rope_state[instance_id]
-        chunk_size = self._ctx.chunk_size
+        chunk_size = self._ctx.default_chunk_size
         # Blend's read set: attention (+ connector-private aux), never
         # recurrent-state groups. Legacy fused layout: every kernel group.
         read_groups, staged_kernel = self._cb_staged_groups(gpu_context)

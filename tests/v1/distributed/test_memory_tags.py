@@ -30,8 +30,6 @@ from lmcache.v1.distributed.l2_adapters.nixl_native_l2_adapter import (
 )
 from lmcache.v1.distributed.storage_controllers.utils import resolve_l1_affinity
 
-pytestmark = pytest.mark.no_shared_allocator
-
 DRAM = MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)
 CXL = MemoryTags(MemorySegment.CXL, MemoryResidency.LOCAL)
 GDS = MemoryTags(MemorySegment.GDS, MemoryResidency.LOCAL)
