@@ -1163,7 +1163,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 )
                 copy = msgspec.msgpack.decode(history_copy, type=HistoryCopy)
                 receive_recurrent_history(
-                    cache_context, self._recurrent_history, key, copy, set(), True
+                    cache_context, self._recurrent_history, key, copy
                 )
                 completion = event_backend.create_event(cache_context.device)
                 event_backend.record_event(completion, cache_context.stream)

@@ -388,9 +388,14 @@ def test_primary_returns_before_history_is_published(
         from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
         from lmcache.integration.vllm.lmcache_mp_metadata import (
             LMCacheMPRequestState,
-            LMCacheMPWorkerMetadata,
+            LMCacheMPConnectorMetadata,
         )
 
+        from lmcache.integration.vllm.vllm_multi_process_adapter import (
+            LMCacheMPWorkerAdapter,
+        )
+
+        workers = []
         connector = MagicMock()
         connector.lazy_offload = False
         connector._recurrent_history = scheduler
@@ -406,9 +411,18 @@ def test_primary_returns_before_history_is_published(
             ).history_tasks
 
         def update(primary=False, ranks=()):
-            metadata = LMCacheMPWorkerMetadata(
-                {}, history_receipts={("A", lease, rank) for rank in ranks}
-            )
+            metadata = None
+            for rank in ranks:
+                worker = workers[rank]
+                worker._get_connector_metadata.return_value = (
+                    LMCacheMPConnectorMetadata()
+                )
+                LMCacheMPConnector.start_load_kv(worker, None)
+                report = LMCacheMPConnector.build_connector_worker_meta(worker)
+                if report is not None:
+                    metadata = (
+                        report if metadata is None else metadata.aggregate(report)
+                    )
             LMCacheMPConnector.update_connector_output(
                 connector,
                 SimpleNamespace(
@@ -456,10 +470,39 @@ def test_primary_returns_before_history_is_published(
     [(owner, tokens, end, salt, copy)] = tasks
     assert (owner, tokens, end, salt) == ("A", key.token_bytes, 48, tracker.cache_salt)
     for rank in range(tp):
-        _, ok = module.retrieve(
-            replace(key, worker_id=rank, history_copy=copy), 1, [], b"event"
-        )
-        assert ok
+        if real_connector:
+            worker = MagicMock()
+            worker.lazy_offload = False
+            worker_adapter = object.__new__(LMCacheMPWorkerAdapter)
+            worker.worker_adapter = worker_adapter
+            worker_adapter.history_receipts = set()
+            worker_adapter.parallel_strategy = SimpleNamespace(kv_worker_id=rank)
+            worker_adapter.blocks_in_chunk = 1
+            worker_adapter.kv_caches = {}
+            worker_adapter.create_recorded_event = MagicMock(return_value=b"event")
+            worker_adapter._create_key = MagicMock(
+                return_value=replace(key, worker_id=rank)
+            )
+
+            def submit_retrieve(rid, cache_key, caches, blocks, event, block_size):
+                _, ok = module.retrieve(cache_key, 1, blocks, event)
+                assert ok
+                return fences[cache_key.worker_id]
+
+            worker_adapter._require_transfer_ctx = MagicMock(
+                return_value=SimpleNamespace(submit_retrieve=submit_retrieve)
+            )
+            metadata = LMCacheMPConnectorMetadata()
+            metadata.history_tasks = tasks
+            worker._get_connector_metadata.return_value = metadata
+            LMCacheMPConnector.start_load_kv(worker, None)
+            assert LMCacheMPConnector.build_connector_worker_meta(worker) is None
+            workers.append(worker)
+        else:
+            _, ok = module.retrieve(
+                replace(key, worker_id=rank, history_copy=copy), 1, [], b"event"
+            )
+            assert ok
         fences[rank].record.assert_called_once()
         if cancel:
             scheduler.finish_request("A", normal_finish=False)

@@ -2,7 +2,7 @@
 """Scatter recurrent checkpoint objects into private device destinations."""
 
 # Standard
-from collections.abc import Mapping, Set
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 # First Party
@@ -20,7 +20,6 @@ def enqueue_recurrent_copies(
     lease: "RecurrentReadLease",
     rank: int,
     destinations: Mapping[int, Mapping[int, int]],
-    primary_blocks: Set[int],
 ) -> None:
     """Enqueue this rank's extra checkpoint copies on the current transfer stream.
 
@@ -29,7 +28,6 @@ def enqueue_recurrent_copies(
         lease: Read-locked sources for the full checkpoint set.
         rank: Worker rank that has claimed this lease.
         destinations: Token positions mapped to engine groups and private block IDs.
-        primary_blocks: Block IDs used by the primary load or shared prefix.
 
     The caller must keep the lease and destinations alive until a stream fence.
 
@@ -50,7 +48,7 @@ def enqueue_recurrent_copies(
             limit = kernel.shape_desc.nb
             limits[engine_group] = min(limits.get(engine_group, limit), limit)
 
-    occupied = set(primary_blocks)
+    occupied: set[int] = set()
     for row in destinations.values():
         if row.keys() != limits.keys():
             raise ValueError("History destinations differ from the recurrent groups")

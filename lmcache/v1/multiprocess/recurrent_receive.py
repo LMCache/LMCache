@@ -23,8 +23,6 @@ def receive_recurrent_history(
     reservations: RecurrentReservations,
     key: IPCCacheServerKey,
     copy: HistoryCopy,
-    primary_blocks: set[int],
-    primary_succeeded: bool,
 ) -> None:
     """Copy and fence a claimed worker's private history destinations.
 
@@ -33,8 +31,6 @@ def receive_recurrent_history(
         reservations: CPU reservation table shared by all worker handlers.
         key: Worker prefix key used for the primary load.
         copy: History reservation token and allocated device destinations.
-        primary_blocks: Blocks occupied by the primary load or shared prefix.
-        primary_succeeded: Whether the primary load succeeded.
 
     Raises:
         ValueError: The copy key differs from its reserved source prefix.
@@ -61,12 +57,9 @@ def receive_recurrent_history(
             return
     succeeded = False
     try:
-        if primary_succeeded:
-            with torch_dev.device(context.device), torch_dev.stream(context.stream):
-                enqueue_recurrent_copies(
-                    context, entry.reads, rank, copy.destinations, primary_blocks
-                )
-            succeeded = True
+        with torch_dev.device(context.device), torch_dev.stream(context.stream):
+            enqueue_recurrent_copies(context, entry.reads, rank, copy.destinations)
+        succeeded = True
     finally:
         # If the fence fails, keep the running claim and all memory references.
         try:
