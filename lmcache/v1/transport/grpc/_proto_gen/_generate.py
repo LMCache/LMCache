@@ -7,10 +7,6 @@ package names to build only those. Run it as a file from the repository root,
 the way ``setup.py`` and CI do::
 
     python lmcache/v1/transport/grpc/_proto_gen/_generate.py
-
-Do not run it with ``python -m``: that imports ``lmcache`` (and torch) first,
-and the protoc embedded in ``grpc_tools`` has been seen segfaulting in such a
-process.
 """
 
 # Standard
