@@ -90,6 +90,9 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                  protocol and ships fixes/features ahead of the version vendored
                  into vLLM, so prefer it whenever you are on vLLM 0.20.0 or newer.
 
+            To set a client minimum in ``kv_connector_extra_config``, see the
+            vLLM example in :doc:`/mp/chunk_size_negotiation`.
+
             **Test** -- open a new terminal and send two requests whose
             prompts share a prefix:
 
@@ -179,6 +182,9 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
 
       ``mp_host`` and ``mp_port`` identify the standalone LMCache request
       server. A bare host uses the default gRPC transport.
+
+      To set a client minimum under ``extra_config``, see the SGLang example
+      in :doc:`/mp/chunk_size_negotiation`.
 
       Engine-driven transfer can be selected under ``extra_config`` with the
       same name as the vLLM connector:
@@ -345,6 +351,10 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                export PYTHONHASHSEED=0
                lmcache server \
                    --l1-size-gb 10 --eviction-policy LRU --chunk-size 256
+
+            The TensorRT-LLM adapter rounds the server minimum up to a multiple
+            of ``KvCacheConfig.tokens_per_block``. See
+            :doc:`/mp/chunk_size_negotiation`.
 
             In a separate terminal, point TRT-LLM at the server via
             ``server_url``:

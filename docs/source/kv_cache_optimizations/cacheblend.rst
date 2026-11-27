@@ -19,6 +19,12 @@ The ``blend`` engine composes a ``BlendModule`` into the server and requires
 ``--supported-transfer-mode`` to be ``lmcache_driven`` (the default) or ``auto``. See
 :doc:`/mp/configuration` for the related server flags.
 
+.. important::
+
+   CacheBlend requires a single chunk size. Every model's effective chunk
+   size must equal the server's ``--chunk-size``. See
+   :ref:`mp-global-chunk-size` for how to choose a value.
+
 .. note::
 
    The legacy in-process CacheBlend documentation is maintained in

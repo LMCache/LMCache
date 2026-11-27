@@ -223,14 +223,6 @@ class DeviceOps:
     def single_layer_kv_transfer(self, *args, **kwargs):
         return torch_ops.single_layer_kv_transfer(*args, **kwargs)
 
-    # ── Ops: KV reshape ──────────────────────────────────────────────
-
-    def load_and_reshape_flash(self, *args, **kwargs):
-        return torch_ops.load_and_reshape_flash(*args, **kwargs)
-
-    def reshape_and_cache_back_flash(self, *args, **kwargs):
-        return torch_ops.reshape_and_cache_back_flash(*args, **kwargs)
-
     # ── Ops: codec ───────────────────────────────────────────────────
 
     def calculate_cdf(self, input_tensor, num_bins):

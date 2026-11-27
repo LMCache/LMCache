@@ -608,7 +608,7 @@ class TestLoad:
         assert not bm.test(0)
 
     def test_size_mismatch_treated_as_miss(self, adapter):
-        """A stale/wrong-size GET must be reported as a cache miss."""
+        """A short GET is a miss and must leave the destination intact."""
         k = create_object_key(1)
         obj = create_memory_obj(size=16)  # 64 bytes (16 * float32)
 
@@ -617,9 +617,10 @@ class TestLoad:
         _wait_for_store(adapter, adapter.submit_store_task([k], [obj]))
         _SERVER.truncate_bytes = None
 
-        dst = create_memory_obj(size=16)
+        dst = create_memory_obj(size=16, fill_value=0.0)
         bm = _wait_for_load(adapter, adapter.submit_load_task([k], [dst]))
         assert not bm.test(0), "size-mismatched value must be reported as miss"
+        assert torch.count_nonzero(dst.tensor).item() == 0
 
     def test_length_mismatch_raises(self, adapter):
         with pytest.raises(ValueError, match="length mismatch"):

@@ -7,8 +7,10 @@ Usage::
 """
 
 # Standard
-from typing import TYPE_CHECKING
+from http.client import IncompleteRead
+from typing import TYPE_CHECKING, Iterable
 import argparse
+import math
 import sys
 import urllib.error
 import urllib.request
@@ -38,6 +40,28 @@ if TYPE_CHECKING:
 
 class DescribeError(Exception):
     """Raised when the describe command cannot fetch or parse status data."""
+
+
+_RUNNING_REQUESTS = "vllm:num_requests_running"
+
+
+# Lookup counters exported by the MP server's metrics subscriber
+# (``lmcache/v1/mp_observability/subscribers/metrics/lookup.py``), named by
+# Prometheus family as they appear on ``GET /metrics``.
+LOOKUP_REQUESTED_TOKENS = "lmcache_mp_lookup_requested_tokens"
+LOOKUP_HIT_TOKENS = "lmcache_mp_lookup_hit_tokens"
+LOOKUP_HIT_L1_TOKENS = "lmcache_mp_lookup_hit_l1_tokens"
+LOOKUP_HIT_L2_TOKENS = "lmcache_mp_lookup_hit_l2_tokens"
+LOOKUP_PROMPT_TOKENS = "lmcache_mp_lookup_prompt_tokens"
+LOOKUP_REQUEST_HIT_TOKENS = "lmcache_mp_lookup_request_hit_tokens"
+HIT_COUNTER_NAMES: tuple[str, ...] = (
+    LOOKUP_REQUESTED_TOKENS,
+    LOOKUP_HIT_TOKENS,
+    LOOKUP_HIT_L1_TOKENS,
+    LOOKUP_HIT_L2_TOKENS,
+    LOOKUP_PROMPT_TOKENS,
+    LOOKUP_REQUEST_HIT_TOKENS,
+)
 
 
 def fetch_json(url: str, timeout: int = 10) -> dict:
@@ -93,27 +117,61 @@ def fetch_running_requests(url: str, timeout: int = 10) -> int | None:
         unreachable or the metric is absent (e.g. metrics disabled or an
         unsupported engine version).
     """
+    totals = fetch_metric_totals(url, [_RUNNING_REQUESTS], timeout=timeout)
+    running = totals.get(_RUNNING_REQUESTS)
+    return int(running) if running is not None else None
+
+
+def fetch_metric_totals(
+    url: str, names: Iterable[str], timeout: int = 10
+) -> dict[str, float]:
+    """Sum Prometheus metric families from a ``/metrics`` page.
+
+    Each requested family is summed across all its label series (e.g. one
+    per model or cache salt). Counters are named by family, without the
+    ``_total`` suffix (``lmcache_mp_lookup_hit_tokens`` reads
+    ``lmcache_mp_lookup_hit_tokens_total``); their ``_created`` timestamps
+    are not counted. This is best effort, for informational rows.
+
+    Args:
+        url: Full ``/metrics`` URL to GET.
+        names: Metric family names to read.
+        timeout: Socket timeout in seconds.
+
+    Returns:
+        A mapping from each requested family found on the page to its sum.
+        Families absent from the page or with a non-finite sum (``NaN`` or
+        ``Inf``) are omitted, and an unreachable, truncated or unparsable
+        page yields an empty mapping.
+    """
+    wanted = set(names)
     try:
         with urllib.request.urlopen(
             urllib.request.Request(url), timeout=timeout
         ) as resp:
             text = resp.read().decode()
-    except (urllib.error.URLError, OSError):
-        return None
+    except (urllib.error.URLError, OSError, IncompleteRead, UnicodeDecodeError):
+        return {}
 
-    total = 0.0
-    found = False
+    totals: dict[str, float] = {}
     try:
         for family in text_string_to_metric_families(text):
-            if family.name != "vllm:num_requests_running":
+            if family.name not in wanted:
                 continue
-            for sample in family.samples:
-                total += sample.value
-                found = True
+            # A counter's value is its ``_total`` sample; a gauge's sample
+            # carries the family name itself.
+            values = [
+                sample.value
+                for sample in family.samples
+                if sample.name in (family.name, f"{family.name}_total")
+            ]
+            if values:
+                totals[family.name] = totals.get(family.name, 0.0) + sum(values)
     except ValueError:
-        # Malformed exposition text; treat as unavailable.
-        return None
-    return int(total) if found else None
+        # Malformed exposition text; treat the whole page as unavailable.
+        return {}
+    # The exposition format allows NaN and +/-Inf, which no count can hold.
+    return {name: total for name, total in totals.items() if math.isfinite(total)}
 
 
 def fmt_bytes(n: int) -> str:
@@ -131,6 +189,22 @@ def fmt_l1_used(used_bytes: int, total_bytes: int) -> str:
     """Format L1 usage as GB with its share of capacity, e.g. ``0.33 (8.3%)``."""
     pct = used_bytes / total_bytes * 100 if total_bytes > 0 else 0.0
     return f"{used_bytes / 1024**3:.2f} ({pct:.1f}%)"
+
+
+def fmt_hit_rate(hits: int | None, total: int | None) -> float | None:
+    """Return *hits* / *total* as a percentage rounded to one decimal.
+
+    Args:
+        hits: Tokens that hit, or ``None`` if unknown.
+        total: Tokens looked up, or ``None`` if unknown.
+
+    Returns:
+        The percentage, or ``None`` if either count is unknown or *total*
+        is 0 (no lookups yet), so the row renders as ``N/A``.
+    """
+    if hits is None or not total:
+        return None
+    return round(hits / total * 100, 1)
 
 
 def fmt_health(is_healthy: object) -> str | None:
@@ -166,15 +240,33 @@ class KVCacheDescriber:
     about it.
     """
 
-    def __init__(self, metrics: "Metrics", data: dict, base_url: str) -> None:
+    def __init__(
+        self,
+        metrics: "Metrics",
+        data: dict,
+        base_url: str,
+        hit_totals: dict[str, float],
+    ) -> None:
+        """Bind the inputs for one ``describe kvcache`` report.
+
+        Args:
+            metrics: The output collector to populate.
+            data: The server's ``/status`` response.
+            base_url: The normalized server URL, shown in the overview.
+            hit_totals: Lookup counter sums from the server's ``/metrics``, as
+                returned by :func:`fetch_metric_totals` for
+                :data:`HIT_COUNTER_NAMES`; missing names render as ``N/A``.
+        """
         self.metrics = metrics
         self.data = data
         self.base_url = base_url
+        self.hit_totals = hit_totals
 
     def describe(self) -> None:
         """Run all section builders and emit."""
         self.add_overview()
         self.add_l1_storage()
+        self.add_cache_hits()
         self.add_models()
         self.add_l2_adapters()
         self.metrics.emit()
@@ -225,6 +317,34 @@ class KVCacheDescriber:
         if len(managers) > 1:
             for tag, manager in managers.items():
                 self._add_l1_section(tag, manager, evictions[tag])
+
+    def add_cache_hits(self) -> None:
+        """Lookup hit counts and rates since the server started.
+
+        Adds the ``cache_hits`` section from :attr:`hit_totals`. Token counts
+        missing from ``/metrics`` are ``None`` (``N/A``); a rate is ``None``
+        when either operand is missing or its denominator is 0.
+        """
+        requested = self._hit_tokens(LOOKUP_REQUESTED_TOKENS)
+        hit = self._hit_tokens(LOOKUP_HIT_TOKENS)
+        sec = self.metrics.add_section("cache_hits", "Cache hits (since server start)")
+        sec.add("lookup_requested_tokens", "Lookup requested (tokens)", requested)
+        sec.add("lookup_hit_tokens", "Lookup hits (tokens)", hit)
+        sec.add("lookup_hit_rate", "Lookup hit rate (%)", fmt_hit_rate(hit, requested))
+        sec.add(
+            "l1_hit_tokens", "L1 hits (tokens)", self._hit_tokens(LOOKUP_HIT_L1_TOKENS)
+        )
+        sec.add(
+            "l2_hit_tokens", "L2 hits (tokens)", self._hit_tokens(LOOKUP_HIT_L2_TOKENS)
+        )
+        sec.add(
+            "request_hit_rate",
+            "Request hit rate (%)",
+            fmt_hit_rate(
+                self._hit_tokens(LOOKUP_REQUEST_HIT_TOKENS),
+                self._hit_tokens(LOOKUP_PROMPT_TOKENS),
+            ),
+        )
 
     def add_models(self) -> None:
         """Per-model KV cache layout sections.
@@ -378,6 +498,11 @@ class KVCacheDescriber:
         sec.add("cached_objects", "Cached objects", manager["total_object_count"])
         sec.add("eviction_policy", "Eviction policy", eviction["eviction_policy"])
 
+    def _hit_tokens(self, name: str) -> int | None:
+        """Return the summed counter *name* as a token count, or ``None``."""
+        value = self.hit_totals.get(name)
+        return int(value) if value is not None else None
+
 
 # -------------------------------------------------------------------
 # Engine describer
@@ -474,8 +599,9 @@ class DescribeCommand(BaseCommand):
             print(str(exc), file=sys.stderr)
             sys.exit(1)
 
+        hit_totals = fetch_metric_totals(f"{base_url}/metrics", HIT_COUNTER_NAMES)
         metrics = self.create_metrics("LMCache KV Cache Service", args, width=50)
-        KVCacheDescriber(metrics, data, base_url).describe()
+        KVCacheDescriber(metrics, data, base_url, hit_totals).describe()
 
     def _describe_engine(self, args: argparse.Namespace) -> None:
         base_url = normalize_url(args.url)

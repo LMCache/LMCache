@@ -173,6 +173,26 @@ def _mock_client(worker: AtomMPWorkerAdapter) -> MagicMock:
     return cast(MagicMock, worker._client)
 
 
+def test_lookup_uses_block_aligned_server_chunk_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ATOM lookup boundaries use the block-aligned server minimum."""
+    client = MagicMock(name="req_client")
+    client.get_chunk_size.return_value.result.return_value = 250
+    _patch_request_client_factory(monkeypatch, client)
+    scheduler = AtomMPSchedulerAdapter(
+        server_url="tcp://127.0.0.1:5555",
+        context=MagicMock(name="zmq_context"),
+        model_name="atom-test-model",
+        block_size=64,
+        parallel_config=AtomMPParallelConfig(2, 1, 2),
+    )
+
+    scheduler.maybe_submit_lookup_request("request-1", list(range(300)))
+
+    assert client.lookup.call_args.args[0].end == 256
+
+
 def test_atom_lookup_submits_valid_reader_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

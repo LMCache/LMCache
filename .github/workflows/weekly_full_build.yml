@@ -1,19 +1,18 @@
 name: Weekly full build
 
-# Runs the full CUDA and Intel XPU suites as a weekly regression checkpoint
-# while per-PR CI gets narrower: CUDA (k3-unit-tests, k3-multiprocess-test +
-# DSV4 TP=4, k3-blend-test) and Intel XPU (unit-tests-xpu, xpu-mp-test).
-# A run passes only when every required job ran and passed
-# (.buildkite/k3_tests/weekly/manifest.json, manifest-xpu.json, README.md).
+# Orchestrates the weekly CUDA, Intel XPU, AMD ROCm, and RBLN suites from a
+# single schedule and produces one combined workflow run. Each device suite
+# lives in its own workflow file (weekly_full_build_<device>.yml) so it can
+# be maintained independently, while manual and scheduled runs always go
+# through this orchestrator.
 #
 # Sunday 08:00 UTC is the quietest window of the k8s CUDA GPU queue in the
 # 30-day PR CI baseline (2026-10-17 to 2026-11-15): 0.6 of 16 GPUs busy on
 # average over the following six hours.
 
 on:
-  # Enable after validating manual runs (see #6919 for CUDA schedule):
-  # schedule:
-  #   - cron: '0 8 * * 0'
+  schedule:
+    - cron: '0 8 * * 0'
   workflow_dispatch:
     inputs:
       device:
@@ -25,6 +24,8 @@ on:
           - all
           - cuda
           - xpu
+          - amd
+          - rbln
 
 permissions:
   contents: read
@@ -78,76 +79,30 @@ jobs:
           # through "Cancel Intermediate Builds".
           sleep 90
 
-  full-build:
+  cuda:
     name: Weekly full build (CUDA)
     needs: prepare
-    if: >-
-      github.repository == 'LMCache/LMCache' &&
-      (github.event_name != 'workflow_dispatch' ||
-       inputs.device == 'all' || inputs.device == 'cuda')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 350
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
-        with:
-          egress-policy: audit
+    if: github.repository == 'LMCache/LMCache' && (github.event_name != 'workflow_dispatch' || inputs.device == 'all' || inputs.device == 'cuda')
+    uses: ./.github/workflows/weekly_full_build_cuda.yml
+    secrets: inherit
 
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-
-      - name: Run and check the full build on Buildkite
-        env:
-          BUILDKITE_API_TOKEN: ${{ secrets.BUILD_KITE_API_TOKEN }}
-          SOURCE_COMMIT: ${{ github.sha }}
-        run: |
-          python3 .github/scripts/weekly_full_build.py \
-            --manifest .buildkite/k3_tests/weekly/manifest.json \
-            --commit "${SOURCE_COMMIT}" \
-            --out-dir weekly-full-build \
-            --timeout-minutes 330
-
-      - name: Keep the report and failed-job logs
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: weekly-full-build-${{ github.run_number }}
-          path: weekly-full-build/
-          if-no-files-found: warn
-          retention-days: 90
-
-  full-build-xpu:
+  xpu:
     name: Weekly full build (XPU)
     needs: prepare
-    if: >-
-      github.repository == 'LMCache/LMCache' &&
-      (github.event_name != 'workflow_dispatch' ||
-       inputs.device == 'all' || inputs.device == 'xpu')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 350
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
-        with:
-          egress-policy: audit
+    if: github.repository == 'LMCache/LMCache' && (github.event_name != 'workflow_dispatch' || inputs.device == 'all' || inputs.device == 'xpu')
+    uses: ./.github/workflows/weekly_full_build_xpu.yml
+    secrets: inherit
 
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+  amd:
+    name: Weekly full build (AMD)
+    needs: prepare
+    if: github.repository == 'LMCache/LMCache' && (github.event_name != 'workflow_dispatch' || inputs.device == 'all' || inputs.device == 'amd')
+    uses: ./.github/workflows/weekly_full_build_amd.yml
+    secrets: inherit
 
-      - name: Run and check the XPU full build on Buildkite
-        env:
-          BUILDKITE_API_TOKEN: ${{ secrets.BUILD_KITE_API_TOKEN }}
-          SOURCE_COMMIT: ${{ github.sha }}
-        run: |
-          python3 .github/scripts/weekly_full_build.py \
-            --manifest .buildkite/k3_tests/weekly/manifest-xpu.json \
-            --commit "${SOURCE_COMMIT}" \
-            --out-dir weekly-full-build-xpu \
-            --timeout-minutes 330
-
-      - name: Keep the report and failed-job logs
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: weekly-full-build-xpu-${{ github.run_number }}
-          path: weekly-full-build-xpu/
-          if-no-files-found: warn
-          retention-days: 90
+  rbln:
+    name: Weekly full build (RBLN)
+    needs: prepare
+    if: github.repository == 'LMCache/LMCache' && (github.event_name != 'workflow_dispatch' || inputs.device == 'all' || inputs.device == 'rbln')
+    uses: ./.github/workflows/weekly_full_build_rbln.yml
+    secrets: inherit

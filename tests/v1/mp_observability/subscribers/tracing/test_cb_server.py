@@ -21,6 +21,7 @@ from lmcache.v1.mp_observability.subscribers.tracing.cb_server import (
 from lmcache.v1.mp_observability.subscribers.tracing.span_registry import (
     SpanRegistry,
 )
+from tests.v1.distributed.utils import wait_until
 import lmcache.v1.mp_observability.subscribers.tracing.cb_server as cb_server_module
 
 
@@ -61,8 +62,7 @@ class TestBlendTracingSubscriber:
     def test_root_span_created_on_request_start(self, bus, registry, subscriber):
         bus.start()
         bus.publish(Event(event_type=EventType.CB_REQUEST_START, session_id="req-root"))
-        time.sleep(0.15)
-        assert registry.get("req-root", "cb.request") is not None
+        assert wait_until(lambda: registry.get("req-root", "cb.request") is not None)
         bus.stop()
 
     def test_no_root_span_before_any_event(self, registry):
@@ -155,10 +155,9 @@ class TestBlendTracingSubscriber:
                 timestamp=now + 0.005,
             )
         )
-        time.sleep(0.15)
-
+        # The drain thread runs asynchronously: wait until it has handled the end.
+        assert wait_until(lambda: sid in subscriber._deferred_session_end_ts)
         assert registry.get(sid, "cb.request") is not None
-        assert sid in subscriber._deferred_session_end_ts
 
         bus.publish(
             Event(

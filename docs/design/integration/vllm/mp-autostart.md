@@ -83,6 +83,12 @@ If worker 0 starts a process and it exits or fails to become healthy before the
 timeout, the launcher terminates that owned process and raises `ConnectionError`.
 If the server is already healthy, worker 0 does not start another process.
 
+The started process runs `lmcache.v1.multiprocess.http_server`, which only the
+full `lmcache` distribution ships. When no server is healthy and that package
+cannot be found, as with only `lmcache-client` installed, worker 0 raises
+`RuntimeError` before spawning, naming the full distribution. A healthy server
+is still reused in that environment.
+
 ## Lifetime
 
 The autostarted server is a child of vLLM worker 0, not an independently managed
@@ -104,7 +110,8 @@ this startup convenience feature.
 ## Tests
 
 Unit coverage validates config parsing, local-host restrictions, endpoint flag
-rejection, PING health checks, failure cleanup, worker-0 ownership,
+rejection, PING health checks, failure cleanup, the error when no server can
+be started (client-only install), worker-0 ownership,
 non-owner worker waiting, legacy connector connect-only behavior, and scheduler
 connect-only behavior.
 

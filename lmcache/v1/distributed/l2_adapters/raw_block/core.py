@@ -57,6 +57,8 @@ _MAX_FIXED_BUFFER_REGION_BYTES = 1 << 30
 # recovery. Use a conservative reader count to expose device parallelism without
 # relying on high thread counts; io_uring recovery should use batched reads.
 DEFAULT_RECOVERY_READ_THREADS = 8
+# Warn once when a checkpoint payload uses this share of one metadata copy.
+_META_USAGE_WARN_RATIO = 0.8
 
 
 def round_up(x: int, align: int) -> int:
@@ -263,6 +265,7 @@ class RawBlockCore:
         self._worker_error_logged: bool = False
 
         self._meta_seq: int = 0
+        self._meta_usage_warned = False
         self._meta_dirty_total: int = 0
         self._meta_persisted: int = 0
         self._inflight_io_count: int = 0
@@ -1895,11 +1898,28 @@ class RawBlockCore:
         if len(payload) > payload_cap:
             logger.warning(
                 "RawBlockCore metadata payload too large (%d > %d), "
-                "skipping checkpoint",
+                "skipping checkpoint; newer entries are lost on restart. "
+                "Increase meta_total_bytes (this changes the device layout, "
+                "so the existing cache is not recovered).",
                 len(payload),
                 payload_cap,
             )
             return False
+        if (
+            not self._meta_usage_warned
+            and len(payload) >= _META_USAGE_WARN_RATIO * payload_cap
+        ):
+            self._meta_usage_warned = True
+            logger.warning(
+                "RawBlockCore metadata checkpoint uses %d of %d bytes (%.0f%%); "
+                "checkpoints are skipped once the index no longer fits. "
+                "Increase meta_total_bytes if the index keeps growing (this "
+                "changes the device layout, so the existing cache is not "
+                "recovered).",
+                len(payload),
+                payload_cap,
+                100.0 * len(payload) / payload_cap,
+            )
 
         next_seq = self._meta_seq + 1
         target_idx = int((next_seq - 1) % self._meta_copy_count)

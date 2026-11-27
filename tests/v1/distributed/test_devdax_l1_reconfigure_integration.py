@@ -56,13 +56,10 @@ REAL_DEVICE_PATHS = [
 USING_REAL_DEVICES = bool(REAL_DEVICE_PATHS)
 SLOT_BYTES = int(os.environ.get("LMCACHE_TEST_DEVDAX_L1_SLOT_BYTES", str(2 << 20)))
 
-pytestmark = [
-    pytest.mark.no_shared_allocator,
-    pytest.mark.skipif(
-        not RUN_IT,
-        reason="Device-DAX L1 integration test (set RUN_DEVDAX_L1_INTEGRATION=1)",
-    ),
-]
+pytestmark = pytest.mark.skipif(
+    not RUN_IT,
+    reason="Device-DAX L1 integration test (set RUN_DEVDAX_L1_INTEGRATION=1)",
+)
 
 
 class _DeviceProvider:

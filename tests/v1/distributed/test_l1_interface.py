@@ -3,6 +3,8 @@
 
 # Standard
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 # Third Party
 import pytest
@@ -15,8 +17,6 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface, L1ManagerListener
 from lmcache.v1.distributed.l1_manager import DevDaxL1Manager, DramL1Manager
 import lmcache.v1.memory_management as memory_management
-
-pytestmark = pytest.mark.no_shared_allocator
 
 ALIGN = 4096
 CAPACITY = 32 * ALIGN
@@ -103,6 +103,46 @@ def test_write_commit_read_release(l1: L1ManagerInterface) -> None:
     assert l1.unsafe_read([key(1)])[key(1)][0] is not L1Error.SUCCESS
     assert listener.read_reserved == [key(1)]
     assert listener.read_finished == [key(1)]
+
+
+def test_unregister_waits_for_active_read_callback(l1: L1ManagerInterface) -> None:
+    obj_key = key(1)
+    l1.reserve_write([obj_key], [False], LAYOUT)
+    l1.finish_write_and_reserve_read([obj_key])
+    callback_started = Event()
+    release_callback = Event()
+    removing = Event()
+
+    class BlockingListener(RecordingListener):
+        def on_l1_keys_read_finished(self, keys: list[ObjectKey]) -> None:
+            callback_started.set()
+            assert release_callback.wait(timeout=5)
+            super().on_l1_keys_read_finished(keys)
+
+    listener = BlockingListener()
+    l1.register_listener(listener)
+
+    def unregister() -> None:
+        removing.set()
+        l1.unregister_listener(listener)
+        assert listener.read_finished == [obj_key]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        read = pool.submit(l1.finish_read, [obj_key])
+        try:
+            assert callback_started.wait(timeout=5)
+            removal = pool.submit(unregister)
+            assert removing.wait(timeout=5)
+            with pytest.raises(TimeoutError):
+                removal.result(timeout=0.1)
+        finally:
+            release_callback.set()
+        assert read.result(timeout=5) == {obj_key: L1Error.SUCCESS}
+        removal.result(timeout=5)
+
+    assert l1.reserve_read([obj_key])[obj_key][0] is L1Error.SUCCESS
+    assert l1.finish_read([obj_key]) == {obj_key: L1Error.SUCCESS}
+    assert listener.read_finished == [obj_key]
 
 
 def test_aborted_write_is_never_readable(l1: L1ManagerInterface) -> None:

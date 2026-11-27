@@ -13,6 +13,9 @@ LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
 vLLM instances reach through a configurable ZMQ or gRPC request transport.
 One LMCache server per node can serve multiple vLLM pods, providing process
 isolation, shared caching, and independent resource scaling.
+With the default prefix-caching engine and no Coordinator, that server can
+serve model deployments with
+:doc:`different effective chunk sizes <chunk_size_negotiation>`.
 
 .. contents::
    :local:
@@ -240,7 +243,7 @@ name; see :doc:`request_transport` for endpoint selection and wire details.
        when set, active locks may be ignored.
    * - ``GET_CHUNK_SIZE``
      - SERIALIZED
-     - Return the server's chunk size.
+     - Return the server's configured minimum chunk size in tokens.
    * - ``PING``
      - BLOCKING
      - Liveness ping; the handler always returns ``True``.

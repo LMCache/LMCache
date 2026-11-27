@@ -56,8 +56,10 @@ Commonly used flags include:
    * - ``--port PORT``
      - Request-transport port.
    * - ``--chunk-size N``
-     - Minimum KV cache chunk size in tokens. The vLLM MP connector may
-       negotiate it upward; see :doc:`/mp/chunk_size_negotiation`.
+     - Minimum KV cache chunk size in tokens. MP integrations can resolve a
+       larger effective size per model and world size. CacheBlend and
+       Coordinator require the configured size to match every model's
+       effective size. See :doc:`/mp/chunk_size_negotiation`.
    * - ``--l1-size-gb GB``
      - L1 (CPU/DRAM) cache capacity in GB.
    * - ``--eviction-policy POLICY``

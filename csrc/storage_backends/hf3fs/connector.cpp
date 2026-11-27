@@ -167,6 +167,9 @@ void Hf3fsConnector::init_read_iov(hf3fs_iov& iov) {
     throw std::runtime_error("hf3fs_iovcreate (read) failed: " +
                              std::to_string(-ret));
   }
+  // 3FS FUSE has mapped the buffer by now. Without the unlink, its /dev/shm
+  // file is removed only by hf3fs_iovdestroy and outlives a SIGKILL.
+  hf3fs_iovunlink(&iov);
 }
 
 /**
@@ -183,6 +186,8 @@ void Hf3fsConnector::init_write_iov(hf3fs_iov& iov) {
     throw std::runtime_error("hf3fs_iovcreate (write) failed: " +
                              std::to_string(-ret));
   }
+  // See init_read_iov.
+  hf3fs_iovunlink(&iov);
 }
 
 /**
@@ -621,10 +626,11 @@ bool Hf3fsConnector::do_single_exists(WorkerHf3fsConn& conn,
  *
  * @param conn Connection to use
  * @param key Key to delete
- * @return true if deleted, false if not found
+ * @return DELETED if removed, NOT_FOUND if the file was already gone,
+ *         NOT_DELETED if the removal failed
  */
-bool Hf3fsConnector::do_single_delete(WorkerHf3fsConn& conn,
-                                      const std::string& key) {
+DeleteResult Hf3fsConnector::do_single_delete_result(WorkerHf3fsConn& conn,
+                                                     const std::string& key) {
   (void)conn;  // Unused
   std::string file_path = key_to_path(key);
   try {
@@ -632,11 +638,11 @@ bool Hf3fsConnector::do_single_delete(WorkerHf3fsConn& conn,
     if (buffer_enabled_) {
       buffer_remove_(key);
     }
-    return removed;
+    return removed ? DeleteResult::DELETED : DeleteResult::NOT_FOUND;
   } catch (const std::filesystem::filesystem_error& e) {
     fprintf(stderr, "[LMCache HF3FS] Delete file %s failed: %s\n",
             file_path.c_str(), e.what());
-    return false;
+    return DeleteResult::NOT_DELETED;
   }
 }
 
@@ -780,8 +786,8 @@ void Hf3fsConnector::buffer_add_(const std::string& key) {
  * Remove a key from the buffer.
  *
  * Thread-safe via concurrent_flat_hash_set (sharded locks).
- * Called by do_single_delete(), and when do_single_get() finds the key's file
- * gone.
+ * Called by do_single_delete_result(), and when do_single_get() finds the
+ * key's file gone.
  */
 void Hf3fsConnector::buffer_remove_(const std::string& key) {
   key_buffer_.Erase(key);

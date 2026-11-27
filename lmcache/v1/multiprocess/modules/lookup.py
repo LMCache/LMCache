@@ -683,6 +683,7 @@ class LookupModule(DiscoverableModule):
             unfull_obj_keys = self._all_object_keys(
                 key,
                 [TokenHasher.hash_to_bytes(session.get_unfull_chunk_hash(key.end))],
+                chunk_size,
             )
             locked_keys = session.get_prefetch_owners()
             if all(obj_key in locked_keys for obj_key in unfull_obj_keys):
@@ -740,6 +741,7 @@ class LookupModule(DiscoverableModule):
         self,
         key: IPCCacheServerKey,
         chunk_hashes: list[bytes],
+        chunk_size: int | None = None,
     ) -> list[ObjectKey]:
         """Resolve every object key of a request across all object groups.
 
@@ -750,6 +752,8 @@ class LookupModule(DiscoverableModule):
         Args:
             key: The IPC key (model/world/worker, salt).
             chunk_hashes: Chunk hashes to resolve keys for.
+            chunk_size: Effective full chunk size when resolving an
+                unfull chunk; adds it to object identity.
 
         Returns:
             The object keys of all groups and kv ranks for ``chunk_hashes``.
@@ -764,6 +768,7 @@ class LookupModule(DiscoverableModule):
             chunk_hashes,
             list(range(attn_desc.num_object_groups)),
             shard_replication_desc,
+            chunk_size,
         )
         return [obj_key for group_keys in per_group for obj_key in group_keys]
 
@@ -814,7 +819,9 @@ class LookupModule(DiscoverableModule):
                 request_id=key.request_id,
                 requested_tokens=requested_tokens,
                 chunk_size=(
-                    chunk_size if chunk_size is not None else self._ctx.chunk_size
+                    chunk_size
+                    if chunk_size is not None
+                    else self._ctx.default_chunk_size
                 ),
                 num_object_groups=num_object_groups,
                 attn_desc=attn_desc,
@@ -1018,6 +1025,7 @@ class LookupModule(DiscoverableModule):
                 group_layout_descs,
                 attn_desc,
                 shard_replication_desc,
+                chunk_size,
             )
             handle = self._ctx.storage_manager.submit_prefetch_task(
                 PrefetchTaskSpec(

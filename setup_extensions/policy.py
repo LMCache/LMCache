@@ -229,6 +229,30 @@ class BuildPolicy:
         return ext_modules, cmdclass, req_file
 
     @staticmethod
+    def collect_client_extensions(
+        profile: Optional[BuildProfile],
+    ) -> tuple[list, dict]:
+        """Build the extensions of the lmcache-client wheel.
+
+        The client wheel (``pyproject_client.toml``) ships only
+        ``lmcache.lmcache_native``. Storage backends are server-only, so their
+        builders are not called: a ``BUILD_WITH_<backend>=1`` inherited from
+        the environment does not require that backend's SDK.
+
+        Args:
+            profile: Resolved build profile, or ``None``.
+
+        Returns:
+            ``(ext_modules, cmdclass)`` tuple.
+        """
+        if BuildProfile.is_building_sdist() or BuildProfile.is_native_ext_disabled():
+            return [], {}
+
+        ext_modules, cmdclass = build_common_cpp(profile)
+        native = [ext for ext in ext_modules if ext.name == "lmcache.lmcache_native"]
+        return native, cmdclass
+
+    @staticmethod
     def collect_storage_backends(
         extra_cxx_flags: list[str],
     ) -> list:
