@@ -2,8 +2,9 @@
 """LMCache-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
+from collections import deque
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 import threading
 import time
 
@@ -65,6 +66,11 @@ from lmcache.v1.transport.errors import InvalidRequestError
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
+
+#: How long ``close()`` lets queued context releases finish at shutdown. A
+#: release behind a stuck stream never finishes, so shutdown must not wait
+#: for it without a bound.
+_SHUTDOWN_RELEASE_TIMEOUT_S = 30.0
 
 
 def get_layout_desc(
@@ -218,6 +224,129 @@ class ContextEntry:
     event_profile: KVEventProfile | None = None
 
 
+class ContextReleaser:
+    """Releases detached cache contexts on one thread per device.
+
+    Releasing a context drains its stream and unmaps the worker's IPC
+    segments, and both wait for the device. A stream that waits on the event
+    of a worker that died never drains (LMCache#4676). On the MQ main loop
+    (UNREGISTER) such a release stops every request from every instance; on
+    the reaper thread it stops all later reaping. Here a stuck release only
+    delays the releases queued after it on the same device.
+
+    Args:
+        release: Releases one batch of entries of a single device. It
+            receives the only remaining references to them and clears the
+            list.
+    """
+
+    def __init__(self, release: Callable[[list[ContextEntry]], None]) -> None:
+        self._release = release
+        self._cond = threading.Condition()
+        self._queues: dict[str, deque[list[ContextEntry]]] = {}
+        # Entries submitted and not yet released, per device.
+        self._pending: dict[str, int] = {}
+        self._threads: dict[str, threading.Thread] = {}
+        self._closed = False
+
+    def submit(self, entries: list[ContextEntry]) -> None:
+        """Queue entries for release on their devices' threads.
+
+        Args:
+            entries: Detached entries. The list is cleared, so the queue
+                holds the only references.
+        """
+        if not entries:
+            return
+        by_device: dict[str, list[ContextEntry]] = {}
+        for entry in entries:
+            by_device.setdefault(str(entry.cache_context.device), []).append(entry)
+        del entry
+        entries.clear()
+        with self._cond:
+            for device, batch in by_device.items():
+                self._queues.setdefault(device, deque()).append(batch)
+                self._pending[device] = self._pending.get(device, 0) + len(batch)
+                if device not in self._threads:
+                    thread = threading.Thread(
+                        target=self._run,
+                        args=(device,),
+                        name=f"lmcache-mp-release-{device}",
+                        daemon=True,
+                    )
+                    self._threads[device] = thread
+                    thread.start()
+            # Drop this frame's references before a release thread can run
+            # the reclaim, which needs the entries to be unreferenced.
+            del batch
+            by_device.clear()
+            self._cond.notify_all()
+
+    def _run(self, device: str) -> None:
+        """Release the batches queued for ``device`` in order."""
+        queue = self._queues[device]
+        while True:
+            with self._cond:
+                self._cond.wait_for(lambda: bool(queue) or self._closed)
+                if not queue:
+                    return
+                batch = queue.popleft()
+            count = len(batch)
+            try:
+                self._release(batch)
+            except Exception:
+                logger.exception("Releasing cache contexts on %s failed", device)
+            finally:
+                batch.clear()
+                with self._cond:
+                    self._pending[device] -= count
+                    if not self._pending[device]:
+                        del self._pending[device]
+                    self._cond.notify_all()
+
+    def pending_by_device(self) -> dict[str, int]:
+        """Return the number of entries not yet released, per device."""
+        with self._cond:
+            return dict(self._pending)
+
+    def wait_idle(self, timeout: float) -> bool:
+        """Wait until every submitted entry has been released.
+
+        Args:
+            timeout: Maximum seconds to wait.
+
+        Returns:
+            True if nothing is pending, False on timeout.
+        """
+        with self._cond:
+            return self._cond.wait_for(lambda: not self._pending, timeout)
+
+    def close(self, timeout: float) -> bool:
+        """Let queued releases finish for up to ``timeout`` s, then stop.
+
+        A release still running after the timeout keeps its daemon thread;
+        it is abandoned rather than waited for.
+
+        Args:
+            timeout: Maximum seconds to wait for queued releases.
+
+        Returns:
+            True if every release finished.
+        """
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+            drained = self._cond.wait_for(lambda: not self._pending, timeout)
+            pending = dict(self._pending)
+        if not drained:
+            logger.warning(
+                "Shutting down with cache-context releases still pending "
+                "(per device): %s",
+                pending,
+            )
+        return drained
+
+
 class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     """Handles LMCache-driven KV cache transfer operations.
 
@@ -255,6 +384,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         # ops -- never across context creation, layout-registry calls, or
         # empty_cache (leaf-lock invariant: no thread holds two locks).
         self._lock = threading.Lock()
+        # Detached contexts are released here, never on the caller's thread.
+        self._releaser = ContextReleaser(self._release_entries)
 
         # Route finish_write / finish_read_prefetched through a C++ host
         # callback so the driver thread doesn't acquire the GIL.
@@ -441,11 +572,43 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         if reaped:
             del e  # a bound name would pin the final entry (see _release_entries)
             reaped.clear()
-            self._release_entries(entries)
+            self._submit_release(entries)
         return reaped_ids
+
+    def _submit_release(self, entries: list[ContextEntry]) -> None:
+        """Hand detached entries to their devices' release threads.
+
+        The layout registrations are dropped here, so the registry stops
+        counting the instances at once; the device work runs later.
+
+        Args:
+            entries: The only remaining references to the detached entries.
+                The list is cleared.
+        """
+        if not entries:
+            return
+        for entry in entries:
+            self._ctx.layout_desc_registry.unregister(
+                entry.model_name, entry.world_size
+            )
+        del entry
+        self._releaser.submit(entries)
+
+    def wait_for_releases(self, timeout: float) -> bool:
+        """Wait until every detached context has been released.
+
+        Args:
+            timeout: Maximum seconds to wait.
+
+        Returns:
+            True if no release is pending, False on timeout.
+        """
+        return self._releaser.wait_idle(timeout)
 
     def _release_entries(self, entries: list[ContextEntry]) -> None:
         """Release a batch of entries and reclaim their device memory.
+
+        Runs on a release thread of :class:`ContextReleaser`.
 
         Args:
             entries: The only remaining references to the released entries.
@@ -455,9 +618,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             return
         for entry in entries:
             entry.cache_context.close()
-            self._ctx.layout_desc_registry.unregister(
-                entry.model_name, entry.world_size
-            )
         del entry
         entries.clear()
         # ipc_collect() only unmaps a CUDA-IPC-imported segment once its last
@@ -490,6 +650,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         return {
             "registered_gpu_ids": registered_gpu_ids,
             "cache_context_meta": cache_context_meta,
+            "pending_releases": self._releaser.pending_by_device(),
         }
 
     def close(self) -> None:
@@ -501,7 +662,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         with self._lock:
             entries = list(self._cache_contexts.values())
             self._cache_contexts.clear()
-        self._release_entries(entries)
+        self._submit_release(entries)
+        self._releaser.close(_SHUTDOWN_RELEASE_TIMEOUT_S)
         if self._fd_channel is not None:
             set_fd_resolver(None)
             self._fd_channel.close()
@@ -701,8 +863,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             return
 
         # No scalar binding: `popped` must stay the only reference so
-        # _release_entries' reclaim actually unmaps the IPC segments.
-        self._release_entries(popped)
+        # _release_entries' reclaim actually unmaps the IPC segments. The
+        # release runs on the device's release thread: it can wait on a
+        # stuck stream, and this handler runs on the MQ main loop.
+        self._submit_release(popped)
         logger.info("Unregistered KV cache for GPU ID %d", instance_id)
 
     @request_handler(
