@@ -49,6 +49,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     trim_and_stage_unfull_chunk_block_ids,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.retained_views import create_store
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -234,6 +235,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
     """
 
     module_name = "lmcache_driven_transfer"
+    _retained = None
 
     @classmethod
     def create(cls, build_ctx: ModuleBuildContext) -> EngineModule | None:
@@ -248,6 +250,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
     def __init__(self, ctx: MPCacheServerContext, fd_socket_path: str = "") -> None:
         self._ctx = ctx
+        self._retained = create_store(ctx)
         self._cache_contexts: dict[int, ContextEntry] = {}
         # Guards all reads/writes of _cache_contexts. The reaper mutates it
         # off the MQ main loop, so register/unregister/store/retrieve and
@@ -453,7 +456,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         """
         if not entries:
             return
+        released = []
         for entry in entries:
+            if self._retained is not None:
+                released.append(self._retained.retire(entry.cache_context))
             entry.cache_context.close()
             self._ctx.layout_desc_registry.unregister(
                 entry.model_name, entry.world_size
@@ -467,6 +473,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         if ipc_collect is not None:
             # Backends without IPC collection omit this optional operation.
             ipc_collect()
+        if self._retained is not None:
+            self._retained.event("registration_cleanup_complete", instances=released)
 
     def report_status(self) -> dict:
         """Return GPU transfer module status information.
@@ -502,6 +510,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             entries = list(self._cache_contexts.values())
             self._cache_contexts.clear()
         self._release_entries(entries)
+        if self._retained is not None:
+            self._ctx.storage_manager.retained_reads.close()
+            self._retained.close()
         if self._fd_channel is not None:
             set_fd_resolver(None)
             self._fd_channel.close()
@@ -662,6 +673,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             cache_context.close()
             raise
 
+        if self._retained is not None:
+            self._retained.register(cache_context, instance_id)
         with self._lock:
             self._cache_contexts[instance_id] = ContextEntry(
                 cache_context=cache_context,
@@ -807,6 +820,45 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             else []
         )
         num_chunks = len(obj_keys_per_obj_group[0])
+
+        if self._retained is not None and self._retained.matches_salt(key.cache_salt):
+            try:
+                if (
+                    unfull_obj_keys
+                    or key.model_name != model_name
+                    or entry.world_size != 1
+                    or num_object_groups != 1
+                    or cache_context.kv_layer_groups_manager.num_kernel_groups != 1
+                ):
+                    raise ValueError(
+                        "retained STORE requires complete registered TP1 chunks"
+                    )
+                label = (
+                    f"spark_zc/daemon_publish/{key.request_id}/{key.start}-{key.end}"
+                )
+                with (
+                    torch_dev.device(cache_context.device),
+                    torch_dev.nvtx.range(label),
+                ):
+                    return self._retained.publish(
+                        instance_id,
+                        cache_context,
+                        event_backend,
+                        event_ipc_handle,
+                        key,
+                        obj_keys_per_obj_group[0],
+                        gpu_block_ids,
+                        chunk_size,
+                    )
+            except Exception as exc:
+                self._retained.event(
+                    "store_error",
+                    instance=instance_id,
+                    request_id=key.request_id,
+                    error=repr(exc),
+                )
+                logger.exception("Retained target STORE failed")
+                return b"", False, [False] * (num_chunks + bool(unfull_obj_keys))
 
         # NOTE: different engine groups may have different block sizes, so
         # ``blocks_per_chunk[i]`` is the number of blocks in one chunk for
@@ -1156,6 +1208,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             the unfull chunk only when the range has no full chunk (the
             engine's prefix cache already holds part of the unfull chunk).
         """
+        from lmcache.v1.multiprocess import retained_retrieve
+
+        retained_store = retained_retrieve.selected_store(self._ctx, key.cache_salt)
         st = time.perf_counter()
 
         entry = self.get_and_touch_context_entry(instance_id)
@@ -1167,6 +1222,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 "Rejecting RETRIEVE for unregistered GPU instance ID %d",
                 instance_id,
             )
+            if retained_store is not None:
+                self._ctx.storage_manager.retained_reads.cancel(
+                    id(self._ctx.session_manager.get(key.request_id))
+                )
             return b"", False
         cache_context = entry.cache_context
         model_name = entry.model_name
@@ -1179,6 +1238,17 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
             key, list(range(num_object_groups))
         )
+        if retained_store is not None and (
+            key.model_name != model_name
+            or entry.world_size != 1
+            or chunk_size != 256
+            or num_object_groups != 1
+            or key.has_unfull_chunk(chunk_size)
+        ):
+            self._ctx.storage_manager.retained_reads.cancel(
+                id(self._ctx.session_manager.get(key.request_id))
+            )
+            return b"", False
         unfull_obj_keys = (
             self._ctx.resolve_unfull_chunk_obj_keys(
                 key, list(range(num_object_groups)), chunk_size
@@ -1249,6 +1319,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     num_chunks,
                     blocks_per_chunk,
                 )
+                if retained_store is not None:
+                    self._ctx.storage_manager.retained_reads.cancel(
+                        id(self._ctx.session_manager.get(key.request_id))
+                    )
                 event_backend.record_event(event, cache_context.stream)
                 return event_backend.export_event(event, cache_context.device), False
 
@@ -1303,63 +1377,83 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ] + unfull_retained_keys
             # Capture every retained lock before enqueuing GPU work, including
             # groups that a later transfer failure may leave unvisited.
-            read_completion = self._ctx.storage_manager.prepare_read_completion(
-                retained_keys, read_owners
-            )
+            read_completion = None
+            if retained_store is None:
+                read_completion = self._ctx.storage_manager.prepare_read_completion(
+                    retained_keys, read_owners
+                )
             total_bytes = 0
             retrieve_succeeded = True
             try:
-                for obj_group_id in range(num_object_groups):
-                    if obj_group_id in skipped_groups:
-                        continue
-                    skip = group_skips[obj_group_id]
-                    in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
-                    # Only an unfull chunk: no full chunk to read.
-                    if unfull_obj_keys and (not in_window_keys):
-                        continue
-                    found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
-                        in_window_keys, l1_owners=read_owners
-                    )
-                    if not window_objs or found_keys != in_window_keys:
-                        logger.error("Some keys not found during retrieve!")
-                        retrieve_succeeded = False
-                        break
-
-                    total_bytes += sum(mo.get_size() for mo in window_objs)
-                    # None-pad the skipped prefix so block-id slicing is unchanged.
-                    memory_objs: list[MemoryObj | None] = [None] * skip + window_objs
-                    cache_context.transfer_object_group(
-                        block_ids_per_group_gpu,
-                        memory_objs,
-                        object_group_id=obj_group_id,
-                        batch_size=cache_context.max_batch_size,
-                        skip_first_n_tokens=skip_first_n_tokens,
-                        direction=lmcache_native.TransferDirection.H2D,
-                        transfer_key=transfer_key,
-                        block_ids_host=gpu_block_ids,
-                    )
-                    prefetched_keys.extend(in_window_keys)
-                if retrieve_succeeded and unfull_retained_keys:
-                    total_bytes += self._retrieve_unfull_chunk_objects(
-                        cache_context,
+                if retained_store is not None:
+                    total_bytes = retained_retrieve.restore(
+                        self._ctx,
                         key,
-                        unfull_retained_keys,
-                        [
-                            group
-                            for group in range(num_object_groups)
-                            if group not in skipped_groups
-                        ],
-                        unfull_block_ids,
-                        max(0, skip_first_n_tokens - num_chunks * chunk_size),
-                        chunk_size,
+                        instance_id,
+                        cache_context,
+                        retained_keys,
+                        gpu_block_ids,
+                        skip_first_n_tokens,
                     )
-                    prefetched_keys.extend(unfull_retained_keys)
+                    prefetched_keys.extend(retained_keys)
+                else:
+                    for obj_group_id in range(num_object_groups):
+                        if obj_group_id in skipped_groups:
+                            continue
+                        skip = group_skips[obj_group_id]
+                        in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
+                        # Only an unfull chunk: no full chunk to read.
+                        if unfull_obj_keys and (not in_window_keys):
+                            continue
+                        found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
+                            in_window_keys, l1_owners=read_owners
+                        )
+                        if not window_objs or found_keys != in_window_keys:
+                            logger.error("Some keys not found during retrieve!")
+                            retrieve_succeeded = False
+                            break
+
+                        total_bytes += sum(mo.get_size() for mo in window_objs)
+                        # None-pad the skipped prefix so block-id slicing is unchanged.
+                        memory_objs: list[MemoryObj | None] = [
+                            None
+                        ] * skip + window_objs
+                        cache_context.transfer_object_group(
+                            block_ids_per_group_gpu,
+                            memory_objs,
+                            object_group_id=obj_group_id,
+                            batch_size=cache_context.max_batch_size,
+                            skip_first_n_tokens=skip_first_n_tokens,
+                            direction=lmcache_native.TransferDirection.H2D,
+                            transfer_key=transfer_key,
+                            block_ids_host=gpu_block_ids,
+                        )
+                        prefetched_keys.extend(in_window_keys)
+                    if retrieve_succeeded and unfull_retained_keys:
+                        total_bytes += self._retrieve_unfull_chunk_objects(
+                            cache_context,
+                            key,
+                            unfull_retained_keys,
+                            [
+                                group
+                                for group in range(num_object_groups)
+                                if group not in skipped_groups
+                            ],
+                            unfull_block_ids,
+                            max(0, skip_first_n_tokens - num_chunks * chunk_size),
+                            chunk_size,
+                        )
+                        prefetched_keys.extend(unfull_retained_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
             finally:
                 event_backend.record_event(event, cache_context.stream)
-                if retained_keys:
+                if retained_store is not None:
+                    self._ctx.storage_manager.retained_reads.cancel(
+                        id(self._ctx.session_manager.get(key.request_id)), retained_keys
+                    )
+                elif retained_keys:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
                         "finish_read_by_owner",

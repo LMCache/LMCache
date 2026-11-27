@@ -31,6 +31,7 @@ from typing import ClassVar, Literal, cast
 import os
 import threading
 import uuid
+import weakref
 
 # Third Party
 import torch
@@ -45,6 +46,7 @@ from lmcache.v1.platform.base.ipc_wire import (
     WireIPCData,
 )
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper, resolve_fd
+from lmcache.v1.platform.devices.cuda import retention_allocator
 from lmcache.v1.platform.devices.cuda.utils import (
     _bind_primary_context,
     _cuda,
@@ -420,6 +422,13 @@ class RawCudaIPCWrapper(DeviceIPCWrapper):
                 )
 
 
+def _close_unsent_fd(fd: int, export_id: bytes, creation_id: str | None) -> None:
+    os.close(fd)
+    retention_allocator.record(
+        "unoffered_fd_closed", fd=fd, export_id=export_id.hex(), creation_id=creation_id
+    )
+
+
 class VmmCudaIPCWrapper(DeviceIPCWrapper):
     """IPC wrapper for CUDA VMM (``cuMemCreate``/``cuMemMap``) memory.
 
@@ -495,6 +504,9 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
         # Byte range spans dim-0 padding too; equals numel bytes if contiguous.
         nbytes = self.wire_metadata().byte_span()
 
+        creation = retention_allocator.lookup_creation(data_ptr, nbytes)
+        self.creation_id = creation[0] if creation else None
+        self._export_id = uuid.uuid4().bytes
         kind: str = ""
         payload: object = None
         driver = self._driver()
@@ -503,7 +515,9 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
             # Recover the allocation handle from the bare pointer (works
             # for interior pointers; adds one driver reference we must
             # release below).
-            err, alloc_handle = driver.cuMemRetainAllocationHandle(int(data_ptr))
+            err, alloc_handle = driver.cuMemRetainAllocationHandle(
+                creation[1] if creation else int(data_ptr)
+            )
             if err != driver.CUresult.CUDA_SUCCESS:
                 raise RuntimeError(
                     f"cuMemRetainAllocationHandle failed: {err} "
@@ -511,7 +525,16 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
                     "be VMM-backed."
                 )
             try:
+                self._event(
+                    "export_probe_retain", pointer=data_ptr, handle=alloc_handle
+                )
                 kind, payload = self._export_allocation(alloc_handle)
+                self._event(
+                    "shareable_exported",
+                    kind=kind,
+                    fd=payload if kind == "posix_fd" else None,
+                    handle=alloc_handle,
+                )
 
                 # The fabric kind is isolation-clean (inline blob, IMEX
                 # channel device); a POSIX fd is not -- it must cross via
@@ -530,14 +553,33 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
                 # One exported handle maps exactly one physical chunk.
                 # cuMemGetAddressRange on VMM reports the mapped chunk
                 # containing data_ptr, so the tensor must fit inside it.
-                range_result = driver.cuMemGetAddressRange(driver.CUdeviceptr(data_ptr))
-                if range_result[0] != driver.CUresult.CUDA_SUCCESS:
-                    raise RuntimeError(
-                        f"cuMemGetAddressRange failed: {range_result[0]} "
-                        f"(ptr=0x{data_ptr:x})"
+                if creation:
+                    # cuMemMap succeeded for this exact extent, and lookup_creation
+                    # already checked the full byte span under the allocator mutex.
+                    _, chunk_base, chunk_size = creation
+                else:
+                    range_result = driver.cuMemGetAddressRange(
+                        driver.CUdeviceptr(data_ptr)
                     )
-                _err, chunk_base, chunk_size = range_result
+                    if range_result[0] != driver.CUresult.CUDA_SUCCESS:
+                        raise RuntimeError(
+                            f"cuMemGetAddressRange failed: {range_result[0]} "
+                            f"(ptr=0x{data_ptr:x})"
+                        )
+                    _err, chunk_base, chunk_size = range_result
                 alloc_offset = data_ptr - int(chunk_base)
+                self._event(
+                    "export_view",
+                    base=int(chunk_base),
+                    size=int(chunk_size),
+                    offset=alloc_offset,
+                    span=nbytes,
+                    shape=self.shape,
+                    stride=self.stride,
+                    dtype=str(self.dtype),
+                    device_uuid=str(self.device_uuid),
+                    kind=kind,
+                )
                 if alloc_offset + nbytes > int(chunk_size):
                     raise RuntimeError(
                         f"tensor bytes [{alloc_offset}, {alloc_offset + nbytes}) "
@@ -547,21 +589,34 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
             except BaseException:
                 if kind == "posix_fd" and isinstance(payload, int):
                     os.close(payload)
+                    self._event("export_fd_rollback", fd=payload)
                 raise
             finally:
                 # The exported fd/blob (or, failing that, the exporter's
                 # own live mapping) keeps the allocation reachable; the
                 # retained reference is ours to drop.
                 (release_err,) = driver.cuMemRelease(alloc_handle)
+                self._event(
+                    "export_probe_release",
+                    rc=int(release_err),
+                    handle=alloc_handle,
+                )
                 if release_err != driver.CUresult.CUDA_SUCCESS:
                     logger.warning(
                         "cuMemRelease of retained handle failed: %s", release_err
                     )
 
-        self._export_id = uuid.uuid4().bytes
         self._kind = kind
         self._fabric_blob = payload if kind == "fabric" else None
         self._fd = payload if kind == "posix_fd" else None
+        if self._fd is not None and os.environ.get("LMCACHE_ZC_RUN_ID"):
+            self._fd_finalizer = weakref.finalize(
+                self,
+                _close_unsent_fd,
+                self._fd,
+                self._export_id,
+                self.creation_id,
+            )
         self._alloc_size = int(chunk_size)
         self._alloc_offset = alloc_offset
         self._nbytes = nbytes
@@ -588,9 +643,14 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
             return None
         return (self._export_id, fd)
 
+    def on_fd_delivered(self, fd: int) -> None:
+        """Record the server ACK for the existing LMCache FD channel."""
+        self._event("fd_sent", fd=fd)
+
     def to_wire(self) -> VmmCudaIPCData:
         """Return the VMM descriptor, excluding local fds and mapping counts."""
         return self._wire_cls(
+            creation_id=getattr(self, "creation_id", None),
             version=1,
             metadata=self.wire_metadata(),
             export_id=self._export_id,
@@ -609,6 +669,7 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
         obj = object.__new__(cls)
         obj.restore_metadata(data.metadata)
         obj.handle = data.export_id
+        obj.creation_id = data.creation_id
         obj._export_id = data.export_id
         obj._kind = data.kind
         obj._fabric_blob = data.fabric_blob
@@ -635,21 +696,32 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
             RuntimeError: If the fd resolver is missing (POSIX-fd kind)
                 or any driver import/mapping step fails.
         """
-        # Third Party
-        import cupy
-
         device_index = self._get_device_index_from_uuid(self.device_uuid)
 
         with _MAPPINGS_LOCK:
             entry = _MAPPED_VMM_ALLOCATIONS.get(self._export_id)
             if entry is None:
                 with torch.cuda.device(device_index):
+                    if os.environ.get("LMCACHE_ZC_RUN_ID"):
+                        self._bind_context(device_index)
                     entry = self._import_and_map(device_index)
                 _MAPPED_VMM_ALLOCATIONS[self._export_id] = entry
             entry.refcount += 1
             self._opens += 1
             base_ptr = entry.base_ptr
+            if os.environ.get("LMCACHE_ZC_RUN_ID"):
+                try:
+                    self._event("mapping_acquire", base=base_ptr, refs=entry.refcount)
+                    return self._tensor_view(base_ptr)
+                except BaseException:
+                    self._drop_opens_locked(1)
+                    raise
+        return self._tensor_view(base_ptr)
 
+    def _tensor_view(self, base_ptr):
+        import cupy
+
+        device_index = self._get_device_index_from_uuid(self.device_uuid)
         # Same reconstruction as RawCudaIPCWrapper: flat uint8 CuPy view
         # at the chunk offset, DLPack to torch, then view as the original
         # dtype/shape (uint8 avoids bf16/fp8 dtype-conversion gaps).
@@ -679,49 +751,62 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
         teardown paths where raising would abort cleanup of the
         remaining entries.
         """
+        finalizer = getattr(self, "_fd_finalizer", None)
+        if finalizer is not None:
+            finalizer.detach()
         fd = getattr(self, "_fd", None)
         if fd is not None:
             self._fd = None
             try:
                 os.close(fd)
+                self._event("sender_fd_closed", fd=fd)
             except OSError:
                 logger.warning("closing exported VMM fd %d failed", fd)
 
-        opens = getattr(self, "_opens", 0)
-        if opens <= 0:
-            return
         with _MAPPINGS_LOCK:
-            self._opens = 0
-            entry = _MAPPED_VMM_ALLOCATIONS.get(self._export_id)
-            if entry is None:
-                return
-            entry.refcount -= opens
-            if entry.refcount > 0:
-                return
-            del _MAPPED_VMM_ALLOCATIONS[self._export_id]
-            base_ptr, alloc_handle = entry.base_ptr, entry.alloc_handle
-            driver = self._driver()
-            for what, result in (
-                ("cuMemUnmap", driver.cuMemUnmap(base_ptr, self._alloc_size)),
-                (
-                    "cuMemAddressFree",
-                    driver.cuMemAddressFree(base_ptr, self._alloc_size),
-                ),
-                ("cuMemRelease", driver.cuMemRelease(alloc_handle)),
-            ):
-                if result[0] != driver.CUresult.CUDA_SUCCESS:
-                    logger.warning(
-                        "%s failed during VMM mapping close: %s (ptr=0x%x)",
-                        what,
-                        result[0],
-                        base_ptr,
-                    )
+            if self._opens:
+                self._drop_opens_locked(self._opens)
+
+    def _drop_opens_locked(self, opens):
+        entry = _MAPPED_VMM_ALLOCATIONS.get(self._export_id)
+        if entry is None:
+            return
+        if entry.refcount == opens and os.environ.get("LMCACHE_ZC_RUN_ID"):
+            # Reapers and control RPCs can run on a fresh thread.
+            self._bind_context(self._get_device_index_from_uuid(self.device_uuid))
+        self._opens -= opens
+        entry.refcount -= opens
+        self._event(
+            "mapping_drop", base=entry.base_ptr, refs=entry.refcount, opens=opens
+        )
+        if entry.refcount > 0:
+            return
+        del _MAPPED_VMM_ALLOCATIONS[self._export_id]
+        base_ptr, alloc_handle = entry.base_ptr, entry.alloc_handle
+        driver = self._driver()
+        for what, result in (
+            ("cuMemUnmap", driver.cuMemUnmap(base_ptr, self._alloc_size)),
+            (
+                "cuMemAddressFree",
+                driver.cuMemAddressFree(base_ptr, self._alloc_size),
+            ),
+            ("cuMemRelease", driver.cuMemRelease(alloc_handle)),
+        ):
+            self._event(what, base=base_ptr, handle=alloc_handle, rc=int(result[0]))
+            if result[0] != driver.CUresult.CUDA_SUCCESS:
+                logger.warning(
+                    "%s failed during VMM mapping close: %s (ptr=0x%x)",
+                    what,
+                    result[0],
+                    base_ptr,
+                )
 
     def __getstate__(self) -> dict[str, object]:
         """Pickle without process-local state (fd, registry references)."""
         state = dict(self.__dict__)
         state["_fd"] = None
         state["_opens"] = 0
+        state.pop("_fd_finalizer", None)
         return state
 
     def _export_allocation(self, alloc_handle: object) -> "tuple[str, int | bytes]":
@@ -787,12 +872,14 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
         if self._kind == "posix_fd":
             fd = resolve_fd(self._export_id)
             try:
+                self._event("receiver_fd_acquired", fd=fd)
                 err, handle = driver.cuMemImportFromShareableHandle(
                     fd,
                     driver.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
                 )
             finally:
                 os.close(fd)
+                self._event("receiver_fd_closed", fd=fd)
             if err != driver.CUresult.CUDA_SUCCESS:
                 raise RuntimeError(f"cuMemImportFromShareableHandle(fd) failed: {err}")
         else:
@@ -807,15 +894,28 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
                     f"cuMemImportFromShareableHandle(fabric) failed: {err}"
                 )
 
+        self._event("import_handle", handle=handle)
         err, base = driver.cuMemAddressReserve(self._alloc_size, 0, 0, 0)
         if err != driver.CUresult.CUDA_SUCCESS:
-            driver.cuMemRelease(handle)
+            self._event(
+                "rollback_handle_release",
+                handle=handle,
+                rc=int(driver.cuMemRelease(handle)[0]),
+            )
             raise RuntimeError(f"cuMemAddressReserve failed: {err}")
 
         (err,) = driver.cuMemMap(base, self._alloc_size, 0, handle, 0)
         if err != driver.CUresult.CUDA_SUCCESS:
-            driver.cuMemAddressFree(base, self._alloc_size)
-            driver.cuMemRelease(handle)
+            self._event(
+                "rollback_va_free",
+                base=int(base),
+                rc=int(driver.cuMemAddressFree(base, self._alloc_size)[0]),
+            )
+            self._event(
+                "rollback_handle_release",
+                handle=handle,
+                rc=int(driver.cuMemRelease(handle)[0]),
+            )
             raise RuntimeError(f"cuMemMap failed: {err}")
 
         access = driver.CUmemAccessDesc()
@@ -824,11 +924,26 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
         access.flags = driver.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
         (err,) = driver.cuMemSetAccess(base, self._alloc_size, [access], 1)
         if err != driver.CUresult.CUDA_SUCCESS:
-            driver.cuMemUnmap(base, self._alloc_size)
-            driver.cuMemAddressFree(base, self._alloc_size)
-            driver.cuMemRelease(handle)
+            self._event(
+                "rollback_unmap",
+                base=int(base),
+                rc=int(driver.cuMemUnmap(base, self._alloc_size)[0]),
+            )
+            self._event(
+                "rollback_va_free",
+                base=int(base),
+                rc=int(driver.cuMemAddressFree(base, self._alloc_size)[0]),
+            )
+            self._event(
+                "rollback_handle_release",
+                handle=handle,
+                rc=int(driver.cuMemRelease(handle)[0]),
+            )
             raise RuntimeError(f"cuMemSetAccess failed: {err}")
 
+        self._event(
+            "import_mapped", base=int(base), size=self._alloc_size, handle=handle
+        )
         return _VmmMapping(base_ptr=int(base), alloc_handle=handle, refcount=0)
 
     @staticmethod
@@ -840,3 +955,60 @@ class VmmCudaIPCWrapper(DeviceIPCWrapper):
     def _bind_context(device_index: int) -> None:
         """Make ``device_index``'s context current for the driver calls."""
         _bind_primary_context(device_index)
+
+    def _event(self, event, **fields):
+        if os.environ.get("LMCACHE_ZC_RUN_ID"):
+            try:
+                if "handle" in fields:
+                    fields["handle"] = int(fields["handle"])
+                retention_allocator.record(
+                    event,
+                    export_id=self._export_id.hex(),
+                    creation_id=getattr(self, "creation_id", None),
+                    **fields,
+                )
+            except OSError:
+                logger.exception("Incomplete VMM ledger while recording %s", event)
+
+    def acquire_mapping_lease(self):
+        """Hold the registered mapping independently of registration teardown."""
+        # Make a descriptor-only holder. Reserve its registry ref before
+        # releasing the lock so concurrent registration close cannot unmap it.
+        holder = object.__new__(type(self))
+        holder.__dict__ = self.__getstate__()
+        with _MAPPINGS_LOCK:
+            entry = _MAPPED_VMM_ALLOCATIONS.get(self._export_id)
+            if entry is None or self._opens == 0:
+                raise RuntimeError(
+                    "Independent leases require a live imported registration"
+                )
+            holder._opens = 1
+            entry.refcount += 1
+            base = entry.base_ptr
+        try:
+            tensor = holder._tensor_view(base)
+            holder._event("lease_acquire", base=base)
+            return VmmMappingLease(holder, tensor)
+        except BaseException:
+            holder.close()
+            raise
+
+
+class VmmMappingLease:
+    def __init__(self, holder, tensor):
+        self._holder = holder
+        self._close_lock = threading.Lock()
+        self.tensor = tensor
+        self.creation_id = getattr(holder, "creation_id", None)
+        self.alloc_size = holder._alloc_size
+        self.alloc_offset = holder._alloc_offset
+        self.export_id = holder._export_id.hex()
+
+    def close(self):
+        with self._close_lock:
+            if self._holder is None:
+                return
+            self.tensor = None
+            self._holder.close()
+            self._holder._event("lease_drop")
+            self._holder = None

@@ -83,7 +83,7 @@ class RawCudaIPCData(IPCData, tag="cuda_raw"):
             raise ValueError("IPC view exceeds raw CUDA byte range")
 
 
-class VmmCudaIPCData(IPCData, tag="cuda_vmm"):
+class VmmCudaIPCData(IPCData, tag="cuda_vmm", omit_defaults=True):
     """VMM allocation descriptor; process-local file descriptors are excluded."""
 
     export_id: Annotated[bytes, msgspec.Meta(min_length=16, max_length=16)]
@@ -92,6 +92,7 @@ class VmmCudaIPCData(IPCData, tag="cuda_vmm"):
     alloc_size: NonNegative
     alloc_offset: NonNegative
     nbytes: NonNegative
+    creation_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.metadata.byte_span() > self.nbytes:

@@ -1948,14 +1948,41 @@ class LMCacheMPWorkerAdapter:
             request_configs=request_configs,
         )
         transfer_ctx = self._require_transfer_ctx("submitting store requests")
-        future = transfer_ctx.submit_store(
-            request_id,
-            key,
-            self.kv_caches,
-            self._block_ids_per_group(op),
-            event,
-            self.blocks_in_chunk,
-        )
+        block_ids = self._block_ids_per_group(op)
+        trace = os.environ.get("LMCACHE_ZC_WORKER_DIR")
+        if trace:
+            from lmcache.integration.vllm.spark_zc_worker import emit
+
+            label = f"spark_zc/worker_submit/{request_id}/{op.start}-{op.end}"
+            emit(
+                "worker",
+                "store_submit_begin",
+                request_id=request_id,
+                cache_salt=cache_salt,
+                start=op.start,
+                end=op.end,
+                block_ids=block_ids,
+                instance_id=int(self.instance_id),
+                producer_event_recorded=event is not None,
+            )
+            torch.cuda.nvtx.range_push(label)
+        try:
+            future = transfer_ctx.submit_store(
+                request_id, key, self.kv_caches, block_ids, event, self.blocks_in_chunk
+            )
+        finally:
+            if trace:
+                torch.cuda.nvtx.range_pop()
+        if trace:
+            emit(
+                "worker",
+                "store_enqueued",
+                request_id=request_id,
+                cache_salt=cache_salt,
+                start=op.start,
+                end=op.end,
+                instance_id=int(self.instance_id),
+            )
         self.store_futures[request_id] = future
         if event is not None:
             self.store_events[request_id] = event
@@ -2212,6 +2239,16 @@ class LMCacheMPWorkerAdapter:
             if not done:
                 continue
 
+            if os.environ.get("LMCACHE_ZC_WORKER_DIR"):
+                from lmcache.integration.vllm.spark_zc_worker import emit
+
+                emit(
+                    "worker",
+                    "store_reply",
+                    request_id=request_id,
+                    ok=bool(s_result),
+                    instance_id=int(self.instance_id),
+                )
             finished_stores.add(request_id)
 
             if not s_result:
