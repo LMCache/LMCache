@@ -23,6 +23,7 @@ from lmcache.v1.multiprocess.engine_module import (
     ModuleBuildContext,
 )
 from lmcache.v1.multiprocess.ext_server_module import (
+    ExtServerModuleRouter,
     ExtServerModuleSpec,
     build_server_module_router,
     load_server_module_classes,
@@ -37,6 +38,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.request_handler import iter_request_handlers
+from lmcache.v1.transport.recurrent_history import HISTORY_METHOD
 from lmcache.v1.transport.server_module import ServerModuleCallRequest
 
 
@@ -357,10 +359,14 @@ def test_build_modules_loads_plugin_and_registers_liveness_target(
     log_format, module_count, module_details = logger_info.call_args.args
     log_message = log_format % (module_count, module_details)
     assert module_count == len(modules)
+    router = modules[-1]
+    assert isinstance(router, ExtServerModuleRouter)
+    assert HISTORY_METHOD in router.report_status()["server_module_plugins"]["methods"]
+    assert "server_module_router(internal)" in log_message
     assert all(
         isinstance(m, DiscoverableModule)
         and m.module_name + "(dependencies=[" in log_message
-        for m in modules
+        for m in modules[:-1]
     )
     assert "fake_plugin(dependencies=[lookup])" in log_message
 

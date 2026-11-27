@@ -8,6 +8,7 @@ import threading
 import time
 
 # Third Party
+import msgspec
 import torch
 
 # First Party
@@ -35,6 +36,7 @@ from lmcache.v1.multiprocess.engine_module import (
     InstanceLivenessTarget,
     ModuleBuildContext,
 )
+from lmcache.v1.multiprocess.ext_server_module import server_module_handler
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
@@ -48,6 +50,9 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     transfer_unfull_chunk,
     trim_and_stage_unfull_chunk_block_ids,
 )
+from lmcache.v1.multiprocess.recurrent_receive import receive_recurrent_history
+from lmcache.v1.multiprocess.recurrent_reservations import RecurrentReservations
+from lmcache.v1.multiprocess.recurrent_server import handle_recurrent_history
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
@@ -62,6 +67,10 @@ from lmcache.v1.platform.fd_channel import (
     is_fd_channel_supported,
 )
 from lmcache.v1.transport.errors import InvalidRequestError
+from lmcache.v1.transport.recurrent_history import (
+    HISTORY_METHOD,
+    HistoryCopy,
+)
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -248,6 +257,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
     def __init__(self, ctx: MPCacheServerContext, fd_socket_path: str = "") -> None:
         self._ctx = ctx
+        self._recurrent_history = RecurrentReservations()
         self._cache_contexts: dict[int, ContextEntry] = {}
         # Guards all reads/writes of _cache_contexts. The reaper mutates it
         # off the MQ main loop, so register/unregister/store/retrieve and
@@ -413,6 +423,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             The instance IDs reaped this scan.
         """
         now = time.monotonic()
+        self._recurrent_history.reap(now)
         reaped: list[tuple[int, ContextEntry]] = []
         with self._lock:
             stale_ids = [
@@ -494,6 +505,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
     def close(self) -> None:
         """Release GPU resources owned by this module."""
+        self._recurrent_history.reap(float("inf"))
         # Stop the drain thread before storage_manager.close() so any
         # in-flight completions reach a live storage manager.
         self._device_host_func_dispatcher.stop()
@@ -1175,6 +1187,34 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         if event_backend is None:
             raise RuntimeError("Registered cache context has no event backend")
 
+        history_copy = getattr(key, "history_copy", None)
+        if not gpu_block_ids and history_copy is not None:
+            # Same worker affinity and producer-stream ordering as ordinary retrieves.
+            # The returned event belongs only to the background future.
+            with (
+                torch_dev.device(cache_context.device),
+                torch_dev.stream(cache_context.stream),
+            ):
+                producer = event_backend.import_event(
+                    event_ipc_handle, cache_context.device
+                )
+                event_backend.wait_event(producer, cache_context.stream)
+                token = cache_context.hold_imported_event(producer)
+                submit_callback_to_stream(
+                    cache_context.cupy_stream,
+                    "release_imported_event",
+                    (instance_id, token),
+                )
+                copy = msgspec.msgpack.decode(history_copy, type=HistoryCopy)
+                receive_recurrent_history(
+                    cache_context, self._recurrent_history, key, copy
+                )
+                completion = event_backend.create_event(cache_context.device)
+                event_backend.record_event(completion, cache_context.stream)
+                return event_backend.export_event(
+                    completion, cache_context.device
+                ), True
+
         num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
         obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
             key, list(range(num_object_groups))
@@ -1399,6 +1439,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         return (
             event_backend.export_event(event, cache_context.device),
             retrieve_succeeded,
+        )
+
+    @server_module_handler(HISTORY_METHOD)
+    def recurrent_history(self, payload: bytes) -> bytes:
+        """Handle optional recurrent checkpoint planning and completion RPCs."""
+        return handle_recurrent_history(
+            payload, self._ctx, self._recurrent_history, self.context_entries_snapshot()
         )
 
     def _publish_token_bindings(

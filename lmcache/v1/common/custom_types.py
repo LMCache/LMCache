@@ -102,6 +102,9 @@ class IPCCacheServerKey:
     # instead of token_bytes. Defaulted, so payloads without it decode to b"".
     chunk_hashes: bytes = b""
 
+    # Private arguments for one retrieve. Never exported as ObjectKey attributes.
+    history_copy: bytes | None = field(default=None, compare=False)
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")

@@ -1096,3 +1096,50 @@ def test_block_allocation_records_carry_key_token_ids(
         assert records == expected
     finally:
         connector.shutdown()
+
+
+def test_primary_load_survives_background_poll_failure(monkeypatch):
+    worker = object.__new__(LMCacheMPConnector)
+    adapter = object.__new__(adapter_mod.LMCacheMPWorkerAdapter)
+    worker.worker_adapter = adapter
+    worker._delay_free_req_ids = set()
+    meta = LMCacheMPConnectorMetadata()
+    op = MagicMock()
+    meta.requests.append(
+        SimpleNamespace(
+            request_id="B",
+            direction="RETRIEVE",
+            op=op,
+            cache_salt="",
+            request_configs=None,
+        )
+    )
+    worker._get_connector_metadata = lambda: meta
+    adapter.create_recorded_event = MagicMock()
+    adapter.batched_submit_retrieve_requests = MagicMock()
+    producer = object()
+    history = MagicMock()
+    history.query.side_effect = [RuntimeError("A completion event unavailable"), True]
+    adapter.history_receipts = set()
+    receipt = ("A", "lease", 0)
+    adapter._history_transfers = {receipt: (history, producer, 0.0)}
+    now = [10.0]
+    monkeypatch.setattr(adapter_mod, "time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    worker.start_load_kv(MagicMock())
+    adapter.batched_submit_retrieve_requests.assert_called_once_with(
+        ["B"],
+        [op],
+        adapter.create_recorded_event.return_value,
+        cache_salts=[""],
+        request_configs_list=[None],
+    )
+    assert adapter._history_transfers[receipt][1] is producer
+    meta.requests.clear()
+    worker.start_load_kv(MagicMock())
+    history.query.assert_called_once_with()
+    now[0] += 1.01
+    worker.start_load_kv(MagicMock())
+    assert history.query.call_count == 2
+    assert not adapter._history_transfers
+    assert adapter.history_receipts == {receipt}

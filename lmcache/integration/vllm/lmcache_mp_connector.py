@@ -89,6 +89,7 @@ from lmcache.integration.vllm.lmcache_mp_metrics import (
 from lmcache.integration.vllm.mp_server_launcher import (
     is_mp_server_autostart_enabled,
 )
+from lmcache.integration.vllm.recurrent_scheduler import RecurrentHistoryScheduler
 from lmcache.integration.vllm.utils import (
     vllm_layout_hints,
 )
@@ -864,6 +865,40 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
+            self._recurrent_history: RecurrentHistoryScheduler | None = None
+            self._recurrent_groups: list[int] = []
+            if vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.restore_recurrent_history", False
+            ):
+                if (
+                    kv_cache_config is None
+                    or mamba_cache_mode != "align"
+                    or not vllm_config.cache_config.enable_prefix_caching
+                    or parallel_strategy.pp_size != 1
+                    or parallel_strategy.dcp_size != 1
+                    or len(server_urls) != 1
+                    or vllm_config.parallel_config.data_parallel_size != 1
+                    or vllm_config.parallel_config.prefill_context_parallel_size != 1
+                    or any(
+                        span != scheduler_block_size for span in group_tokens_per_block
+                    )
+                ):
+                    raise ValueError(
+                        "Recurrent history requires align mode, PP1/DP1 without CP, "
+                        "one server, and equal-sized cache blocks"
+                    )
+                self._recurrent_groups = [
+                    i
+                    for i, group in enumerate(kv_cache_config.kv_cache_groups)
+                    if any(
+                        cls.__name__ == "MambaSpec"
+                        for cls in type(group.kv_cache_spec).__mro__
+                    )
+                ]
+                if not self._recurrent_groups:
+                    raise ValueError(
+                        "Recurrent history requires recurrent cache groups"
+                    )
             # Boundary-state blocks pinned for each request's unfull-chunk
             # stores, released once the request's stores finish.
             self._pinned_boundary_state_blocks: dict[str, list[int]] = {}
@@ -1111,18 +1146,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             cache_salts.append(meta.cache_salt)
             request_configs_list.append(meta.request_configs)
 
-        if len(request_ids) == 0:
-            return
+        if request_ids:
+            event = self.worker_adapter.create_recorded_event()
 
-        event = self.worker_adapter.create_recorded_event()
-
-        self.worker_adapter.batched_submit_retrieve_requests(
-            request_ids,
-            ops,
-            event,
-            cache_salts=cache_salts,
-            request_configs_list=request_configs_list,
-        )
+            self.worker_adapter.batched_submit_retrieve_requests(
+                request_ids,
+                ops,
+                event,
+                cache_salts=cache_salts,
+                request_configs_list=request_configs_list,
+            )
+        self.worker_adapter.advance_background_copies(metadata.history_tasks)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
@@ -1295,13 +1329,20 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             Completion counts and failed request IDs, or None when lazy
             offload is disabled or there are no new results.
         """
+        receipts = self.worker_adapter.history_receipts.copy()
+        self.worker_adapter.history_receipts.clear()
         if not self.lazy_offload:
-            return None
+            return (
+                LMCacheMPWorkerMetadata({}, history_receipts=receipts)
+                if receipts
+                else None
+            )
         completed_store_requests = self.worker_adapter.get_completed_store_requests()
         failed_store_requests = self.worker_adapter.get_failed_store_requests()
-        if completed_store_requests or failed_store_requests:
+        if receipts or completed_store_requests or failed_store_requests:
             return LMCacheMPWorkerMetadata(
                 completed_store_requests=completed_store_requests or {},
+                history_receipts=receipts,
                 failed_store_requests=failed_store_requests or set(),
             )
         return None
@@ -1376,6 +1417,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if self.role == KVConnectorRole.SCHEDULER:
             logger.info("Bind GPU block pool in LMCacheMPConnector scheduler")
             self._gpu_block_pool = gpu_block_pool
+            if self._recurrent_groups:
+                if (
+                    gpu_block_pool.hash_block_size
+                    != self.scheduler_adapter.lmcache_tokens_per_chunk
+                ):
+                    raise ValueError(
+                        "Recurrent history requires equal hash and chunk sizes"
+                    )
+                self._recurrent_history = RecurrentHistoryScheduler(
+                    gpu_block_pool, self.scheduler_adapter, self._recurrent_groups
+                )
             if self.lazy_offload:
                 self._lazy_offload_manager.bind_block_pool(gpu_block_pool)
 
@@ -1703,6 +1755,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     free_end,
                 )
 
+        if num_external_tokens and self._recurrent_history is not None:
+            self._recurrent_history.begin_background(request, tracker)
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
@@ -1719,6 +1774,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         metadata.need_flush_before_forward = _has_preemption_reqs(scheduler_output)
         metadata.delay_free_req_ids = self._delay_free_req_ids
         self._delay_free_req_ids = set()
+
+        if self._recurrent_history is not None:
+            self._recurrent_history.poll()
+            metadata.history_tasks = self._recurrent_history.take_background_tasks()
 
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
@@ -1743,10 +1802,20 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         Update KVConnector state from worker-side connectors output.
 
+        Finished receives settle optional recurrent history before completed
+        stores release their retained blocks.
+
         Args:
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
         """
+        if self._recurrent_history is not None:
+            worker_meta = connector_output.kv_connector_worker_meta
+            if isinstance(worker_meta, LMCacheMPWorkerMetadata):
+                for rid, lease, rank in worker_meta.history_receipts:
+                    self._recurrent_history.worker_finished(rid, lease, rank)
+            for request_id in connector_output.finished_recving or ():
+                self._recurrent_history.settle(request_id)
         # A request's stores are done once its workers report it sent.
         for request_id in connector_output.finished_sending or ():
             self._release_boundary_state_blocks(request_id)
@@ -1800,6 +1869,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "num_lmcache_extra_cached_tokens": max(0, num_lmcache - num_vllm),
             }
 
+        if self._recurrent_history is not None:
+            normal_finish = request.status in (
+                RequestStatus.FINISHED_STOPPED,
+                RequestStatus.FINISHED_LENGTH_CAPPED,
+            )
+            self._recurrent_history.finish_request(request.request_id, normal_finish)
         # Keep the blocks only while a store may still read them. A preempted
         # request starts over with a new tracker on its next lookup.
         tracker = self.request_trackers.get(request.request_id)
@@ -1886,10 +1961,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             during a connector-only step. Non-lazy mode uses vLLM's normal
             delayed-free path and does not need this keepalive.
         """
-        if self.role != KVConnectorRole.SCHEDULER or not self.lazy_offload:
+        if self.role != KVConnectorRole.SCHEDULER:
             return False
-
-        return self._lazy_offload_manager.has_inflight_store_work()
+        history = getattr(self, "_recurrent_history", None)
+        if history is not None and history.has_work():
+            return True
+        return (
+            self.lazy_offload and self._lazy_offload_manager.has_inflight_store_work()
+        )
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

@@ -292,6 +292,271 @@ def test_store_skip_chunks_drops_caller_masked_chunks(
     assert mask[1] is False
 
 
+@pytest.mark.parametrize("tp", [1, 2, 4])
+@pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("real_connector", [False, True])
+def test_primary_returns_before_history_is_published(
+    monkeypatch, tp, cancel, real_connector
+):
+    """Drive retrieve and publication with delayed device events."""
+    # Standard
+    from dataclasses import replace
+
+    # Third Party
+    import msgspec
+
+    # First Party
+    from lmcache.integration.vllm.recurrent_scheduler import RecurrentHistoryScheduler
+    from lmcache.v1.common.custom_types import IPCCacheServerKey
+    from lmcache.v1.common.token_codec import pack_token_ids
+    from lmcache.v1.distributed.error import L1Error
+    from lmcache.v1.multiprocess import recurrent_copy, recurrent_receive
+    from lmcache.v1.multiprocess.recurrent_reservations import RecurrentReservations
+    from lmcache.v1.multiprocess.recurrent_server import handle_recurrent_history
+    from lmcache.v1.transport.recurrent_history import HistoryResponse
+
+    module, _, _ = _make_module(monkeypatch, 3, [-1, 1], ("attention", "recurrent"))
+    module._recurrent_history = RecurrentReservations()
+    context = module._ctx
+    context.chunk_size = 16
+    context.layout_desc_registry.get_chunk_size.return_value = 16
+    desc = SimpleNamespace(
+        group_kinds=["attention", "recurrent"], num_chunks_in_sw=[-1, 1]
+    )
+    context.layout_desc_registry.find_attn_desc.return_value = desc
+    context.resolve_obj_keys.side_effect = lambda key, groups: [
+        [(key.worker_id, group, index) for index in range(3)] for group in groups
+    ]
+    manager = MagicMock()
+    manager.config.read_ttl_seconds = 60
+    manager.reserve_read.side_effect = lambda keys: {
+        key: (L1Error.SUCCESS, MagicMock()) for key in keys
+    }
+    context.storage_manager.l1_managers.return_value = [manager]
+    entry = module.get_and_touch_context_entry(1)
+    entry.world_size = tp
+    cache = entry.cache_context
+    cache.lmcache_tokens_per_chunk = 16
+    cache.kv_layer_groups_manager.object_groups = [
+        SimpleNamespace(kernel_group_indices=[i]) for i in range(2)
+    ]
+    cache.kv_layer_groups_manager.kernel_groups = [
+        SimpleNamespace(
+            engine_group_idx=i, tokens_per_block=16, shape_desc=SimpleNamespace(nb=128)
+        )
+        for i in range(2)
+    ]
+    monkeypatch.setattr(
+        recurrent_copy, "downsample_and_stage_block_ids", lambda _, ids: ids
+    )
+    device = MagicMock()
+    monkeypatch.setattr(recurrent_receive, "torch_dev", device)
+    fences = [MagicMock() for _ in range(tp)]
+    for fence in fences:
+        fence.query.return_value = False
+    device.Event.side_effect = fences
+
+    pool = MagicMock(hash_block_size=16)
+    pool.get_cached_block.return_value = None
+    pool.get_num_free_blocks.return_value = 16
+    pool.get_new_blocks.return_value = [SimpleNamespace(block_id=i) for i in (80, 81)]
+    request = SimpleNamespace(request_id="A", block_hashes=[b"a", b"b", b"c"])
+    tracker = SimpleNamespace(
+        num_lmcache_hit_tokens=48,
+        request_configs=None,
+        cache_salt="",
+        packed_token_ids=lambda: pack_token_ids(range(48)),
+        is_ready_for_retrieving=lambda: True,
+    )
+
+    prepare_visible = False
+    actions = []
+
+    def submit(operation):
+        actions.append(operation.action)
+        payload = handle_recurrent_history(
+            msgspec.msgpack.encode(operation),
+            context,
+            module._recurrent_history,
+            {1: entry},
+        )
+        return SimpleNamespace(
+            query=lambda: prepare_visible or operation.action != "prepare",
+            payload=payload,
+        )
+
+    adapter = SimpleNamespace(
+        model_name="m",
+        world_size=tp,
+        _mq_timeout=3,
+        submit_recurrent_history=submit,
+        read_recurrent_history=lambda f: msgspec.msgpack.decode(
+            f.payload, type=HistoryResponse
+        ),
+    )
+    scheduler = RecurrentHistoryScheduler(pool, adapter, [1])
+    if real_connector:
+        pytest.importorskip("vllm")
+        # First Party
+        from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+        from lmcache.integration.vllm.lmcache_mp_metadata import (
+            LMCacheMPConnectorMetadata,
+            LMCacheMPRequestState,
+        )
+        from lmcache.integration.vllm.vllm_multi_process_adapter import (
+            LMCacheMPWorkerAdapter,
+        )
+
+        workers = []
+        connector = MagicMock()
+        connector.lazy_offload = False
+        connector._recurrent_history = scheduler
+        connector._get_request_tracker.return_value = tracker
+        tracker.state = LMCacheMPRequestState.READY
+        tracker.num_allocated_blocks = lambda: {}
+        tracker.needs_retrieve = lambda: True
+        step = MagicMock()
+
+        def tick():
+            return LMCacheMPConnector.build_connector_meta(
+                connector, step
+            ).history_tasks
+
+        def update(primary=False, ranks=()):
+            metadata = None
+            for rank in ranks:
+                worker = workers[rank]
+                worker._get_connector_metadata.return_value = (
+                    LMCacheMPConnectorMetadata()
+                )
+                LMCacheMPConnector.start_load_kv(worker, None)
+                report = LMCacheMPConnector.build_connector_worker_meta(worker)
+                if report is not None:
+                    metadata = (
+                        report if metadata is None else metadata.aggregate(report)
+                    )
+            LMCacheMPConnector.update_connector_output(
+                connector,
+                SimpleNamespace(
+                    finished_recving={"A"} if primary else set(),
+                    finished_sending=set(),
+                    kv_connector_worker_meta=metadata,
+                ),
+            )
+
+        LMCacheMPConnector.update_state_after_alloc(
+            connector, request, MagicMock(get_block_ids=lambda: ()), 48
+        )
+    else:
+
+        def tick():
+            scheduler.poll()
+            return scheduler.take_background_tasks()
+
+        def update(primary=False, ranks=()):
+            if primary:
+                scheduler.settle("A")
+            for rank in ranks:
+                scheduler.worker_finished("A", lease, rank)
+
+        scheduler.begin_background(request, tracker)
+
+    tick()
+    assert request.request_id in scheduler.planning and not scheduler.dispatch
+    key = IPCCacheServerKey("m", tp, 0, tracker.packed_token_ids(), 0, 48, "A")
+    for rank in range(tp):
+        _, ok = module.retrieve(
+            replace(key, worker_id=rank), 1, [[1, 2, 3], [0, 0, 9]], b"event"
+        )
+        assert ok
+        fences[rank].record.assert_not_called()
+    update(primary=True)
+    assert tick() == []
+    assert tick() == []
+    assert tracker.request_configs is None and not scheduler.pending
+    if not cancel:
+        scheduler.finish_request("A", normal_finish=True)
+    prepare_visible = True
+    tasks = tick()
+    assert len(tasks) == 1, "primary receipt and a ready plan must dispatch one copy"
+    [(owner, tokens, end, salt, copy)] = tasks
+    assert (owner, tokens, end, salt) == ("A", key.token_bytes, 48, tracker.cache_salt)
+    for rank in range(tp):
+        if real_connector:
+            worker = MagicMock()
+            worker.lazy_offload = False
+            worker_adapter = object.__new__(LMCacheMPWorkerAdapter)
+            worker.worker_adapter = worker_adapter
+            worker_adapter.history_receipts = set()
+            worker_adapter.parallel_strategy = SimpleNamespace(kv_worker_id=rank)
+            worker_adapter.blocks_in_chunk = 1
+            worker_adapter.kv_caches = {}
+            worker_adapter.create_recorded_event = MagicMock(return_value=b"event")
+            worker_adapter._create_key = MagicMock(
+                return_value=replace(key, worker_id=rank)
+            )
+
+            def submit_retrieve(rid, cache_key, caches, blocks, event, block_size):
+                _, ok = module.retrieve(cache_key, 1, blocks, event)
+                assert ok
+                return fences[cache_key.worker_id]
+
+            worker_adapter._require_transfer_ctx = MagicMock(
+                return_value=SimpleNamespace(submit_retrieve=submit_retrieve)
+            )
+            metadata = LMCacheMPConnectorMetadata()
+            metadata.history_tasks = tasks
+            worker._get_connector_metadata.return_value = metadata
+            LMCacheMPConnector.start_load_kv(worker, None)
+            assert LMCacheMPConnector.build_connector_worker_meta(worker) is None
+            workers.append(worker)
+        else:
+            _, ok = module.retrieve(
+                replace(key, worker_id=rank, history_copy=copy), 1, [], b"event"
+            )
+            assert ok
+        fences[rank].record.assert_called_once()
+        if cancel:
+            scheduler.finish_request("A", normal_finish=False)
+            break
+    _, ok = module.retrieve(
+        replace(key, request_id="B", worker_id=0), 1, [[1, 2, 3], [0, 0, 9]], b"event"
+    )
+    assert ok
+    for _ in range(32):
+        tick()
+    assert actions.count("status") == 0
+    pool.cache_full_blocks.assert_not_called()
+    manager.finish_read.assert_not_called()
+    assert "A" in scheduler.pending
+    live = fences[:1] if cancel else fences
+    for fence in live[:-1]:
+        fence.query.return_value = True
+    lease = scheduler.pending["A"].plan.lease
+    assert not module._recurrent_history.query(lease).settled
+    live[-1].query.return_value = True
+    if not cancel and tp > 1:
+        update(ranks=[0, 0])
+        scheduler.worker_finished("A", "stale-lease", 1)
+        tick()
+        assert actions.count("status") == 0
+    update(ranks=range(len(live)))
+    # Drive any pending cancellation retry after the last device fence.
+    # First Party
+    from lmcache.integration.vllm import recurrent_scheduler
+
+    monkeypatch.setattr(
+        recurrent_scheduler, "time", SimpleNamespace(monotonic=lambda: 1e12)
+    )
+    for _ in range(6):
+        tick()
+    if not cancel:
+        assert actions.count("status") == 1
+    assert pool.cache_full_blocks.call_count == (0 if cancel else 2)
+    manager.finish_read.assert_called_once()
+    assert not scheduler.pending and not module._recurrent_history.entries
+
+
 @pytest.mark.parametrize(
     ("mask_object_groups", "expected"),
     [(None, [False, True]), ([0], [True, True]), ([1], [False, True])],
@@ -332,7 +597,10 @@ def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
 
     _handle, ok = module.retrieve(
         key=SimpleNamespace(
-            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+            request_id="req",
+            request_configs=None,
+            cache_salt="salt",
+            has_unfull_chunk=_no_unfull,
         ),
         instance_id=1,
         gpu_block_ids=gpu_block_ids,
@@ -361,7 +629,10 @@ def test_retrieve_full_attention_only_reads_everything(monkeypatch):
     )
     _handle, ok = module.retrieve(
         key=SimpleNamespace(
-            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+            request_id="req",
+            request_configs=None,
+            cache_salt="salt",
+            has_unfull_chunk=_no_unfull,
         ),
         instance_id=1,
         gpu_block_ids=[[1, 2, 3]],
@@ -395,7 +666,10 @@ def test_retrieve_never_reads_aux_groups(monkeypatch):
 
     _handle, ok = module.retrieve(
         key=SimpleNamespace(
-            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+            request_id="req",
+            request_configs=None,
+            cache_salt="salt",
+            has_unfull_chunk=_no_unfull,
         ),
         instance_id=1,
         gpu_block_ids=gpu_block_ids,
@@ -424,7 +698,10 @@ def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):
     )
     _, ok = module.retrieve(
         SimpleNamespace(
-            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+            request_id="req",
+            request_configs=None,
+            cache_salt="salt",
+            has_unfull_chunk=_no_unfull,
         ),
         1,
         [[1, 2], [0, 3]],
@@ -500,6 +777,7 @@ def test_downsample_full_attention_keeps_every_block():
 
 
 def _unfull_key(**kwargs):
+    kwargs.setdefault("request_configs", None)
     return SimpleNamespace(
         request_id="req",
         model_name="m",

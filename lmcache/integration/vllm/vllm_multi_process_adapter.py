@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 import enum
@@ -13,6 +13,7 @@ import uuid
 
 # Third Party
 from prometheus_client import Counter, Gauge
+import msgspec
 import torch
 import zmq
 
@@ -60,7 +61,14 @@ from lmcache.v1.platform.fd_channel import fd_channel_path_for_url
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
 from lmcache.v1.transport.errors import REQUEST_FAILURES
 from lmcache.v1.transport.futures import MessagingFuture
+from lmcache.v1.transport.recurrent_history import (
+    HISTORY_METHOD,
+    HistoryCopy,
+    HistoryRequest,
+    HistoryResponse,
+)
 from lmcache.v1.transport.request_client import RequestClient
+from lmcache.v1.transport.server_module import ServerModuleCallRequest
 
 if TYPE_CHECKING:
     # First Party
@@ -1130,6 +1138,25 @@ class LMCacheMPSchedulerAdapter:
                 os.getpid(), self.model_name, records
             )
 
+    def submit_recurrent_history(self, request: HistoryRequest):
+        """Submit without waiting on the scheduler thread."""
+        if len(self.req_clients) != 1:
+            raise ValueError("Recurrent history requires one LMCache server")
+        client = next(iter(self.req_clients.values()))
+        return client.server_module_call(
+            ServerModuleCallRequest(
+                method=HISTORY_METHOD, payload=msgspec.msgpack.encode(request)
+            )
+        )
+
+    @staticmethod
+    def read_recurrent_history(future) -> HistoryResponse:
+        """Decode a control response after its future reports ready."""
+        response = future.result(timeout=0)
+        if not response.success:
+            raise RuntimeError(response.error)
+        return msgspec.msgpack.decode(response.payload, type=HistoryResponse)
+
     # Helper functions
     def _buffer_kv_events(self, events: Sequence[CacheEvent]) -> None:
         """Append events to the buffer vLLM drains and update its metrics."""
@@ -1539,6 +1566,7 @@ class LMCacheMPWorkerAdapter:
         # or dropped while unhealthy). Reported alongside the completion
         # receipts so the scheduler can break their stored-prefix chains.
         self._failed_store_requests: set[str] = set()
+        self.history_receipts: set[tuple[str, str, int]] = set()
 
     @property
     def is_healthy(self) -> bool:
@@ -1959,6 +1987,47 @@ class LMCacheMPWorkerAdapter:
         self.store_futures[request_id] = future
         if event is not None:
             self.store_events[request_id] = event
+
+    def advance_background_copies(self, tasks):
+        """Keep optional futures and producer events independent of engine receipts."""
+        retained = getattr(self, "_history_transfers", {})
+        if not tasks and not retained:
+            return
+        now = time.monotonic()
+        for receipt, (future, event, retry_at) in tuple(retained.items()):
+            if now < retry_at:
+                continue
+            try:
+                completed = future.query()
+            except Exception:
+                # A failed poll gives no device fence. Keep the IPC event alive
+                # and let the next foreground receive proceed normally.
+                if not retry_at:
+                    logger.exception("Could not poll a background history transfer")
+                retained[receipt] = (future, event, now + 1.0)
+                continue
+            if completed:
+                self.history_receipts.add(receipt)
+                del retained[receipt]
+        for rid, tokens, end, salt, payload in tasks:
+            # Bound producer handles even if the device never confirms a fence.
+            # Unclaimed optional reservations are retired by the server reaper.
+            if len(retained) >= 128:
+                break
+            try:
+                key = self._create_key(tokens, 0, end, request_id=rid, cache_salt=salt)
+                key = replace(key, history_copy=payload)
+                ctx = self._require_transfer_ctx("submitting independent history")
+                event = self.create_recorded_event()
+                future = ctx.submit_retrieve(
+                    rid, key, self.kv_caches, [], event, self.blocks_in_chunk
+                )
+            except Exception:
+                logger.exception("History submission failed for %s", rid)
+                continue
+            lease = msgspec.msgpack.decode(payload, type=HistoryCopy).lease
+            retained[rid, lease, self.worker_id] = (future, event, 0.0)
+        self._history_transfers = retained
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(

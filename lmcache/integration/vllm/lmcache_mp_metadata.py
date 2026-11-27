@@ -669,6 +669,7 @@ class LMCacheMPRequestMetadata:
 class LMCacheMPConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         super().__init__()
+        self.history_tasks = []
         self.requests: list[LMCacheMPRequestMetadata] = []
         self.q_requests: list[LMCacheMPQRequestMetadata] = []
         self.need_flush_before_forward: bool = False
@@ -682,7 +683,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
         self.q_requests.append(window)
 
     def __len__(self):
-        return len(self.requests)
+        return len(self.requests) + len(self.history_tasks)
 
     # For debugging
     def __str__(self):
@@ -726,6 +727,8 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
     completed_store_requests: dict[str, int]
     failed_store_requests: set[str] = field(default_factory=set)
 
+    history_receipts: set[tuple[str, str, int]] = field(default_factory=set)
+
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
     ) -> "KVConnectorWorkerMetadata":
@@ -744,6 +747,7 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             merged[k] = merged.get(k, 0) + v
         return LMCacheMPWorkerMetadata(
             completed_store_requests=merged,
+            history_receipts=self.history_receipts | other.history_receipts,
             failed_store_requests=(
                 self.failed_store_requests | other.failed_store_requests
             ),

@@ -37,6 +37,8 @@ message IpcCacheServerKey {
   reserved "num_kv_readers";
   // Client-computed chunk hashes of [0, end), sent instead of token_bytes.
   bytes chunk_hashes = 11;
+
+  optional bytes history_copy = 12;
 }
 
 // Store / Retrieve and CacheBlend retrieve share this reply shape.
