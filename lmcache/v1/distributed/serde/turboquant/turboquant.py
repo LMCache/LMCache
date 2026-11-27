@@ -345,7 +345,15 @@ def _make_tq_tensors_for_layer(
     layer_idx: int,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Create PiT, midpoints, and centroids for one TurboQuant layer."""
+    """Create low-bit quantization tensors or unused FP8 placeholders.
+
+    FP8 keys bypass rotation and centroid lookup in both kernels, so their
+    pointer arguments need no initialized data or host-to-device transfers.
+    """
+    if cfg.key_fp8:
+        unused = torch.empty((0,), device=device, dtype=torch.float32)
+        return unused, unused, unused
+
     seed = 42 + layer_idx * _TQ_LAYER_SEED_STRIDE
     signs = _generate_wht_signs(cfg.head_dim, seed=seed, device=device)
     hadamard = _build_hadamard_cpu(cfg.head_dim).to(device=device)
@@ -357,12 +365,6 @@ def _make_tq_tensors_for_layer(
     )
     centroids = centroids_cpu.to(device=device, dtype=torch.float32)
     midpoints = midpoints_cpu.to(device=device, dtype=torch.float32)
-
-    if cfg.key_fp8:
-        # FP8-key store/dequant paths do not use PiT/midpoints/centroids, but
-        # keep valid tensors to satisfy kernel signatures.
-        midpoints = torch.empty((0,), device=device, dtype=torch.float32)
-        centroids = torch.empty((1,), device=device, dtype=torch.float32)
 
     return pi_t, midpoints, centroids
 
