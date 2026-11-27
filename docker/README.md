@@ -181,7 +181,7 @@ docker run -d --name lmcache --runtime nvidia --gpus all \
 # SGLang, connected through the environment variables
 docker run --runtime nvidia --gpus all \
   --network host --ipc host \
-  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  -v ~/.cache/huggingface:/home/lmcache/.cache/huggingface \
   --env "HF_TOKEN=$HF_TOKEN" \
   --env LMCACHE_MP_HOST=127.0.0.1 --env LMCACHE_MP_PORT=5555 \
   lmcache/sglang:latest \
@@ -190,6 +190,8 @@ docker run --runtime nvidia --gpus all \
 ```
 
 Both containers share the host IPC namespace (`--ipc host`) so the LMCache server can open the CUDA IPC handles SGLang registers.
+
+**Note**: Like the other LMCache images, the image runs as the non-root user `lmcache` (uid 1000), with Hugging Face caches under `/home/lmcache/.cache/huggingface`. SGLang and the LMCache server must run as the same user: the server can't open the CUDA IPC events of a process running as another user (`Failed to open/create interprocess memory file`). The host cache mount rules in the note above apply here too.
 
 ---
 

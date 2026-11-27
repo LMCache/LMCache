@@ -61,6 +61,20 @@ RUN --mount=type=bind,source=.,target=/mnt/lmcache-source,readonly \
     python3 -c 'import importlib.metadata as m, torch; print("lmcache", m.version("lmcache"), "sglang", m.version("sglang"), "torch", torch.__version__)'; \
     rm -rf /tmp/lmcache-source /tmp/sglang-constraints.txt
 
+# Run as uid 1000 like lmcache/vllm-openai and lmcache/standalone. With
+# --ipc host (or a shared /dev/shm), the LMCache server opens the CUDA IPC
+# events SGLang creates, which fails across users ("Failed to open/create
+# interprocess memory file"). The base image's uid-1000 account, if any, is
+# replaced by lmcache.
+RUN set -eux; \
+    u1000="$(getent passwd 1000 | cut -d: -f1 || true)"; \
+    if [ -n "${u1000}" ]; then userdel "${u1000}"; fi; \
+    useradd --create-home --uid 1000 --shell /usr/sbin/nologin lmcache; \
+    mkdir -p /home/lmcache/.cache/huggingface; \
+    chown -R lmcache:lmcache /home/lmcache
+ENV HOME=/home/lmcache
+USER lmcache
+
 LABEL org.opencontainers.image.title="lmcache/sglang" \
       org.opencontainers.image.description="SGLang ${SGLANG_VERSION} with LMCache ${LMCACHE_VERSION}" \
       org.opencontainers.image.source="https://github.com/LMCache/LMCache"
