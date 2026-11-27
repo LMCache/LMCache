@@ -47,9 +47,10 @@ from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_observability.trace.decorator import set_tracing_enabled
 from lmcache.v1.mp_observability.trace.format import (
     TRACE_SCHEMA_VERSION,
-    decode_header,
     encode_header,
+    encode_record,
 )
+from lmcache.v1.mp_observability.trace.reader import TraceReader
 from lmcache.v1.mp_observability.trace.recorder import (
     EventsTraceRecorder,
     StorageTraceRecorder,
@@ -104,6 +105,8 @@ def _write(
     records: list[tuple[float, str, dict[str, Any]]],
     schema: int = CACHE_EVENT_SCHEMA_VERSION,
     trace_schema: int = TRACE_SCHEMA_VERSION,
+    t_wall_start: float = 0.0,
+    t_mono: list[float] | None = None,
 ) -> str:
     """Write an events file with the specified payload and storage schema versions.
 
@@ -112,6 +115,10 @@ def _write(
         records: Wall times, record names and argument dictionaries to record.
         schema: Cache-event payload schema in the level metadata.
         trace_schema: Storage schema counter stamped in the shared header.
+        t_wall_start: Wall time when the file was opened.
+        t_mono: Each record's monotonic seconds since the file was opened;
+            defaults to its wall time minus ``t_wall_start``, as if the clock
+            never stepped.
 
     Returns:
         The output path, ready to load through the public trace reader.
@@ -122,15 +129,17 @@ def _write(
     for t_wall, qualname, args in records:
         recorder.write_record(qualname, args, t_wall=t_wall, t_mono=t_wall)
     recorder.close()
-    data = Path(path).read_bytes()
-    header_length = int.from_bytes(data[:4], "big")
-    header = decode_header(data[4 : 4 + header_length])
-    frame = encode_header(
-        msgspec.structs.replace(header, trace_schema_version=trace_schema)
-    )
-    Path(path).write_bytes(
-        len(frame).to_bytes(4, "big") + frame + data[4 + header_length :]
-    )
+    if t_mono is None:
+        t_mono = [t_wall - t_wall_start for t_wall, _, _ in records]
+    with TraceReader(path) as reader:
+        header = msgspec.structs.replace(
+            reader.header, trace_schema_version=trace_schema, t_wall_start=t_wall_start
+        )
+        frames = [encode_header(header)] + [
+            encode_record(msgspec.structs.replace(record, t_mono=mono))
+            for record, mono in zip(reader.records(), t_mono, strict=True)
+        ]
+    Path(path).write_bytes(b"".join(len(f).to_bytes(4, "big") + f for f in frames))
     return path
 
 
@@ -202,6 +211,35 @@ def test_load_keeps_a_servers_order_at_equal_timestamps(tmp_path):
     trace = EventsTrace.load([path])
 
     assert [r.args["seq"] for r in trace.records] == [1, 2, 3]
+
+
+def test_load_keeps_a_servers_order_across_a_clock_step(tmp_path):
+    """A wall clock that steps back mid-recording must not reorder the
+    server's batches: the coordinator drops a seq that arrives late. A batch
+    another server recorded between the first two stays between them."""
+    a = _write(
+        str(tmp_path / "a.lct"),
+        [
+            (5.0, EVENTS_TRACE_BATCH, _batch("node-a", 1, 1)),
+            (3.0, EVENTS_TRACE_BATCH, _batch("node-a", 1, 2)),
+            (4.0, EVENTS_TRACE_BATCH, _batch("node-a", 1, 3)),
+        ],
+        t_mono=[5.0, 6.0, 7.0],
+    )
+    b = _write(
+        str(tmp_path / "b.lct"),
+        [(5.5, EVENTS_TRACE_BATCH, _batch("node-b", 1, 1))],
+        t_wall_start=5.0,
+    )
+
+    trace = EventsTrace.load([a, b])
+
+    assert [(r.args["instance_id"], r.args["seq"]) for r in trace.records] == [
+        ("node-a", 1),
+        ("node-b", 1),
+        ("node-a", 2),
+        ("node-a", 3),
+    ]
 
 
 def test_load_refuses_a_storage_level_file(tmp_path):
@@ -310,13 +348,21 @@ def test_replay_skips_what_it_cannot_deliver(tmp_path):
     assert result.records == 2
 
 
-def test_replay_paces_by_the_recorded_clock_when_asked(tmp_path):
+@pytest.mark.parametrize(
+    "second_t_wall",
+    [10.3, 7.3, 13.3],
+    ids=["steady_clock", "wall_clock_stepped_back", "wall_clock_stepped_forward"],
+)
+def test_replay_paces_by_the_recorded_clock_when_asked(tmp_path, second_t_wall):
+    """The gap between the two batches is the server's 0.3 s on its monotonic
+    clock, whichever way its wall clock stepped between them."""
     path = _write(
         str(tmp_path / "a.lct"),
         [
             (10.0, EVENTS_TRACE_BATCH, _batch("node-a", 1, 1)),
-            (10.3, EVENTS_TRACE_BATCH, _batch("node-a", 1, 2)),
+            (second_t_wall, EVENTS_TRACE_BATCH, _batch("node-a", 1, 2)),
         ],
+        t_mono=[10.0, 10.3],
     )
     trace = EventsTrace.load([path])
 
@@ -327,7 +373,7 @@ def test_replay_paces_by_the_recorded_clock_when_asked(tmp_path):
     asyncio.run(replay(trace, _RecordingTarget()))
     unpaced = time.monotonic() - t0
 
-    assert paced >= 0.1
+    assert 0.1 <= paced < 1.0
     assert unpaced < 0.1
 
 

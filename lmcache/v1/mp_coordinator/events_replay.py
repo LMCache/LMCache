@@ -4,16 +4,22 @@
 ``lmcache server --trace-level events`` writes one file per server process
 holding the cache-event stream in wire form (see
 :mod:`lmcache.v1.mp_coordinator.cache_events`). A fleet is a set of such
-files. :meth:`EventsTrace.load` merges them into one stream ordered by
-wall-clock time, and :func:`replay` feeds that stream to a
-:class:`CoordinatorTarget`, which registers and reports over HTTP the way a
-live server does, so a recorded fleet can be replayed into a coordinator
-that never saw it.
+files. :meth:`EventsTrace.load` merges them into one stream, and
+:func:`replay` feeds that stream to a :class:`CoordinatorTarget`, which
+registers and reports over HTTP the way a live server does, so a recorded
+fleet can be replayed into a coordinator that never saw it.
+
+A record's time is its file's ``t_wall_start`` plus its ``t_mono``: the
+host's wall clock when the file was opened, advanced by the monotonic clock,
+which never steps. The merge and the pacing both use that time, so a step of
+a host's wall clock mid-recording neither reorders its batches nor changes
+the gaps between them.
 
 Batches are handed over exactly as recorded, so a file has the same
 compatibility with a newer coordinator that a live server would have. Only
-``seq`` order within a server matters to the coordinator; the merge across
-servers is by each host's wall clock and carries that clock's skew.
+``seq`` order within a server matters to the coordinator; across servers
+the merge carries the skew each host's wall clock had when its file was
+opened.
 """
 
 # Future
@@ -25,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any
 import asyncio
 import contextlib
+import heapq
 import time
 
 # Third Party
@@ -113,17 +120,20 @@ class Ingested:
 
 @dataclass
 class EventsTrace:
-    """A fleet's cache-event stream, one record after another in time order.
+    """A fleet's cache-event stream, its files merged into one timeline.
 
     Attributes:
-        records: Batches and lifecycle marks, ascending by ``t_wall``.
-            Records with equal timestamps keep file order, so no server's
-            sequence is reordered.
+        records: Batches and lifecycle marks, merged by ``times``. Each
+            file's records keep their file order, even where its wall
+            clock stepped, so no server's sequence is reordered.
+        times: Each record's place on that timeline: its file's
+            ``t_wall_start`` plus its ``t_mono``.
         meta: The ``level_meta`` of the first file loaded.
         files: The files the records came from.
     """
 
     records: list[Record] = field(default_factory=list)
+    times: list[float] = field(default_factory=list)
     meta: dict[str, Any] = field(default_factory=dict)
     files: list[str] = field(default_factory=list)
 
@@ -135,13 +145,13 @@ class EventsTrace:
             paths: The files, typically one per recorded server.
 
         Returns:
-            Their records merged by wall-clock time.
+            Their records merged by ``t_wall_start + t_mono``.
 
         Raises:
             ValueError: If a file is not an ``events``-level trace, or its
                 batches use a cache-event schema this build does not speak.
         """
-        records: list[Record] = []
+        per_file: list[list[tuple[float, Record]]] = []
         meta: dict[str, Any] = {}
         for path in paths:
             with TraceReader(path) as reader:
@@ -159,9 +169,19 @@ class EventsTrace:
                     )
                 if not meta:
                     meta = dict(header.level_meta)
-                records.extend(reader.records())
-        records.sort(key=lambda record: record.t_wall)
-        return cls(records=records, meta=meta, files=list(paths))
+                start = header.t_wall_start
+                per_file.append(
+                    [(start + record.t_mono, record) for record in reader.records()]
+                )
+        # A merge, not a sort, keeps each file's order as written; the
+        # coordinator drops any batch that arrives behind a later seq.
+        merged = list(heapq.merge(*per_file, key=lambda timed: timed[0]))
+        return cls(
+            records=[record for _, record in merged],
+            times=[t for t, _ in merged],
+            meta=meta,
+            files=list(paths),
+        )
 
     @property
     def instances(self) -> list[str]:
@@ -383,9 +403,9 @@ async def replay(
     Args:
         trace: The stream.
         target: Where to deliver it.
-        speed: Pacing relative to the recording's wall clock: ``1.0``
-            replays at the recorded rate, ``2.0`` twice as fast, ``0``
-            (the default) as fast as the target takes records. The
+        speed: Pacing relative to the recording's :attr:`EventsTrace.times`:
+            ``1.0`` replays at the recorded rate, ``2.0`` twice as fast,
+            ``0`` (the default) as fast as the target takes records. The
             coordinator orders by ``seq``, so collapsing the gaps is safe.
 
     Returns:
@@ -398,12 +418,12 @@ async def replay(
         raise ValueError(f"speed must be >= 0 (got {speed})")
     result = EventsReplayResult()
     started = time.monotonic()
-    origin = trace.records[0].t_wall if trace.records else 0.0
+    origin = trace.times[0] if trace.times else 0.0
     last_record = _last_record_per_instance(trace.records)
     total = len(trace.records)
     for index, record in enumerate(trace.records):
         if speed > 0:
-            due = started + (record.t_wall - origin) / speed
+            due = started + (trace.times[index] - origin) / speed
             delay = due - time.monotonic()
             if delay > 0:
                 await asyncio.sleep(delay)

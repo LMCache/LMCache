@@ -603,10 +603,12 @@ attributable after the merge.
 `lmcache/v1/mp_coordinator/events_replay.py`. `EventsTrace.load(paths)`
 reads each file with `TraceReader`, refuses any level but `events` or a
 `cache_event_schema_version` this build does not speak, and merges the
-records by `t_wall`. The sort is stable, so a server's own order (its
-`seq`) is never disturbed; across servers the merge carries each host's
-clock skew, which the coordinator tolerates because it orders per emitter
-only.
+files by `t_wall_start + t_mono`: the host's wall clock when the file was
+opened plus the monotonic seconds since, which a later step of the wall
+clock does not change. The merge never reorders records within one file, so
+a server's own order (its `seq`) is never disturbed; across servers the
+merge carries the skew each host's clock had when its file was opened, which
+the coordinator tolerates because it orders per emitter only.
 
 `replay(trace, target, speed)` hands each record to a `CoordinatorTarget`:
 `start(identity)`, `batch(wire_batch)`, `stop(instance_id)`, and
@@ -623,8 +625,9 @@ turns heartbeats off. A test double of a fleet overrides those four
 methods; one that applies each batch to a placement table and serves the
 coordinator's callbacks is how the coordinator's controllers are tested
 against a recorded workload without running servers. `speed` paces by the
-recorded wall clock (`1.0` real time); `0` delivers as fast as the target
-takes, which is safe because the coordinator orders by `seq`.
+same `t_wall_start + t_mono` (`1.0` real time), so a wall-clock step neither
+bunches nor stalls the replay; `0` delivers as fast as the target takes,
+which is safe because the coordinator orders by `seq`.
 
 ### Size and privacy
 
