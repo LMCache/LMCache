@@ -29,6 +29,7 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
     SGLangKVComponentGroup,
 )
 from lmcache.v1.client.heartbeat import HeartbeatThread
+from lmcache.v1.common.custom_types import RetrieveCoverage
 
 if TYPE_CHECKING:
     # First Party
@@ -970,13 +971,20 @@ class UnifiedLMCacheMPConnector:
         )
 
     def prepare_load_on_stream(
-        self, operation: LMCacheLoadOperation, stream: Any
+        self,
+        operation: LMCacheLoadOperation,
+        stream: Any,
+        *,
+        allow_partial: bool = False,
     ) -> bool:
         """Order a consumer stream after an asynchronous retrieve.
 
         Args:
             operation: Retrieve operation returned by :meth:`submit_load`.
             stream: SGLang forward stream that consumes the loaded KV cache.
+            allow_partial: Accept validated partial coverage for an engine-owned
+                recovery path. Such a response is drained to GPU completion
+                before returning; the caller must partition its allocations.
 
         Returns:
             ``True`` when every TP/PP rank successfully submitted its retrieve;
@@ -991,9 +999,25 @@ class UnifiedLMCacheMPConnector:
         """
         local_success = False
         try:
-            local_success = bool(
-                operation.future.wait_on_stream(stream, timeout=self._mq_timeout)
-            )
+            outcome = operation.future.wait_on_stream(stream, timeout=self._mq_timeout)
+            if isinstance(outcome, RetrieveCoverage):
+                outcome.validate()
+                operation.coverage = outcome
+            local_success = bool(outcome)
+            if (
+                allow_partial
+                and isinstance(outcome, RetrieveCoverage)
+                and outcome.failed_chunks
+            ):
+                # Recovery may immediately free missing destinations. A stream
+                # wait alone does not permit the host allocator to reuse them.
+                terminal = operation.future.result(timeout=self._mq_timeout)
+                if terminal != outcome:
+                    raise ValueError("Retrieve coverage changed before GPU completion")
+                local_success = True
+                operation.result = True
+                operation.lookup.locks_held = False
+                self._cleanup_lookup_result(operation.lookup)
         except Exception:
             logger.exception(
                 "LMCache retrieve preparation failed for %s", operation.request_id

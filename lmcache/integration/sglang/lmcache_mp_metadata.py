@@ -8,6 +8,9 @@ from typing import TYPE_CHECKING, Any, Optional
 # Third Party
 import torch
 
+# First Party
+from lmcache.v1.common.custom_types import RetrieveCoverage
+
 if TYPE_CHECKING:
     # Third Party
     from sglang.srt.managers.schedule_batch import Req
@@ -53,6 +56,7 @@ class LMCacheLoadOperation:
     future: Any
     lookup: LMCacheLookupOperation
     result: Optional[bool] = None
+    coverage: RetrieveCoverage | None = None
 
     def query(self) -> bool:
         return self.result is not None or bool(self.future.query())

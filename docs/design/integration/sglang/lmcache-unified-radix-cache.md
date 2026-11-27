@@ -468,3 +468,22 @@ per rank, so a hybrid model deduplicates only its MLA groups.
 - All ranks complete collective-bearing operations in the same order.
 - `END_SESSION` follows every store associated with the session.
 - SWA and recurrent-state deployments use separate LMCache object groups.
+
+## Terminal partial-load evidence
+
+`LMCacheLoadOperation.coverage` preserves a validated `RetrieveCoverage` reply.
+`prepare_load_on_stream(..., allow_partial=True)` accepts partial coverage only
+after draining the device completion event. The engine may then free missing
+allocations safely; a stream wait by itself would not permit host-side reuse.
+The default remains conservative boolean failure for callers without recovery.
+
+Recovery policy and execution belong to SGLang. Its generic
+`--kv-load-failure-policy recompute|repair` flag selects suffix recompute or one
+ordinary middle-chunk prefill, with healthy suffix ownership carried by the
+engine's `KVLoadRecovery` contract. There is no LMCache-specific policy flag.
+HiCache can supply the same engine contract once it has equivalent partial-load
+evidence. This adapter does not execute model forwards or alter attention kernels.
+
+The first qualified path is full-attention-only, one GPU and synchronous engine
+scheduling. Transfer coverage remains relative to the original MP chunk range;
+legacy boolean replies and callers that reject partial transfers are unchanged.

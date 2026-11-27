@@ -1549,3 +1549,35 @@ class TestSGLangRecovery:
             nprocs=2,
             join=True,
         )
+
+
+@pytest.mark.parametrize("allow_partial", [False, True])
+@pytest.mark.parametrize("missing", [0, 1, 2])
+def test_terminal_partial_retrieve_is_available_to_engine_recovery(
+    allow_partial, missing
+):
+    """Engine opt-in preserves validated coverage after event completion."""
+    from lmcache.v1.common.custom_types import RetrieveCoverage
+    from lmcache.v1.transport.futures import MessagingFuture
+
+    coverage = RetrieveCoverage(3, [i for i in range(3) if i != missing], [missing])
+    raw = MessagingFuture()
+    backend = Mock()
+    backend.query_event.return_value = True
+    future = raw.to_device_future(device=0, event_backend=backend)
+    raw.set_result((b"event", coverage))
+    lookup = LMCacheLookupOperation(
+        "recover", list(range(24)), 0, "", total_hit_tokens=24
+    )
+    operation = LMCacheLoadOperation(
+        "recover", lookup.token_ids, 0, 24, 0, torch.arange(24), future, lookup
+    )
+    with _store_connector() as (connector, _, _):
+        assert (
+            connector.prepare_load_on_stream(
+                operation, "forward", allow_partial=allow_partial
+            )
+            is allow_partial
+        )
+        assert operation.coverage == coverage
+        assert connector.complete_load(operation) is allow_partial
