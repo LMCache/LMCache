@@ -30,6 +30,7 @@ from lmcache.v1.distributed.api import (
     FULL_ATTENTION_WINDOW_CHUNKS,
     MemoryLayoutDesc,
     ObjectKey,
+    PrefetchPriority,
     PrefetchTaskSpec,
     get_request_tags,
     ipc_key_to_grouped_object_keys,
@@ -180,11 +181,15 @@ class LookupMixin:
             "tuple[_BlendReadGroups, dict[int, MemoryLayoutDesc], AttnWindowDesc]"
         ),
         matches: list[CBMatchResult],
+        priority: PrefetchPriority,
     ) -> "tuple[PrefetchHandle, dict[bytes, list], dict[bytes, int]]":
         """Coalesce all matches into one sparse L2->L1 prefetch (non-blocking).
 
         The caller polls ``query_prefetch_status(handle)`` then calls
         :meth:`_sparse_classify` with the found rows.
+
+        ``priority`` is ``HIGH`` when the prefix leg already admitted this
+        lookup.
 
         Returns:
             The prefetch handle, per-hash object keys (one per blend read
@@ -225,6 +230,7 @@ class LookupMixin:
             PrefetchTaskSpec(
                 key_groups=key_groups,
                 fetching_policy="whole_chunk",
+                priority=priority,
             ),
             external_request_id=key.request_id,
         )
@@ -379,7 +385,7 @@ class LookupMixin:
         # Group 0 may be recurrent, so use the first attention group.
         layout_desc = layouts[read.attn_gids[0]]
 
-        chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
+        chunk_hashes = self._ctx.default_token_hasher.compute_packed_chunk_hashes(
             key.token_bytes
         )
         if not chunk_hashes:
@@ -395,7 +401,7 @@ class LookupMixin:
                         "request_id": rid,
                         "chunk_hashes": chunk_hashes,
                         "model_name": model_name,
-                        "chunk_size": self._ctx.chunk_size,
+                        "chunk_size": self._ctx.default_chunk_size,
                         "seq_len": key.num_tokens,
                         "dtypes": [str(d) for d in layout_desc.dtypes],
                         "shapes": [list(s) for s in layout_desc.shapes],
@@ -501,7 +507,7 @@ class LookupMixin:
             ends the request here (no retrieve will follow).
         """
         rid = key.request_id
-        chunk_size = self._ctx.chunk_size
+        chunk_size = self._ctx.default_chunk_size
 
         with self._cb_jobs_lock:
             job = self._cb_jobs.get(rid)
@@ -626,7 +632,14 @@ class LookupMixin:
                         job.handle,
                         job.per_hash_obj_keys,
                         job.hash_to_col,
-                    ) = self._sparse_prefetch_submit(key, resolved, job.non_prefix)
+                    ) = self._sparse_prefetch_submit(
+                        key,
+                        resolved,
+                        job.non_prefix,
+                        PrefetchPriority.HIGH
+                        if job.prefix_handle is not None
+                        else PrefetchPriority.NORMAL,
+                    )
                     # Trace the span only when the prefetch actually reads L2.
                     job.l2_keys = job.handle.total_requested_keys
                     if job.l2_keys > 0:
@@ -706,7 +719,7 @@ class LookupMixin:
         # so the connector tags them ``prefix`` (pure load, no recompute).
         segmented_tail: list[CBMatchResult] = []
         if segmented and job.retained_chunks:
-            chunk_hashes = self._ctx.token_hasher.compute_packed_chunk_hashes(
+            chunk_hashes = self._ctx.default_token_hasher.compute_packed_chunk_hashes(
                 key.token_bytes
             )
             for i in job.retained_chunks:
@@ -782,7 +795,7 @@ class LookupMixin:
             return False
         try:
             tokens = unpack_token_ids(key.token_bytes)
-            if len(tokens) < self._ctx.chunk_size:
+            if len(tokens) < self._ctx.default_chunk_size:
                 return False
             coordinator.submit_match(
                 key.request_id,
@@ -855,7 +868,7 @@ class LookupMixin:
         Returns:
             One :class:`CBMatchResult` per matched chunk (request order).
         """
-        chunk_size = self._ctx.chunk_size
+        chunk_size = self._ctx.default_chunk_size
         return [
             CBMatchResult(
                 old_st=m.old_st,

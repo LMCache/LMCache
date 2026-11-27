@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Unit tests for the version-gated ``client_info_tag`` support in the shared
+Tests for staged reads and version-gated ``client_info_tag`` support in the shared
 ``ValkeyWorkerPool`` (used by both ``ValkeyConnector`` and the MP-mode
 ``ValkeyL2Adapter``).
 
@@ -353,3 +353,29 @@ def test_get_client_omits_credentials_when_unset() -> None:
             assert fake.GlideClient.last_config.kwargs["credentials"] is None
         finally:
             pool.close()
+
+
+def test_buffer_get_isolates_destination_from_late_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GLIDE write through its saved buffer cannot corrupt a reused destination."""
+    fake = _make_fake_glide_sync(supports_tag=True)
+    buffers: list[memoryview] = []
+
+    def get(client: object, key: bytes, buffer: memoryview) -> bytes:
+        buffers.append(buffer)
+        buffer[:] = b"data"
+        return b"4"
+
+    monkeypatch.setattr(fake.GlideClient, "get", get)
+    monkeypatch.setitem(sys.modules, "glide_sync", fake)
+    pool = ValkeyWorkerPool(addresses=[("h", 1)], num_workers=1)
+    try:
+        dst = bytearray(4)
+        assert pool.submit_get_into("key", dst).result(timeout=5) == 4
+        assert dst == b"data"
+        dst[:] = b"next"
+        buffers[0][:] = b"late"
+        assert dst == b"next"
+    finally:
+        pool.close()

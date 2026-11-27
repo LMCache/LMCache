@@ -1262,7 +1262,7 @@ Fields:
 * ``HS`` -- head size (in elements).
 * ``dtype`` -- element dtype (e.g. ``float16``, ``bfloat16``, ``float32``,
   ``uint8``). The full set matches the keys of ``DTYPE_MAP`` in
-  ``lmcache/v1/kv_layer_groups.py``.
+  ``lmcache/v1/common/kv_layer_groups.py``.
 * ``layers`` -- number of layers in this group.
 
 Multi-group specs let you model heterogeneous layers (for example, MLA
@@ -1349,7 +1349,7 @@ Replicated readers use their writer's KV identity for deterministic filling.
 The bench verifies retrieved data on every rank and reports the rank and
 chunk for checksum mismatches.
 
-See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
+See ``parse_kvcache_shape_spec`` in ``lmcache/v1/common/kv_layer_groups.py``
 for the authoritative parsing rules and validation errors.
 
 

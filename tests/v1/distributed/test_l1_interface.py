@@ -3,6 +3,8 @@
 
 # Standard
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 # Third Party
 import pytest
@@ -15,8 +17,6 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface, L1ManagerListener
 from lmcache.v1.distributed.l1_manager import DevDaxL1Manager, DramL1Manager
 import lmcache.v1.memory_management as memory_management
-
-pytestmark = pytest.mark.no_shared_allocator
 
 ALIGN = 4096
 CAPACITY = 32 * ALIGN
@@ -105,6 +105,46 @@ def test_write_commit_read_release(l1: L1ManagerInterface) -> None:
     assert listener.read_finished == [key(1)]
 
 
+def test_unregister_waits_for_active_read_callback(l1: L1ManagerInterface) -> None:
+    obj_key = key(1)
+    l1.reserve_write([obj_key], [False], LAYOUT)
+    l1.finish_write_and_reserve_read([obj_key])
+    callback_started = Event()
+    release_callback = Event()
+    removing = Event()
+
+    class BlockingListener(RecordingListener):
+        def on_l1_keys_read_finished(self, keys: list[ObjectKey]) -> None:
+            callback_started.set()
+            assert release_callback.wait(timeout=5)
+            super().on_l1_keys_read_finished(keys)
+
+    listener = BlockingListener()
+    l1.register_listener(listener)
+
+    def unregister() -> None:
+        removing.set()
+        l1.unregister_listener(listener)
+        assert listener.read_finished == [obj_key]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        read = pool.submit(l1.finish_read, [obj_key])
+        try:
+            assert callback_started.wait(timeout=5)
+            removal = pool.submit(unregister)
+            assert removing.wait(timeout=5)
+            with pytest.raises(TimeoutError):
+                removal.result(timeout=0.1)
+        finally:
+            release_callback.set()
+        assert read.result(timeout=5) == {obj_key: L1Error.SUCCESS}
+        removal.result(timeout=5)
+
+    assert l1.reserve_read([obj_key])[obj_key][0] is L1Error.SUCCESS
+    assert l1.finish_read([obj_key]) == {obj_key: L1Error.SUCCESS}
+    assert listener.read_finished == [obj_key]
+
+
 def test_aborted_write_is_never_readable(l1: L1ManagerInterface) -> None:
     assert l1.reserve_write([key(2)], [False], LAYOUT)[key(2)][0] is L1Error.SUCCESS
     assert l1.finish_write_and_delete([key(2)]) == {key(2): L1Error.SUCCESS}
@@ -171,3 +211,34 @@ def test_resident_key_needs_allow_resident_to_stage(l1: L1ManagerInterface) -> N
     assert l1.is_key_evictable(key(5)) is False
     l1.finish_read([key(5)])
     assert l1.is_key_evictable(key(5)) is True
+
+
+def test_prefetch_locked_bytes_follow_the_read_lock(l1: L1ManagerInterface) -> None:
+    keys = [key(1), key(2), key(3)]
+    staged = l1.reserve_write(keys, [False] * 3, LAYOUT, tag="pf")
+    _error, staged_obj = staged[key(1)]
+    assert staged_obj is not None
+    size = staged_obj.get_size()
+    l1.finish_write_and_reserve_read(keys[:2], tag="pf")
+    l1.finish_write(keys[2:], tag="pf")  # resident but not read-locked
+    l1.track_prefetch_locked(keys + [key(4)])  # key(4) is not resident
+    l1.track_prefetch_locked([key(1)])  # charged once
+    assert l1.get_prefetch_locked_bytes() == 2 * size
+
+    l1.finish_read([key(1)])
+    assert l1.get_prefetch_locked_bytes() == size
+    l1.delete([key(2)], force=True)
+    assert l1.get_prefetch_locked_bytes() == 0
+
+
+def test_prefetch_locked_ends_with_the_prefetch_read(l1: L1ManagerInterface) -> None:
+    """Once the prefetch's reader is done, a later lock on the same object by
+    another reader (e.g. a store to L2) is not counted as prefetch-locked."""
+    l1.reserve_write([key(5)], [False], LAYOUT, tag="pf")
+    l1.finish_write_and_reserve_read([key(5)], tag="pf")
+    l1.track_prefetch_locked([key(5)])
+    l1.finish_read([key(5)])
+
+    assert l1.reserve_read([key(5)])[key(5)][0] is L1Error.SUCCESS
+    assert l1.get_prefetch_locked_bytes() == 0
+    l1.finish_read([key(5)])

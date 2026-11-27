@@ -50,8 +50,8 @@ class MPServerConfig:
     """Request server port."""
 
     chunk_size: int = 256
-    """Minimum chunk size for KV cache operations. vLLM connector startup may
-    negotiate this upward to satisfy model-specific KV geometry."""
+    """Minimum chunk size for KV cache operations. Clients may resolve a larger
+    model-specific effective size before registration."""
 
     max_workers: int = 1
     """Base number of worker threads. Sets default for both GPU and CPU pools."""
@@ -114,12 +114,6 @@ class MPServerConfig:
     """Transfer mode: 'lmcache_driven' for server-driven transfer
     (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
     engine-driven transfer (PREPARE/COMMIT), or 'auto' to enable both."""
-
-    rocm_host_event_wait: bool = False
-    """ROCm workaround: LMCache-driven STORE / RETRIEVE enqueue their copies
-    only once the engine's producer event has completed on the host, instead of
-    a stream wait on it; see lmcache.v1.multiprocess.rocm_host_event_wait.
-    LMCACHE_ROCM_HOST_EVENT_WAIT=1 enables it too. Ignored off ROCm."""
 
     isolated_ipc: bool = False
     """Whether IPC mechanisms must work across isolated containers (no shared
@@ -458,8 +452,8 @@ def add_mp_server_args(
         "--chunk-size",
         type=int,
         default=256,
-        help="Minimum chunk size for KV cache operations. The vLLM connector "
-        "may negotiate this upward to satisfy model-specific KV geometry. "
+        help="Minimum chunk size for KV cache operations. Clients may resolve "
+        "a larger model-specific size before registration. "
         "Default is 256.",
     )
     mp_group.add_argument(
@@ -535,16 +529,6 @@ def add_mp_server_args(
         "'engine_driven' for engine-driven transfer (PREPARE/COMMIT), "
         "or 'auto' to enable both transfer paths. "
         "Default is 'lmcache_driven'.",
-    )
-    mp_group.add_argument(
-        "--rocm-host-event-wait",
-        action="store_true",
-        help="ROCm workaround: a stream wait on the serving engine's pending "
-        "event can slow the engine's kernels on the same hardware pipe. With "
-        "this flag STORE / RETRIEVE enqueue their copies only once that event "
-        "has completed (polled on the host). Enable it when this server runs "
-        "next to the engine on ROCm; ignored elsewhere. "
-        "LMCACHE_ROCM_HOST_EVENT_WAIT=1 enables it too. (Default is off)",
     )
     mp_group.add_argument(
         "--isolated-ipc",
@@ -736,7 +720,6 @@ def parse_args_to_mp_server_config(
         enable_dedup_content_kv=args.enable_dedup_content_kv,
         enable_blend_reorder=args.enable_blend_reorder,
         supported_transfer_mode=args.supported_transfer_mode,
-        rocm_host_event_wait=args.rocm_host_event_wait,
         isolated_ipc=args.isolated_ipc,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),

@@ -33,9 +33,8 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
-from lmcache.utils import EngineType
 from lmcache.v1.client.transport.factory import RequestClientFactory
-from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey
 from lmcache.v1.common.kv_format.types import LayoutHints
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform.base.event_ipc import (
@@ -58,6 +57,23 @@ def _get_server_url(llm_args: "TorchLlmArgs") -> str:
     if cfg is not None and cfg.server_url is not None:
         return cfg.server_url
     return os.environ.get("LMCACHE_SERVER_URL", DEFAULT_SERVER_URL)
+
+
+def _resolve_chunk_size(
+    req_client: RequestClient, timeout: float, block_size: int
+) -> int:
+    """Round the server minimum up to the TensorRT-LLM block size.
+
+    Args:
+        req_client: MP request client used to read the server minimum.
+        timeout: Maximum seconds to wait for the response.
+        block_size: TensorRT-LLM paged block size in tokens.
+
+    Returns:
+        The aligned effective chunk size.
+    """
+    server_minimum = req_client.get_chunk_size().result(timeout=timeout)
+    return ((server_minimum + block_size - 1) // block_size) * block_size
 
 
 @dataclass
@@ -90,8 +106,9 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)
         )
 
-        future = self._req_client.get_chunk_size()
-        self._chunk_size = future.result(timeout=self._mq_timeout)
+        self._chunk_size = _resolve_chunk_size(
+            self._req_client, self._mq_timeout, self._block_size
+        )
         logger.info(
             "LMCache MP scheduler: connected to server at %s (chunk_size=%d)",
             _get_server_url(self._llm_args),
@@ -296,8 +313,9 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         self._world_size = tp_size * pp_size
         self._model_name = str(getattr(llm_args, "model", "unknown_model"))
 
-        future = self._req_client.get_chunk_size()
-        self._chunk_size = future.result(timeout=self._mq_timeout)
+        self._chunk_size = _resolve_chunk_size(
+            self._req_client, self._mq_timeout, self._block_size
+        )
 
     def _create_key(
         self,
@@ -366,6 +384,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             layout_hints,
             [],
             None,
+            self._chunk_size,
         )
 
         try:

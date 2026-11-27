@@ -4,7 +4,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import EngineType
+from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.platform.devices.cpu.cache_context import CPUCacheContext
 from lmcache.v1.platform.devices.cpu.shm import migrate_to_shm_and_wrap
 from lmcache.v1.platform.posix_shm import shm_unlink

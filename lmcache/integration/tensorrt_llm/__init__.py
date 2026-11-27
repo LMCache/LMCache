@@ -1,69 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
-"""LMCache integration for NVIDIA TensorRT-LLM via the KV Cache Connector API.
+"""LMCache multi-process integration for NVIDIA TensorRT-LLM.
 
-Two modes are supported:
+Start the standalone LMCache server, then select the ``lmcache-mp`` preset::
 
-**In-process mode** (``lmcache``)
-    The LMCache engine runs inside the TRT-LLM process. Simple to set
-    up; no extra services required. Requires the external
-    ``lmcache_inprocess`` package, which provides
-    ``lmcache.inprocess.integration.tensorrt_llm``.
-
-    .. code-block:: yaml
-
-       kv_connector_config:
-         connector: lmcache
-
-**Multi-process mode** (``lmcache-mp``)
-    The LMCache engine runs as a standalone request server, providing
-    process isolation and shared KV caching across multiple TRT-LLM
-    instances on the same node. The endpoint scheme selects ZMQ or gRPC.
-
-    1. Start the LMCache server::
-
-        python -m lmcache.v1.multiprocess.server \\
-            --host 0.0.0.0 --port 5555 \\
-            --l1-size-gb 10 --eviction-policy LRU --max-workers 4
-
-    2. Use the ``lmcache-mp`` preset with ``server_url``::
-
-        kv_connector_config:
-          connector: lmcache-mp
-          server_url: grpc://localhost:5555
-
-Both modes can also be configured explicitly instead of via presets::
-
-    # In-process
     kv_connector_config:
-      connector_module: lmcache.inprocess.integration.tensorrt_llm.tensorrt_adapter
-      connector_scheduler_class: LMCacheKvConnectorScheduler
-      connector_worker_class: LMCacheKvConnectorWorker
+      connector: lmcache-mp
+      server_url: grpc://localhost:5555
 
-    # Multi-process
+The scheduler and worker can also be configured explicitly::
+
     kv_connector_config:
       connector_module: lmcache.integration.tensorrt_llm.tensorrt_mp_adapter
       connector_scheduler_class: LMCacheMPKvConnectorScheduler
       connector_worker_class: LMCacheMPKvConnectorWorker
 """
 
-# tensorrt_llm is an optional dependency. Guard the import so importing
-# ``lmcache.integration.tensorrt_llm`` does not crash when the package
-# is absent (e.g. core LMCache unit tests, doc builds).
-try:
-    # First Party
-    from lmcache.inprocess.integration.tensorrt_llm.tensorrt_adapter import (
-        LMCacheKvConnectorScheduler,
-        LMCacheKvConnectorWorker,
-        destroy_engine,
-    )
-
-    __all__ = [
-        "LMCacheKvConnectorScheduler",
-        "LMCacheKvConnectorWorker",
-        "destroy_engine",
-    ]
-except ImportError:
-    __all__ = []
+# TensorRT-LLM is optional for core LMCache imports and documentation builds.
+__all__: list[str] = []
 
 try:
     # First Party
@@ -72,7 +25,7 @@ try:
         LMCacheMPKvConnectorWorker,
     )
 
-    __all__ += [
+    __all__ = [
         "LMCacheMPKvConnectorScheduler",
         "LMCacheMPKvConnectorWorker",
     ]

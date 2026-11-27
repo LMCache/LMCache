@@ -129,8 +129,11 @@ class MyConnector : public lmcache::connector::ConnectorBase<MyConn> {
 
   // Optional: delete a key (enables eviction support)
   bool do_single_delete(MyConn& conn, const std::string& key) override {
-    // send DELETE, return true if deleted, false if not found
+    // send DELETE, return true if deleted, false otherwise
   }
+  // If the backend can tell an absent key from a failed delete, override
+  // do_single_delete_result() instead and return DeleteResult::NOT_FOUND
+  // for an absent key, so eviction stops tracking it.
 
   // Optional: clean shutdown of connections
   void shutdown_connections() override { /* close sockets */ }

@@ -4,6 +4,7 @@
 # Standard
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
+import builtins
 import importlib
 import sys
 
@@ -98,6 +99,34 @@ def test_failed_retrieve_waits_for_device_result_and_fails_closed(
     device_future.result.assert_called_once_with(timeout=5.0)
 
 
+def test_lookup_uses_block_aligned_server_chunk_size(
+    trt_mp_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TensorRT-LLM lookup boundaries use the aligned server minimum."""
+    module = trt_mp_module
+    client = MagicMock(name="req_client")
+    client.get_chunk_size.return_value.result.return_value = 250
+    client.query_prefetch_status.return_value.result.return_value = 0
+    monkeypatch.setattr(
+        module.RequestClientFactory,
+        "create",
+        MagicMock(return_value=client),
+    )
+    llm_args = SimpleNamespace(
+        kv_cache_config=SimpleNamespace(tokens_per_block=64),
+        kv_connector_config=SimpleNamespace(server_url="tcp://127.0.0.1:5555"),
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        model="trt-test-model",
+    )
+    scheduler = module.LMCacheMPKvConnectorScheduler(llm_args)
+    request = SimpleNamespace(request_id=7, get_tokens=lambda beam: list(range(300)))
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert client.lookup.call_args.args[0].end == 256
+
+
 def test_store_wait_retains_event_on_raw_future(
     trt_mp_module,
 ) -> None:
@@ -161,3 +190,26 @@ def test_lookup_carries_trt_prefix_hit_hint(trt_mp_module) -> None:
 
     lookup_key = scheduler._req_client.lookup.call_args.args[0]
     assert lookup_key.request_configs == {"lmcache.hint.engine_computed_tokens": 4}
+
+
+def test_package_import_does_not_load_inprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MP package must not attempt to import the optional InProcess engine."""
+    original_import = builtins.__import__
+
+    def import_without_inprocess(
+        name: str,
+        globals: dict[str, object] | None = None,
+        locals: dict[str, object] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> ModuleType:
+        if name == "lmcache.inprocess" or name.startswith("lmcache.inprocess."):
+            pytest.fail(f"core TensorRT package attempted optional import: {name}")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_inprocess)
+    module = importlib.import_module("lmcache.integration.tensorrt_llm")
+    importlib.reload(module)
+    assert "LMCacheKvConnectorScheduler" not in module.__all__

@@ -64,6 +64,7 @@ def test_split_manifest_schema_and_tiers() -> None:
     pr_smoke_names = {w["workload"] for w in workloads if w["tier"] == "pr-smoke"}
     assert pr_smoke_names == {
         "cpu_e2e_validation",
+        "client_wheel",
         "cache_stats",
         "lazy_offload",
         "http_api",
@@ -77,7 +78,7 @@ def test_smoke_pipeline_only_contains_0_or_1_gpu_pr_smoke() -> None:
     smoke = yaml.safe_load(SMOKE_PIPELINE_PATH.read_text(encoding="utf-8"))
     steps = _collect_steps(smoke)
     command_steps = [s for s in steps if "command" in s]
-    assert len(command_steps) == 6
+    assert len(command_steps) == 7
 
     trigger_steps = [s for s in steps if "trigger" in s]
     assert len(trigger_steps) == 0
@@ -90,6 +91,7 @@ def test_smoke_pipeline_only_contains_0_or_1_gpu_pr_smoke() -> None:
     commands = " ".join(str(s.get("command", "")) for s in command_steps)
     for expected in (
         "run.sh lm_eval",
+        "run.sh client_wheel",
         "run.sh restart_recovery",
         "run.sh cache_stats",
         "run.sh lazy_offload",

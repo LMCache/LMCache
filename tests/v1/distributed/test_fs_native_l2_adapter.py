@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the native C++ filesystem connector's read pool."""
+"""Tests for the native C++ filesystem connector."""
 
 # Standard
 from pathlib import Path
@@ -10,10 +10,21 @@ import time
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.key_codec import encode_fs_filename, encode_storage_key
+from lmcache.v1.distributed.l2_adapters import create_l2_adapter
+from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+    FSNativeL2AdapterConfig,
+)
+from lmcache.v1.memory_management import (
+    MemoryFormat,
+    MemoryObjMetadata,
+    TensorMemoryObj,
+)
 
 try:
     # First Party
@@ -35,6 +46,34 @@ def _make_key(chunk_id: int) -> ObjectKey:
         model_name="test_model",
         kv_rank=0,
     )
+
+
+def _make_memory_obj(num_floats: int) -> TensorMemoryObj:
+    metadata = MemoryObjMetadata(
+        shape=torch.Size([num_floats]),
+        dtype=torch.float32,
+        address=0,
+        phy_size=num_floats * 4,
+        fmt=MemoryFormat.KV_2LTD,
+        ref_count=1,
+    )
+    return TensorMemoryObj(
+        torch.zeros(num_floats, dtype=torch.float32), metadata, parent_allocator=None
+    )
+
+
+class _DeleteRecorder(L2AdapterListener):
+    def __init__(self) -> None:
+        self.deleted: list[ObjectKey] = []
+
+    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
+        pass
+
+    def on_l2_keys_accessed(self, keys: list[ObjectKey]) -> None:
+        pass
+
+    def on_l2_keys_deleted(self, keys: list[ObjectKey]) -> None:
+        self.deleted.extend(keys)
 
 
 class _CompletionTracker:
@@ -343,3 +382,61 @@ def test_lookup_error_fails_batch_while_read_error_zeroes_key(
         assert dst_good == src
     finally:
         client.close()
+
+
+def test_delete_tells_missing_key_from_failed_delete(tmp_path: Path) -> None:
+    """A delete reports a key that is already gone as deleted, and a key it
+    could not remove as not deleted."""
+    client = LMCacheFSClient(str(tmp_path), 1, "", False, 0, 0, 0)
+    tracker = _CompletionTracker(client)
+    try:
+        stored_key = encode_storage_key(_make_key(1))
+        src = bytearray(b"payload" * 100)
+        assert tracker.wait(client.submit_batch_set([stored_key], [memoryview(src)]))[0]
+        missing_key = encode_storage_key(_make_key(2))
+        blocked_obj = _make_key(3)
+        blocked_path = tmp_path / encode_fs_filename(blocked_obj)
+        (blocked_path / "child").mkdir(parents=True)  # remove() fails: ENOTEMPTY
+
+        ok, err, bits = tracker.wait(
+            client.submit_batch_delete(
+                [stored_key, missing_key, encode_storage_key(blocked_obj)]
+            )
+        )
+        assert ok, err
+        assert bits == [True, True, False]
+        assert blocked_path.exists()
+    finally:
+        client.close()
+
+
+def test_adapter_drops_key_deleted_by_peer_and_keeps_failed_delete(
+    tmp_path: Path,
+) -> None:
+    """An adapter stops accounting for a key that another adapter on the same
+    directory already deleted, and keeps a key whose delete failed."""
+    config = FSNativeL2AdapterConfig(str(tmp_path), num_workers=1, max_capacity_gb=1)
+    adapter = create_l2_adapter(config)
+    peer = create_l2_adapter(config)
+    recorder = _DeleteRecorder()
+    adapter.register_listener(recorder)
+    try:
+        gone_key = _make_key(1)
+        stuck_key = _make_key(2)
+        adapter.submit_store_task(
+            [gone_key, stuck_key], [_make_memory_obj(256), _make_memory_obj(512)]
+        )
+        assert select.select([adapter.get_store_event_fd()], [], [], 5.0)[0]
+        assert adapter.get_usage().total_bytes_used == (256 + 512) * 4
+        peer.delete([gone_key])
+        stuck_path = tmp_path / encode_fs_filename(stuck_key)
+        stuck_path.unlink()
+        (stuck_path / "child").mkdir(parents=True)  # remove() fails: ENOTEMPTY
+
+        adapter.delete([gone_key, stuck_key])
+
+        assert recorder.deleted == [gone_key]
+        assert adapter.get_usage().total_bytes_used == 512 * 4
+    finally:
+        peer.close()
+        adapter.close()

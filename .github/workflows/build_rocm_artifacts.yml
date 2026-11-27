@@ -122,4 +122,6 @@ jobs:
 # GitHub-hosted runners do not provide and LMCache does not maintain a
 # self-hosted runner for. It is therefore run manually on AMD hardware:
 # install the built wheel into the upstream vllm/vllm-openai-rocm image and run
-# tests/v1/test_mem_kernels.py. Recorded gfx942 + gfx950 results are in the PR.
+# tests/v1/test_mp_mem_kernels.py, tests/v1/test_mem_kernels.py and
+# tests/v1/inprocess_contract/test_device_kernels.py. Recorded gfx942 + gfx950
+# results are in the PR.

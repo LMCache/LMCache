@@ -36,7 +36,7 @@ def _make_ctx(wait_result=True, found=None):
     ctx = mock.Mock()
     ctx.storage_manager = storage_manager
     ctx.event_bus = mock.Mock()
-    ctx.chunk_size = 256
+    ctx.default_chunk_size = 256
     return ctx
 
 
@@ -72,7 +72,7 @@ def test_wait_prefetch_status_returns_count_and_consumes_job():
         chunk_size=256,
     )
 
-    assert module.wait_prefetch_status("req", timeout=1.0) == 4 * ctx.chunk_size
+    assert module.wait_prefetch_status("req", timeout=1.0) == 4 * ctx.default_chunk_size
     ctx.storage_manager.wait_prefetch_status.assert_called_once_with(handle, 1.0)
     ctx.event_bus.publish.assert_called_once()
     # Exactly-once: the job is removed after a non-None result.

@@ -30,7 +30,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform.base.device_ops import DeviceOps
 
 logger = init_logger(__name__)
@@ -237,30 +237,6 @@ class GcuDeviceOps(DeviceOps):
                 skip_prefix_n_blocks,
                 dtype_code,
             )
-
-    def load_and_reshape_flash(
-        self,
-        key_value: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        layer_idx: int,
-    ) -> None:
-        self._op("load_and_reshape_flash")(
-            key_value, key_cache, value_cache, slot_mapping, layer_idx
-        )
-
-    def reshape_and_cache_back_flash(
-        self,
-        key_value: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        layer_idx: int,
-    ) -> None:
-        self._op("reshape_and_cache_back_flash")(
-            key_value, key_cache, value_cache, slot_mapping, layer_idx
-        )
 
     # ── Ops: codec ───────────────────────────────────────────────────
 

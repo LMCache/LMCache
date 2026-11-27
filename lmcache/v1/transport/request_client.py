@@ -5,11 +5,11 @@
 from typing import Protocol
 
 # First Party
-from lmcache.utils import EngineType
 from lmcache.v1.common.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
     CBUnifiedLookupResult,
+    EngineType,
     IPCCacheServerKey,
     KVEventBatch,
     KVEventProfile,
@@ -44,10 +44,13 @@ class RequestClient(Protocol):
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
         event_profile: KVEventProfile | None,
+        chunk_size: int | None = None,
     ) -> MessagingFuture[KVEventProfile | None]:
         """Register caches and return their recorded native identity profile.
 
         ``event_profile`` is required; pass None to retain current event output.
+        ``chunk_size`` is the effective logical chunk size; ``None`` uses the
+        server default.
         The returned profile lets a caller detect an older gRPC server that
         ignored it. Integrations begin comparing profiles when they send one.
         A rejection raises MPRequestError with the server's reason and code
@@ -71,6 +74,7 @@ class RequestClient(Protocol):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
+        chunk_size: int | None = None,
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
@@ -207,11 +211,6 @@ class RequestClient(Protocol):
 
     @rpc_method
     def get_chunk_size(self) -> MessagingFuture[int]: ...
-
-    @rpc_method
-    def negotiate_chunk_size(
-        self, required_chunk_alignment: int
-    ) -> MessagingFuture[int]: ...
 
     @rpc_method
     def ping(self, instance_id: int | None) -> MessagingFuture[bool]: ...

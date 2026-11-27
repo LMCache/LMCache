@@ -566,15 +566,15 @@ the engine is initialized, it just has no L2 storage).
 Version descriptors. Each returns a bare JSON **string** (not an object):
 
 - ``GET /version`` — the combined descriptor from
-  ``lmcache.utils.get_version()``, formatted ``"<version>-<commit_id>"``
+  ``lmcache.v1.common.utils.get_version()``, formatted ``"<version>-<commit_id>"``
   (e.g. ``"0.3.1-ca79ea33"``). On a source checkout without build-time
   version metadata, each missing component falls back to the literal
   ``"NA"`` (so a metadata-less build returns ``"NA-NA"``).
 - ``GET /lmc_version`` — the raw package version string
-  (``lmcache.utils.VERSION``); empty string ``""`` when the generated
+  (``lmcache.v1.common.utils.VERSION``); empty string ``""`` when the generated
   ``lmcache._version`` module is absent.
 - ``GET /commit_id`` — the git commit id baked into the build
-  (``lmcache.utils.COMMIT_ID``); empty string ``""`` when unavailable.
+  (``lmcache.v1.common.utils.COMMIT_ID``); empty string ``""`` when unavailable.
 
 All three are unconditional ``200 OK``.
 
@@ -762,6 +762,10 @@ skip read/write-locked keys unless ``force`` is set. Blocking adapter I/O is run
 off the event loop. When the tier includes L2 the primary (or selected) L2
 adapter must be configured, else ``503``; a pure ``l1`` delete needs no adapter.
 
+Deletion is best effort. It does not wait for or cancel store or write-back
+tasks already in flight for these keys, so such a task can make a key resident
+again after the call returns. This also holds for ``tier=all`` and ``force``.
+
 Per-key successful L2 deletions fire ``on_l2_keys_deleted`` on the
 adapter's listeners — when the coordinator is wired (see
 ``--coordinator-event-reporting``), the deletions show up at the
@@ -948,10 +952,13 @@ the requests that will use them, so the first request hits L1 instead of
 paying the L2 fetch inline. Useful when a workload is about to be routed to a
 node (a traffic shift, a hot shared system prompt).
 
-The caller describes content by **token ids**, never by internal cache keys (a
-key is a content hash plus a per-rank layout bitmap, which callers cannot
-construct). The server hashes the tokens, expands each chunk across the node's
-ranks, and submits a *warm* prefetch: loaded chunks are **retained**
+The caller describes content by **token ids**, or by **keys** it already holds
+(for example from the coordinator's directory). Supply exactly one. Token ids
+always cover every chunk from position 0, since chunk hashes are
+prefix-chained; keys reach a chunk in the middle of a prompt without its prefix
+chunks. A key names its chunk: whichever object group and rank it carries, the
+chunk is warmed in every group and rank. The server expands each chunk across
+the node's object groups and ranks, and submits a *warm* prefetch: loaded chunks are **retained**
 (permanent) and left **unlocked** — there is no downstream reader to pin them
 for, so a later real lookup takes its own lock. The call returns immediately;
 the load runs in the storage manager's own thread. It coalesces across all
@@ -966,18 +973,24 @@ configured L2 adapters, so there is no ``?adapter=`` selector.
    * - Field
      - Type
      - Description
+   * - ``keys``
+     - list[object]
+     - Keys form. Each ``{"chunk_hash_hex", "model_name", "kv_rank",
+       "object_group_id", "cache_salt", "tags"}``; they must agree on model,
+       world size (packed in ``kv_rank``), ``cache_salt`` and ``tags``; at
+       most 10,000 keys. The token-form fields below are then ignored.
    * - ``model_name``
      - string
-     - The served model id, exactly as registered (e.g. ``Qwen/Qwen3-8B``).
+     - Tokens form, required. The served model id, exactly as registered
+       (e.g. ``Qwen/Qwen3-8B``).
    * - ``world_size``
      - int
-     - The value vLLM registered for the node's KV layout and rank fan-out
-       (``1`` for a single-GPU, TP=1 deployment).
+     - Tokens form, required. The value vLLM registered for the node's KV
+       layout and rank fan-out (``1`` for a single-GPU, TP=1 deployment).
    * - ``token_ids``
      - list[int]
-     - The prompt token ids. Must use the same tokenizer / special-token
-       settings as the store, and contain at least one full ``chunk_size`` of
-       tokens — only complete chunks are warmed.
+     - Tokens form. The prompt token ids. Must use the same tokenizer /
+       special-token settings as the store; only complete chunks are warmed.
    * - ``cache_salt``
      - string
      - Per-tenant key isolation; must match the store (default ``""``).
@@ -1003,12 +1016,24 @@ no ``request_id`` to poll:
 **HTTP status codes:**
 
 - ``202``: submitted (or a ``noop`` as above).
-- ``400``: ``token_ids`` exceeds the per-request cap, or ``cache_salt``
-  violates its invariants.
-- ``409``: no layout registered for ``(model_name, world_size)`` — the model
-  has not allocated KV cache on this node yet (start vLLM first).
-- ``422``: request body fails field-level validation.
-- ``503``: engine not initialized.
+- ``400``: ``token_ids`` exceeds the per-request cap, ``cache_salt``
+  violates its invariants, or ``keys`` disagree on model, world size,
+  ``cache_salt`` or ``tags`` or pack no world size in ``kv_rank``.
+- ``422``: request body fails field-level validation, supplies both or
+  neither of ``keys`` / ``token_ids``, omits ``model_name`` or
+  ``world_size`` in the tokens form, or carries more than 10,000 keys.
+- ``503``: engine not initialized, or no layout registered for
+  ``(model_name, world_size)`` — the model has not allocated KV cache on this
+  node yet (start vLLM first).
+
+.. note::
+
+   **Sliding-window models:** the two forms load different chunks. The tokens
+   form keeps each object group's attention window, and a warm prefetch plans
+   nothing for a model with a sliding-window group. The keys form names chunks
+   that need not be a contiguous prefix, so it has no window to keep: it loads
+   every named chunk in every group and retains it in L1 until evicted. Serving
+   is unaffected, since a lookup still applies each group's window.
 
 **Example:**
 
@@ -1020,6 +1045,14 @@ no ``request_id`` to poll:
              "token_ids": [101, 102, 103], "cache_salt": "user-a",
              "tags": {"adapter_revision": "abc123"}}'
     # -> {"request_id": "abc123", "chunks": 1, "status": "submitted"}
+
+    # Keys form: warm one mid-prompt chunk.
+    curl -s -X POST http://localhost:8080/cache/prefetches \
+        -H 'Content-Type: application/json' \
+        -d '{"keys": [{"chunk_hash_hex": "aa12...", "model_name": "Qwen/Qwen3-8B",
+                       "kv_rank": 16777472, "object_group_id": 0,
+                       "cache_salt": "user-a", "tags": {}}]}'
+    # -> {"request_id": "def456", "chunks": 1, "status": "submitted"}
 
 ``GET /cache/prefetches/{request_id}``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

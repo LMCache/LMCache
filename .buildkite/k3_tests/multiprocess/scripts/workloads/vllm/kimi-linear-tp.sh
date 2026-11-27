@@ -103,6 +103,10 @@ launch_vllm() {
     # collide with the serving port for torch.distributed.
     local saved_port="$VLLM_PORT"
     unset VLLM_PORT
+    local -a mamba_args=()
+    if vllm_supports_mamba_cache_mode; then
+        mamba_args=(--mamba-cache-mode align)
+    fi
 
     VLLM_SERVER_DEV_MODE=1 vllm serve "$MODEL" \
         --tensor-parallel-size 2 \
@@ -111,7 +115,7 @@ launch_vllm() {
         --no-enable-flashinfer-autotune \
         --enable-prefix-caching \
         --moe-backend triton \
-        --mamba-cache-mode align \
+        "${mamba_args[@]}" \
         --max-model-len auto \
         --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS" \
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \

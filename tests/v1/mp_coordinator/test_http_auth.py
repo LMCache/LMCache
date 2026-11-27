@@ -260,7 +260,7 @@ def test_live_coordinator_uses_cli_key_for_outbound_mp_request(
                     "instance_id": "outbound-probe",
                     "model_name": "probe",
                     "world_size": 1,
-                    "token_ids": [],
+                    "token_ids": [1],
                 },
             )
     finally:

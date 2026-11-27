@@ -80,6 +80,7 @@ jobs:
           filters: |
             lmcache:
               - '**.py'
+              - '.github/deprecated-modules.toml'
               - 'pyproject.toml'
               - 'requirements/**.txt'
               - '.github/workflows/test.yml'
@@ -90,8 +91,8 @@ jobs:
               - 'lmcache/v1/distributed/l2_adapters/raw_block/**'
               - 'lmcache/v1/distributed/l2_adapters/raw_block_l2_adapter.py'
               - 'lmcache/v1/multiprocess/**'
-              - 'tests/v1/distributed/raw_block/test_*.py'
-              - 'tests/v1/distributed/raw_block/test_utils.py'
+              - 'tests/v1/distributed/raw_block/**'
+              - 'tests/v1/distributed/test_raw_block_l2_adapter.py'
               - 'tests/v1/multiprocess/test_raw_block_l2_adapter.py'
               - '.github/workflows/test.yml'
             hf3fs_native:
@@ -314,9 +315,9 @@ jobs:
 
       - name: Run raw-block tests
         run: |
-          pytest -q --basetemp=.pytest-tmp/raw-block \
-            tests/v1/distributed/raw_block/test_device.py \
-            tests/v1/distributed/raw_block/test_core.py \
+          python -m pytest -q --basetemp=.pytest-tmp/raw-block \
+            tests/v1/distributed/raw_block/ \
+            tests/v1/distributed/test_raw_block_l2_adapter.py \
             tests/v1/multiprocess/test_raw_block_l2_adapter.py
 
   grpc-native-tests:

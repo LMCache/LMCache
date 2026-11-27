@@ -34,6 +34,7 @@ from lmcache.v1.distributed.api import (
     MemoryTags,
     ObjectKey,
     PrefetchLockMode,
+    PrefetchPriority,
     PrefetchResult,
     PrefetchTaskSpec,
 )
@@ -140,6 +141,7 @@ def make_spec(
     lock_mode: PrefetchLockMode = PrefetchLockMode.LOCK,
     allowed_l1_memory_tags: frozenset[MemoryTags] | None = None,
     allowed_l2_memory_tags: frozenset[MemoryTags] | None = None,
+    priority: PrefetchPriority = PrefetchPriority.NORMAL,
 ) -> PrefetchTaskSpec:
     """Build a request over the given rows."""
     return PrefetchTaskSpec(
@@ -148,6 +150,7 @@ def make_spec(
         lock_mode=lock_mode,
         allowed_l1_memory_tags=allowed_l1_memory_tags,
         allowed_l2_memory_tags=allowed_l2_memory_tags,
+        priority=priority,
     )
 
 
@@ -350,6 +353,46 @@ class TestLifecycle:
         ctrl = make_controller(l1_manager, [])
         ctrl.start()
         ctrl.stop()
+
+    @pytest.mark.parametrize("failure", ["second_manager", "thread_start"])
+    def test_listener_registration_rolls_back(self, l1_manager, failure):
+        second = MagicMock(spec=L1ManagerInterface)
+        ctrl = PrefetchController(
+            l1_managers=[l1_manager, second],
+            l1_manager_descriptors=[
+                L1ManagerDescriptor(index=i, config=make_l1_config()) for i in range(2)
+            ],
+            l2_adapters=[],
+            adapter_descriptors=[],
+            policy=BufferOnlyPrefetchPolicy(),
+        )
+        target, method = (
+            (second, "register_listener")
+            if failure == "second_manager"
+            else (ctrl._thread, "start")
+        )
+
+        def fail(*args):
+            assert len(l1_manager._registered_listeners) == 1
+            raise RuntimeError("startup failed")
+
+        with patch.object(target, method, side_effect=fail):
+            with pytest.raises(RuntimeError, match="startup failed"):
+                ctrl.start()
+        assert not l1_manager._registered_listeners
+        if failure == "thread_start":
+            second.unregister_listener.assert_called_once_with(
+                second.register_listener.call_args.args[0]
+            )
+
+        ctrl.start()
+        try:
+            assert l1_manager._registered_listeners == [
+                second.register_listener.call_args.args[0]
+            ]
+        finally:
+            ctrl.stop()
+        assert not l1_manager._registered_listeners
 
     def test_report_status_keys(self, l1_manager):
         """Status reports health, queue depths, and adapter counts."""
@@ -554,7 +597,6 @@ class TestSingleAdapterPrefetch:
 # =============================================================================
 
 
-@pytest.mark.no_shared_allocator
 class TestRawBlockWorkerFailure:
     @pytest.mark.parametrize("failure_phase", ["lookup", "load"])
     def test_worker_failure_preserves_other_hits_and_releases_resources(
@@ -937,9 +979,10 @@ class TestAdmission:
         l1_manager.finish_read(all_keys)
 
     def test_watermark_holds_back_requests(self):
-        """Once in-flight requests reach the watermark, later requests wait
-        in the pending queue; the first is admitted even though it alone
-        exceeds the budget, and every request completes."""
+        """Once prefetch holds the watermark, later requests wait in the
+        pending queue; the first is admitted even though it alone exceeds the
+        budget, and each later one starts as soon as the one before is
+        consumed."""
         layout = make_layout()
         object_bytes = 100 * 2 * 512 * 2
         l1_manager = DramL1Manager(
@@ -964,11 +1007,12 @@ class TestAdmission:
                     and ctrl.report_status()["in_flight_request_count"] == 1
                 )
             ), ctrl.report_status()
-            results = [wait_for_result(ctrl, r, timeout=15.0) for r in req_ids]
-
-            assert [row_bits(r) for r in results] == [[0, 1]] * 4
+            for i, req_id in enumerate(req_ids):
+                result = wait_for_result(ctrl, req_id, timeout=15.0)
+                assert row_bits(result) == [0, 1]
+                # Consuming the result releases the budget for the next one.
+                l1_manager.finish_read(all_keys[i * 2 : i * 2 + 2])
             assert l1_manager.get_staging_memory_usage() == 0
-            l1_manager.finish_read(all_keys)
         finally:
             ctrl.stop()
             adapter.close()
@@ -1474,6 +1518,18 @@ class AdmissionRacingL1Manager:
         return wrapped
 
 
+_NOT_RACED_L1_CALLS = frozenset(
+    {
+        "register_listener",
+        "unregister_listener",
+        "get_memory_tags",
+        "get_memory_usage",
+        "get_staging_memory_usage",
+        "get_prefetch_locked_bytes",
+    }
+)
+
+
 class EvictionRacingL1Manager:
     """DramL1Manager wrapper emulating a concurrent evictor, deterministically.
 
@@ -1498,9 +1554,11 @@ class EvictionRacingL1Manager:
 
     def __getattr__(self, name: str):
         attr = getattr(self._inner, name)
-        # Memory tags are static metadata read when the controller is built,
-        # not a request-path call for the evictor to race with.
-        if not callable(attr) or name == "get_memory_tags":
+        # Listeners and memory tags are controller lifecycle operations,
+        # and the usage reads are admission bookkeeping made before the
+        # request locks anything: neither is a request-path call for the
+        # evictor to race with.
+        if not callable(attr) or name in _NOT_RACED_L1_CALLS:
             return attr
 
         def wrapped(*args, **kwargs):
@@ -2420,3 +2478,149 @@ class TestP2PPeerFailures:
             )
             assert locked == num_requests * len(keys)
             assert unlocked == locked
+
+
+# =============================================================================
+# Prefetch-locked bytes in the watermark, prefetch priority
+# =============================================================================
+
+OBJECT_BYTES = 100 * 2 * 512 * 2
+
+
+def make_budget_l1(num_objects: int = 16) -> DramL1Manager:
+    """A non-lazy L1 that holds exactly ``num_objects`` test objects."""
+    return DramL1Manager(
+        make_l1_config(size_in_bytes=OBJECT_BYTES * num_objects + 65536, use_lazy=False)
+    )
+
+
+def watermark_for(l1_manager: DramL1Manager, num_objects: float) -> float:
+    """The in-flight watermark whose budget is ``num_objects`` test objects."""
+    _used, total = l1_manager.get_memory_usage()
+    return OBJECT_BYTES * num_objects / total
+
+
+class TestPrefetchLockedBudget:
+    @pytest.mark.parametrize(
+        "priority, queue",
+        [
+            (PrefetchPriority.NORMAL, "pending_queue_size"),
+            (PrefetchPriority.HIGH, "high_priority_queue_size"),
+        ],
+    )
+    def test_unconsumed_loads_hold_back_new_requests(
+        self, monkeypatch, priority, queue
+    ):
+        """Loaded-but-unconsumed objects count against the watermark:
+        once they fill it, a new request waits with nothing in flight, and it
+        starts as soon as the earlier reader releases its objects."""
+        # The release itself must wake the queue, independently of the
+        # periodic retry used for silent read-TTL expiry.
+        monkeypatch.setattr(
+            "lmcache.v1.distributed.storage_controllers.prefetch_controller."
+            "PREFETCH_LOOP_POLL_TIMEOUT_MS",
+            60_000,
+        )
+        l1_manager = make_budget_l1()
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(6)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = make_controller(
+            l1_manager,
+            [adapter],
+            inflight_watermark=watermark_for(l1_manager, 5.5),
+        )
+        ctrl.start()
+        try:
+            first = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys[0:2]))
+            )
+            second = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys[2:4]))
+            )
+            assert row_bits(first) == [0, 1] and row_bits(second) == [0, 1]
+            assert l1_manager.get_prefetch_locked_bytes() == 4 * OBJECT_BYTES
+
+            third_id = ctrl.submit_prefetch_request(
+                single_row_spec(keys[4:6], priority=priority)
+            )
+            assert wait_for_condition(lambda: ctrl.report_status()[queue] == 1), (
+                ctrl.report_status()
+            )
+            assert ctrl.report_status()["in_flight_request_count"] == 0
+            assert ctrl.query_prefetch_result(third_id) is None
+
+            l1_manager.finish_read(keys[0:2])
+            third = wait_for_result(ctrl, third_id)
+            assert row_bits(third) == [0, 1]
+            l1_manager.finish_read(keys[2:6])
+            assert l1_manager.get_prefetch_locked_bytes() == 0
+        finally:
+            ctrl.stop()
+            adapter.close()
+            l1_manager.close()
+
+    def test_l1_hits_are_charged_until_released(self, l1_manager):
+        """L1 hits stay pinned for the request like loads from L2, so they
+        count until the reader releases them."""
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        write_keys_to_l1(l1_manager, keys, layout)
+        adapter = make_adapter()
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+        try:
+            result = wait_for_result(
+                ctrl, ctrl.submit_prefetch_request(single_row_spec(keys))
+            )
+            assert hit_counts(result) == (3, 0)
+            assert l1_manager.get_prefetch_locked_bytes() == 3 * OBJECT_BYTES
+            l1_manager.finish_read(keys)
+            assert l1_manager.get_prefetch_locked_bytes() == 0
+        finally:
+            ctrl.stop()
+            adapter.close()
+
+    def test_high_priority_starts_ahead_of_waiting_normal_request(self):
+        """A HIGH-priority request that fits starts while an earlier NORMAL
+        request is still waiting for budget."""
+        l1_manager = make_budget_l1()
+        adapter = make_adapter()
+        layout = make_layout()
+        held, new_keys, cont_keys = (
+            [make_object_key(i) for i in range(3)],
+            [make_object_key(i) for i in range(10, 13)],
+            [make_object_key(20)],
+        )
+        store_keys_in_l2(adapter, held + new_keys + cont_keys, layout)
+        ctrl = make_controller(
+            l1_manager,
+            [adapter],
+            inflight_watermark=watermark_for(l1_manager, 5.5),
+        )
+        ctrl.start()
+        try:
+            assert row_bits(
+                wait_for_result(
+                    ctrl, ctrl.submit_prefetch_request(single_row_spec(held))
+                )
+            ) == [0, 1, 2]
+            new_id = ctrl.submit_prefetch_request(single_row_spec(new_keys))
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_queue_size"] == 1
+            )
+            cont_id = ctrl.submit_prefetch_request(
+                single_row_spec(cont_keys, priority=PrefetchPriority.HIGH)
+            )
+            assert row_bits(wait_for_result(ctrl, cont_id)) == [0]
+            assert ctrl.report_status()["pending_queue_size"] == 1
+            assert ctrl.query_prefetch_result(new_id) is None
+
+            l1_manager.finish_read(held + cont_keys)
+            assert row_bits(wait_for_result(ctrl, new_id)) == [0, 1, 2]
+            l1_manager.finish_read(new_keys)
+        finally:
+            ctrl.stop()
+            adapter.close()
+            l1_manager.close()

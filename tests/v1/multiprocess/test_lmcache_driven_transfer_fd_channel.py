@@ -13,8 +13,6 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 
-pytestmark = pytest.mark.no_shared_allocator
-
 
 def test_unsupported_fd_channel_does_not_log_startup_error(
     monkeypatch: pytest.MonkeyPatch,
