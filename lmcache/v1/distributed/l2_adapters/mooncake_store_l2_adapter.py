@@ -40,6 +40,9 @@ _LMCACHE_ONLY_KEYS = {
     "num_workers",
     "eviction",
     "per_op_workers",
+    "num_slices",
+    "max_inflight_slices",
+    "pipelined_load",
 }
 
 
@@ -64,6 +67,14 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
             (``"lookup"``, ``"retrieve"``, ``"store"``,
             ``"delete"``) to dedicated worker counts.  Ops
             not mentioned use the shared ``num_workers`` pool.
+        num_slices: Store each object as this many byte slices, one
+            Mooncake key each (default 1: one key per object). See
+            ``slice_major``.
+        max_inflight_slices: Slice gets of one load in flight at once
+            (default 2).
+        pipelined_load: With ``num_slices > 1``, report a load once its
+            first slice landed and fill the rest in the background
+            (default True).
     """
 
     def __init__(
@@ -71,6 +82,9 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
         setup_config: dict[str, str],
         num_workers: int = 4,
         per_op_workers: dict[str, int] | None = None,
+        num_slices: int = 1,
+        max_inflight_slices: int = 2,
+        pipelined_load: bool = True,
     ):
         super().__init__()
         self.num_workers = L2AdapterConfigBase._validate_num_workers(num_workers)
@@ -78,6 +92,15 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
             per_op_workers
         )
         self.setup_config: dict[str, str] = dict(setup_config)
+        if not isinstance(num_slices, int) or num_slices < 1:
+            raise ValueError(f"num_slices must be an int >= 1, got {num_slices!r}")
+        if not isinstance(max_inflight_slices, int) or max_inflight_slices < 1:
+            raise ValueError(
+                f"max_inflight_slices must be an int >= 1, got {max_inflight_slices!r}"
+            )
+        self.num_slices = num_slices
+        self.max_inflight_slices = max_inflight_slices
+        self.pipelined_load = bool(pipelined_load)
 
     @classmethod
     def from_dict(cls, d: dict[str, object]) -> "MooncakeStoreL2AdapterConfig":
@@ -109,10 +132,17 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
             if v is not None:
                 setup[k] = str(v)
 
+        pipelined_load = d.get("pipelined_load", True)
+        if isinstance(pipelined_load, str):
+            pipelined_load = pipelined_load.strip().lower() in ("1", "true", "yes")
+
         return cls(
             setup_config=setup,
             num_workers=num_workers,
             per_op_workers=per_op_workers,
+            num_slices=cast(int, d.get("num_slices", 1)),
+            max_inflight_slices=cast(int, d.get("max_inflight_slices", 2)),
+            pipelined_load=bool(pipelined_load),
         )
 
     @classmethod
@@ -134,7 +164,16 @@ class MooncakeStoreL2AdapterConfig(L2AdapterConfigBase):
             "dict mapping lane keys to dedicated worker "
             "counts. Valid keys: lookup, retrieve, "
             "store, delete. Ops not mentioned use the "
-            "shared num_workers pool."
+            "shared num_workers pool.\n"
+            "- num_slices (int): Store each object as this "
+            "many byte slices, one key each (default 1). "
+            "Pick a divisor of the layer count. All "
+            "instances sharing the store must agree.\n"
+            "- max_inflight_slices (int): Slice gets of "
+            "one load in flight at once (default 2).\n"
+            "- pipelined_load (bool): With num_slices > 1, "
+            "report loads once their first slice landed "
+            "(default true)."
         )
 
 
@@ -203,14 +242,32 @@ def _create_mooncake_store_l2_adapter(
     )
     logger.info(
         "Created Mooncake Store L2 adapter "
-        "(workers=%d, per_op_workers=%s, preregister_l1_memory=%s)",
+        "(workers=%d, per_op_workers=%s, preregister_l1_memory=%s, "
+        "num_slices=%d)",
         config.num_workers,
         config.per_op_workers,
         l1_registration.enabled and l1_registration.size > 0,
+        config.num_slices,
     )
-    return NativeConnectorL2Adapter(
-        native_client, MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
-    )
+    memory_tags = MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
+    if config.num_slices > 1:
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.slice_major import (
+            SliceMajorL2Adapter,
+            SlicedClient,
+        )
+
+        return SliceMajorL2Adapter(
+            SlicedClient(native_client, config.num_slices, config.max_inflight_slices),
+            memory_tags,
+            pipelined_load=config.pipelined_load,
+            type_name=type(native_client).__name__,
+            extra_status={
+                "num_slices": config.num_slices,
+                "pipelined_load": config.pipelined_load,
+            },
+        )
+    return NativeConnectorL2Adapter(native_client, memory_tags)
 
 
 # Self-register config type and adapter factory
