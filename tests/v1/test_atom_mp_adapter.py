@@ -217,6 +217,33 @@ def test_atom_lookup_submits_valid_reader_count(
     assert lookup_call.args[1] == 2
 
 
+def test_the_scheduler_lookup_uses_the_salted_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lookup has to name the same tenant the store was written under."""
+    client = MagicMock(name="req_client")
+    future: MessagingFuture[None] = MessagingFuture()
+    future.set_result(None)
+    client.lookup.return_value = future
+    _patch_request_client_factory(monkeypatch, client)
+    monkeypatch.setattr(atom_adapter, "_get_chunk_size", lambda *args: 256)
+    scheduler = AtomMPSchedulerAdapter(
+        server_url="tcp://127.0.0.1:5555",
+        context=MagicMock(name="zmq_context"),
+        model_name="atom-test-model",
+        block_size=64,
+        parallel_config=AtomMPParallelConfig(2, 1, 2),
+    )
+    scheduler._hash_cache = MagicMock()
+
+    scheduler.maybe_submit_lookup_request(
+        "request-1", [], chunk_hashes=bytes([7]) * 32, cache_salt="tenant-a"
+    )
+
+    key = client.lookup.call_args.args[0]
+    assert key.cache_salt == "tenant-a"
+
+
 def test_atom_worker_registers_native_engine_type(
     worker_with_transfer_context: tuple[
         AtomMPWorkerAdapter, MagicMock, dict[str, torch.Tensor]
@@ -1103,3 +1130,24 @@ def test_atom_worker_rejects_mismatched_or_unexpected_caller_hashes(
             _FakeEvent(),
         )
     plain_context.submit_store.assert_not_called()
+
+
+def test_the_spec_salt_reaches_the_key(worker_with_transfer_context):
+    """ATOM's chunk hashes cover tokens only; the salt is a separate identity."""
+    worker, _transfer_context, caches = worker_with_transfer_context
+    worker.register_kv_caches(caches, engine_group_infos=_atom_groups())
+
+    # The converter sends chunk hashes with no token ids; cover that path.
+    worker._hash_cache = MagicMock()
+    key = worker._create_key(
+        "request-1",
+        AtomMPTransferSpec(
+            token_ids=[],
+            block_ids=[[0, 1, 2, 3]],
+            end=256,
+            chunk_hashes=bytes([7]) * 32,
+            cache_salt="tenant-a",
+        ),
+    )
+
+    assert key.cache_salt == "tenant-a"

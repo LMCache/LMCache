@@ -130,6 +130,7 @@ class AtomMPTransferSpec:
     start: int = 0
     end: int = 0
     chunk_hashes: bytes | None = None
+    cache_salt: str = ""
 
 
 class AtomMPSchedulerAdapter:
@@ -189,6 +190,7 @@ class AtomMPSchedulerAdapter:
         request_id: str,
         token_ids: Sequence[int],
         chunk_hashes: bytes | None = None,
+        cache_salt: str = "",
     ) -> None:
         """Submit a lookup once for ``request_id``.
 
@@ -225,6 +227,7 @@ class AtomMPSchedulerAdapter:
             request_id=request_id,
             worker_id=None,
             chunk_hashes=chunk_hashes,
+            cache_salt=cache_salt,
         )
         self._client.lookup(key, self._parallel.tp_size).result(
             timeout=self._mq_timeout
@@ -253,6 +256,7 @@ class AtomMPSchedulerAdapter:
         end: int,
         request_id: str,
         chunk_hashes: bytes | None = None,
+        cache_salt: str = "",
     ) -> None:
         """Release lookup locks for an ATOM token range.
 
@@ -276,6 +280,7 @@ class AtomMPSchedulerAdapter:
             request_id=request_id,
             worker_id=None,
             chunk_hashes=chunk_hashes,
+            cache_salt=cache_salt,
         )
         self._client.free_lookup_locks(key, self._parallel.tp_size)
 
@@ -308,6 +313,7 @@ class AtomMPSchedulerAdapter:
         request_id: str,
         worker_id: int | None,
         chunk_hashes: bytes | None = None,
+        cache_salt: str = "",
     ) -> IPCCacheServerKey:
         if chunk_hashes is not None:
             return IPCCacheServerKey.from_chunk_hashes(
@@ -325,6 +331,7 @@ class AtomMPSchedulerAdapter:
                 start=start,
                 end=end,
                 request_id=request_id,
+                cache_salt=cache_salt,
             )
         if self._hash_cache is not None:
             return IPCCacheServerKey.from_chunk_hashes(
@@ -335,6 +342,7 @@ class AtomMPSchedulerAdapter:
                 start=start,
                 end=end,
                 request_id=request_id,
+                cache_salt=cache_salt,
             )
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
@@ -344,6 +352,7 @@ class AtomMPSchedulerAdapter:
             start=start,
             end=end,
             request_id=request_id,
+            cache_salt=cache_salt,
         )
 
 
@@ -886,6 +895,7 @@ class AtomMPWorkerAdapter:
                 start=spec.start,
                 end=spec.end,
                 request_id=request_id,
+                cache_salt=spec.cache_salt,
             )
         if self._hash_cache is not None:
             return IPCCacheServerKey.from_chunk_hashes(
@@ -898,6 +908,7 @@ class AtomMPWorkerAdapter:
                 start=spec.start,
                 end=spec.end,
                 request_id=request_id,
+                cache_salt=spec.cache_salt,
             )
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
@@ -907,4 +918,5 @@ class AtomMPWorkerAdapter:
             start=spec.start,
             end=spec.end,
             request_id=request_id,
+            cache_salt=spec.cache_salt,
         )
