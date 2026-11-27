@@ -41,6 +41,29 @@ from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
+
+def _remove_storage_files(fds: list[int], paths: list[str]) -> None:
+    """Close the given storage fds and delete the files at ``paths``.
+
+    Every fd and path is attempted; failures are logged rather than raised
+    so one bad file does not leak the rest.
+
+    Args:
+        fds: File descriptors to close.
+        paths: Files to delete.
+    """
+    for fd in fds:
+        try:
+            os.close(fd)
+        except OSError:
+            logger.exception("Failed to close nixl_store pool fd %d", fd)
+    for path in paths:
+        try:
+            os.unlink(path)
+        except OSError:
+            logger.exception("Failed to delete nixl_store pool file %s", path)
+
+
 # Main class
 
 
@@ -174,6 +197,9 @@ class NixlStorageAgent:
         self.backend_params = backend_params
 
         self.l1_align_bytes = l1_memory_desc.align_bytes
+        # Only file backends fill these; object backends keep them empty.
+        self.storage_fds: list[int] = []
+        self.storage_paths: list[str] = []
 
         self.agent_name = "NixlAgent_" + str(uuid.uuid4())
         nixl_conf = NixlAgentConfig(backends=[])
@@ -268,6 +294,7 @@ class NixlStorageAgent:
 
         # Create file descriptors for Nixl to register
         fds: list[int] = []
+        paths: list[str] = []
         flags = os.O_CREAT | os.O_RDWR
         if use_direct_io:
             if hasattr(os, "O_DIRECT"):
@@ -277,30 +304,38 @@ class NixlStorageAgent:
                     "use_direct_io is True, but O_DIRECT is not available on "
                     "this system. Falling back to buffered I/O."
                 )
-        for i in range(num_files):
-            filename = f"obj_{i}_{uuid.uuid4().hex[0:4]}.bin"
-            tmp_path = os.path.join(file_path, filename)
-            fd = os.open(tmp_path, flags)
-            fds.append(fd)
+        try:
+            for i in range(num_files):
+                filename = f"obj_{i}_{uuid.uuid4().hex[0:4]}.bin"
+                tmp_path = os.path.join(file_path, filename)
+                fd = os.open(tmp_path, flags)
+                fds.append(fd)
+                paths.append(tmp_path)
 
-        # Register each file covering the full file_size.
-        # Build one xfer_desc entry per page slot (page index i maps to
-        # offset (i % pages_per_file) * page_size inside fd[i // pages_per_file]).
-        reg_list = []
-        xfer_desc = []
-        for fd in fds:
-            reg_list.append((0, file_size, fd, ""))
-        for page_idx in range(num_pages):
-            fd = fds[page_idx // pages_per_file]
-            offset = (page_idx % pages_per_file) * page_size
-            xfer_desc.append((offset, page_size, fd))
-        reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="FILE")
-        xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="FILE")
-        xfer_handler = self.nixl_agent.prep_xfer_dlist(
-            self.agent_name, xfer_descs, mem_type="FILE"
-        )
+            # Register each file covering the full file_size.
+            # Build one xfer_desc entry per page slot (page index i maps to
+            # offset (i % pages_per_file) * page_size inside
+            # fd[i // pages_per_file]).
+            reg_list = []
+            xfer_desc = []
+            for fd in fds:
+                reg_list.append((0, file_size, fd, ""))
+            for page_idx in range(num_pages):
+                fd = fds[page_idx // pages_per_file]
+                offset = (page_idx % pages_per_file) * page_size
+                xfer_desc.append((offset, page_size, fd))
+            reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="FILE")
+            xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="FILE")
+            xfer_handler = self.nixl_agent.prep_xfer_dlist(
+                self.agent_name, xfer_descs, mem_type="FILE"
+            )
+        except Exception:
+            # No agent is returned to close, so remove the files here.
+            _remove_storage_files(fds, paths)
+            raise
 
         self.storage_fds = fds
+        self.storage_paths = paths
         self.storage_reg_descs = reg_descs
         self.storage_xfer_descs = xfer_descs
         self.storage_xfer_handler = xfer_handler
@@ -427,13 +462,23 @@ class NixlStorageAgent:
     def release_handle(self, handle):
         self.nixl_agent.release_xfer_handle(handle)
 
-    def close(self):
-        self.nixl_agent.release_dlist_handle(self.storage_xfer_handler)
-        self.nixl_agent.release_dlist_handle(self.mem_xfer_handler)
-        self.nixl_agent.deregister_memory(self.storage_reg_descs)
-        self.nixl_agent.deregister_memory(self.mem_reg_descs)
-        for fd in getattr(self, "storage_fds", []):
-            os.close(fd)
+    def close(self) -> None:
+        """Release NIXL handles and registrations, then delete the pool files.
+
+        Pool files are removed exactly once, even if a NIXL release raises.
+
+        Raises:
+            Exception: Whatever a NIXL release or deregistration raises.
+        """
+        try:
+            self.nixl_agent.release_dlist_handle(self.storage_xfer_handler)
+            self.nixl_agent.release_dlist_handle(self.mem_xfer_handler)
+            self.nixl_agent.deregister_memory(self.storage_reg_descs)
+            self.nixl_agent.deregister_memory(self.mem_reg_descs)
+        finally:
+            fds, paths = self.storage_fds, self.storage_paths
+            self.storage_fds, self.storage_paths = [], []
+            _remove_storage_files(fds, paths)
 
 
 class NixlStoreL2Adapter(L2AdapterInterface):
