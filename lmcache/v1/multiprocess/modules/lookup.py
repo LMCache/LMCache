@@ -16,6 +16,7 @@ from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     ObjectKey,
     PrefetchHandle,
+    PrefetchResult,
     PrefetchTaskSpec,
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
@@ -26,7 +27,6 @@ from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.engine_context import (
     MPCacheServerContext,
     check_chunk_hash_key,
-    finish_lookup_read,
 )
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
@@ -610,13 +610,12 @@ class LookupModule(DiscoverableModule):
             return
 
         check_chunk_hash_key(self._ctx, key)
-        token_hasher = self._ctx.layout_desc_registry.get_token_hasher(
-            key.model_name, key.world_size
-        )
+        session = self._ctx.session_manager.get(key.request_id)
+        if session is None:
+            return
         chunk_size = self._ctx.layout_desc_registry.get_chunk_size(
             key.model_name, key.world_size
         )
-        session = self._ctx.session_manager.get_or_create(key.request_id, token_hasher)
         if session.prefetch_hit_chunks < 0:
             # The lookup result has not reached the session yet (no
             # QUERY/WAIT_PREFETCH_STATUS consumed it). Hand it over now so
@@ -637,9 +636,7 @@ class LookupModule(DiscoverableModule):
 
         hit_chunks = session.prefetch_hit_chunks
         if hit_chunks < 0:
-            # No lookup result exists (never looked up, or the session was
-            # recreated after END_SESSION). L1 locks are anonymous refcounts:
-            # guessing a range could strip a concurrent reader's lock.
+            # No prefetch result was recorded for this session.
             logger.warning(
                 "free_lookup_locks for request %s without a lookup result; "
                 "nothing to release",
@@ -691,8 +688,8 @@ class LookupModule(DiscoverableModule):
         if not obj_keys:
             return
 
-        finish_lookup_read(
-            self._ctx, key, obj_keys, self._ctx.get_read_owners(key.request_id)
+        self._ctx.storage_manager.finish_read_reservations(
+            session.claim_free_reads(key, obj_keys)
         )
 
     @request_handler(HandlerType.BLOCKING)
@@ -885,17 +882,26 @@ class LookupModule(DiscoverableModule):
         # The unfull chunk's owners join the full chunks', so a retrieve and
         # free_lookup_locks release it on the L1 that holds its locks.
         session = self._ctx.session_manager.get_or_create(job.request_id)
-        unfull_chunk_boundary, unfull_chunk_probes, unfull_chunk_owners = (
+        unfull_chunk_boundary, unfull_chunk_probes, unfull_result = (
             self._lock_unfull_chunk(
                 job.unfull_chunk_lookup_key, found_count, job.attn_desc, session
             )
             if job.unfull_chunk_lookup_key is not None
-            else (0, 0, {})
+            else (0, 0, None)
         )
+        owners = result.l1_owners.copy()
+        generations = result.read_generations.copy()
+        read_counts = result.read_counts.copy()
+        if unfull_result is not None:
+            owners.update(unfull_result.l1_owners)
+            generations.update(unfull_result.read_generations)
+            read_counts.update(unfull_result.read_counts)
         session.record_prefetch_result(
             found_count,
             tuple(range(job.attn_desc.num_object_groups)),
-            {**result.l1_owners, **unfull_chunk_owners},
+            owners,
+            read_generations=generations,
+            read_counts=read_counts,
         )
 
         chunk_size = job.chunk_size
@@ -954,7 +960,7 @@ class LookupModule(DiscoverableModule):
         hit_chunks: int,
         attn_desc: AttnWindowDesc,
         session: Session,
-    ) -> tuple[int, int, dict[ObjectKey, int]]:
+    ) -> tuple[int, int, PrefetchResult | None]:
         """Read-lock the longest unfull chunk L1 holds after the hit prefix.
 
         This is the lookup's second stage: it runs once the full-chunk hit is
@@ -972,8 +978,8 @@ class LookupModule(DiscoverableModule):
 
         Returns:
             The locked unfull chunk's boundary (token count, 0 when none was
-            locked), the number of boundaries checked, and the L1 owner of
-            each locked key.
+            locked), the number of boundaries checked, and the successful
+            reservation's owners, generations and reader counts, or None.
 
         Note:
             Each candidate is tried with its own L1-only prefetch, longest
@@ -1002,7 +1008,7 @@ class LookupModule(DiscoverableModule):
         # and no grid, so it has no candidate. A key carrying chunk hashes
         # has no tokens to hash an unfull chunk from.
         if not candidate_boundaries or key.chunk_hashes:
-            return 0, 0, {}
+            return 0, 0, None
         group_layout_descs = (
             self._ctx.layout_desc_registry.find_group_unfull_chunk_layout_descs(
                 key.model_name, key.world_size
@@ -1010,7 +1016,7 @@ class LookupModule(DiscoverableModule):
         )
         # The model may have unregistered since the lookup was submitted.
         if not group_layout_descs:
-            return 0, 0, {}
+            return 0, 0, None
         object_group_ids = list(range(attn_desc.num_object_groups))
         shard_replication_desc = (
             self._ctx.layout_desc_registry.find_shard_replication_desc(
@@ -1042,8 +1048,8 @@ class LookupModule(DiscoverableModule):
                 result.hit_cells, [row.sliding_window_size for row in key_groups]
             )
             if hit:
-                return boundary, num_checked, result.l1_owners
-        return 0, len(candidate_boundaries), {}
+                return boundary, num_checked, result
+        return 0, len(candidate_boundaries), None
 
     def _active_prefetch_count(self) -> int:
         """Return the number of active prefetch jobs (thread-safe)."""
