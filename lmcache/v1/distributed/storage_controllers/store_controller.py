@@ -20,7 +20,7 @@ import weakref
 
 # First Party
 from lmcache.v1.common.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import ObjectKey, is_l1_only
 from lmcache.v1.distributed.config import EvictionConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerInterface, L1ManagerListener
@@ -196,6 +196,10 @@ class InFlightStoreTask:
     """The subset of keys for which reserve_read succeeded
     (i.e., keys holding an L1 read lock that must be released)."""
 
+    l1_delete: bool
+    """Whether ``keys`` leave L1 once this store succeeds
+    (``StoreAction.l1_delete``)."""
+
     l2_store_result: bool | None = None
     """L2 outcome (True=success, False=failure, None=still in flight)."""
 
@@ -281,7 +285,7 @@ class StoreController(StorageControllerInterface):
         # Composite key is needed because task IDs are only unique
         # within a single adapter, not across adapters.
         self._in_flight_tasks: dict[tuple[int, L2TaskId], InFlightStoreTask] = {}
-        # Stored keys whose L1 deletion was refused because a reader held them.
+        # Keys whose L1 deletion was refused because a reader held them.
         # Only the store loop thread changes these.
         self._deferred_l1_deletions: set[ObjectKey] = set()
         self._last_l1_deletion_retry = 0.0
@@ -651,6 +655,20 @@ class StoreController(StorageControllerInterface):
 
         # A rewritten key is deleted again once its own store finishes.
         self._deferred_l1_deletions.difference_update(keys)
+        # L1-only keys (e.g. unfull-chunk tails) never go to L2, so they take
+        # no budget. The policy, offered no adapters, only decides whether
+        # they leave L1 now.
+        l1_only = [key for key in keys if is_l1_only(key)]
+        if l1_only:
+            keys = [key for key in keys if not is_l1_only(key)]
+            delete_keys = [
+                key
+                for action in self._policy.get_store_actions(l1_only, [])
+                if action.destination is None and action.l1_delete
+                for key in action.keys
+            ]
+            if delete_keys:
+                self._delete_from_l1(delete_keys)
         for group in _group_keys_by_shape(keys).values():
             self._queued.append(group)
             self._queued_keys.update(group)
@@ -695,7 +713,7 @@ class StoreController(StorageControllerInterface):
         return self._in_flight_bytes >= budget
 
     def _submit_store_for_single_shape(self, keys: list[ObjectKey]) -> None:
-        """Submit ``keys`` (all same shape) to their target adapters."""
+        """Carry out the policy's actions for ``keys`` (all same shape)."""
         # Only route to adapters that are live (not draining). Descriptors
         # for draining adapters are kept for in-flight completion handling
         # but excluded here so no new task targets them.
@@ -704,12 +722,17 @@ class StoreController(StorageControllerInterface):
             for adapter_id, desc in self._adapter_descriptors.items()
             if adapter_id not in self._draining
         ]
-        plan = self._policy.select_store_targets(keys, routing_descriptors)
+        actions = self._policy.get_store_actions(keys, routing_descriptors)
 
         l1_mgr = self._l1_manager
 
-        for adapter_index, target_keys in plan.items():
+        for action in actions:
+            adapter_index, target_keys = action.destination, action.keys
             if not target_keys:
+                continue
+            if adapter_index is None:
+                if action.l1_delete:
+                    self._delete_from_l1(target_keys)
                 continue
 
             if adapter_index not in self._l2_adapters:
@@ -792,6 +815,7 @@ class StoreController(StorageControllerInterface):
                 adapter_index=adapter_index,
                 keys=successful_keys,
                 read_locked_keys=list(successful_keys),
+                l1_delete=action.l1_delete,
             )
             self._budget_deadlines[(adapter_index, task_id)] = (
                 time.monotonic() + self._read_ttl_seconds
@@ -903,11 +927,8 @@ class StoreController(StorageControllerInterface):
                 adapter_index,
                 len(task.keys),
             )
-            delete_keys = self._policy.select_l1_deletions(
-                task.keys, self._adapter_descriptors[adapter_index]
-            )
-            if delete_keys:
-                self._delete_from_l1(delete_keys)
+            if task.l1_delete:
+                self._delete_from_l1(task.keys)
         else:
             self._event_bus.publish(
                 Event(

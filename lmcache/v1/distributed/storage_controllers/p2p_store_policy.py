@@ -18,6 +18,7 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
 from lmcache.v1.distributed.storage_controllers.store_policy import (
+    StoreAction,
     StorePolicy,
     register_store_policy,
 )
@@ -56,62 +57,46 @@ class P2PStorePolicy(StorePolicy):
         )
         self._next_peer = 0
 
-    def select_store_targets(
+    def get_store_actions(
         self,
         keys: list[ObjectKey],
         adapters: list[L2AdapterDescriptor],
-    ) -> dict[int, list[ObjectKey]]:
+    ) -> list[StoreAction]:
         """
-        Send the keys to every non-P2P adapter and, above the usage
-        threshold, to one write-enabled peer.
+        Send the keys to every non-P2P adapter and, at or above the usage
+        threshold, to one write-enabled peer, dropping them from L1 once the
+        peer stored them.
 
         Args:
             keys: Keys that were just written to L1.
-            adapters: Descriptors of available L2 adapters.
+            adapters: Descriptors of the live L2 adapters.
 
         Returns:
-            Mapping from adapter index to the keys to store there. A peer is
-            included only when the local DRAM L1's used fraction is at or
-            above that peer adapter's ``write_l1_usage_threshold``.
+            One action with ``l1_delete=False`` per non-P2P adapter, plus one
+            with ``l1_delete=True`` for the peer whose turn it is when the
+            local DRAM L1's used fraction is at or above that peer adapter's
+            ``write_l1_usage_threshold``. Choosing a peer advances the turn.
         """
-        targets = {
-            ad.index: list(keys)
+        actions = [
+            StoreAction(keys=list(keys), destination=ad.index, l1_delete=False)
             for ad in adapters
             if not isinstance(ad.config, P2PL2AdapterConfig)
-        }
+        ]
         peers = [
             (ad.index, config)
             for ad in adapters
             if (config := _peer_write_config(ad)) is not None
         ]
         if not peers or self._local_dram_l1 is None:
-            return targets
-
+            return actions
         peer_index, peer_config = peers[self._next_peer % len(peers)]
         used_bytes, total_bytes = self._local_dram_l1.get_memory_usage()
         if used_bytes >= peer_config.write_l1_usage_threshold * total_bytes:
             self._next_peer += 1
-            targets[peer_index] = list(keys)
-        return targets
-
-    def select_l1_deletions(
-        self,
-        keys: list[ObjectKey],
-        adapter: L2AdapterDescriptor,
-    ) -> list[ObjectKey]:
-        """
-        Drop the local copies of keys that now live on a peer.
-
-        Args:
-            keys: Keys that were successfully stored to L2.
-            adapter: Descriptor of the L2 adapter that stored them.
-
-        Returns:
-            All keys when ``adapter`` stores into a peer, otherwise none.
-        """
-        if _peer_write_config(adapter) is None:
-            return []
-        return list(keys)
+            actions.append(
+                StoreAction(keys=list(keys), destination=peer_index, l1_delete=True)
+            )
+        return actions
 
 
 register_store_policy("p2p", P2PStorePolicy)

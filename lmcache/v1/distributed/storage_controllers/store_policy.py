@@ -1,29 +1,44 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-Store policy interface and default implementation for L1-to-L2 storage decisions.
+"""Store policy interface and built-in policies for L1-to-L2 storage.
 
-The store policy makes two decisions after data is written to L1:
-1. Which L2 adapter(s) should each key be stored to?
-2. After a successful L2 store, should the key be deleted from L1?
-"""
+After keys are written to L1, the policy returns the store actions for them:
+which L2 adapter stores which keys, and whether each key leaves L1."""
 
 # Standard
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import ObjectKey, is_l1_only
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
+
+
+@dataclass(frozen=True)
+class StoreAction:
+    """One thing the store controller does with keys just written to L1."""
+
+    keys: list[ObjectKey]
+    """The keys this action applies to."""
+
+    destination: int | None
+    """Index of the L2 adapter that stores ``keys``, or None for no L2 store.
+    The store controller never sends a key marked ``L1_ONLY_ATTRIBUTE`` to an
+    adapter (see ``StorePolicy.get_store_actions``)."""
+
+    l1_delete: bool
+    """Whether ``keys`` leave L1. With a destination, each key is deleted once
+    that adapter stored it successfully; without one, right away. A key a
+    reader still holds is deleted once the reader is done."""
 
 
 class StorePolicy(ABC):
     """
     Abstract interface for store decisions.
 
-    The store policy is called by the StoreController to decide:
-    1. Which adapter(s) to store each key to (select_store_targets).
-    2. Which keys to delete from L1 after successful L2 store
-       (select_l1_deletions).
+    The StoreController calls ``get_store_actions`` with keys that finished
+    writing to L1 and carries out the returned actions. A key in no action
+    stays in L1 and is not stored.
 
     Args:
         l1_managers: Every L1 manager of the storage manager, in
@@ -35,40 +50,28 @@ class StorePolicy(ABC):
         self._l1_managers = l1_managers
 
     @abstractmethod
-    def select_store_targets(
+    def get_store_actions(
         self,
         keys: list[ObjectKey],
         adapters: list[L2AdapterDescriptor],
-    ) -> dict[int, list[ObjectKey]]:
+    ) -> list[StoreAction]:
         """
-        Decide which keys to store to which L2 adapters.
+        Decide where ``keys`` are stored and whether they leave L1.
+
+        Called only from the store controller's loop thread, so a policy may
+        keep plain (unlocked) state.
 
         Args:
-            keys: Keys that were just written to L1 and are
-                candidates for L2 storage.
-            adapters: Descriptors of available L2 adapters.
+            keys: Keys that were just written to L1. Keys marked
+                ``L1_ONLY_ATTRIBUTE`` come in a call of their own,
+                with no adapters; the controller ignores any action with a
+                destination for them.
+            adapters: Descriptors of the live (not draining) L2 adapters.
 
         Returns:
-            Mapping from adapter index to list of keys to store
-            to that adapter. Keys absent from all lists are NOT
-            stored to L2.
-        """
-
-    @abstractmethod
-    def select_l1_deletions(
-        self,
-        keys: list[ObjectKey],
-        adapter: L2AdapterDescriptor,
-    ) -> list[ObjectKey]:
-        """
-        Decide which keys to delete from L1 after successful L2 store.
-
-        Args:
-            keys: Keys that were successfully stored to L2.
-            adapter: Descriptor of the L2 adapter that stored them.
-
-        Returns:
-            Keys to delete from L1. Empty list means keep all.
+            The actions to carry out, in any order. A key may appear in
+            several actions (for example one per adapter); a key in none
+            stays in L1 and is not stored.
         """
 
 
@@ -131,70 +134,64 @@ class DefaultStorePolicy(StorePolicy):
     never delete from L1.
     """
 
-    def select_store_targets(
+    def get_store_actions(
         self,
         keys: list[ObjectKey],
         adapters: list[L2AdapterDescriptor],
-    ) -> dict[int, list[ObjectKey]]:
+    ) -> list[StoreAction]:
         """
-        Store all keys to all adapters.
+        Store all keys to every adapter and keep them in L1.
 
         Args:
             keys: Keys that were just written to L1.
-            adapters: Descriptors of available L2 adapters.
+            adapters: Descriptors of the live L2 adapters.
 
         Returns:
-            Mapping from every adapter index to the full list of keys.
+            One action per adapter, with every key and ``l1_delete=False``.
         """
-        return {ad.index: list(keys) for ad in adapters}
-
-    def select_l1_deletions(
-        self,
-        keys: list[ObjectKey],
-        adapter: L2AdapterDescriptor,
-    ) -> list[ObjectKey]:
-        """
-        Never delete from L1.
-
-        Args:
-            keys: Keys that were successfully stored to L2.
-            adapter: Descriptor of the L2 adapter that stored them.
-
-        Returns:
-            Empty list (keep all keys in L1).
-        """
-        return []
+        return [
+            StoreAction(keys=list(keys), destination=ad.index, l1_delete=False)
+            for ad in adapters
+        ]
 
 
-class BufferOnlyStorePolicy(DefaultStorePolicy):
+class BufferOnlyStorePolicy(StorePolicy):
     """
     Buffer-only store policy: store all keys to all adapters,
-    then delete them from L1 immediately.
+    then delete them from L1.
 
     Use this with NoOpEvictionPolicy to avoid useless LRU
-    tracking overhead when L1 is a pure write buffer.
-
-    Inherits ``select_store_targets`` from ``DefaultStorePolicy``
-    (store all keys to all adapters) and only overrides the L1
-    deletion decision.
+    tracking overhead when L1 is a pure write buffer. Since nothing else
+    frees L1 then, keys marked ``L1_ONLY_ATTRIBUTE`` leave L1 right away.
     """
 
-    def select_l1_deletions(
+    def get_store_actions(
         self,
         keys: list[ObjectKey],
-        adapter: L2AdapterDescriptor,
-    ) -> list[ObjectKey]:
+        adapters: list[L2AdapterDescriptor],
+    ) -> list[StoreAction]:
         """
-        Delete all keys from L1 after successful L2 store.
+        Store all keys to every adapter, deleting each from L1 once stored.
 
         Args:
-            keys: Keys that were successfully stored to L2.
-            adapter: Descriptor of the L2 adapter that stored them.
+            keys: Keys that were just written to L1.
+            adapters: Descriptors of the live L2 adapters.
 
         Returns:
-            All keys (remove everything from L1).
+            One action per adapter with ``l1_delete=True`` for the keys not
+            marked ``L1_ONLY_ATTRIBUTE``, plus one action without a
+            destination that deletes the marked keys from L1.
         """
-        return list(keys)
+        l1_only = [key for key in keys if is_l1_only(key)]
+        stored = [key for key in keys if not is_l1_only(key)]
+        actions = [
+            StoreAction(keys=list(stored), destination=ad.index, l1_delete=True)
+            for ad in adapters
+            if stored
+        ]
+        if l1_only:
+            actions.append(StoreAction(keys=l1_only, destination=None, l1_delete=True))
+        return actions
 
 
 register_store_policy("default", DefaultStorePolicy)

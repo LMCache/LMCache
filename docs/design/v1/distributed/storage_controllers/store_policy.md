@@ -3,23 +3,25 @@
 `lmcache/v1/distributed/storage_controllers/store_policy.py`,
 `lmcache/v1/distributed/storage_controllers/p2p_store_policy.py`
 
-A store policy answers two questions for the `StoreController` after an
-object has been written to L1:
-
-1. `select_store_targets(keys, adapters)`: which L2 adapters get which keys.
-2. `select_l1_deletions(keys, adapter)`: after `adapter` stored `keys`
-   successfully, which of them leave L1.
-
-The store flow around these two calls is described in
-[`l2_adapters/overall.md`](../l2_adapters/overall.md#storecontroller).
+A store policy decides, for keys just written to L1, which L2 adapters store
+them and whether they leave L1. It answers with a list of store actions; the
+`StoreController` carries them out. The store flow around the call is
+described in [`l2_adapters/overall.md`](../l2_adapters/overall.md#storecontroller).
 
 ## Interface
 
 ```python
+@dataclass(frozen=True)
+class StoreAction:
+    keys: list[ObjectKey]
+    destination: int | None  # L2 adapter index; None = no L2 store
+    l1_delete: bool          # leave L1: after that store succeeds, or now if no destination
+
+
 class StorePolicy(ABC):
     def __init__(self, l1_managers: list[L1ManagerInterface]) -> None: ...
-    def select_store_targets(self, keys, adapters) -> dict[int, list[ObjectKey]]: ...
-    def select_l1_deletions(self, keys, adapter) -> list[ObjectKey]: ...
+    @abstractmethod
+    def get_store_actions(self, keys, adapters) -> list[StoreAction]: ...
 ```
 
 - **`l1_managers`** is every L1 manager of the storage manager, in
@@ -27,25 +29,41 @@ class StorePolicy(ABC):
   tags, configuration) picks the manager it cares about from this list. The
   list is the same for every policy instance; a policy must not assume it only
   contains the L1 of the store controller that owns it.
-- **`adapters`** in `select_store_targets` are the descriptors of the adapters
+- **`adapters`** are the descriptors of the live (not draining) adapters
   attached to the calling store controller. An adapter is attached to the
   controller of the one L1 it has affinity with (`resolve_l1_affinity`), so a
   policy only ever sees adapters that can read that L1's objects.
-- **`adapter`** in `select_l1_deletions` is the descriptor of the adapter
-  whose store task succeeded. It lets a policy drop the L1 copy after a store
-  into one kind of adapter and keep it after a store into another.
+- **Actions.** A key may appear in several actions, for example one per
+  adapter. A key in no action stays in L1 and is not stored. With
+  `l1_delete=True`, a key leaves L1 once the action's store succeeds (a failed
+  store keeps it), or right away when the action has no destination. A key a
+  reader still holds is deleted once the reader is done.
+- **L1-only keys.** A key whose `extra_attributes[L1_ONLY_ATTRIBUTE]`
+  (`"_lmcache_internal.l1_only"`) is true is never sent to an adapter. The
+  controller offers such keys to the policy in a call of their own, with no
+  adapters and before they are queued, so they take no store budget; it
+  carries out only the actions without a destination. The server marks
+  unfull-chunk tails this way because lookups read them from L1 only (see
+  [`unfull_chunk.md`](../../multiprocess/unfull_chunk.md)). Request configs
+  cannot set the mark: entries named `_lmcache_internal.*` are dropped when
+  keys are built from a request.
 
 The storage manager creates one policy instance per store controller with
-`create_store_policy(name, l1_managers)`. Both methods are called only from
-that controller's loop thread, so a policy may keep plain (unlocked) state.
+`create_store_policy(name, l1_managers)`. `get_store_actions` is called only
+from that controller's loop thread, so a policy may keep plain (unlocked)
+state.
 
 ## Built-in policies
 
-| Name | Class | Targets | L1 deletions |
-|---|---|---|---|
-| `default` | `DefaultStorePolicy` | every key to every adapter | none |
-| `skip_l1` | `BufferOnlyStorePolicy` | every key to every adapter | every key, after any successful store |
-| `p2p` | `P2PStorePolicy` | see below | keys stored into a peer |
+| Name | Class | Destinations | `l1_delete` | L1-only keys |
+|---|---|---|---|---|
+| `default` | `DefaultStorePolicy` | every adapter | no | stay in L1 |
+| `skip_l1` | `BufferOnlyStorePolicy` | every adapter | yes | leave L1 right away |
+| `p2p` | `P2PStorePolicy` | see below | only for the peer | stay in L1 |
+
+`skip_l1` is meant for `noop` eviction, where nothing else frees L1, so it
+deletes L1-only keys as soon as they are written. Under `default` and `p2p`
+they stay until the eviction policy removes them.
 
 Select one with `--l2-store-policy`. A new policy is a module in
 `storage_controllers/` that calls `register_store_policy(name, cls)` at
@@ -63,22 +81,22 @@ At construction the policy keeps the L1 manager whose memory tags are
 DRAM/LOCAL: the L1 registered with the transfer channel, and therefore the
 only one whose objects a P2P adapter can send.
 
-`select_store_targets(keys, adapters)`:
+`get_store_actions(keys, adapters)`:
 
-| Adapter | Gets the keys? |
+| Adapter | Action |
 |---|---|
-| Not a P2P adapter | Always, as under `default` |
-| P2P adapter with `write_enabled=False` | Never. (Under `default` it gets a task that the adapter completes as a 0-byte no-op.) |
-| P2P adapters with `write_enabled=True` | Exactly **one** of them, and only when `used / total` of the local DRAM L1 is at or above that adapter's `write_l1_usage_threshold` |
+| Not a P2P adapter | Always, with `l1_delete=False`, as under `default` |
+| P2P adapter with `write_enabled=False` | None. (Under `default` it gets a task that the adapter completes as a 0-byte no-op.) |
+| P2P adapters with `write_enabled=True` | Exactly **one** of them, with `l1_delete=True`, and only when `used / total` of the local DRAM L1 is at or above that adapter's `write_l1_usage_threshold` |
 
 The write-enabled peers take turns: a counter advances each time a task is
 sent to a peer, so tasks spread evenly without the policy tracking peer
 capacity. A task is not retried on another peer when the chosen one rejects
-it; the objects then simply stay local.
+it; the objects then simply stay local. The store controller defers the
+deletion of a key a reader still holds.
 
-`select_l1_deletions(keys, adapter)` returns every key when `adapter` is a
-write-enabled P2P adapter and nothing otherwise. The store controller defers
-the deletion of a key a reader still holds.
+L1-only keys (unfull-chunk tails) are offered with no adapters, so they get no
+action and stay local at any usage; normal eviction removes them.
 
 What this adds up to:
 
