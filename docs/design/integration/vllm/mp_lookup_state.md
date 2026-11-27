@@ -112,6 +112,12 @@ The scheduler thread calls everything else.
 - `request_finished` calls `cleanup_lookup_result` before `end_session`, and
   cleanup forgets the state, so `end_session` has nothing to drain for an
   aborted mid-lookup request.
+  The server settles that lookup when the session is destroyed (END_SESSION
+  or session TTL): a lookup whose result was never queried is abandoned
+  (`StorageManager.abandon_prefetch_task`) and its read locks are released,
+  unless they are older than the read-lock TTL. A lookup whose result was
+  queried is not covered: if the request is aborted before its retrieve or
+  FREE_LOOKUP_LOCKS, its locks still expire with the TTL.
 - A request id reused while the old state still has a QUERY_PREFETCH_STATUS
   in flight can let that query consume the new lookup's job. Connector paths
   reuse an id only after the old lookup resolved, so this does not occur

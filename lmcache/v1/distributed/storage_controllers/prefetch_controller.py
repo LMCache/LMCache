@@ -668,6 +668,8 @@ class PrefetchController(StorageControllerInterface):
         self._prefetch_results_lock = threading.Lock()
         self._prefetch_results_cv = threading.Condition(self._prefetch_results_lock)
         self._completed_results: dict[PrefetchRequestId, PrefetchResult] = {}
+        # Unpublished requests not abandoned; guarded by the results lock.
+        self._awaited_requests: set[PrefetchRequestId] = set()
 
         # Map eventfds to adapter indices for quick lookup in poll.
         # Relies on the L2AdapterInterface contract that every adapter
@@ -755,6 +757,8 @@ class PrefetchController(StorageControllerInterface):
         with self._submission_lock:
             request_id = self._next_request_id
             self._next_request_id += 1
+        with self._prefetch_results_lock:
+            self._awaited_requests.add(request_id)
 
         allows_no_l2 = spec.allowed_l2_memory_tags == frozenset()
         if allows_no_l2 or not self._l2_adapters:
@@ -812,6 +816,28 @@ class PrefetchController(StorageControllerInterface):
             return self._prefetch_results_cv.wait_for(
                 lambda: request_id in self._completed_results, timeout=timeout
             )
+
+    def abandon_prefetch_request(
+        self, request_id: PrefetchRequestId
+    ) -> dict[ObjectKey, int]:
+        """
+        Give up a prefetch request whose result nobody will retrieve.
+
+        Thread-safe. A finished request loses its result; one in progress
+        releases every lock it holds when it finishes and publishes no
+        result; one already retrieved is left unchanged.
+
+        Args:
+            request_id: The request ID from submit_prefetch_request.
+
+        Returns:
+            The read locks the caller now holds and must release, as key to
+            the id of the L1 manager holding it; empty when there are none.
+        """
+        with self._prefetch_results_lock:
+            self._awaited_requests.discard(request_id)
+            result = self._completed_results.pop(request_id, None)
+        return result.l1_owners if result is not None else {}
 
     def report_status(self) -> dict:
         """Return a status dict for the prefetch controller."""
@@ -1844,11 +1870,19 @@ class PrefetchController(StorageControllerInterface):
     def _publish_result(
         self, request: InFlightPrefetchRequest, result: PrefetchResult
     ) -> None:
-        """Store the request's result and wake any waiter."""
+        """Store the request's result and wake any waiter; an abandoned
+        request stores nothing and returns the read locks its hit retained."""
         with self._prefetch_results_lock:
-            self._completed_results[request.request_id] = result
-            # Wake any WAIT_PREFETCH_STATUS handler blocked on this result.
-            self._prefetch_results_cv.notify_all()
+            abandoned = request.request_id not in self._awaited_requests
+            if not abandoned:
+                self._awaited_requests.remove(request.request_id)
+                self._completed_results[request.request_id] = result
+                # Wake any WAIT_PREFETCH_STATUS handler blocked on this result.
+                self._prefetch_results_cv.notify_all()
+        # Under NO_LOCK the hit keeps no lock, and its map still names the
+        # keys _finish_request already released.
+        if abandoned and request.lock_mode == PrefetchLockMode.LOCK:
+            self._release_all_locks(request)
 
     def _abort_request(self, request: InFlightPrefetchRequest) -> None:
         """Give up on a request after an error: return everything it holds,

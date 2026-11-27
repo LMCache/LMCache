@@ -904,6 +904,61 @@ class TestWaitPrefetchResult:
         ctrl.stop()
 
 
+class TestAbandonPrefetchRequest:
+    def test_finished_request_hands_its_locks_to_the_caller(self, l1_manager):
+        """Abandoning a finished request names the read locks it retained and
+        drops its result; the locks stay held for the caller to release, and
+        abandoning it again changes nothing."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+        assert ctrl.wait_prefetch_result(req_id, timeout=10.0) is True
+        l1_owners = ctrl.abandon_prefetch_request(req_id)
+
+        assert l1_owners == dict.fromkeys(keys, l1_manager.l1_manager_id)
+        assert ctrl.query_prefetch_result(req_id) is None
+        assert ctrl.abandon_prefetch_request(req_id) == {}
+        assert_read_locked(l1_manager, keys)
+        l1_manager.finish_read(keys)
+        ctrl.stop()
+        adapter.close()
+
+    def test_request_in_progress_releases_its_locks_when_it_finishes(self, l1_manager):
+        """Abandoning a request still loading hands over no lock; when the
+        loads land it keeps no read lock and publishes no result."""
+        adapter = make_adapter(bandwidth_gb=0.001)
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(3)]
+        store_keys_in_l2(adapter, keys, layout)
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(single_row_spec(keys))
+        in_flight = wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_request_count"] == 1
+        )
+        abandoned = ctrl.abandon_prefetch_request(req_id)
+        finished = wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_request_count"] == 0,
+            timeout=15.0,
+        )
+
+        assert in_flight and finished
+        assert abandoned == {}
+        assert ctrl.query_prefetch_result(req_id) is None
+        assert ctrl.report_status()["completed_results_count"] == 0
+        # The loaded copies were temporary: with no reader left they are gone.
+        assert_absent(l1_manager, keys)
+        assert_l2_unlocked(adapter)
+        ctrl.stop()
+        adapter.close()
+
+
 # =============================================================================
 # L2 lock release
 # =============================================================================

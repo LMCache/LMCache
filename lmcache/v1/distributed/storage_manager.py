@@ -639,6 +639,34 @@ class StorageManager:
             )
         return result
 
+    def abandon_prefetch_task(self, handle: PrefetchHandle) -> dict[ObjectKey, int]:
+        """
+        Give up a prefetch task whose status nobody will query.
+
+        Args:
+            handle (PrefetchHandle): The handle of the prefetch task.
+
+        Returns:
+            The read locks the caller must release (e.g. with
+            finish_read_prefetched), as key to the id of the L1 manager
+            holding it. Empty while the task is in progress, which then
+            releases them itself, and after its result was queried.
+
+        Note:
+            Keys of a task older than their L1 manager's read-lock TTL are
+            left out: the lock has expired or been extended by other
+            readers, and releasing it could take a later reader's lock.
+        """
+        l1_owners = self._prefetch_controller.abandon_prefetch_request(
+            handle.prefetch_request_id
+        )
+        task_age = time.monotonic() - handle.submit_time
+        return {
+            key: owner
+            for key, owner in l1_owners.items()
+            if task_age < self._l1_managers_by_id[owner].config.read_ttl_seconds
+        }
+
     def wait_prefetch_status(
         self,
         handle: PrefetchHandle,
