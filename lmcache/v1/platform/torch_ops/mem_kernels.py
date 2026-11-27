@@ -283,16 +283,19 @@ def lmcache_memcpy_async(
     Python fallback for lmcache_memcpy_async.
 
     - Tensor mode (non-CUDA devices like HPU): uses .to(device) + copy_()
-    - Pointer mode with libcudart: uses synchronous cudaMemcpy (cudaMemcpyDefault)
+    - Pointer mode with libcudart: uses synchronous cudaMemcpy, split at
+      every host_buffer_alignments boundary (see below)
     - Pointer mode without libcudart: uses CPU tensor copy
 
-    Unlike the C++ version (which uses cudaMemcpyAsync and must split copies
-    at cudaHostRegister boundaries), this Python fallback does NOT need
-    alignment-based chunking because:
-    - cudaMemcpy (synchronous) handles cross-cudaHostRegister boundaries
-      internally via staging buffers
-    - CPU tensor copy has no alignment constraints
-    - Tensor mode bypasses raw pointers entirely
+    Pointer mode with libcudart: the host buffer is pinned in
+    host_buffer_alignments-sized chunks (LazyMemoryAllocator), and ONE
+    cudaMemcpy spanning two registered chunks fails with
+    cudaErrorInvalidValue (error code 1) — measured on 4-bit NVFP4 KV stores
+    (LMCache/LMCache#6617). This fallback therefore splits the copy at every
+    host_buffer_alignments boundary, mirroring the C++ lmcache_memcpy_async
+    in csrc/cuda/mem_kernels.cu. The regression test
+    tests/v1/platform/test_memcpy_async_host_register_split.py locks this
+    contract in.
 
     dest:
         - If int: raw memory pointer (used for CUDA/CPU devices where we
@@ -346,16 +349,34 @@ def lmcache_memcpy_async(
     libcudart = _get_copy_lib()
     if libcudart is not None and hasattr(libcudart, "cudaMemcpy"):
         try:
-            # Synchronous cudaMemcpy handles cross-cudaHostRegister boundaries
-            # internally — no manual alignment splitting needed.
-            ret = libcudart.cudaMemcpy(
-                ctypes.c_void_p(dest),
-                ctypes.c_void_p(src),
-                ctypes.c_size_t(nbytes),
-                ctypes.c_int(4),  # cudaMemcpyDefault
-            )
-            if ret != 0:
-                raise RuntimeError(f"cudaMemcpy failed with error code {ret}")
+            # Split host<->device copies at every cudaHostRegister boundary:
+            # LazyMemoryAllocator pins host_buffer_alignments-sized chunks
+            # separately, and one cudaMemcpy spanning two registered chunks
+            # fails with cudaErrorInvalidValue — unlike what the old comment
+            # claimed, synchronous cudaMemcpy does NOT handle that case
+            # (context: LMCache/LMCache#6617). The C++ lmcache_memcpy_async
+            # in csrc/cuda/mem_kernels.cu already splits the same way.
+            base_off = int(host_buffer_offset) if host_buffer_offset else 0
+            align = int(host_buffer_alignments) if host_buffer_alignments else 0
+            remaining = int(nbytes)
+            done = 0
+            while remaining > 0:
+                piece = remaining
+                if align > 0:
+                    piece = min(piece, align - ((base_off + done) % align))
+                ret = libcudart.cudaMemcpy(
+                    ctypes.c_void_p(dest + done),
+                    ctypes.c_void_p(src + done),
+                    ctypes.c_size_t(piece),
+                    ctypes.c_int(4),  # cudaMemcpyDefault
+                )
+                if ret != 0:
+                    raise RuntimeError(
+                        f"cudaMemcpy failed with error code {ret} "
+                        f"(offset={done} piece={piece} nbytes={nbytes})"
+                    )
+                done += piece
+                remaining -= piece
         except AttributeError:
             raise
     else:
