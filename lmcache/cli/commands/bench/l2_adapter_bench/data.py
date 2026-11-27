@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 # Standard
+import hashlib
 import select
 
 # Third Party
@@ -24,12 +25,19 @@ from lmcache.v1.platform import consume_fd
 _KB = 1024
 
 
-def make_aligned_tensor(num_bytes: int, align_bytes: int = 1) -> torch.Tensor:
+def make_aligned_tensor(
+    num_bytes: int, align_bytes: int = 1, use_hugepages: bool = False
+) -> torch.Tensor:
     """Create a 1-D uint8 tensor whose data pointer is aligned.
 
     Args:
         num_bytes: Number of bytes in the returned tensor.
         align_bytes: Required data pointer alignment in bytes.
+        use_hugepages: When True, allocate the buffer from the pre-allocated
+            2 MiB hugepage pool (via ``_allocate_cpu_memory``) instead of
+            regular pinned memory. The returned pointer is already
+            hugepage-aligned, which satisfies any ``align_bytes`` that divides
+            the page size.
 
     Returns:
         A 1-D ``torch.uint8`` tensor with ``num_bytes`` elements.
@@ -43,6 +51,11 @@ def make_aligned_tensor(num_bytes: int, align_bytes: int = 1) -> torch.Tensor:
         raise ValueError("num_bytes must be non-negative")
     if align_bytes <= 0:
         raise ValueError("align_bytes must be positive")
+    if use_hugepages:
+        # First Party
+        from lmcache.v1.memory_management import _allocate_cpu_memory
+
+        return _allocate_cpu_memory(num_bytes, use_hugepages=True).view(-1)
     if align_bytes == 1:
         return torch.empty(num_bytes, dtype=torch.uint8)
 
@@ -64,6 +77,10 @@ def make_object_keys(
     ``ObjectKey`` is a frozen dataclass with field order:
     (chunk_hash, model_name, kv_rank).
 
+    Each ``chunk_hash`` is a deterministic 32-byte hash of the key index, so
+    the same index always yields the same key and hash bytes are uniformly
+    distributed like real blake3/sha256 chunk hashes.
+
     Args:
         num_keys: Number of keys to generate.
         model_name: Model name embedded in each key.
@@ -72,8 +89,10 @@ def make_object_keys(
     keys: list[ObjectKey] = []
     for i in range(num_keys):
         idx = key_offset + i
-        # chunk_hash: 16 bytes derived from index to guarantee uniqueness
-        chunk_hash = idx.to_bytes(16, "big")
+        # Hash the index so keys look like real 32-byte chunk hashes. A raw
+        # big-endian index starts with zero bytes, which collapses adapters
+        # that place files by hash prefix into a single directory.
+        chunk_hash = hashlib.blake2b(idx.to_bytes(16, "big"), digest_size=32).digest()
         keys.append(
             ObjectKey(
                 chunk_hash=chunk_hash,
@@ -128,7 +147,7 @@ def make_memory_objects(
         metadata = MemoryObjMetadata(
             shape=torch.Size([data_size]),
             dtype=torch.uint8,
-            address=raw_tensor.data_ptr(),
+            address=start,
             phy_size=data_size * raw_tensor.element_size(),
             fmt=MemoryFormat.KV_2LTD,
             ref_count=1,

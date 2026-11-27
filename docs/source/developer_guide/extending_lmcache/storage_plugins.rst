@@ -139,7 +139,8 @@ A plugin adapter class **must**:
 1. Subclass ``L2AdapterInterface`` from ``lmcache.v1.distributed.l2_adapters.base``.
 2. Implement all abstract methods: ``submit_store_task``, ``pop_completed_store_tasks``,
    ``submit_lookup_and_lock_task``, ``query_lookup_and_lock_result``, ``submit_unlock``,
-   ``submit_load_task``, ``query_load_result``, ``close``, and all three event-fd getters.
+   ``submit_load_task``, ``query_load_result``, ``close``, ``get_memory_tags``, and all
+   three event-fd getters.
 3. Provide **three distinct event fds** (store / lookup / load). The controllers build
    ``fd -> adapter`` maps; duplicates will misroute events.
 4. Be **thread-safe**: ``StoreController`` and ``PrefetchController`` call adapter methods

@@ -285,12 +285,13 @@ class TestCreateWorkload:
 
     def test_rag_qa_quality(self, tmp_path, monkeypatch) -> None:
         # First Party
+        from lmcache.cli.commands.bench.engine_bench.quality import alignment
         from lmcache.cli.commands.bench.engine_bench.workloads import rag_qa_quality
 
         # Local
         from ..fake_tokenizer import make_fake_tokenizer
 
-        monkeypatch.setattr(rag_qa_quality, "_FILLER_VOCAB_SIZE", 200)
+        monkeypatch.setattr(alignment, "_FILLER_VOCAB_SIZE", 200)
         monkeypatch.setattr(
             rag_qa_quality, "try_load_tokenizer", lambda _n: make_fake_tokenizer()
         )
@@ -321,12 +322,13 @@ class TestCreateWorkload:
     ) -> None:
         """The results file is always written, so it needs a default path."""
         # First Party
+        from lmcache.cli.commands.bench.engine_bench.quality import alignment
         from lmcache.cli.commands.bench.engine_bench.workloads import rag_qa_quality
 
         # Local
         from ..fake_tokenizer import make_fake_tokenizer
 
-        monkeypatch.setattr(rag_qa_quality, "_FILLER_VOCAB_SIZE", 200)
+        monkeypatch.setattr(alignment, "_FILLER_VOCAB_SIZE", 200)
         monkeypatch.setattr(
             rag_qa_quality, "try_load_tokenizer", lambda _n: make_fake_tokenizer()
         )

@@ -19,19 +19,88 @@ set -euo pipefail
 PIPELINE_FILE="${1:?Usage: upload-pipeline.sh <path/to/pipeline.yml>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# shellcheck source=path-filter.sh
+# shellcheck source=.buildkite/k3_tests/common_scripts/helpers.sh
+source "${SCRIPT_DIR}/helpers.sh"
+# shellcheck source=.buildkite/k3_tests/common_scripts/path-filter.sh
 source "${SCRIPT_DIR}/path-filter.sh"
 
-if should_skip_ci; then
-    echo "+++ :fast_forward: Skipping CI — only trivial files changed"
+# weekly_full_build.yml pushes the tested commit to this CI-owned branch and
+# then creates the real weekly builds through the API with CI_WEEKLY_FULL=1.
+# The push itself can also start ordinary branch builds; end those green here
+# instead of spending GPUs on a duplicate, unchecked run.
+if [[ "${BUILDKITE_BRANCH:-}" == "ci-weekly-full" && "${CI_WEEKLY_FULL:-0}" != "1" ]]; then
+    echo "+++ :fast_forward: Push build on ci-weekly-full; the weekly full build runs separately"
+    exit 0
+fi
+
+case "${PIPELINE_FILE}" in
+    *k3_tests/multiprocess/pipeline.yml|*k3_tests/multiprocess/smoke-pipeline.yml)
+        expensive_pipeline_name="multiprocess"
+        ;;
+    *)
+        expensive_pipeline_name=""
+        ;;
+esac
+
+if [[ -n "${expensive_pipeline_name}" ]] && \
+    should_skip_expensive_k3_pipeline "${expensive_pipeline_name}"; then
+    echo "+++ :fast_forward: Skipping ${expensive_pipeline_name} CI"
+    if command -v buildkite-agent >/dev/null 2>&1; then
+        buildkite-agent annotate \
+            --style success \
+            --context "skip expensive ci" \
+            "Skipped: PR has the \`skip expensive ci\` label. Add a \`force-ci\` label to run the full ${expensive_pipeline_name} suite." \
+            || true
+    fi
+    exit 0
+fi
+
+merge_pr_base_branch
+
+if [[ "${XPU_CANDIDATE_VALIDATION:-0}" != "1" ]] && should_skip_ci "${PIPELINE_FILE}"; then
+    echo "+++ :fast_forward: Skipping CI — no relevant files changed for ${PIPELINE_FILE}"
     if command -v buildkite-agent >/dev/null 2>&1; then
         buildkite-agent annotate \
             --style success \
             --context "path-filter-skip" \
-            "Skipped: only trivial files (docs, license, etc.) changed. Add a \`force-ci\` label to the PR to force a full run." \
+            "Skipped: no relevant files changed for ${PIPELINE_FILE}. Add a \`force-ci\` label to the PR to force a full run." \
             || true
     fi
     exit 0
+fi
+
+if should_skip_multiprocess_heavy "${PIPELINE_FILE}"; then
+    echo "+++ :fast_forward: Bypassing heavy multiprocess tier on PR (covered by PR-smoke)"
+    if command -v buildkite-agent >/dev/null 2>&1; then
+        buildkite-agent annotate \
+            --style success \
+            --context "mp-heavy-skip" \
+            "Bypassed heavy multiprocess tier on PR; PR-smoke runs independently in parallel. Add \`force-ci\` label (or set \`MP_FULL_ON_PR=true\`) to run heavy." \
+            || true
+    fi
+    exit 0
+fi
+
+if [[ "${PIPELINE_FILE}" == */xpu/*/pipeline.yml ]]; then
+    if [[ "${PIPELINE_FILE}" == */xpu/multiprocess/pipeline.yml ]]; then
+        export XPU_RELEASE_IMAGE="${XPU_RELEASE_IMAGE:-public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:ee0da84ab9e04ac7610e28580af62c365e898389-xpu}"
+    fi
+    if [[ "${XPU_CANDIDATE_VALIDATION:-0}" == "1" ]]; then
+        XPU_CI_IMAGE="${XPU_CANDIDATE_IMAGE:?Candidate validation requires XPU_CANDIDATE_IMAGE}"
+    else
+        # shellcheck source=.buildkite/k3_harness/resolve-pinned-vllm.sh
+        source "${SCRIPT_DIR}/../../k3_harness/resolve-pinned-vllm.sh"
+        XPU_CI_IMAGE="${PINNED_XPU_IMAGE}"
+    fi
+    export XPU_CI_IMAGE
+fi
+
+if [[ "${PIPELINE_FILE}" == */rbln/pipeline.yml ]]; then
+    # The RBLN nightly lane uploads pipeline.yml itself with its candidate
+    # image; PR and dev builds run on the last image that lane verified.
+    # shellcheck source=.buildkite/k3_harness/resolve-pinned-vllm.sh
+    source "${SCRIPT_DIR}/../../k3_harness/resolve-pinned-vllm.sh"
+    export RBLN_SERVE_IMAGE="${PINNED_RBLN_IMAGE}"
 fi
 
 echo "--- :pipeline: Uploading ${PIPELINE_FILE}"

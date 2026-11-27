@@ -56,12 +56,13 @@ Colab Notebook, which can also be accessed here:
   examples were run on a single RTX 6000 PRO.
 * **LMCache**. The SDK can use either shared memory transport or pickle 
   transport. This example uses shared memory. To transfer the query tensors,
-  pass `--enable transfer_query` when starting LMCache.
+  load the qstore server module when starting LMCache:
+  `--server-module '{"module_path": "lmcache.v1.multiprocess.plugin_modules.qstore"}'`.
 * **vLLM** with below patch.
 
 ### Installing LMCache
 
-This example uses recent `dev`-branch features (`--enable transfer_query`,
+This example uses recent `dev`-branch features (the qstore server module,
 engine-driven transfer), so install LMCache **from source** rather than a
 released wheel:
 

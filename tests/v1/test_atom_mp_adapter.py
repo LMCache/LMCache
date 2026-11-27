@@ -18,11 +18,12 @@ from lmcache.integration.atom.multi_process_adapter import (
     AtomMPTransferSpec,
     AtomMPWorkerAdapter,
 )
-from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format import detect_format
-from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache
-from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.client.chunk_hashes import lmcache_chunk_hashes
+from lmcache.v1.common.custom_types import EngineType
+from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.kv_format import detect_format
+from lmcache.v1.common.kv_format.types import DiscoverableKVCache
+from lmcache.v1.transport.futures import MessagingFuture
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -108,7 +109,7 @@ def worker_with_transfer_context(
         "create_transfer_context",
         lambda *args, **kwargs: transfer_context,
     )
-    monkeypatch.setattr(atom_adapter, "_HeartbeatThread", _FakeHeartbeatThread)
+    monkeypatch.setattr(atom_adapter, "HeartbeatThread", _FakeHeartbeatThread)
     _FakeHeartbeatThread.instances.clear()
 
     worker = AtomMPWorkerAdapter(
@@ -193,8 +194,6 @@ def test_atom_lookup_submits_valid_reader_count(
     scheduler.maybe_submit_lookup_request("request-1", list(range(300)))
 
     lookup_call = client.lookup.call_args
-    key = lookup_call.args[0]
-    assert key.require_num_kv_readers() == 1
     assert lookup_call.args[1] == 2
 
 
@@ -251,8 +250,7 @@ def test_atom_submit_returns_future_and_expands_physical_groups(
     assert returned is future
     assert event in returned._retained_references
     submit_call = getattr(transfer_context, submit_name).call_args
-    assert submit_call.args[1].require_num_kv_readers() == 1
-    assert submit_call.args[4] == [[7, 8, 9, 10], [7, 8, 9, 10]]
+    assert submit_call.args[3] == [[7, 8, 9, 10], [7, 8, 9, 10]]
 
     future.set_result(True)
     assert returned.result(timeout=0) is True
@@ -318,7 +316,7 @@ def test_atom_heartbeat_runs_recovery_before_publishing_health(
     health_event.set()
     recover = MagicMock(return_value=True)
     unhealthy = MagicMock()
-    heartbeat = atom_adapter._HeartbeatThread(
+    heartbeat = atom_adapter.HeartbeatThread(
         client,
         health_event,
         instance_id=7,
@@ -393,13 +391,13 @@ def test_atom_initial_registration_failure_rolls_back_candidate(
     transfer_context.register.side_effect = register_error
     rollback_future: MessagingFuture[None] = MessagingFuture()
     rollback_future.set_result(None)
-    client.unregister_kv_cache.return_value = rollback_future
+    transfer_context.unregister.return_value = rollback_future
 
     with pytest.raises(type(register_error)) as exc_info:
         worker.register_kv_caches(caches, engine_group_infos=_atom_groups())
 
     assert exc_info.value is register_error
-    client.unregister_kv_cache.assert_called_once_with(worker.instance_id)
+    transfer_context.unregister.assert_called_once_with()
     transfer_context.close.assert_called_once_with()
     client.close.assert_called_once_with()
     assert worker.is_healthy is False
@@ -414,7 +412,7 @@ def test_atom_initial_registration_preserves_error_across_cleanup_failures(
     worker, transfer_context, caches = worker_with_transfer_context
     client = _mock_client(worker)
     transfer_context.register.side_effect = ValueError("original register failure")
-    client.unregister_kv_cache.side_effect = RuntimeError("rollback failed")
+    transfer_context.unregister.side_effect = RuntimeError("rollback failed")
     transfer_context.close.side_effect = RuntimeError("context close failed")
     client.close.side_effect = RuntimeError("client close failed")
 
@@ -432,7 +430,6 @@ def test_atom_failed_recovery_rolls_back_candidate_and_keeps_old_context(
 ) -> None:
     """A failed recovery cleans its candidate and can retry the old registration."""
     worker, old_context, caches = worker_with_transfer_context
-    client = _mock_client(worker)
     worker.register_kv_caches(caches, engine_group_infos=_atom_groups())
     heartbeat = _FakeHeartbeatThread.instances[0]
     heartbeat.mark_unhealthy()
@@ -450,7 +447,7 @@ def test_atom_failed_recovery_rolls_back_candidate_and_keeps_old_context(
     )
     rollback_future: MessagingFuture[None] = MessagingFuture()
     rollback_future.set_result(None)
-    client.unregister_kv_cache.return_value = rollback_future
+    failed_candidate.unregister.return_value = rollback_future
 
     assert heartbeat.recover() is False
     failed_candidate.close.assert_called_once_with()
@@ -458,7 +455,7 @@ def test_atom_failed_recovery_rolls_back_candidate_and_keeps_old_context(
     assert worker._transfer_context is old_context
     assert worker._registered is True
     assert worker.is_healthy is False
-    client.unregister_kv_cache.assert_called_once_with(worker.instance_id)
+    failed_candidate.unregister.assert_called_once_with()
 
     assert heartbeat.recover() is True
     old_context.close.assert_called_once_with()
@@ -684,7 +681,7 @@ def test_atom_shutdown_discards_late_recovery_registration(
         "create_transfer_context",
         lambda *args, **kwargs: next(contexts),
     )
-    monkeypatch.setattr(atom_adapter, "_HeartbeatThread", _FakeHeartbeatThread)
+    monkeypatch.setattr(atom_adapter, "HeartbeatThread", _FakeHeartbeatThread)
     _FakeHeartbeatThread.instances.clear()
     worker = AtomMPWorkerAdapter(
         server_url="tcp://127.0.0.1:5555",
@@ -754,7 +751,11 @@ def test_atom_heartbeat_publish_and_start_are_one_lifecycle_transition(
         "create_transfer_context",
         lambda *args, **kwargs: transfer_context,
     )
-    monkeypatch.setattr(atom_adapter, "_HeartbeatThread", _BlockingStartHeartbeat)
+    monkeypatch.setattr(
+        atom_adapter,
+        "HeartbeatThread",
+        _BlockingStartHeartbeat,
+    )
     _BlockingStartHeartbeat.instances.clear()
     worker = AtomMPWorkerAdapter(
         server_url="tcp://127.0.0.1:5555",
@@ -821,12 +822,11 @@ def test_atom_shutdown_unregisters_gpu_context(
 ) -> None:
     """ATOM removes its LMCache-driven GPU registration during shutdown."""
     worker, transfer_context, caches = worker_with_transfer_context
-    client = _mock_client(worker)
     worker.register_kv_caches(caches, engine_group_infos=_atom_groups())
 
     worker.shutdown()
 
-    client.unregister_kv_cache.assert_called_once_with(worker.instance_id)
+    transfer_context.unregister.assert_called_once_with()
 
 
 @pytest.mark.parametrize(
@@ -871,7 +871,7 @@ def test_atom_shutdown_drains_unresolved_operation_before_unregister(
     assert wait_started.wait(timeout=5.0)
     transfer_context.close.assert_not_called()
     client.close.assert_not_called()
-    client.unregister_kv_cache.assert_not_called()
+    transfer_context.unregister.assert_not_called()
 
     future.set_result(True)
     shutdown_thread.join(timeout=5.0)
@@ -881,7 +881,7 @@ def test_atom_shutdown_drains_unresolved_operation_before_unregister(
     assert returned.result(timeout=0) is True
     transfer_context.close.assert_called_once_with()
     client.close.assert_called_once_with()
-    client.unregister_kv_cache.assert_called_once_with(worker.instance_id)
+    transfer_context.unregister.assert_called_once_with()
 
 
 @pytest.mark.parametrize(
@@ -933,7 +933,7 @@ def test_atom_restart_window_transfer_and_shutdown_terminate(
     assert raw_wait_started.wait(timeout=5.0)
     transfer_context.close.assert_not_called()
     client.close.assert_not_called()
-    client.unregister_kv_cache.assert_not_called()
+    transfer_context.unregister.assert_not_called()
 
     raw_future.set_result((b"", False))
     shutdown_thread.join(timeout=5.0)
@@ -942,7 +942,7 @@ def test_atom_restart_window_transfer_and_shutdown_terminate(
     assert returned.result(timeout=0) is False
     transfer_context.close.assert_called_once_with()
     client.close.assert_called_once_with()
-    client.unregister_kv_cache.assert_called_once_with(worker.instance_id)
+    transfer_context.unregister.assert_called_once_with()
 
 
 def test_atom_shutdown_finally_closes_client_when_context_close_fails(
@@ -984,3 +984,102 @@ def test_atom_detector_recognizes_paged_3d_cache_views() -> None:
     assert [tensor.data_ptr() for tensor in normalized_tensors] == [
         tensor.data_ptr() for tensor in cache_tensors
     ]
+
+
+def _hashing_worker(
+    monkeypatch: pytest.MonkeyPatch, **kwargs: Any
+) -> tuple[AtomMPWorkerAdapter, MagicMock]:
+    """A registered worker (chunk size 256, block size 64), stubbed as in
+    ``worker_with_transfer_context``, built with ``kwargs``."""
+    transfer_context = MagicMock(name="transfer_context")
+    for name in ("submit_store", "submit_retrieve"):
+        getattr(transfer_context, name).side_effect = lambda *args, **kw: (
+            MessagingFuture()
+        )
+    _patch_request_client_factory(monkeypatch, MagicMock(name="req_client"))
+    monkeypatch.setattr(atom_adapter, "_get_chunk_size", lambda *args: 256)
+    monkeypatch.setattr(
+        atom_adapter,
+        "create_transfer_context",
+        lambda *args, **kw: transfer_context,
+    )
+    monkeypatch.setattr(atom_adapter, "HeartbeatThread", _FakeHeartbeatThread)
+    worker = AtomMPWorkerAdapter(
+        server_url="tcp://127.0.0.1:5555",
+        context=MagicMock(name="zmq_context"),
+        model_name="atom-test-model",
+        block_size=64,
+        parallel_config=AtomMPParallelConfig(world_size=2, worker_id=1, tp_size=2),
+        transfer_mode="lmcache_driven",
+        **kwargs,
+    )
+    worker.register_kv_caches(
+        {
+            "layer.0.latent": torch.empty(4, 64, 576),
+            "layer.0.index": torch.empty(4, 64, 144),
+        },
+        engine_group_infos=_atom_groups(),
+    )
+    return worker, transfer_context
+
+
+@pytest.mark.parametrize(
+    ("method_name", "submit_name"),
+    [
+        ("submit_store_request", "submit_store"),
+        ("submit_retrieve_request", "submit_retrieve"),
+    ],
+)
+def test_atom_worker_caller_hashes_key_like_tokens(
+    monkeypatch: pytest.MonkeyPatch, method_name: str, submit_name: str
+) -> None:
+    """A spec carrying chunk hashes of [0, end) gets the token spec's key."""
+    worker, transfer_context = _hashing_worker(monkeypatch, client_chunk_hashes=True)
+    tokens = list(range(1000, 1000 + 3 * 256 + 40))
+    hashes = lmcache_chunk_hashes(tokens, 256)
+    keys = []
+    for spec in (
+        AtomMPTransferSpec(tokens, [[3, 4, 5, 6]], start=512, end=768),
+        AtomMPTransferSpec([], [[3, 4, 5, 6]], start=512, end=768, chunk_hashes=hashes),
+    ):
+        getattr(worker, method_name)("request-1", spec, _FakeEvent())
+        keys.append(getattr(transfer_context, submit_name).call_args.args[1])
+
+    assert AtomMPWorkerAdapter.ACCEPTS_CALLER_CHUNK_HASHES
+    assert keys[1] == keys[0]
+    assert keys[1].chunk_hashes == keys[0].chunk_hashes == hashes
+    assert (keys[1].start, keys[1].end, keys[1].token_bytes) == (512, 768, b"")
+
+
+def test_atom_worker_rejects_mismatched_or_unexpected_caller_hashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hashes not covering [0, end) chunk by chunk, or sent to a worker
+    without client_chunk_hashes, fail before anything is submitted."""
+    hashes = lmcache_chunk_hashes(list(range(3 * 256)), 256)
+    worker, transfer_context = _hashing_worker(monkeypatch, client_chunk_hashes=True)
+    with pytest.raises(ValueError, match="expected 2"):
+        worker.submit_store_request(
+            "request-1",
+            AtomMPTransferSpec([], [[3, 4]], start=256, end=512, chunk_hashes=hashes),
+            _FakeEvent(),
+        )
+    with pytest.raises(ValueError, match="whole number"):
+        worker.submit_retrieve_request(
+            "request-1",
+            AtomMPTransferSpec(
+                [], [[3, 4]], start=0, end=768, chunk_hashes=hashes[:-1]
+            ),
+            _FakeEvent(),
+        )
+    transfer_context.submit_store.assert_not_called()
+    transfer_context.submit_retrieve.assert_not_called()
+
+    plain, plain_context = _hashing_worker(monkeypatch)
+    with pytest.raises(ValueError, match="client_chunk_hashes"):
+        plain.submit_store_request(
+            "request-1",
+            AtomMPTransferSpec([], [[3, 4]], start=0, end=768, chunk_hashes=hashes),
+            _FakeEvent(),
+        )
+    plain_context.submit_store.assert_not_called()

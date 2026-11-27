@@ -9,7 +9,6 @@ Usage::
 # Standard
 from typing import TYPE_CHECKING
 import argparse
-import json
 import sys
 import urllib.error
 import urllib.request
@@ -19,16 +18,18 @@ from prometheus_client.parser import text_string_to_metric_families
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
+from lmcache.cli.http import (
+    DEFAULT_URLS,
+    CLIHTTPError,
+)
+from lmcache.cli.http import fetch_json as _fetch_json
+from lmcache.cli.http import (
+    normalize_url,
+)
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.cli.metrics import Metrics
-
-# Default server URLs per describe target (ZMQ/HTTP semantics differ).
-DEFAULT_URLS: dict[str, str] = {
-    "kvcache": "http://localhost:8080",
-    "engine": "http://localhost:8000",
-}
+    from lmcache.v1.common.metrics import Metrics
 
 # -------------------------------------------------------------------
 # Shared helpers
@@ -39,36 +40,16 @@ class DescribeError(Exception):
     """Raised when the describe command cannot fetch or parse status data."""
 
 
-def normalize_url(url: str) -> str:
-    """Ensure *url* has an ``http://`` or ``https://`` scheme."""
-    if not url.startswith(("http://", "https://")):
-        url = f"http://{url}"
-    return url.rstrip("/")
-
-
 def fetch_json(url: str, timeout: int = 10) -> dict:
     """GET *url* and return the parsed JSON body.
 
     Raises:
         DescribeError: On network/HTTP errors.
     """
-    req = urllib.request.Request(url)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as exc:
-        if exc.code == 503:
-            body = exc.read().decode()
-            try:
-                detail = json.loads(body).get("error", body)
-            except (json.JSONDecodeError, AttributeError):
-                detail = body
-            raise DescribeError(f"Server unhealthy: {detail}") from exc
-        raise DescribeError(f"HTTP {exc.code} from {url}: {exc.reason}") from exc
-    except urllib.error.URLError as exc:
-        raise DescribeError(f"Cannot connect to {url}: {exc.reason}") from exc
-    except OSError as exc:
-        raise DescribeError(f"Cannot connect to {url}: {exc}") from exc
+        return _fetch_json(url, timeout=timeout)
+    except CLIHTTPError as exc:
+        raise DescribeError(str(exc)) from exc
 
 
 def fetch_health(url: str, timeout: int = 10) -> bool:
@@ -146,6 +127,12 @@ def fmt_bytes(n: int) -> str:
     return f"{n} B"
 
 
+def fmt_l1_used(used_bytes: int, total_bytes: int) -> str:
+    """Format L1 usage as GB with its share of capacity, e.g. ``0.33 (8.3%)``."""
+    pct = used_bytes / total_bytes * 100 if total_bytes > 0 else 0.0
+    return f"{used_bytes / 1024**3:.2f} ({pct:.1f}%)"
+
+
 def fmt_health(is_healthy: object) -> str | None:
     """Format a boolean health flag as ``'OK'`` / ``'UNHEALTHY'``."""
     if is_healthy is None:
@@ -202,50 +189,42 @@ class KVCacheDescriber:
         self.metrics.add("chunk_size", "Chunk size", self.data.get("chunk_size"))
 
     def add_l1_storage(self) -> None:
-        """L1 cache capacity, usage, eviction, and object count."""
-        total_bytes = safe_get(
-            self.data, "storage_manager", "l1_manager", "memory_total_bytes"
-        )
-        if total_bytes is not None:
-            self.metrics.add(
-                "l1_capacity_gb",
-                "L1 capacity (GB)",
-                round(total_bytes / (1024**3), 2),
-            )
-        else:
-            self.metrics.add("l1_capacity_gb", "L1 capacity (GB)", None)
+        """L1 totals across all L1s, plus one section per L1 when there are several.
 
-        used_bytes = safe_get(
-            self.data, "storage_manager", "l1_manager", "memory_used_bytes"
+        Reads the per-tag ``l1_managers`` and ``l1_eviction_controllers`` maps,
+        which ``/status`` sends for any number of L1s. The single-L1 keys
+        (``l1_manager``, ``l1_eviction_controller``) are omitted on multi-L1
+        servers, so they cannot describe every deployment.
+        """
+        managers = safe_get(self.data, "storage_manager", "l1_managers") or {}
+        evictions = (
+            safe_get(self.data, "storage_manager", "l1_eviction_controllers") or {}
         )
-        usage_ratio = safe_get(
-            self.data, "storage_manager", "l1_manager", "memory_usage_ratio"
-        )
-        if used_bytes is not None and usage_ratio is not None:
-            gb = used_bytes / (1024**3)
-            pct = usage_ratio * 100
-            self.metrics.add("l1_used_gb", "L1 used (GB)", f"{gb:.2f} ({pct:.1f}%)")
-        else:
-            self.metrics.add("l1_used_gb", "L1 used (GB)", None)
+        capacity_gb: float | None = None
+        used_gb: str | None = None
+        objects: int | None = None
+        if managers:
+            total = sum(m["memory_total_bytes"] for m in managers.values())
+            used = sum(m["memory_used_bytes"] for m in managers.values())
+            capacity_gb = round(total / (1024**3), 2)
+            used_gb = fmt_l1_used(used, total)
+            objects = sum(m["total_object_count"] for m in managers.values())
+        # Each L1 may set its own policy; list each distinct one once.
+        policies = dict.fromkeys(e["eviction_policy"] for e in evictions.values())
 
+        self.metrics.add("l1_capacity_gb", "L1 capacity (GB)", capacity_gb)
+        self.metrics.add("l1_used_gb", "L1 used (GB)", used_gb)
         self.metrics.add(
-            "eviction_policy",
-            "Eviction policy",
-            safe_get(
-                self.data,
-                "storage_manager",
-                "eviction_controller",
-                "eviction_policy",
-            ),
+            "eviction_policy", "Eviction policy", ", ".join(policies) or None
         )
-        self.metrics.add(
-            "cached_objects",
-            "Cached objects",
-            safe_get(self.data, "storage_manager", "l1_manager", "total_object_count"),
-        )
+        self.metrics.add("cached_objects", "Cached objects", objects)
         self.metrics.add(
             "active_sessions", "Active sessions", self.data.get("active_sessions")
         )
+
+        if len(managers) > 1:
+            for tag, manager in managers.items():
+                self._add_l1_section(tag, manager, evictions[tag])
 
     def add_models(self) -> None:
         """Per-model KV cache layout sections.
@@ -373,6 +352,31 @@ class KVCacheDescriber:
                     "Pool used",
                     f"{pool_used} / {pool_size} ({pct:.1f}%)",
                 )
+
+    def _add_l1_section(self, tag: str, manager: dict, eviction: dict) -> None:
+        """Emit one ``l1_managers`` list section for the L1 tagged *tag*.
+
+        Args:
+            tag: The L1's configured tag.
+            manager: That L1's entry in ``storage_manager.l1_managers``.
+            eviction: That L1's entry in ``storage_manager.l1_eviction_controllers``.
+        """
+        self.metrics.add_list_section("l1_managers", f"l1_{tag}", f"L1: {tag}")
+        sec = self.metrics[f"l1_{tag}"]
+        sec.add("tag", "Tag", tag)
+        sec.add("backend", "Backend", manager["backend"])
+        sec.add(
+            "capacity_gb",
+            "Capacity (GB)",
+            round(manager["memory_total_bytes"] / (1024**3), 2),
+        )
+        sec.add(
+            "used_gb",
+            "Used (GB)",
+            fmt_l1_used(manager["memory_used_bytes"], manager["memory_total_bytes"]),
+        )
+        sec.add("cached_objects", "Cached objects", manager["total_object_count"])
+        sec.add("eviction_policy", "Eviction policy", eviction["eviction_policy"])
 
 
 # -------------------------------------------------------------------

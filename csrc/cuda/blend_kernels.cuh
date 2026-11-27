@@ -33,7 +33,9 @@ struct CBGroupSpec {
   EngineKVFormat engine_kv_format;
   int page_buffer_size;
   int block_size;
-  int head_size;                  // scatter kernel head_size (element units)
+  int head_size;  // scatter kernel head_size (element units)
+  // Pool's per-block stride in scalars; 0 = tight block_size*head_size.
+  int64_t block_stride_elems;
   uintptr_t slot_mapping_base;    // device int64*, whole-request slot mapping
   int64_t slot_mapping_capacity;  // int64 elements behind slot_mapping_base
   // Re-RoPE (cos_sin_cache == 0 disables rope for this group). Rotation
@@ -44,6 +46,9 @@ struct CBGroupSpec {
   int rope_num_kv_heads;
   int64_t rope_head_stride;  // == head_size, or 2*head_size for fused packed
   int key_scalar_type;       // at::ScalarType of the KV data
+  // at::ScalarType of the cos/sin cache; equals key_scalar_type except for
+  // fp8 KV caches, whose cache stays in the model's float dtype.
+  int cache_scalar_type;
   bool is_neox;
   // Byte offset from the slot's K-plane base to the first rope-carrying
   // element: 0 unless MLA, where rope dims trail the latent row.
@@ -67,6 +72,11 @@ struct CBScatterVar {
   int64_t slot_mapping_offset;
   int n_tok;
 };
+
+// StagingCopy.host_offset (-1 in the int64 table) of a device-to-device row:
+// copies a slot an earlier row of the same step staged, so a chunk matched at
+// several positions crosses PCIe once.
+constexpr size_t kCBStagingD2D = static_cast<size_t>(-1);
 
 // One batch of tmp slots: H2D staging, then re-RoPE, then scatter. The order
 // is load-bearing (slots are reused by the next step).

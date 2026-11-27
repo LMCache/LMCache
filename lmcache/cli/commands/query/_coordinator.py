@@ -3,7 +3,7 @@
 
 One entry per queryable coordinator endpoint. Each knows its path, which
 extra arguments it needs, and how to shape the reply into a
-:class:`~lmcache.cli.metrics.Metrics` report -- so the terminal gets an
+:class:`~lmcache.v1.common.metrics.Metrics` report -- so the terminal gets an
 aligned table and ``--format json`` gets the same data structurally.
 
 Only reads live here. The coordinator's mutating routes (``POST /events``,
@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import quote
 import json
 import sys
 import urllib.error
@@ -25,19 +26,14 @@ import urllib.request
 
 # First Party
 from lmcache.cli.commands.describe import fmt_bytes
-from lmcache.cli.metrics import Metrics
-from lmcache.logging import init_logger
+from lmcache.cli.commands.quota._helpers import escape_salt
+from lmcache.cli.http import normalize_url as normalize_url
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.metrics import Metrics
 
 logger = init_logger(__name__)
 
 _TIMEOUT = 10
-
-
-def normalize_url(url: str) -> str:
-    """Ensure *url* has a scheme and no trailing slash."""
-    if not url.startswith(("http://", "https://")):
-        url = f"http://{url}"
-    return url.rstrip("/")
 
 
 def _fetch(url: str, timeout: int = _TIMEOUT) -> str:
@@ -182,6 +178,8 @@ def _render_directory_stats(body: Any, metrics: Metrics) -> None:
     for key, label in (
         ("num_contents", "Contents"),
         ("num_chunks", "Chunks"),
+        ("num_claims", "Claims"),
+        ("num_namespaces", "Namespaces"),
         ("table_size", "Table size"),
     ):
         section.add(key, label, blend.get(key))
@@ -264,6 +262,144 @@ def _render_prefetch(body: Any, metrics: Metrics) -> None:
         metrics.add(key, key.replace("_", " ").capitalize(), value)
 
 
+def _render_status(body: Any, metrics: Metrics) -> None:
+    """The coordinator's debugging snapshot, one block per component.
+
+    Tables print without their label, so each one's first column names
+    what its rows are.
+    """
+    source = body["event_source"]
+    section = metrics.add_section("event_source", "Event source")
+    section.add("source_name", "Source", source["source_name"])
+    section.add("replay_capability", "Replay", source["replay_capability"])
+    # Only the Kafka source reports what it has read.
+    reads = source.get("reads")
+    if reads is not None:
+        for key, label in (
+            ("records_applied", "Records applied"),
+            ("records_undecodable", "Records undecodable"),
+            ("records_failed", "Records failed"),
+            ("partitions_assigned", "Partitions assigned"),
+        ):
+            section.add(key, label, reads[key])
+        table = metrics.add_table(
+            "partitions",
+            "Partitions",
+            ("partition", "partition"),
+            ("next_offset", "next offset"),
+            ("unread_records", "unread"),
+        )
+        partitions = set(reads["next_offsets"]) | set(reads["unread_records"])
+        for partition in sorted(partitions, key=int):
+            table.add_row(
+                partition=partition,
+                next_offset=reads["next_offsets"].get(partition),
+                unread_records=reads["unread_records"].get(partition),
+            )
+
+    ingest = body["ingest"]
+    section = metrics.add_section("ingest", "Ingest")
+    for key, label in (
+        ("batches_applied", "Batches applied"),
+        ("batches_duplicate", "Batches duplicate"),
+        ("batches_stale", "Batches stale"),
+        ("batches_missing", "Batches missing"),
+        ("events_dropped", "Events dropped by servers"),
+    ):
+        section.add(key, label, ingest[key])
+    table = metrics.add_table(
+        "streams",
+        "Streams",
+        ("server", "server"),
+        ("incarnation", "incarnation"),
+        ("last_seq", "last seq"),
+        ("view", "view"),
+        ("missing_batches", "missing"),
+        ("events_dropped", "dropped"),
+        ("seconds_since_last_event", "since event s"),
+        ("event_delivery_delay_seconds", "delivery delay s"),
+    )
+    for server, stream in sorted(ingest["streams"].items()):
+        table.add_row(
+            server=server,
+            incarnation=stream["incarnation"],
+            last_seq=stream["last_seq"],
+            view="incomplete" if stream["gap_detected"] else "complete",
+            missing_batches=stream["missing_batches"],
+            events_dropped=stream["events_dropped"],
+            seconds_since_last_event=stream["seconds_since_last_event"],
+            event_delivery_delay_seconds=stream["event_delivery_delay_seconds"],
+        )
+
+    table = metrics.add_table(
+        "consumers",
+        "Consumers",
+        ("consumer", "consumer"),
+        ("batches_delivered", "delivered"),
+        ("average_apply_ms", "avg apply ms"),
+        ("consume_failures", "consume failures"),
+        ("fence_failures", "fence failures"),
+    )
+    for name, consumer in sorted(body["consumers"].items()):
+        delivered = consumer["batches_delivered"]
+        table.add_row(
+            consumer=name,
+            batches_delivered=delivered,
+            average_apply_ms=(
+                consumer["apply_seconds"] / delivered * 1000 if delivered else None
+            ),
+            consume_failures=consumer["consume_failures"],
+            fence_failures=consumer["fence_failures"],
+        )
+
+    table = metrics.add_table(
+        "heartbeats",
+        "Heartbeats",
+        ("server", "registered server"),
+        ("seconds_since_heartbeat", "since heartbeat s"),
+    )
+    for server, age in sorted(body["registry"]["seconds_since_heartbeat"].items()):
+        table.add_row(server=server, seconds_since_heartbeat=age)
+
+    table = metrics.add_table(
+        "controllers",
+        "Controllers",
+        ("controller", "controller"),
+        ("started", "started"),
+    )
+    for name, started in sorted(body["controllers"].items()):
+        table.add_row(controller=name, started="yes" if started else "no")
+
+    # The error is last: it is free text of any length, and as the final
+    # column it cannot push the others out of line.
+    table = metrics.add_table(
+        "background_loops",
+        "Background loops",
+        ("loop", "loop"),
+        ("interval_seconds", "every s"),
+        ("passes_ok", "ok"),
+        ("passes_failed", "failed"),
+        ("seconds_since_last_success", "since success s"),
+        ("failing", "failing"),
+        ("last_error", "last error"),
+    )
+    for name, loop in sorted(body["background_loops"].items()):
+        table.add_row(
+            loop=name,
+            interval_seconds=loop["interval_seconds"],
+            passes_ok=loop["passes_ok"],
+            passes_failed=loop["passes_failed"],
+            seconds_since_last_success=loop["seconds_since_last_success"],
+            failing="yes" if _still_failing(loop) else "no",
+            last_error=loop["last_error"] or "--",
+        )
+
+    section = metrics.add_section("event_loop", "Event loop")
+    section.add(
+        "blocked_seconds", "Blocked (s, total)", body["event_loop"]["blocked_seconds"]
+    )
+
+
 @dataclass(frozen=True)
 class CoordinatorApi:
     """One queryable coordinator endpoint.
@@ -315,7 +451,9 @@ APIS: dict[str, CoordinatorApi] = {
     "quota": CoordinatorApi(
         summary="per-salt usage against quota",
         path=lambda a: (
-            f"/quota/{a.cache_salt}" if a.cache_salt is not None else "/quota"
+            f"/quota/{quote(escape_salt(a.cache_salt), safe='')}"
+            if a.cache_salt is not None
+            else "/quota"
         ),
         render=_render_quota,
     ),
@@ -330,9 +468,25 @@ APIS: dict[str, CoordinatorApi] = {
         render=_render_prefetch,
         requires=("instance", "request_id"),
     ),
+    "status": CoordinatorApi(
+        summary="debugging snapshot: ingest, consumers, loops, controllers",
+        path=lambda a: "/status",
+        render=_render_status,
+    ),
     "metrics": CoordinatorApi(
         summary="Prometheus metrics, verbatim",
         path=lambda a: "/metrics",
         raw=True,
     ),
 }
+
+
+def _still_failing(loop: dict[str, Any]) -> bool:
+    """Whether a loop's latest pass failed.
+
+    A later success leaves ``last_error`` in place, so the error alone does
+    not say the loop is failing now; its time against the last success does.
+    """
+    failed_at = loop["last_error_timestamp"]
+    succeeded_at = loop["last_success_timestamp"]
+    return failed_at is not None and (succeeded_at is None or failed_at > succeeded_at)

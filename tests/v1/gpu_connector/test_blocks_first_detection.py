@@ -12,9 +12,9 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import EngineType
-from lmcache.v1.gpu_connector.kv_format import detect_format
-from lmcache.v1.gpu_connector.utils import resolve_block_stride_and_log_layout
+from lmcache.v1.common.custom_types import EngineType
+from lmcache.v1.common.kv_format import detect_format
+from lmcache.v1.common.utils import resolve_block_stride_and_log_layout
 import lmcache.lmcache_native as lmcache_native
 
 NB, NL, NH, BS, CS = 6, 3, 2, 4, 8

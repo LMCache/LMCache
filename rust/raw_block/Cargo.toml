@@ -9,7 +9,12 @@ edition = "2021"
 name = "lmcache_rust_raw_block_io"
 crate-type = ["cdylib"]
 
+[features]
+# Disable extension-module for cargo test so test binaries link to libpython.
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
-pyo3 = { version = "0.24", features = ["extension-module"] }
+pyo3 = "0.24"
 libc = "0.2"
 io-uring = "0.7"

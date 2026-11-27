@@ -103,16 +103,65 @@ var _ = Describe("LMCacheEngine injection webhook smoke", func() {
 				"webhook did not stamp lmcache-injected=true; injection did not fire "+
 					"(skip-reason=%q)", pod.Annotations["lmcache.ai/lmcache-skip-reason"])
 			g.Expect(pod.Spec.HostIPC).To(BeFalse(), "webhook must not inject hostIPC by default")
-			g.Expect(podHasDevShmHostPath(pod)).To(BeTrue(), "webhook did not inject the /dev/shm hostPath volume")
+			g.Expect(podHasDevShmMemoryEmptyDir(pod)).To(BeTrue(),
+				"webhook did not inject the pod-private /dev/shm emptyDir (isolated IPC default)")
+			g.Expect(podHasDevShmHostPath(pod)).To(BeFalse(),
+				"host /dev/shm hostPath must not be injected under isolated IPC")
 
 			args := vllmContainerArgs(pod)
 			g.Expect(argValue(args, "--kv-transfer-config")).To(ContainSubstring("LMCacheMPConnector"),
 				"injected --kv-transfer-config missing the LMCacheMPConnector JSON: %v", args)
+			g.Expect(argValue(args, "--kv-transfer-config")).To(ContainSubstring("lmcache.mp.isolated_ipc"),
+				"injected --kv-transfer-config missing the isolated-IPC key: %v", args)
 			g.Expect(podEnvValue(pod, "vllm", "PYTHONHASHSEED")).To(Equal("0"),
 				"webhook did not inject PYTHONHASHSEED=0")
 		}, 60*time.Second, 2*time.Second).Should(Succeed())
 
 		_, _ = fmt.Fprintf(GinkgoWriter, "LMCache injection smoke satisfied (engine=%s)\n", lmc.Name)
+	})
+
+	It("injects the host /dev/shm hostPath when the engine disables isolatedIPC", func() {
+		By("applying an LMCacheEngine with isolatedIPC: false (legacy /dev/shm sharing)")
+		lmc, err := utils.NewLMCFromFixture("lmc_minimal.yaml", nsName, "inject-legacy")
+		Expect(err).NotTo(HaveOccurred())
+		isolatedIPC := false
+		lmc.Spec.IsolatedIPC = &isolatedIPC
+		Expect(utils.ApplyLMC(ctx, k8sClient, lmc)).To(Succeed())
+
+		key := engineKey(nsName, lmc.Name)
+		Expect(utils.WaitLMCReconciled(ctx, k8sClient, key, 60*time.Second)).To(Succeed())
+
+		connName := fmt.Sprintf("%s-connection", lmc.Name)
+		Eventually(func() error {
+			return k8sClient.Get(ctx, engineKey(nsName, connName), &corev1.ConfigMap{})
+		}, 30*time.Second, 2*time.Second).Should(Succeed(),
+			"engine connection ConfigMap %q never appeared", connName)
+
+		By("creating the opted-in vLLM Deployment")
+		raw, err := utils.LoadFixture("vllm_lmcache_injection_deployment.yaml")
+		Expect(err).NotTo(HaveOccurred())
+		yamlText := strings.NewReplacer(
+			"__NAMESPACE__", nsName,
+			"__ENGINE_NAME__", lmc.Name,
+		).Replace(string(raw))
+		dep := &appsv1.Deployment{}
+		Expect(yaml.Unmarshal([]byte(yamlText), dep)).To(Succeed())
+		Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+
+		By("verifying the webhook injected the legacy hostPath /dev/shm wiring")
+		Eventually(func(g Gomega) {
+			pod := firstPodForDeployment(ctx, nsName, dep)
+			g.Expect(pod).NotTo(BeNil(), "no vLLM pod created yet")
+			g.Expect(pod.Annotations).To(HaveKeyWithValue("lmcache.ai/lmcache-injected", "true"))
+			g.Expect(pod.Spec.HostIPC).To(BeFalse())
+			g.Expect(podHasDevShmHostPath(pod)).To(BeTrue(),
+				"webhook did not inject the /dev/shm hostPath volume in legacy mode")
+			args := vllmContainerArgs(pod)
+			g.Expect(argValue(args, "--kv-transfer-config")).NotTo(ContainSubstring("isolated_ipc"),
+				"legacy mode must not carry the isolated-IPC key: %v", args)
+		}, 60*time.Second, 2*time.Second).Should(Succeed())
+
+		_, _ = fmt.Fprintf(GinkgoWriter, "LMCache legacy-IPC injection smoke satisfied (engine=%s)\n", lmc.Name)
 	})
 
 	It("stages the lmcache payload when injection.payloadImage is set", func() {
@@ -196,7 +245,7 @@ var _ = Describe("LMCacheEngine injection webhook smoke", func() {
 			g.Expect(pod.Spec.ImagePullSecrets).To(ContainElement(corev1.LocalObjectReference{Name: pullSecret}))
 
 			By("connection wiring still applied alongside staging")
-			g.Expect(podHasDevShmHostPath(pod)).To(BeTrue())
+			g.Expect(podHasDevShmMemoryEmptyDir(pod)).To(BeTrue())
 			g.Expect(argValue(vllmContainerArgs(pod), "--kv-transfer-config")).To(ContainSubstring("LMCacheMPConnector"))
 		}, 60*time.Second, 2*time.Second).Should(Succeed())
 

@@ -119,6 +119,10 @@ func (p *LMCachePodInjector) Handle(ctx context.Context, req admission.Request) 
 	engine := &lmcachev1alpha1.LMCacheEngine{}
 	var targetDefault *string
 	engineHostIPC := false
+	// CR absent → legacy /dev/shm sharing: the pod must match whatever the
+	// engine was wired with, and only the CR says; the host mount at least
+	// keeps a legacy engine working (an isolated engine ignores it).
+	engineIsolatedIPC := false
 	if err := p.Client.Get(ctx, types.NamespacedName{Name: engineName, Namespace: namespace}, engine); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return admission.Errored(http.StatusInternalServerError, err)
@@ -131,6 +135,7 @@ func (p *LMCachePodInjector) Handle(ctx context.Context, req admission.Request) 
 			targetDefault = engine.Spec.Injection.TargetContainer
 		}
 		engineHostIPC = derefBool(engine.Spec.HostIPC)
+		engineIsolatedIPC = engine.Spec.IsolatedIPCEnabled()
 	}
 
 	// Read the connection ConfigMap (existence gate), resolve the target
@@ -151,9 +156,9 @@ func (p *LMCachePodInjector) Handle(ctx context.Context, req admission.Request) 
 
 	// --- Connection wiring (always applied) ---
 
-	// M0: share the host's /dev/shm for CUDA IPC with the node-local engine,
-	// mirroring the engine's spec.hostIPC mode (hostPath mount by default).
-	applyIPCSharing(pod, target, engineHostIPC)
+	// M0: wire the pod for the engine's IPC mode — isolated IPC (pod-private
+	// /dev/shm), hostIPC mirror, or the host /dev/shm hostPath mount (default).
+	applyIPCSharing(pod, target, engineHostIPC, engineIsolatedIPC)
 
 	// Args: inject --kv-transfer-config unless the user already supplied one.
 	kvForArgs := kvTransferConfigJSON

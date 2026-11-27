@@ -12,9 +12,11 @@ This module holds HTTP models only.
 # Standard
 from typing import Annotated
 import base64
+import ipaddress
 
 # Third Party
 from pydantic import (
+    AfterValidator,
     BaseModel,
     Field,
     StringConstraints,
@@ -25,9 +27,52 @@ import numpy as np
 
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
-from lmcache.v1.distributed.api import Tier
+from lmcache.v1.distributed.api import Tier, validate_identity_tags
 from lmcache.v1.mp_coordinator.api import CacheEventBatch
 from lmcache.v1.mp_coordinator.views.key_directory import Placement
+from lmcache.v1.multiprocess.cache_control.key_resolver import (
+    MAX_KEYS_PER_REQUEST,
+    named_chunks_of_keys,
+)
+
+
+def _validate_matching_tags(value: dict[str, str]) -> dict[str, str]:
+    """Share identity validation across token-addressed request schemas."""
+    validate_identity_tags(value)
+    return dict(sorted(value.items()))
+
+
+MatchingTags = Annotated[dict[str, str], AfterValidator(_validate_matching_tags)]
+
+_URL_HOST_DELIMITERS = frozenset("/\\:?#@[]")
+
+
+def _validate_instance_host(value: str) -> str:
+    """Validate an MP server address without resolving it.
+
+    Args:
+        value: A bare IPv4 address, IPv6 address, or resolver host name.
+
+    Returns:
+        The unchanged address after validation.
+
+    Raises:
+        ValueError: If ``value`` contains URL syntax or control characters.
+    """
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        if any(
+            char in _URL_HOST_DELIMITERS
+            or char.isspace()
+            or ord(char) < 0x20
+            or ord(char) == 0x7F
+            for char in value
+        ):
+            raise ValueError(
+                "ip must be a bare IP address or host name without URL delimiters"
+            ) from None
+    return value
 
 
 def encode_tokens(tokens: "list[int] | np.ndarray") -> str:
@@ -78,15 +123,20 @@ class RegisterRequest(BaseModel):
     Attributes:
         instance_id: Identifier of the mp server. Optional -- if empty (or
             whitespace-only), the coordinator generates one and returns it.
-        ip: IP/host of the mp server's HTTP server. Whitespace is stripped and a
-            blank value is rejected, since the coordinator calls this address.
+        ip: Bare IPv4 address, IPv6 address, or resolver host name of the mp
+            server's HTTP API. Schemes, ports, paths, queries, fragments, and
+            userinfo are rejected because the coordinator combines this field
+            with ``http_port`` to build outbound URLs. Resolver-specific names
+            such as Docker service names containing underscores are accepted.
         http_port: Port of the mp server's HTTP server, which the coordinator
             calls to push work to this instance.
         metadata: Free-form registration hints.
+        chunk_size: Configured MP server chunk size. Optional for compatibility
+            with servers that predate coordinator chunk-size validation.
         p2p_advertised_url: URL the instance advertises for peer-to-peer
             transfers. Optional -- empty when the instance does not participate
             in P2P.
-        mq_port: Port of the instance's ZMQ message-queue server that P2P peers
+        mq_port: Port of the instance's P2P gRPC listener that P2P peers
             send lookup/unlock RPCs to, reachable at the instance's ``ip``.
             Optional -- 0 when P2P is disabled.
     """
@@ -95,8 +145,25 @@ class RegisterRequest(BaseModel):
     ip: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     http_port: int = Field(ge=1, le=65535)
     metadata: dict[str, str] = Field(default_factory=dict)
+    chunk_size: int | None = Field(default=None, ge=1)
     p2p_advertised_url: Annotated[str, StringConstraints(strip_whitespace=True)] = ""
     mq_port: int = Field(default=0, ge=0, le=65535)
+
+    @field_validator("ip")
+    @classmethod
+    def _validate_ip(cls, value: str) -> str:
+        """Reject URL components in the registered server address.
+
+        Args:
+            value: The stripped ``ip`` field.
+
+        Returns:
+            The unchanged address after validation.
+
+        Raises:
+            ValueError: If ``value`` contains URL delimiters or control characters.
+        """
+        return _validate_instance_host(value)
 
 
 class RegisterResponse(BaseModel):
@@ -347,6 +414,7 @@ class DirectoryLookupRequest(BaseModel):
             (tokens form).
         cache_salt: Per-tenant isolation salt applied to produced keys
             (tokens form).
+        tags: Matching tags supplied when the content was stored (tokens form).
     """
 
     keys: list[EncodedObjectKey] = Field(default_factory=list)
@@ -354,6 +422,7 @@ class DirectoryLookupRequest(BaseModel):
     model_name: str = ""
     world_size: int = Field(default=1, ge=1)
     cache_salt: str = ""
+    tags: MatchingTags = Field(default_factory=dict)
 
     @field_validator("keys")
     @classmethod
@@ -388,6 +457,95 @@ class DirectoryLookupRequest(BaseModel):
             raise ValueError("supply exactly one of 'keys' or 'token_ids'")
         if self.token_ids and not self.model_name:
             raise ValueError("'model_name' is required with 'token_ids'")
+        return self
+
+
+class KeysOrTokensRequest(BaseModel):
+    """Cache content named either by object keys or by a token sequence.
+
+    The base of the coordinator bodies that act on cache content: pin and
+    unpin, prefetch, delete. Supply exactly one of the two forms:
+
+    * ``keys`` — name chunks by key, in the wire form the directory and pin
+      listings return. It reaches a chunk in the middle of a prompt without
+      its prefix chunks. At most ``MAX_KEYS_PER_REQUEST`` keys. A key names
+      its whole chunk, whichever object group and rank it carries:
+
+      - pin / unpin cover the chunk in every object group and on every rank
+        of the key's world size;
+      - delete removes every stored copy of the chunk in those groups and
+        ranks;
+      - prefetch warms the chunk in every group and rank the target
+        registered, with no sliding window, so all named chunks load even
+        for a sliding-window model.
+
+    * ``token_ids`` (with ``model_name`` and ``world_size``) — resolve a
+      token sequence to the keys of its complete chunks. Chunk hashes are
+      prefix-chained, so this must be the **full** sequence from position 0
+      and always covers every chunk from there; trailing incomplete chunks
+      are ignored. ``world_size`` must be stated: a defaulted one resolves
+      another parallel setup's keys, and the request would report success
+      having touched nothing.
+
+    Attributes:
+        keys: Keys naming the chunks (keys form).
+        token_ids: The full token sequence (tokens form).
+        model_name: Model whose rank fan-out to use (tokens form).
+        world_size: World size selecting the per-rank fan-out (tokens form).
+        cache_salt: Per-tenant isolation salt applied to produced keys
+            (tokens form).
+        tags: Matching tags supplied when the content was stored (tokens form).
+    """
+
+    keys: list[EncodedObjectKey] = Field(default_factory=list)
+    token_ids: list[int] = Field(default_factory=list)
+    model_name: str = ""
+    world_size: int = Field(default=1, ge=1)
+    cache_salt: str = ""
+    tags: MatchingTags = Field(default_factory=dict)
+
+    @field_validator("keys")
+    @classmethod
+    def _validate_keys(cls, value: list[EncodedObjectKey]) -> list[EncodedObjectKey]:
+        """Reject undecodable keys at request validation (surfaced as 422).
+
+        Args:
+            value: The hydrated keys.
+
+        Returns:
+            The unchanged keys once each converts to an ``ObjectKey``.
+
+        Raises:
+            ValueError: If there are more than ``MAX_KEYS_PER_REQUEST`` keys,
+                or a key cannot convert into an ``ObjectKey``.
+        """
+        if len(value) > MAX_KEYS_PER_REQUEST:
+            raise ValueError(
+                f"too many keys in a single request "
+                f"(limit={MAX_KEYS_PER_REQUEST}, got={len(value)})"
+            )
+        for encoded in value:
+            encoded.to_object_key()
+        return value
+
+    @model_validator(mode="after")
+    def _validate_one_form(self) -> "KeysOrTokensRequest":
+        """Enforce that exactly one form is supplied (surfaced as 422).
+
+        Returns:
+            The unchanged request once exactly one form is present.
+
+        Raises:
+            ValueError: If both or neither of ``keys`` / ``token_ids``
+                is supplied, or the tokens form omits ``model_name`` or a
+                required ``world_size``.
+        """
+        if bool(self.keys) == bool(self.token_ids):
+            raise ValueError("supply exactly one of 'keys' or 'token_ids'")
+        if self.token_ids and not self.model_name:
+            raise ValueError("'model_name' is required with 'token_ids'")
+        if self.token_ids and "world_size" not in self.model_fields_set:
+            raise ValueError("'world_size' is required with 'token_ids'")
         return self
 
 
@@ -456,14 +614,33 @@ class DirectoryListResponse(BaseModel):
 class BlendLookupRequest(BaseModel):
     """Body of ``POST /directory/blend-lookup``.
 
-    Unlike ``/directory/lookup`` the query need not be a prefix.
+    Unlike ``/directory/lookup`` the query need not be a prefix. It
+    carries the same identity fields, but uses them to scope matches to
+    the caller's namespace rather than to build keys.
 
     Attributes:
         tokens_b64: The query tokens, packed via :func:`encode_tokens`
             (base64 little-endian ``uint32``).
+        model_name: Model the caller retrieves under; matches are
+            restricted to chunks stored for it.
+        world_size: The caller's world size (TP x PP), selecting its rank
+            fan-out.
+        cache_salt: The caller's per-tenant isolation salt.
+        tags: Matching tags supplied when the content was stored.
     """
 
     tokens_b64: str = ""
+    model_name: str = ""
+    world_size: int = Field(default=1, ge=1)
+    cache_salt: str = ""
+    tags: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("tags")
+    @classmethod
+    def _validate_tags(cls, value: dict[str, str]) -> dict[str, str]:
+        """Validate and canonicalize the matching-tag namespace."""
+        validate_identity_tags(value)
+        return dict(sorted(value.items()))
 
     @field_validator("tokens_b64")
     @classmethod
@@ -485,6 +662,21 @@ class BlendLookupRequest(BaseModel):
         """
         decode_tokens(value)
         return value
+
+    @model_validator(mode="after")
+    def _validate_namespace(self) -> "BlendLookupRequest":
+        """Enforce that the query names the namespace to scope it to.
+
+        Returns:
+            The unchanged request once a query sequence names a model.
+
+        Raises:
+            ValueError: If ``tokens_b64`` is supplied without
+                ``model_name``.
+        """
+        if self.tokens_b64 and not self.model_name:
+            raise ValueError("'model_name' is required with 'tokens_b64'")
+        return self
 
 
 class BlendMatchModel(BaseModel):
@@ -513,29 +705,39 @@ class BlendLookupResponse(BaseModel):
     matches: list[BlendMatchModel] = Field(default_factory=list)
 
 
-class PrefetchRequest(BaseModel):
+class PrefetchRequest(KeysOrTokensRequest):
     """Body of ``POST /cache/prefetches`` on the coordinator.
 
-    Asks the coordinator to warm one MP server's L1 with the chunks of a token
-    sequence. The caller describes content by ``token_ids`` -- the unit the
-    cache speaks -- not by internal cache keys, which it cannot construct. The
-    coordinator forwards the request verbatim to that server's own
-    ``POST /cache/prefetches``, which hashes the tokens and expands them into the
-    per-rank keys.
+    Asks the coordinator to warm one MP server's L1 with the named chunks, in
+    either form of :class:`KeysOrTokensRequest`. The coordinator forwards
+    the supplied form alone to that server's own ``POST /cache/prefetches``,
+    which resolves it against its registered layouts. A key names its chunk:
+    the server warms that chunk in every object group and rank.
 
     Attributes:
         instance_id: Identifier of the target MP server (must be registered).
-        model_name: Model whose layout the target uses to allocate L1 buffers.
-        world_size: World size selecting the layout and the per-rank fan-out.
-        token_ids: Prompt tokens whose complete chunks should be warmed.
-        cache_salt: Per-tenant isolation salt applied to the produced keys.
     """
 
     instance_id: str
-    model_name: str
-    world_size: int = Field(ge=1)
-    token_ids: list[int] = Field(default_factory=list)
-    cache_salt: str = ""
+
+    @model_validator(mode="after")
+    def _validate_one_setup(self) -> "PrefetchRequest":
+        """Reject keys that no single parallel setup holds (surfaced as 422).
+
+        One prefetch warms one model's layout on the target, which would
+        reject such keys itself; checking here reports the caller's error
+        as a 422 rather than a relayed 502.
+
+        Returns:
+            The unchanged request.
+
+        Raises:
+            ValueError: The keys disagree on model, world size, cache salt or
+                tags, or their ``kv_rank`` packs no world size.
+        """
+        if self.keys:
+            named_chunks_of_keys([encoded.to_object_key() for encoded in self.keys])
+        return self
 
 
 class PrefetchResponse(BaseModel):
@@ -557,33 +759,27 @@ class PrefetchResponse(BaseModel):
     status: str
 
 
-class PinRequest(BaseModel):
+class PinRequest(KeysOrTokensRequest):
     """Body of ``POST`` / ``DELETE /cache/pins`` on the coordinator.
 
-    Pinning protects the resolved keys from L2 eviction until unpinned. The
-    coordinator resolves ``token_ids`` to keys locally; L2 pins are fleet-wide
-    (per ``cache_salt``), so no target instance is needed.
-
-    Attributes:
-        model_name: Model whose rank fan-out to use when resolving keys.
-        world_size: World size selecting the per-rank fan-out.
-        token_ids: Prompt tokens whose complete chunks should be (un)pinned.
-        cache_salt: Per-tenant isolation salt applied to the produced keys.
+    Pinning protects keys from L2 eviction until unpinned. L2 pins are
+    fleet-wide (per ``cache_salt``), so no target instance is needed. Content
+    is named in either form of :class:`KeysOrTokensRequest`; the coordinator
+    resolves the tokens form locally. A pin covers its chunk in every object
+    group and on every rank of its world size, and one request pins each
+    chunk once however many of its keys it names.
     """
-
-    model_name: str
-    world_size: int = Field(ge=1)
-    token_ids: list[int] = Field(default_factory=list)
-    cache_salt: str = ""
 
 
 class PinResponse(BaseModel):
     """Reply to ``POST`` / ``DELETE /cache/pins`` on the coordinator.
 
     Attributes:
-        requested: Number of whole chunks the token sequence resolved to.
-        affected: Number of L2 keys pinned (on pin) or unpinned (on unpin);
-            disambiguated by ``status``.
+        requested: Number of whole chunks the request named: those the token
+            sequence resolved to, or the distinct chunks the keys name.
+        affected: Number of keys the request resolved to and pinned (on pin)
+            or unpinned (on unpin), disambiguated by ``status``; each covers
+            its whole chunk.
         status: ``"pinned"`` / ``"unpinned"``.
     """
 
@@ -592,15 +788,42 @@ class PinResponse(BaseModel):
     status: str
 
 
-class DeleteRequest(BaseModel):
+class PinnedKeyInfo(BaseModel):
+    """One L2-pinned chunk as listed by ``GET /cache/pins``.
+
+    Attributes:
+        key: The chunk's rank-0 key in object group 0; the pin covers every
+            group and rank of its world size.
+        pin_count: Active pins on the chunk. Each ``DELETE /cache/pins`` that
+            names the chunk lowers it by one; a force delete removes it.
+    """
+
+    key: EncodedObjectKey
+    pin_count: int = 0
+
+
+class PinListResponse(BaseModel):
+    """Reply to ``GET /cache/pins``.
+
+    Attributes:
+        total: Pinned chunks matching the filters.
+        pins: The requested page of them, in first-pinned order.
+    """
+
+    total: int = 0
+    pins: list[PinnedKeyInfo] = Field(default_factory=list)
+
+
+class DeleteRequest(KeysOrTokensRequest):
     """Body of ``POST /cache/delete`` on the coordinator.
+
+    Content is named in either form of :class:`KeysOrTokensRequest`; the
+    coordinator expands each key to every copy of its chunk the directory
+    holds, in any object group and on any rank of the key's world size, and
+    sends them to the node in batches it accepts.
 
     Attributes:
         instance_id: Identifier of the target MP server (must be registered).
-        model_name: Model whose layout the target uses to resolve keys.
-        world_size: World size selecting the layout and the per-rank fan-out.
-        token_ids: Prompt tokens whose complete chunks should be deleted.
-        cache_salt: Per-tenant isolation salt applied to the produced keys.
         tier: Which tier(s) to delete: ``l1`` (L1 only), ``l2`` (L2 only), or
             ``all`` (both). ``l1`` never touches L2 and vice versa.
         force: When True, delete even locked/pinned keys -- bypasses L1
@@ -608,10 +831,6 @@ class DeleteRequest(BaseModel):
     """
 
     instance_id: str
-    model_name: str
-    world_size: int = Field(ge=1)
-    token_ids: list[int] = Field(default_factory=list)
-    cache_salt: str = ""
     tier: Tier = Tier.ALL
     force: bool = False
 
@@ -621,7 +840,8 @@ class DeleteResponse(BaseModel):
 
     Attributes:
         instance_id: The target MP server the request was dispatched to.
-        requested: Number of whole chunks the token sequence resolved to.
+        requested: Number of whole chunks the request named: those the token
+            sequence resolved to, or the distinct chunks the keys name.
         affected: Total keys removed across the tiers acted on -- L1 keys deleted
             by the node plus L2 keys deleted by the coordinator. A chunk resident
             in both tiers (``tier=all``) contributes to both, so ``affected`` may

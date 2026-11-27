@@ -38,8 +38,8 @@ Required Docker flags:
 
 - ``--network host`` -- Allows the vLLM container to reach LMCache on localhost.
 - ``--ipc host`` -- Required for CUDA IPC shared memory transfers between
-  containers (see *Isolated IPC* below for the plan to remove this
-  requirement).
+  containers in the default (legacy) mode; see *Isolated IPC* below for
+  running without it.
 - ``--runtime nvidia --gpus all`` -- GPU access via the NVIDIA container
   runtime.
 
@@ -73,9 +73,9 @@ really provides:
 
 The **isolated IPC** setting removes both: KV-cache registration switches
 to raw CUDA IPC memory handles
-(``docs/design/v1/platform/cuda/ipc_wrapper.md``) and event ordering to
+(``docs/design/v1/platform/devices/cuda/ipc_wrapper.md``) and event ordering to
 timeline-semaphore events carried over CUDA IPC memory handles
-(``docs/design/v1/platform/cuda/timeline_semaphore_event_ipc.md``). Both
+(``docs/design/v1/platform/devices/cuda/timeline_semaphore_event_ipc.md``). Both
 rendezvous in the kernel driver, so they work across containers that
 share nothing -- no host IPC namespace, no common ``/dev/shm``, no
 ``--ipc host``. It must be enabled on **both** sides of a deployment:
@@ -102,6 +102,8 @@ after ``lmcache.mp.mq_timeout``).
    ``hostIPC: true`` / the shared ``/dev/shm`` mount (Kubernetes) can be
    dropped. The two containers only need access to the same GPUs and
    distinct PID *values* (any regular container setup provides both).
+   The Kubernetes :doc:`operator` (deprecated; expected to be removed in
+   2027Q1) wires isolated IPC by default on NVIDIA (``spec.isolatedIPC``).
 
 Current limitations:
 
@@ -131,6 +133,13 @@ Prerequisites
 - At least 4 GPUs per node
 - ``kubectl`` configured to access your cluster
 
+Classic GPU Operator installs register RuntimeClass ``nvidia``. CDI+NRI
+installs often have no RuntimeClass objects. On those clusters omit
+``runtimeClassName`` on the LMCache DaemonSet and request a management CDI
+device (see *GPU Operator NRI/CDI* below). The operator path is
+:ref:`mp-operator-nri-cdi` (the operator is deprecated and expected to be
+removed in 2027Q1).
+
 Step-by-Step
 ~~~~~~~~~~~~
 
@@ -145,6 +154,12 @@ Step-by-Step
 .. code-block:: bash
 
     kubectl apply -f examples/multi_process/lmcache-daemonset.yaml
+
+.. note::
+   The LMCache server in the DaemonSet binds the transport port only to
+   ``127.0.0.1`` on the host network. vLLM pods reach the server on the same
+   node through the loopback interface, so the transport port is never
+   exposed beyond the node.
 
 **Step 3: Deploy vLLM**
 
@@ -203,13 +218,44 @@ Architecture Notes
 - **DaemonSet uses ``hostNetwork: true``** so vLLM pods discover the LMCache
   server via ``status.hostIP``.
 - **Both containers mount ``/dev/shm``** from the host to enable CUDA IPC
-  memory sharing (see *Isolated IPC* above for the plan to remove this
-  requirement).
+  memory sharing in the default (legacy) mode; see *Isolated IPC* above for
+  running without it.
 - **GPUs are NOT requested in the DaemonSet** -- this allows GPUs to remain
-  exclusively allocated to vLLM pods.  The NVIDIA container runtime
-  automatically provides GPU access for IPC-based memory transfers.
+  exclusively allocated to vLLM pods. On classic GPU Operator installs the
+  NVIDIA container runtime (RuntimeClass ``nvidia``) provides GPU access
+  for IPC-based memory transfers. On CDI+NRI installs there is no
+  ``nvidia`` RuntimeClass; omit it and request a management CDI device
+  instead (see below).
 - **Multiple vLLM pods** on the same node automatically connect to the same
   LMCache DaemonSet instance.
+
+GPU Operator NRI/CDI
+^^^^^^^^^^^^^^^^^^^^
+
+If ``kubectl get runtimeclass`` is empty, do not set ``runtimeClassName``
+on the DaemonSet. Request the management CDI device on the pod (the
+container name must match the annotation key):
+
+.. code-block:: yaml
+
+    metadata:
+      annotations:
+        nvidia.cdi.k8s.io/container.lmcache-server: management.nvidia.com/gpu=all
+
+If the DaemonSet namespace is not the GPU Operator install namespace,
+NVIDIA Container Toolkit **≥ v1.20.0** takes extra namespaces from
+``NRI_MANAGEMENT_CDI_DEVICE_NAMESPACES`` (Helm ``toolkit.env``, or
+``ClusterPolicy`` ``spec.toolkit.env``).
+(`NVIDIA: Requesting a Management CDI Device
+<https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/cdi.html>`_)
+Below v1.20.0 that env is not available, so the DaemonSet can see GPUs
+only in the toolkit install namespace (typically ``gpu-operator``).
+
+For reference, toolkit v1.20.0 became the GPU Operator Helm default in
+v26.7.0. The default allowed namespace is the toolkit install namespace;
+from 1.20, additional namespaces can be listed in
+``NRI_MANAGEMENT_CDI_DEVICE_NAMESPACES``, and the toolkit namespace remains
+allowed.
 
 .. note::
    LMCache pods on nodes without GPUs will crash with CUDA initialization
@@ -267,6 +313,13 @@ override the CPU pool for lookup and other non-GPU operations.
 Allocate as much CPU memory as available after accounting for the OS and vLLM.
 A larger L1 cache means fewer L2 round-trips.
 
+**GPU memory headroom for the server process:**
+The ``lmcache server`` process holds GPU memory (CUDA contexts and streams) on
+every GPU, on top of the KV cache that vLLM sizes with
+``--gpu-memory-utilization``. If the first request fails with a CUDA
+out-of-memory error, lower vLLM's ``--gpu-memory-utilization`` to leave
+headroom for the LMCache server process.
+
 **Eviction tuning:**
 
 - ``--eviction-trigger-watermark 0.8`` (default) triggers eviction when L1 is
@@ -280,6 +333,8 @@ A larger L1 cache means fewer L2 round-trips.
 Use ``LMCACHE_LOG_LEVEL=DEBUG`` during initial setup to verify L2 store/load
 activity.  Switch to ``INFO`` (default) for production to reduce log volume.
 
+.. _mp-transfer-mode:
+
 Transfer Mode (``--supported-transfer-mode``, ``--shm-name``)
 -------------------------------------------------------------
 
@@ -292,17 +347,78 @@ The server picks which paths to load via ``--supported-transfer-mode``:
 - ``lmcache_driven`` *(default)* -- load only the server-driven
   transfer path.  Supports CUDA devices (IPC) and CPU devices (SHM),
   and skips allocating the engine-driven prepare/commit resources
-  (pickle codec).
+  (inline tensor codec).
 - ``engine_driven`` -- load only the engine-driven path.  Use when
   serving CPU-only or non-CUDA accelerator workers.
 - ``auto`` -- load both paths.  Workers of either device
   type can connect without manual configuration; the server has no
   upfront knowledge of the connecting worker's device.
 
-When the engine-driven path is loaded (``auto`` or ``engine_driven``),
-KV transfers between the server and vLLM workers use a pickle-based
-path by default.  Pass ``--shm-name`` with a segment name to create a
-shared-memory (SHM) pool instead:
+When the engine-driven path is loaded (``auto`` or ``engine_driven``), the
+server offers workers one of two engine-driven transports:
+
+- **SHM pool** -- the server backs its L1 pool with a named POSIX shared-memory
+  segment and workers copy KV chunks directly into or out of that segment.
+  This is the transport to use for any real workload.
+- **Typed inline** -- the fallback when no SHM pool is available.  Every KV
+  chunk is serialised into the request message and copied through the
+  ZMQ/gRPC request channel on each store and retrieve (and deserialised on the
+  other side), in messages of up to 128 MiB.  It only exists so that the engine-driven path still works
+  where ``/dev/shm`` is unavailable (for example Docker without
+  ``--ipc host``); it is not tuned for throughput.
+
+.. warning::
+
+   The server does **not** create an SHM pool by default: ``--shm-name``
+   defaults to ``""`` and the L1 pool defaults to lazy allocation, which also
+   disables SHM.  An engine-driven worker that connects to such a server
+   silently uses the typed inline transport.  The symptom is that
+   store/retrieve of a long prompt (a few thousand tokens) takes seconds
+   instead of milliseconds, and CPU offloading through LMCache can end up
+   slower than the inference engine's built-in CPU offloading.
+
+   To enable the SHM pool, pass **both** flags:
+
+   .. code-block:: bash
+
+       lmcache server ... --supported-transfer-mode engine_driven \
+           --shm-name lmcache_pool --no-l1-use-lazy
+
+   With the default lazy allocation (``--l1-use-lazy``) a non-empty
+   ``--shm-name`` is accepted but ignored: the server logs
+   ``--shm-name '...' is set but SHM transfer is disabled`` and workers use
+   the inline path.  ``--shm-name`` is **mutually exclusive** with
+   ``--l1-devdax-path`` and with ``--l1-use-hugepages``: either combination
+   is rejected with a ``ValueError`` during config validation, so leave
+   ``--shm-name`` at ``""`` for those backends.  See
+   :ref:`mp/configuration:L1 Memory Manager`.
+
+   Confirm the active transport in the vLLM worker log.  The worker creates
+   its transfer context right after registration and logs which
+   implementation it ended up with:
+
+   .. code-block:: text
+
+       Creating EngineDrivenContextShm (shm_name=lmcache_l1_pool_lmcache_pool, pool_size=...)
+
+   If the SHM segment cannot be attached (for example the worker container
+   lacks ``--ipc host`` or ``/dev/shm`` is too small) the worker falls back
+   at this point and logs:
+
+   .. code-block:: text
+
+       Failed to initialize SHM context (shm_name=...), falling back to inline tensor transport
+       Creating EngineDrivenContextInline
+
+   ``Creating EngineDrivenContextInline`` without a preceding SHM line means
+   the server advertised no pool (``--shm-name`` unset or lazy allocation
+   on).  Check these lines rather than the ``mode=`` field of the later
+   ``Worker engine-driven context registered (...)`` message, which reflects
+   what the server advertised, not whether SHM attachment succeeded.
+
+The typed inline protocol is not compatible with older workers or servers.
+Upgrade both sides together; payloads from the previous untyped protocol are
+rejected rather than accepted as a fallback.
 
 .. list-table::
    :header-rows: 1
@@ -311,22 +427,26 @@ shared-memory (SHM) pool instead:
    * - Value
      - Effect
    * - ``""`` (empty string, default)
-     - No SHM pool; KV transfer uses the pickle-based path.  Works
+     - No SHM pool; KV transfer uses the typed inline path.  Works
        when ``/dev/shm`` is unavailable or when running without
-       ``--ipc host`` in Docker.
+       ``--ipc host`` in Docker, but is slow (see the warning above).
    * - ``"my_pool"`` (any non-empty name)
-     - Create a SHM pool with that exact segment name and use it for
-       KV transfers.  The deterministic, human-readable name also
-       helps with monitoring and debugging.
+     - Create a SHM pool and use it for KV transfers.  Requires
+       ``--no-l1-use-lazy``.  The segment is named
+       ``lmcache_l1_pool_<name>`` (the prefix is added when missing) so
+       stale segments can be cleaned up; the deterministic,
+       human-readable name also helps with monitoring and debugging.
 
 **Examples:**
 
 .. code-block:: bash
 
-    # Engine-driven path with pickle transfer (no SHM) -- the default:
+    # Engine-driven path with a named SHM pool -- recommended:
+    lmcache server --l1-size-gb 60 --eviction-policy LRU \
+        --supported-transfer-mode engine_driven \
+        --shm-name "lmcache_pool" --no-l1-use-lazy
+
+    # Engine-driven path with typed inline transfer (no SHM) -- fallback for
+    # hosts without /dev/shm; expect much slower store/retrieve:
     lmcache server --l1-size-gb 60 --eviction-policy LRU \
         --supported-transfer-mode engine_driven
-
-    # Engine-driven path with a named SHM segment:
-    lmcache server --l1-size-gb 60 --eviction-policy LRU \
-        --supported-transfer-mode engine_driven --shm-name "lmcache_pool"

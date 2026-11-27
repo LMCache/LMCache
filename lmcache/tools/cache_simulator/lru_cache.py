@@ -29,12 +29,13 @@ class LRUCacheFast:
     Parameters
     ----------
     capacity:
-        Maximum number of entries before LRU eviction kicks in.
+        Maximum number of entries before LRU eviction kicks in. Zero disables
+        storage; negative capacities are invalid.
     """
 
     def __init__(self, capacity: int) -> None:
-        if capacity < 1:
-            raise ValueError(f"LRUCacheFast capacity must be >= 1, got {capacity}")
+        if capacity < 0:
+            raise ValueError(f"LRUCacheFast capacity must be >= 0, got {capacity}")
         self.capacity = capacity
         self._cache: OrderedDict[Any, None] = OrderedDict()
         self.eviction_count: int = 0
@@ -46,15 +47,25 @@ class LRUCacheFast:
         """Mark an existing entry as most-recently used. O(1)."""
         self._cache.move_to_end(key)
 
-    def insert(self, key: Any) -> None:
-        """Insert a new entry, or refresh if already present. O(1)."""
+    def insert(self, key: Any) -> Any | None:
+        """Insert or refresh an entry; do nothing at zero capacity. O(1).
+
+        Returns:
+            The key evicted to make room, or ``None`` when nothing was
+            evicted. Callers that mirror the cache's contents elsewhere
+            (e.g. a fingerprint index) use it to drop the same entry.
+        """
+        if self.capacity == 0:
+            return None
         if key in self._cache:
             self._cache.move_to_end(key)
-            return
+            return None
+        evicted = None
         if len(self._cache) >= self.capacity:
-            self._cache.popitem(last=False)
+            evicted, _ = self._cache.popitem(last=False)
             self.eviction_count += 1
         self._cache[key] = None
+        return evicted
 
     def __len__(self) -> int:
         return len(self._cache)
@@ -74,12 +85,13 @@ class LRUCache:
     Parameters
     ----------
     capacity:
-        Maximum number of entries before LRU eviction kicks in.
+        Maximum number of entries before LRU eviction kicks in. Zero disables
+        storage; negative capacities are invalid.
     """
 
     def __init__(self, capacity: int) -> None:
-        if capacity < 1:
-            raise ValueError(f"LRUCache capacity must be >= 1, got {capacity}")
+        if capacity < 0:
+            raise ValueError(f"LRUCache capacity must be >= 0, got {capacity}")
         self.capacity = capacity
         self._clock: int = 0
         self._map: dict[Any, int] = {}  # key -> clock value at last access
@@ -107,7 +119,9 @@ class LRUCache:
         self._sl.add((self._clock, key))
 
     def insert(self, key: Any) -> None:
-        """Insert a new entry, or refresh if already present. O(log n)."""
+        """Insert or refresh an entry; do nothing at zero capacity. O(log n)."""
+        if self.capacity == 0:
+            return
         if key in self._map:
             self.access(key)
             return

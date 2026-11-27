@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import gc
 import inspect
+import weakref
 
 # Third Party
 import pytest
@@ -9,16 +11,17 @@ import pytest
 from lmcache import torch_device_type
 from lmcache.v1.platform.base.device_spec import DeviceSpec
 from lmcache.v1.platform.base.event_ipc import (
+    _EXPORTED_EVENT_RING_SIZE,
     DefaultEventIPCBackend,
     EventIPCBackend,
     get_event_ipc_backend,
 )
-from lmcache.v1.platform.cpu import CpuDeviceSpec
-from lmcache.v1.platform.cuda import CudaDeviceSpec
-from lmcache.v1.platform.cuda.timeline_semaphore_event_ipc import (
+from lmcache.v1.platform.devices.cpu import CpuDeviceSpec
+from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
+from lmcache.v1.platform.devices.cuda.timeline_semaphore_event_ipc import (
     TimelineSemaphoreEventIPCBackend,
 )
-from lmcache.v1.platform.isolated_ipc import is_isolated_ipc, set_isolated_ipc
+from lmcache.v1.platform.ipc_policy import is_isolated_ipc, set_isolated_ipc
 import lmcache.v1.platform as platform
 
 pytestmark = pytest.mark.skipif(
@@ -94,6 +97,36 @@ def test_default_backend_create_export_import_delegate():
         _is_device := imported.calls[0][1],
         b"h",
     ) == imported.calls[0]
+
+
+def test_export_event_retains_event_while_handle_is_usable():
+    """An IPC handle dangles if its event dies, so export must retain it.
+
+    The exporter previously dropped its only reference on return, so whether a
+    peer could still import the handle depended on refcount/GC timing.
+    """
+    backend = DefaultEventIPCBackend(
+        event_module=_FakeEventModule(), device_type="fake"
+    )
+    event = backend.create_event(_Device("fake"))
+    alive = weakref.ref(event)
+
+    backend.export_event(event, _Device("fake"))
+    del event
+    gc.collect()
+
+    assert alive() is not None
+
+
+def test_exported_event_retention_is_bounded():
+    """Retention must not grow without limit on a long-lived backend."""
+    backend = DefaultEventIPCBackend(
+        event_module=_FakeEventModule(), device_type="fake"
+    )
+    for _ in range(_EXPORTED_EVENT_RING_SIZE + 64):
+        backend.export_event(backend.create_event(_Device("fake")), _Device("fake"))
+
+    assert len(backend._exported_events) == _EXPORTED_EVENT_RING_SIZE
 
 
 def test_default_backend_record_wait_query_synchronize_delegate():

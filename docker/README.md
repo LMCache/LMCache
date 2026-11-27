@@ -20,14 +20,13 @@ This directory contains Dockerfiles for building different LMCache images. Each 
 **Build Targets**:
 - `image-build`: Builds with vLLM nightly and LMCache from source
 - `image-release`: Uses stable vLLM release and LMCache from PyPI
-- `image-release-cu129`: Uses nightly cu12.9 vLLM and LMCache from the cu12.9 GitHub Release
 
 **Usage**:
 
 ```bash
 # Build with nightly vLLM
 docker build \
-  --build-arg CUDA_VERSION=13.0 \
+  --build-arg CUDA_VERSION=13.2 \
   --build-arg UBUNTU_VERSION=24.04 \
   --target image-build \
   --tag lmcache/vllm-openai:latest \
@@ -36,35 +35,38 @@ docker build \
 # Build with stable releases
 docker build \
   --build-arg CUDA_VERSION=13.0 \
+  --build-arg NGC_VERSION=25.09 \
   --build-arg UBUNTU_VERSION=24.04 \
   --target image-release \
   --tag lmcache/vllm-openai:latest \
   --file docker/Dockerfile .
-
-# Build with cu12.9 release packages
-docker build \
-  --build-arg CUDA_VERSION=12.9 \
-  --build-arg UBUNTU_VERSION=24.04 \
-  --build-arg LMCACHE_VERSION=<version> \
-  --target image-release-cu129 \
-  --tag lmcache/vllm-openai:cu129 \
-  --file docker/Dockerfile .
 ```
 
-**Run Example**:
+The stable vLLM release is currently built for CUDA 13.0, so `image-release`
+needs `CUDA_VERSION=13.0` and `NGC_VERSION=25.09` as shown. With the default
+CUDA 13.2 the build stops at its `import torchaudio` check, because vLLM's
+pinned torchaudio has no CUDA 13.2 wheel.
 
-```bash
-export HF_TOKEN=<your_huggingface_token>
+Run the image with a separate ``lmcache server`` and
+``LMCacheMPConnector`` as described in the
+[Docker deployment guide](../docs/source/production/docker_deployment.rst).
 
-docker run --runtime nvidia --gpus all \
-  -v ~/.cache/huggingface:/root/.cache/huggingface \
-  -p 8000:8000 \
-  --ipc=host \
-  lmcache/vllm-openai:latest \
-  Qwen/Qwen3-0.6B \
-  --kv-transfer-config \
-  '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
-```
+**Note**: The image runs as the non-root user `lmcache` (uid 1000) by
+default, so Hugging Face caches under the user's home directory
+(`/home/lmcache/.cache/huggingface`).
+
+- The bind mount above reuses models already downloaded in the host's
+  `$HOME/.cache/huggingface`. The directory and its contents must be readable
+  and writable by container uid 1000. If the host cache has different ownership,
+  grant that user access using the host's permission or ACL configuration.
+- For a separate Docker-managed cache, use
+  `-v hf-cache:/home/lmcache/.cache/huggingface` instead. A new empty named volume
+  inherits the image's pre-created cache directory ownership; existing volumes
+  retain their permissions. This does not reuse the host's Hugging Face cache.
+- To reuse a cache previously populated under `/root` (or to run with
+  root for any other reason), use `docker run --user 0 ...`. On
+  Kubernetes, set `securityContext.runAsUser: 0` (or use the `lmcache`
+  uid 1000).
 
 ---
 
@@ -86,7 +88,7 @@ docker run --runtime nvidia --gpus all \
 
 ```bash
 docker build \
-  --build-arg CUDA_VERSION=13.0 \
+  --build-arg CUDA_VERSION=13.2 \
   --build-arg UBUNTU_VERSION=24.04 \
   --target lmcache-final \
   --tag lmcache/standalone:latest \
@@ -133,21 +135,61 @@ docker build \
   --file docker/Dockerfile.lightweight .
 ```
 
+Use this image as the vLLM side of an MP deployment; start a separate LMCache
+server and configure ``LMCacheMPConnector`` as shown in the
+[Docker deployment guide](../docs/source/production/docker_deployment.rst).
+
+---
+
+### 4. `Dockerfile.sglang` - SGLang
+
+**Image**: `lmcache/sglang:latest`
+
+**Description**: The official SGLang release image (`lmsysorg/sglang`) with LMCache compiled from source against the torch in that image. SGLang supports only LMCache MP mode, so this image runs SGLang with `--enable-lmcache` and connects to a separate LMCache server (for example `lmcache/standalone`).
+
+Release builds use the SGLang release that `lmsysorg/sglang:latest` points to and pass its exact tag as `SGLANG_VERSION`, so the image label names the SGLang it contains. LMCache is installed from the checked-out release source with `--no-build-isolation`; this compiles its native extensions against SGLang's torch instead of the torch pin used by the general vLLM wheel. The build fails if the resolved torch differs from the image, if installing dependencies changes SGLang's torch/CUDA stack, or if LMCache's native extension or SGLang connector does not load.
+
+**Build Arguments**:
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `LMCACHE_VERSION` | (required) | Version expected from the LMCache source in the build context, e.g. `v0.5.8` |
+| `SGLANG_VERSION` | `latest` | `lmsysorg/sglang` tag, e.g. `v0.5.23` |
+| `EXPECTED_TORCH` | (empty, check skipped) | torch version shipped by the selected SGLang image; the release workflow always sets it |
+| `torch_cuda_arch_list` | `7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX` | CUDA architectures compiled into the LMCache native extension |
+
+**Usage**:
+
+```bash
+docker build \
+  --build-arg LMCACHE_VERSION=v0.5.8 \
+  --build-arg EXPECTED_TORCH=2.14.1 \
+  --tag lmcache/sglang:v0.5.8 \
+  --file docker/Dockerfile.sglang .
+```
+
 **Run Example**:
 
 ```bash
-export HF_TOKEN=<your_huggingface_token>
+# LMCache server
+docker run -d --name lmcache --runtime nvidia --gpus all \
+  --network host --ipc host \
+  lmcache/standalone:latest \
+  /opt/venv/bin/lmcache server --host 127.0.0.1 --port 5555 \
+  --l1-size-gb 10 --eviction-policy LRU
 
+# SGLang, connected through the environment variables
 docker run --runtime nvidia --gpus all \
+  --network host --ipc host \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   --env "HF_TOKEN=$HF_TOKEN" \
-  -p 8000:8000 \
-  --ipc=host \
-  lmcache/vllm-openai:lightweight \
-  Qwen/Qwen3-0.6B \
-  --kv-transfer-config \
-  '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+  --env LMCACHE_MP_HOST=127.0.0.1 --env LMCACHE_MP_PORT=5555 \
+  lmcache/sglang:latest \
+  python3 -m sglang.launch_server --model-path Qwen/Qwen3-0.6B \
+  --host 0.0.0.0 --port 30000 --enable-lmcache
 ```
+
+Both containers share the host IPC namespace (`--ipc host`) so the LMCache server can open the CUDA IPC handles SGLang registers.
 
 ---
 
@@ -168,6 +210,9 @@ docker run --runtime nvidia --gpus all \
 - Prefer stable releases from PyPI
 - Need fast build times
 
+### Use `Dockerfile.sglang` if you:
+- Serve with SGLang instead of vLLM
+
 ---
 
 ## CUDA Build Arguments
@@ -176,7 +221,8 @@ docker run --runtime nvidia --gpus all \
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `CUDA_VERSION` | `13.0` | CUDA version to use |
+| `CUDA_VERSION` | `13.2` | CUDA version to use |
+| `NGC_VERSION` | `26.05` | NGC `cuda-dl-base` release; must be one that ships `CUDA_VERSION` |
 | `UBUNTU_VERSION` | `24.04` | Ubuntu base version |
 | `PYTHON_VERSION` | `3.12` | Python version |
 | `max_jobs` | `2` | Max parallel jobs for build |
@@ -207,11 +253,27 @@ Pre-built images are available on Docker Hub:
 - `lmcache/vllm-openai:lightweight` - Lightweight version
 - `lmcache/standalone:latest` - Latest standalone release
 - `lmcache/standalone:{version}` - Specific standalone version
+- `lmcache/sglang:latest` - Latest stable release with SGLang
+- `lmcache/sglang:{version}` - Specific version, including release candidates (e.g., `v0.5.6rc1`)
 
 ```bash
 # Pull pre-built images
 docker pull lmcache/vllm-openai:latest
 docker pull lmcache/standalone:latest
+```
+
+The default CUDA 13 `lmcache/vllm-openai`, `lmcache/standalone`, and
+`lmcache/lmcache-payload` release and nightly tags, and the `lmcache/sglang`
+release tags, are multi-platform images
+for `linux/amd64` and `linux/arm64`. The `lmcache/vllm-openai:lightweight`
+release image supports both platforms as well. Docker selects the matching image automatically. The
+ARM64 variant targets NVIDIA Grace/SBSA systems; it is not a Jetson/L4T image.
+To select one explicitly:
+
+```bash
+docker pull --platform linux/arm64 lmcache/vllm-openai:latest
+docker pull --platform linux/arm64 lmcache/vllm-openai:lightweight
+docker pull --platform linux/arm64 lmcache/standalone:latest
 ```
 
 ---

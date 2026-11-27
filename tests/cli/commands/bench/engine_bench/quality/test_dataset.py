@@ -127,6 +127,106 @@ class TestLoadSamplesCacheBlendStyle:
         )
 
 
+class TestLoadSamplesRagasHandoff:
+    """NVIDIA's ``inputs_<dataset>.jsonl``: RAGAS field names, a ``_meta`` row."""
+
+    _META = {"id": "_meta", "dataset": "hotpotqa", "system_prompt": "..."}
+
+    def _record(self, **overrides) -> dict:
+        record = {
+            "id": "h1",
+            "user_input": "Where is it based?",
+            "reference": "Bassendean",
+            "retrieved_contexts": ["Passage one.", "Passage two.", "Passage three."],
+            "context_metadata": [
+                {"source_id": "A", "gold": False},
+                {"source_id": "B", "gold": True},
+                {"source_id": "C", "gold": False},
+            ],
+        }
+        record.update(overrides)
+        return record
+
+    def test_reads_question_reference_and_contexts(self, tmp_path) -> None:
+        path = _write_jsonl(tmp_path, "inputs.jsonl", [self._META, self._record()])
+        [sample] = load_samples(path)
+        assert sample.sample_id == "h1"
+        assert sample.question == "Where is it based?"
+        assert sample.answers == ["Bassendean"]
+        assert sample.documents == ["Passage one.", "Passage two.", "Passage three."]
+
+    def test_meta_row_is_skipped(self, tmp_path) -> None:
+        path = _write_jsonl(tmp_path, "inputs.jsonl", [self._META, self._record()])
+        assert [s.sample_id for s in load_samples(path)] == ["h1"]
+
+    def test_gold_flags_mark_evidence(self, tmp_path) -> None:
+        path = _write_jsonl(tmp_path, "inputs.jsonl", [self._record()])
+        [sample] = load_samples(path)
+        assert sample.evidence_indices == [1]
+
+    def test_evidence_follows_its_passage_past_dropped_ones(self, tmp_path) -> None:
+        """An empty passage is dropped; evidence must still point at its text."""
+        record = self._record(retrieved_contexts=["", "Passage two.", "Passage three."])
+        path = _write_jsonl(tmp_path, "inputs.jsonl", [record])
+        [sample] = load_samples(path)
+        assert sample.documents[sample.evidence_indices[0]] == "Passage two."
+
+    def test_without_metadata_no_evidence_is_marked(self, tmp_path) -> None:
+        record = self._record()
+        del record["context_metadata"]
+        path = _write_jsonl(tmp_path, "inputs.jsonl", [record])
+        assert load_samples(path)[0].evidence_indices == []
+
+    def test_longbench_aliases_follow_the_reference(self, tmp_path) -> None:
+        """LongBench hand-offs keep alternate answers in ``extra``."""
+        record = self._record(
+            reference="Nightwing",
+            extra={"answer_aliases": ["Nightwing", "Dick Grayson"]},
+        )
+        path = _write_jsonl(tmp_path, "inputs.jsonl", [record])
+        assert load_samples(path)[0].answers == ["Nightwing", "Dick Grayson"]
+
+
+class TestLoadSamplesEvidence:
+    def test_musique_supporting_paragraphs(self, tmp_path) -> None:
+        record = {
+            "id": "m1",
+            "paragraphs": [
+                {"title": "A", "paragraph_text": "a", "is_supporting": False},
+                {"title": "B", "paragraph_text": "b", "is_supporting": True},
+            ],
+            "question": "q?",
+            "answer": "x",
+        }
+        path = _write_jsonl(tmp_path, "m.jsonl", [record])
+        assert load_samples(path)[0].evidence_indices == [1]
+
+    def test_hotpot_struct_supporting_facts(self, tmp_path) -> None:
+        record = {
+            "id": "h1",
+            "context": {
+                "title": ["A", "B", "C"],
+                "sentences": [["a."], ["b."], ["c."]],
+            },
+            "supporting_facts": {"title": ["C", "A"], "sent_id": [0, 0]},
+            "question": "q?",
+            "answer": "x",
+        }
+        path = _write_json(tmp_path, "h.json", [record])
+        assert load_samples(path)[0].evidence_indices == [0, 2]
+
+    def test_hotpot_pair_supporting_facts(self, tmp_path) -> None:
+        record = {
+            "_id": "h1",
+            "context": [["A", ["a."]], ["B", ["b."]]],
+            "supporting_facts": [["B", 0]],
+            "question": "q?",
+            "answer": "x",
+        }
+        path = _write_json(tmp_path, "h.json", [record])
+        assert load_samples(path)[0].evidence_indices == [1]
+
+
 class TestLoadSamplesRejection:
     """Unusable records are skipped rather than silently scored."""
 

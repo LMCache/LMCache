@@ -2,8 +2,8 @@
 """
 No-op eviction policy for buffer-only mode.
 
-When L1 is used purely as a write buffer (data is deleted from L1
-immediately after being stored to L2 by the StoreController), there
+When L1 is used purely as a write buffer (the StoreController deletes
+data from L1 once it is stored to L2 and no reader holds it), there
 is no need for the eviction policy to track keys at all.
 """
 

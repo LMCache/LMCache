@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
+from pathlib import Path
 from unittest.mock import patch
 import os
 import select
@@ -13,7 +14,13 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
-from lmcache.v1.distributed.internal_api import L2AdapterListener
+from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2AdapterListener
+from lmcache.v1.distributed.l2_adapters.raw_block import encode_object_key
+from lmcache.v1.distributed.l2_adapters.raw_block.io_engine import (
+    IoUringBlockIO,
+    IoUringBlockIOConfig,
+    RawBlockIOConfig,
+)
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
     RawBlockL2Adapter,
     RawBlockL2AdapterConfig,
@@ -23,9 +30,12 @@ from lmcache.v1.distributed.storage_controllers.eviction_controller import (
 )
 from lmcache.v1.memory_management import (
     MemoryFormat,
+    MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from tests.v1.distributed.raw_block.test_utils import _RecordingRawDevice
+import lmcache.v1.distributed.l2_adapters.raw_block.core as raw_block_core
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -138,6 +148,7 @@ def _make_config(
     capacity_bytes: int = 0,
     io_engine: str = "posix",
     use_uring_cmd: bool = False,
+    max_data_transfer_size: int = 0,
 ) -> RawBlockL2AdapterConfig:
     return RawBlockL2AdapterConfig(
         device_path=device_path,
@@ -146,6 +157,7 @@ def _make_config(
         use_odirect=False,
         io_engine=io_engine,
         use_uring_cmd=use_uring_cmd,
+        max_data_transfer_size=max_data_transfer_size,
         block_align=4096,
         header_bytes=4096,
         meta_total_bytes=1 * 1024 * 1024,
@@ -182,6 +194,20 @@ def test_raw_block_l2_adapter_config_accepts_io_engine_values(io_engine):
 def test_raw_block_l2_adapter_config_rejects_invalid_io_engine():
     with pytest.raises(ValueError, match="io_engine"):
         RawBlockL2AdapterConfig.from_dict(_config_dict(io_engine="uring"))
+
+
+def test_raw_block_l2_adapter_buffered_iouring_accepts_unaligned_l1() -> None:
+    """Buffered io_uring does not require block-aligned L1 memory."""
+    config = RawBlockL2AdapterConfig.from_dict(_config_dict(io_engine="io_uring"))
+    descriptor = L1MemoryDesc(ptr=0x4000, size=8192, align_bytes=1024)
+    with patch(
+        "lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter.RawBlockCore",
+        autospec=True,
+    ) as core_cls:
+        core_cls.return_value.report_status.return_value = {}
+        core_cls.return_value.snapshot_indexed_keys.return_value = []
+        adapter = RawBlockL2Adapter(config, descriptor)
+        adapter.close()
 
 
 @pytest.mark.parametrize("legacy_key", ["use_iouring", "use_uring"])
@@ -636,3 +662,83 @@ def test_raw_block_l2_adapter_error_bitmaps_keep_submitted_size():
             assert str(load_bitmap) == "00"
         finally:
             adapter.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_uecc_preserves_healthy_slots(
+    tmp_path: Path,
+) -> None:
+    """A payload UECC retires its slot while healthy siblings continue serving."""
+    fake = _RecordingRawDevice(size=8 * 1024 * 1024)
+    config = _make_config(
+        str(tmp_path / "device"),
+        capacity_bytes=fake.size,
+        io_engine="io_uring",
+        use_uring_cmd=True,
+        max_data_transfer_size=4096,
+    )
+
+    def make_engine(cfg: RawBlockIOConfig) -> IoUringBlockIO:
+        assert isinstance(cfg, IoUringBlockIOConfig)
+        engine = IoUringBlockIO.from_config(cfg)
+        engine._raw = fake
+        return engine
+
+    with (
+        patch.object(IoUringBlockIO, "validate_uring_cmd_device"),
+        patch.object(raw_block_core, "make_raw_block_io", make_engine),
+    ):
+        adapter = RawBlockL2Adapter(config)
+    try:
+        keys = [_create_object_key(51), _create_object_key(52)]
+        encoded = [encode_object_key(key).encoded for key in keys]
+        sizes = [4096, 1024]  # float32 elements: four and one 4 KiB chunks
+        objects: list[MemoryObj] = [
+            _create_memory_obj(size=size, fill_value=1.0) for size in sizes
+        ]
+        assert _run_store(adapter, keys, objects)
+        assert adapter.pop_completed_store_tasks() == {}
+        core = adapter._core
+        entry_offset = core.entry_offset(encoded[0])
+        assert entry_offset is not None
+        failing_offset = entry_offset + core.header_bytes + 8192
+        destinations = [_create_memory_obj(size=size) for size in sizes]
+
+        listener = _RecordingListener()
+        adapter.register_listener(listener)
+        for uecc in (False, True):
+            lookup_id, hits = _run_lookup(adapter, keys)
+            assert str(hits) == "11"
+            assert adapter.query_lookup_and_lock_result(lookup_id) is None
+            assert [core.lock_refcount(key) for key in encoded] == [1, 1]
+            if uecc:
+                fake.uecc_on_next_wait_batch = True
+            else:
+                fake.fail_completion_entries.add(2)
+            load_id, loaded = _run_load(adapter, keys, destinations)
+            assert fake.last_read_lens == [4096] * 5
+            assert fake.last_read_offsets[2] == failing_offset
+            assert str(loaded) == "01"
+            assert adapter.query_load_result(load_id) is None
+            adapter.submit_unlock(keys)
+            assert [core.lock_refcount(key) for key in encoded] == [0, 0]
+            assert adapter.report_status()["is_healthy"]
+            if not uecc:
+                assert listener.deleted == []
+                fake.fail_completion_entries.clear()
+        assert listener.deleted == [[keys[0]]]
+        assert adapter.get_usage().total_bytes_used == core.slot_bytes
+        lookup_id, hits = _run_lookup(adapter, keys)
+        assert str(hits) == "01"
+        assert adapter.query_lookup_and_lock_result(lookup_id) is None
+        load_id, loaded = _run_load(adapter, keys[1:], destinations[1:])
+        assert str(loaded) == "1"
+        assert adapter.query_load_result(load_id) is None
+        adapter.submit_unlock(keys[1:])
+        assert _run_store(adapter, keys[:1], objects[:1])
+        assert core.entry_offset(encoded[0]) not in (None, entry_offset)
+        assert adapter.get_usage().total_bytes_used == 2 * core.slot_bytes
+        _, restored = _run_load(adapter, keys, destinations)
+        assert str(restored) == "11"
+    finally:
+        adapter.close()

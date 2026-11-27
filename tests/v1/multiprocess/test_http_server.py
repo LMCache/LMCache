@@ -1,18 +1,273 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the POST /cache/checksums endpoint (and other MP HTTP routes)."""
+"""Tests for MP HTTP server routes and lifespan wiring."""
 
 # Standard
+from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock
+import asyncio
 
 # Third Party
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 import torch
 
 # First Party
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
+from lmcache.v1.mp_coordinator import cache_events as cache_events_module
+from lmcache.v1.mp_coordinator.cache_events import (
+    CacheEventSink,
+)
+from lmcache.v1.mp_observability.config import ObservabilityConfig
+from lmcache.v1.multiprocess import http_server as http_server_module
+from lmcache.v1.multiprocess.config import (
+    CoordinatorConfig,
+    HTTPFrontendConfig,
+    KafkaCacheEventSinkConfig,
+    MPServerConfig,
+    P2PConfig,
+)
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 from lmcache.v1.multiprocess.http_server import app
 import lmcache.lmcache_native as lmcache_native
+
+
+def test_lifespan_owns_transport_neutral_request_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The HTTP lifecycle closes RequestServer without exposing ZMQ state."""
+    request_server = MagicMock()
+    engine = MagicMock()
+    event_bus = MagicMock()
+    mp_config = MagicMock()
+    mp_config.runtime_plugin_config.locations = []
+
+    monkeypatch.setattr(
+        http_server_module,
+        "_configs",
+        {
+            "mp": mp_config,
+            "storage_manager": MagicMock(),
+            "observability": MagicMock(),
+        },
+    )
+    monkeypatch.setattr(
+        http_server_module,
+        "run_cache_server",
+        MagicMock(return_value=(request_server, engine)),
+    )
+    monkeypatch.setattr(http_server_module, "build_context", MagicMock())
+    monkeypatch.setattr(
+        http_server_module,
+        "get_event_bus",
+        MagicMock(return_value=event_bus),
+    )
+
+    async def exercise_lifespan() -> None:
+        test_app = FastAPI()
+        async with http_server_module.lifespan(test_app):
+            assert not hasattr(test_app.state, "zmq_server")
+            assert test_app.state.request_server is request_server
+            assert test_app.state.engine is engine
+
+    asyncio.run(exercise_lifespan())
+
+    request_server.close.assert_called_once_with()
+    engine.close.assert_called_once_with()
+    event_bus.stop.assert_called_once_with()
+
+
+def _patch_lifespan_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    coordinator_config: CoordinatorConfig,
+    request_server: MagicMock,
+    engine: MagicMock,
+    event_bus: MagicMock,
+) -> None:
+    """Point the lifespan at stand-ins so it runs without a cache engine.
+
+    Coordinator registration is replaced by a task that never contacts a
+    coordinator, so a config with a URL exercises the wiring only.
+
+    Args:
+        monkeypatch: The test's monkeypatch fixture.
+        coordinator_config: Coordinator settings the lifespan reads.
+        request_server: Returned by the patched ``run_cache_server``.
+        engine: Returned by the patched ``run_cache_server``.
+        event_bus: Returned by the patched ``get_event_bus``.
+    """
+    monkeypatch.setattr(
+        http_server_module,
+        "_configs",
+        {
+            "mp": MPServerConfig(),
+            "storage_manager": MagicMock(),
+            "observability": ObservabilityConfig(),
+            "http": HTTPFrontendConfig(),
+            "coordinator": coordinator_config,
+        },
+    )
+    monkeypatch.setattr(
+        http_server_module,
+        "run_cache_server",
+        MagicMock(return_value=(request_server, engine)),
+    )
+    monkeypatch.setattr(http_server_module, "build_context", MagicMock())
+    monkeypatch.setattr(
+        http_server_module,
+        "get_event_bus",
+        MagicMock(return_value=event_bus),
+    )
+
+    async def _never_registers(*args: object, **kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(http_server_module, "keep_registered", _never_registers)
+
+
+def test_event_reporting_builds_sink_from_transport_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The lifespan passes the coordinator and MP auth configs to the sink."""
+    coordinator_config = CoordinatorConfig(
+        url="http://coordinator:9300",
+        event_reporting=True,
+        event_sink_config=KafkaCacheEventSinkConfig(bootstrap_servers="broker:9092"),
+    )
+    request_server = MagicMock()
+    engine = MagicMock()
+    event_bus = MagicMock()
+    create_sink = MagicMock(return_value=MagicMock(spec=CacheEventSink))
+    _patch_lifespan_dependencies(
+        monkeypatch, coordinator_config, request_server, engine, event_bus
+    )
+    key_file = tmp_path / "coordinator-key"
+    key_file.write_text("secret\n", encoding="utf-8")
+    http_server_module._configs["mp"].api_key_files = [str(key_file)]
+    monkeypatch.setattr(cache_events_module, "create_cache_event_sink", create_sink)
+
+    async def exercise_lifespan() -> None:
+        async with http_server_module.lifespan(FastAPI()):
+            create_sink.assert_called_once_with(coordinator_config, [str(key_file)])
+            event_bus.register_subscriber.assert_called_once()
+
+    asyncio.run(exercise_lifespan())
+
+    event_bus.stop.assert_called_once_with()
+    request_server.close.assert_called_once_with()
+    engine.close.assert_called_once_with()
+
+
+def test_http_event_reporting_without_coordinator_url_registers_no_subscriber(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default HTTP transport still needs a coordinator URL to report."""
+    coordinator_config = CoordinatorConfig(event_reporting=True)
+    event_bus = MagicMock()
+    create_sink = MagicMock()
+    _patch_lifespan_dependencies(
+        monkeypatch, coordinator_config, MagicMock(), MagicMock(), event_bus
+    )
+    monkeypatch.setattr(cache_events_module, "create_cache_event_sink", create_sink)
+
+    async def exercise_lifespan() -> None:
+        async with http_server_module.lifespan(FastAPI()):
+            create_sink.assert_not_called()
+            event_bus.register_subscriber.assert_not_called()
+
+    asyncio.run(exercise_lifespan())
+
+
+def _start_server_with_p2p(
+    monkeypatch: pytest.MonkeyPatch,
+    p2p_config: P2PConfig,
+    store_policy: str = "default",
+    prefetch_policy: str = "default",
+) -> StorageManagerConfig:
+    """Run ``run_http_server`` without serving and return the storage
+    manager configuration the server would start with."""
+    size = 1 << 20
+    storage_manager_config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=size, use_lazy=False, init_size_in_bytes=size
+            ),
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+        store_policy=store_policy,
+        prefetch_policy=prefetch_policy,
+    )
+    monkeypatch.setattr(http_server_module, "_configs", {})
+    monkeypatch.setattr(http_server_module.uvicorn, "Server", MagicMock())
+    http_server_module.run_http_server(
+        HTTPFrontendConfig(),
+        MPServerConfig(p2p_config=p2p_config),
+        storage_manager_config,
+        ObservabilityConfig(),
+        CoordinatorConfig(url="http://coordinator:9000"),
+    )
+    return http_server_module.app.state.configs["storage_manager"]
+
+
+@pytest.mark.parametrize(
+    ("enable_write", "chosen", "expected"),
+    [
+        pytest.param(
+            True,
+            ("default", "default"),
+            ("p2p", "skip_l1"),
+            id="writes-select-both-policies",
+        ),
+        pytest.param(
+            True,
+            ("p2p", "default"),
+            ("p2p", "skip_l1"),
+            id="an-explicit-p2p-store-policy-still-selects-the-prefetch-policy",
+        ),
+        pytest.param(
+            True,
+            ("skip_l1", "default"),
+            ("skip_l1", "skip_l1"),
+            id="an-explicit-store-policy-is-kept",
+        ),
+        pytest.param(
+            True,
+            ("default", "retain"),
+            ("p2p", "retain"),
+            id="an-explicit-prefetch-policy-is-kept",
+        ),
+        pytest.param(
+            False,
+            ("default", "default"),
+            ("default", "default"),
+            id="no-writes-no-change",
+        ),
+    ],
+)
+def test_p2p_write_picks_the_store_and_prefetch_policies(
+    monkeypatch: pytest.MonkeyPatch,
+    enable_write: bool,
+    chosen: tuple[str, str],
+    expected: tuple[str, str],
+) -> None:
+    started_with = _start_server_with_p2p(
+        monkeypatch,
+        P2PConfig(advertise_url="10.0.0.1:8700", enable_write=enable_write),
+        store_policy=chosen[0],
+        prefetch_policy=chosen[1],
+    )
+
+    assert (started_with.store_policy, started_with.prefetch_policy) == expected
+
+
+def test_p2p_write_without_p2p_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValueError, match="--p2p-advertise-url"):
+        _start_server_with_p2p(monkeypatch, P2PConfig(enable_write=True))
 
 
 def _make_kv_tensors(
@@ -360,7 +615,7 @@ class TestHealthAndMiscEndpoints:
         """200 and engine.clear() called."""
         resp = client_with_engine.post("/cache/clear", json={"tier": "l1"})
         assert resp.status_code == 200
-        mock_engine.clear.assert_called_once()
+        mock_engine.clear.assert_called_once_with(force=False)
 
     def test_status_no_engine(self, client_no_engine):
         """503 when engine is not set."""

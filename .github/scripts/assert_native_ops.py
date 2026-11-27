@@ -53,8 +53,7 @@ def main() -> int:
     except ImportError as exc:
         print(
             f"::error::{module} is installed but failed to load against torch "
-            f"{torch.__version__}; LMCache would silently fall back to the torch "
-            f"baseline for all ops. {exc}"
+            f"{torch.__version__}; native extension is unavailable. {exc}"
         )
         return 1
 

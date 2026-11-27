@@ -63,7 +63,8 @@ func (r *LMCacheCoordinatorReconciler) validateAndSetCondition(ctx context.Conte
 	return nil
 }
 
-// reconcileDeployment creates or updates the coordinator Deployment.
+// reconcileDeployment creates or updates the coordinator Deployment, preserving
+// the existing selector's labels in the pod template on updates.
 func (r *LMCacheCoordinatorReconciler) reconcileDeployment(ctx context.Context, coordinator *lmcachev1alpha1.LMCacheCoordinator) error {
 	desired := resources.BuildCoordinatorDeployment(coordinator)
 
@@ -81,6 +82,10 @@ func (r *LMCacheCoordinatorReconciler) reconcileDeployment(ctx context.Context, 
 
 	// Preserve immutable selector.
 	desired.Spec.Selector = existing.Spec.Selector
+	desired.Spec.Template.Labels = resources.MergeLabels(
+		desired.Spec.Template.Labels,
+		existing.Spec.Selector.MatchLabels,
+	)
 
 	if err := ctrl.SetControllerReference(coordinator, desired, r.Scheme); err != nil {
 		return err

@@ -42,7 +42,7 @@ def test_register_returns_assigned_id():
     asyncio.run(run())
 
 
-def test_register_forwards_p2p_and_mq_fields():
+def test_register_forwards_p2p_mq_and_chunk_size_fields():
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -62,6 +62,7 @@ def test_register_forwards_p2p_and_mq_fields():
                 instance_id="i1",
                 p2p_advertised_url="10.0.0.1:7600",
                 mq_port=5555,
+                chunk_size=640,
             )
 
     asyncio.run(run())
@@ -70,6 +71,7 @@ def test_register_forwards_p2p_and_mq_fields():
     assert captured["ip"] == "10.0.0.1"
     assert captured["p2p_advertised_url"] == "10.0.0.1:7600"
     assert captured["mq_port"] == 5555
+    assert captured["chunk_size"] == 640
 
 
 def test_register_omits_mq_port_when_p2p_disabled():

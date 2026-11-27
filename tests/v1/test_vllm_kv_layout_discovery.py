@@ -79,6 +79,30 @@ class TestTranslateVllmKVCacheLayout:
 
 
 class TestTryGetVllmKVCacheLayout:
+    @pytest.mark.parametrize("reported_layout", ("NHD", "HND"))
+    def test_legacy_mlu_uses_physical_hnd_layout(
+        self, monkeypatch: pytest.MonkeyPatch, reported_layout: str
+    ) -> None:
+        """Cambricon's legacy V1 backend allocates [2, NB, NH, BS, HS]."""
+        monkeypatch.setattr("lmcache.integration.vllm.utils.torch_device_type", "mlu")
+        stub_module(
+            monkeypatch,
+            "vllm.v1.attention.backends.utils",
+            get_kv_cache_layout=lambda: reported_layout,
+        )
+        config = SimpleNamespace(cache_config=LegacyCacheConfig())
+        assert try_get_vllm_kv_cache_layout(config) == "HND"
+        assert vllm_layout_hints(config) == {"kv_layout": "HND"}
+
+    @pytest.mark.parametrize("resolved_layout", ("NHD", "HND", "BLNHC", "BLHNC"))
+    def test_mlu_preserves_resolved_layout(
+        self, monkeypatch: pytest.MonkeyPatch, resolved_layout: str
+    ) -> None:
+        """An explicit resolved layout takes precedence over legacy defaults."""
+        monkeypatch.setattr("lmcache.integration.vllm.utils.torch_device_type", "mlu")
+        config = make_vllm_config(resolved_layout)
+        assert try_get_vllm_kv_cache_layout(config) == resolved_layout
+
     def test_resolved_layout_from_explicit_config(self):
         config = make_vllm_config("LBNHC")
         assert try_get_vllm_kv_cache_layout(config) == "NHD"
@@ -118,6 +142,19 @@ class TestTryGetVllmKVCacheLayout:
         config = SimpleNamespace(cache_config=LegacyCacheConfig())
         assert try_get_vllm_kv_cache_layout(config) == "HND"
 
+    def test_legacy_neuron_nhd_is_normalized_at_vllm_boundary(self, monkeypatch):
+        """vllm-neuron reports NHD but allocates [2, NB, NH, BS, HS]."""
+        monkeypatch.setattr(
+            "lmcache.integration.vllm.utils.torch_device_type", "neuron"
+        )
+        stub_module(
+            monkeypatch,
+            "vllm.v1.attention.backends.utils",
+            get_kv_cache_layout=lambda: "NHD",
+        )
+        config = SimpleNamespace(cache_config=LegacyCacheConfig())
+        assert try_get_vllm_kv_cache_layout(config) == "HND"
+
     def test_vllm_absent_returns_none(self, monkeypatch):
         monkeypatch.setitem(sys.modules, "vllm", None)
         monkeypatch.setitem(sys.modules, "vllm.config", None)
@@ -139,6 +176,20 @@ class TestVllmLayoutHints:
         config = SimpleNamespace(cache_config=LegacyCacheConfig())
         assert vllm_layout_hints(config) == {"kv_layout": "HND"}
 
+    @pytest.mark.parametrize(
+        ("device_type", "expected"),
+        [("cpu", {"kv_layout": "HND"}), ("cuda", {})],
+    )
+    def test_unknown_layout_falls_back_by_device(
+        self, monkeypatch, device_type, expected
+    ):
+        monkeypatch.setattr(
+            "lmcache.integration.vllm.utils.torch_device_type", device_type
+        )
+        monkeypatch.setitem(sys.modules, "vllm", None)
+        monkeypatch.setitem(sys.modules, "vllm.config", None)
+        assert vllm_layout_hints() == expected
+
     def test_unresolved_layout_raises_through_hints(self):
         with pytest.raises(ValueError, match="resolved"):
             vllm_layout_hints(make_unresolved_vllm_config())
@@ -148,22 +199,17 @@ class TestResolveVllmKVLayout:
     @pytest.fixture
     def resolve(self):
         detectors_vllm = pytest.importorskip(
-            "lmcache.v1.gpu_connector.kv_format.detectors.vllm"
+            "lmcache.v1.common.kv_format.detectors.vllm"
         )
         return detectors_vllm.resolve_vllm_kv_layout
 
-    def test_cpu_backend_honors_explicit_layout(self, resolve):
-        assert resolve({"kv_layout": "NHD"}, cpu_attention_backend=True) == "NHD"
-
     def test_missing_hint_defaults_to_nhd(self, resolve):
-        assert resolve({}, cpu_attention_backend=False) == "NHD"
+        assert resolve({}) == "NHD"
 
-    def test_missing_cpu_hint_keeps_legacy_hnd_default(self, resolve):
-        assert resolve({}, cpu_attention_backend=True) == "HND"
-
-    def test_hnd_hint_passes_through(self, resolve):
-        assert resolve({"kv_layout": "HND"}, cpu_attention_backend=False) == "HND"
+    def test_hint_passes_through(self, resolve):
+        assert resolve({"kv_layout": "HND"}) == "HND"
+        assert resolve({"kv_layout": "NHD"}) == "NHD"
 
     def test_unsupported_hint_rejected(self, resolve):
         with pytest.raises(ValueError, match="LHBNC"):
-            resolve({"kv_layout": "LHBNC"}, cpu_attention_backend=False)
+            resolve({"kv_layout": "LHBNC"})

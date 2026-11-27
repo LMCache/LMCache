@@ -52,6 +52,13 @@ void execute_cb_retrieve_plan(const torch::Device& device,
         compute_done[parity].block(copy_stream);
       }
       for (const auto& copy : step.staging) {
+        if (copy.host_offset == kCBStagingD2D) {  // src: a slot staged above
+          C10_CUDA_CHECK(cudaMemcpyAsync(
+              reinterpret_cast<void*>(copy.dest),
+              reinterpret_cast<const void*>(copy.src), copy.nbytes,
+              cudaMemcpyDeviceToDevice, at::cuda::getCurrentCUDAStream()));
+          continue;
+        }
         lmcache_memcpy_async(copy.dest, copy.src, copy.nbytes,
                              TransferDirection::H2D, copy.host_offset,
                              host_buffer_alignment);
@@ -74,6 +81,7 @@ void execute_cb_retrieve_plan(const torch::Device& device,
           }
           rotary_embedding_k_fused_ramp_multi_ptr(
               rope_keys, static_cast<at::ScalarType>(group.key_scalar_type),
+              static_cast<at::ScalarType>(group.cache_scalar_type),
               static_cast<int64_t>(group.num_layers) * group.slot_tokens,
               rope_old, rope_new, group.slot_tokens,
               static_cast<int64_t>(group.head_size), group.rope_head_stride,
@@ -116,7 +124,8 @@ void execute_cb_retrieve_plan(const torch::Device& device,
             sc_bufs, sc_maps, sc_toks, group.paged_kv_ptrs, group.num_layers,
             group.slot_tokens, group.hidden_elems, group.element_size, device,
             group.page_buffer_size, TransferDirection::H2D,
-            group.engine_kv_format, group.block_size, group.head_size);
+            group.engine_kv_format, group.block_size, group.head_size,
+            group.block_stride_elems);
         sc_bufs.clear();
         sc_maps.clear();
         sc_toks.clear();

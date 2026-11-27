@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """The unified per-device operations abstraction.
 
-:class:`DeviceOps` is a strategy base class whose every op is an instance
-method delegating to :mod:`lmcache.v1.platform.torch_ops`.  Accelerator
-subclasses override individual methods with native kernels via normal OO
-polymorphism, or bulk-rebind via :meth:`DeviceOps.bind_native`.
+:class:`DeviceOps` is a strategy base class whose portable ops delegate to
+:mod:`lmcache.v1.platform.torch_ops`. Accelerator subclasses override
+device-specific capabilities via normal OO polymorphism, or bulk-rebind native
+kernels via :meth:`DeviceOps.bind_native`.
 """
 
 # Future
@@ -18,9 +18,10 @@ if TYPE_CHECKING:
     import torch
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.platform import ops_types, torch_ops
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.common import ops_types
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
+from lmcache.v1.platform import torch_ops
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -29,8 +30,10 @@ logger = init_logger(__name__)
 class DeviceOps:
     """Strategy base: per-device ops resolved via normal instance MRO.
 
-    Every op is an instance method delegating to the torch baseline in
-    :mod:`~lmcache.v1.platform.torch_ops`.  Accelerator subclasses either:
+    Every op is an instance method. Portable ops delegate to the torch baseline
+    in :mod:`~lmcache.v1.platform.torch_ops`; capabilities that cannot have a
+    safe generic implementation fail in the base class. Accelerator subclasses
+    either:
 
     - Override individual methods (e.g. MUSA overrides
       :meth:`multi_layer_block_kv_transfer`).
@@ -160,6 +163,36 @@ class DeviceOps:
 
     # ── Ops: KV transfer ─────────────────────────────────────────────
 
+    def tensor_from_ptr(
+        self,
+        ptr: int,
+        shape: tuple[int, ...],
+        dtype: "torch.dtype",
+        device: "torch.device",
+    ) -> "torch.Tensor":
+        """Create a tensor from a raw pointer owned by this backend.
+
+        Accelerator subclasses must override this method when their transfer
+        path accepts raw pointers.
+
+        Args:
+            ptr: Non-zero pointer in the current process.
+            shape: Logical dense tensor shape.
+            dtype: Element dtype of the pointed-to storage.
+            device: Device that owns the pointer.
+
+        Returns:
+            A tensor produced by the device-specific implementation.
+
+        Raises:
+            ValueError: If this backend does not support raw-pointer tensor
+                construction.
+        """
+        raise ValueError(
+            f"Device backend {self.device_type!r} does not support "
+            "tensor construction from raw pointers."
+        )
+
     def multi_layer_block_kv_transfer(
         self,
         paged_buffer_ptrs_tensor: "torch.Tensor | list",
@@ -187,22 +220,8 @@ class DeviceOps:
     def multi_layer_kv_transfer(self, *args, **kwargs):
         return torch_ops.multi_layer_kv_transfer(*args, **kwargs)
 
-    def multi_layer_kv_transfer_unilateral(self, *args, **kwargs):
-        return torch_ops.multi_layer_kv_transfer_unilateral(*args, **kwargs)
-
     def single_layer_kv_transfer(self, *args, **kwargs):
         return torch_ops.single_layer_kv_transfer(*args, **kwargs)
-
-    def single_layer_kv_transfer_sgl(self, *args, **kwargs):
-        return torch_ops.single_layer_kv_transfer_sgl(*args, **kwargs)
-
-    # ── Ops: KV reshape ──────────────────────────────────────────────
-
-    def load_and_reshape_flash(self, *args, **kwargs):
-        return torch_ops.load_and_reshape_flash(*args, **kwargs)
-
-    def reshape_and_cache_back_flash(self, *args, **kwargs):
-        return torch_ops.reshape_and_cache_back_flash(*args, **kwargs)
 
     # ── Ops: codec ───────────────────────────────────────────────────
 

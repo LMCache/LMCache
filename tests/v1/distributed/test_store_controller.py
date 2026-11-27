@@ -5,12 +5,14 @@ Unit tests for StoreController.
 Tests verify the end-to-end flow: L1 write -> listener notification ->
 L2 store submission -> completion handling -> L1 read lock release.
 
-Uses a real L1Manager and MockL2Adapter (with debug methods) to exercise
+Uses a real DramL1Manager and MockL2Adapter (with debug methods) to exercise
 the full integration without mocking internals.
 """
 
 # Standard
+from typing import NoReturn
 import select
+import threading
 import time
 
 # Third Party
@@ -20,11 +22,16 @@ import torch
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+)
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.eviction_policy.noop import (
     NoOpEvictionPolicy,
 )
-from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
@@ -34,11 +41,14 @@ from lmcache.v1.distributed.storage_controllers.store_controller import (
     StoreListener,
 )
 from lmcache.v1.distributed.storage_controllers.store_policy import (
-    AdapterDescriptor,
     BufferOnlyStorePolicy,
     DefaultStorePolicy,
     StorePolicy,
 )
+from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
+from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventBusConfig, init_event_bus
 from tests.v1.distributed.utils import should_use_lazy_alloc
 
 if not torch_dev.is_available():
@@ -52,12 +62,12 @@ if not torch_dev.is_available():
 # =============================================================================
 
 
-def make_object_key(chunk_id: int) -> ObjectKey:
+def make_object_key(chunk_id: int, kv_rank: int = 0) -> ObjectKey:
     """Create a test ObjectKey with the given chunk ID."""
     return ObjectKey(
         chunk_hash=ObjectKey.IntHash2Bytes(chunk_id),
         model_name="test_model",
-        kv_rank=0,
+        kv_rank=kv_rank,
     )
 
 
@@ -94,7 +104,7 @@ def wait_for_condition(
 
 
 def write_keys_to_l1(
-    l1_manager: L1Manager,
+    l1_manager: DramL1Manager,
     keys: list[ObjectKey],
     layout: MemoryLayoutDesc,
 ) -> list[ObjectKey]:
@@ -113,7 +123,6 @@ def write_keys_to_l1(
         keys=keys,
         is_temporary=[False] * len(keys),
         layout_desc=layout,
-        mode="new",
     )
     written = [k for k, (e, m) in results.items() if m is not None]
     if written:
@@ -121,14 +130,23 @@ def write_keys_to_l1(
     return written
 
 
+def budget_config(budget_bytes: float, total_bytes: int) -> EvictionConfig:
+    """LRU settings whose store budget, ``trigger_watermark *
+    (1 - eviction_ratio)`` of L1, is ``budget_bytes``."""
+    return EvictionConfig(
+        eviction_policy="LRU",
+        trigger_watermark=0.5,
+        eviction_ratio=1 - 2 * budget_bytes / total_bytes,
+    )
+
+
 # =============================================================================
 # Fixtures
 # =============================================================================
 
 
-@pytest.fixture
-def l1_manager():
-    """Create an L1Manager with a reasonable memory config."""
+def make_l1_manager(read_ttl_seconds: int = 300) -> DramL1Manager:
+    """Create an DramL1Manager with a reasonable memory config."""
     config = L1ManagerConfig(
         memory_config=L1MemoryManagerConfig(
             size_in_bytes=128 * 1024 * 1024,
@@ -137,11 +155,37 @@ def l1_manager():
             align_bytes=0x1000,
         ),
         write_ttl_seconds=600,
-        read_ttl_seconds=300,
+        read_ttl_seconds=read_ttl_seconds,
     )
-    mgr = L1Manager(config)
+    return DramL1Manager(config)
+
+
+@pytest.fixture
+def l1_manager():
+    mgr = make_l1_manager()
     yield mgr
     mgr.close()
+
+
+@pytest.fixture
+def short_ttl_l1_manager():
+    """An L1 whose read locks lapse after 1 s."""
+    mgr = make_l1_manager(read_ttl_seconds=1)
+    yield mgr
+    mgr.close()
+
+
+@pytest.fixture
+def read_failures():
+    """Enable the event bus and collect L1_READ_FAILED events. Controllers
+    pick up the bus when built, so build them after this fixture."""
+    bus = init_event_bus(EventBusConfig(enabled=True))
+    events: list[Event] = []
+    bus.subscribe(EventType.L1_READ_FAILED, events.append)
+    bus.start()
+    yield events
+    bus.stop()
+    init_event_bus(EventBusConfig(enabled=False))
 
 
 def make_adapter() -> MockL2Adapter:
@@ -153,10 +197,10 @@ def make_adapter() -> MockL2Adapter:
     return MockL2Adapter(config)
 
 
-def make_descriptor(index: int) -> AdapterDescriptor:
-    """Create an AdapterDescriptor for testing."""
+def make_descriptor(index: int) -> L2AdapterDescriptor:
+    """Create an L2AdapterDescriptor for testing."""
     config = MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)
-    return AdapterDescriptor(index=index, config=config)
+    return L2AdapterDescriptor(index=index, config=config)
 
 
 # =============================================================================
@@ -167,10 +211,10 @@ def make_descriptor(index: int) -> AdapterDescriptor:
 class TestStoreListener:
     """Test StoreListener as a standalone component."""
 
-    def test_pop_pending_keys_returns_empty_initially(self):
-        """A fresh listener should have no pending keys."""
+    def test_pop_pending_changes_returns_empty_initially(self):
+        """A fresh listener should have no pending changes."""
         listener = StoreListener()
-        assert listener.pop_pending_keys() == []
+        assert listener.pop_pending_changes() == ([], [])
         listener.close()
 
     def test_on_l1_keys_write_finished_enqueues_keys(self):
@@ -179,18 +223,31 @@ class TestStoreListener:
         keys = [make_object_key(i) for i in range(3)]
 
         listener.on_l1_keys_write_finished(keys)
-        popped = listener.pop_pending_keys()
+        written, _ = listener.pop_pending_changes()
 
-        assert popped == keys
+        assert written == keys
         listener.close()
 
-    def test_pop_pending_keys_clears_queue(self):
-        """pop_pending_keys should drain the queue."""
+    def test_pop_pending_changes_clears_queue(self):
+        """pop_pending_changes should drain the queue."""
         listener = StoreListener()
         listener.on_l1_keys_write_finished([make_object_key(0)])
-        listener.pop_pending_keys()
+        listener.on_l1_keys_deleted_by_manager([make_object_key(1)])
+        listener.pop_pending_changes()
 
-        assert listener.pop_pending_keys() == []
+        assert listener.pop_pending_changes() == ([], [])
+        listener.close()
+
+    def test_deletion_drops_earlier_writes_of_the_key(self):
+        """A key deleted before the pop is not reported as written, unless
+        it is written again after the deletion."""
+        listener = StoreListener()
+        k0, k1 = make_object_key(0), make_object_key(1)
+        listener.on_l1_keys_write_finished([k0, k1])
+        listener.on_l1_keys_deleted_by_manager([k0, k1])
+        listener.on_l1_keys_write_finished([k1])
+
+        assert listener.pop_pending_changes() == ([k1], [k0, k1])
         listener.close()
 
     def test_on_l1_keys_write_finished_signals_eventfd(self):
@@ -212,8 +269,8 @@ class TestStoreListener:
         listener.on_l1_keys_write_finished([make_object_key(0)])
         listener.on_l1_keys_write_finished([make_object_key(1), make_object_key(2)])
 
-        popped = listener.pop_pending_keys()
-        assert len(popped) == 3
+        written, _ = listener.pop_pending_changes()
+        assert len(written) == 3
         listener.close()
 
     def test_finish_write_and_reserve_read_does_not_enqueue(self):
@@ -223,7 +280,7 @@ class TestStoreListener:
 
         listener.on_l1_keys_finish_write_and_reserve_read(keys)
 
-        assert listener.pop_pending_keys() == []
+        assert listener.pop_pending_changes() == ([], [])
         assert listener.pending_count() == 0
         listener.close()
 
@@ -243,7 +300,7 @@ class TestStoreControllerLifecycle:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
         ctrl.stop()
@@ -255,7 +312,7 @@ class TestStoreControllerLifecycle:
             l1_manager=l1_manager,
             l2_adapters=[],
             adapter_descriptors=[],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
         ctrl.stop()
@@ -264,6 +321,70 @@ class TestStoreControllerLifecycle:
 class TestStoreControllerSingleAdapter:
     """Test StoreController with one MockL2Adapter."""
 
+    def test_temporary_l1_write_does_not_trigger_l2_store(self, l1_manager):
+        """Temporary staging objects should remain internal to L1."""
+        adapter = make_adapter()
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([l1_manager]),
+        )
+        ctrl.start()
+
+        layout = make_layout()
+        keys = [make_object_key(0)]
+        result = l1_manager.reserve_write(
+            keys=keys,
+            is_temporary=[True],
+            layout_desc=layout,
+        )
+        assert result[keys[0]][1] is not None
+
+        l1_manager.finish_write(keys)
+        time.sleep(0.3)
+
+        assert adapter.debug_get_stored_object_count() == 0
+        assert l1_manager.delete(keys)[keys[0]] == L1Error.SUCCESS
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_submit_failure_releases_l1_read_lock(self, l1_manager, monkeypatch):
+        """An adapter submission failure should not leak L1 read locks."""
+        adapter = make_adapter()
+        submission_attempted = threading.Event()
+
+        def fail_submit(
+            _keys: list[ObjectKey],
+            _memory_objs: list[MemoryObj],
+        ) -> NoReturn:
+            submission_attempted.set()
+            raise RuntimeError("injected store submission failure")
+
+        monkeypatch.setattr(adapter, "submit_store_task", fail_submit)
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([l1_manager]),
+        )
+        ctrl.start()
+
+        layout = make_layout()
+        keys = [make_object_key(0)]
+        write_keys_to_l1(l1_manager, keys, layout)
+
+        assert submission_attempted.wait(timeout=5.0)
+        ok = wait_for_condition(
+            lambda: l1_manager.report_status()["read_locked_count"] == 0,
+            timeout=5.0,
+        )
+        assert ok, "Submission failure should release the acquired L1 read lock"
+
+        ctrl.stop()
+        adapter.close()
+
     def test_l1_write_triggers_l2_store(self, l1_manager):
         """Writing to L1 should cause the object to appear in L2."""
         adapter = make_adapter()
@@ -271,7 +392,7 @@ class TestStoreControllerSingleAdapter:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -297,7 +418,7 @@ class TestStoreControllerSingleAdapter:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -323,7 +444,7 @@ class TestStoreControllerSingleAdapter:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -338,20 +459,12 @@ class TestStoreControllerSingleAdapter:
         )
         assert ok
 
-        # Verify read lock is released: the key should be updatable
+        # Verify read lock is released: the key should be evictable
         ok = wait_for_condition(
-            lambda: (
-                l1_manager.reserve_write(
-                    keys=keys,
-                    is_temporary=[False],
-                    layout_desc=layout,
-                    mode="update",
-                )[keys[0]][1]
-                is not None
-            ),
+            lambda: (l1_manager.is_key_evictable(keys[0])),
             timeout=5.0,
         )
-        assert ok, "Key should be updatable after store controller releases read lock"
+        assert ok, "Key should be evictable after store controller releases read lock"
 
         ctrl.stop()
         adapter.close()
@@ -368,7 +481,7 @@ class TestStoreControllerSingleAdapter:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -386,25 +499,387 @@ class TestStoreControllerSingleAdapter:
         )
         assert ok, "Both batches should reach L2"
 
-        # Every key must be updatable: read locks from both requests released.
-        # ``reserve_write`` acquires a write lock on success, so release it
-        # via ``finish_write`` after each successful check — otherwise the
-        # second poll would find already-locked keys and time out.
-        def all_keys_updatable() -> bool:
-            for k in all_keys:
-                result = l1_manager.reserve_write(
-                    keys=[k],
-                    is_temporary=[False],
-                    layout_desc=layout,
-                    mode="update",
-                )
-                if result[k][1] is None:
-                    return False
-                l1_manager.finish_write([k])
-            return True
+        # Every key must be evictable: read locks from both requests released.
+        def all_keys_evictable() -> bool:
+            return all(l1_manager.is_key_evictable(k) for k in all_keys)
 
-        ok = wait_for_condition(all_keys_updatable, timeout=5.0)
+        ok = wait_for_condition(all_keys_evictable, timeout=5.0)
         assert ok, "Read locks must be released for every concurrent request"
+
+        ctrl.stop()
+        adapter.close()
+
+
+class TestStoreBudget:
+    def test_groups_past_budget_wait_unlocked(self, l1_manager, read_failures):
+        """With two groups in flight the third waits unlocked; evicting it
+        while it waits drops it from the queue, so it never reaches L2 and
+        counts as an L1 read failure."""
+        group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
+        # Lazy allocation grows L1 in the background; wait for its full size.
+        total_bytes = l1_manager.config.memory_config.size_in_bytes
+        assert wait_for_condition(
+            lambda: l1_manager.get_memory_usage()[1] == total_bytes
+        )
+        eviction = budget_config(1.5 * group_bytes, total_bytes)
+        # About 3 s per group, so the first two stay in flight below.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=group_bytes / 3 / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([l1_manager]),
+            eviction_config=eviction,
+        )
+        ctrl.start()
+
+        groups = [[make_object_key(g * 4 + i) for i in range(4)] for g in range(3)]
+        for keys in groups:
+            write_keys_to_l1(l1_manager, keys, make_layout())
+            # One listener drain per write, so each write is its own group.
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_keys_count"] == 0
+            )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["queued_keys_count"] == 4
+            and ctrl.report_status()["in_flight_task_count"] == 2
+        )
+
+        deleted = l1_manager.delete(groups[2])
+        assert all(err == L1Error.SUCCESS for err in deleted.values())
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["queued_keys_count"] == 0
+            and ctrl.report_status()["in_flight_task_count"] == 2
+        )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 0, timeout=10.0
+        )
+        assert all(adapter.debug_has_key(k) for k in groups[0] + groups[1])
+        assert not any(adapter.debug_has_key(k) for k in groups[2])
+        assert wait_for_condition(lambda: len(read_failures) == 1)
+        meta = read_failures[0].metadata
+        assert (meta["during"], meta["reason"]) == ("l2_store", "not_found")
+        assert set(meta["keys"]) == set(groups[2])
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_key_deleted_and_rewritten_is_still_stored(self, l1_manager):
+        """A key deleted and written again before the controller sees either
+        change is queued as the new write and reaches L2."""
+        adapter = make_adapter()
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([l1_manager]),
+            eviction_config=EvictionConfig(
+                "LRU", trigger_watermark=0.5, eviction_ratio=1.0
+            ),
+        )
+        first = [make_object_key(i) for i in range(4)]
+        # Another kv_rank, so a separate group that waits behind ``first``.
+        rewritten = [make_object_key(i, kv_rank=1) for i in range(4)]
+        write_keys_to_l1(l1_manager, first + rewritten, make_layout())
+        l1_manager.delete(rewritten)
+        write_keys_to_l1(l1_manager, rewritten, make_layout())
+        ctrl.start()
+
+        assert wait_for_condition(
+            lambda: all(adapter.debug_has_key(k) for k in first + rewritten)
+        )
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_group_larger_than_budget_goes_alone(self, l1_manager):
+        """A group larger than the budget goes out when nothing is in flight,
+        and later groups wait for it, so the overshoot never builds up."""
+        object_bytes = make_layout().shapes[0].numel() * 2  # bf16
+        total_bytes = l1_manager.config.memory_config.size_in_bytes
+        assert wait_for_condition(
+            lambda: l1_manager.get_memory_usage()[1] == total_bytes
+        )
+        eviction = budget_config(6 * object_bytes, total_bytes)
+        # About 2 s for the large group, so it stays in flight below.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=5 * object_bytes / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([l1_manager]),
+            eviction_config=eviction,
+        )
+        ctrl.start()
+
+        large = [make_object_key(i) for i in range(10)]
+        small = [make_object_key(i) for i in range(10, 14)]
+        for keys in (large, small):
+            write_keys_to_l1(l1_manager, keys, make_layout())
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_keys_count"] == 0
+            )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 1
+            and ctrl.report_status()["queued_keys_count"] == 4
+        )
+        assert wait_for_condition(
+            lambda: all(adapter.debug_has_key(k) for k in large + small),
+            timeout=10.0,
+        )
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_key_stored_to_two_adapters_counts_once(self, l1_manager):
+        """A key stored to two adapters is one L1 object, so it uses the
+        budget once, until the slower adapter finishes."""
+        group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
+        total_bytes = l1_manager.config.memory_config.size_in_bytes
+        assert wait_for_condition(
+            lambda: l1_manager.get_memory_usage()[1] == total_bytes
+        )
+        eviction = budget_config(1.5 * group_bytes, total_bytes)
+        # About 1 s and 3 s per group.
+        adapters = [
+            MockL2Adapter(
+                MockL2AdapterConfig(
+                    max_size_gb=0.01, mock_bandwidth_gb=group_bytes / s / (1 << 30)
+                )
+            )
+            for s in (1, 3)
+        ]
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=adapters,
+            adapter_descriptors=[make_descriptor(i) for i in range(2)],
+            policy=DefaultStorePolicy([l1_manager]),
+            eviction_config=eviction,
+        )
+        ctrl.start()
+
+        groups = [[make_object_key(g * 4 + i) for i in range(4)] for g in range(3)]
+        for keys in groups:
+            write_keys_to_l1(l1_manager, keys, make_layout())
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_keys_count"] == 0
+            )
+
+        def tasks_and_queued() -> tuple[int, int]:
+            status = ctrl.report_status()
+            return status["in_flight_task_count"], status["queued_keys_count"]
+
+        # Two groups go to both adapters and the third waits, also after the
+        # fast adapter is done: the slow one still locks both groups.
+        assert wait_for_condition(lambda: tasks_and_queued() == (4, 4))
+        assert wait_for_condition(lambda: tasks_and_queued() == (2, 4))
+        assert wait_for_condition(lambda: tasks_and_queued() == (0, 0), timeout=10.0)
+
+        ctrl.stop()
+        for a in adapters:
+            a.close()
+
+    @pytest.mark.parametrize(
+        "eviction",
+        [
+            EvictionConfig("LRU", trigger_watermark=0.5, eviction_ratio=0.6),
+            EvictionConfig("noop", trigger_watermark=0.5, eviction_ratio=1.0),
+        ],
+        ids=["ratio_above_watermark", "noop"],
+    )
+    def test_small_groups_go_out_together(self, l1_manager, eviction):
+        """A ratio above the watermark still leaves a budget (20% of L1 here),
+        and noop has none, so three small groups are in flight at once."""
+        group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
+        # About 2 s per group, so all three stay in flight below.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=group_bytes / 2 / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([l1_manager]),
+            eviction_config=eviction,
+        )
+        ctrl.start()
+
+        groups = [[make_object_key(g * 4 + i) for i in range(4)] for g in range(3)]
+        for keys in groups:
+            write_keys_to_l1(l1_manager, keys, make_layout())
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_keys_count"] == 0
+            )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 3
+        )
+        assert wait_for_condition(
+            lambda: all(adapter.debug_has_key(k) for g in groups for k in g),
+            timeout=10.0,
+        )
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_ratio_one_sends_one_group_at_a_time(self, l1_manager):
+        """With eviction_ratio 1 the budget is zero, so stores go one group
+        at a time and all of them still reach L2."""
+        group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
+        # About 1 s per group, so the first one stays in flight below.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=group_bytes / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([l1_manager]),
+            eviction_config=EvictionConfig(
+                "LRU", trigger_watermark=0.5, eviction_ratio=1.0
+            ),
+        )
+        ctrl.start()
+
+        groups = [[make_object_key(g * 4 + i) for i in range(4)] for g in range(3)]
+        for keys in groups:
+            write_keys_to_l1(l1_manager, keys, make_layout())
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_keys_count"] == 0
+            )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 1
+            and ctrl.report_status()["queued_keys_count"] == 8
+        )
+        assert wait_for_condition(
+            lambda: all(adapter.debug_has_key(k) for g in groups for k in g),
+            timeout=10.0,
+        )
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_stop_clears_queue_and_in_flight_status(self, l1_manager):
+        """stop() drops the queued keys and the unfinished stores, and
+        releases their read locks."""
+        group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
+        # About 3 s per group, so the first one is still in flight at stop().
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=group_bytes / 3 / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([l1_manager]),
+            eviction_config=EvictionConfig(
+                "LRU", trigger_watermark=0.5, eviction_ratio=1.0
+            ),
+        )
+        ctrl.start()
+
+        groups = [[make_object_key(g * 4 + i) for i in range(4)] for g in range(3)]
+        for keys in groups:
+            write_keys_to_l1(l1_manager, keys, make_layout())
+            assert wait_for_condition(
+                lambda: ctrl.report_status()["pending_keys_count"] == 0
+            )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 1
+            and ctrl.report_status()["queued_keys_count"] == 8
+        )
+
+        ctrl.stop()
+        status = ctrl.report_status()
+        assert status["in_flight_task_count"] == 0
+        assert status["queued_keys_count"] == 0
+        assert l1_manager.report_status()["read_locked_count"] == 0
+        adapter.close()
+
+    def test_store_stops_holding_budget_when_its_locks_lapse(
+        self, short_ttl_l1_manager
+    ):
+        """A store slower than the read lock TTL frees its budget once the
+        locks lapse, so the next group goes out while it still runs."""
+        group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=group_bytes / 20 / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=short_ttl_l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([short_ttl_l1_manager]),
+            eviction_config=EvictionConfig(
+                "LRU", trigger_watermark=0.5, eviction_ratio=1.0
+            ),
+        )
+        ctrl.start()
+
+        keys = [make_object_key(i, kv_rank=r) for r in range(2) for i in range(4)]
+        write_keys_to_l1(short_ttl_l1_manager, keys, make_layout())
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 1
+            and ctrl.report_status()["queued_keys_count"] == 4
+        )
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 2
+        )
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_store_finishing_after_its_locks_lapse_frees_budget_once(
+        self, short_ttl_l1_manager
+    ):
+        """A store that finishes after its read locks lapsed doesn't free its
+        budget again, so later groups still wait for each other."""
+        group_bytes = 4 * make_layout().shapes[0].numel() * 2  # 4 bf16 objects
+        # About 3 s per group, so the locks lapse well before it finishes.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(
+                max_size_gb=0.01, mock_bandwidth_gb=group_bytes / 3 / (1 << 30)
+            )
+        )
+        ctrl = StoreController(
+            l1_manager=short_ttl_l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([short_ttl_l1_manager]),
+            eviction_config=EvictionConfig(
+                "LRU", trigger_watermark=0.5, eviction_ratio=1.0
+            ),
+        )
+        ctrl.start()
+
+        first = [make_object_key(i) for i in range(4)]
+        write_keys_to_l1(short_ttl_l1_manager, first, make_layout())
+        assert wait_for_condition(lambda: adapter.debug_has_key(first[0]))
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 0
+        )
+
+        later = [make_object_key(i, kv_rank=r) for r in (1, 2) for i in range(4)]
+        write_keys_to_l1(short_ttl_l1_manager, later, make_layout())
+        assert wait_for_condition(
+            lambda: ctrl.report_status()["in_flight_task_count"] == 1
+            and ctrl.report_status()["queued_keys_count"] == 4
+        )
 
         ctrl.stop()
         adapter.close()
@@ -422,7 +897,7 @@ class TestStoreControllerMultipleAdapters:
             l1_manager=l1_manager,
             l2_adapters=adapters,
             adapter_descriptors=descriptors,
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -450,7 +925,7 @@ class TestStoreControllerMultipleAdapters:
             l1_manager=l1_manager,
             l2_adapters=adapters,
             adapter_descriptors=descriptors,
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -466,18 +941,10 @@ class TestStoreControllerMultipleAdapters:
         assert ok
 
         ok = wait_for_condition(
-            lambda: (
-                l1_manager.reserve_write(
-                    keys=keys,
-                    is_temporary=[False],
-                    layout_desc=layout,
-                    mode="update",
-                )[keys[0]][1]
-                is not None
-            ),
+            lambda: (l1_manager.is_key_evictable(keys[0])),
             timeout=5.0,
         )
-        assert ok, "Key should be updatable after all adapter stores complete"
+        assert ok, "Key should be evictable after all adapter stores complete"
 
         ctrl.stop()
         for a in adapters:
@@ -493,7 +960,7 @@ class TestStoreControllerNoAdapters:
             l1_manager=l1_manager,
             l2_adapters=[],
             adapter_descriptors=[],
-            policy=DefaultStorePolicy(),
+            policy=DefaultStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -504,14 +971,8 @@ class TestStoreControllerNoAdapters:
         # Give the controller time to process the listener event
         time.sleep(0.3)
 
-        # Key should be updatable (no read locks)
-        result = l1_manager.reserve_write(
-            keys=keys,
-            is_temporary=[False],
-            layout_desc=layout,
-            mode="update",
-        )
-        assert result[keys[0]][1] is not None
+        # Key should be evictable (no read locks)
+        assert l1_manager.is_key_evictable(keys[0])
 
         ctrl.stop()
 
@@ -528,7 +989,7 @@ class TestStoreControllerCustomPolicy:
             def select_store_targets(self, keys, adapters):
                 return {}
 
-            def select_l1_deletions(self, keys):
+            def select_l1_deletions(self, keys, adapter):
                 return []
 
         adapter = make_adapter()
@@ -536,7 +997,7 @@ class TestStoreControllerCustomPolicy:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=SkipAllPolicy(),
+            policy=SkipAllPolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -563,7 +1024,7 @@ class TestStoreControllerCustomPolicy:
             def select_store_targets(self, keys, adapters):
                 return {ad.index: list(keys) for ad in adapters}
 
-            def select_l1_deletions(self, keys):
+            def select_l1_deletions(self, keys, adapter):
                 return list(keys)
 
         adapter = make_adapter()
@@ -571,7 +1032,7 @@ class TestStoreControllerCustomPolicy:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=DeleteAfterStorePolicy(),
+            policy=DeleteAfterStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -586,14 +1047,13 @@ class TestStoreControllerCustomPolicy:
         )
         assert ok, "Object should be stored in L2"
 
-        # After deletion, reserve_write with mode="new" should succeed
+        # After deletion, reserve_write should succeed
         ok = wait_for_condition(
             lambda: (
                 l1_manager.reserve_write(
                     keys=keys,
                     is_temporary=[False],
                     layout_desc=layout,
-                    mode="new",
                 )[keys[0]][1]
                 is not None
             ),
@@ -603,6 +1063,51 @@ class TestStoreControllerCustomPolicy:
 
         ctrl.stop()
         adapter.close()
+
+    def test_l1_deletion_decision_is_told_which_adapter_stored(self, l1_manager):
+        """The policy sees the adapter that finished, so it can decide per
+        adapter whether the L1 copy goes away."""
+        consulted: list[int] = []
+
+        class DeleteAfterSecondAdapterPolicy(StorePolicy):
+            def select_store_targets(self, keys, adapters):
+                return {ad.index: list(keys) for ad in adapters}
+
+            def select_l1_deletions(self, keys, adapter):
+                consulted.append(adapter.index)
+                return list(keys) if adapter.index == 1 else []
+
+        adapters = [make_adapter(), make_adapter()]
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=adapters,
+            adapter_descriptors=[make_descriptor(0), make_descriptor(1)],
+            policy=DeleteAfterSecondAdapterPolicy([l1_manager]),
+        )
+        ctrl.start()
+
+        layout = make_layout()
+        keys = [make_object_key(0)]
+        write_keys_to_l1(l1_manager, keys, layout)
+
+        ok = wait_for_condition(lambda: sorted(consulted) == [0, 1], timeout=5.0)
+        assert ok, "The policy should be consulted once per finished adapter"
+        ok = wait_for_condition(
+            lambda: (
+                l1_manager.reserve_write(
+                    keys=keys,
+                    is_temporary=[False],
+                    layout_desc=layout,
+                )[keys[0]][1]
+                is not None
+            ),
+            timeout=5.0,
+        )
+        assert ok, "The second adapter's store should delete the key from L1"
+
+        ctrl.stop()
+        for adapter in adapters:
+            adapter.close()
 
     def test_policy_selects_subset_of_adapters(self, l1_manager):
         """A policy that targets only some adapters should skip others."""
@@ -616,7 +1121,7 @@ class TestStoreControllerCustomPolicy:
                         return {0: list(keys)}
                 return {}
 
-            def select_l1_deletions(self, keys):
+            def select_l1_deletions(self, keys, adapter):
                 return []
 
         adapters = [make_adapter(), make_adapter()]
@@ -626,7 +1131,7 @@ class TestStoreControllerCustomPolicy:
             l1_manager=l1_manager,
             l2_adapters=adapters,
             adapter_descriptors=descriptors,
-            policy=FirstAdapterOnlyPolicy(),
+            policy=FirstAdapterOnlyPolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -662,7 +1167,7 @@ class TestBufferOnlyMode:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=BufferOnlyStorePolicy(),
+            policy=BufferOnlyStorePolicy([l1_manager]),
         )
         ctrl.start()
 
@@ -687,6 +1192,50 @@ class TestBufferOnlyMode:
         ctrl.stop()
         adapter.close()
 
+    def test_read_locked_key_deleted_after_reader_finishes(
+        self, l1_manager, monkeypatch
+    ):
+        """A key still being read when its L2 store finishes leaves L1 once
+        the reader is done."""
+        delete_called = threading.Event()
+        delete = l1_manager.delete
+
+        def watched_delete(*args, **kwargs):
+            result = delete(*args, **kwargs)
+            delete_called.set()
+            return result
+
+        monkeypatch.setattr(l1_manager, "delete", watched_delete)
+        # Slow enough that the read lock below is taken before the store ends.
+        adapter = MockL2Adapter(
+            MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=0.001)
+        )
+
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=BufferOnlyStorePolicy([l1_manager]),
+        )
+        ctrl.start()
+
+        keys = [make_object_key(0)]
+        write_keys_to_l1(l1_manager, keys, make_layout())
+        assert l1_manager.reserve_read(keys)[keys[0]][0] == L1Error.SUCCESS
+
+        assert delete_called.wait(5.0), "L2 store should finish and try L1 delete"
+        assert l1_manager.get_object_state(keys[0]) is not None
+
+        l1_manager.finish_read(keys)
+        ok = wait_for_condition(
+            lambda: l1_manager.get_object_state(keys[0]) is None,
+            timeout=5.0,
+        )
+        assert ok, "Key should be deleted from L1 after the reader finishes"
+
+        ctrl.stop()
+        adapter.close()
+
     def test_noop_eviction_never_evicts(self):
         """NoOpEvictionPolicy should never return eviction actions."""
         noop = NoOpEvictionPolicy()
@@ -702,7 +1251,7 @@ class TestBufferOnlyMode:
             l1_manager=l1_manager,
             l2_adapters=[adapter],
             adapter_descriptors=[make_descriptor(0)],
-            policy=BufferOnlyStorePolicy(),
+            policy=BufferOnlyStorePolicy([l1_manager]),
         )
         ctrl.start()
 

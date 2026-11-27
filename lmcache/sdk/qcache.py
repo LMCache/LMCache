@@ -7,8 +7,8 @@ SDK for retrieving Q tensors.
 from __future__ import annotations
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.sdk.context import LMCacheSDKCacheKind, LMCacheSDKContext
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 
@@ -21,7 +21,7 @@ def connect(
     however, specific model name prefix needs to be used.
 
     Args:
-        url: The MQ URL of the LMCache server.
+        url: Multiprocess request endpoint. Its scheme selects ZMQ or gRPC.
         http_url: The HTTP URL of the LMCache server.
         model_name: The original model name.
         timeout: The timeout for the connection.

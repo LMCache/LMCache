@@ -108,8 +108,12 @@ inherit from ``ConnectorBase<YourConnectionType>``. You need to override 4 requi
       // 5. DELETE: remove key (optional, has default no-op)
       bool do_single_delete(MyConn& conn,
                             const std::string& key) override {
-        // send DELETE, return true if deleted, false if not found
+        // send DELETE, return true if deleted, false otherwise
       }
+      // If the backend can tell an absent key from a failed delete,
+      // override do_single_delete_result() instead and return
+      // DeleteResult::NOT_FOUND for an absent key, so eviction stops
+      // tracking it.
 
       // Optional: clean shutdown
       void shutdown_connections() override {
@@ -195,7 +199,7 @@ Register your C++ sources in ``setup.py`` alongside the existing Redis extension
             "csrc/storage_backends",
             "csrc/storage_backends/mybackend",
         ],
-        extra_compile_args={"cxx": ["-O3", "-std=c++17"]},
+        extra_compile_args={"cxx": ["-O3"]},
     ),
 
 Then rebuild:
@@ -205,31 +209,7 @@ Then rebuild:
     pip install -e .
 
 
-Step 4: Python Client (Non-MP Mode)
-------------------------------------
-
-Inherit from ``ConnectorClientBase`` which provides asyncio event loop integration,
-future management, and both sync and async methods.
-
-.. code-block:: python
-
-    # lmcache/v1/storage_backend/native_clients/mybackend_client.py
-    from .connector_client_base import ConnectorClientBase
-    from lmcache.lmcache_mybackend import LMCacheMyBackendClient
-
-    class MyBackendClient(ConnectorClientBase[LMCacheMyBackendClient]):
-        def __init__(self, host: str, port: int,
-                     num_workers: int, loop=None):
-            native = LMCacheMyBackendClient(host, port, num_workers)
-            super().__init__(native, loop)
-
-This gives you ``batch_get``, ``batch_set``, ``batch_exists`` (async), and their
-synchronous variants, all with automatic eventfd-driven completion handling.
-
-**Reference:** ``lmcache/v1/storage_backend/native_clients/resp_client.py``
-
-
-Step 5: L2 Adapter (MP Mode)
+Step 4: L2 Adapter (MP Mode)
 -----------------------------
 
 To use your connector as an L2 adapter in MP mode, create a single Python module that
@@ -298,6 +278,11 @@ Create a new file in the L2 adapters package:
         l1_memory_desc: "Optional[L1MemoryDesc]" = None,
     ) -> L2AdapterInterface:
         from lmcache.lmcache_mybackend import LMCacheMyBackendClient
+        from lmcache.v1.distributed.api import (
+            MemoryResidency,
+            MemorySegment,
+            MemoryTags,
+        )
         from lmcache.v1.distributed.l2_adapters \
             .native_connector_l2_adapter import (
             NativeConnectorL2Adapter,
@@ -307,8 +292,10 @@ Create a new file in the L2 adapters package:
         native_client = LMCacheMyBackendClient(
             config.host, config.port, config.num_workers
         )
+        # A network service, so the bytes are remote storage.
         return NativeConnectorL2Adapter(
             native_client,
+            MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE),
             max_capacity_gb=config.max_capacity_gb,
         )
 
@@ -501,7 +488,7 @@ Loading Flow
       +-- getattr(module, config.class_name)
       +-- connector_cls(**config.adapter_params)
       +-- validate 6 required methods
-      +-- NativeConnectorL2Adapter(native_client)
+      +-- NativeConnectorL2Adapter(native_client, memory_tags)
               |
               v
       L2AdapterInterface instance (ready for use)
@@ -683,4 +670,4 @@ Additional Resources
   ``lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py``
 - Design document:
   ``lmcache/v1/distributed/l2_adapters/design_docs/plugin.md``
-- RESP backend user guide: :doc:`RESP (Native Redis/Valkey) <../../kv_cache/storage_backends/resp>`
+- RESP backend user guide: :doc:`RESP (Native Redis/Valkey) <../../mp/l2_storage/resp>`

@@ -80,6 +80,11 @@ P2P is enabled per server by the ``--p2p-advertise-url`` flag. The relevant
      - Address the transfer-channel server binds to. Defaults to
        ``--p2p-advertise-url``; set it to bind ``0.0.0.0`` while advertising a
        routable IP.
+   * - ``--p2p-rpc-port PORT``
+     - Independent P2P gRPC control port, bound on ``--host`` (default ``0``:
+       OS-assigned). Pin and allow this port when a firewall, Docker port
+       mapping, or NetworkPolicy restricts reachable ports; allowing only
+       the worker ``--port`` is insufficient.
    * - ``--p2p-lookup-timeout SECONDS``
      - Deadline for a peer lookup before it counts as a miss (default ``30``).
    * - ``--p2p-load-timeout SECONDS``
@@ -87,6 +92,15 @@ P2P is enabled per server by the ``--p2p-advertise-url`` flag. The relevant
        (default ``30``).
    * - ``--p2p-transfer-engine ENGINE``
      - Transfer-channel implementation (default ``nixl``).
+   * - ``--enable-p2p-write``
+     - Also store objects into peers' memory once the local L1 fills up, and
+       drop the local copy. Off by default. See :doc:`p2p_deployment`.
+   * - ``--p2p-write-l1-usage-threshold FRACTION``
+     - Local DRAM L1 usage from which new objects go to a peer
+       (default ``0.7``). Only used with ``--enable-p2p-write``.
+   * - ``--p2p-store-timeout SECONDS``
+     - Deadline for a store into a peer before it counts as a failure
+       (default ``30``). Only used with ``--enable-p2p-write``.
 
 P2P also reuses the coordinator connection flags (``--coordinator-url``,
 ``--coordinator-advertise-ip``, ``--coordinator-heartbeat-interval``); the
@@ -146,12 +160,13 @@ Running a multi-node deployment
 The example below brings up a two-node fleet. Adding more nodes is just more
 copies of the per-node step, all pointing at the same coordinator.
 
-**Step 1 — start the coordinator** (on a host all nodes can reach, here
+**Step 1 — start the coordinator** on a host all nodes can reach. Replace
+``<COORDINATOR_IP>`` with a routable address on that host (for example,
 ``10.0.0.1``):
 
 .. code-block:: bash
 
-   lmcache coordinator --host 0.0.0.0 --port 9300
+   lmcache coordinator --host <COORDINATOR_IP> --port 9300
 
 **Step 2 — on each node, start the LMCache server with P2P enabled.** Replace
 ``<NODE_IP>`` with that node's routable address (e.g. ``10.0.0.2``,
@@ -166,6 +181,7 @@ copies of the per-node step, all pointing at the same coordinator.
        --l1-align-bytes 65536 \
        --coordinator-url http://10.0.0.1:9300 \
        --coordinator-advertise-ip <NODE_IP> \
+       --p2p-rpc-port 9555 \
        --p2p-advertise-url <NODE_IP>:8500
 
 ``--coordinator-advertise-ip`` is the address peers use to reach this node's
@@ -186,6 +202,17 @@ Once both nodes have registered, a prefix first served on node 2 will be served
 from node 2's cache when the same prefix later arrives on node 3 — read over
 RDMA instead of recomputed.
 
+.. note::
+
+   ``kv_load_failure_policy`` is a vLLM connector setting that LMCache passes
+   through unchanged; LMCache's own L2 adapters do not currently read or
+   enforce it. A genuine L2 load failure (a peer unreachable, an object
+   backend erroring out, etc.) and an ordinary cache miss are not
+   distinguished internally — both fall through to recompute, regardless of
+   what ``kv_load_failure_policy`` is set to. If your deployment needs load
+   failures to surface as an error rather than silently recompute, that
+   distinction is not yet implemented at the connector boundary.
+
 Running on a single node (testing & debugging)
 ----------------------------------------------
 
@@ -196,7 +223,7 @@ coordinator. This is the recommended way to develop and debug P2P.
 .. code-block:: bash
 
    # Terminal 1 — coordinator
-   lmcache coordinator --host 0.0.0.0 --port 9300
+   lmcache coordinator --host 127.0.0.1 --port 9300
 
    # Terminal 2 — node "A": LMCache server
    lmcache server \
@@ -226,9 +253,10 @@ coordinator. This is the recommended way to develop and debug P2P.
    CUDA_VISIBLE_DEVICES=1 vllm serve <model> --port 8001 \
        --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"lmcache.mp.port":6556}}'
 
-The two servers must differ in **every** port: ZMQ (``--port``), HTTP
-(``--http-port``), and the P2P transfer endpoint (``--p2p-advertise-url``).
-Give each a distinct ``--instance-id`` so they are easy to tell apart.
+The two servers must differ in **every** port: request transport
+(``--port``), HTTP (``--http-port``), and the P2P transfer endpoint
+(``--p2p-advertise-url``). Give each a distinct ``--instance-id`` so they are
+easy to tell apart.
 
 To test the path, send a long prompt to vLLM **A** (port ``8000``) and then the
 *same* prompt to vLLM **B** (port ``8001``). B has never seen the prompt and its
@@ -262,10 +290,72 @@ With ``LMCACHE_LOG_LEVEL=DEBUG``, each server logs ``Added P2P adapter ... for
 peer <instance-id>`` when it connects to a peer, and ``Removed P2P adapter ...``
 when a peer leaves.
 
+Using the agent skills
+----------------------
+
+The repository ships three `agent skills <https://docs.anthropic.com/en/docs/claude-code/skills>`_
+under ``.claude/skills/`` that package the recipes on this page as runnable scripts, so a
+coding agent (Claude Code, Codex, Cursor, ...) or a person can bring up, test and
+diagnose a P2P deployment without improvising:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - Skill
+     - What it does
+   * - ``lmcache-p2p-launch``
+     - Probes each node (GPUs, RDMA devices and their NUMA placement, Python stack,
+       free ports, model cache), optionally creates a venv, writes one ``env.sh`` per
+       LMCache instance, starts the coordinator, the servers and vLLM, and waits until
+       every node reports ``p2p_state=registered`` with the expected peer count. Its
+       references explain the UCX multi-rail settings (``UCX_TLS`` must include
+       ``cuda_copy`` with recent nixl; ``UCX_MAX_RMA_RAILS`` counts paths, two per
+       LAG bond) and the single-node variant.
+   * - ``lmcache-p2p-test``
+     - Cross-node correctness (``basic_test.py``: a prompt served cold on one node and
+       from the peer on the other, with ``num_lmcache_cached_tokens`` and identical
+       outputs as the pass criteria), a stress ladder (concurrency, long documents,
+       sustained mixed load), the ``lmcache bench engine`` long-doc-qa workload across
+       nodes, Prometheus scraping of both servers with a live per-node monitor, and a
+       Markdown summary of all results.
+   * - ``lmcache-p2p-diagnose``
+     - A symptom-to-fix decision tree (peers not registered, server exiting with
+       ``NIXL_ERR_BACKEND``, zero cached tokens, ``l1_oom`` / ``l1_contended``
+       fallbacks, single-NIC or TCP transfers), plus scripts that check RDMA readiness,
+       probe the NIXL/UCX backend under a candidate environment, show which NICs carried
+       a transfer, parse UCX traces, and collect a debug bundle for an issue.
+
+With an agent, describe the task and the matching skill loads on its own, for example
+"bring up LMCache P2P between host A and host B with Qwen/Qwen3-8B", "stress P2P at
+concurrency 32", or "only one NIC carries P2P traffic". Without an agent, the scripts run
+directly; every one of them reads the ``env.sh`` written by the launch skill:
+
+.. code-block:: bash
+
+   S=.claude/skills
+   # on every node: describe the deployment (the coordinator runs on 10.0.0.1)
+   $S/lmcache-p2p-launch/scripts/gen_env.sh --coordinator-ip 10.0.0.1 \
+       --peer-ip 10.0.0.3 --peer-ssh node3 --model Qwen/Qwen3-8B --gpu 0 --l1-gb 80
+   # coordinator node, then the others
+   $S/lmcache-p2p-launch/scripts/start_node.sh --with-coordinator
+   $S/lmcache-p2p-launch/scripts/wait_ready.sh --peers 1
+   # prove a transfer, then stress it with the monitor running
+   python $S/lmcache-p2p-test/scripts/basic_test.py
+   $S/lmcache-p2p-test/scripts/start_prometheus.sh
+   python $S/lmcache-p2p-test/scripts/stress_p2p.py --concurrency 32 --tag conc32
+   # if something is off: which NICs moved bytes, and a bundle to attach to an issue
+   $S/lmcache-p2p-diagnose/scripts/rail_check.sh --peer-ssh node3
+   $S/lmcache-p2p-diagnose/scripts/collect_bundle.sh
+
+Each ``SKILL.md`` records the LMCache, vLLM and nixl versions it was last verified with.
+
 Limitations
 -----------
 
-* **Read-only.** A node reads KV from its peers; it never writes into a peer's
-  memory. This keeps each node the sole owner of its L1.
+* **Read-only by default.** A node reads KV from its peers; it does not write
+  into a peer's memory unless it is started with ``--enable-p2p-write``. Writes
+  are meant for a server whose peers extend its memory, and only one side of a
+  pair may enable them. See :doc:`p2p_deployment`.
 * **One hop.** A node reads directly from the peer that holds the prefix; reads
   are not chained across multiple peers.

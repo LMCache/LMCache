@@ -10,17 +10,18 @@ from __future__ import annotations
 # Standard
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, cast
 import asyncio
 import contextlib
 
 # Third Party
 import httpx
+import msgspec
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import EncodedObjectKey, Tier
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.distributed.api import EncodedObjectKey, ObjectKey, Tier
 from lmcache.v1.distributed.eviction import EvictionPolicy
 from lmcache.v1.distributed.eviction_policy.isolated_lru import (
     IsolatedLRUEvictionPolicy,
@@ -31,10 +32,12 @@ from lmcache.v1.mp_coordinator.controllers.base import (
     Controller,
     ControllerRuntime,
 )
+from lmcache.v1.mp_coordinator.controllers.eviction_http_api import build_routers
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
 )
+from lmcache.v1.mp_coordinator.utils.http import instance_url
 from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 from lmcache.v1.mp_coordinator.views.usage_manager import CacheUsageManager
 from lmcache.v1.multiprocess.cache_control.object_service import (
@@ -42,14 +45,30 @@ from lmcache.v1.multiprocess.cache_control.object_service import (
 )
 
 if TYPE_CHECKING:
+    # Third Party
+    from fastapi import APIRouter
+
     # First Party
-    from lmcache.v1.distributed.api import ObjectKey
     from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
     from lmcache.v1.mp_coordinator.discovery import Registry
     from lmcache.v1.mp_coordinator.views.base import View
     from lmcache.v1.mp_coordinator.views.instance_registry import InstanceRegistry
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class PinnedKey:
+    """One L2-pinned key and how many pins hold it.
+
+    Attributes:
+        key: The pinned key.
+        pin_count: Active pins on the key. ``unpin`` lowers it by one per
+            call; ``drop_pins`` removes the key outright.
+    """
+
+    key: ObjectKey
+    pin_count: int
 
 
 class FleetEvictionController(Controller):
@@ -152,18 +171,26 @@ class FleetEvictionController(Controller):
         self._policy.on_keys_removed([key])
 
     def pin(self, keys: list[ObjectKey]) -> None:
-        """Increment each key's pin count, excluding it from eviction."""
-        for key in keys:
-            self._pin_counts[key] = self._pin_counts.get(key, 0) + 1
+        """Increment the pin count of each chunk ``keys`` name, excluding it
+        from eviction.
+
+        A pin covers the key's chunk in every object group and on every rank
+        of its world size (see :func:`_pinned_chunk_key`). Each chunk counts
+        once per call, however many of its keys the call names: a tokens-form
+        pin names a chunk once per rank, and one unpin must release it.
+        """
+        for chunk_key in dict.fromkeys(map(_pinned_chunk_key, keys)):
+            self._pin_counts[chunk_key] = self._pin_counts.get(chunk_key, 0) + 1
 
     def unpin(self, keys: list[ObjectKey]) -> None:
-        """Decrement each key's pin count, floored at 0."""
-        for key in keys:
-            count = self._pin_counts.get(key, 0)
+        """Decrement the pin count of each chunk ``keys`` name, once per call,
+        floored at 0."""
+        for chunk_key in dict.fromkeys(map(_pinned_chunk_key, keys)):
+            count = self._pin_counts.get(chunk_key, 0)
             if count <= 1:
-                self._pin_counts.pop(key, None)
+                self._pin_counts.pop(chunk_key, None)
             else:
-                self._pin_counts[key] = count - 1
+                self._pin_counts[chunk_key] = count - 1
 
     @classmethod
     def from_config(
@@ -188,6 +215,17 @@ class FleetEvictionController(Controller):
             trigger_watermark=config.trigger_watermark,
             check_interval=config.eviction_check_interval,
         )
+
+    def get_routers(self) -> tuple[APIRouter, ...]:
+        """Return the ``/quota``, ``/cache/pins`` and ``/cache/delete``
+        endpoints, bound to this controller.
+
+        They act on state only this controller holds, so they are built around
+        it rather than resolving it per request -- and go away with it when an
+        operator leaves it unbuilt, rather than lingering as paths that cannot
+        answer.
+        """
+        return build_routers(self)
 
     def get_durable_components(self) -> tuple[DurableComponent, ...]:
         """Return the state this controller owns that must outlive the process.
@@ -230,26 +268,64 @@ class FleetEvictionController(Controller):
         The document is the coordinator's own, so values are taken as
         written.
 
+        A document saved while pins were per group or per rank can hold
+        several entries for one chunk. Entries for different groups were
+        separate pin calls, so their counts add up; entries for different
+        ranks were written by the same calls (one key per rank), so they
+        load as the largest of their counts, not the sum.
+
         Args:
             state: A :meth:`capture` value, as decoded from the
                 metadata document — see there for the shape; non-positive
                 counts are dropped.
         """
         entries = cast("list[Mapping[str, object]]", state["entries"])
-        restored = (_decode_pin(entry) for entry in entries)
-        self._pin_counts = {key: count for key, count in restored if count > 0}
+        counts_per_group: dict[tuple[ObjectKey, int], int] = {}
+        for key, count in (_decode_pin(entry) for entry in entries):
+            if count > 0:
+                group = (_pinned_chunk_key(key), key.object_group_id)
+                counts_per_group[group] = max(counts_per_group.get(group, 0), count)
+        pin_counts: dict[ObjectKey, int] = {}
+        for (chunk_key, _), count in counts_per_group.items():
+            pin_counts[chunk_key] = pin_counts.get(chunk_key, 0) + count
+        self._pin_counts = pin_counts
 
     def filter_unpinned(self, keys: list[ObjectKey]) -> list[ObjectKey]:
         """Return the subset of ``keys`` with no active L2 pin, in input order.
 
         Used by non-force delete to skip L2-pinned keys.
         """
-        return [key for key in keys if key not in self._pin_counts]
+        return [key for key in keys if _pinned_chunk_key(key) not in self._pin_counts]
 
     def drop_pins(self, keys: list[ObjectKey]) -> None:
         """Remove each key from the L2 pin set (used by force delete; idempotent)."""
         for key in keys:
-            self._pin_counts.pop(key, None)
+            self._pin_counts.pop(_pinned_chunk_key(key), None)
+
+    def list_pins(
+        self, cache_salt: str, model_name: str, offset: int, limit: int
+    ) -> tuple[int, list[PinnedKey]]:
+        """Page through the L2 pin table.
+
+        Keys come back in the order they were first pinned. Pins taken
+        between two page reads can shift later pages by one.
+
+        Args:
+            cache_salt: Keep keys with this salt. Empty keeps every salt.
+            model_name: Keep keys for this model. Empty keeps every model.
+            offset: Matching keys to skip.
+            limit: Maximum keys to return.
+
+        Returns:
+            The number of keys matching the filters, and the requested page.
+        """
+        matching = [
+            PinnedKey(key=key, pin_count=count)
+            for key, count in self._pin_counts.items()
+            if (not cache_salt or key.cache_salt == cache_salt)
+            and (not model_name or key.model_name == model_name)
+        ]
+        return len(matching), matching[offset : offset + limit]
 
     def compute_eviction_plan(self) -> dict[str, list[ObjectKey]]:
         """Select eviction candidates per ``cache_salt``.
@@ -280,7 +356,9 @@ class FleetEvictionController(Controller):
             actions = self._policy.get_eviction_actions(
                 effective_ratio,
                 cache_salt=cache_salt,
-                key_eligible_filter=lambda key: key not in self._pin_counts,
+                key_eligible_filter=lambda key: (
+                    _pinned_chunk_key(key) not in self._pin_counts
+                ),
             )
             keys_to_evict: list[ObjectKey] = []
             for action in actions:
@@ -314,11 +392,16 @@ class FleetEvictionController(Controller):
         would otherwise die with the process; the exit half waits for it.
 
         Args:
-            runtime: Supplies the client for the outbound DELETEs.
+            runtime: Supplies the client for the outbound DELETEs and the
+                runner the sweep loop is started on (as ``eviction``).
         """
         task: asyncio.Task | None = None
         if self._check_interval > 0:
-            task = asyncio.create_task(self._sweep_forever(runtime.http_client))
+            task = runtime.background_loops.start(
+                "eviction",
+                self._check_interval,
+                lambda: self.execute_evictions(runtime.http_client),
+            )
         else:
             logger.debug("Eviction loop disabled (check_interval=0)")
         try:
@@ -363,7 +446,7 @@ class FleetEvictionController(Controller):
             )
             return plan
 
-        url = f"http://{target.ip}:{target.http_port}/cache/objects"
+        url = instance_url(target, "/cache/objects")
         all_keys: list[ObjectKey] = [k for keys in plan.values() for k in keys]
 
         for start in range(0, len(all_keys), MAX_DELETE_BATCH):
@@ -386,12 +469,6 @@ class FleetEvictionController(Controller):
     async def wait_for_in_flight_dispatches(self) -> None:
         """Await every outstanding fire-and-forget dispatch."""
         await asyncio.gather(*self._in_flight_dispatches, return_exceptions=True)
-
-    async def _sweep_forever(self, http_client: httpx.AsyncClient) -> None:
-        """Evict on a cadence until cancelled, sleeping first."""
-        while True:
-            await asyncio.sleep(self._check_interval)
-            await self.execute_evictions(http_client)
 
     @staticmethod
     async def _dispatch_eviction(
@@ -434,11 +511,25 @@ def _decode_pin(entry: Mapping[str, object]) -> tuple[ObjectKey, int]:
         The key and its pin count.
     """
     fields = cast("Mapping[str, object]", entry["key"])
-    encoded = EncodedObjectKey(
-        chunk_hash_hex=str(fields["chunk_hash_hex"]),
-        model_name=str(fields["model_name"]),
-        kv_rank=cast(int, fields["kv_rank"]),
-        object_group_id=cast(int, fields["object_group_id"]),
-        cache_salt=str(fields["cache_salt"]),
-    )
+    encoded = msgspec.convert(fields, type=EncodedObjectKey)
     return encoded.to_object_key(), cast(int, entry["count"])
+
+
+def _pinned_chunk_key(key: ObjectKey) -> ObjectKey:
+    """Return the key the pin table stores for ``key``'s chunk: its rank-0
+    key in object group 0.
+
+    A pin is on a chunk, which is stored once per rank and, with
+    ``--separate-object-groups``, once per object group; one pin must cover
+    them all, or eviction could take one share and leave the pinned chunk
+    unusable. Keys of one world size are the same chunk, as the directory
+    treats them for a delete; another world size is a different parallel
+    setup's object and keeps its own pins.
+    """
+    world_size = ObjectKey.WorldSizeFromKVRank(key.kv_rank)
+    kv_rank = ObjectKey.ComputeKVRank(world_size, 0, world_size, 0)
+    if key.object_group_id == 0 and key.kv_rank == kv_rank:
+        return key
+    return replace(
+        key, identity=replace(key.identity, object_group_id=0, kv_rank=kv_rank)
+    )

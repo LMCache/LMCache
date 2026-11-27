@@ -2,8 +2,8 @@
 """Runtime L2 adapter reconfiguration endpoints for MP mode."""
 
 # Standard
-from decimal import Decimal
 from typing import Literal, Protocol, cast
+import asyncio
 
 # Third Party
 from fastapi import APIRouter, Request
@@ -12,28 +12,19 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 # First Party
 from lmcache.v1.distributed.l2_adapters.reconfiguration import L2ReconfigureError
+from lmcache.v1.multiprocess.http_apis.reconfigure_schemas import (
+    OFFSET_ERROR,
+    SIZE_ERROR,
+    OffsetRequest,
+    SizeRequest,
+    get_engine_from_request,
+    reconfigure_error_response,
+    resolve_offset_bytes,
+    resolve_size_bytes,
+    validation_error_response,
+)
 
 router = APIRouter()
-
-_MAX_SIZE_STRING_LEN = 64
-_SIZE_ERROR = "size must be a positive integer byte count or a string like '100GiB'"
-_SIZE_UNITS = {
-    "": 1,
-    "b": 1,
-    "k": 1024,
-    "kb": 1024,
-    "kib": 1024,
-    "m": 1024**2,
-    "mb": 1024**2,
-    "mib": 1024**2,
-    "g": 1024**3,
-    "gb": 1024**3,
-    "gib": 1024**3,
-    "t": 1024**4,
-    "tb": 1024**4,
-    "tib": 1024**4,
-}
-SizeRequest = int | str
 
 
 class _StorageManagerLike(Protocol):
@@ -52,7 +43,7 @@ class _EngineLike(Protocol):
 
 
 class GenericReconfigureRequest(BaseModel):
-    """Request body for generic ``POST /reconfigure/{backend}/{operation}``."""
+    """Request body for generic ``POST /reconfigure/{backend}/l2/{operation}``."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -60,17 +51,18 @@ class GenericReconfigureRequest(BaseModel):
 
 
 class DaxAddRequest(BaseModel):
-    """Request body for ``POST /reconfigure/dax/add``."""
+    """Request body for ``POST /reconfigure/dax/l2/add``."""
 
     model_config = ConfigDict(extra="forbid")
 
     adapter_index: int = 0
     device_path: str
     size: SizeRequest
+    offset: OffsetRequest | None = None
 
 
 class DaxRemoveRequest(BaseModel):
-    """Request body for ``POST /reconfigure/dax/remove``."""
+    """Request body for ``POST /reconfigure/dax/l2/remove``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -78,10 +70,11 @@ class DaxRemoveRequest(BaseModel):
     device_path: str
     mode: Literal["migrate", "evict", "drain"] = "migrate"
     force: bool = False
+    offset: OffsetRequest | None = None
 
 
 class DaxResizeRequest(BaseModel):
-    """Request body for ``POST /reconfigure/dax/resize``."""
+    """Request body for ``POST /reconfigure/dax/l2/resize``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -90,61 +83,24 @@ class DaxResizeRequest(BaseModel):
     size: SizeRequest
     mode: Literal["migrate", "evict"] = "migrate"
     force: bool = False
+    offset: OffsetRequest | None = None
+
+
+def _dax_offset_bytes(offset: OffsetRequest | None) -> int | JSONResponse:
+    try:
+        return 0 if offset is None else resolve_offset_bytes(offset)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": OFFSET_ERROR})
 
 
 def _get_storage_manager(request: Request) -> _StorageManagerLike | JSONResponse:
-    engine = getattr(request.app.state, "engine", None)
+    engine = get_engine_from_request(request)
     if engine is None:
         return JSONResponse(
             status_code=503,
             content={"error": "engine not initialized"},
         )
     return cast(_EngineLike, engine).storage_manager
-
-
-def _parse_size_string(size: str) -> int:
-    text = size.strip()
-    if not text or len(text) > _MAX_SIZE_STRING_LEN:
-        raise ValueError(_SIZE_ERROR)
-
-    unit_start = len(text)
-    while unit_start > 0 and text[unit_start - 1].isalpha():
-        unit_start -= 1
-
-    value_text = text[:unit_start].strip()
-    unit = text[unit_start:].lower()
-    if unit not in _SIZE_UNITS:
-        raise ValueError(_SIZE_ERROR)
-    if "." in value_text:
-        whole, fraction = value_text.split(".", 1)
-        if not whole or not fraction:
-            raise ValueError(_SIZE_ERROR)
-        if not whole.isdigit() or not fraction.isdigit():
-            raise ValueError(_SIZE_ERROR)
-    elif not value_text.isdigit():
-        raise ValueError(_SIZE_ERROR)
-
-    value = Decimal(value_text)
-    if value <= 0:
-        raise ValueError(_SIZE_ERROR)
-    return int(value * _SIZE_UNITS[unit])
-
-
-def _resolve_size_bytes(size: SizeRequest) -> int:
-    if isinstance(size, bool):
-        raise ValueError(_SIZE_ERROR)
-    resolved = size if isinstance(size, int) else _parse_size_string(size)
-    if resolved <= 0:
-        raise ValueError(_SIZE_ERROR)
-    return resolved
-
-
-def _api_error_response(exc: L2ReconfigureError) -> JSONResponse:
-    return JSONResponse(status_code=exc.status_code, content=exc.payload)
-
-
-def _validation_error_response(exc: ValidationError) -> JSONResponse:
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 
 def _normalize_backend(backend: str) -> str:
@@ -223,34 +179,45 @@ def _dax_operation_payload(
         if operation == "add":
             add_body = DaxAddRequest.model_validate(payload)
             try:
-                size_bytes = _resolve_size_bytes(add_body.size)
+                size_bytes = resolve_size_bytes(add_body.size)
             except ValueError:
-                return JSONResponse(status_code=400, content={"error": _SIZE_ERROR})
+                return JSONResponse(status_code=400, content={"error": SIZE_ERROR})
+            offset_bytes = _dax_offset_bytes(add_body.offset)
+            if isinstance(offset_bytes, JSONResponse):
+                return offset_bytes
             return (
                 add_body.adapter_index,
                 {
                     "device_path": add_body.device_path,
                     "size_bytes": size_bytes,
+                    "offset_bytes": offset_bytes,
                 },
             )
 
         if operation == "remove":
             remove_body = DaxRemoveRequest.model_validate(payload)
+            offset_bytes = _dax_offset_bytes(remove_body.offset)
+            if isinstance(offset_bytes, JSONResponse):
+                return offset_bytes
             return (
                 remove_body.adapter_index,
                 {
                     "device_path": remove_body.device_path,
                     "mode": remove_body.mode,
                     "force": remove_body.force,
+                    "offset_bytes": offset_bytes,
                 },
             )
 
         if operation == "resize":
             resize_body = DaxResizeRequest.model_validate(payload)
             try:
-                size_bytes = _resolve_size_bytes(resize_body.size)
+                size_bytes = resolve_size_bytes(resize_body.size)
             except ValueError:
-                return JSONResponse(status_code=400, content={"error": _SIZE_ERROR})
+                return JSONResponse(status_code=400, content={"error": SIZE_ERROR})
+            offset_bytes = _dax_offset_bytes(resize_body.offset)
+            if isinstance(offset_bytes, JSONResponse):
+                return offset_bytes
             return (
                 resize_body.adapter_index,
                 {
@@ -258,10 +225,11 @@ def _dax_operation_payload(
                     "size_bytes": size_bytes,
                     "mode": resize_body.mode,
                     "force": resize_body.force,
+                    "offset_bytes": offset_bytes,
                 },
             )
     except ValidationError as exc:
-        return _validation_error_response(exc)
+        return validation_error_response(exc)
 
     raise L2ReconfigureError(
         400,
@@ -275,7 +243,7 @@ def _generic_operation_payload(
     try:
         body = GenericReconfigureRequest.model_validate(payload)
     except ValidationError as exc:
-        return _validation_error_response(exc)
+        return validation_error_response(exc)
 
     operation_payload = dict(body.model_extra or {})
     return body.adapter_index, operation_payload
@@ -291,7 +259,7 @@ def _operation_payload(
     return _generic_operation_payload(payload)
 
 
-@router.get("/reconfigure/{backend}/status", response_model=None)
+@router.get("/reconfigure/{backend}/l2/status", response_model=None)
 async def reconfigure_status(backend: str, request: Request) -> dict | JSONResponse:
     """Return runtime reconfiguration status for one backend type."""
     sm = _get_storage_manager(request)
@@ -299,13 +267,13 @@ async def reconfigure_status(backend: str, request: Request) -> dict | JSONRespo
         return sm
     try:
         normalized_backend = _normalize_backend(backend)
-        status = sm.get_l2_adapter_reconfigure_status()
+        status = await asyncio.to_thread(sm.get_l2_adapter_reconfigure_status)
         return _backend_status_response(status, normalized_backend)
     except L2ReconfigureError as exc:
-        return _api_error_response(exc)
+        return reconfigure_error_response(exc)
 
 
-@router.post("/reconfigure/{backend}/{operation}", response_model=None)
+@router.post("/reconfigure/{backend}/l2/{operation}", response_model=None)
 async def reconfigure_backend(
     backend: str,
     operation: str,
@@ -323,15 +291,20 @@ async def reconfigure_backend(
         if isinstance(resolved, JSONResponse):
             return resolved
         adapter_index, operation_payload = resolved
-        generic_adapter_index = _resolve_backend_adapter_index(
-            sm,
-            normalized_backend,
-            adapter_index,
-        )
-        return sm.reconfigure_l2_adapter(
-            generic_adapter_index,
-            normalized_operation,
-            operation_payload,
-        )
+
+        def reconfigure() -> dict:
+            """Keep status-probe locks and the operation off the event loop."""
+            generic_adapter_index = _resolve_backend_adapter_index(
+                sm,
+                normalized_backend,
+                adapter_index,
+            )
+            return sm.reconfigure_l2_adapter(
+                generic_adapter_index,
+                normalized_operation,
+                operation_payload,
+            )
+
+        return await asyncio.to_thread(reconfigure)
     except L2ReconfigureError as exc:
-        return _api_error_response(exc)
+        return reconfigure_error_response(exc)

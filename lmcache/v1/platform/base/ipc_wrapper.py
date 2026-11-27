@@ -4,24 +4,75 @@
 :class:`DeviceIPCWrapper` is the abstract base for KV-cache IPC wrapper
 implementations.  Every concrete wrapper (e.g. :class:`~.cpu.shm.CpuShmTensorWrapper`,
 :class:`~.cuda.ipc_wrapper.CudaIPCWrapper`) subclasses it so they share
-the single msgspec ext code (1) -- pickle preserves the concrete
-subclass identity across the wire so ``to_tensor`` dispatches correctly
-on the receiving side.
+the single msgspec ext code (1). A data-only descriptor selects the
+concrete implementation from a local allowlist.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
-from typing import Any, Tuple
-import pickle
+from typing import Any, Callable, Tuple, cast
+import importlib
 import threading
 
 # Third Party
+import msgspec
 import torch
 
 # First Party
 from lmcache import torch_dev
+from lmcache.v1.platform.base.ipc_wire import (
+    DTYPES,
+    WRAPPER_TYPES,
+    TensorMetadata,
+    WireIPCData,
+)
+
+# Importer-side hook resolving an export id to a POSIX fd that the exporter
+# delivered out of band (fds cannot ride the wire descriptor; see
+# DeviceIPCWrapper.fd_payload). Installed by the MP server's fd channel
+# (lmcache.v1.platform.fd_channel) or by tests; unset means fd delivery is
+# not configured in this process.
+_FD_RESOLVER: Callable[[bytes], int] | None = None
+
+
+def set_fd_resolver(resolver: Callable[[bytes], int] | None) -> None:
+    """Install the process-wide export-id -> fd resolver.
+
+    Wrappers whose handle is a process-local fd call it from ``to_tensor``
+    on the importing side. Ownership of the returned fd transfers to the
+    caller.
+
+    Args:
+        resolver: Callable mapping an export id to an open fd, or ``None``
+            to uninstall.
+    """
+    global _FD_RESOLVER
+    _FD_RESOLVER = resolver
+
+
+def resolve_fd(export_id: bytes) -> int:
+    """Resolve an export id to a POSIX fd via the installed resolver.
+
+    Args:
+        export_id: The exporting wrapper's export id.
+
+    Returns:
+        An open fd owned by the caller.
+
+    Raises:
+        RuntimeError: If no resolver is installed, or the resolver has no fd
+            for ``export_id``.
+    """
+    if _FD_RESOLVER is None:
+        raise RuntimeError(
+            "No fd resolver installed in this process: the wrapper's POSIX "
+            "fd must be delivered out of band (SCM_RIGHTS, e.g. over the MP "
+            "server's fd channel) and registered via set_fd_resolver() "
+            "before to_tensor()."
+        )
+    return _FD_RESOLVER(export_id)
 
 
 class DeviceIPCWrapper:
@@ -30,12 +81,11 @@ class DeviceIPCWrapper:
     Holds the device-agnostic mechanism shared by all transports: the
     interface fields (``dtype``/``shape``/``stride``/``storage_offset``/
     ``device_uuid``), UUID<->ordinal discovery via the ``torch_dev``
-    abstraction, equality, and pickle-based (de)serialization.
+    abstraction, equality, and data-only (de)serialization.
 
     Every wire-level wrapper subclasses this so they share the single
-    msgspec ext code (1) registered for ``DeviceIPCWrapper``: pickle
-    preserves the concrete subclass identity across the wire so
-    ``to_tensor`` dispatches correctly on the receiving side.
+    msgspec ext code (1) registered for ``DeviceIPCWrapper``. Explicit
+    descriptor tags preserve concrete wrapper identity without unpickling.
 
     Subclasses implement ``__init__`` (populate the interface fields from a
     tensor) and ``to_tensor`` (reconstruct the tensor from the handle).
@@ -88,7 +138,42 @@ class DeviceIPCWrapper:
 
     @classmethod
     def _get_device_index_from_uuid(cls, device_uuid: str) -> int:
-        """Get the physical device ordinal from its UUID."""
+        """Get the physical device ordinal from its UUID.
+
+        Args:
+            device_uuid: the UUID of the device to resolve, as carried in an
+                inter-process device handle received from a peer process.
+
+        Returns:
+            The physical device ordinal for ``device_uuid`` on this host.
+
+        Raises:
+            RuntimeError: if this process has no accelerator devices available
+                (e.g. a device-incapable process that received an IPC handle
+                from an accelerator worker); the message points at the two
+                supported topologies -- giving the receiving process visibility
+                of the same devices, or using ``engine_driven`` transfer so the
+                sending client does the device-side copy. Also raised if a
+                device is available but ``device_uuid`` is not among the
+                discovered devices.
+        """
+        # A device-incapable process (e.g. one started without accelerator
+        # visibility) can never resolve a peer's device IPC handle. Fail with
+        # actionable guidance instead of the generic "not found" below, which
+        # misleads operators into checking device visibility when the real fix
+        # may be the transfer mode. This layer is engine-agnostic, so the
+        # message names neither a specific engine, process role, nor config
+        # keys. See #4186.
+        if not torch_dev.is_available():
+            raise RuntimeError(
+                "This process cannot access the accelerator device "
+                f"referenced by this IPC handle (device {device_uuid}); "
+                "no accelerator devices are available. Ensure the receiving "
+                "process can see the same accelerator devices, or configure "
+                "the MP deployment to use engine_driven transfer so the "
+                "sending client performs the device-side copy."
+            )
+
         cls._discover_devices()
 
         with DeviceIPCWrapper._device_mapping_lock:
@@ -110,6 +195,20 @@ class DeviceIPCWrapper:
         Subclasses implement the transport-specific reconstruction.
         """
         raise NotImplementedError
+
+    def fd_payload(self) -> tuple[bytes, int] | None:
+        """Return the fd this wrapper's handle needs delivered out of band.
+
+        Returns:
+            ``(export_id, fd)`` on the exporting side of a wrapper whose
+            handle is a process-local POSIX fd.
+
+            ``None`` (the default) when the handle rides the wire descriptor.
+
+        Note:
+            The fd stays owned by the wrapper until :meth:`close`.
+        """
+        return None
 
     def close(self) -> None:
         """Release process-local resources held for reconstruction.
@@ -138,32 +237,78 @@ class DeviceIPCWrapper:
             and self.device_uuid == other.device_uuid
         )
 
+    def wire_metadata(self) -> TensorMetadata:
+        """Return the data-only tensor view metadata for this wrapper."""
+        return TensorMetadata(
+            dtype=str(self.dtype).removeprefix("torch."),
+            shape=self.shape,
+            stride=self.stride,
+            storage_offset=self.storage_offset,
+            device_uuid=self.device_uuid,
+        )
+
+    def restore_metadata(self, metadata: TensorMetadata) -> None:
+        """Restore validated tensor metadata without opening IPC resources."""
+        self.dtype = DTYPES[metadata.dtype]
+        self.shape = metadata.shape
+        self.stride = metadata.stride
+        self.storage_offset = metadata.storage_offset
+        self.device_uuid = metadata.device_uuid
+
+    def to_wire(self) -> WireIPCData:
+        """Return an explicit descriptor for a supported IPC implementation."""
+        raise NotImplementedError
+
+    @classmethod
+    def from_wire(cls, data: WireIPCData) -> "DeviceIPCWrapper":
+        """Restore a wrapper from its validated descriptor without opening it."""
+        raise NotImplementedError
+
     @staticmethod
     def Serialize(obj: "DeviceIPCWrapper") -> bytes:
-        """Pickle ``obj`` for the multiprocess wire.
-
-        Pickle (rather than msgspec) is used so the concrete subclass
-        identity round-trips: every wrapper shares the single msgspec
-        ext code (1), and the receiver relies on the unpickled type to
-        dispatch ``to_tensor`` correctly.
+        """Encode an IPC descriptor as MessagePack, without Python objects.
 
         Args:
-            obj: The wrapper instance to serialize.
+            obj: A supported concrete IPC wrapper.
 
         Returns:
-            The pickled bytes payload.
+            Versioned descriptor bytes for both MP transports.
+
+        Raises:
+            ValueError: If the wrapper is not an explicitly supported type.
         """
-        return pickle.dumps(obj)
+        data = obj.to_wire()
+        module, name = WRAPPER_TYPES[type(data)]
+        if (type(obj).__module__, type(obj).__name__) != (
+            f"lmcache.v1.platform.devices.{module}",
+            name,
+        ):
+            raise ValueError("Unsupported IPC wrapper type")
+        return msgspec.msgpack.encode(data)
 
     @staticmethod
     def Deserialize(data: bytes) -> "DeviceIPCWrapper":
-        """Inverse of :meth:`Serialize`.
+        """Decode a data-only IPC descriptor. Legacy pickle is rejected.
 
         Args:
-            data: The pickled bytes payload produced by :meth:`Serialize`.
+            data: Bytes produced by :meth:`Serialize`.
 
         Returns:
-            The reconstructed wrapper instance, with its concrete
-            subclass identity preserved.
+            A wrapper with no receiver-local resources opened.
+
+        Raises:
+            msgspec.DecodeError: If the descriptor is malformed or unsupported.
         """
-        return pickle.loads(data)
+        descriptor = msgspec.msgpack.decode(data, type=WireIPCData)
+        module, name = WRAPPER_TYPES[type(descriptor)]
+        # Module and class names come exclusively from the local allowlist.
+        wrapper_cls = cast(
+            type[DeviceIPCWrapper],
+            getattr(
+                importlib.import_module(f"lmcache.v1.platform.devices.{module}"), name
+            ),
+        )
+        return wrapper_cls.from_wire(descriptor)
+
+
+KVCache = list[DeviceIPCWrapper]

@@ -39,7 +39,10 @@ use NVMe passthrough via the io_uring command interface for direct device access
   character devices.
 - `wait_iouring` returns a success bitmap and a sparse
   `(operation_index, error_message)` list after the worker releases the
-  request's global and per-batch in-flight accounting.
+  request's global and per-batch in-flight accounting. Use
+  `wait_iouring_exceptions(batch_id)` to get the same bitmap and the original
+  exception objects. Both methods consume the batch. A payload UECC is an
+  instance of `lmcache_rust_raw_block_io.NvmeUnrecoveredReadError`.
 
 ## MP Mode Integration
 
@@ -62,7 +65,10 @@ StoreController / PrefetchController
 ```
 
 This split lets LMCache reuse the same on-device metadata and recovery model in
-both non-MP and MP mode without duplicating the raw-block implementation.
+both non-MP and MP mode without duplicating the raw-block implementation. During
+restart recovery, the shared `RawBlockCore` validates POSIX per-slot headers with
+an internal pool of 8 reader threads. Both regular `io_uring` and `io_uring_cmd`
+batch header reads up to `iouring_queue_depth`.
 
 ## Zero-Copy Data Path
 
@@ -89,8 +95,8 @@ To compare `local_disk` vs `rust_raw_block` on a real NVMe device:
 - Unmount it.
 - Run `rust_raw_block` directly on the raw block device.
 
-Use the benchmark commands in:
-- `benchmarks/storage_backend_io/README.md`
+Use the multiprocess benchmark tooling under `lmcache bench` to compare the
+backends on the target host.
 
 No fixed numbers are included here because results are host/device/workload dependent.
 
@@ -102,6 +108,13 @@ No fixed numbers are included here because results are host/device/workload depe
   requests whose offset or `total_len` is not a multiple of the configured
   alignment; misaligned write buffers are copied through an aligned bounce
   buffer.
+- `write_uring` and `batched_write` take a logical payload length alongside the
+  physical transfer length (`write_uring`'s `total_len` defaults to
+  `payload_len`; `batched_write`'s `payload_lens` defaults to `total_lens`).
+  They read only within the source buffer bounds, never modify it, and always
+  write the padding region as zeroes. A bounce buffer is used when the source is
+  shorter than the transfer length or its padding tail is not already zero,
+  so a caller buffer whose tail is zero keeps the fixed-buffer zero-copy path.
 
 ## Build
 
@@ -171,7 +184,7 @@ To use the MP adapter from `lmcache server`, pass a `raw_block` L2 adapter
 config:
 
 ```bash
-lmcache server \
+lmcache server --transport grpc --host 127.0.0.1 --port 5555 \
   --l1-size-gb 10 \
   --eviction-policy LRU \
   --l1-align-bytes 4096 \
@@ -189,6 +202,9 @@ lmcache server \
     "num_load_workers": 4
   }'
 ```
+
+Connect the MP client to `grpc://127.0.0.1:5555`. The scheme-less endpoint
+`127.0.0.1:5555` also selects gRPC on the current default transport.
 
 Notes:
 

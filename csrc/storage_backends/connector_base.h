@@ -38,7 +38,8 @@ class:
 - 4. do_single_exists()
 
 optionally override do_single_delete() to support eviction (default returns
-false for all keys).
+false for all keys), or do_single_delete_result() when the backend can tell
+an absent key from a failed delete.
 
 see the RedisConnector (csrc/redis/) implementing the RESP2 protocol over TCP
 for an example
@@ -84,7 +85,7 @@ class ConnectorBase : public IStorageConnector {
     validate_batch_inputs(keys, bufs, lens);
 
     size_t num_items = keys.size();
-    auto [batch_future_id, batch_state, num_tiles, tile_size] =
+    auto [batch_future_id, batch_state, num_tiles] =
         prepare_batch_operation(num_items, Op::BATCH_TILE_GET);
 
     // pre-allocate per-key results for load error tolerance
@@ -93,7 +94,7 @@ class ConnectorBase : public IStorageConnector {
     // fan out work to threads
     for (size_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
       auto tile_req = create_tile_request(
-          keys, bufs, lens, tile_idx, tile_size, num_items, batch_future_id,
+          keys, bufs, lens, tile_idx, num_tiles, num_items, batch_future_id,
           batch_state, Op::BATCH_TILE_GET, batch_chunk_num_bytes);
       enqueue_request(std::move(tile_req));
     }
@@ -108,13 +109,13 @@ class ConnectorBase : public IStorageConnector {
     validate_batch_inputs(keys, bufs, lens);
 
     size_t num_items = keys.size();
-    auto [batch_future_id, batch_state, num_tiles, tile_size] =
+    auto [batch_future_id, batch_state, num_tiles] =
         prepare_batch_operation(num_items, Op::BATCH_TILE_SET);
 
     // fan out work to threads
     for (size_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
       auto tile_req = create_tile_request(
-          keys, bufs, lens, tile_idx, tile_size, num_items, batch_future_id,
+          keys, bufs, lens, tile_idx, num_tiles, num_items, batch_future_id,
           batch_state, Op::BATCH_TILE_SET, batch_chunk_num_bytes);
       enqueue_request(std::move(tile_req));
     }
@@ -128,7 +129,7 @@ class ConnectorBase : public IStorageConnector {
     }
 
     size_t num_items = keys.size();
-    auto [batch_future_id, batch_state, num_tiles, tile_size] =
+    auto [batch_future_id, batch_state, num_tiles] =
         prepare_batch_operation(num_items, Op::BATCH_TILE_EXISTS);
 
     // pre-allocate results vector with correct size
@@ -136,8 +137,7 @@ class ConnectorBase : public IStorageConnector {
 
     // fan out work to threads
     for (size_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
-      size_t start = tile_idx * tile_size;
-      size_t end = std::min(start + tile_size, num_items);
+      auto [start, end] = get_tile_range(tile_idx, num_items, num_tiles);
 
       Request tile_req;
       tile_req.op = Op::BATCH_TILE_EXISTS;
@@ -161,16 +161,15 @@ class ConnectorBase : public IStorageConnector {
     }
 
     size_t num_items = keys.size();
-    auto [batch_future_id, batch_state, num_tiles, tile_size] =
+    auto [batch_future_id, batch_state, num_tiles] =
         prepare_batch_operation(num_items, Op::BATCH_TILE_DELETE);
 
-    // pre-allocate per-key results (1 = deleted, 0 = not found)
+    // pre-allocate per-key results (DeleteResult, default NOT_DELETED)
     batch_state->per_key_results.assign(num_items, 0);
 
     // fan out work to threads
     for (size_t tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
-      size_t start = tile_idx * tile_size;
-      size_t end = std::min(start + tile_size, num_items);
+      auto [start, end] = get_tile_range(tile_idx, num_items, num_tiles);
 
       Request tile_req;
       tile_req.op = Op::BATCH_TILE_DELETE;
@@ -310,6 +309,14 @@ class ConnectorBase : public IStorageConnector {
     (void)key;
     return false;  // no-op default for backward compat with plugins
   }
+  // A false from do_single_delete() may be an error, so it maps to
+  // NOT_DELETED and the key stays tracked; only an override can report
+  // NOT_FOUND.
+  virtual DeleteResult do_single_delete_result(ConnectionType& conn,
+                                               const std::string& key) {
+    return do_single_delete(conn, key) ? DeleteResult::DELETED
+                                       : DeleteResult::NOT_DELETED;
+  }
   virtual size_t choose_num_tiles(Op op, size_t num_items) const {
     return std::min<size_t>(worker_count_for_op(op), num_items);
   }
@@ -341,10 +348,11 @@ class ConnectorBase : public IStorageConnector {
   virtual void do_batch_delete(ConnectionType& conn, const Request& req) {
     for (size_t i = 0; i < req.keys.size(); ++i) {
       try {
-        bool deleted = do_single_delete(conn, req.keys[i]);
-        req.batch->per_key_results[req.start_idx + i] = deleted ? 1 : 0;
+        req.batch->per_key_results[req.start_idx + i] =
+            static_cast<uint8_t>(do_single_delete_result(conn, req.keys[i]));
       } catch (const std::exception& e) {
-        req.batch->per_key_results[req.start_idx + i] = 0;
+        req.batch->per_key_results[req.start_idx + i] =
+            static_cast<uint8_t>(DeleteResult::NOT_DELETED);
         fprintf(stderr, "[LMCache DELETE] key %s failed: %s\n",
                 req.keys[i].c_str(), e.what());
       }
@@ -364,14 +372,7 @@ class ConnectorBase : public IStorageConnector {
     return num_workers_;
   }
 
- private:
-  struct WorkerLane {
-    std::mutex mu;
-    std::condition_variable cv;
-    std::queue<Request> requests;
-    std::vector<std::thread> workers;
-  };
-
+  // Helpers for derived connectors that complete batches outside workers_.
   void validate_batch_inputs(const std::vector<std::string>& keys,
                              const std::vector<void*>& bufs,
                              const std::vector<size_t>& lens) {
@@ -383,15 +384,47 @@ class ConnectorBase : public IStorageConnector {
     }
   }
 
-  // returns: (batch_future_id, batch_state, num_tiles, tile_size)
-  std::tuple<uint64_t, std::shared_ptr<BatchState>, size_t, size_t>
+  void push_completion(Completion&& c) {
+    {
+      std::lock_guard<std::mutex> lk(comp_mu_);
+      completions_.push(std::move(c));
+    }
+    signal_eventfd_();
+  }
+
+ private:
+  struct WorkerLane {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::queue<Request> requests;
+    std::vector<std::thread> workers;
+  };
+
+  struct TileRange {
+    size_t start;
+    size_t end;
+  };
+
+  static TileRange get_tile_range(size_t tile_idx, size_t num_items,
+                                  size_t num_tiles) {
+    // Distribute the remainder across the first tiles so tile sizes differ
+    // by at most one. The quotient/remainder calculation also avoids
+    // overflow-prone round-up and tile_idx * num_items formulas.
+    size_t base_tile_size = num_items / num_tiles;
+    size_t larger_tiles = num_items % num_tiles;
+    size_t start = tile_idx * base_tile_size + std::min(tile_idx, larger_tiles);
+    size_t tile_size = base_tile_size + (tile_idx < larger_tiles ? 1 : 0);
+    return {start, start + tile_size};
+  }
+
+  // returns: (batch_future_id, batch_state, num_tiles)
+  std::tuple<uint64_t, std::shared_ptr<BatchState>, size_t>
   prepare_batch_operation(size_t num_items, Op op) {
     size_t num_tiles = choose_num_tiles(op, num_items);
     if (num_tiles == 0 || num_tiles > num_items) {
       throw std::runtime_error(
           "choose_num_tiles must return a value in [1, num_items]");
     }
-    size_t tile_size = (num_items + num_tiles - 1) / num_tiles;  // round up
 
     // create shared batch state
     uint64_t batch_future_id =
@@ -400,18 +433,17 @@ class ConnectorBase : public IStorageConnector {
     batch_state->remaining_tiles.store(num_tiles, std::memory_order_relaxed);
     batch_state->batch_op = op;
 
-    return {batch_future_id, batch_state, num_tiles, tile_size};
+    return {batch_future_id, batch_state, num_tiles};
   }
 
   Request create_tile_request(const std::vector<std::string>& keys,
                               const std::vector<void*>& bufs,
                               const std::vector<size_t>& lens, size_t tile_idx,
-                              size_t tile_size, size_t num_items,
+                              size_t num_tiles, size_t num_items,
                               uint64_t batch_future_id,
                               std::shared_ptr<BatchState> batch_state, Op op,
                               size_t batch_chunk_num_bytes) {
-    size_t start = tile_idx * tile_size;
-    size_t end = std::min(start + tile_size, num_items);  // clip last tile
+    auto [start, end] = get_tile_range(tile_idx, num_items, num_tiles);
 
     Request tile_req;
     tile_req.op = op;
@@ -446,14 +478,6 @@ class ConnectorBase : public IStorageConnector {
       requests_.push(std::move(req));
     }
     req_cv_.notify_one();
-  }
-
-  void push_completion(Completion&& c) {
-    {
-      std::lock_guard<std::mutex> lk(comp_mu_);
-      completions_.push(std::move(c));
-    }
-    signal_eventfd_();
   }
 
   void drain_eventfd_() { notifier_->consume(); }

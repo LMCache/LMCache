@@ -7,4 +7,3 @@ Caching state beyond the attention KV cache.
    :maxdepth: 1
 
    encodings
-   hidden_states

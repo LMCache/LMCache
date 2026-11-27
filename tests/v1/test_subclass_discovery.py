@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for ``lmcache.v1.utils.subclass_discovery``."""
+"""Unit tests for ``lmcache.v1.common.subclass_discovery``."""
 
 # Standard
 from pathlib import Path
@@ -13,7 +13,7 @@ import uuid
 import pytest
 
 # First Party
-from lmcache.v1.utils.subclass_discovery import discover_subclasses
+from lmcache.v1.common.subclass_discovery import discover_subclasses
 
 
 def _write_module(pkg_dir: Path, name: str, source: str) -> None:
@@ -144,6 +144,51 @@ class TestDiscoverSubclassesBasic:
         )
 
         assert base_mod.Base not in result
+
+
+class TestDiscoverSubclassesInModule:
+    def test_scans_one_non_package_module(self, temp_pkg: Tuple[str, Path]) -> None:
+        pkg_name, pkg_dir = temp_pkg
+        _populate_basic_pkg(pkg_dir)
+        base_mod = importlib.import_module(f"{pkg_name}.base")
+
+        result = list(
+            discover_subclasses(
+                f"{pkg_name}.child_a",
+                base_mod.Base,
+                walk_submodules=False,
+            )
+        )
+
+        assert _names(result) == ["ChildA"]
+
+    def test_scans_package_itself_without_walking_children(
+        self, temp_pkg: Tuple[str, Path]
+    ) -> None:
+        pkg_name, pkg_dir = temp_pkg
+        _populate_basic_pkg(pkg_dir)
+        (pkg_dir / "__init__.py").write_text(
+            textwrap.dedent(
+                """
+                from .base import Base
+
+                class RootChild(Base):
+                    def name(self) -> str:
+                        return "root"
+                """
+            )
+        )
+        base_mod = importlib.import_module(f"{pkg_name}.base")
+
+        result = list(
+            discover_subclasses(
+                pkg_name,
+                base_mod.Base,
+                walk_submodules=False,
+            )
+        )
+
+        assert _names(result) == ["RootChild"]
 
 
 class TestAbstractFiltering:
@@ -297,7 +342,7 @@ class TestImportErrorHandling:
         # test to pytest's caplog interaction with the project's
         # custom logger setup.
         # First Party
-        from lmcache.v1.utils import subclass_discovery as sd
+        from lmcache.v1.common import subclass_discovery as sd
 
         warnings: List[Tuple[str, Tuple[object, ...]]] = []
         monkeypatch.setattr(

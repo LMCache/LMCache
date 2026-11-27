@@ -15,12 +15,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, ClassVar
 import array
+import threading
 
 # Third Party
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.utils import (
+from lmcache.v1.common.utils import (
     get_attention_backend,
     get_concrete_engine_kv_shape_from_shape_desc,
     get_engine_kv_shape_description,
@@ -28,9 +29,15 @@ from lmcache.v1.gpu_connector.utils import (
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
+    # Standard
+    from collections.abc import Sequence
+
     # First Party
-    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-    from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+    from lmcache.v1.common.buffer_registration import BufferRegistration
+    from lmcache.v1.common.kv_layer_groups import KVLayerGroupsManager
+    from lmcache.v1.common.memory_management import MemoryObj
+    from lmcache.v1.common.ops_types import PageBufferShapeDesc
+    from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 
 
 class BaseCacheContext(ABC):
@@ -38,7 +45,10 @@ class BaseCacheContext(ABC):
 
     Subclasses call :meth:`__init__` after computing the common
     layout parameters and before setting up device-specific state.
-    All keyword arguments are required so the contract is explicit.
+    Layout keyword arguments are required. ``object_group_transfer`` is the
+    optional default copy callback, supplied at construction by server callers.
+    Contexts that only use layout helpers or override ``transfer_object_group``
+    do not need it.
 
     Concrete subclasses MUST set :attr:`device_type` to the
     ``torch.device.type`` string they handle (``"cuda"``, ``"cpu"``,
@@ -60,6 +70,7 @@ class BaseCacheContext(ABC):
         kv_layer_groups_manager: KVLayerGroupsManager,
         block_ids_buffer: torch.Tensor,
         lmcache_tokens_per_chunk: int,
+        object_group_transfer: ObjectGroupTransfer | None = None,
     ) -> None:
         self.kv_caches_ = kv_caches
         self.device_ = device
@@ -67,6 +78,40 @@ class BaseCacheContext(ABC):
         self.kv_layer_groups_manager_ = kv_layer_groups_manager
         self.block_ids_buffer_ = block_ids_buffer
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        self._object_group_transfer = object_group_transfer
+        # Imported worker events, held until the stream wait queued on each
+        # has been consumed (see hold_imported_event / release_imported_event).
+        self._held_imports: dict[int, object] = {}
+        self._next_import_token = 0
+        self._held_imports_lock = threading.Lock()
+
+    def hold_imported_event(self, event: object) -> int:
+        """Keep an imported worker event alive until :meth:`release_imported_event`.
+
+        A stream wait queued on an imported event refers to it until the
+        stream has consumed the wait, so the import must outlive the handler
+        that queued it.
+
+        Args:
+            event: The imported event.
+
+        Returns:
+            The token that releases this import.
+        """
+        with self._held_imports_lock:
+            token = self._next_import_token
+            self._next_import_token += 1
+            self._held_imports[token] = event
+            return token
+
+    def release_imported_event(self, token: int) -> None:
+        """Drop the imported event behind ``token``; its stream wait has drained.
+
+        Args:
+            token: Token returned by :meth:`hold_imported_event`.
+        """
+        with self._held_imports_lock:
+            self._held_imports.pop(token, None)
 
     # ------------------------------------------------------------------
     # Abstract -- subclasses MUST implement
@@ -117,6 +162,19 @@ class BaseCacheContext(ABC):
         ...
 
     @abstractmethod
+    def get_temp_staging_buffer(self, num_bytes: int) -> torch.Tensor | None:
+        """Return the start of the transfer staging buffer as one flat region.
+
+        Args:
+            num_bytes: Bytes the region must hold.
+
+        Returns:
+            A flat uint8 view of the buffer's first ``num_bytes`` bytes, or
+            None when the staging buffer is smaller than ``num_bytes``.
+        """
+        ...
+
+    @abstractmethod
     def get_kernel_group_shape_dtype(
         self,
         num_tokens: int,
@@ -133,6 +191,15 @@ class BaseCacheContext(ABC):
     # ------------------------------------------------------------------
     # Concrete -- shared implementations
     # ------------------------------------------------------------------
+
+    def register_staging_buffer(  # noqa: B027 -- optional device capability
+        self, registration: BufferRegistration
+    ) -> None:
+        """Register staging storage before transfers; no-op by default.
+
+        Overrides retain successful registrations until close drains the stream.
+        """
+        return None
 
     @property
     def device(self) -> torch.device:
@@ -230,6 +297,57 @@ class BaseCacheContext(ABC):
         transfer."""
         return self.kv_layer_groups_manager.get_slots_per_chunk_in_sw(kernel_group_idx)
 
+    def get_kernel_group_kv_pointer_list(self, kernel_group_idx: int) -> list[int]:
+        """Returns the host-side list of paged KV pointers of a kernel group.
+
+        Same pointers and order as :meth:`get_kernel_group_kv_pointers`, as
+        Python ints for host-side address arithmetic. This default reads the
+        device tensor back, which synchronizes the current stream; subclasses
+        cache the list.
+
+        Args:
+            kernel_group_idx: Index of the kernel group.
+
+        Returns:
+            The paged buffer data pointers of the group, in kernel order.
+        """
+        return self.get_kernel_group_kv_pointers(kernel_group_idx).tolist()
+
+    def get_kernel_group_offset_in_object(
+        self, object_group_idx: int, kernel_group_idx: int
+    ) -> int:
+        """Returns the byte offset of a kernel group's region inside one
+        memory object of ``object_group_idx``.
+
+        A memory object concatenates the ``[kv_size, num_layers, slots,
+        hidden]`` regions of its kernel groups in the object group's declared
+        order (the layout of :func:`get_layout_desc` and of the temp staging
+        buffer), each sized for one LMCache chunk.
+
+        Args:
+            object_group_idx: Index of the object group.
+            kernel_group_idx: Index of a kernel group that belongs to it.
+
+        Returns:
+            Byte offset of the kernel group's region from the object start.
+
+        Raises:
+            ValueError: If the kernel group is not part of the object group.
+        """
+        object_group = self.kv_layer_groups_manager.object_groups[object_group_idx]
+        offset = 0
+        for member_idx in object_group.kernel_group_indices:
+            if member_idx == kernel_group_idx:
+                return offset
+            shape, dtype = self.get_kernel_group_shape_dtype(
+                self.lmcache_tokens_per_chunk, member_idx
+            )
+            offset += shape.numel() * dtype.itemsize
+        raise ValueError(
+            f"kernel group {kernel_group_idx} is not part of object group "
+            f"{object_group_idx} (members: {object_group.kernel_group_indices})"
+        )
+
     def get_kv_buffer_shape(
         self, logical_num_tokens: int, group_idx: int = 0
     ) -> torch.Size:
@@ -275,6 +393,45 @@ class BaseCacheContext(ABC):
             self.block_ids_buffer_[offsets[i] : offsets[i + 1]]
             for i in range(len(block_ids_per_group))
         ]
+
+    def transfer_object_group(
+        self,
+        block_ids_gpu: list[torch.Tensor],
+        memory_objs: Sequence[MemoryObj | None],
+        *,
+        object_group_id: int,
+        batch_size: int,
+        skip_first_n_tokens: int,
+        direction: lmcache_native.TransferDirection,
+        transfer_key: str,
+        block_ids_host: Sequence[Sequence[int]] = (),
+    ) -> None:
+        """Enqueue the copy of one object group between the KV cache and
+        *memory_objs*, in either direction.
+
+        A subclass that changes the staging layout can override this method.
+        The default calls the ``object_group_transfer`` constructor callback;
+        see :class:`~lmcache.v1.platform.base.object_group_transfer.ObjectGroupTransfer`
+        for argument semantics, completion ownership and copy errors.
+
+        Raises:
+            RuntimeError: If no default transfer callback was supplied.
+        """
+        if self._object_group_transfer is None:
+            raise RuntimeError(
+                "No object-group transfer callback supplied to cache context"
+            )
+        self._object_group_transfer(
+            self,
+            block_ids_gpu,
+            memory_objs,
+            object_group_id=object_group_id,
+            batch_size=batch_size,
+            skip_first_n_tokens=skip_first_n_tokens,
+            direction=direction,
+            transfer_key=transfer_key,
+            block_ids_host=block_ids_host,
+        )
 
     # ------------------------------------------------------------------
     # Derived properties (pure helpers)

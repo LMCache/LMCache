@@ -10,6 +10,46 @@ defaults below.
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+# First Party
+from lmcache.v1.multiprocess.config import DEFAULT_KAFKA_CACHE_EVENT_TOPIC
+
+
+@dataclass(frozen=True)
+class HttpCacheEventSourceConfig:
+    """Consume cache events pushed to ``POST /events`` (the default)."""
+
+
+@dataclass(frozen=True)
+class KafkaCacheEventSourceConfig:
+    """Consume cache events from a Kafka topic instead of ``POST /events``.
+
+    Attributes:
+        bootstrap_servers: Comma-separated Kafka bootstrap servers.
+        topic: Topic to consume; must match the MP servers'
+            ``--coordinator-kafka-topic``.
+        group_id: Consumer group the coordinator joins. Where a restart
+            resumes is the checkpoint's business, not the group's (see
+            :class:`~.ingest.stream_position.StreamPosition`); the group
+            only decides how partitions are shared between members.
+    """
+
+    bootstrap_servers: str = ""
+    topic: str = DEFAULT_KAFKA_CACHE_EVENT_TOPIC
+    group_id: str = "lmcache-coordinator"
+
+    def __post_init__(self) -> None:
+        """Validate the bootstrap servers, topic, and consumer group.
+
+        Raises:
+            ValueError: If any of them is empty.
+        """
+        if not self.bootstrap_servers.strip():
+            raise ValueError("Kafka bootstrap servers must be non-empty")
+        if not self.topic.strip():
+            raise ValueError("Kafka cache-event topic must be non-empty")
+        if not self.group_id.strip():
+            raise ValueError("Kafka consumer group must be non-empty")
+
 
 @dataclass(frozen=True)
 class MPCoordinatorConfig:
@@ -29,10 +69,9 @@ class MPCoordinatorConfig:
             cycle (0.0 to 1.0).
         trigger_watermark: Eviction fires when usage reaches this fraction
             of the quota (0.0 to 1.0).
-        chunk_size: Tokens per KV chunk. The single fleet chunk size: it is the
-            CacheBlend match unit *and* resolves a pin request's ``token_ids`` to
-            object keys. Must equal the MP servers' ``--chunk-size`` or blend
-            matches and resolved pin keys will not line up with what was stored.
+        chunk_size: Fixed tokens per KV chunk for CacheBlend matching and
+            pin-request token hashing. It must match every MP server connected
+            to this coordinator.
         hash_algorithm: Token hash algorithm for pin key resolution. Must equal
             the MP servers' ``--hash-algorithm`` (default ``blake3``, which is
             self-contained; other algorithms require vLLM importable in the
@@ -54,21 +93,39 @@ class MPCoordinatorConfig:
         timeout_keep_alive: Seconds the HTTP server keeps idle connections
             open before closing them. Must be greater than the heartbeat
             interval of MP servers to avoid race-condition disconnects.
+        public_endpoints: Exact HTTP paths the coordinator serves without
+            credentials when API-key authentication is on. ``None`` keeps the
+            default, which is ``/healthz`` alone: the liveness probe must not
+            require configuration, while ``/metrics`` describes fleet placement
+            and reported bytes. An explicit tuple replaces that default -- the
+            usual value is ``("/healthz", "/metrics")`` for a deployment that
+            scrapes without a credential -- and an empty tuple requires a key
+            on every path including the probe.
         extra_config: Settings the core config does not name, keyed by
             whatever reads them. Discovery means a new view or controller
             is one file; without this, giving it a setting would still
             mean editing this class, the CLI, and the docs. The
-            coordinator itself reads one key, ``controller_packages``: a
-            list of importable paths to load controllers from, which is
-            how an out-of-tree controller gets in without anything here
-            importing it. Views have no equivalent -- they are in-tree
-            only.
+            coordinator itself reads two keys.
+            ``controller_packages`` is a list of importable paths to load
+            controllers from, which is how an out-of-tree controller gets
+            in without anything here importing it;
+            ``disabled_controllers`` is a list of class names to leave
+            unbuilt, which is how one of them takes a built-in
+            controller's place rather than running beside it. Views have
+            no equivalent of either -- they are in-tree only.
         metrics_enabled: Whether to initialize OpenTelemetry metrics.
         otlp_endpoint: OTLP gRPC endpoint for metrics push mode. When unset,
             metrics use Prometheus pull mode on the coordinator HTTP port.
+        event_source_config: The one transport the fleet's cache events
+            arrive on. :class:`HttpCacheEventSourceConfig` (the default)
+            serves ``POST /events``; :class:`KafkaCacheEventSourceConfig`
+            consumes a Kafka topic instead -- one ``CacheEventsRequest`` JSON
+            envelope per record, the same body ``POST /events`` accepts --
+            and ``POST /events`` then answers 404. Kafka needs the
+            ``lmcache[kafka]`` extra.
     """
 
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 9300
     instance_timeout: float = 30.0
     health_check_interval: float = 10.0
@@ -82,16 +139,21 @@ class MPCoordinatorConfig:
     checkpoint_path: str = ""
     checkpoint_interval: float = 60.0
     metadata_path: str = ""
+    public_endpoints: tuple[str, ...] | None = None
     extra_config: Mapping[str, object] = field(default_factory=dict)
     timeout_keep_alive: int = 10
     metrics_enabled: bool = True
     otlp_endpoint: str | None = None
+    event_source_config: HttpCacheEventSourceConfig | KafkaCacheEventSourceConfig = (
+        field(default_factory=HttpCacheEventSourceConfig)
+    )
 
     def __post_init__(self) -> None:
         """Validate timing parameters.
 
         Raises:
-            ValueError: If a timing parameter is non-positive/negative.
+            ValueError: If a timing parameter is non-positive/negative, or a
+                public endpoint is not an absolute path.
         """
         if self.instance_timeout <= 0:
             raise ValueError("instance_timeout must be positive")
@@ -115,3 +177,9 @@ class MPCoordinatorConfig:
             raise ValueError("checkpoint_interval must be non-negative")
         if self.timeout_keep_alive <= 0:
             raise ValueError("timeout_keep_alive must be positive")
+        for endpoint in self.public_endpoints or ():
+            if not endpoint.startswith("/"):
+                raise ValueError(
+                    f"public endpoint {endpoint!r} must be an absolute path "
+                    "starting with '/'"
+                )

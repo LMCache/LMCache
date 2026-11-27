@@ -17,13 +17,20 @@ from fastapi import Request
 import httpx
 
 # First Party
-from lmcache.v1.mp_coordinator.controllers.base import Controller
+from lmcache.v1.common.token_hasher import TokenHasher
+from lmcache.v1.mp_coordinator.background_loops import (
+    BackgroundLoops,
+    EventLoopMonitor,
+)
+from lmcache.v1.mp_coordinator.controllers.base import Controller, ControllerStatus
 from lmcache.v1.mp_coordinator.discovery import Registry
+from lmcache.v1.mp_coordinator.ingest.event_broadcaster import (
+    CacheEventBroadcaster,
+)
 from lmcache.v1.mp_coordinator.ingest.event_gate import EventGate
-from lmcache.v1.mp_coordinator.ingest.http_event_source import HttpCacheEventSource
+from lmcache.v1.mp_coordinator.ingest.event_source import CacheEventSource
 from lmcache.v1.mp_coordinator.persistence.metadata import MetadataPersister
 from lmcache.v1.mp_coordinator.views.base import View
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 
 @dataclass
@@ -48,19 +55,50 @@ class CoordinatorContext:
             ``ServerConfigRegistry`` for the declared capacities a usage
             ratio divides by.
         event_gate: Admission authority after a source delivers cache events.
-        event_source: HTTP source adapter used by ``POST /events`` before
-            batches reach the gate.
+        event_source: The one source adapter delivering cache events to the
+            gate, per ``MPCoordinatorConfig.event_source_config``: the HTTP
+            push source behind ``POST /events``, or the Kafka pull source
+            (in which case ``POST /events`` answers 404).
         metadata_persister: Durable store for operator intent. Every
             handler that changes a pin or a quota must ``save`` so the
             change survives a restart.
+        event_broadcaster: Fans admitted batches out to the consumers;
+            keeps each consumer's delivery and failure counts.
+        background_loops: Runs the periodic work; keeps each loop's stats.
+        event_loop_monitor: How long the event loop was blocked.
+        controller_status: Which controllers started.
     """
 
     controllers: Registry[Controller]
     token_hasher: TokenHasher
     views: Registry[View]
     event_gate: EventGate
-    event_source: HttpCacheEventSource
+    event_source: CacheEventSource
     metadata_persister: MetadataPersister
+    event_broadcaster: CacheEventBroadcaster
+    background_loops: BackgroundLoops
+    event_loop_monitor: EventLoopMonitor
+    controller_status: ControllerStatus
+
+    def validate_chunk_size(self, chunk_size: int) -> int:
+        """Validate an MP server's chunk size against the coordinator.
+
+        Args:
+            chunk_size: The MP server's configured chunk size.
+
+        Returns:
+            The matching coordinator chunk size.
+
+        Raises:
+            ValueError: If the MP server uses a different chunk size.
+        """
+        configured_chunk_size = self.token_hasher.chunk_size
+        if chunk_size != configured_chunk_size:
+            raise ValueError(
+                f"Coordinator uses chunk size {configured_chunk_size}, but the "
+                f"MP server uses {chunk_size}"
+            )
+        return configured_chunk_size
 
 
 def get_context(request: Request) -> CoordinatorContext:

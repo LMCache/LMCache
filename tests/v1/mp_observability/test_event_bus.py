@@ -14,6 +14,7 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import (
     EventBus,
     EventBusConfig,
+    EventCallback,
     EventSubscriber,
     get_event_bus,
     init_event_bus,
@@ -266,6 +267,71 @@ class TestEventDispatch:
 # ---------------------------------------------------------------------------
 
 
+class TestShutdownOrder:
+    def test_subscribers_shut_down_in_reverse_registration_order(self, bus):
+        """A later subscriber may write into an earlier one at shutdown, so
+        the later one must go first."""
+        order: list[str] = []
+
+        class _Named(EventSubscriber):
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            def get_subscriptions(self) -> dict[EventType, EventCallback]:
+                return {}
+
+            def shutdown(self) -> None:
+                order.append(self.name)
+
+        for name in ("first", "second", "third"):
+            bus.register_subscriber(_Named(name))
+        bus.start()
+
+        bus.stop()
+
+        assert order == ["third", "second", "first"]
+
+    def test_a_writer_registered_after_its_target_flushes_before_it_closes(self, bus):
+        """The case the order exists for: a target that closes at shutdown
+        and a writer that emits its last record at shutdown."""
+
+        class _Target(EventSubscriber):
+            def __init__(self) -> None:
+                self.closed = False
+                self.received: list[str] = []
+
+            def get_subscriptions(self) -> dict[EventType, EventCallback]:
+                return {}
+
+            def write(self, record: str) -> None:
+                if self.closed:
+                    raise RuntimeError("write after close")
+                self.received.append(record)
+
+            def shutdown(self) -> None:
+                self.closed = True
+
+        class _Writer(EventSubscriber):
+            def __init__(self, target: _Target) -> None:
+                self.target = target
+
+            def get_subscriptions(self) -> dict[EventType, EventCallback]:
+                return {}
+
+            def shutdown(self) -> None:
+                self.target.write("final")
+
+        target = _Target()
+        bus.register_subscriber(target)
+        bus.register_subscriber(_Writer(target))
+        bus.start()
+
+        bus.stop()
+
+        assert target.received == ["final"]
+        assert target.closed
+
+
 class TestExceptionIsolation:
     def test_bad_callback_doesnt_block_good(self, bus):
         bad_cb = MagicMock(side_effect=RuntimeError("boom"))
@@ -469,7 +535,7 @@ class TestBlockAllocationEvent:
         bus.start()
 
         # First Party
-        from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
+        from lmcache.v1.common.custom_types import BlockAllocationRecord
 
         records = [
             BlockAllocationRecord(
@@ -537,3 +603,8 @@ class TestSelfMonitoringGauges:
             bus.publish(_make_event(session_id="s1"))
             bus.publish(_make_event(session_id="s2"))
             assert captured["lmcache_mp.event_bus.queue_depth"]() == 2
+
+    def test_disabled_bus_registers_no_gauges(self):
+        with patch(_REGISTER_GAUGE) as mock_register:
+            EventBus(EventBusConfig(enabled=False))
+            mock_register.assert_not_called()

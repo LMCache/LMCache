@@ -3,6 +3,7 @@
 
 # Third Party
 from fastapi.testclient import TestClient
+import pytest
 
 # First Party
 from lmcache.v1.mp_coordinator.app import create_app
@@ -29,6 +30,38 @@ def test_register_lists_then_deregister():
 
         assert client.delete("/instances/i1").status_code == 204
         assert client.get("/instances").json()["instances"] == []
+
+
+def test_instance_registration_validates_chunk_size() -> None:
+    """Coordinator membership uses one configured fleet chunk size."""
+    with _client() as client:
+        accepted = client.post(
+            "/instances",
+            json={
+                "instance_id": "matching-size",
+                "ip": "127.0.0.1",
+                "http_port": 8080,
+                "chunk_size": 256,
+            },
+        )
+        assert accepted.status_code == 200
+        assert accepted.json() == {
+            "instance_id": "matching-size",
+            "re_registered": False,
+        }
+
+        mismatch = client.post(
+            "/instances",
+            json={
+                "instance_id": "wrong-size",
+                "ip": "127.0.0.1",
+                "http_port": 8080,
+                "chunk_size": 512,
+            },
+        )
+        assert mismatch.status_code == 409
+        instances = client.get("/instances").json()["instances"]
+        assert [instance["instance_id"] for instance in instances] == ["matching-size"]
 
 
 def test_register_round_trips_p2p_and_mq_fields():
@@ -114,6 +147,53 @@ def test_register_rejects_blank_ip():
         # Whitespace-only ip is stripped to empty and rejected.
         bad = {"instance_id": "x", "ip": "   ", "http_port": 8080}
         assert client.post("/instances", json=bad).status_code == 422
+
+
+@pytest.mark.parametrize(
+    "ip",
+    [
+        "169.254.169.254/latest/meta-data/iam/security-credentials/?x=",
+        "127.0.0.1:6379/inject",
+        "http://127.0.0.1",
+        "user@internal.example",
+        "internal.example?path=/admin",
+        "internal host",
+        "internal\\admin",
+        "[::1]",
+    ],
+)
+def test_register_rejects_ip_with_url_syntax(ip: str) -> None:
+    """Registration cannot inject authority or path components via ``ip``."""
+    with _client() as client:
+        response = client.post(
+            "/instances",
+            json={"instance_id": "x", "ip": ip, "http_port": 8080},
+        )
+
+        assert response.status_code == 422
+        assert client.get("/instances").json()["instances"] == []
+
+
+@pytest.mark.parametrize(
+    "ip",
+    [
+        "127.0.0.1",
+        "internal.svc.cluster.local",
+        "lmcache_mp",
+        "localhost",
+        "::1",
+    ],
+)
+def test_register_accepts_bare_ip_or_host_name(ip: str) -> None:
+    with _client() as client:
+        response = client.post(
+            "/instances",
+            json={"instance_id": "x", "ip": ip, "http_port": 8080},
+        )
+
+        assert response.status_code == 200
+        listed = client.get("/instances").json()["instances"]
+        assert listed[0]["ip"] == ip
 
 
 def test_whitespace_instance_id_is_generated():

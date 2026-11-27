@@ -353,11 +353,26 @@ func vllmContainerArgs(pod *corev1.Pod) []string {
 }
 
 // podHasDevShmHostPath reports whether the pod carries a hostPath volume for
-// /dev/shm — the webhook's default CUDA IPC wiring (hostIPC is opt-in).
+// /dev/shm — the webhook's CUDA IPC wiring in legacy mode
+// (spec.isolatedIPC: false; hostIPC is opt-in on top).
 func podHasDevShmHostPath(pod *corev1.Pod) bool {
 	for i := range pod.Spec.Volumes {
 		hp := pod.Spec.Volumes[i].HostPath
 		if hp != nil && hp.Path == "/dev/shm" {
+			return true
+		}
+	}
+	return false
+}
+
+// podHasDevShmMemoryEmptyDir reports whether the pod carries the pod-private
+// memory-backed /dev/shm emptyDir — the webhook's wiring under isolated IPC
+// (the default for gpuVendor nvidia).
+func podHasDevShmMemoryEmptyDir(pod *corev1.Pod) bool {
+	for i := range pod.Spec.Volumes {
+		v := &pod.Spec.Volumes[i]
+		if v.Name == "lmcache-dev-shm" && v.EmptyDir != nil &&
+			v.EmptyDir.Medium == corev1.StorageMediumMemory {
 			return true
 		}
 	}

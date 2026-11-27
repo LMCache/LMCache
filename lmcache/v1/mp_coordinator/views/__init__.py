@@ -11,7 +11,7 @@ by type, and routes whatever durable state it advertises.
 from typing import TYPE_CHECKING
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.mp_coordinator.discovery import Registry, discover
 from lmcache.v1.mp_coordinator.views import base
 from lmcache.v1.mp_coordinator.views.base import View

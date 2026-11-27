@@ -10,10 +10,10 @@
 # per OS rather than requiring one shared version across all of them.
 # pin-tested-vllm.sh writes latest_tested_vllm_<os>.txt accordingly.
 #
-# Results come from cpu_device.yml, whose matrix is (os x model), so one
-# OS contributes several legs. An OS is only pinned as tested when every
-# one of its legs passed the full CPU device suite (server bench + e2e);
-# "importable" is not enough.
+# Results come from cpu_device.yml, whose matrix is
+# (os x model x request transport), so one OS contributes several legs.
+# An OS is only pinned as tested when every one of its legs passed the full
+# CPU device suite (server bench + e2e); "importable" is not enough.
 #
 # Expects artifacts under verify-results/*/verify_result.json (one
 # subdirectory per matrix leg, from download-artifact).
@@ -47,7 +47,7 @@ find_tracking_issue() {
 # ── Parse per-leg artifacts and fold them per OS ────────────────────
 # OS_LEGS keeps the individual "model=status" verdicts for the report;
 # OS_STATUS is the folded result: failed as soon as any leg failed.
-declare -A OS_STATUS OS_VERSION OS_REASON OS_LEGS
+declare -A OS_STATUS OS_VERSION OS_REASON OS_LEGS OS_SOURCE_SHA OS_BUILT_AT
 for d in verify-results/*/; do
     f="${d}verify_result.json"
     if [ ! -f "$f" ]; then
@@ -55,21 +55,28 @@ for d in verify-results/*/; do
     fi
     # Read all fields in a single python3 invocation (tab-separated) to
     # avoid spawning one interpreter per field.
-    IFS=$'\t' read -r os model st ver rsn < <(python3 -c '
+    IFS=$'\t' read -r os model transport st ver source_sha built_at rsn < <(python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
 print("\t".join([
     d["os"],
     d.get("model", "-"),
+    d.get("request_transport", "zmq"),
     d["status"],
-    d.get("vllm_version", ""),
+    d.get("vllm_version") or "unknown",
+    d.get("source_sha") or "-",
+    d.get("built_at") or "-",
     d.get("reason", ""),
 ]))
 ' "$f")
-    OS_LEGS["$os"]="${OS_LEGS[$os]:-} ${model}=${st}"
+    OS_LEGS["$os"]="${OS_LEGS[$os]:-} ${model}/${transport}=${st}"
     # Record a version from any leg that reported one, even a failing
     # one, so the report can name the build that broke.
     [ -n "$ver" ] && OS_VERSION["$os"]="$ver"
+    [[ "$source_sha" == "-" ]] && source_sha=""
+    [[ "$built_at" == "-" ]] && built_at=""
+    OS_SOURCE_SHA["$os"]="$source_sha"
+    OS_BUILT_AT["$os"]="$built_at"
 
     # First failure decides the OS verdict and keeps its reason; a later
     # passing leg must not overwrite it.
@@ -92,7 +99,7 @@ for os in ${EXPECTED_OSS:-}; do
     fi
 done
 
-# Sort so log order, CSV append order and issue table order are stable
+# Sort so log order, history append order and issue table order are stable
 # across runs; bash iterates associative arrays in hash order.
 ALL_OSS="$(printf '%s\n' "${!OS_STATUS[@]}" | sort)"
 
@@ -100,6 +107,7 @@ total=0
 passed=0
 failed_oss=""
 success_oss=""
+pin_failed=0
 for os in $ALL_OSS; do
     total=$((total + 1))
     echo "  $os  status=${OS_STATUS[$os]}  version=${OS_VERSION[$os]:-}" \
@@ -125,7 +133,7 @@ fi
 # Every platform is pinned independently: a green ubuntu leg still
 # publishes its version even when macOS is broken, and vice versa.
 for os in $ALL_OSS; do
-    # Record the observed version on failure rows too: the CSV is the
+    # Record the observed version on failure rows too: the JSONL is the
     # append-only history used to answer "which builds broke before", and
     # dropping it there left a useless "unknown". Only the latest_*.txt
     # pointer is gated on status, and the pin script still falls back to
@@ -142,19 +150,27 @@ for os in $ALL_OSS; do
     # A single bad platform must not abort the loop, or the issue below
     # would never be created.
     if ! CI_PLATFORM=github_actions \
+        PIN_BACKEND=cpu \
         PIN_VLLM_STATUS="$pin_status" \
         PIN_VLLM_REASON="$pin_reason" \
         PIN_VLLM_DRY_RUN="${DRY_RUN:-0}" \
         OS_PLATFORM="$os" \
         VLLM_VERSION="$pin_version" \
+        VLLM_SOURCE_SHA="${OS_SOURCE_SHA[$os]:-}" \
+        VLLM_BUILT_AT="${OS_BUILT_AT[$os]:-}" \
         bash "${PIN_SCRIPT}"; then
         printf '::warning::Failed to record %s result for %s\n' \
             "$pin_status" "$os"
+        pin_failed=1
     fi
 done
 
 # ── All platforms passed: close any open tracking issue ─────────────
 if [ "$passed" -eq "$total" ]; then
+    if [ "$pin_failed" -ne 0 ]; then
+        echo "::error::Validation passed but publishing the pin failed"
+        exit 1
+    fi
     printf '::notice::vLLM verified on all %s CPU platforms\n' "$total"
 
     if [ "${DRY_RUN:-0}" = "1" ]; then
@@ -214,3 +230,4 @@ else
         --label "ci/cd" --label "bug"
     echo "::warning::Created new vLLM verify failure issue"
 fi
+exit 1

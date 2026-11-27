@@ -1,0 +1,30 @@
+# RBLN hardware smoke test for the multiprocess (MP) path.
+# rbln-queue is served by agent-stack-k8s: each job is a pod, and the NPU is
+# allocated through DRA from the buildkite/npu1 ResourceClaimTemplate.
+
+env:
+  LMCACHE_TRACK_USAGE: "false"
+
+steps:
+  - label: "RBLN MP Hardware Smoke"
+    key: "rbln_mp_hardware_smoke"
+    command: bash .buildkite/k3_tests/rbln/run.sh
+    timeout_in_minutes: 60
+    agents:
+      queue: "rbln-queue"
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                # Set by the uploader: the nightly lane's candidate image, or
+                # for PR builds the last image that lane verified.
+                image: ${RBLN_SERVE_IMAGE}
+                securityContext:
+                  runAsUser: 0
+                resources:
+                  claims:
+                    - name: npu
+            resourceClaims:
+              - name: npu
+                resourceClaimTemplateName: npu1

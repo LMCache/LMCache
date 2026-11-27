@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import argparse
 import asyncio
 import contextlib
-import time
+import dataclasses
 
 # Third Party
 from fastapi import FastAPI
@@ -13,7 +14,7 @@ import uvicorn
 
 # First Party
 from lmcache import torch_dev
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
@@ -21,8 +22,7 @@ from lmcache.v1.distributed.config import (
     parse_args_to_config,
 )
 from lmcache.v1.mp_coordinator.cache_events import (
-    CacheEventSubscriber,
-    HttpCacheEventSink,
+    maybe_create_cache_event_subscriber,
 )
 from lmcache.v1.mp_coordinator.registrar import keep_registered
 from lmcache.v1.mp_observability.config import (
@@ -31,11 +31,14 @@ from lmcache.v1.mp_observability.config import (
     parse_args_to_observability_config,
 )
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import shutdown_grpc_otel_metrics
+from lmcache.v1.mp_observability.trace.lifecycle import EVENTS_LEVEL
 from lmcache.v1.multiprocess.config import (
     DEFAULT_COORDINATOR_CONFIG,
     CoordinatorConfig,
     HTTPFrontendConfig,
     MPServerConfig,
+    P2PConfig,
     add_coordinator_args,
     add_http_frontend_args,
     add_mp_server_args,
@@ -49,6 +52,11 @@ from lmcache.v1.multiprocess.http_api_registry import (
 )
 from lmcache.v1.multiprocess.http_apis.dependencies import build_context
 from lmcache.v1.multiprocess.http_apis.error_handlers import register_error_handlers
+from lmcache.v1.multiprocess.http_auth import (
+    HTTPAuthenticationConfig,
+    HTTPAuthenticationMiddleware,
+)
+from lmcache.v1.multiprocess.http_reconfigure import ReconfigureInstanceMiddleware
 from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
     MPRuntimePluginLauncher,
 )
@@ -62,16 +70,80 @@ logger = init_logger(__name__)
 _configs: dict = {}
 
 
+def _with_p2p_write_policies(
+    storage_manager_config: StorageManagerConfig,
+    p2p_config: P2PConfig,
+) -> StorageManagerConfig:
+    """Pick the L2 policies of a server that stores objects into its peers.
+
+    Args:
+        storage_manager_config: The storage manager configuration as parsed.
+        p2p_config: P2P configuration with writes enabled.
+
+    Returns:
+        The configuration with the ``p2p`` store policy and the ``skip_l1``
+        prefetch policy, each replacing a policy that was ``default``. A
+        policy that was chosen explicitly is kept.
+    """
+    store_policy = storage_manager_config.store_policy
+    prefetch_policy = storage_manager_config.prefetch_policy
+    if store_policy in ("default", "p2p"):
+        l1_config = storage_manager_config.l1_manager_config
+        eviction = l1_config.eviction or storage_manager_config.eviction_config
+        if (
+            eviction.eviction_policy != "noop"
+            and p2p_config.write_l1_usage_threshold >= eviction.trigger_watermark
+        ):
+            logger.warning(
+                "--p2p-write-l1-usage-threshold (%s) is not below the L1 "
+                "eviction trigger watermark (%s): local eviction will discard "
+                "objects before they are stored into a peer",
+                p2p_config.write_l1_usage_threshold,
+                eviction.trigger_watermark,
+            )
+        store_policy = "p2p"
+    else:
+        logger.warning(
+            "P2P writes are enabled with store policy %r: it decides which "
+            "objects go to peers, and --p2p-write-l1-usage-threshold does not "
+            "apply",
+            store_policy,
+        )
+
+    # An object read back from a peer must not stay in the local L1: the
+    # copies would fill it and evict objects that live nowhere else.
+    if prefetch_policy == "default":
+        prefetch_policy = "skip_l1"
+    elif prefetch_policy != "skip_l1":
+        logger.warning(
+            "P2P writes are enabled with prefetch policy %r: objects read "
+            "back from a peer may stay in the local L1 and evict objects "
+            "that are stored nowhere else",
+            prefetch_policy,
+        )
+
+    logger.info(
+        "P2P writes are enabled: using store policy %r and prefetch policy %r",
+        store_policy,
+        prefetch_policy,
+    )
+    return dataclasses.replace(
+        storage_manager_config,
+        store_policy=store_policy,
+        prefetch_policy=prefetch_policy,
+    )
+
+
 # ----------------------------
 # FastAPI lifespan for initialization and cleanup
 # ----------------------------
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     Manage the lifecycle of the LMCache HTTP server.
 
-    On startup: Initialize ZMQ server and cache engine.
-    On shutdown: Clean up ZMQ server and cache engine resources.
+    On startup: Initialize the selected request server and cache engine.
+    On shutdown: Clean up request server and cache engine resources.
     """
     # Startup
     logger.info(
@@ -90,7 +162,7 @@ async def lifespan(app: FastAPI):
         coordinator_config=coordinator_config,
     )
     assert result is not None, "run_cache_server returned None with return_engine=True"
-    zmq_server, engine = result
+    request_server, engine = result
 
     # Launch runtime plugins if configured. Plugins receive the full
     # server config (including HTTP host/port) via the
@@ -110,7 +182,7 @@ async def lifespan(app: FastAPI):
         )
         plugin_launcher.launch_plugins()
 
-    app.state.zmq_server = zmq_server
+    app.state.request_server = request_server
     app.state.engine = engine
     # Typed per-app context the cache handlers resolve via ``get_context``
     # (built now that the engine is ready).
@@ -125,7 +197,17 @@ async def lifespan(app: FastAPI):
     coordinator_client = None
     coordinator_registration_task = None
     if coordinator_config.url and http_config is not None:
-        coordinator_client = httpx.AsyncClient(timeout=10.0)
+        # Present the shared fleet key when one is configured, so registration
+        # and heartbeats pass a coordinator that enforces authentication.
+        # First Party
+        from lmcache.v1.transport.auth import (
+            request_client_auth_headers,
+        )
+
+        coordinator_client = httpx.AsyncClient(
+            timeout=10.0,
+            headers=request_client_auth_headers(mp_config.api_key_files),
+        )
         # Canonical id resolved by run_cache_server above; shared with
         # the OTel service.instance.id so membership matches metrics/traces.
         coordinator_registration_task = asyncio.create_task(
@@ -137,26 +219,21 @@ async def lifespan(app: FastAPI):
                 advertise_ip=coordinator_config.advertise_ip,
                 heartbeat_interval=coordinator_config.heartbeat_interval,
                 p2p_advertised_url=mp_config.p2p_config.advertise_url,
-                mq_port=mp_config.port if mp_config.p2p_config.enabled else 0,
+                mq_port=engine.mq_port,
                 on_registered=engine.storage_manager.publish_capacity,
+                chunk_size=engine.context.default_chunk_size,
             )
         )
-    # Optionally report cache events to the coordinator
-    if (
-        coordinator_client is not None
-        and coordinator_config.url
-        and coordinator_config.event_reporting
-    ):
-        get_event_bus().register_subscriber(
-            CacheEventSubscriber(
-                sink=HttpCacheEventSink(coordinator_config.url),
-                instance_id=mp_config.instance_id,
-                # Server start time: fences out placements this instance
-                # reported before a restart (its pools restarted empty).
-                incarnation=int(time.time()),
-                flush_interval=coordinator_config.event_flush_interval,
-            )
-        )
+    # Optionally emit cache events: to the coordinator, to an events-level
+    # trace file, or both.
+    subscriber = maybe_create_cache_event_subscriber(
+        mp_config,
+        http_config,
+        coordinator_config,
+        mq_port=engine.mq_port,
+    )
+    if subscriber is not None:
+        get_event_bus().register_subscriber(subscriber)
 
     app.state.coordinator_client = coordinator_client
     app.state.coordinator_registration_task = coordinator_registration_task
@@ -181,13 +258,16 @@ async def lifespan(app: FastAPI):
     if launcher is not None:
         launcher.stop_plugins()
     get_event_bus().stop()
-    if hasattr(app.state, "zmq_server") and app.state.zmq_server is not None:
-        app.state.zmq_server.close()
+    request_server.close()
     engine.close()
+    shutdown_grpc_otel_metrics()
     logger.info("LMCache HTTP server stopped")
 
 
 app = FastAPI(title="LMCache HTTP API", version="1.0.0", lifespan=lifespan)
+app.state.http_authentication = HTTPAuthenticationConfig()
+app.add_middleware(ReconfigureInstanceMiddleware)
+app.add_middleware(HTTPAuthenticationMiddleware)
 
 # Automatically discover and register all HTTP API endpoints
 registry = HTTPAPIRegistry(app)
@@ -204,23 +284,28 @@ def run_http_server(
     storage_manager_config: StorageManagerConfig,
     obs_config: ObservabilityConfig,
     coordinator_config: CoordinatorConfig,
+    http_authentication: HTTPAuthenticationConfig | None = None,
 ) -> None:
     """
-    Run the LMCache HTTP server with integrated MP (ZMQ) server.
+    Run the LMCache HTTP server with an integrated MP request server.
 
     Args:
         http_config: Configuration for the HTTP frontend
-        mp_config: Configuration for the ZMQ multiprocess server
+        mp_config: Configuration for the multiprocess request server
         storage_manager_config: Configuration for the storage manager
         obs_config: Configuration for the observability stack
         coordinator_config: Configuration for MP coordinator registration
             (an empty URL disables registration)
+        http_authentication: Bearer API keys accepted by the HTTP frontend.
+            ``None`` leaves authentication disabled.
 
     Raises:
         ValueError: If P2P is enabled without a coordinator URL, or with an L1
-            tier that is not a single registerable memory region; or if
-            coordinator event reporting is enabled with observability
-            disabled (the cache-event stream rides the event bus).
+            tier that is not a single registerable memory region; if P2P
+            writes are enabled without P2P; or if
+            coordinator event reporting or ``--trace-level events`` is enabled
+            with observability disabled (the cache-event stream rides the
+            event bus).
     """
     if mp_config.p2p_config.enabled:
         if not coordinator_config.url:
@@ -235,10 +320,23 @@ def run_http_server(
                 "can register; it is incompatible with GDS L1 (--gds-l1-path) "
                 "and Device-DAX L1 (--l1-devdax-path)."
             )
+    if mp_config.p2p_config.enable_write:
+        if not mp_config.p2p_config.enabled:
+            raise ValueError(
+                "--enable-p2p-write requires P2P: set --p2p-advertise-url."
+            )
+        storage_manager_config = _with_p2p_write_policies(
+            storage_manager_config, mp_config.p2p_config
+        )
     if coordinator_config.event_reporting and not obs_config.enabled:
         raise ValueError(
             "--coordinator-event-reporting rides the observability event "
             "bus: remove --disable-observability to report cache events."
+        )
+    if obs_config.trace_level == EVENTS_LEVEL and not obs_config.enabled:
+        raise ValueError(
+            "--trace-level events records the cache-event stream, which rides "
+            "the observability event bus: remove --disable-observability."
         )
     _configs["mp"] = mp_config
     _configs["storage_manager"] = storage_manager_config
@@ -246,6 +344,7 @@ def run_http_server(
     _configs["http"] = http_config
     _configs["coordinator"] = coordinator_config
     app.state.configs = _configs
+    app.state.http_authentication = http_authentication or HTTPAuthenticationConfig()
 
     config = uvicorn.Config(
         app=app,
@@ -284,10 +383,12 @@ if __name__ == "__main__":
     storage_manager_config = parse_args_to_config(args)
     obs_config = parse_args_to_observability_config(args)
     coordinator_config = parse_args_to_coordinator_config(args)
+    http_authentication = HTTPAuthenticationConfig.from_sources(args.api_key_file)
     run_http_server(
         http_config=http_config,
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
         obs_config=obs_config,
         coordinator_config=coordinator_config,
+        http_authentication=http_authentication,
     )

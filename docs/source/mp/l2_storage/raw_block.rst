@@ -6,6 +6,17 @@ device or pre-sized file using the Rust raw-device I/O bindings. It reuses the
 existing raw-block metadata checkpoint model and writes directly into the
 caller-provided load buffers during prefetch.
 
+**Installation:** the Rust bindings ship as a separate wheel,
+``lmcache-rust-raw-block-io``, released at the same version as ``lmcache``.
+Install both together through the ``raw-block`` extra. The extra does not pin
+the Rust wheel's version, so pin it yourself to guarantee a matching pair:
+
+.. code-block:: bash
+
+    pip install 'lmcache[raw-block]'
+    # exact match, e.g. for 0.5.7:
+    pip install lmcache==0.5.7 lmcache-rust-raw-block-io==0.5.7
+
 **Required fields:**
 
 - ``device_path``: Raw device path or pre-sized file path.
@@ -20,14 +31,23 @@ caller-provided load buffers during prefetch.
   power of two.
 - ``header_bytes``: Per-slot header reservation (default ``4096``).
 - ``meta_total_bytes``: Reserved metadata checkpoint region (default ``256MiB``).
+  The region holds two checkpoint copies, and each copy must fit the whole
+  index. A checkpoint larger than one copy is skipped, so newer entries are
+  lost on restart; the core logs a warning when a checkpoint passes 80% of a
+  copy. Changing this value changes the device layout, so the existing cache
+  is not recovered.
 - ``meta_magic`` / ``meta_version``: Metadata checkpoint identity/version knobs.
 - ``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` /
   ``meta_enable_periodic`` / ``meta_verify_on_load``: Checkpoint and recovery
-  controls carried over from the legacy raw-block backend.
+  controls carried over from the legacy raw-block backend. A periodic
+  checkpoint waits for ``meta_idle_quiet_ms`` without I/O, but not for more
+  than one extra interval, so steady traffic cannot hold it off.
 - ``load_checkpoint_on_init``: Load an existing on-device metadata checkpoint
   during startup (default ``true``). Set to ``false`` to start with an empty
   in-memory index instead.
-- ``enable_zero_copy``: Try aligned direct-buffer I/O when possible.
+- ``enable_zero_copy``: Try aligned direct-buffer I/O when possible. With
+  ``io_engine="io_uring"``, also try to register eligible L1 memory as fixed
+  buffers.
 - ``io_engine``: Rust raw-block I/O engine. Valid values are ``"posix"``
   (default synchronous ``pread``/``pwrite`` path), ``"io_uring"`` (direct Rust
   io_uring syscall path).
@@ -73,10 +93,13 @@ caller-provided load buffers during prefetch.
 - ``raw_block`` owns on-device slot allocation, checkpointing, and recovery
   through ``RawBlockCore``. Slot reclamation is driven by the shared/global
   L2 eviction controller or explicit ``delete()`` calls.
+- POSIX restart recovery validates slot headers with an internal pool of 8
+  reader threads. Both regular ``io_uring`` and ``io_uring_cmd`` batch header
+  reads up to ``iouring_queue_depth``.
 - ``slot_bytes``, ``header_bytes``, and ``meta_total_bytes`` must be multiples
   of ``block_align``.
-- If ``use_odirect`` is enabled, the server's ``--l1-align-bytes`` should be
-  at least ``block_align``.
+- If ``use_odirect`` or ``use_uring_cmd`` is enabled, the server's
+  ``--l1-align-bytes`` must be at least ``block_align``.
 - With ``O_DIRECT``, raw-block I/O rejects offsets and total I/O lengths that
   are not multiples of ``block_align``. Misaligned write buffers use an aligned
   bounce buffer.
@@ -140,7 +163,80 @@ caller-provided load buffers during prefetch.
 - Metadata checkpoint writes use ``meta_checkpoint_placement_id`` when
   configured, otherwise they use default NVMe placement with no directive.
 
+**Fixed-buffer registration and memlock:**
+
+With ``io_engine="io_uring"`` and ``enable_zero_copy=true``, the adapter
+registers the stable L1 memory range during initialization. An anonymous
+``MixedMemoryAllocator`` exposes its full arena; ``LazyMemoryAllocator``
+exposes only the currently pinned prefix. POSIX shared-memory arenas do not
+expose an eligible range. Registration uses regions no larger than 1 GiB and
+does not grow when the lazy allocator expands.
+
+The kernel charges registered buffers against ``RLIMIT_MEMLOCK`` unless the
+process has ``CAP_IPC_LOCK``. The default lazy initial prefix is 20 GiB, so
+allow at least that much locked memory, plus headroom for other registrations
+and locked memory. Splitting the prefix into 1 GiB regions does not reduce
+the total memlock requirement. See the Linux
+`io_uring_register(2) manual <https://man7.org/linux/man-pages/man2/io_uring_register.2.html>`_.
+
+For a Bash-launched server, inspect the soft and hard limits in KiB and set
+the soft limit before starting the server from the same shell:
+
+.. code-block:: bash
+
+    ulimit -Sl
+    ulimit -Hl
+    # 20 GiB in KiB; requires a hard limit of at least this value.
+    ulimit -Sl 20971520
+
+If the hard limit is too low, raise it through the service, container, or
+login configuration. A systemd service can use ``LimitMEMLOCK=infinity``;
+a Docker container can use ``--ulimit memlock=-1:-1``. Apply the setting to
+the process running the LMCache server, then restart it. Registration is
+attempted once during adapter initialization.
+
+If registration fails, the adapter logs a warning and continues with ordinary
+io_uring. The adapter can therefore remain healthy even when fixed buffers
+are inactive. Check ``RawBlockL2Adapter.report_status()["core"]`` for:
+
+- ``fixed_buffers_registered``: ``true`` only after successful kernel
+  registration.
+- ``fixed_buffer_registered_bytes``: Total bytes in the registered regions;
+  ``0`` when no buffers are registered. This is the registered range size,
+  not the final L1 capacity or the number of bytes transferred.
+
+Both fields also appear under each raw-block adapter in
+:doc:`GET /status <../http_api>`:
+
+.. code-block:: bash
+
+    curl -fsS http://localhost:8080/status | jq '
+      .storage_manager.l2_adapters[]
+      | select(.type == "RawBlockL2Adapter")
+      | .core
+      | {fixed_buffers_registered, fixed_buffer_registered_bytes}'
+
+For a successfully registered 20 GiB prefix, the result is:
+
+.. code-block:: json
+
+    {
+      "fixed_buffers_registered": true,
+      "fixed_buffer_registered_bytes": 21474836480
+    }
+
+Failed or skipped registration reports ``false`` and ``0``, as does a closed
+adapter. Successful registration does not mean every request uses fixed I/O:
+requests outside the registered prefix or crossing a region boundary still
+use ordinary io_uring. When comparing performance, verify these fields and
+keep ``enable_zero_copy`` enabled in both cases to isolate registration from
+direct-buffer I/O.
+
 **Configuration examples:**
+
+Pass these L2 options to ``lmcache server``. For a server on
+``127.0.0.1:5555``, use the MP client endpoint ``grpc://127.0.0.1:5555``.
+A bare ``127.0.0.1:5555`` also selects the default gRPC request transport.
 
 .. code-block:: bash
 
@@ -165,6 +261,55 @@ caller-provided load buffers during prefetch.
     # With eviction
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
 
+**Failure handling and shutdown:**
+
+Recoverable ``io_uring`` submission errors (``EAGAIN``, ``EINTR``, ``EBUSY``)
+retry after completion progress or 1–100 ms exponential backoff. Permanent
+errors, or 30 seconds without submission or completion progress, mark the
+worker unhealthy and stop new native I/O. The core status exposes the failure
+reason as ``worker_error``.
+
+On an initialized MP adapter with ``io_engine="io_uring"`` and
+``use_uring_cmd=true``, a read completion with NVMe SCT 2 / SC 0x81
+confirms an Unrecovered Read Error (UECC). The status mask ignores CRD,
+More and DNR. POSIX and ordinary ``io_uring`` surface Linux errors and
+retain per-request handling.
+
+Slot quarantine requires a matching raw-block wheel with typed completion
+errors. Older wheels report failed reads as per-request misses.
+
+On a confirmed UECC while loading a cached payload, the core quarantines
+the affected data slot until the handle closes. Lookup and load miss for
+the slot's key. The worker keeps serving other slots, including successful
+keys in the same load. A later store can cache the recomputed key in a
+different slot. Each quarantined slot reduces usable capacity by one slot.
+
+For a full-attention prefix request for A, B and C, if B fails and no
+other tier supplies B, the serving caller gets only A. If A fails, the
+prefix is empty. The prefetch controller applies this rule after combining
+the available tiers. A separate request can still use healthy C.
+
+The core logs the failed byte range and raw NVMe status. The adapter's core
+status exposes ``quarantined_slot_count``, ``last_payload_uecc`` and the
+remaining ``usable_capacity_bytes``. A payload UECC alone leaves the worker
+healthy. Checkpointing continues and records the remaining indexed keys.
+The quarantine set is local to the open handle. After restart the allocator
+can reuse the slot, and an unreadable range can trigger quarantine again.
+Checkpoint and slot-header recovery reads retain their per-request handling.
+
+After a known worker failure, new prefetch tasks report failure through their
+normal task results and new stores are skipped. The adapter still publishes
+completion results and notifications so controllers can release locks and
+buffers; the serving engine can recompute missing data instead of receiving a
+synchronous storage exception. Valid hits from L1 or other L2 adapters remain
+usable. The legacy non-MP raw-block backend also skips new stores after worker
+failure.
+
+Already-accepted I/O retains its buffers until completion or successful
+cancellation. Close and destructor cleanup release the Python GIL while
+waiting, but can still block indefinitely if accepted I/O cannot finish or be
+cancelled. The 30-second submission retry budget is not a shutdown timeout.
+
 **Hardware-gated FDP status validation:**
 
 FDP live-device validation is opt-in because it requires an FDP-capable NVMe
@@ -176,7 +321,7 @@ data, or verify the MP adapter's cache-salt placement policy.
 .. code-block:: bash
 
     LMCACHE_TEST_FDP_CHAR_DEVICE=/dev/ng0n1 \
-      pytest -q tests/v1/storage_backend/test_raw_block_fdp_status_probe.py
+      pytest -q tests/v1/distributed/raw_block/test_fdp_status_probe.py
 
 When the variable is not set, the test skips. If the configured device, kernel,
 or controller does not support the FDP status query, the test skips with the

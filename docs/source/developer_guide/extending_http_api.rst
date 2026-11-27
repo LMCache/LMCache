@@ -85,7 +85,7 @@ An API module **should**:
 
 - guard against uninitialized state by checking ``request.app.state.engine``
   and returning ``503`` when it is ``None``;
-- use ``lmcache.logging.init_logger(__name__)`` for logging;
+- use ``lmcache.v1.common.logging.init_logger(__name__)`` for logging;
 - use ``async`` handlers and avoid blocking I/O.
 
 An API module **must not** import or mutate the ``app`` object from
@@ -101,9 +101,14 @@ through the request object:
 
    @router.get("/my-endpoint")
    async def my_endpoint(request: Request):
-       engine = request.app.state.engine          # main cache engine
-       zmq_server = request.app.state.zmq_server   # underlying ZMQ server
+       engine = request.app.state.engine                  # main cache engine
+       request_server = request.app.state.request_server  # RequestServer protocol
        ...
+
+The request server is exposed through the transport-neutral ``RequestServer``
+protocol. Endpoint handlers should normally use the engine or the typed
+context supplied by the HTTP dependency layer; code that does need the request
+server must not depend on a concrete ZMQ or gRPC class.
 
 For the full design rationale see
 ``docs/design/v1/multiprocess/http_api_extension.md`` in the source tree.

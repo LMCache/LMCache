@@ -9,9 +9,9 @@ device-name list to the LMCache repository.
 
 This is an alternative to the existing in-tree model, not a replacement for
 it. Vendors can still contribute a backend under
-`lmcache/v1/platform/<device>/` when joint maintenance and the LMCache release
-cadence are preferable. Both models implement the same interfaces and merge
-into the same runtime registry.
+`lmcache/v1/platform/devices/<backend>/` when joint maintenance and the
+LMCache release cadence are preferable. Both models implement the same
+interfaces and merge into the same runtime registry.
 
 The plugin boundary is a `DeviceSpec` subclass. Existing dispatch paths then
 resolve operations, IPC wrappers, event IPC, pinning, and cache contexts from
@@ -52,7 +52,7 @@ and avoids platform initialization cycles.
 first platform access
         |
         v
-scan lmcache.v1.platform subpackages ------> built-in DeviceSpec instances
+scan lmcache.v1.platform.devices ---------> built-in DeviceSpec instances
         |
         v
 read importlib.metadata entry points ------> external DeviceSpec instances
@@ -83,6 +83,11 @@ different capability objects for detection and use.
 
 The registry and detected device are process-lifetime caches. Installing or
 removing a plugin requires restarting every LMCache and serving-engine process.
+Per-tensor lookups (`resolve_device_ops`, `synchronize_device`, KV-cache IPC
+wrapping) are also cached per `device_type` after their first success. Hot
+paths and per-layer KV-cache registration therefore do not re-probe
+`is_available()`, and the auto-selected backend is logged once per process.
+`LMCACHE_DEVICE_BACKEND` must be set before that first lookup.
 
 ## Ordering, Conflicts, and Failure Isolation
 

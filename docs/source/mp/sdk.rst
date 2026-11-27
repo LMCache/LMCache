@@ -52,15 +52,28 @@ The SDK runs on **CPU** and hands you KV tensors in ``HND`` order with shape
 Configuration
 -------------
 
-The SDK runs on CPU and talks to the server over the engine-driven
-transfer path, which the server does not load by default -- start the
-server with ``--supported-transfer-mode auto`` so both the vLLM
-(lmcache-driven) and SDK (engine-driven) paths are available.
-To enable shared-memory transfer, pass ``--shm-name`` and disable lazy
-L1 allocation with ``--no-l1-use-lazy``. If shared memory is
-unavailable and these flags are not specified, the SDK falls back to
-pickle.
-To transfer query tensors, add ``--enable transfer_query`` flag.
+The SDK is a separate process from vLLM and the LMCache server. It retrieves
+and stores KV cache and query tensors through the LMCache server over the
+LMCache-driven transfer path. That path needs one side of each copy in GPU
+memory, so the SDK borrows free blocks of the QRingBuffer, the GPU ring in
+which vLLM captures query tensors, as its staging buffer: the server copies
+cached chunks' L1 objects into the ring as raw bytes, and the SDK decodes them
+into contiguous CPU tensors (KV at TP 1 only; query tensors at any TP). This
+needs:
+
+- the opt-in ``qstore`` server module, loaded with ``--server-module``. It
+  requires the LMCache-driven transfer path (``--supported-transfer-mode
+  lmcache_driven`` or ``auto``) and advertises the ``transfer_query``
+  experimental feature;
+- vLLM with ``"lmcache.mp.transfer_intermediate_tensors": true``, which
+  creates the Q ring;
+- no requests scheduled by vLLM while the SDK transfers (the token-dropping
+  workflow pauses every stream during ``modify``); a transfer that happens
+  during vLLM prefill/decode will fail.
+
+The SDK request client supports gRPC (default) or the deprecated ZMQ. Its ``url``
+scheme and the vLLM connector endpoint must match the server's ``--transport``
+setting.
 
 .. code-block:: bash
 
@@ -70,34 +83,17 @@ To transfer query tensors, add ``--enable transfer_query`` flag.
         --chunk-size 256 \
         --port 6555 \
         --http-port 8080 \
-        --supported-transfer-mode auto \
-        --shm-name lmcache_kvcache_sdk \
-        --no-l1-use-lazy \
-        --enable transfer_query
+        --supported-transfer-mode lmcache_driven \
+        --server-module '{"module_path": "lmcache.v1.multiprocess.plugin_modules.qstore"}'
 
-Then start vLLM with the LMCache MP connector.
-
-.. code-block:: bash
-
-    vllm serve Qwen/Qwen3-8B \
-        --port 8000 \
-        --enforce-eager \
-        --gpu-memory-utilization 0.65 \
-        --kv-transfer-config '{
-            "kv_connector":"LMCacheMPConnector",
-            "kv_role":"kv_both",
-            "kv_connector_extra_config":{"lmcache.mp.port":6555}
-        }' \
-        --trust-remote-code \
-        --return-tokens-as-token-ids
-
-To also send intermediate tensors, add 
-``"lmcache.mp.transfer_intermediate_tensors": true`` to
+Then start vLLM with the LMCache MP connector and
+``"lmcache.mp.transfer_intermediate_tensors": true`` in
 ``kv_connector_extra_config``.
-By default, the QRingBuffer, a temporary staging buffer for containing
-query tensor, has the capacity to hold the query tensor of 2 forward
-passes. However, it can also be configured via 
-``"lmcache.mp.q.ring_depth":2``.
+By default, the QRingBuffer has the capacity to hold the query tensors of 2
+forward passes (``"lmcache.q.ring_depth":2``), or an explicit number of blocks
+with ``"lmcache.q.ring_blocks"``. The SDK transfers through the ring's free
+blocks, so it needs at least one chunk's worth of them; a larger ring moves a
+transfer in fewer batches.
 Example:
 
 .. code-block:: bash
@@ -112,7 +108,7 @@ Example:
             "kv_connector_extra_config":{
                 "lmcache.mp.transfer_intermediate_tensors": true,
                 "lmcache.mp.port":6555,
-                "lmcache.mp.q.ring_depth":2
+                "lmcache.q.ring_depth":2
             }
         }' \
         --trust-remote-code \
@@ -132,13 +128,13 @@ Each type of tensor (KV, query intermediate) has its own context.
     import lmcache.sdk as lmc_sdk
 
     kv_ctx = lmc_sdk.kvcache.connect(
-        url="tcp://localhost:6555",         # must match --port
+        url="grpc://localhost:6555",        # grpc:// for gRPC; tcp:// for ZMQ
         http_url="http://localhost:8080",   # must match --http-port
         model_name="Qwen/Qwen3-8B",
         timeout=60,
     )
     q_ctx = lmc_sdk.qcache.connect(
-        url="tcp://localhost:6555",         # must match --port
+        url="grpc://localhost:6555",        # grpc:// for gRPC; tcp:// for ZMQ
         http_url="http://localhost:8080",   # must match --http-port
         model_name="Qwen/Qwen3-8B",
         timeout=60,
@@ -151,10 +147,19 @@ Each type of tensor (KV, query intermediate) has its own context.
 Writing a custom edit function
 ------------------------------
 
-An edit function takes the Mapping[kind, retrieved tensor] and its token ids and returns the
-edited ``(kv, tokens)``. ``batch.modify(fn)`` applies it for every requests. The
-function should be implemented as if it's only for single request, and the SDK
-will call it in parallel for every requests in the batch.
+An edit function takes a ``TensorDict`` (a dict of the retrieved tensor per
+cache kind) and its token ids and returns the edited ``(kv, tokens)``.
+``batch.modify(fn)`` applies it for every requests. The function should be
+implemented as if it's only for single request, and the SDK will call it in
+parallel for every requests in the batch.
+
+The KV covers every cached token ``[0, T)``. Query tensors exist only for the
+tokens the latest ``prefill`` or ``decode`` computed: tokens loaded from the
+cache (for example the prefix kept by an earlier ``modify``) have no query
+rows. So the query tensor covers ``[segment_start_token_id, T)``, where
+``tensors.segment_start_token_id`` is the chunk-aligned first token that pass
+computed. Query rows are captured across forward steps, so they include
+chunked-prefill and decoded tokens.
 
 ``modify`` operates only on the **chunk-aligned** prefix. A trailing partial
 chunk is tracked by the SDK and re-sent on the next ``decode``, so
@@ -190,9 +195,13 @@ Modules
      - Per-request streaming: ``create_request()`` and ``LMCacheRequestStream``.
    * - ``lmcache.sdk.batch``
      - Orchestrates many request streams together via ``LMCacheBatchedStream``.
-   * - ``lmcache.sdk.wrapper.contiguous``
-     - ``ContiguousTransferWrapper`` — the transfer helper the context holds
-       (used internally; exposed via ``ctx.transfer_ctx``).
+   * - ``lmcache.sdk.wrapper.ring_transfer``
+     - ``RingSDKTransferWrapper`` — the transfer helper the context holds,
+       moving tensors through free blocks of vLLM's Q ring (used internally;
+       exposed via ``ctx.transfer_ctx``).
+   * - ``lmcache.sdk.wrapper.ring_mapping``
+     - ``RingMapping`` — opens the Q ring's IPC handles and checks that vLLM
+       took no ring blocks during a transfer.
 
 Classes
 ~~~~~~~
@@ -222,9 +231,13 @@ Classes
      - Protocol you implement: a callable that submits a request to your engine.
    * - ``context.ModifyFnType``
      - Type alias for the edit function you pass to ``modify`` / ``modify_kv``:
-       ``Callable[[Mapping[LMCacheSDKCacheKind, torch.Tensor], Sequence[int]],
+       ``Callable[[TensorDict, Sequence[int]],
        tuple[torch.Tensor, Sequence[int]]]``.
-   * - ``lmcache.cli.metrics.Metrics``
+   * - ``context.TensorDict``
+     - ``dict[LMCacheSDKCacheKind, torch.Tensor]`` handed to the edit
+       function, plus ``segment_start_token_id``: the first token the latest
+       generate pass computed, where the query tensor begins.
+   * - ``lmcache.v1.common.metrics.Metrics``
      - Aggregated report returned by ``batch.prefill`` / ``modify`` / ``decode``
        (not an ``lmcache.sdk`` type). Emit it or convert it to a dict.
    * - ``context.LMCacheSDKError`` / ``request.LMCacheRequestStreamError`` /

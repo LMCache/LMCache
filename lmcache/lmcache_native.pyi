@@ -28,6 +28,9 @@ class EngineKVFormat(IntEnum):
     NL_X_NB_BSV_BSS = 14
     NL_X_TWO_NB_NH_ONE_BS_HS = 15
     NL_X_TWO_X_NB_BS_NH_HS = 16
+    NL_X_NP_X_NB_BS_ONE_HS = 17
+    NL_X_NB_BS_NH_HS = 18
+    NL_X_NB_TWO_NH_ONE_BS_HS = 19
 
 # Backward-compat alias for EngineKVFormat.
 GPUKVFormat = EngineKVFormat
@@ -50,6 +53,11 @@ class PageBufferShapeDesc:
     element_size: int
     block_stride_elems: int
     dtype: Any
+    # Per-plane byte geometry for plane-tuple formats
+    # (NL_X_NP_X_NB_BS_ONE_HS / NL_X_TWO_X_NB_BS_NH_HS)
+    num_planes: int
+    plane_slot_bytes: tuple[int, ...]
+    plane_block_stride_bytes: tuple[int, ...]
 
     def __init__(self) -> None: ...
 
@@ -180,6 +188,18 @@ class Bitmap:
         """
         ...
 
+    def size(self) -> int:
+        """Number of bits in the bitmap."""
+        ...
+
+    def __len__(self) -> int:
+        """Number of bits in the bitmap (same as :meth:`size`)."""
+        ...
+
+    def copy(self) -> Bitmap:
+        """Return an independent copy with the same size and bits."""
+        ...
+
     def popcount(self) -> int:
         """Return the number of bits set to 1."""
         ...
@@ -285,6 +305,55 @@ def unfold(
         (all ranks of each retained ``(group, chunk)`` set).
     """
     ...
+
+def fold_grouped(
+    rows: Sequence[Bitmap],
+    windows: Sequence[int],
+) -> Bitmap:
+    """Fold per-row presence bitmaps into servable prefix lengths.
+
+    Args:
+        rows: Presence bitmaps, all of the same length (the number of
+            chunks); bit ``j`` of ``rows[i]`` set iff chunk ``j`` is present.
+        windows: Per-row cross-chunk window size in chunks, parallel to
+            ``rows``; ``<= 0`` means full attention.
+
+    Returns:
+        A bitmap of size ``num_chunks``; bit ``j`` set iff every row can serve
+        a length-``j + 1`` prefix under its own window.
+
+    Raises:
+        ValueError: If ``rows`` and ``windows`` differ in length or the rows
+            differ in length.
+    """
+    ...
+
+def unfold_grouped(
+    hit_length: int,
+    num_chunks: int,
+    windows: Sequence[int],
+) -> list[Bitmap]:
+    """Expand a model-wide hit length into per-row retain bitmaps.
+
+    Args:
+        hit_length: Model-wide prefix hit length in chunks (clamped to
+            ``num_chunks``).
+        num_chunks: Number of LMCache chunks in the request.
+        windows: Per-row cross-chunk window size in chunks; ``<= 0`` means
+            full attention.
+
+    Returns:
+        ``len(windows)`` bitmaps of size ``num_chunks``, parallel to
+        ``windows``; bit ``j`` of row ``i`` set iff that row retains chunk
+        ``j``.
+    """
+    ...
+
+def cache_flush_supported() -> bool:
+    """Return whether :func:`cache_flush_range` works on this CPU."""
+
+def cache_flush_range(ptr: int, size: int) -> None:
+    """Write back and invalidate the CPU cache lines of ``[ptr, ptr + size)``."""
 
 class ParallelPatternMatcher:
     """

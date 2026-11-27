@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from pathlib import Path
 import subprocess
 import sys
 import textwrap
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+# First Party
+from tests.import_utils import lmcache_path, lmcache_subprocess_env
 
 
 def _run_import_script(script: str) -> None:
@@ -20,7 +20,8 @@ def _run_import_script(script: str) -> None:
     """
     result = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(script)],
-        cwd=_REPO_ROOT,
+        cwd=lmcache_path().parent,
+        env=lmcache_subprocess_env(),
         text=True,
         capture_output=True,
         check=False,

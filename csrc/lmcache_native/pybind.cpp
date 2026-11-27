@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#include <algorithm>
+#include <cstddef>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include "ttl_lock.h"
+#include "cache_flush.h"
 #include "bitmap.h"
 #include "fold.h"
 #include "periodic_event_notifier.h"
@@ -19,13 +22,34 @@ using lmcache::lmcache_native::TTLLock;
 using lmcache::utils::ParallelPatternMatcher;
 using lmcache::utils::RangePatternMatcher;
 
+namespace {
+// Fixed C arrays surface as tuples trimmed to num_planes (non-positive
+// reads back empty); setters zero-pad and truncate at the array size.
+template <size_t N>
+py::tuple plane_array_get(const int64_t (&arr)[N], int32_t n) {
+  const size_t len = n > 0 ? std::min(static_cast<size_t>(n), N) : 0;
+  py::tuple out(len);
+  for (size_t i = 0; i < len; ++i) {
+    out[i] = arr[i];
+  }
+  return out;
+}
+
+template <size_t N>
+void plane_array_set(int64_t (&arr)[N], const std::vector<int64_t>& v) {
+  for (size_t i = 0; i < N; ++i) {
+    arr[i] = i < v.size() ? v[i] : 0;
+  }
+}
+}  // namespace
+
 PYBIND11_MODULE(lmcache_native, m) {
   m.doc() = "Native operations for LMCache (device-independent)";
 
   // Device-independent KV-format and transfer enums. These live in the
   // common (non-CUDA) native module so they are available regardless of the
   // GPU backend, and so they are the single source of truth shared with the
-  // pure-Python fallback in ``lmcache.v1.platform.ops_types``.
+  // pure-Python fallback in ``lmcache.v1.common.ops_types``.
   py::enum_<EngineKVFormat>(m, "EngineKVFormat")
       .value("NB_NL_TWO_BS_NH_HS", EngineKVFormat::NB_NL_TWO_BS_NH_HS)
       .value("NL_X_TWO_NB_BS_NH_HS", EngineKVFormat::NL_X_TWO_NB_BS_NH_HS)
@@ -44,7 +68,11 @@ PYBIND11_MODULE(lmcache_native, m) {
       .value("NL_X_NB_BSV_BSS", EngineKVFormat::NL_X_NB_BSV_BSS)
       .value("NL_X_TWO_NB_NH_ONE_BS_HS",
              EngineKVFormat::NL_X_TWO_NB_NH_ONE_BS_HS)
-      .value("NL_X_TWO_X_NB_BS_NH_HS", EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS);
+      .value("NL_X_TWO_X_NB_BS_NH_HS", EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS)
+      .value("NL_X_NP_X_NB_BS_ONE_HS", EngineKVFormat::NL_X_NP_X_NB_BS_ONE_HS)
+      .value("NL_X_NB_BS_NH_HS", EngineKVFormat::NL_X_NB_BS_NH_HS)
+      .value("NL_X_NB_TWO_NH_ONE_BS_HS",
+             EngineKVFormat::NL_X_NB_TWO_NH_ONE_BS_HS);
 
   m.attr("GPUKVFormat") = m.attr("EngineKVFormat");
 
@@ -62,11 +90,28 @@ PYBIND11_MODULE(lmcache_native, m) {
       .def_readwrite("hs", &PageBufferShapeDesc::hs)
       .def_readwrite("element_size", &PageBufferShapeDesc::element_size)
       .def_readwrite("block_stride_elems",
-                     &PageBufferShapeDesc::block_stride_elems);
+                     &PageBufferShapeDesc::block_stride_elems)
+      .def_readwrite("num_planes", &PageBufferShapeDesc::num_planes)
+      .def_property(
+          "plane_slot_bytes",
+          [](const PageBufferShapeDesc& s) {
+            return plane_array_get(s.plane_slot_bytes, s.num_planes);
+          },
+          [](PageBufferShapeDesc& s, const std::vector<int64_t>& v) {
+            plane_array_set(s.plane_slot_bytes, v);
+          })
+      .def_property(
+          "plane_block_stride_bytes",
+          [](const PageBufferShapeDesc& s) {
+            return plane_array_get(s.plane_block_stride_bytes, s.num_planes);
+          },
+          [](PageBufferShapeDesc& s, const std::vector<int64_t>& v) {
+            plane_array_set(s.plane_block_stride_bytes, v);
+          });
 
   py::class_<KernelGroupSpec>(m, "KernelGroupSpec")
       .def(py::init([](uintptr_t paged_buffer_ptrs,
-                       std::vector<int64_t> lmcache_objects_ptrs,
+                       std::vector<uintptr_t> lmcache_objects_ptrs,
                        PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
                        int engine_kv_format, uintptr_t block_ids_base,
                        int64_t block_ids_capacity) {
@@ -109,6 +154,24 @@ PYBIND11_MODULE(lmcache_native, m) {
       py::arg("num_chunks"), py::arg("num_ranks"), py::arg("group_windows"),
       "Expand a model-wide hit length into the per-group retain mask over the "
       "group x chunk x kv_rank layout.");
+  m.def("fold_grouped", &lmcache::lmcache_native::fold_grouped, py::arg("rows"),
+        py::arg("windows"),
+        "Fold per-row presence bitmaps (rows[i] with window windows[i], all "
+        "of size num_chunks) into a servable-prefix-lengths bitmap; bit j set "
+        "iff every row can serve a length-(j + 1) prefix. Raises ValueError "
+        "if rows and windows differ in length or the rows differ in size.");
+  m.def("unfold_grouped", &lmcache::lmcache_native::unfold_grouped,
+        py::arg("hit_length"), py::arg("num_chunks"), py::arg("windows"),
+        "Expand a model-wide hit length into one retain bitmap of size "
+        "num_chunks per window, parallel to windows.");
+
+  m.def("cache_flush_supported",
+        &lmcache::lmcache_native::cache_flush_supported,
+        "Return whether cache_flush_range() works on this CPU.");
+  m.def("cache_flush_range", &lmcache::lmcache_native::cache_flush_range,
+        py::arg("ptr"), py::arg("size"),
+        py::call_guard<py::gil_scoped_release>(),
+        "Write back and invalidate the CPU cache lines of [ptr, ptr + size).");
 
   py::class_<TTLLock>(m, "TTLLock")
       .def(py::init<uint32_t>(), py::arg("ttl_second") = 300,
@@ -136,7 +199,11 @@ PYBIND11_MODULE(lmcache_native, m) {
            "Clear the bit at the specified index to 0.")
       .def("test", &Bitmap::test, py::arg("index"),
            "Test the bit at the specified index.")
+      .def("copy", &Bitmap::copy,
+           "Return an independent copy with the same size and bits.")
       .def("popcount", &Bitmap::popcount, "Count the number of bits set to 1.")
+      .def("size", &Bitmap::size, "Number of bits in the bitmap.")
+      .def("__len__", &Bitmap::size, "Number of bits in the bitmap.")
       .def("count_leading_zeros", &Bitmap::clz,
            "Count the number of leading zeros.")
       .def("count_leading_ones", &Bitmap::clo,

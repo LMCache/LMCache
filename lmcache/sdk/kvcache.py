@@ -7,8 +7,8 @@ SDK for retrieving and storing KV cache tensors.
 from __future__ import annotations
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.sdk.context import LMCacheSDKCacheKind, LMCacheSDKContext
+from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 
@@ -22,7 +22,7 @@ def connect(
     """Create and initialize the LMCache SDK context.
 
     Args:
-        url: ZMQ endpoint URL for the LMCache message queue.
+        url: Multiprocess request endpoint. Its scheme selects ZMQ or gRPC.
         http_url: HTTP endpoint URL for fetching server configuration.
         model_name: Model name used by the running LMCache server instance.
         timeout: Timeout in seconds for blocking MQ calls. Defaults to 60.

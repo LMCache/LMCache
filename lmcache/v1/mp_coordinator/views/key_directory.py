@@ -15,28 +15,31 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Mapping
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, cast
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Literal, cast
 import threading
 
 # Third Party
 import numpy as np
 
 # First Party
-from lmcache.logging import init_logger
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey, Tier
 from lmcache.v1.mp_coordinator.api import (
     UNKNOWN_TOKEN_OFFSET,
     BlendMatch,
+    BlendNamespace,
     CacheEventBatch,
     CacheEventEntry,
     CacheEventType,
 )
 from lmcache.v1.mp_coordinator.blend_index import BlendIndex, BlendIndexStats
+from lmcache.v1.mp_coordinator.metric_sources import register_metric_source
 from lmcache.v1.mp_coordinator.persistence.durable_component import (
     DurableComponent,
     PersistenceType,
 )
+from lmcache.v1.mp_coordinator.utils.histogram import CHUNK_COUNT_BOUNDS, Histogram
 from lmcache.v1.mp_coordinator.views.base import View
 
 if TYPE_CHECKING:
@@ -84,6 +87,29 @@ class Placement:
     shared: bool = False
 
 
+LookupType = Literal["prefix", "non_prefix"]
+
+
+@dataclass
+class LookupStats:
+    """Lookups of one type served since this process started.
+
+    Attributes:
+        lookups: Lookup requests served.
+        chunks_requested: Chunks the lookups asked for.
+        chunks_found: Chunks the lookups found; ``chunks_found /
+            chunks_requested`` is the hit rate.
+        chunks_found_per_request: How many chunks each lookup found.
+    """
+
+    lookups: int = 0
+    chunks_requested: int = 0
+    chunks_found: int = 0
+    chunks_found_per_request: Histogram = field(
+        default_factory=lambda: Histogram.with_bounds(CHUNK_COUNT_BOUNDS)
+    )
+
+
 @dataclass(frozen=True)
 class DirectoryStats:
     """A point-in-time summary of directory contents.
@@ -94,12 +120,35 @@ class DirectoryStats:
         l1_keys_by_instance: Keys each instance reported L1 placements
             for; its stream cursor lives on the ingest gate.
         blend: How much of the directory is fragment-matchable.
+        blend_lookup_enabled: Whether non-prefix (blend) lookups are on;
+            when off, ``blend`` describes an empty, unused index.
+        l1_count: Placements currently recorded in L1.
+        l1_size_bytes: Reported logical bytes across the L1 placements.
+        l2_count: Placements currently recorded in L2.
+        l2_size_bytes: Reported logical bytes across the L2 placements.
+        lookups: Lookups served, keyed by type: ``prefix``
+            (``/directory/lookup``) and ``non_prefix``
+            (``/directory/blend-lookup``). Both are present, from 0.
     """
 
     num_keys: int
     num_placements: int
     l1_keys_by_instance: dict[str, int]
     blend: BlendIndexStats
+    blend_lookup_enabled: bool
+    l1_count: int
+    l1_size_bytes: int
+    l2_count: int
+    l2_size_bytes: int
+    lookups: dict[str, LookupStats]
+
+
+@dataclass
+class _TierPlacementStats:
+    """Incrementally maintained placement totals for one cache tier."""
+
+    count: int = 0
+    size_bytes: int = 0
 
 
 @dataclass
@@ -116,11 +165,21 @@ class _KeyRecord:
 class _TokenBinding:
     """Token content for one chunk hash plus the keys sharing it (dropped
     when the last key goes). ``token_ids`` is empty until a
-    token-bearing ``STORE`` entry arrives."""
+    token-bearing ``STORE`` entry arrives. ``missing`` holds the keys that
+    lost their last placement while other keys kept the binding alive: a
+    chunk is loadable only with every key, so a namespace with a missing
+    key holds no blend claim until that key is stored again."""
 
     token_ids: np.ndarray
     token_offset: int
     keys: set[ObjectKey]
+    missing: set[ObjectKey] = field(default_factory=set)
+
+    def is_missing_a_key_in(self, namespace: BlendNamespace) -> bool:
+        """Return whether a key of ``namespace`` has no placement left."""
+        return any(
+            BlendNamespace.from_object_key(key) == namespace for key in self.missing
+        )
 
 
 class KeyDirectory(View):
@@ -138,6 +197,10 @@ class KeyDirectory(View):
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._directory: dict[ObjectKey, _KeyRecord] = {}
+        self._placement_stats = {
+            Tier.L1: _TierPlacementStats(),
+            Tier.L2: _TierPlacementStats(),
+        }
         # instance_id → keys it reported L1 placements for. The reverse
         # index that makes fencing proportional to the instance's own
         # keys instead of a full directory scan.
@@ -149,6 +212,13 @@ class KeyDirectory(View):
         # enable_blend_lookup() swaps in one sized to the fleet's chunk size.
         self._blend_index = BlendIndex()
         self._blend_lookup_enabled = False
+        self._blend_chunk_size: int | None = None
+        self._blend_probe_stride = 1
+        self._lookups: dict[LookupType, LookupStats] = {
+            "prefix": LookupStats(),
+            "non_prefix": LookupStats(),
+        }
+        register_metric_source(self)
 
     @classmethod
     def from_config(
@@ -193,8 +263,13 @@ class KeyDirectory(View):
         Raises:
             ValueError: If ``chunk_size`` or ``probe_stride`` is < 1.
         """
-        self._blend_index = BlendIndex(chunk_size=chunk_size, probe_stride=probe_stride)
-        self._blend_lookup_enabled = True
+        with self._lock:
+            self._blend_index = BlendIndex(
+                chunk_size=chunk_size, probe_stride=probe_stride
+            )
+            self._blend_lookup_enabled = True
+            self._blend_chunk_size = chunk_size
+            self._blend_probe_stride = probe_stride
 
     def consume(self, batch: CacheEventBatch) -> None:
         """Apply one gate-admitted batch, idempotently: re-storing
@@ -235,6 +310,125 @@ class KeyDirectory(View):
                 )
             return results
 
+    def record_lookup(
+        self, lookup_type: LookupType, chunks_requested: int, chunks_found: int
+    ) -> None:
+        """Count one lookup request served, for :meth:`stats`.
+
+        Called by the lookup endpoints rather than by :meth:`lookup`, so
+        the coordinator's own lookups (eviction routing, deletes) are not
+        counted as requests served.
+
+        Args:
+            lookup_type: ``prefix`` or ``non_prefix``.
+            chunks_requested: Chunks the request asked for; a lookup by
+                keys counts each key as one chunk.
+            chunks_found: Chunks with at least one placement.
+        """
+        with self._lock:
+            lookup_stats = self._lookups[lookup_type]
+            lookup_stats.lookups += 1
+            lookup_stats.chunks_requested += chunks_requested
+            lookup_stats.chunks_found += chunks_found
+            lookup_stats.chunks_found_per_request.observe(chunks_found)
+
+    def get_stored_keys_of_chunks(self, keys: list[ObjectKey]) -> list[ObjectKey]:
+        """Return every stored copy of the chunks ``keys`` name.
+
+        A key names its chunk: the copies are the stored keys that share its
+        chunk hash, model, cache salt, tags and world size, in any object
+        group and on any kv rank. A delete by key uses this, so any one of a
+        chunk's keys removes the whole chunk rather than one rank's share of
+        it. Another world size's copy is a different parallel setup's
+        object and is left alone.
+
+        Args:
+            keys: Keys naming the chunks.
+
+        Returns:
+            Each key, then the other stored copies of its chunk ordered by
+            ``(object_group_id, kv_rank)``; a key reached twice is returned
+            once, at its first position.
+        """
+        with self._lock:
+            stored_copies: dict[ObjectKey, None] = {}
+            for key in keys:
+                stored_copies[key] = None
+                stored_copies.update(
+                    dict.fromkeys(
+                        sorted(
+                            self._get_stored_copies_of_chunk(key),
+                            key=lambda copy: (copy.object_group_id, copy.kv_rank),
+                        )
+                    )
+                )
+            return list(stored_copies)
+
+    def get_keys_across_object_groups(self, keys: list[ObjectKey]) -> list[ObjectKey]:
+        """Return each key with its stored copies in other object groups.
+
+        Token-addressed lookups and deletes resolve object group ``0``; under
+        ``--separate-object-groups`` the same chunk is also stored in other
+        groups, and this reaches them through the chunk-hash index.
+
+        Args:
+            keys: The resolved keys.
+
+        Returns:
+            Each key with the stored keys that differ from it only in
+            ``object_group_id``, in ascending group order.
+        """
+        with self._lock:
+            expanded_keys: list[ObjectKey] = []
+            for key in keys:
+                key_in_each_group = [key, *self._get_stored_keys_in_other_groups(key)]
+                key_in_each_group.sort(key=lambda group_key: group_key.object_group_id)
+                expanded_keys.extend(key_in_each_group)
+            return expanded_keys
+
+    def _get_stored_copies_of_chunk(self, key: ObjectKey) -> list[ObjectKey]:
+        """Return the stored keys of ``key``'s chunk in its parallel setup:
+        same chunk hash, model, salt, tags and world size, any group or rank.
+
+        Call under the directory lock.
+        """
+        chunk_binding = self._token_bindings.get(key.chunk_hash)
+        if chunk_binding is None:
+            return []
+        world_size = ObjectKey.WorldSizeFromKVRank(key.identity.kv_rank)
+        return [
+            stored_key
+            for stored_key in chunk_binding.keys
+            if ObjectKey.WorldSizeFromKVRank(stored_key.identity.kv_rank) == world_size
+            and replace(
+                stored_key.identity,
+                object_group_id=key.identity.object_group_id,
+                kv_rank=key.identity.kv_rank,
+            )
+            == key.identity
+        ]
+
+    def _get_stored_keys_in_other_groups(self, key: ObjectKey) -> list[ObjectKey]:
+        """Return the stored keys that differ from ``key`` only in object group.
+
+        Call under the directory lock.
+        """
+        chunk_binding = self._token_bindings.get(key.chunk_hash)
+        if chunk_binding is None:
+            return []
+        return [
+            stored_key
+            for stored_key in chunk_binding.keys
+            if stored_key.object_group_id != key.object_group_id
+            and replace(
+                stored_key,
+                identity=replace(
+                    stored_key.identity, object_group_id=key.object_group_id
+                ),
+            )
+            == key
+        ]
+
     def get_token_ids(self, chunk_hashes: list[bytes]) -> list[tuple[int, ...]]:
         """Return the known token ids for each requested chunk hash.
 
@@ -270,16 +464,20 @@ class KeyDirectory(View):
                 for key in keys
             ]
 
-    def blend_match(self, tokens: np.ndarray) -> list[BlendMatch]:
-        """Find cached chunks contained anywhere in ``tokens``.
+    def blend_match(
+        self, tokens: np.ndarray, namespace: BlendNamespace
+    ) -> list[BlendMatch]:
+        """Find chunks ``namespace`` can retrieve, anywhere in ``tokens``.
 
         Unlike :meth:`lookup` the query need not be a prefix. Matches name
         a ``chunk_hash`` only, which the caller expands with its own
-        model, salt, and world size. Takes the blend index's lock, not
-        the directory's.
+        model, salt, and world size, so they are restricted to chunks some
+        instance stored in ``namespace``. Takes the blend index's lock,
+        not the directory's.
 
         Args:
             tokens: The query token ids.
+            namespace: The requester's retrieval namespace.
 
         Returns:
             Matches in ascending ``cur_st`` order, at most one per chunk;
@@ -289,7 +487,7 @@ class KeyDirectory(View):
         """
         if not self._blend_lookup_enabled:
             return []
-        return self._blend_index.match(tokens)
+        return self._blend_index.match(tokens, namespace)
 
     def blend_stats(self) -> BlendIndexStats:
         """Return a point-in-time summary of the blend index.
@@ -390,7 +588,9 @@ class KeyDirectory(View):
             ``{"keys": [(key, last_access, access_count, [placement, ...]), ...],
             "bindings": [(chunk_hash, token_offset, token bytes), ...],
             "l1_keys_by_instance": {instance_id: [key index, ...]}}``.
-            The blend index is derived, so it is absent.
+            The blend index is derived, so it is absent. Missing keys are
+            not captured: a restored chunk is claimed by the keys it still
+            has until one of them leaves.
         """
         with self._lock:
             keys = [
@@ -433,6 +633,7 @@ class KeyDirectory(View):
 
         Raises:
             ValueError: If the directory already holds keys, or the
+                captured state contains an invalid placement tier, or the
                 reverse index cites a key position that does not exist.
         """
         captured_keys = cast(
@@ -451,11 +652,28 @@ class KeyDirectory(View):
             for encoded_key, last_access, access_count, placements in captured_keys:
                 key = decode_key(encoded_key)
                 key_table.append(key)
+                decoded_placements = [_decode_placement(p) for p in placements]
+                invalid_tiers = [
+                    placement.tier
+                    for placement in decoded_placements
+                    if placement.tier not in (Tier.L1, Tier.L2)
+                ]
+                if invalid_tiers:
+                    raise ValueError(
+                        "captured placements must use tier l1 or l2, got "
+                        f"{invalid_tiers[0]}"
+                    )
                 self._directory[key] = _KeyRecord(
-                    placements=[_decode_placement(p) for p in placements],
+                    placements=decoded_placements,
                     last_access=last_access,
                     access_count=access_count,
                 )
+                for placement in decoded_placements:
+                    self._adjust_placement_stats(
+                        placement,
+                        count_delta=1,
+                        size_bytes_delta=placement.size_bytes,
+                    )
                 self._add_token_binding(key)
             for chunk_hash, token_offset, raw_tokens in bindings:
                 binding = self._token_bindings.get(chunk_hash)
@@ -468,8 +686,8 @@ class KeyDirectory(View):
                 token_ids.flags.writeable = False
                 binding.token_ids = token_ids
                 binding.token_offset = token_offset
-                if self._blend_lookup_enabled and token_offset != UNKNOWN_TOKEN_OFFSET:
-                    self._blend_index.add(token_ids, chunk_hash, token_offset)
+                for held in binding.keys:
+                    self._claim_binding(chunk_hash, binding, held)
             for instance_id, positions_ in l1_by_instance.items():
                 for position in positions_:
                     if not 0 <= position < len(key_table):
@@ -482,20 +700,35 @@ class KeyDirectory(View):
                 }
 
     def stats(self) -> DirectoryStats:
-        """Return a point-in-time summary of directory contents."""
+        """Return a point-in-time summary of directory contents.
+
+        Reads running totals, so its cost does not grow with the number of
+        keys: a metrics scrape calls it while ingest waits on the same lock.
+        """
         blend = self._blend_index.stats()
         with self._lock:
-            num_placements = sum(
-                len(record.placements) for record in self._directory.values()
-            )
+            l1_stats = self._placement_stats[Tier.L1]
+            l2_stats = self._placement_stats[Tier.L2]
             return DirectoryStats(
                 num_keys=len(self._directory),
-                num_placements=num_placements,
+                num_placements=l1_stats.count + l2_stats.count,
                 l1_keys_by_instance={
                     instance_id: len(keys)
                     for instance_id, keys in self._l1_keys_by_instance.items()
                 },
                 blend=blend,
+                blend_lookup_enabled=self._blend_lookup_enabled,
+                l1_count=l1_stats.count,
+                l1_size_bytes=l1_stats.size_bytes,
+                l2_count=l2_stats.count,
+                l2_size_bytes=l2_stats.size_bytes,
+                lookups={
+                    lookup_type: replace(
+                        stats,
+                        chunks_found_per_request=stats.chunks_found_per_request.copy(),
+                    )
+                    for lookup_type, stats in self._lookups.items()
+                },
             )
 
     # -- Internals (call with self._lock held) --------------------------------
@@ -526,10 +759,21 @@ class KeyDirectory(View):
             index = self._find_placement(record.placements, batch)
             if index is None:
                 record.placements.append(placement)
+                self._adjust_placement_stats(
+                    placement,
+                    count_delta=1,
+                    size_bytes_delta=placement.size_bytes,
+                )
             else:
+                old_placement = record.placements[index]
                 record.placements[index] = placement
+                self._adjust_placement_stats(
+                    placement,
+                    count_delta=0,
+                    size_bytes_delta=placement.size_bytes - old_placement.size_bytes,
+                )
             if entry.token_ids:
-                self._create_token_binding(key.chunk_hash, entry)
+                self._create_token_binding(key, entry)
             record.last_access = max(record.last_access, batch.ts)
             if batch.tier == Tier.L1:
                 l1_keys.add(key)
@@ -539,7 +783,12 @@ class KeyDirectory(View):
                 return
             index = self._find_placement(record.placements, batch)
             if index is not None:
-                record.placements.pop(index)
+                placement = record.placements.pop(index)
+                self._adjust_placement_stats(
+                    placement,
+                    count_delta=-1,
+                    size_bytes_delta=-placement.size_bytes,
+                )
             if not record.placements:
                 del self._directory[key]
                 self._remove_token_binding(key)
@@ -580,12 +829,17 @@ class KeyDirectory(View):
             record = self._directory.get(key)
             if record is None:
                 continue
-            kept = [
-                p
-                for p in record.placements
-                if p.tier != Tier.L1 or p.instance_id != instance_id
-            ]
-            removed += len(record.placements) - len(kept)
+            kept = []
+            for placement in record.placements:
+                if placement.tier == Tier.L1 and placement.instance_id == instance_id:
+                    self._adjust_placement_stats(
+                        placement,
+                        count_delta=-1,
+                        size_bytes_delta=-placement.size_bytes,
+                    )
+                    removed += 1
+                else:
+                    kept.append(placement)
             if kept:
                 record.placements = kept
             else:
@@ -594,8 +848,21 @@ class KeyDirectory(View):
         l1_keys.clear()
         return removed
 
-    def _create_token_binding(self, chunk_hash: bytes, entry: CacheEventEntry) -> None:
-        """Record ``entry``'s token content on ``chunk_hash``'s binding.
+    def _adjust_placement_stats(
+        self,
+        placement: Placement,
+        count_delta: int,
+        size_bytes_delta: int,
+    ) -> None:
+        """Adjust one tier's aggregate under the directory lock."""
+        tier_stats = self._placement_stats.get(placement.tier)
+        if tier_stats is None:
+            raise ValueError(f"placement tier must be l1 or l2, got {placement.tier}")
+        tier_stats.count += count_delta
+        tier_stats.size_bytes += size_bytes_delta
+
+    def _create_token_binding(self, key: ObjectKey, entry: CacheEventEntry) -> None:
+        """Record ``entry``'s token content on ``key``'s chunk binding.
 
         Token ids outside ``uint32`` leave the binding as it was, so one
         bad entry is a lookup miss rather than a failed batch. An entry
@@ -605,9 +872,10 @@ class KeyDirectory(View):
         no stored position would re-RoPE from the wrong source.
 
         Args:
-            chunk_hash: Chunk hash whose binding to fill.
+            key: The stored key whose chunk binding to fill.
             entry: The store entry carrying the token ids and offset.
         """
+        chunk_hash = key.chunk_hash
         try:
             token_ids = np.asarray(entry.token_ids, dtype=_TOKEN_DTYPE)
         except (OverflowError, TypeError, ValueError):
@@ -618,44 +886,81 @@ class KeyDirectory(View):
             return
         token_ids.flags.writeable = False
         binding = self._token_bindings[chunk_hash]
-        if (
+        # Content changed under a known hash: retire the stale fingerprint.
+        replaced = (
             self._blend_lookup_enabled
-            and binding.token_ids.size
+            and bool(binding.token_ids.size)
             and not np.array_equal(binding.token_ids, token_ids)
-        ):
-            # Re-store with different content: retire the old fingerprint,
-            # or the chunk stays discoverable under content it no longer has.
-            self._blend_index.remove(binding.token_ids, chunk_hash)
+        )
+        if replaced:
+            self._blend_index.remove_chunk(binding.token_ids, chunk_hash)
+        fresh_content = replaced or not binding.token_ids.size
         binding.token_ids = token_ids
         binding.token_offset = entry.token_offset
-        if not self._blend_lookup_enabled:
-            return
-        if entry.token_offset == UNKNOWN_TOKEN_OFFSET:
-            return
-        self._blend_index.add(token_ids, chunk_hash, entry.token_offset)
+        if fresh_content:
+            # Other namespaces' keys may have attached while the binding had
+            # no content, so claim it for all of them. Steady-state stores
+            # take the single-key path instead of rehashing per rank.
+            for held in binding.keys:
+                self._claim_binding(chunk_hash, binding, held)
+        else:
+            self._claim_binding(chunk_hash, binding, key)
 
     def _add_token_binding(self, key: ObjectKey) -> None:
         """Index ``key`` under its chunk's token binding, creating an
-        empty binding on first reference."""
+        empty binding on first reference. A key joining a binding that
+        already has content claims it for the key's namespace, unless
+        another key of that namespace is still missing."""
         binding = self._token_bindings.get(key.chunk_hash)
         if binding is None:
             self._token_bindings[key.chunk_hash] = _TokenBinding(
                 token_ids=_NO_TOKENS, token_offset=UNKNOWN_TOKEN_OFFSET, keys={key}
             )
-        else:
-            binding.keys.add(key)
+            return
+        binding.keys.add(key)
+        binding.missing.discard(key)
+        self._claim_binding(key.chunk_hash, binding, key)
 
     def _remove_token_binding(self, key: ObjectKey) -> None:
-        """Remove ``key`` from its chunk's token binding, dropping the
-        binding — and its blend-index entry — with its last key."""
+        """Remove ``key``, which lost its last placement, from its chunk's
+        token binding. The key's namespace loses its blend claim on the
+        chunk at once, and the binding is dropped with its last key."""
         binding = self._token_bindings.get(key.chunk_hash)
         if binding is None:
             return
         binding.keys.discard(key)
-        if not binding.keys:
+        if self._blend_lookup_enabled and binding.token_ids.size:
+            # Each rank and object group holds a different part of the
+            # chunk, so no server can assemble it without this key.
+            self._blend_index.remove_claim(
+                binding.token_ids,
+                key.chunk_hash,
+                BlendNamespace.from_object_key(key),
+            )
+        if binding.keys:
+            binding.missing.add(key)
+        else:
             del self._token_bindings[key.chunk_hash]
-            if self._blend_lookup_enabled and binding.token_ids.size:
-                self._blend_index.remove(binding.token_ids, key.chunk_hash)
+
+    def _claim_binding(
+        self, chunk_hash: bytes, binding: _TokenBinding, key: ObjectKey
+    ) -> None:
+        """Claim ``chunk_hash`` in the blend index for ``key``'s namespace.
+
+        A no-op while blend lookup is off, before the binding has content,
+        without a stored position, or while a key of that namespace is
+        missing.
+        """
+        if not self._blend_lookup_enabled:
+            return
+        if not binding.token_ids.size or binding.token_offset == UNKNOWN_TOKEN_OFFSET:
+            return
+        namespace = BlendNamespace.from_object_key(key)
+        if binding.is_missing_a_key_in(namespace):
+            return
+        self._blend_index.add(
+            binding.token_ids, chunk_hash, binding.token_offset, namespace
+        )
 
 
 # -- Durable encoding ---------------------------------------------------------

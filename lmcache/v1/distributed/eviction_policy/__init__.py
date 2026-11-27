@@ -4,6 +4,9 @@ Eviction policies for L1 cache management
 """
 
 # First Party
+from lmcache.v1.distributed.eviction_policy.arc import (
+    ARCEvictionPolicy,
+)
 from lmcache.v1.distributed.eviction_policy.factory import (
     CreateEvictionPolicy,
 )
@@ -18,6 +21,7 @@ from lmcache.v1.distributed.eviction_policy.noop import (
 )
 
 __all__ = [
+    "ARCEvictionPolicy",
     "LRUEvictionPolicy",
     "NoOpEvictionPolicy",
     "IsolatedLRUEvictionPolicy",
