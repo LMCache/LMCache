@@ -28,6 +28,9 @@ LMIN = 16
 # there but P has it elsewhere.
 GLUE = 3
 
+# Balance early mismatch detection with the cost of extending long runs.
+_INITIAL_COMPARE_WIDTH = 256
+
 
 class PlanBudgetExceeded(Exception):
     pass
@@ -88,10 +91,22 @@ class _Copier:
             if best is not None and n <= best[1]:
                 break  # later windows can only tie
             self._check()
-            stop = np.flatnonzero(
-                (self.Pn[i : i + n] != Hn[k : k + n]) | used[i : i + n]
-            )
-            m = int(stop[0]) if stop.size else n
+            # Repeated headers often diverge near their start. Bound early
+            # comparisons instead of scanning the full remaining prompt;
+            # grow the slices for long matches to limit Python overhead.
+            m = 0
+            width = _INITIAL_COMPARE_WIDTH
+            while m < n:
+                end = min(m + width, n)
+                stop = np.flatnonzero(
+                    (self.Pn[i + m : i + end] != Hn[k + m : k + end])
+                    | used[i + m : i + end]
+                )
+                if stop.size:
+                    m += int(stop[0])
+                    break
+                m = end
+                width *= 2
             if m >= LMIN and (best is None or m > best[1]):
                 best = (i, m)
         return best
