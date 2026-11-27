@@ -23,6 +23,9 @@ from lmcache.integration.vllm.lazy_offload_policy.base import (
     OffloadPolicy,
     PendingStoreItem,
 )
+from lmcache.integration.vllm.lazy_offload_policy.prefix_write_index import (
+    PrefixWriteIndex,
+)
 from lmcache.v1.common.logging import init_logger
 
 if TYPE_CHECKING:
@@ -186,6 +189,11 @@ class EvictionAwareStoreQueue(OffloadPolicy):
     come due are dropped, never stored stale. Scheduler thread only.
     """
 
+    @property
+    def uses_prefix_index(self) -> bool:
+        """Whether the block-pool observer has been installed."""
+        return self.prefix_index is not None
+
     def __init__(self, config: EvictionAwarePolicyConfig, pool: "BlockPool") -> None:
         """Create an empty queue over ``pool`` with the tunables in ``config``.
 
@@ -194,6 +202,7 @@ class EvictionAwareStoreQueue(OffloadPolicy):
             pool: The scheduler's GPU block pool. It is only ever read here:
                 free-queue order and block hashes.
         """
+        self.prefix_index: PrefixWriteIndex | None = None
         self._config = config
         self._pool = pool
         # Insertion order is admission order (a re-entering request goes to
@@ -262,6 +271,8 @@ class EvictionAwareStoreQueue(OffloadPolicy):
                 admitted_at_time=time.monotonic(),
             )
         )
+        if self.prefix_index is not None:
+            self.prefix_index.add(meta.request_id, block_hashes)
         self._counters.admitted += 1
 
     def has_pending_request(self, request_id: str) -> bool:
@@ -288,6 +299,8 @@ class EvictionAwareStoreQueue(OffloadPolicy):
             The number of buffered operations discarded.
         """
         dropped = self._pending.pop(request_id, [])
+        if self.prefix_index is not None:
+            self.prefix_index.remove(request_id, dropped, empty=True)
         self._broken_prefixes.discard(request_id)
         self._counters.dropped_on_request_drop += len(dropped)
         return len(dropped)
@@ -300,6 +313,8 @@ class EvictionAwareStoreQueue(OffloadPolicy):
                 buffer and broken-chain marker are dropped.
         """
         dropped = self._pending.pop(request_id, [])
+        if self.prefix_index is not None:
+            self.prefix_index.remove(request_id, dropped, empty=True)
         self._broken_prefixes.discard(request_id)
         self._counters.dropped_id_reuse += len(dropped)
 
@@ -328,6 +343,8 @@ class EvictionAwareStoreQueue(OffloadPolicy):
             The number of buffered operations dropped.
         """
         dropped = self._pending.pop(request_id, [])
+        if self.prefix_index is not None:
+            self.prefix_index.remove(request_id, dropped, empty=True)
         self._counters.dropped_failed_store += len(dropped)
         self._broken_prefixes.add(request_id)
         return len(dropped)
@@ -379,12 +396,21 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         # Of those, the ones the deadline alone made due: they release their
         # whole buffer, not just the segment sitting in the danger window.
         overdue_ids: set[str] = set()
-        for order, request_id in enumerate(list(self._pending)):
+        request_ids = (
+            list(self._pending)
+            if self.prefix_index is None
+            else self.prefix_index.candidates(ranks, signals.blocked_request_ids)
+        )
+        for order, request_id in enumerate(request_ids):
             if request_id in signals.blocked_request_ids:
                 continue
             ops = self._pending[request_id]
             surviving = self._drop_evicted_suffix(request_id, ops)
             if len(surviving) != len(ops):
+                if self.prefix_index is not None:
+                    self.prefix_index.remove(
+                        request_id, ops[len(surviving) :], not surviving
+                    )
                 dropped_ops += len(ops) - len(surviving)
                 dropped_ids.append(request_id)
                 if not surviving:
@@ -448,6 +474,8 @@ class EvictionAwareStoreQueue(OffloadPolicy):
             )
             drain.items.append(item)
             remaining = ops[len(emitted) :]
+            if self.prefix_index is not None:
+                self.prefix_index.remove(request_id, emitted, not remaining)
             if remaining:
                 self._pending[request_id] = remaining
             else:
@@ -599,5 +627,9 @@ class EvictionAwareStoreQueue(OffloadPolicy):
         fields = " ".join(
             f"{name}={value}" for name, value in asdict(self._counters).items()
         )
-        pending = sum(len(ops) for ops in self._pending.values())
+        pending = (
+            self.prefix_index.num_ops
+            if self.prefix_index is not None
+            else sum(len(ops) for ops in self._pending.values())
+        )
         return f"{fields} pending={pending}"

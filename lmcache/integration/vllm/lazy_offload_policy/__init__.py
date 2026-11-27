@@ -15,6 +15,9 @@ from lmcache.integration.vllm.lazy_offload_policy.eviction_aware import (
     EvictionAwareStoreQueue,
 )
 from lmcache.integration.vllm.lazy_offload_policy.fifo import FIFOOffloadPolicy
+from lmcache.integration.vllm.lazy_offload_policy.prefix_write_index import (
+    PrefixWriteIndex,
+)
 from lmcache.v1.common.logging import init_logger
 
 if TYPE_CHECKING:
@@ -52,7 +55,7 @@ def create_offload_policy(
             remaining keys are read by the selected policy itself.
         gpu_block_pool: The scheduler's GPU block pool, which the
             eviction-aware policy ranks by eviction order. It is held for
-            the policy's lifetime and only ever read.
+            the policy's lifetime. The optional index observes hash invalidations.
 
     Returns:
         A policy ready to buffer store operations.
@@ -71,4 +74,17 @@ def create_offload_policy(
         return FIFOOffloadPolicy(configs)
     config = EvictionAwarePolicyConfig.from_configs(configs)
     logger.info("lazy offload enabled with EVICTION_AWARE policy: %s", config)
-    return EvictionAwareStoreQueue(config, gpu_block_pool)
+    queue = EvictionAwareStoreQueue(config, gpu_block_pool)
+    use_index = configs.get("lmcache.mp.indexed_prefix_writes", False)
+    if not isinstance(use_index, bool):
+        raise ValueError("lmcache.mp.indexed_prefix_writes must be a JSON boolean")
+    if use_index:
+        index = PrefixWriteIndex()
+        if config.max_deferral_seconds == 0 and index.observe_pool(gpu_block_pool):
+            queue.prefix_index = index
+            logger.info("Indexed prefix writes enabled")
+        else:
+            logger.warning(
+                "Using full prefix scan: timed deferral or unrecognized block pool"
+            )
+    return queue

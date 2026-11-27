@@ -1253,6 +1253,15 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
      - Lazy drain policy. ``EVICTION_AWARE`` drains blocks near the GPU free
        queue's eviction head. Set ``FIFO`` explicitly to keep the
        count-triggered behavior.
+   * - ``lmcache.mp.indexed_prefix_writes``
+     - ``false``
+     - JSON boolean. In ``EVICTION_AWARE`` mode, index pending STORE operations
+       by GPU block. Each drain checks requests whose blocks approach eviction
+       or whose hash mappings changed. STORE still emits a contiguous prefix.
+       The index uses host memory proportional to pending block/request pairs.
+       The initial implementation recognizes an audited vLLM 0.34.0 block pool.
+       Other builds and positive deferral deadlines use the full scan and log
+       the fallback. Look for ``Indexed prefix writes enabled`` on activation.
    * - ``lmcache.mp.lazy_offload_horizon_steps``
      - ``2.5``
      - ``EVICTION_AWARE`` only: estimated scheduler steps of block
