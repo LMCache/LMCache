@@ -235,6 +235,8 @@ policy evicts a fraction of the least-recently-used keys.
     --eviction-trigger-watermark 0.8 \
     --eviction-ratio 0.2
 
+.. _l2-eviction-adapter-support:
+
 L2 Eviction
 ~~~~~~~~~~~
 
@@ -328,8 +330,20 @@ because every ``L2AdapterEvictionState`` owns its own policy instance.
      - No eviction support (native connector adapter).
    * - ``fs``
      - No eviction support (``delete`` and ``get_usage`` are no-ops).
+   * - ``hf3fs``
+     - Full support. ``delete`` removes KVCache files from 3FS. The deleted
+       bytes are freed from accounting. ``get_usage`` reports
+       ``usage_fraction == -1.0`` when ``max_capacity_gb`` is ``0`` (disabled).
+       set a non-zero ``max_capacity_gb`` to enable the watermark-triggered
+       eviction controller. When capacity accounting is enabled, the adapter
+       pre-seeds usage with file size of every KVCache file already present
+       in its ``base_paths`` at startup. Files that pre-date the instance
+       (restart ) are charged against capacity and can be evicted — see
+       :ref:`hf3fs<l2-hf3fs>`.
    * - native connectors
-     - No eviction support.
+     - Depends on the connector. Connectors that declare capacity via
+       ``max_capacity_gb`` (``fs_native``, ``nixl_native``, ``hf3fs``)
+       support watermark eviction; the rest do not.
 
 .. note::
 

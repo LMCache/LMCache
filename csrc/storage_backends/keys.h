@@ -190,5 +190,6 @@ std::string get_chunk_hash_from_key(const std::string& key) {
   }
   return parts[3];
 }
+
 }  // namespace connector
 }  // namespace lmcache
