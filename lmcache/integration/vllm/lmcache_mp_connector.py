@@ -627,6 +627,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # Tail block slots vLLM may relocate for one request; 0 means vLLM only
     # appends. The scheduler role sets it from the vLLM config.
     _mamba_relocation_window: int = 0
+    # Whether the exact prompt-end unfull chunk (``B = P``) is stored; the
+    # scheduler role clears it under speculative decoding.
+    _store_exact_unfull_tail: bool = True
 
     def __init__(
         self,
@@ -693,17 +696,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
         if not isinstance(self._save_unfull_chunk, bool):
             raise ValueError("lmcache.mp.save_unfull_chunk must be a boolean")
-        spec_config = getattr(vllm_config, "speculative_config", None)
-        if (
-            self._save_unfull_chunk
-            and spec_config is not None
-            and (spec_config.num_speculative_tokens or 0) > 0
-        ):
-            # Draft rows sit past the prompt end in relocated Mamba blocks,
-            # so the state at the prompt end is not isolated.
-            raise ValueError(
-                "lmcache.mp.save_unfull_chunk does not support speculative decoding"
-            )
         if (
             self._save_unfull_chunk
             and kv_cache_config is not None
@@ -956,6 +948,22 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             _, self._unfull_chunk_grid = resolve_kv_cache_block_sizes(
                 kv_cache_config, vllm_config
             )
+        spec_config = getattr(vllm_config, "speculative_config", None)
+        if (
+            self._save_unfull_chunk
+            and spec_config is not None
+            and (spec_config.num_speculative_tokens or 0) > 0
+            # The scheduler builds the stores; workers may lack the groups.
+            and role == KVConnectorRole.SCHEDULER
+        ):
+            if not self._boundary_state_groups:
+                raise ValueError(
+                    "lmcache.mp.save_unfull_chunk supports speculative decoding "
+                    "only for align-mode Mamba models"
+                )
+            # Draft rows sit past the prompt end, so the running state block
+            # is not isolated there; grid tails read boundary-state snapshots.
+            self._store_exact_unfull_tail = False
         if self.role == KVConnectorRole.SCHEDULER:
             # Chunk boundaries must land on every group's paged-chunk
             # boundary so per-group block-id slicing stays aligned.
@@ -2313,6 +2321,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._unfull_chunk_grid,
             boundary_state_blocks,
             self._boundary_state_groups,
+            store_exact_tail=self._store_exact_unfull_tail,
         ):
             if pool is not None and boundary_state_block_ids:
                 pool.touch(

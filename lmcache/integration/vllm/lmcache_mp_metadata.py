@@ -469,6 +469,8 @@ class LMCacheMPRequestMetadata:
         tail_grid_tokens: int,
         boundary_state_blocks: Mapping[int, Mapping[int, int]],
         boundary_state_groups: Collection[int],
+        *,
+        store_exact_tail: bool = True,
     ) -> list[tuple["LMCacheMPRequestMetadata", list[int]]]:
         """Generate store metadata for the prompt's newly storable unfull chunks.
 
@@ -506,6 +508,8 @@ class LMCacheMPRequestMetadata:
                 ``{boundary token: {engine group: block id}}``.
             boundary_state_groups: Engine groups whose state at a grid
                 boundary must come from ``boundary_state_blocks``.
+            store_exact_tail: Whether the exact ``B = P`` tail may be stored
+                (False under speculative decoding).
 
         Returns:
             One ``(metadata, boundary-state block IDs it reads)`` pair per newly
@@ -539,7 +543,8 @@ class LMCacheMPRequestMetadata:
             if computed_tokens >= tail_boundary:
                 boundaries[tail_boundary] = []
         if (
-            tracker.ends_at_prompt
+            store_exact_tail
+            and tracker.ends_at_prompt
             and computed_tokens >= num_prompt_tokens
             # A chunk-aligned prompt length is a full chunk's.
             and num_prompt_tokens % lmcache_tokens_per_chunk != 0

@@ -1112,9 +1112,12 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
        then stored. Set a finer grid with ``vllm serve --prefix-match-unit``
        (e.g. ``32``; it must divide every KV cache group's block size).
        Served from L1 only. Requires the ``lmcache_driven``
-       transfer mode; not supported with speculative decoding,
-       ``lmcache.mp.lazy_offload``, or compressed-attention models with a
-       per-request ring (DeepSeek-V4.1, GLM-5.3, Qwen3.8-Flash-Next) yet.
+       transfer mode; not supported with ``lmcache.mp.lazy_offload`` or
+       compressed-attention models with a per-request ring (DeepSeek-V4.1,
+       GLM-5.3, Qwen3.8-Flash-Next) yet. With speculative decoding it is
+       supported only for align-mode Mamba hybrids, which then store grid
+       tails only (no exact prompt-end tail); other models are rejected at
+       startup.
    * - ``lmcache.mp.server_urls``
      - *(unset)*
      - Multi-server deployment: list (or comma-separated string) of

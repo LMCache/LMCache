@@ -3,6 +3,7 @@
 
 # Standard
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock
 
 # Third Party
@@ -11,10 +12,16 @@ import pytest
 pytest.importorskip("vllm", reason="MP connector imports vLLM at module top")
 
 # Third Party
+from vllm.config import KVTransferConfig, VllmConfig  # noqa: E402
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
+    KVConnectorRole,
+)
+from vllm.v1.core import kv_cache_utils  # noqa: E402
 from vllm.v1.request import RequestStatus  # noqa: E402
 from vllm.v1.utils import ConstantList  # noqa: E402
 
 # First Party
+from lmcache.integration.vllm import lmcache_mp_connector as connector_mod  # noqa: E402
 from lmcache.integration.vllm.lmcache_mp_connector import (  # noqa: E402
     LMCacheMPConnector,
 )
@@ -72,6 +79,177 @@ def test_prompt_ending_request_also_stores_its_exact_tail():
         # The running Mamba block holds the state at P: nothing runs after.
         (PROMPT, MAMBA_BLOCKS[2:]),
     ]
+
+
+def test_exact_tail_is_not_stored_under_spec_decode():
+    """Draft rows sit past the prompt end, so only grid tails read from
+    boundary-state snapshots are stored."""
+    tracker = _tracker(max_tokens=1)
+    tracker.increase_num_scheduled_tokens(PROMPT)
+
+    stores = LMCacheMPRequestMetadata.GetUnfullChunkStoreMetadata(
+        tracker,
+        CHUNK,
+        GROUP_TOKENS_PER_BLOCK,
+        GRID,
+        {TAIL_BOUNDARY: {1: BOUNDARY_STATE_BLOCK}},
+        (1,),
+        store_exact_tail=False,
+    )
+
+    assert [(meta.op.end, meta.op.block_ids[1]) for meta, _ in stores] == [
+        (TAIL_BOUNDARY, [BOUNDARY_STATE_BLOCK]),
+    ]
+
+
+class AttentionSpec:
+    """Stand-in matched by class name, like vLLM's spec."""
+
+    block_size = GRID
+
+
+class MambaSpec:
+    """Stand-in matched by class name, like vLLM's spec."""
+
+    block_size = CHUNK
+
+    def __init__(self, mamba_cache_mode: str) -> None:
+        self.mamba_cache_mode = mamba_cache_mode
+
+
+def _init_connector(
+    monkeypatch: pytest.MonkeyPatch,
+    role: KVConnectorRole,
+    *,
+    draft_tokens: int,
+    mamba_cache_mode: str | None = "align",
+    with_groups: bool = True,
+) -> LMCacheMPConnector:
+    """Run the real ``__init__`` with ``lmcache.mp.save_unfull_chunk`` on.
+
+    Args:
+        monkeypatch: Stubs the server-facing adapters and vLLM's grid.
+        role: Scheduler or worker.
+        draft_tokens: ``num_speculative_tokens``; 0 means no draft.
+        mamba_cache_mode: Mode of the Mamba group, ``None`` for attention only.
+        with_groups: Whether vLLM passes the resolved KV cache groups.
+
+    Returns:
+        The constructed connector.
+    """
+    monkeypatch.setattr(
+        connector_mod,
+        "LMCacheMPSchedulerAdapter",
+        lambda **kwargs: MagicMock(lmcache_tokens_per_chunk=CHUNK),
+    )
+    monkeypatch.setattr(
+        LMCacheMPConnector, "create_lmcache_mp_worker_adapter", MagicMock()
+    )
+    monkeypatch.setattr(connector_mod, "print_banner_once", MagicMock())
+    monkeypatch.setattr(connector_mod, "vllm_layout_hints", lambda config: {})
+    # A vLLM that hands boundary states to connectors, on the test's grid.
+    monkeypatch.setattr(
+        connector_mod,
+        "SchedulerOutput",
+        SimpleNamespace(__dataclass_fields__={"kv_connector_block_state": None}),
+    )
+    monkeypatch.setattr(
+        kv_cache_utils, "resolve_kv_cache_block_sizes", lambda *args: (CHUNK, GRID)
+    )
+    specs: list[object] = [AttentionSpec()]
+    if mamba_cache_mode is not None:
+        specs.append(MambaSpec(mamba_cache_mode))
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec) for spec in specs]
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(model="test-model", use_mla=False),
+        parallel_config=SimpleNamespace(
+            world_size=1, rank=0, tensor_parallel_size=1, pipeline_parallel_size=1
+        ),
+        cache_config=SimpleNamespace(block_size=GRID, enable_prefix_caching=True),
+        scheduler_config=SimpleNamespace(
+            disable_hybrid_kv_cache_manager=False, max_num_batched_tokens=1 << 20
+        ),
+        speculative_config=(
+            SimpleNamespace(num_speculative_tokens=draft_tokens)
+            if draft_tokens
+            else None
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="LMCacheMPConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"lmcache.mp.save_unfull_chunk": True},
+        ),
+    )
+    return LMCacheMPConnector(
+        cast(VllmConfig, vllm_config),
+        role,
+        kv_cache_config if with_groups else None,  # type: ignore[arg-type]
+    )
+
+
+def _stored_tail_ends(connector: LMCacheMPConnector) -> list[int]:
+    """Boundaries of the tails a prompt-ending request stores once its prompt
+    is computed and vLLM offers the grid boundary's state."""
+    pool = MagicMock()
+    pool.blocks = {BOUNDARY_STATE_BLOCK: "boundary-state-block"}
+    connector.bind_gpu_block_pool(pool)
+    tracker = _tracker(max_tokens=1)
+    tracker.increase_num_scheduled_tokens(PROMPT)
+    scheduler_output = SimpleNamespace(
+        kv_connector_block_state=SimpleNamespace(
+            boundary_state_offloads={
+                "req-0": [(1, BOUNDARY_STATE_BLOCK, TAIL_BOUNDARY)]
+            }
+        )
+    )
+    metadata = MagicMock()
+
+    connector._add_unfull_chunk_stores(scheduler_output, tracker, metadata)
+
+    return [
+        call.args[0].op.end for call in metadata.add_request_metadata.call_args_list
+    ]
+
+
+def test_connector_stores_both_tails_without_a_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connector = _init_connector(monkeypatch, KVConnectorRole.SCHEDULER, draft_tokens=0)
+
+    assert _stored_tail_ends(connector) == [TAIL_BOUNDARY, PROMPT]
+
+
+def test_connector_skips_the_exact_tail_under_spec_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a draft, a prompt-ending request stores no ``B = P`` tail."""
+    connector = _init_connector(monkeypatch, KVConnectorRole.SCHEDULER, draft_tokens=4)
+
+    assert _stored_tail_ends(connector) == [TAIL_BOUNDARY]
+
+
+@pytest.mark.parametrize("mamba_cache_mode", [None, "all"])
+def test_spec_decode_unfull_chunk_needs_align_mode_mamba(
+    monkeypatch: pytest.MonkeyPatch, mamba_cache_mode: str | None
+) -> None:
+    with pytest.raises(ValueError, match="speculative decoding"):
+        _init_connector(
+            monkeypatch,
+            KVConnectorRole.SCHEDULER,
+            draft_tokens=4,
+            mamba_cache_mode=mamba_cache_mode,
+        )
+
+
+def test_worker_without_resolved_groups_starts_under_spec_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the scheduler builds the stores, so only it checks the groups."""
+    _init_connector(
+        monkeypatch, KVConnectorRole.WORKER, draft_tokens=4, with_groups=False
+    )
 
 
 def test_exact_tail_waits_for_the_whole_prompt():

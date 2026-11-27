@@ -46,7 +46,9 @@ repeated prompt hits 4,896 tokens instead of 4,160.
 Requirements, checked at startup:
 
 - LMCache-driven transfer mode (the CUDA default).
-- No speculative decoding, no `lmcache.mp.lazy_offload`.
+- No `lmcache.mp.lazy_offload`.
+- Speculative decoding only with an align-mode Mamba hybrid; see
+  [Speculative decoding](#speculative-decoding).
 - No compressed-attention model with a per-request ring (DeepSeek-V4.1,
   GLM-5.3, Qwen3.8-Flash-Next; see [Limits](#limits)).
 - For Mamba hybrids, a vLLM whose `SchedulerOutput` has
@@ -197,7 +199,7 @@ STORE [kC, B)                         blocks: ceil(B / T)        one object per 
   computes it is scheduled. Blocks come from the block table.
 - **Requests that end at the prompt**: also store the exact tail `[kC, P)`
   once the prompt is computed, all blocks from the block table. Skipped when
-  `P` is a multiple of `C`.
+  `P` is a multiple of `C`, and under speculative decoding (below).
 - A tail is a store of its own, with no full chunk in it. vLLM hands over the
   Mamba state one step after computing `B`, usually after the full chunks
   were stored. So one request can send two stores in one step. The worker
@@ -212,6 +214,19 @@ STORE [kC, B)                         blocks: ceil(B / T)        one object per 
 - Blocks below `B` must not change after the store is sent. Attention rows
   below `B` are never rewritten, and the Mamba block is a copy, so this
   holds.
+
+### Speculative decoding
+
+Supported for align-mode Mamba hybrids only; any other model with
+`lmcache.mp.save_unfull_chunk` and a draft is rejected at startup.
+
+- **Grid tails are stored.** Their Mamba state is vLLM's boundary-state
+  block, a snapshot taken at `B <= P - 1`. Draft tokens are written past the
+  prompt end and never reach it.
+- **The exact tail (`B = P`) is not stored.** It would read the running Mamba
+  state block, and with draft rows past the prompt end that state is not
+  isolated at `P`. A request that ends at its prompt still stores the grid
+  tail, so a later hit recomputes fewer than `g` tokens.
 
 ### Lookup
 
