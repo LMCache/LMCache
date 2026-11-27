@@ -8,6 +8,8 @@ end-to-end against the actual fragment lookup without a network or server.
 
 # Standard
 from collections.abc import Callable
+from itertools import count
+from threading import Event
 import time
 
 # Third Party
@@ -185,6 +187,79 @@ def test_take_match_clears():
         client.take_match("r1")
         assert client.poll_match("r1") is None
     finally:
+        client.close()
+
+
+@pytest.mark.parametrize(
+    "old_fails,new_tokens",
+    [(False, [4, 5, 6]), (True, [4, 5, 6]), (True, [1, 2, 3])],
+)
+def test_reused_request_id_ignores_abandoned_response(
+    old_fails: bool, new_tokens: list[int]
+) -> None:
+    """An abandoned response cannot complete a newer query with the same ID."""
+    directory = _directory()
+    hashes = _stored(directory, [[1, 2, 3], [4, 5, 6]])
+    directory_request = _directory_request(directory)
+    entered = [Event(), Event()]
+    resume = [Event(), Event()]
+    calls = count()
+
+    def request(
+        method: str, path: str, payload: dict[str, object]
+    ) -> dict[str, object]:
+        index = next(calls)
+        entered[index].set()
+        assert resume[index].wait(5)
+        if index == 0 and old_fails:
+            raise RuntimeError("abandoned roundtrip failed")
+        return directory_request(method, path, payload)
+
+    client = BlendCoordinatorClient(request_fn=request, match_concurrency=1)
+    try:
+        client.submit_match("reused", [1, 2, 3], NS)
+        assert entered[0].wait(5)
+        client.take_match("reused")
+        client.submit_match("reused", new_tokens, NS)
+        resume[0].set()
+        # One worker: entering the new HTTP call means the old result was handled.
+        assert entered[1].wait(5)
+        assert client.poll_match("reused") is PENDING
+        resume[1].set()
+        matches = _wait_match(client, "reused")
+        index = 0 if new_tokens == [1, 2, 3] else 1
+        assert [(m.chunk_hash, m.old_st, m.cur_st) for m in matches] == [
+            (hashes[index], index * CHUNK, 0)
+        ]
+    finally:
+        for event in resume:
+            event.set()
+        client.close()
+
+
+def test_late_response_after_take_leaves_no_state() -> None:
+    """An abandoned response without a replacement query stays discarded."""
+    entered, resume = Event(), Event()
+
+    def request(
+        method: str, path: str, payload: dict[str, object]
+    ) -> dict[str, object]:
+        entered.set()
+        assert resume.wait(5)
+        return {"matches": []}
+
+    client = BlendCoordinatorClient(request_fn=request, match_concurrency=1)
+    try:
+        client.submit_match("taken", [1, 2, 3], NS)
+        assert entered.wait(5)
+        client.take_match("taken")
+        resume.set()
+        # One worker: the next result fences processing of the abandoned reply.
+        client.submit_match("next", [1, 2, 3], NS)
+        assert _wait_match(client, "next") == []
+        assert client.poll_match("taken") is None
+    finally:
+        resume.set()
         client.close()
 
 
