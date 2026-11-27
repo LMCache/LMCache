@@ -25,10 +25,18 @@ requires_vllm = pytest.mark.skipif(
 _TAG_KEY = "lmcache.tag.kv_dtype"
 
 
-def _config(*, cache_dtype: object = "auto", dtype: object = "torch.bfloat16"):
+def _config(
+    *,
+    cache_dtype: object = "auto",
+    dtype: object = "torch.bfloat16",
+    skip_layers: list[str] | None = None,
+):
     """Build the vLLM config subset the dtype helper reads."""
     return SimpleNamespace(
-        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
+        cache_config=SimpleNamespace(
+            cache_dtype=cache_dtype,
+            kv_cache_dtype_skip_layers=skip_layers or [],
+        ),
         model_config=SimpleNamespace(dtype=dtype),
     )
 
@@ -97,3 +105,29 @@ def test_a_conflicting_caller_tag_is_overridden():
 def test_a_matching_caller_tag_is_kept_without_noise():
     configs = _apply("bf16", {_TAG_KEY: "bf16"})
     assert configs == {_TAG_KEY: "bf16"}
+
+
+@requires_vllm
+def test_skipped_layers_change_the_tag():
+    """Two engines with the same fp8 dtype but different skips write differently."""
+    one = _dtype_tag(_config(cache_dtype="fp8_e4m3", skip_layers=["3"]))
+    two = _dtype_tag(_config(cache_dtype="fp8_e4m3", skip_layers=["3", "7"]))
+
+    assert one != two
+    assert "skip:" in one and "auto:bf16" in one
+    assert "skip:3|" in one
+    assert "skip:3,7|" in two
+
+
+@requires_vllm
+def test_skip_layer_order_does_not_change_the_tag():
+    """The list is a set, so its order must not fork the cache."""
+    assert _dtype_tag(
+        _config(cache_dtype="fp8_e4m3", skip_layers=["7", "3"])
+    ) == _dtype_tag(_config(cache_dtype="fp8_e4m3", skip_layers=["3", "7"]))
+
+
+@requires_vllm
+def test_skips_with_auto_do_not_change_the_tag():
+    """With ``auto`` every layer already uses the model dtype."""
+    assert _dtype_tag(_config(skip_layers=["3"])) == "bf16"

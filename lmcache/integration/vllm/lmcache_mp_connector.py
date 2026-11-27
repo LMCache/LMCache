@@ -170,10 +170,22 @@ def _kv_dtype_tag(vllm_config: "VllmConfig") -> str:
     """
     cache_config = getattr(vllm_config, "cache_config", None)
     cache_dtype = getattr(cache_config, "cache_dtype", None)
-    if cache_dtype not in (None, "", "auto"):
-        return kv_dtype_tag_code(cache_dtype)
     model_dtype = getattr(getattr(vllm_config, "model_config", None), "dtype", None)
-    return kv_dtype_tag_code(model_dtype)
+    if cache_dtype in (None, "", "auto"):
+        # Every layer uses the model dtype, so a skip list cannot change the
+        # bytes and must not change the tag.
+        return kv_dtype_tag_code(model_dtype)
+    code = kv_dtype_tag_code(cache_dtype)
+    skip_layers = getattr(cache_config, "kv_cache_dtype_skip_layers", None)
+    if skip_layers:
+        # vLLM keeps the skipped layers in the model dtype, so two engines with
+        # the same fp8 cache_dtype but different skip lists write different
+        # bytes. The list is a set of layer indices plus the ``sliding_window``
+        # token, so sort it to make the tag canonical.
+        skip_spec = ",".join(sorted({str(item).strip() for item in skip_layers}))
+        auto_code = kv_dtype_tag_code(model_dtype)
+        return f"{code}|skip:{skip_spec}|auto:{auto_code}"
+    return code
 
 
 _MAX_LCM_EXPANSION_FACTOR = 4
