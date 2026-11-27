@@ -354,6 +354,46 @@ class TestLifecycle:
         ctrl.start()
         ctrl.stop()
 
+    @pytest.mark.parametrize("failure", ["second_manager", "thread_start"])
+    def test_listener_registration_rolls_back(self, l1_manager, failure):
+        second = MagicMock(spec=L1ManagerInterface)
+        ctrl = PrefetchController(
+            l1_managers=[l1_manager, second],
+            l1_manager_descriptors=[
+                L1ManagerDescriptor(index=i, config=make_l1_config()) for i in range(2)
+            ],
+            l2_adapters=[],
+            adapter_descriptors=[],
+            policy=BufferOnlyPrefetchPolicy(),
+        )
+        target, method = (
+            (second, "register_listener")
+            if failure == "second_manager"
+            else (ctrl._thread, "start")
+        )
+
+        def fail(*args):
+            assert len(l1_manager._registered_listeners) == 1
+            raise RuntimeError("startup failed")
+
+        with patch.object(target, method, side_effect=fail):
+            with pytest.raises(RuntimeError, match="startup failed"):
+                ctrl.start()
+        assert not l1_manager._registered_listeners
+        if failure == "thread_start":
+            second.unregister_listener.assert_called_once_with(
+                second.register_listener.call_args.args[0]
+            )
+
+        ctrl.start()
+        try:
+            assert l1_manager._registered_listeners == [
+                second.register_listener.call_args.args[0]
+            ]
+        finally:
+            ctrl.stop()
+        assert not l1_manager._registered_listeners
+
     def test_report_status_keys(self, l1_manager):
         """Status reports health, queue depths, and adapter counts."""
         adapter = make_adapter()

@@ -720,6 +720,7 @@ class PrefetchController(StorageControllerInterface):
                 ),
             )
 
+        self._admission_listener = _AdmissionWakeListener(self._wake_pending_admission)
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
             target=self._prefetch_loop,
@@ -915,7 +916,13 @@ class PrefetchController(StorageControllerInterface):
     def start(self) -> None:
         """Start the background prefetch loop thread."""
         logger.info("Starting PrefetchController...")
-        self._thread.start()
+        # Roll back registrations if a later manager or thread startup fails.
+        with ExitStack() as rollback:
+            for manager in self._l1_managers.values():
+                manager.register_listener(self._admission_listener)
+                rollback.callback(manager.unregister_listener, self._admission_listener)
+            self._thread.start()
+            rollback.pop_all()
 
     def stop(self) -> None:
         """
@@ -927,6 +934,8 @@ class PrefetchController(StorageControllerInterface):
         self._stop_flag.set()
         self._submission_efd.notify()
         self._thread.join()
+        for manager in self._l1_managers.values():
+            manager.unregister_listener(self._admission_listener)
         self._cleanup_in_flight_requests()
         self._submission_efd.close()
         self._adapter_ctrl_efd.close()
@@ -992,14 +1001,6 @@ class PrefetchController(StorageControllerInterface):
     # =========================================================================
 
     def _prefetch_loop(self) -> None:
-        listener = _AdmissionWakeListener(self._wake_pending_admission)
-        with ExitStack() as cleanup:
-            for manager in self._l1_managers.values():
-                manager.register_listener(listener)
-                cleanup.callback(manager.unregister_listener, listener)
-            self._poll_prefetch_events()
-
-    def _poll_prefetch_events(self) -> None:
         """
         Main event-driven loop running in a background thread.
 
