@@ -1,0 +1,17 @@
+steps:
+  - label: ":test_tube: Token-dropping GPU tests (vLLM 0.25.1)"
+    command: bash .buildkite/k3_tests/token-dropping/run.sh
+    timeout_in_minutes: 60
+    agents: { queue: "k8s" }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                resources:
+                  limits:
+                    nvidia.com/gpu: "1"
+    artifact_paths:
+      - "junit-token-dropping-gpu.xml"
